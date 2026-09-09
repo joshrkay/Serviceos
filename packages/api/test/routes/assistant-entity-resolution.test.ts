@@ -261,6 +261,15 @@ describe('#909 — an unambiguous reference lifts the gate that blocked approval
       },
       gate: 'invoiceId',
       filledWith: RESOLVED.invoice,
+      // The entity gate lifts — that is what this suite is about — but the
+      // draft still carries an EMPTY `editActions`, and `updateInvoicePayload
+      // Schema` requires at least one. Approve used to succeed here and the
+      // execution handler would then have thrown: `approveProposal` checks
+      // `missingFields`, and nothing was putting the contract failure there.
+      // The chat chokepoint's contract gate now does (routes/assistant.ts,
+      // `applyContractGate`), so this row joins the "refused, but never for the
+      // entity gate" branch below.
+      residualGates: ['editActions'],
     },
     {
       row: 'A13',

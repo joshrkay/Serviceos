@@ -18,21 +18,27 @@ import type { VoiceSessionEvent } from '../../agents/customer-calling/voice-sess
 import type { SideEffect } from '../../agents/customer-calling/types';
 import type { LLMGateway, LLMRequest, LLMResponse } from '../../gateway/gateway';
 import { missingFieldsFor } from '../../../proposals/proposal';
-import type { Register, RegisterCase, ScriptedLlmTurn } from './register';
-import { turnsFor } from './register';
+import type { Register, RegisterCase, ScriptedLlmTurn, Surface } from './register';
+import { SURFACES, expectForSurface, isChatSurface, skipReasonForSurface, turnsFor } from './register';
 import { buildWorld, type World } from './world';
 import {
+  deriveChatStage,
   deriveStage,
+  isChatIntentCaptureOnly,
   isIntentCaptureOnly,
   proposalContractViolation,
   scoreCase,
+  scoreChatCase,
   type CaseEvidence,
+  type ChatCaseEvidence,
+  type ChatTurnEvidence,
   type ProposalEvidence,
   type RootCause,
   type Stage,
   type TurnEvidence,
   type Verdict,
 } from './score';
+import { driveChatCase } from './chat-driver';
 import { buildRunResult, type RunResult } from './report';
 
 /** Hard cap from the plan's turn driver — a case may never run away. */
@@ -45,6 +51,12 @@ const MAX_DISAMBIGUATION_TURNS = 2;
 export interface CaseResult {
   id: number;
   key: string;
+  /**
+   * Which entry point produced this row. Present on every case so a run
+   * artifact carries voice AND chat side by side and the two can never be
+   * mistaken for each other in the dashboard, the triage report or the gate.
+   */
+  surface: Surface;
   cluster: string;
   severity: RegisterCase['severity'];
   op: string;
@@ -56,7 +68,8 @@ export interface CaseResult {
   /** True ⇒ understood the request and produced nothing actionable. */
   intentCaptureOnly: boolean;
   failures: string[];
-  turns: TurnEvidence[];
+  /** Voice surfaces carry FSM turns; chat surfaces carry HTTP round trips. */
+  turns: TurnEvidence[] | ChatTurnEvidence[];
   proposals: ProposalEvidence[];
   durationMs: number;
 }
@@ -67,6 +80,8 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Batch index (1..5) recorded on the artifact; null for a full run. */
   batch?: number | null;
+  /** Surfaces to drive; defaults to all three. */
+  surfaces?: readonly Surface[];
 }
 
 /** The utterance a classify call is about: the LAST user message it carries. */
@@ -95,17 +110,37 @@ export function classifyUserText(request: Pick<LLMRequest, 'messages'>): string 
  * slot it had just been given. `for` pins an entry to its utterance; a
  * register with no `for` anywhere behaves exactly as before.
  */
-export function scriptedGateway(script: readonly ScriptedLlmTurn[]): LLMGateway {
+export interface ScriptedGatewayOptions {
+  /**
+   * Called with each entry as it is served. The chat driver uses this to give
+   * the drafting LLM call (a SECOND gateway call the voice path does not make)
+   * the same extracted entities the classifier just produced — see
+   * `chat-driver.ts#chatScriptedGateway`.
+   */
+  onServe?: (entry: ScriptedLlmTurn) => void;
+}
+
+export function scriptedGateway(
+  script: readonly ScriptedLlmTurn[],
+  options: ScriptedGatewayOptions = {},
+): LLMGateway {
   const consumed = new Set<number>();
+  const matchesKey = (entry: ScriptedLlmTurn, needle: string): boolean =>
+    typeof entry.for === 'string' && needle.includes(entry.for.toLowerCase());
   const pick = (userText: string): number => {
     const needle = userText.toLowerCase();
-    const keyed = script.findIndex(
-      (entry, i) =>
-        !consumed.has(i) &&
-        typeof entry.for === 'string' &&
-        needle.includes(entry.for.toLowerCase()),
-    );
+    const keyed = script.findIndex((entry, i) => !consumed.has(i) && matchesKey(entry, needle));
     if (keyed >= 0) return keyed;
+    // A keyed entry that is already CONSUMED still answers its own utterance.
+    // The real classifier is a function of the text: the same sentence sent
+    // twice classifies the same way twice. Falling through to the
+    // repeat-the-last-entry rule instead let a DOUBLE-SUBMIT case pass for
+    // the wrong reason — the second identical booking was answered with the
+    // NEXT case's 'confirm' entry, so the route never even tried to draft a
+    // second proposal and the harness scored "one proposal" as a de-dup the
+    // product does not perform.
+    const reused = script.findIndex((entry) => matchesKey(entry, needle));
+    if (reused >= 0) return reused;
     const positional = script.findIndex((entry, i) => !consumed.has(i) && entry.for === undefined);
     if (positional >= 0) return positional;
     return -1;
@@ -115,6 +150,7 @@ export function scriptedGateway(script: readonly ScriptedLlmTurn[]): LLMGateway 
       const index = pick(classifyUserText(request));
       const entry = index >= 0 ? script[index] : script[script.length - 1];
       if (index >= 0) consumed.add(index);
+      options.onServe?.(entry);
       return {
         content: JSON.stringify(entry),
         model: 'scripted',
@@ -342,33 +378,81 @@ function timeoutEvidence(message: string): CaseEvidence {
   };
 }
 
-/** Run ONE case end to end: fresh world, fresh adapter, scored. */
+/**
+ * Run ONE case on ONE surface: fresh world, fresh driver, scored.
+ *
+ * The world is rebuilt per case×surface on purpose — a chat run must not see
+ * the proposals a voice run just minted, or `proposalCount` would count the
+ * other surface's work.
+ */
 export async function runCase(
   c: RegisterCase,
   register: Register,
-  opts: RunOptions = {},
+  opts: RunOptions & { surface?: Surface } = {},
 ): Promise<CaseResult> {
+  const surface: Surface = opts.surface ?? 'voice';
   const startedAt = Date.now();
   const timeoutMs = opts.timeoutMs ?? CASE_TIMEOUT_MS;
+  const scoreOptions = { timezone: register.harnessSeeds.tenantTimezone };
   let world: World | undefined;
-  let evidence: CaseEvidence;
 
+  const base = {
+    id: c.id,
+    key: c.key,
+    surface,
+    cluster: c.cluster,
+    severity: c.severity,
+    op: c.op,
+    intent: c.intent,
+  };
+
+  if (isChatSurface(surface)) {
+    let evidence: ChatCaseEvidence;
+    try {
+      world = await buildWorld(register, opts.now);
+      evidence = await withTimeout(
+        driveChatCase(c, world, surface),
+        timeoutMs,
+        (message) => chatTimeoutEvidence(message),
+        `case '${c.key}' on ${surface} exceeded ${timeoutMs}ms`,
+      );
+    } catch (err) {
+      evidence = {
+        turns: [],
+        proposals: [],
+        replies: [],
+        auditEvents: [],
+        error: err instanceof Error ? err.message : String(err),
+        clarificationTurnSent: false,
+      };
+    }
+    const expect = expectForSurface(c, surface);
+    const score = scoreChatCase(c, expect, evidence, world?.fixtureIds ?? {}, scoreOptions);
+    const stage = score.stage ?? deriveChatStage(evidence);
+    return {
+      ...base,
+      verdict: score.verdict,
+      reason: score.reason,
+      stage,
+      rootCause: score.rootCause,
+      intentCaptureOnly: isChatIntentCaptureOnly(stage, evidence),
+      failures: score.failures,
+      turns: evidence.turns,
+      proposals: evidence.proposals,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  let evidence: CaseEvidence;
   try {
     world = await buildWorld(register, opts.now);
     const w = world;
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<CaseEvidence>((resolve) => {
-      timer = setTimeout(
-        () => resolve(timeoutEvidence(`case '${c.key}' exceeded ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-      timer.unref?.();
-    });
-    try {
-      evidence = await Promise.race([driveCase(c, w), timeout]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    evidence = await withTimeout(
+      driveCase(c, w),
+      timeoutMs,
+      timeoutEvidence,
+      `case '${c.key}' exceeded ${timeoutMs}ms`,
+    );
   } catch (err) {
     evidence = {
       turns: [],
@@ -381,19 +465,11 @@ export async function runCase(
     };
   }
 
-  const fixtureIds = world?.fixtureIds ?? {};
-  const score = scoreCase(c, evidence, fixtureIds, {
-    timezone: register.harnessSeeds.tenantTimezone,
-  });
+  const score = scoreCase(c, evidence, world?.fixtureIds ?? {}, scoreOptions);
   const stage = score.stage ?? deriveStage(evidence.turns, evidence.proposals);
 
   return {
-    id: c.id,
-    key: c.key,
-    cluster: c.cluster,
-    severity: c.severity,
-    op: c.op,
-    intent: c.intent,
+    ...base,
     verdict: score.verdict,
     reason: score.reason,
     stage,
@@ -406,20 +482,59 @@ export async function runCase(
   };
 }
 
+/** Race `work` against the per-case budget; a hang is a FAIL, not a hung CI. */
+async function withTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  onTimeout: (message: string) => T,
+  message: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout(message)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function chatTimeoutEvidence(message: string): ChatCaseEvidence {
+  return {
+    turns: [],
+    proposals: [],
+    replies: [],
+    auditEvents: [],
+    error: message,
+    timedOut: true,
+    clarificationTurnSent: false,
+  };
+}
+
 /**
- * Run a set of cases (default: the whole register) and assemble the run
- * artifact. Cases run SEQUENTIALLY — each one owns a whole world, and a
- * deterministic order keeps the artifact diffable run to run.
+ * Run a set of cases on every requested surface and assemble the run artifact.
+ *
+ * Cases run SEQUENTIALLY — each one owns a whole world (and, on chat, a whole
+ * listening express app) — and surfaces are the OUTER loop so the console
+ * scoreboard reads surface by surface. A case the register skips on a surface
+ * (`chat.skip`) produces no row at all rather than a fake PASS; the gate's
+ * expected count for that surface is reduced to match.
  */
 export async function runRegister(
   register: Register,
   opts: RunOptions & { cases?: readonly RegisterCase[] } = {},
 ): Promise<RunResult> {
   const cases = opts.cases ?? register.cases;
+  const surfaces = opts.surfaces ?? SURFACES;
   const startedAt = new Date();
   const results: CaseResult[] = [];
-  for (const c of cases) {
-    results.push(await runCase(c, register, opts));
+  for (const surface of surfaces) {
+    for (const c of cases) {
+      if (skipReasonForSurface(c, surface) !== undefined) continue;
+      results.push(await runCase(c, register, { ...opts, surface }));
+    }
   }
   return buildRunResult(register, results, {
     startedAt,

@@ -47,6 +47,40 @@ export const INTENT_CAPTURE_ONLY_STAGES = new Set([
 
 const VERDICT_KEYS = ['PASS', 'PARTIAL', 'DEGRADED', 'FAIL'];
 
+/**
+ * The entry points a run can cover, in canonical order:
+ *   voice       the live-voice session panel (`POST /api/voice/sessions`)
+ *   chat        the assistant page, typed  (`POST /api/assistant/chat`)
+ *   chat-voice  the assistant page, mic     (same route, `inputMode: 'voice'`)
+ *
+ * Kept in sync with `SURFACES` in
+ * packages/api/src/ai/voice-quality/inapp-50/register.ts.
+ */
+export const SURFACES = ['voice', 'chat', 'chat-voice'];
+
+/** Runs written before the register grew a chat surface carry no field. */
+export function caseSurface(caseResult) {
+  return caseResult?.surface ?? 'voice';
+}
+
+/** `book-01` on voice, `book-01@chat` elsewhere — never collapse the two. */
+export function caseLabel(caseResult) {
+  const surface = caseSurface(caseResult);
+  return surface === 'voice' ? caseResult?.key : `${caseResult?.key}@${surface}`;
+}
+
+/**
+ * How many register cases a clean run of `surface` should contain. A case the
+ * register declares meaningless on chat (`chat.skip`) is not run there, so it
+ * is not owed a PASS either.
+ */
+export function expectedCaseCount(register, surface) {
+  const cases = Array.isArray(register?.cases) ? register.cases : [];
+  if (cases.length === 0) return 50;
+  if (surface === 'voice') return cases.length;
+  return cases.filter((c) => !c?.chat?.skip).length;
+}
+
 function emptyVerdictCounts() {
   return { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0 };
 }
@@ -140,12 +174,18 @@ export function summarize(run) {
   const counts = emptyVerdictCounts();
   const bySeverity = {};
   const byCluster = {};
+  const bySurface = {};
   const byRootCause = emptyRootCauseCounts();
   const intentCaptureOnlyCritical = [];
 
   for (const c of cases) {
     const verdict = VERDICT_KEYS.includes(c?.verdict) ? c.verdict : undefined;
     if (verdict) counts[verdict] += 1;
+
+    const surface = caseSurface(c);
+    bySurface[surface] ??= { ...emptyVerdictCounts(), total: 0 };
+    bySurface[surface].total += 1;
+    if (verdict) bySurface[surface][verdict] += 1;
 
     if (c?.severity) {
       bySeverity[c.severity] ??= emptyVerdictCounts();
@@ -161,7 +201,7 @@ export function summarize(run) {
     if (category && category in byRootCause) byRootCause[category] += 1;
 
     if (c?.severity === 'critical' && isIntentCaptureOnly(c)) {
-      intentCaptureOnlyCritical.push(c.key);
+      intentCaptureOnlyCritical.push(caseLabel(c));
     }
   }
 
@@ -171,6 +211,7 @@ export function summarize(run) {
     PARTIAL: counts.PARTIAL,
     DEGRADED: counts.DEGRADED,
     FAIL: counts.FAIL,
+    bySurface,
     bySeverity,
     byCluster,
     byRootCause,
@@ -193,8 +234,13 @@ export function summarize(run) {
  * as `newCases` and nothing else is computed.
  */
 export function diffRuns(prev, next) {
-  const prevByKey = new Map((prev?.cases ?? []).map((c) => [c.key, c]));
-  const nextByKey = new Map((next?.cases ?? []).map((c) => [c.key, c]));
+  // Keyed by case AND surface (`caseLabel`): the same case can pass spoken and
+  // regress typed, and collapsing the two would let one surface's PASS hide the
+  // other's regression — the exact blind spot the chat surfaces were added to
+  // close. A run whose cases carry no surface labels as the bare key, so a
+  // voice-only history diffs exactly as it did before.
+  const prevByKey = new Map((prev?.cases ?? []).map((c) => [caseLabel(c), c]));
+  const nextByKey = new Map((next?.cases ?? []).map((c) => [caseLabel(c), c]));
 
   const flipped = [];
   const fixed = [];
@@ -241,10 +287,18 @@ export function diffRuns(prev, next) {
  * The three release-gate rules from the plan, evaluated against a
  * RECOMPUTED summary (never `run.summary`):
  *
- *   1. `summary.PASS === 50` (or `register.cases.length` if a register is
- *      given and its size differs — a case entirely missing from
- *      `run.cases` also fails this rule, distinctly from a case that ran
- *      and got a non-PASS verdict).
+ *   1. `PASS === 50` ON EVERY SURFACE THE RUN COVERS (or `register.cases.length`
+ *      if a register is given and its size differs, minus the cases the
+ *      register skips on that surface — a case entirely missing from
+ *      `run.cases` also fails this rule, distinctly from a case that ran and
+ *      got a non-PASS verdict).
+ *
+ *      Per surface, not in aggregate: voice and chat are two different entry
+ *      points into the same pipeline, and a run that is 50/50 spoken and 31/50
+ *      typed is not "81/100, nearly there" — it is a product half of whose
+ *      operators are broken. A run with no `surface` field on its cases (every
+ *      artifact written before the chat surfaces existed) reads as voice-only
+ *      and is judged exactly as it was.
  *   2. Zero CRITICAL cases in cluster scheduling/search/confirmations whose
  *      furthest stage is `intent_capture_only` (see isIntentCaptureOnly).
  *   3. Zero FAIL verdicts, at any severity.
@@ -259,37 +313,52 @@ export function diffRuns(prev, next) {
  */
 export function gateVerdict(run, register) {
   const summary = summarize(run);
+  const runCases = Array.isArray(run?.cases) ? run.cases : [];
   const registerCases = Array.isArray(register?.cases) ? register.cases : [];
   const registerByKey = new Map(registerCases.map((c) => [c.key, c]));
-  const runByKey = new Map((run?.cases ?? []).map((c) => [c.key, c]));
-  const expectedTotal = registerCases.length > 0 ? registerCases.length : 50;
+  // Keyed by case AND surface — the same identity `latest.json` merges on.
+  const runByKey = new Map(runCases.map((c) => [`${c.key}@${caseSurface(c)}`, c]));
 
   const reasons = [];
 
-  // Rule 1 — PASS === expectedTotal (50 by default), and nothing from the
-  // register is simply absent from the run.
-  const missingKeys = [...registerByKey.keys()].filter((k) => !runByKey.has(k));
-  if (summary.PASS !== expectedTotal || missingKeys.length > 0) {
-    reasons.push(`PASS ${summary.PASS}/${expectedTotal}`);
-    if (missingKeys.length > 0) {
-      reasons.push(`missing from run: ${missingKeys.join(', ')}`);
+  // Rule 1 — per surface: PASS === that surface's expected count, and nothing
+  // the register owes that surface is simply absent from the run.
+  const surfacesInRun = SURFACES.filter((s) => runCases.some((c) => caseSurface(c) === s));
+  const orderedSurfaces = surfacesInRun.length > 0 ? surfacesInRun : ['voice'];
+  for (const surface of orderedSurfaces) {
+    const tally = summary.bySurface[surface] ?? { ...emptyVerdictCounts(), total: 0 };
+    const expected = expectedCaseCount(register, surface);
+    const owed =
+      surface === 'voice'
+        ? registerCases
+        : registerCases.filter((c) => !c?.chat?.skip);
+    const missingKeys = owed
+      .map((c) => c.key)
+      .filter((k) => !runByKey.has(`${k}@${surface}`));
+    if (tally.PASS !== expected || missingKeys.length > 0) {
+      reasons.push(`${surface}: PASS ${tally.PASS}/${expected}`);
+      if (missingKeys.length > 0) {
+        reasons.push(`${surface}: missing from run: ${missingKeys.join(', ')}`);
+      }
     }
   }
 
   // Rule 2 — zero critical scheduling/search/confirmations intent_capture_only.
   // Cluster/severity come from the register when available (do not trust
   // the run's own copy of case metadata), falling back to the run's fields
-  // for register-less callers/tests.
-  const gatedIntentCaptureOnly = summary.intentCaptureOnlyCritical.filter((key) => {
-    const cluster = registerByKey.get(key)?.cluster ?? runByKey.get(key)?.cluster;
+  // for register-less callers/tests. Labels are `key` or `key@surface`, so the
+  // register lookup uses the key half.
+  const gatedIntentCaptureOnly = summary.intentCaptureOnlyCritical.filter((label) => {
+    const key = String(label).split('@')[0];
+    const cluster = registerByKey.get(key)?.cluster ?? runByKey.get(String(label))?.cluster;
     return GATED_CLUSTERS.includes(cluster);
   });
   if (gatedIntentCaptureOnly.length > 0) {
     reasons.push(`critical intent_capture_only in ${GATED_CLUSTERS.join('/')}: ${gatedIntentCaptureOnly.join(', ')}`);
   }
 
-  // Rule 3 — zero FAIL, any severity.
-  const failKeys = (run?.cases ?? []).filter((c) => c.verdict === 'FAIL').map((c) => c.key);
+  // Rule 3 — zero FAIL, any severity, any surface.
+  const failKeys = runCases.filter((c) => c.verdict === 'FAIL').map((c) => caseLabel(c));
   if (failKeys.length > 0) {
     reasons.push(`FAIL: ${failKeys.join(', ')}`);
   }

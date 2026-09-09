@@ -707,3 +707,552 @@ export function scoreCase(
     failures,
   };
 }
+
+// ── CHAT surfaces ───────────────────────────────────────────────────────────
+//
+// `POST /api/assistant/chat` is the surface an operator actually types on (and
+// the one the web assistant page posts mic transcripts to, `inputMode:
+// 'voice'`). It reaches the SAME classifier, the SAME task-handler registry,
+// the SAME entity resolver and the SAME lookup dispatch as the voice FSM — but
+// it has no FSM, so an entire family of the register's expectations is
+// meaningless here and scoring them would manufacture failures the product does
+// not have.
+//
+// IGNORED on chat, deliberately, each because it names an `InAppVoiceAdapter`
+// concept with no counterpart on an HTTP request/response:
+//   `stateAfterTurn`, `allowedStates`  — there is no session state machine.
+//   `requireSideEffects`/`forbidSideEffects` — `SideEffect` is the FSM's
+//       return channel; chat's effects are repository writes, which are
+//       checked directly (proposals, `requireAuditEvents`).
+// Everything that describes the OUTCOME — which proposal, with which payload,
+// on which entity id, gated on what, and what the operator was told — is
+// scored exactly as hard as it is on voice.
+
+/** One `POST /api/assistant/chat` round trip. */
+export interface ChatTurnEvidence {
+  /** 1-based position in the driven conversation. */
+  index: number;
+  text: string;
+  inputMode: 'voice' | 'text';
+  httpStatus: number;
+  /** `message.content` — chat's equivalent of a spoken line. */
+  content: string;
+  taskType?: string;
+  model?: string;
+  degraded?: boolean;
+  fallbackStage?: string;
+  /** `AssistantLookupReply.outcome`, when this turn took the lookup path. */
+  lookupOutcome?: string;
+  /** `message.proposal` — the UI card, NOT the persisted row. */
+  card?: {
+    id?: string;
+    type?: string;
+    status?: string;
+    missingFields?: string[];
+  };
+  /** Every proposal id in the tenant repo AFTER this turn. */
+  proposalIds: string[];
+  clarificationFollowUp?: boolean;
+  error?: string;
+}
+
+export interface ChatCaseEvidence {
+  turns: ChatTurnEvidence[];
+  /** The persisted rows — the authoritative record of what was drafted. */
+  proposals: ProposalEvidence[];
+  /** `message.content` per turn, in order. */
+  replies: string[];
+  /** `eventType`s written to the tenant's audit repository during the case. */
+  auditEvents: string[];
+  error?: string;
+  timedOut?: boolean;
+  clarificationTurnSent: boolean;
+}
+
+/**
+ * taskTypes that mean "the route did NOT recognize an actionable intent".
+ * Everything else (`assistant.<intent>`, `assistant.lookup.*`,
+ * `assistant.en_route`, `assistant.chain`, `assistant.unhandled.<intent>`,
+ * `assistant.entity_resolution`, `assistant.voice_approval_refused`) means the
+ * classifier produced an intent the route then routed — well or badly.
+ */
+const CHAT_UNRECOGNIZED_TASK_TYPES = new Set([
+  'assistant.not_understood',
+  'assistant.intent_failed',
+  'assistant.general',
+  'assistant.invoice',
+  'assistant.schedule',
+  'assistant.followup',
+  'assistant.estimate',
+]);
+
+function chatOk(turn: ChatTurnEvidence): boolean {
+  return !turn.error && turn.httpStatus >= 200 && turn.httpStatus < 300;
+}
+
+/**
+ * The route ANSWERED rather than drafting something.
+ *
+ * Three shapes, all of them a real reply that hands control back:
+ *   1. a lookup / deterministic data query (`assistant.lookup.*`,
+ *      `assistant.query.*`),
+ *   2. the en-route direct act,
+ *   3. an honest not-found (`assistant.<intent>.not_found`) — "I couldn't find
+ *      a matching appointment for Patel" IS the correct outcome for a
+ *      reference to a record that does not exist, so counting it as "nothing
+ *      landed" would make the register's `cancel-02` permanently trip gate
+ *      rule 2 for doing exactly the right thing. Same allowance the voice
+ *      scorer makes for `entity_not_found_operator` (see `answered`).
+ */
+export function chatAnswered(evidence: ChatCaseEvidence): boolean {
+  return evidence.turns.some(
+    (t) =>
+      chatOk(t) &&
+      typeof t.taskType === 'string' &&
+      (t.taskType.startsWith('assistant.lookup.') ||
+        t.taskType.startsWith('assistant.query.') ||
+        t.taskType.endsWith('.not_found') ||
+        t.taskType === 'assistant.en_route'),
+  );
+}
+
+/** A deterministic policy refusal fired (chat's only guard shape). */
+export function chatGuarded(evidence: ChatCaseEvidence): boolean {
+  return evidence.turns.some(
+    (t) =>
+      chatOk(t) &&
+      (t.taskType === 'assistant.voice_approval_refused' ||
+        (typeof t.taskType === 'string' && t.taskType.startsWith('assistant.unhandled.'))),
+  );
+}
+
+/** The reply asked the ONE clarification question (which-one / gated ask). */
+export function chatAskedClarification(evidence: ChatCaseEvidence): boolean {
+  return (
+    evidence.turns.some((t) => t.lookupOutcome === 'ambiguous') ||
+    /more than one|which one|which (?:of|[A-Z])|did you mean/i.test(evidence.replies.join('\n'))
+  );
+}
+
+/**
+ * Furthest stage reached on a chat surface, mapped onto the SAME ladder the
+ * voice run reports so one artifact, one dashboard and one gate read both.
+ *
+ * `confirmation_asked` never appears: chat has no spoken readback, a drafted
+ * card IS the confirmation, and it is committed by a screen tap. `committed`
+ * means the row came back already approved (an auto-approving type at or above
+ * the threshold), which is the only "and it went through" chat has.
+ */
+export function deriveChatStage(evidence: ChatCaseEvidence): Stage {
+  if (evidence.turns.length === 0 || evidence.turns.every((t) => !chatOk(t))) return 'none';
+
+  let best: Stage = 'none';
+  const raise = (stage: Stage): void => {
+    if (ladderIndex(stage) > ladderIndex(best)) best = stage;
+  };
+
+  for (const turn of evidence.turns) {
+    if (!chatOk(turn)) continue;
+    if (turn.taskType && !CHAT_UNRECOGNIZED_TASK_TYPES.has(turn.taskType)) {
+      raise('intent_detected');
+    }
+    if (turn.proposalIds.length > 0) raise('proposal_created');
+  }
+  if (evidence.proposals.length > 0) raise('proposal_created');
+  if (chatAskedClarification(evidence) && ladderIndex(best) < ladderIndex('proposal_created')) {
+    raise('clarification_asked');
+  }
+  if (evidence.proposals.some((p) => p.status === 'approved')) raise('committed');
+
+  if (ladderIndex(best) < ladderIndex('proposal_created') && chatAnswered(evidence)) {
+    return 'answered';
+  }
+  if (ladderIndex(best) <= ladderIndex('intent_detected') && chatGuarded(evidence)) return 'guarded';
+  return best;
+}
+
+/** The chat twin of `isIntentCaptureOnly` — same rule, chat's evidence. */
+export function isChatIntentCaptureOnly(stage: Stage, evidence: ChatCaseEvidence): boolean {
+  return (
+    ['intent_detected', 'clarification_asked', 'confirmation_asked'].includes(stage) &&
+    evidence.proposals.length === 0 &&
+    !chatAnswered(evidence)
+  );
+}
+
+function lastReply(evidence: ChatCaseEvidence): string {
+  return evidence.replies.length > 0 ? evidence.replies[evidence.replies.length - 1] : '';
+}
+
+function chatHaystack(evidence: ChatCaseEvidence, anyTurn: boolean | undefined): string {
+  return anyTurn ? evidence.replies.join('\n') : lastReply(evidence);
+}
+
+/**
+ * Evaluate one case's `expect` block against CHAT evidence.
+ *
+ * Same contract as `evaluateExpectations`: pure, returns EVERY unmet
+ * expectation rather than the first, and resolves fixture keys through
+ * `fixtureIds` before comparing.
+ */
+export function evaluateChatExpectations(
+  expect: CaseExpect,
+  evidence: ChatCaseEvidence,
+  fixtureIds: Record<string, string>,
+  options: ScoreOptions = {},
+): string[] {
+  const failures: string[] = [];
+  const timezone = options.timezone ?? DEFAULT_TIMEZONE;
+  const proposals = evidence.proposals;
+  const actionable = proposals.filter((p) => p.proposalType !== 'voice_clarification');
+  const primary =
+    (expect.proposalType
+      ? proposals.find((p) => p.proposalType === expect.proposalType)
+      : undefined) ?? actionable[0] ?? proposals[0];
+
+  // An `escalation` that came back as an emergency_dispatch DRAFT is the
+  // correct chat outcome (see the switch below); remember it so the spoken
+  // check further down does not then demand the FSM's escalation copy.
+  let escalationSatisfiedByProposal = false;
+
+  switch (expect.outcome) {
+    case 'proposal':
+      if (!primary) {
+        // The card and the taskType are the route's OWN claim about what it
+        // drafted. When the repo has nothing but one of those says otherwise,
+        // that is a persistence bug worth naming precisely rather than the
+        // flat "nothing happened".
+        const claimed = evidence.turns.find(
+          (t) => t.card?.type || (t.taskType ?? '').startsWith('assistant.'),
+        );
+        failures.push(
+          claimed?.card?.type
+            ? `no proposal row exists although the reply carried a '${claimed.card.type}' card`
+            : 'no proposal was created',
+        );
+      } else if (expect.proposalType && primary.proposalType !== expect.proposalType) {
+        failures.push(
+          `proposalType '${primary.proposalType}' ≠ expected '${expect.proposalType}'`,
+        );
+      }
+      break;
+    case 'lookup_answer':
+      if (!chatAnswered(evidence)) failures.push('no lookup answer was returned');
+      if (actionable.length > 0) {
+        failures.push(`a proposal ('${actionable[0].proposalType}') replaced the read-only answer`);
+      }
+      break;
+    case 'clarification_question':
+      if (!chatAskedClarification(evidence)) failures.push('no which-one clarification was asked');
+      break;
+    case 'not_found':
+      if (proposals.length > 0) failures.push('a proposal was minted for a not-found reference');
+      break;
+    case 'escalation':
+      // Chat has NO on-call side effect — `notify_oncall` is an FSM effect and
+      // the route never pages anyone. The two honest chat outcomes for an
+      // emergency are: draft the `emergency_dispatch` proposal for a human to
+      // act on, or say the emergency words. Anything else means the emergency
+      // vanished into a generic reply.
+      escalationSatisfiedByProposal = proposals.some(
+        (p) => p.proposalType === 'emergency_dispatch',
+      );
+      if (
+        !escalationSatisfiedByProposal &&
+        !(expect.spokenMatches &&
+          new RegExp(expect.spokenMatches, 'i').test(evidence.replies.join('\n')))
+      ) {
+        failures.push(
+          'neither an emergency_dispatch proposal nor emergency copy came back for an emergency',
+        );
+      }
+      break;
+    case 'direct_act':
+      if (actionable.length > 0) {
+        failures.push(`a proposal ('${actionable[0].proposalType}') replaced the direct act`);
+      }
+      if (proposals.some((p) => p.proposalType === 'voice_clarification')) {
+        failures.push('a dead voice_clarification card replaced the direct act');
+      }
+      break;
+    case 'guard':
+      // Chat's guard is "nothing was written and the operator was told
+      // something honest" — the spoken/forbidSpoken checks below carry the
+      // copy half; this half is the one that matters most.
+      if (proposals.length > 0) {
+        failures.push(`a proposal ('${proposals[0].proposalType}') was minted on a guard turn`);
+      }
+      break;
+  }
+
+  // ── Proposal-level expectations (against the PERSISTED row) ───────────
+  if (expect.status !== undefined && primary && primary.status !== expect.status) {
+    failures.push(`proposal status '${primary.status}' ≠ expected '${expect.status}'`);
+  }
+  if (expect.payloadContains) {
+    for (const [key, raw] of Object.entries(expect.payloadContains)) {
+      const wanted = resolveExpectedValue(raw, fixtureIds);
+      const actual = primary?.payload[key];
+      if (actual === undefined) failures.push(`payload.${key} is absent`);
+      else if (String(actual) !== String(wanted)) {
+        failures.push(`payload.${key} = ${JSON.stringify(actual)} ≠ ${JSON.stringify(wanted)}`);
+      }
+    }
+  }
+  if (expect.payloadHas) {
+    for (const key of expect.payloadHas) {
+      if (!isPresent(primary?.payload[key])) failures.push(`payload.${key} is absent or empty`);
+    }
+  }
+  if (expect.missingFieldsContains) {
+    for (const field of expect.missingFieldsContains) {
+      if (!primary?.missingFields.includes(field)) {
+        failures.push(`missingFields does not gate on '${field}'`);
+      }
+    }
+  }
+  if (expect.proposalCount !== undefined && proposals.length !== expect.proposalCount) {
+    failures.push(`proposalCount ${proposals.length} ≠ expected ${expect.proposalCount}`);
+  }
+  if (expect.forbidProposalTypes) {
+    for (const type of expect.forbidProposalTypes) {
+      if (proposals.some((p) => p.proposalType === type)) {
+        failures.push(`forbidden proposal type '${type}' was minted`);
+      }
+    }
+  }
+  if (expect.scheduledStartWeekday !== undefined) {
+    const weekday = isoWeekdayInZone(primary?.payload.scheduledStart, timezone);
+    if (weekday !== expect.scheduledStartWeekday) {
+      failures.push(
+        `scheduledStart weekday ${weekday ?? 'unresolved'} ≠ expected ` +
+          `${expect.scheduledStartWeekday} (${timezone})`,
+      );
+    }
+  }
+
+  // ── Reply copy ────────────────────────────────────────────────────────
+  if (expect.spokenMatches && !escalationSatisfiedByProposal) {
+    const hay = chatHaystack(evidence, expect.anyTurn);
+    if (!new RegExp(expect.spokenMatches, 'i').test(hay)) {
+      failures.push(`reply did not match /${expect.spokenMatches}/i: "${hay}"`);
+    }
+  }
+  if (expect.forbidSpoken) {
+    const hay = evidence.replies.join('\n');
+    if (new RegExp(expect.forbidSpoken, 'i').test(hay)) {
+      failures.push(`reply matched forbidden /${expect.forbidSpoken}/i`);
+    }
+  }
+
+  // ── Audited acts ──────────────────────────────────────────────────────
+  if (expect.requireAuditEvents) {
+    const seenAudit = new Set(evidence.auditEvents);
+    for (const event of expect.requireAuditEvents) {
+      if (!seenAudit.has(event)) failures.push(`required audit event '${event}' was never written`);
+    }
+  }
+  if (expect.requireClarificationTurn && !evidence.clarificationTurnSent) {
+    failures.push('no disambiguation follow-up was asked for (and answered)');
+  }
+
+  return failures;
+}
+
+interface ChatSignals {
+  http5xx: boolean;
+  unrecognized: boolean;
+  unhandledCapability: boolean;
+  approvalRefused: boolean;
+  degradedEnvelope: boolean;
+  lookupFailedOrRefused: boolean;
+  clarificationMinted: boolean;
+  clarificationAsked: boolean;
+}
+
+function deriveChatSignals(c: RegisterCase, evidence: ChatCaseEvidence): ChatSignals {
+  const turns = evidence.turns;
+  return {
+    http5xx: turns.some((t) => t.httpStatus >= 500),
+    unrecognized: turns.some(
+      (t) => chatOk(t) && t.taskType !== undefined && CHAT_UNRECOGNIZED_TASK_TYPES.has(t.taskType),
+    ),
+    unhandledCapability: turns.some((t) => (t.taskType ?? '').startsWith('assistant.unhandled.')),
+    approvalRefused:
+      turns.some((t) => t.taskType === 'assistant.voice_approval_refused') &&
+      c.expect.outcome !== 'guard',
+    degradedEnvelope: turns.some((t) => t.degraded === true),
+    lookupFailedOrRefused: turns.some(
+      (t) => t.lookupOutcome === 'failed' || t.lookupOutcome === 'refused',
+    ),
+    clarificationMinted: evidence.proposals.some((p) => p.proposalType === 'voice_clarification'),
+    clarificationAsked: chatAskedClarification(evidence),
+  };
+}
+
+function deriveChatRootCause(
+  c: RegisterCase,
+  expect: CaseExpect,
+  failures: string[],
+  signals: ChatSignals,
+): RootCause {
+  const failureText = failures.join('; ');
+
+  if (signals.http5xx) {
+    return { category: 'infra', detail: `chat route returned 5xx — ${failureText}` };
+  }
+  if (signals.degradedEnvelope) {
+    return {
+      category: 'fallback',
+      detail: `degraded reply envelope (fallbackStage) — ${failureText}`,
+    };
+  }
+  if (signals.unrecognized) {
+    return {
+      category: 'intent',
+      detail:
+        `the turn fell through to the generic reply — no intent branch claimed intent ` +
+        `'${c.intent}' — ${failureText}`,
+    };
+  }
+  if (signals.unhandledCapability) {
+    return {
+      category: 'fallback',
+      detail: `honest unmapped-capability refusal for '${c.intent}' — ${failureText}`,
+    };
+  }
+  if (signals.approvalRefused) {
+    return {
+      category: 'fallback',
+      detail: `voice-mode approval refusal fired on a non-approval turn — ${failureText}`,
+    };
+  }
+  if (signals.clarificationMinted) {
+    return expect.outcome === 'proposal'
+      ? {
+          category: 'proposal_generation',
+          detail: `voice_clarification minted instead of '${expect.proposalType}' — ${failureText}`,
+        }
+      : {
+          category: 'fallback',
+          detail: `dead voice_clarification card for a ${expect.outcome} — ${failureText}`,
+        };
+  }
+  if (signals.lookupFailedOrRefused) {
+    return {
+      category: 'fallback',
+      detail: `lookup came back failed/refused for an entitled operator — ${failureText}`,
+    };
+  }
+  if (failures.some((f) => /proposalType '.*' ≠ expected/.test(f))) {
+    return { category: 'proposal_generation', detail: failureText };
+  }
+  if (
+    signals.clarificationAsked &&
+    expect.outcome === 'proposal' &&
+    failures.some((f) => /no proposal|payload\.|missingFields/.test(f))
+  ) {
+    return {
+      category: 'slot_capture',
+      detail: `the clarification was asked but never resolved into slots — ${failureText}`,
+    };
+  }
+  if (
+    failures.some((f) =>
+      /payload\.[A-Za-z]+ is absent|payload\.[A-Za-z]+ = |missingFields|scheduledStart weekday|proposal status/.test(
+        f,
+      ),
+    )
+  ) {
+    return { category: 'slot_capture', detail: failureText };
+  }
+  if (failures.some((f) => /no proposal|proposalCount|no proposal row exists/.test(f))) {
+    return { category: 'proposal_generation', detail: failureText };
+  }
+  if (
+    failures.some((f) =>
+      /no lookup answer|which-one|emergency|required audit event|replaced the (direct act|read-only answer)|was minted on a guard turn|minted for a not-found/.test(
+        f,
+      ),
+    )
+  ) {
+    return { category: 'fallback', detail: failureText };
+  }
+  if (failures.every((f) => /^reply (did not match|matched forbidden)/.test(f))) {
+    return { category: 'fallback', detail: failureText };
+  }
+  return { category: 'proposal_generation', detail: failureText };
+}
+
+/** Score one case against its (possibly chat-overridden) expectation. */
+export function scoreChatCase(
+  c: RegisterCase,
+  expect: CaseExpect,
+  evidence: ChatCaseEvidence,
+  fixtureIds: Record<string, string>,
+  options: ScoreOptions = {},
+): CaseScore {
+  const stage = deriveChatStage(evidence);
+
+  const violation = evidence.proposals.find((p) => p.contractViolation);
+  if (violation) {
+    return {
+      verdict: 'FAIL',
+      reason: 'voice-proposal contract violation',
+      stage,
+      rootCause: { category: 'proposal_generation', detail: violation.contractViolation! },
+      failures: [violation.contractViolation!],
+    };
+  }
+  const thrown = evidence.error ?? evidence.turns.find((t) => t.error)?.error;
+  if (thrown) {
+    return {
+      verdict: 'FAIL',
+      reason: evidence.timedOut ? 'case timed out' : 'exception during the turn',
+      stage: evidence.turns.length === 0 ? 'none' : stage,
+      rootCause: { category: 'infra', detail: thrown },
+      failures: [thrown],
+    };
+  }
+  const failed = evidence.turns.find((t) => t.httpStatus >= 500);
+  if (failed) {
+    const detail = `HTTP ${failed.httpStatus} on turn ${failed.index} ("${failed.text}")`;
+    return {
+      verdict: 'FAIL',
+      reason: detail,
+      stage,
+      rootCause: { category: 'infra', detail },
+      failures: [detail],
+    };
+  }
+
+  const failures = evaluateChatExpectations(expect, evidence, fixtureIds, options);
+  if (failures.length === 0) {
+    const proposal = evidence.proposals[0];
+    return {
+      verdict: 'PASS',
+      reason: proposal ? `proposal:${proposal.proposalType}` : `${expect.outcome}:${stage}`,
+      stage,
+      rootCause: null,
+      failures: [],
+    };
+  }
+
+  const signals = deriveChatSignals(c, evidence);
+  const rootCause = deriveChatRootCause(c, expect, failures, signals);
+  const fellBack =
+    signals.unrecognized ||
+    signals.unhandledCapability ||
+    signals.approvalRefused ||
+    signals.degradedEnvelope ||
+    signals.lookupFailedOrRefused ||
+    signals.clarificationMinted;
+
+  return {
+    verdict: fellBack ? 'DEGRADED' : 'PARTIAL',
+    reason: failures[0],
+    stage,
+    rootCause,
+    failures,
+  };
+}

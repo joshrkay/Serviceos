@@ -805,7 +805,15 @@ describe('A31 — notify_delay DOES auto-resolve via customer-scoped appointment
     // Two active appointments tenant-wide, exactly like the C2 fixture above
     // — the negative control that proves this is customer-SCOPED resolution,
     // not the "only one active appointment tenant-wide" fallback.
-    const resolvedAppointmentId = 'appt-for-notify-delay-customer';
+    // A REAL uuid. `notifyDelayPayloadSchema` types `appointmentId` as
+    // `z.string().uuid()`, so a readable-but-fake id makes the drafted payload
+    // contract-INVALID — which the chat chokepoint's contract gate now
+    // (correctly) refuses to leave ungated, and which execution would have
+    // rejected in production anyway. Same lesson as the entity resolver
+    // shipping with nonexistent column names because its Pool was mocked: a
+    // fixture that does not have production's shape hides the bug it was
+    // written to catch.
+    const resolvedAppointmentId = '7f9c2b1e-3d4a-4c8b-9e17-5a6b7c8d9e01';
     await appointmentRepo.create({
       id: resolvedAppointmentId,
       tenantId: TEST_TENANT,

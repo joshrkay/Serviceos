@@ -108,6 +108,64 @@ const expectSchema = z
   })
   .strict();
 
+/**
+ * SURFACES the register runs against.
+ *
+ * The product promise is that voice AND text both work, and they are two
+ * DIFFERENT entry points into the same drafting pipeline:
+ *   - `voice`       → `POST /api/voice/sessions` → `InAppVoiceAdapter` FSM
+ *   - `chat`        → `POST /api/assistant/chat` with `inputMode: 'text'`
+ *   - `chat-voice`  → the SAME route with `inputMode: 'voice'` (the web
+ *                     assistant page posts mic transcripts this way, so the
+ *                     voice-approval refusal and any other inputMode-gated
+ *                     behavior are exercised)
+ * A green voice run says nothing about the chat route, which is what an
+ * operator typing at a desk actually hits.
+ */
+export const SURFACES = ['voice', 'chat', 'chat-voice'] as const;
+export type Surface = (typeof SURFACES)[number];
+
+/** The surface the pre-existing artifact shape implicitly meant. */
+export const DEFAULT_SURFACE: Surface = 'voice';
+
+/** `inputMode` the assistant route is driven with for a chat surface. */
+export function inputModeFor(surface: Surface): 'voice' | 'text' {
+  return surface === 'chat-voice' ? 'voice' : 'text';
+}
+
+export function isChatSurface(surface: Surface): boolean {
+  return surface === 'chat' || surface === 'chat-voice';
+}
+
+/**
+ * Per-case CHAT override.
+ *
+ * Used ONLY where the voice script is meaningless on a text surface. Chat has
+ * no spoken readback and therefore no readback-confirmation turn: "yes" after
+ * a booking is not a commit, it is a stray token. Rewriting those cases for
+ * chat is not relaxing the bar — the SAME operator risk (double-submit mints
+ * two proposals, a correction mints a second one, stray noise mints anything
+ * at all) is expressed in the shape the chat surface can actually exhibit.
+ *
+ * Every override carries a `rationale`; anything without one is a voice
+ * script someone quietly reused.
+ */
+const chatOverrideSchema = z
+  .object({
+    turns: z.array(z.string().min(1)).min(1).optional(),
+    /**
+     * Scripted classifier for the chat turns, when they differ enough from
+     * the voice script that its entries no longer cover them. Absent ⇒ the
+     * case's own `llm` is used unchanged.
+     */
+    llm: z.array(llmTurnSchema).min(1).optional(),
+    expect: expectSchema.optional(),
+    /** Present ⇒ the case is not meaningful on chat at all and is not run. */
+    skip: z.string().min(1).optional(),
+    rationale: z.string().min(1).optional(),
+  })
+  .strict();
+
 const caseSchema = z
   .object({
     id: z.number().int().positive(),
@@ -129,6 +187,8 @@ const caseSchema = z
     autoConfirm: z.boolean().optional(),
     rationale: z.string().min(1).optional(),
     expect: expectSchema,
+    /** Chat-surface override — see `chatOverrideSchema`. */
+    chat: chatOverrideSchema.optional(),
   })
   .strict();
 
@@ -191,6 +251,7 @@ export type CaseOutcome = CaseExpect['outcome'];
 export type ScriptedLlmTurn = z.infer<typeof llmTurnSchema>;
 export type HarnessSeeds = z.infer<typeof harnessSeedsSchema>;
 export type TodayAppointmentSeed = z.infer<typeof todayAppointmentSeedSchema>;
+export type ChatOverride = z.infer<typeof chatOverrideSchema>;
 export type Register = z.infer<typeof registerSchema>;
 
 /**
@@ -216,6 +277,23 @@ export function parseRegister(raw: unknown): Register {
     if (c.expect.outcome === 'proposal' && !c.expect.proposalType) {
       throw new Error(`inapp-50 register: case ${c.key} expects a proposal with no proposalType`);
     }
+    if (c.chat) {
+      if (c.chat.skip && (c.chat.turns || c.chat.expect || c.chat.llm)) {
+        throw new Error(
+          `inapp-50 register: case ${c.key} both skips chat and overrides its script`,
+        );
+      }
+      if (!c.chat.skip && !c.chat.rationale) {
+        throw new Error(
+          `inapp-50 register: case ${c.key} overrides the chat script with no rationale`,
+        );
+      }
+      if (c.chat.expect?.outcome === 'proposal' && !c.chat.expect.proposalType) {
+        throw new Error(
+          `inapp-50 register: case ${c.key} chat-expects a proposal with no proposalType`,
+        );
+      }
+    }
     // The turn script and the scripted classifier must be able to cover each
     // other: the runner repeats the LAST llm entry when it runs out, but a
     // register with MORE llm entries than reachable turns is a authoring
@@ -233,6 +311,48 @@ export function parseRegister(raw: unknown): Register {
 /** The operator turns to send, in order. */
 export function turnsFor(c: RegisterCase): string[] {
   return c.turns && c.turns.length > 0 ? c.turns : [c.utterance];
+}
+
+/** The operator turns to send on `surface`, in order. */
+export function turnsForSurface(c: RegisterCase, surface: Surface): string[] {
+  if (isChatSurface(surface) && c.chat?.turns && c.chat.turns.length > 0) return c.chat.turns;
+  return turnsFor(c);
+}
+
+/** The scripted classifier entries to serve on `surface`. */
+export function llmForSurface(c: RegisterCase, surface: Surface): ScriptedLlmTurn[] {
+  if (isChatSurface(surface) && c.chat?.llm && c.chat.llm.length > 0) return c.chat.llm;
+  return c.llm;
+}
+
+/** The expectation block that governs `surface`. */
+export function expectForSurface(c: RegisterCase, surface: Surface): CaseExpect {
+  if (isChatSurface(surface) && c.chat?.expect) return c.chat.expect;
+  return c.expect;
+}
+
+/**
+ * Why this case is not run on `surface`, or undefined when it is.
+ * Voice is never skipped: the voice script IS the register.
+ */
+export function skipReasonForSurface(c: RegisterCase, surface: Surface): string | undefined {
+  return isChatSurface(surface) ? c.chat?.skip : undefined;
+}
+
+/** Parse a `--surface` CLI value into the canonical list. */
+export function parseSurfaces(raw: string): Surface[] {
+  const wanted = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const unknown = wanted.filter((s) => !(SURFACES as readonly string[]).includes(s));
+  if (unknown.length > 0) {
+    throw new Error(
+      `inapp-50: unknown surface(s): ${unknown.join(', ')} (known: ${SURFACES.join(', ')})`,
+    );
+  }
+  // Canonical order, de-duplicated — the artifact must be diffable run to run.
+  return SURFACES.filter((s) => wanted.includes(s));
 }
 
 /** Load + validate the register from disk. */

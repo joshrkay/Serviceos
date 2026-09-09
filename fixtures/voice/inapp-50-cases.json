@@ -1,6 +1,6 @@
 {
   "version": "inapp-50-v1",
-  "label": "In-app operator voice — 50-case register (R0)",
+  "label": "In-app operator voice \u2014 50-case register (R0)",
   "created": "2026-09-09",
   "description": "Fifty in-app operator voice/assistant cases drawn from real usage (PostHog: customer_created 634, job_created 527, estimate_created 432, proposal_approved 275) and support themes: booking, rescheduling, cancellation, status lookup / search, delay notifications, confirmations (incl. duplicate + noisy turns), estimate creation, quote acceptance status, invoice actions, dispatch handoff. Each case carries a severity (critical / core / growth), a cluster, a scripted classifier output (so the hermetic runner exercises the REAL FSM, entity resolver, payload builder and lookup dispatch without an LLM), and a machine-checkable expectation. The same file is loadable by scripts/probe-operator-voice-50-live.mjs (cases[] with id/op/utterance/expectProposal) for live runs against Development/Production.",
   "fixtureCatalog": "fixtures/voice/operator-voice-fixture-catalog.json",
@@ -800,7 +800,7 @@
           "intent_capture"
         ]
       },
-      "rationale": "Two Smiths: the only correct answer is a which-one question — never a silent guess, never a clarification card."
+      "rationale": "Two Smiths: the only correct answer is a which-one question \u2014 never a silent guess, never a clarification card."
     },
     {
       "id": 21,
@@ -917,7 +917,21 @@
           "customerId": "customer.garcia"
         }
       },
-      "rationale": "A noisy but unmistakable yes (\"uh yeah, go ahead\") must commit the readback, not restart the capture."
+      "rationale": "A noisy but unmistakable yes (\"uh yeah, go ahead\") must commit the readback, not restart the capture.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          }
+        },
+        "rationale": "Chat has no spoken readback, so \"uh yeah, go ahead\" confirms nothing \u2014 there is no question on the table to answer. The typed booking IS the whole turn, and the operator's confirmation is the screen tap on the card it drafts, so the chat-equivalent bar is: one message, exactly one approvable card carrying the resolved customer."
+      }
     },
     {
       "id": 24,
@@ -971,7 +985,22 @@
           "closing"
         ]
       },
-      "rationale": "A duplicated confirm (client retry / double tap) must not mint a second proposal and must not escalate."
+      "rationale": "A duplicated confirm (client retry / double tap) must not mint a second proposal and must not escalate.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "Book Garcia for Tuesday at 2 pm for the HVAC install"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          }
+        },
+        "rationale": "The chat shape of voice's duplicated confirm is a DOUBLE-SUBMIT: Enter pressed twice, a client retry, a double-tapped send. The same sentence arriving twice in one conversation inside a second must not put two appointments in the inbox for the operator to approve one of by accident."
+      }
     },
     {
       "id": 25,
@@ -1028,7 +1057,41 @@
           "2": "intent_confirm"
         }
       },
-      "rationale": "The same sentence submitted twice (double-submit / echo) must keep the readback pending with its slots intact, then commit once on yes."
+      "rationale": "The same sentence submitted twice (double-submit / echo) must keep the readback pending with its slots intact, then commit once on yes.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "yes"
+        ],
+        "llm": [
+          {
+            "intentType": "create_appointment",
+            "confidence": 0.94,
+            "extractedEntities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install"
+            },
+            "for": "Book Garcia for Tuesday"
+          },
+          {
+            "intentType": "confirm",
+            "confidence": 0.95,
+            "extractedEntities": {},
+            "for": "yes"
+          }
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          }
+        },
+        "rationale": "The same double-submit as conf-02, followed by the stray \"yes\" the voice script ends on. In chat a typed yes approves nothing (approvals are a screen tap), so the bar is that it neither mints a third card nor silently approves the one on the table."
+      }
     },
     {
       "id": 26,
@@ -1082,7 +1145,23 @@
         },
         "scheduledStartWeekday": 4
       },
-      "rationale": "A rejected readback followed by the corrected request must produce exactly one proposal carrying the corrected slot."
+      "rationale": "A rejected readback followed by the corrected request must produce exactly one proposal carrying the corrected slot.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "no, make it Thursday at 10 am"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          },
+          "scheduledStartWeekday": 4
+        },
+        "rationale": "A correction typed straight after the draft. The operator has ONE booking in mind, so the inbox must end up with ONE card \u2014 the corrected Thursday one. Two competing cards for the same visit is the hazard: whichever the operator taps, the other is still approvable."
+      }
     },
     {
       "id": 27,
@@ -1133,7 +1212,25 @@
           "1": "intent_capture"
         }
       },
-      "rationale": "Filler / mic-check noise gets one gentle reprompt (no LLM needed, no escalation); the next real request proceeds normally. LLM entries are keyed by `for` (utterance substring), so the filler entry is simply never consumed when the deterministic noise filter answers turn 1."
+      "rationale": "Filler / mic-check noise gets one gentle reprompt (no LLM needed, no escalation); the next real request proceeds normally. LLM entries are keyed by `for` (utterance substring), so the filler entry is simply never consumed when the deterministic noise filter answers turn 1.",
+      "chat": {
+        "turns": [
+          "um... hello?",
+          "Book Garcia for Tuesday at 2 pm for the HVAC install"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          },
+          "forbidProposalTypes": [
+            "voice_clarification"
+          ]
+        },
+        "rationale": "Same script as voice, scored the way chat can be scored: `stateAfterTurn` names an FSM state chat does not have, so the noise turn's \"nothing happened\" is expressed as the end-state count \u2014 one card in total means the mic-check turn minted none."
+      }
     },
     {
       "id": 28,
@@ -1169,6 +1266,18 @@
         "forbidSideEffects": [
           "notify_oncall"
         ]
+      },
+      "chat": {
+        "turns": [
+          "yes"
+        ],
+        "expect": {
+          "outcome": "guard",
+          "proposalCount": 0,
+          "spokenMatches": "anything waiting|what would you like to do",
+          "forbidSpoken": "I(?:'ve| have) (?:booked|scheduled|created|logged|sent)|all set|that's (?:booked|scheduled|done)"
+        },
+        "rationale": "A bare typed \"yes\" with nothing pending. Chat has no readback either, so the correct answer is the SAME honest re-prompt voice gives (CONFIRM_NOTHING_PENDING_LINE) \u2014 never a generic model reply improvising around an affirmation it cannot ground."
       }
     },
     {

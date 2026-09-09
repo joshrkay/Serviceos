@@ -8,6 +8,11 @@
  * and asserts the plan's three release rules
  * (docs/plans/2026-09-09-inapp-50-cases-plan.md §Gates).
  *
+ * Runs all three SURFACES — the live-voice FSM plus `POST /api/assistant/chat`
+ * with `inputMode: 'text'` and `inputMode: 'voice'` — because the product
+ * promise is that typing and speaking both work, and a green voice run says
+ * nothing about the route the web assistant page actually posts to.
+ *
  * Hermetic: no Postgres, no network, no provider. The whole run is one
  * `beforeAll` so the per-cluster `it`s below split ONE run into attributable
  * failures instead of re-driving 50 sessions eight times.
@@ -17,7 +22,12 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 
-import { loadRegister, type Register } from '../../src/ai/voice-quality/inapp-50/register';
+import {
+  SURFACES,
+  loadRegister,
+  skipReasonForSurface,
+  type Register,
+} from '../../src/ai/voice-quality/inapp-50/register';
 import { runRegister } from '../../src/ai/voice-quality/inapp-50/runner';
 import {
   formatNonPassLines,
@@ -26,7 +36,7 @@ import {
   type RunResult,
 } from '../../src/ai/voice-quality/inapp-50/report';
 
-const RUN_TIMEOUT_MS = 240_000;
+const RUN_TIMEOUT_MS = 600_000;
 
 // Loaded at collection time so the per-cluster `it`s below can be generated
 // from the register's own cluster list.
@@ -51,12 +61,19 @@ describe('in-app 50-case register', () => {
     expect(new Set(register.cases.map((c) => c.key)).size).toBe(50);
   });
 
-  it('scores every case in the register', () => {
-    expect(result.cases).toHaveLength(register.cases.length);
-    expect(result.summary.total).toBe(register.cases.length);
+  it('scores every case on every surface', () => {
+    for (const surface of SURFACES) {
+      const expected = register.cases.filter(
+        (c) => skipReasonForSurface(c, surface) === undefined,
+      ).length;
+      const scored = result.cases.filter((c) => c.surface === surface);
+      expect(scored, `surface '${surface}'`).toHaveLength(expected);
+      expect(result.summary.bySurface[surface]?.expected).toBe(expected);
+    }
+    expect(result.summary.surfaces).toEqual([...SURFACES]);
   });
 
-  it('passes the release gate (50/50, no critical intent_capture_only, no FAIL)', () => {
+  it('passes the release gate (50/50 on EVERY surface, no critical intent_capture_only, no FAIL)', () => {
     const detail = [
       '',
       `PASS ${result.summary.PASS}/${result.summary.total}  ` +
@@ -71,26 +88,32 @@ describe('in-app 50-case register', () => {
     expect(result.summary.gate.pass, detail).toBe(true);
   });
 
-  // One `it` per cluster so a failure names the cluster that owns the fix.
-  for (const cluster of REGISTER.clusters) {
-    it(`cluster '${cluster}' has no non-PASS case`, () => {
-      const inCluster = result.cases.filter((c) => c.cluster === cluster);
-      const nonPass = inCluster
-        .filter((c) => c.verdict !== 'PASS')
-        .map(
-          (c) =>
-            `${c.key} | ${c.verdict} | ${c.stage} | ${c.rootCause?.category ?? '-'} | ` +
-            `${c.rootCause?.detail ?? c.reason}`,
+  // One `it` per SURFACE × cluster: voice and chat are different entry points
+  // into the same pipeline, and a failure has to name which of the two is
+  // broken before anyone can go and fix it.
+  for (const surface of SURFACES) {
+    for (const cluster of REGISTER.clusters) {
+      it(`[${surface}] cluster '${cluster}' has no non-PASS case`, () => {
+        const inCluster = result.cases.filter(
+          (c) => c.surface === surface && c.cluster === cluster,
         );
-      expect(nonPass, `\n${nonPass.join('\n')}\n`).toEqual([]);
-    });
+        const nonPass = inCluster
+          .filter((c) => c.verdict !== 'PASS')
+          .map(
+            (c) =>
+              `${c.key}@${surface} | ${c.verdict} | ${c.stage} | ` +
+              `${c.rootCause?.category ?? '-'} | ${c.rootCause?.detail ?? c.reason}`,
+          );
+        expect(nonPass, `\n${nonPass.join('\n')}\n`).toEqual([]);
+      });
+    }
   }
 
   it('mints no approve-to-fail proposal on any surface', () => {
     const violations = result.cases.flatMap((c) =>
       c.proposals
         .filter((p) => p.contractViolation)
-        .map((p) => `${c.key}: ${p.contractViolation}`),
+        .map((p) => `${c.key}@${c.surface}: ${p.contractViolation}`),
     );
     expect(violations, `\n${violations.join('\n\n')}\n`).toEqual([]);
   });

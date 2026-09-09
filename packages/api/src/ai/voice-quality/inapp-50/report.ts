@@ -10,7 +10,13 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import type { Register } from './register';
+import {
+  SURFACES,
+  isChatSurface,
+  skipReasonForSurface,
+  type Register,
+  type Surface,
+} from './register';
 import type { CaseResult } from './runner';
 import type { RootCauseCategory, Verdict } from './score';
 
@@ -33,16 +39,35 @@ const ROOT_CAUSES: RootCauseCategory[] = [
 
 export type VerdictTally = Record<Verdict, number>;
 
+/** Per-surface tally plus what a clean run of that surface would look like. */
+export interface SurfaceTally extends VerdictTally {
+  /** Cases actually scored on this surface. */
+  total: number;
+  /** Cases the register says this surface should score (skips excluded). */
+  expected: number;
+}
+
 export interface RunSummary {
   total: number;
   PASS: number;
   PARTIAL: number;
   DEGRADED: number;
   FAIL: number;
+  /** Surfaces this run covered, in canonical order. */
+  surfaces: Surface[];
+  /**
+   * The scoreboard that matters: voice AND text are two different entry points
+   * into the same pipeline, and a green voice column says nothing about chat.
+   */
+  bySurface: Record<string, SurfaceTally>;
   bySeverity: Record<string, VerdictTally>;
   byCluster: Record<string, VerdictTally>;
   byRootCause: Record<RootCauseCategory, number>;
-  /** Critical scheduling/search/confirmation cases that produced nothing. */
+  /**
+   * Critical scheduling/search/confirmation cases that produced nothing,
+   * labelled `key@surface` — a chat-only miss and a voice-only miss are two
+   * different bugs and must never collapse into one line.
+   */
   intentCaptureOnlyCritical: string[];
   gate: { pass: boolean; reasons: string[] };
 }
@@ -65,6 +90,21 @@ export const GATED_CLUSTERS = new Set(['scheduling', 'search', 'confirmations'])
 
 function emptyTally(): VerdictTally {
   return { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0 };
+}
+
+function emptySurfaceTally(expected: number): SurfaceTally {
+  return { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0, total: 0, expected };
+}
+
+/** How many register cases a full run of `surface` scores. */
+export function expectedCaseCount(register: Register, surface: Surface): number {
+  if (!isChatSurface(surface)) return register.cases.length;
+  return register.cases.filter((c) => skipReasonForSurface(c, surface) === undefined).length;
+}
+
+/** `book-01` on voice, `book-01@chat` everywhere else. */
+export function caseLabel(result: Pick<CaseResult, 'key' | 'surface'>): string {
+  return result.surface === 'voice' ? result.key : `${result.key}@${result.surface}`;
 }
 
 function gitSha(): string {
@@ -116,12 +156,17 @@ export function buildRunResult(
  *   3. no FAIL verdicts at any severity.
  */
 export function summarize(register: Register, cases: readonly CaseResult[]): RunSummary {
+  const surfaces = SURFACES.filter((s) => cases.some((c) => c.surface === s));
   const summary: RunSummary = {
     total: cases.length,
     PASS: 0,
     PARTIAL: 0,
     DEGRADED: 0,
     FAIL: 0,
+    surfaces,
+    bySurface: Object.fromEntries(
+      surfaces.map((s) => [s, emptySurfaceTally(expectedCaseCount(register, s))]),
+    ),
     bySeverity: { critical: emptyTally(), core: emptyTally(), growth: emptyTally() },
     byCluster: Object.fromEntries(register.clusters.map((c) => [c, emptyTally()])),
     byRootCause: Object.fromEntries(ROOT_CAUSES.map((r) => [r, 0])) as Record<
@@ -134,23 +179,36 @@ export function summarize(register: Register, cases: readonly CaseResult[]): Run
 
   for (const c of cases) {
     summary[c.verdict] += 1;
+    const surfaceTally = (summary.bySurface[c.surface] ??= emptySurfaceTally(
+      expectedCaseCount(register, c.surface),
+    ));
+    surfaceTally[c.verdict] += 1;
+    surfaceTally.total += 1;
     (summary.bySeverity[c.severity] ??= emptyTally())[c.verdict] += 1;
     (summary.byCluster[c.cluster] ??= emptyTally())[c.verdict] += 1;
     if (c.rootCause) summary.byRootCause[c.rootCause.category] += 1;
     if (c.severity === 'critical' && GATED_CLUSTERS.has(c.cluster) && c.intentCaptureOnly) {
-      summary.intentCaptureOnlyCritical.push(c.key);
+      summary.intentCaptureOnlyCritical.push(caseLabel(c));
     }
   }
 
+  // ── Gate ────────────────────────────────────────────────────────────
+  // Rule 1 is now PER SURFACE. A run that is 50/50 on voice and 31/50 on chat
+  // is not "81/100, nearly there" — it is a product where half the operators
+  // are broken, so every surface must be clean on its own.
   const reasons: string[] = [];
-  const expected = register.cases.length;
-  if (summary.PASS !== expected) reasons.push(`PASS ${summary.PASS}/${expected}`);
+  for (const surface of surfaces) {
+    const tally = summary.bySurface[surface];
+    if (tally.PASS !== tally.expected || tally.total !== tally.expected) {
+      reasons.push(`${surface}: PASS ${tally.PASS}/${tally.expected}`);
+    }
+  }
   if (summary.intentCaptureOnlyCritical.length > 0) {
     reasons.push(`critical intent_capture_only: ${summary.intentCaptureOnlyCritical.join(', ')}`);
   }
   if (summary.FAIL > 0) {
     reasons.push(
-      `FAIL verdicts: ${cases.filter((c) => c.verdict === 'FAIL').map((c) => c.key).join(', ')}`,
+      `FAIL verdicts: ${cases.filter((c) => c.verdict === 'FAIL').map(caseLabel).join(', ')}`,
     );
   }
   summary.gate = { pass: reasons.length === 0, reasons };
@@ -196,10 +254,16 @@ function mergeIntoLatest(register: Register, result: RunResult, latestPath: stri
       previous = undefined;
     }
   }
+  // Keyed by case AND surface: a batch run of the chat surface must not
+  // overwrite the voice row for the same case (they are different findings),
+  // and re-running one surface must replace only that surface's rows.
   const byKey = new Map<string, CaseResult>();
-  for (const c of previous?.cases ?? []) byKey.set(c.key, c);
-  for (const c of result.cases) byKey.set(c.key, c);
-  const merged = [...byKey.values()].sort((a, b) => a.id - b.id);
+  const identity = (c: CaseResult): string => `${c.key}@${c.surface}`;
+  for (const c of previous?.cases ?? []) byKey.set(identity(c), c);
+  for (const c of result.cases) byKey.set(identity(c), c);
+  const merged = [...byKey.values()].sort(
+    (a, b) => a.id - b.id || SURFACES.indexOf(a.surface) - SURFACES.indexOf(b.surface),
+  );
   return {
     ...result,
     // The merged artifact is no longer "the batch" — it is the running 50.
@@ -233,6 +297,18 @@ export function formatScoreboard(result: RunResult, registerTotal?: number): str
   );
   lines.push('');
   lines.push(
+    `${pad('surface', 16)}${pad('PASS', 9)}${pad('PARTIAL', 9)}${pad('DEGRADED', 10)}${pad('FAIL', 6)}`,
+  );
+  lines.push('-'.repeat(50));
+  for (const surface of s.surfaces) {
+    const tally = s.bySurface[surface];
+    lines.push(
+      `${pad(surface, 16)}${pad(`${tally.PASS}/${tally.expected}`, 9)}${pad(tally.PARTIAL, 9)}` +
+        `${pad(tally.DEGRADED, 10)}${pad(tally.FAIL, 6)}`,
+    );
+  }
+  lines.push('');
+  lines.push(
     `${pad('cluster', 16)}${pad('PASS', 7)}${pad('PARTIAL', 9)}${pad('DEGRADED', 10)}${pad('FAIL', 6)}`,
   );
   lines.push('-'.repeat(48));
@@ -262,7 +338,7 @@ export function formatScoreboard(result: RunResult, registerTotal?: number): str
     lines.push(`non-PASS (${nonPass.length}):`);
     for (const c of nonPass) {
       lines.push(
-        `  ${pad(c.key, 13)} ${pad(c.verdict, 9)} ${pad(c.stage, 20)} ` +
+        `  ${pad(caseLabel(c), 24)} ${pad(c.verdict, 9)} ${pad(c.stage, 20)} ` +
           `${pad(c.rootCause?.category ?? '-', 20)} ${c.rootCause?.detail ?? c.reason}`,
       );
     }
@@ -272,10 +348,14 @@ export function formatScoreboard(result: RunResult, registerTotal?: number): str
     lines.push(`critical intent_capture_only: ${s.intentCaptureOnlyCritical.join(', ')}`);
   }
   lines.push('');
-  if (registerTotal !== undefined && s.total !== registerTotal) {
+  const expectedTotal =
+    registerTotal === undefined
+      ? undefined
+      : s.surfaces.reduce((sum, surface) => sum + s.bySurface[surface].expected, 0);
+  if (expectedTotal !== undefined && s.total !== expectedTotal) {
     const clean = nonPass.length === 0;
     lines.push(
-      `SCOPE: ${s.total} of ${registerTotal} cases — ${clean ? 'all ran clean' : 'see above'}. ` +
+      `SCOPE: ${s.total} of ${expectedTotal} case×surface runs — ${clean ? 'all ran clean' : 'see above'}. ` +
         'The release gate is judged on the full register (latest.json).',
     );
   } else {
@@ -291,7 +371,7 @@ export function formatNonPassLines(result: RunResult): string[] {
     .filter((c) => c.verdict !== 'PASS')
     .map(
       (c) =>
-        `${c.key} | ${c.verdict} | ${c.stage} | ${c.rootCause?.category ?? '-'} | ` +
+        `${caseLabel(c)} | ${c.verdict} | ${c.stage} | ${c.rootCause?.category ?? '-'} | ` +
         `${c.rootCause?.detail ?? c.reason}`,
     );
 }

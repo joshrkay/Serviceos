@@ -203,6 +203,90 @@ test('gateVerdict passes when latest.json is a merge of five 10-case batches cov
   assert.equal(verdict.summary.PASS, 50);
 });
 
+// ---- surfaces ------------------------------------------------------------
+//
+// A run now covers three ENTRY POINTS — the live-voice FSM, and the assistant
+// route typed and by mic. They are scored separately on purpose: a run that is
+// 50/50 spoken and 31/50 typed is not "81/100, nearly there", it is a product
+// half of whose operators are broken.
+
+function surfaced(cases, surface) {
+  return cases.map((c) => ({ ...c, surface }));
+}
+
+test('summarize buckets by surface and labels a chat case key@surface', () => {
+  const voice = buildFullPassingRun().cases;
+  const chat = surfaced(voice, 'chat');
+  const run = makeRun({ cases: [...surfaced(voice, 'voice'), ...chat] });
+  const summary = summarize(run);
+
+  assert.equal(summary.total, 100);
+  assert.equal(summary.bySurface.voice.PASS, 50);
+  assert.equal(summary.bySurface.chat.PASS, 50);
+  assert.equal(summary.bySurface.chat.total, 50);
+});
+
+test('gateVerdict requires 50/50 on EVERY surface, not 100 in aggregate', () => {
+  const base = buildFullPassingRun().cases;
+  const voice = surfaced(base, 'voice');
+  const chat = surfaced(base, 'chat');
+  // Chat loses one case; voice is still perfect. Aggregate PASS is 99/100.
+  chat[0] = { ...chat[0], verdict: 'PARTIAL', stage: 'proposal_created' };
+  const run = makeRun({ cases: [...voice, ...chat] });
+
+  const verdict = gateVerdict(run, REGISTER);
+  assert.equal(verdict.pass, false);
+  assert.ok(
+    verdict.reasons.some((r) => r.startsWith('chat: PASS 49/50')),
+    `expected a chat-specific PASS reason, got: ${verdict.reasons.join(' | ')}`,
+  );
+  assert.equal(
+    verdict.reasons.some((r) => r.startsWith('voice:')),
+    false,
+    'the clean voice surface must not be blamed for the chat regression',
+  );
+});
+
+test('gateVerdict flags a case missing on ONE surface only', () => {
+  const base = buildFullPassingRun().cases;
+  const run = makeRun({
+    cases: [
+      ...surfaced(base, 'voice'),
+      ...surfaced(base, 'chat').filter((c) => c.key !== 'book-01'),
+    ],
+  });
+
+  const verdict = gateVerdict(run, REGISTER);
+  assert.equal(verdict.pass, false);
+  assert.ok(
+    verdict.reasons.some((r) => r.includes('chat: missing from run') && r.includes('book-01')),
+  );
+});
+
+test('a run whose cases carry no surface is still judged exactly as a voice run', () => {
+  const verdict = gateVerdict(buildFullPassingRun(), REGISTER);
+  assert.equal(verdict.pass, true);
+  assert.equal(verdict.summary.bySurface.voice.PASS, 50);
+});
+
+test('the same case failing on two surfaces reports as two distinct findings', () => {
+  const base = buildFullPassingRun().cases;
+  const voice = surfaced(base, 'voice');
+  const chat = surfaced(base, 'chat');
+  const target = chat.find((c) => c.cluster === 'search' && c.severity === 'critical');
+  target.verdict = 'PARTIAL';
+  target.stage = 'intent_detected';
+  target.proposals = [];
+
+  const verdict = gateVerdict(makeRun({ cases: [...voice, ...chat] }), REGISTER);
+  assert.ok(
+    verdict.reasons.some(
+      (r) => r.includes('critical intent_capture_only') && r.includes(`${target.key}@chat`),
+    ),
+    `expected the chat surface to be named, got: ${verdict.reasons.join(' | ')}`,
+  );
+});
+
 // ---- diffRuns() ----------------------------------------------------------
 
 test('diffRuns reports fixed, regressed, new cases, and root-cause churn', () => {
