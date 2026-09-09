@@ -424,6 +424,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /stream-token
          └─ POST /transcribe
 099  authenticated use    /api/onboarding    [router: router]
+         └─ GET /billing/plans
          └─ GET /operator-hours
          └─ GET /status
          └─ GET /voice/presets

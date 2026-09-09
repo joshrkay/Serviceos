@@ -76,7 +76,9 @@ Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
 | Variable | Notes |
 |----------|-------|
 | `WEB_URL` | Stripe success/cancel URLs, upgrade emails |
-| `STRIPE_PRICE_ID` | Onboarding trial subscription price |
+| `STRIPE_BASIC_PRICE_ID` | Onboarding trial — Basic plan price (must be an active, USD, monthly, $50.00 recurring price on an active product; validated live against Stripe on every checkout and by `GET /api/onboarding/billing/plans`) |
+| `STRIPE_ENTERPRISE_PRICE_ID` | Onboarding trial — Enterprise plan price (active, USD, monthly, $150.00 recurring; same live validation) |
+| `STRIPE_PRICE_ID` | **Deprecated.** Legacy single-plan trial price. Superseded by the two vars above for the onboarding checkout route; still read by `scripts/provision-tenant.ts` and the legacy (no `planId`) `createTrialCheckoutSession` path |
 
 ## Deploy topology (web + worker split)
 
