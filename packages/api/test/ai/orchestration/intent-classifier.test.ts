@@ -654,11 +654,17 @@ describe('U2 — deterministic owner operator commands', () => {
       },
     },
     {
+      // est-01 — the spoken WORK is what gets priced, so it must arrive as a
+      // LINE ITEM. Emitting it as `jobReference` alone (what this entry
+      // asserted originally) meant `draft_estimate`'s required `lineItems`
+      // was never populated: the card minted gated on `lineItems` — an
+      // estimate for nothing — even with the exact item in the price book.
+      // The leading article is stripped so it grounds against the catalog.
       transcript: 'Quote Khan for a three-ton condenser replacement',
       intentType: 'draft_estimate',
       entities: {
         customerName: 'Khan',
-        jobReference: 'three-ton condenser replacement',
+        lineItemDescriptions: ['three-ton condenser replacement'],
       },
     },
     {
@@ -723,6 +729,42 @@ describe('U2 — deterministic owner operator commands', () => {
 
     expect(result.intentType).toBe('unknown');
     expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  // est-01 — "quote X for Y": Y is WORK TO PRICE, not a reference to an
+  // existing job. Keeping it as `jobReference` was doubly wrong: the estimate
+  // got no line item AND `draft_estimate` is a JOB_REF_INTENTS member, so the
+  // spoken work was handed to the job resolver, which trigram-matched it
+  // against job summaries and linked the estimate to whatever scored.
+  describe('draft_estimate "quote X for Y" — Y is a line item, not a job', () => {
+    async function quote(transcript: string) {
+      const gateway = mockGateway(sinkResponse);
+      const result = await classifyIntent(transcript, { tenantId, ownerSession: true }, gateway);
+      expect(gateway.complete).not.toHaveBeenCalled();
+      return result.extractedEntities as Record<string, unknown>;
+    }
+
+    it('spoken WORK becomes a line item and is NOT sent to the job resolver', async () => {
+      const entities = await quote('Quote Khan for a three-ton condenser replacement');
+      expect(entities.lineItemDescriptions).toEqual(['three-ton condenser replacement']);
+      expect(entities.jobReference).toBeUndefined();
+    });
+
+    it.each([
+      ['Quote Garcia for the Patel job', 'the Patel job'],
+      ['Quote Garcia for JOB-0012', 'JOB-0012'],
+    ])('%s keeps jobReference — it names an existing job', async (transcript, reference) => {
+      const entities = await quote(transcript);
+      expect(entities.jobReference).toBe(reference);
+      // Still offered as a line item too: the payload builder grounds it and
+      // an unmatched description is a reviewable line, never a silent drop.
+      expect(entities.lineItemDescriptions).toHaveLength(1);
+    });
+
+    it('strips a leading article so the description grounds against the catalog', async () => {
+      const entities = await quote('Quote Khan for the duct sealing');
+      expect(entities.lineItemDescriptions).toEqual(['duct sealing']);
+    });
   });
 });
 

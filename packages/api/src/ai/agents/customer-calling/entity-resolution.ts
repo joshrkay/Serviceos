@@ -356,6 +356,26 @@ const SCHEDULING_TECHNICIAN_INTENTS = new Set([
 ]);
 
 /**
+ * #909 — intents that operate on an EXISTING lead, named by the person or
+ * company on it ("convert the Greenfield lead", "mark the Acme lead lost").
+ *
+ * `convertLeadPayloadSchema` / `markLeadLostPayloadSchema` both gate on a
+ * resolved `leadId` while the classifier can only ever emit a free-text
+ * `leadReference` — and this planner had NO `lead` branch, so `leadId` was
+ * never resolved on ANY voice surface and the gate had nothing behind it that
+ * could ever lift it. That is precisely the #909 shape CLAUDE.md forbids: "a
+ * proposal gated on an entity id it does not have must have a resolver behind
+ * that gate". `PgEntityResolver.resolveLead` (and the fixture resolver) have
+ * existed since #909; only the plan was missing (register case cust-03).
+ *
+ * Members of `requiresExistingEntity` too: converting a lead that does not
+ * exist is not a request that can proceed, so a miss is an honest "I couldn't
+ * find a matching lead" (in-app: back to intent_capture — transitions.ts
+ * `escalateEntityNotFound`), never a gated card nobody can complete.
+ */
+const LEAD_REF_INTENTS = new Set(['convert_lead', 'mark_lead_lost']);
+
+/**
  * VOX-02 — intents whose whole point is to OPEN a record that does not exist
  * yet. A `not_found` on one of these is the normal, expected outcome, not a
  * failure: `create_appointment` carrying only a `jobTitle` is auto-opened as
@@ -397,6 +417,7 @@ export function requiresExistingEntity(intent: string): boolean {
     APPOINTMENT_REF_INTENTS.has(intent) ||
     JOB_REF_INTENTS.has(intent) ||
     TECHNICIAN_REF_INTENTS.has(intent) ||
+    LEAD_REF_INTENTS.has(intent) ||
     CUSTOMER_REF_INTENTS.has(intent)
   );
 }
@@ -596,6 +617,18 @@ export function planVoiceEntityLookups(
     });
   }
 
+  // #909 — the lead a convert/mark-lost operates on. `leadReference` is the
+  // classifier's own field for it (intent-taxonomy-blocks.ts) and the
+  // deterministic owner-command matcher for "convert the X lead into a
+  // customer" emits the same key. `customerName` is deliberately NOT a
+  // fallback: on these two intents that field names the customer a lead would
+  // BECOME, not the lead — resolving it as a lead reference would be a guess
+  // about which record the operator meant.
+  const leadReference = trimReference(entities.leadReference);
+  if (leadReference && LEAD_REF_INTENTS.has(intent)) {
+    lookups.push({ kind: 'lead', reference: leadReference, refKey: 'leadId' });
+  }
+
   const appointmentReference = trimReference(entities.appointmentReference);
   if (appointmentReference && APPOINTMENT_REF_INTENTS.has(intent)) {
     lookups.push({
@@ -657,6 +690,69 @@ export function planCustomerAnchoredAppointmentLookup(
     kind: 'appointment',
     reference: dayPhrase ?? '',
     refKey: 'appointmentId',
+    customerId,
+  };
+}
+
+/**
+ * The DOCUMENT twin of `planCustomerAnchoredAppointmentLookup`, for the
+ * operator who named the PERSON and no paperwork: "nudge Khan about the
+ * pending estimate", "send Johnson a reminder on the overdue invoice", "text
+ * Smith the invoice link".
+ *
+ * Those utterances carry `customerName` and NOTHING the document-reference
+ * branch of `planVoiceEntityLookups` can use (that branch reads
+ * `jobReference`, which the classifier only fills when a document number or
+ * job name was actually spoken). So `estimateId`/`invoiceId` stayed absent and
+ * the proposal was either gated on a field nothing could ever fill — a #909
+ * gate with no resolver behind it — or, for `send_estimate_nudge`, minted
+ * INVALID with an empty `missingFields` (register cases est-06 / inv-08).
+ *
+ * Same second-pass shape and the same load-bearing conditions as the
+ * appointment version:
+ *   - ESTIMATE_DOC_INTENTS / INVOICE_DOC_INTENTS only — the two families
+ *     whose contracts want a document id. Nothing else gains a reference it
+ *     never asked for.
+ *   - ONLY when NO document reference was spoken (no `jobReference`, and no
+ *     `jobTitle` the JOB_REF fallback would have read as one). A spoken
+ *     reference is the operator's own words and keeps its existing path —
+ *     exact number first, then the customer-name traversal — untouched.
+ *   - ONLY when the id is still absent; the caller checks that.
+ *
+ * The `reference` passed through is the operator's word for the customer,
+ * because with no document named that IS how the document was referred to
+ * ("Khan's estimate"). `PgEntityResolver` scopes on the verified `customerId`
+ * anchor and uses the reference only for the honest not-found line; a resolver
+ * that keys on text (the register's fixture resolver) reads the same words the
+ * operator said. Empty when the customer came from session identity rather
+ * than a spoken name — the anchor alone is a complete scope.
+ *
+ * Honest end to end: the resolver answers one / several / none, several is the
+ * EXISTING one-tap disambiguation, and none is a not-found — never a pick.
+ */
+export function planCustomerAnchoredDocumentLookup(
+  intent: string,
+  entities: Record<string, unknown>,
+  customerId: string,
+): VoiceEntityLookup | undefined {
+  const kind: EntityKind | undefined = ESTIMATE_DOC_INTENTS.has(intent)
+    ? 'estimate'
+    : INVOICE_DOC_INTENTS.has(intent)
+      ? 'invoice'
+      : undefined;
+  if (!kind) return undefined;
+  // Anything the first pass would have treated as a document reference means
+  // the operator DID name the paperwork; that resolution already ran and this
+  // fallback must not second-guess it.
+  if (trimReference(entities.jobReference) ?? trimReference(entities.jobTitle)) return undefined;
+
+  const refKey = REF_KEY_BY_KIND[kind];
+  if (!refKey) return undefined;
+
+  return {
+    kind,
+    reference: trimReference(entities.customerName) ?? '',
+    refKey,
     customerId,
   };
 }
@@ -826,6 +922,18 @@ export async function resolveSchedulingEntities(
     if (anchored) {
       const anchoredTerminal = await resolvePlannedLookups(resolver, tenantId, [anchored], refs);
       if (anchoredTerminal) return anchoredTerminal;
+    }
+  }
+
+  // The DOCUMENT twin of the pass above, for the operator who named the person
+  // and no paperwork ("nudge Khan about the pending estimate"). Same
+  // preconditions: a verified customer in hand, and the id this intent's
+  // contract wants still absent.
+  if (refs.customerId && !refs.estimateId && !refs.invoiceId) {
+    const anchoredDoc = planCustomerAnchoredDocumentLookup(intent, entities, refs.customerId);
+    if (anchoredDoc) {
+      const docTerminal = await resolvePlannedLookups(resolver, tenantId, [anchoredDoc], refs);
+      if (docTerminal) return docTerminal;
     }
   }
 

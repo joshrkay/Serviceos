@@ -447,6 +447,56 @@ const MAX_LEAD_CANDIDATES = 5;
  */
 const MAX_CATALOG_ITEM_CANDIDATES = 5;
 
+/**
+ * Kinds for which a verified `customerId` anchor is itself a complete scope,
+ * so an EMPTY reference is meaningful ("Garcia's next appointment", "Khan's
+ * open estimate"). Every other kind still treats an empty reference as
+ * `skipped`. See `EntityResolver.customerId` (entity-resolver.ts).
+ */
+const CUSTOMER_ANCHORABLE_KINDS: ReadonlySet<EntityKind> = new Set<EntityKind>([
+  'appointment',
+  'estimate',
+  'invoice',
+]);
+
+/**
+ * Statuses a customer-ANCHORED estimate lookup may offer. The operator named
+ * no document at all here, so the only defensible answer is paperwork still
+ * awaiting the customer: `accepted` / `rejected` / `expired` are all closed
+ * books.
+ *
+ * DELIBERATELY NARROWER than `resolveEstimate`'s own floor, which keeps
+ * `accepted` in on purpose (RV-042's acceptance-invalidation edit path). That
+ * path answers a reference the operator SPOKE ("EST-0042", "Khan's estimate")
+ * and must reach whatever they named; this one is a fallback for a document
+ * nobody named, where handing back a closed estimate would be a guess, not a
+ * match. Widening this set would silently change which estimate an unnamed
+ * "nudge Khan" attaches to.
+ */
+const ANCHORED_ESTIMATE_OPEN_STATUSES = ['draft', 'ready_for_review', 'sent'] as const;
+
+/**
+ * Statuses a customer-anchored invoice lookup may offer: ISSUED and not fully
+ * settled. `draft` (never sent, no balance to chase), `paid`, `void` and
+ * `canceled` are excluded for the same reason the estimate set excludes
+ * closed books — an unnamed "send Johnson a reminder on the overdue invoice"
+ * means one with money outstanding. The NAMED path (`resolveInvoice`) still
+ * reaches drafts, because `send_invoice` / `issue_invoice` legitimately
+ * target one the operator asked for by name.
+ */
+const ANCHORED_INVOICE_OPEN_STATUSES = ['open', 'partially_paid'] as const;
+
+/**
+ * The one-tap picker hint for an anchored document candidate: two of a
+ * customer's own estimates are told apart out loud by their AMOUNT, not by
+ * their status. Amounts stay integer cents in the row and are formatted only
+ * here, for the spoken/rendered label.
+ */
+function anchoredDocumentHint(status: string | null, amountCents: number): string {
+  const amount = formatUsdCentsFixed(Number(amountCents) || 0);
+  return status ? `${status} · ${amount}` : amount;
+}
+
 export class PgEntityResolver implements EntityResolver {
   constructor(private readonly pool: Pool) {}
 
@@ -460,12 +510,13 @@ export class PgEntityResolver implements EntityResolver {
     const { tenantId, reference, kind, jobId, customerId } = input;
 
     // Guard: empty/null/whitespace-only references are not resolvable —
-    // EXCEPT a customer-anchored appointment lookup, where the anchor IS the
-    // scope and the empty reference simply means "that customer's upcoming
-    // appointment" ("text Garcia that I'm running late" names no visit at
-    // all). See `customerId` on the EntityResolver interface.
+    // EXCEPT a customer-ANCHORED lookup, where the anchor IS the scope and an
+    // empty reference simply means "that customer's own": their upcoming
+    // appointment ("text Garcia that I'm running late" names no visit at
+    // all), their open estimate, their open invoice. See `customerId` on the
+    // EntityResolver interface.
     if (!reference || reference.trim() === '') {
-      if (!(kind === 'appointment' && customerId)) {
+      if (!(CUSTOMER_ANCHORABLE_KINDS.has(kind) && customerId)) {
         return { kind: 'skipped' };
       }
     }
@@ -476,11 +527,20 @@ export class PgEntityResolver implements EntityResolver {
       case 'job':
         return this.resolveJob(tenantId, reference);
       case 'invoice':
-        return this.resolveInvoice(tenantId, reference);
+        // A verified customer anchor IS the scope: the operator named the
+        // person and no paperwork, so there is no document reference to score
+        // (see `resolveInvoiceByCustomer`). Checked before the number/name
+        // paths for the same reason the appointment branch checks its
+        // anchors: those paths answer a reference the operator SPOKE.
+        return customerId
+          ? this.resolveInvoiceByCustomer(tenantId, reference, customerId)
+          : this.resolveInvoice(tenantId, reference);
       case 'appointment':
         return this.resolveAppointment(tenantId, reference, jobId, customerId);
       case 'estimate':
-        return this.resolveEstimate(tenantId, reference);
+        return customerId
+          ? this.resolveEstimateByCustomer(tenantId, reference, customerId)
+          : this.resolveEstimate(tenantId, reference);
       case 'technician':
         return this.resolveTechnician(tenantId, reference);
       case 'lead':
@@ -1560,6 +1620,141 @@ export class PgEntityResolver implements EntityResolver {
       score: 1.0,
     }));
 
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * The DOCUMENT twin of `resolveAppointmentByCustomer`: "nudge Khan about
+   * the pending estimate" / "send Johnson a reminder on the overdue invoice".
+   *
+   * Operators name the PERSON, not the paperwork. `send_estimate_nudge` and
+   * `send_payment_reminder` therefore routinely arrive with a resolved
+   * `customerId` and NO document reference of any kind — the classifier has
+   * no `estimateReference`/`invoiceReference` field, and `jobReference` is
+   * empty because no number or job name was spoken. Before this,
+   * `estimateId`/`invoiceId` simply stayed absent: `send_estimate_nudge` was
+   * minted INVALID against its own contract and `send_payment_reminder` was
+   * gated on a field nothing in the system could ever fill — a #909 gate with
+   * no resolver behind it.
+   *
+   * THE TRAVERSAL is customer → jobs → estimates/invoices, the only link
+   * there is (neither table carries a `customer_id`; both carry `job_id`) and
+   * the same hop `resolveEstimate`/`resolveInvoice`'s name paths already
+   * make. Here the customer id is already VERIFIED, so it is one indexed join
+   * instead of a trigram score.
+   *
+   * `reference` is NOT used to filter — the anchor is the whole scope. It is
+   * carried only so a `not_found` names what the operator said.
+   *
+   * Honesty rules are the shared ones, so no new way to guess appears:
+   * exactly one row resolves; two to five become the existing one-tap
+   * `entity_ambiguous` picker, labelled by document number with the amount as
+   * the hint (the only two things that tell two of a customer's estimates
+   * apart out loud); zero — or more than five, where reading back an
+   * arbitrary five would be a guess wearing a picker's costume — is
+   * `not_found`.
+   *
+   * Money stays integer cents end to end: `total_cents` / `amount_due_cents`
+   * are read as integers and only rendered for the spoken hint.
+   */
+  private async resolveEstimateByCustomer(
+    tenantId: string,
+    reference: string,
+    customerId: string,
+  ): Promise<EntityResolverResult> {
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          estimate_number: string;
+          status: string | null;
+          total_cents: number;
+        }>(
+          `SELECT e.id, e.estimate_number, e.status, e.total_cents
+             FROM estimates e
+             JOIN jobs j
+               ON j.id = e.job_id AND j.tenant_id = e.tenant_id
+            WHERE e.tenant_id = $1
+              AND j.customer_id = $2
+              AND e.deleted_at IS NULL
+              AND e.status = ANY($3::text[])
+            ORDER BY e.created_at DESC
+            LIMIT ${MAX_ESTIMATE_CANDIDATES + 1}`,
+          [tenantId, customerId, [...ANCHORED_ESTIMATE_OPEN_STATUSES]],
+        )
+        .then((r) => r.rows),
+    );
+
+    return this.foldAnchoredDocuments(
+      rows.map((row) => ({
+        id: row.id,
+        kind: 'estimate' as EntityKind,
+        label: row.estimate_number,
+        hint: anchoredDocumentHint(row.status, row.total_cents),
+        score: 1.0,
+      })),
+      reference,
+      MAX_ESTIMATE_CANDIDATES,
+    );
+  }
+
+  /** Invoice twin of `resolveEstimateByCustomer` — see that doc comment. */
+  private async resolveInvoiceByCustomer(
+    tenantId: string,
+    reference: string,
+    customerId: string,
+  ): Promise<EntityResolverResult> {
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          invoice_number: string;
+          status: string | null;
+          amount_due_cents: number;
+        }>(
+          `SELECT i.id, i.invoice_number, i.status, i.amount_due_cents
+             FROM invoices i
+             JOIN jobs j
+               ON j.id = i.job_id AND j.tenant_id = i.tenant_id
+            WHERE i.tenant_id = $1
+              AND j.customer_id = $2
+              AND i.status = ANY($3::text[])
+            ORDER BY i.due_date ASC NULLS LAST, i.created_at DESC
+            LIMIT ${MAX_INVOICE_CANDIDATES + 1}`,
+          [tenantId, customerId, [...ANCHORED_INVOICE_OPEN_STATUSES]],
+        )
+        .then((r) => r.rows),
+    );
+
+    return this.foldAnchoredDocuments(
+      rows.map((row) => ({
+        id: row.id,
+        kind: 'invoice' as EntityKind,
+        label: row.invoice_number,
+        hint: anchoredDocumentHint(row.status, row.amount_due_cents),
+        score: 1.0,
+      })),
+      reference,
+      MAX_INVOICE_CANDIDATES,
+    );
+  }
+
+  /**
+   * Shared fold for the two anchored-document lookups. Every row is an exact
+   * scope match (score 1.0), so τ_ent has nothing to discriminate on: the
+   * COUNT is the whole answer, exactly as in `resolveAppointmentByCustomer`.
+   */
+  private foldAnchoredDocuments(
+    candidates: EntityCandidate[],
+    reference: string,
+    maxCandidates: number,
+  ): EntityResolverResult {
+    if (candidates.length === 0 || candidates.length > maxCandidates) {
+      return { kind: 'not_found', reference };
+    }
     if (candidates.length === 1) {
       return { kind: 'resolved', candidate: candidates[0] };
     }

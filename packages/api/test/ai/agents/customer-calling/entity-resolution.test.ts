@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   planCustomerAnchoredAppointmentLookup,
+  planCustomerAnchoredDocumentLookup,
   planVoiceEntityLookups,
   requiresExistingEntity,
   resolveSchedulingEntities,
@@ -1063,6 +1064,202 @@ describe('SCH-D2 — customer-anchored appointment lookup (operators name the pe
       kind: 'appointment',
       reference: '',
       refKey: 'appointmentId',
+      customerId: CUSTOMER,
+    });
+  });
+});
+
+// #909 — `convert_lead` / `mark_lead_lost` both gate on a resolved `leadId`
+// while the classifier can only ever emit a free-text `leadReference`. This
+// planner had no `lead` branch at all, so `leadId` was never resolved on any
+// voice surface: a gate with no resolver behind it, which CLAUDE.md names as
+// a capability that can never be approved. Register case cust-03.
+describe('#909 — lead references resolve to a leadId', () => {
+  const TENANT = 'tenant-lead';
+  const LEAD = 'lead-greenfield';
+
+  function leadResolver(result: EntityResolverResult): EntityResolver & {
+    calls: Array<Record<string, unknown>>;
+  } {
+    const calls: Array<Record<string, unknown>> = [];
+    return {
+      calls,
+      resolve: vi.fn(async (input) => {
+        calls.push(input as unknown as Record<string, unknown>);
+        if (input.kind === 'lead') return result;
+        return { kind: 'not_found', reference: input.reference } satisfies EntityResolverResult;
+      }),
+    };
+  }
+
+  it.each(['convert_lead', 'mark_lead_lost'])(
+    '%s plans a lead lookup on leadReference',
+    (intent) => {
+      expect(planVoiceEntityLookups(intent, { leadReference: 'Greenfield' })).toEqual([
+        { kind: 'lead', reference: 'Greenfield', refKey: 'leadId' },
+      ]);
+    },
+  );
+
+  it('a resolved lead lands on refs.leadId', async () => {
+    const resolver = leadResolver({
+      kind: 'resolved',
+      candidate: {
+        id: LEAD,
+        kind: 'lead',
+        label: 'Greenfield Property Management',
+        score: 1,
+      },
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'convert_lead', {
+      leadReference: 'Greenfield',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.leadId).toBe(LEAD);
+  });
+
+  it('two matching leads stay ambiguous — the one-tap picker, never a pick', async () => {
+    const resolver = leadResolver({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'lead-a', kind: 'lead', label: 'Greenfield Property', score: 1 },
+        { id: 'lead-b', kind: 'lead', label: 'Greenfield Homes', score: 1 },
+      ],
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'convert_lead', {
+      leadReference: 'Greenfield',
+    });
+    expect(res.status).toBe('ambiguous');
+    expect(res.ambiguous?.entityKind).toBe('lead');
+  });
+
+  it('a lead that does not exist is an honest not_found, not a silent pass-through', async () => {
+    const resolver = leadResolver({ kind: 'not_found', reference: 'Alvarez' });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'convert_lead', {
+      leadReference: 'Alvarez',
+    });
+    expect(res.status).toBe('not_found');
+    // Record-operating: the request cannot proceed, so the surfaces speak an
+    // honest miss instead of drafting a card nobody can complete.
+    expect(requiresExistingEntity('convert_lead')).toBe(true);
+    expect(requiresExistingEntity('mark_lead_lost')).toBe(true);
+  });
+
+  it('customerName is NOT read as a lead reference — on these intents it names what the lead BECOMES', () => {
+    // convert_lead is a CUSTOMER_REF_INTENTS member (unchanged), so a spoken
+    // customer name still resolves as a CUSTOMER. What must never happen is
+    // that name being handed to the lead resolver as a second guess at which
+    // record the operator meant.
+    expect(planVoiceEntityLookups('convert_lead', { customerName: 'Greenfield' })).toEqual([
+      { kind: 'customer', reference: 'Greenfield', refKey: 'customerId' },
+    ]);
+  });
+
+  it('a lead reference on an unrelated intent plans nothing', () => {
+    expect(planVoiceEntityLookups('create_invoice', { leadReference: 'Greenfield' })).toEqual([]);
+  });
+});
+
+// The DOCUMENT twin of SCH-D2: "nudge Khan about the pending estimate" /
+// "send Johnson a reminder on the overdue invoice" name the PERSON and no
+// paperwork, so `estimateId`/`invoiceId` stayed absent — `send_estimate_nudge`
+// was minted invalid and `send_payment_reminder` gated on a field nothing
+// could fill. Register cases est-06 / inv-08.
+describe('customer-anchored DOCUMENT lookup (operators name the person, not the paperwork)', () => {
+  const TENANT = 'tenant-doc-anchor';
+  const CUSTOMER = 'cust-khan';
+
+  function docResolver(
+    document: EntityResolverResult,
+  ): EntityResolver & { calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = [];
+    return {
+      calls,
+      resolve: vi.fn(async (input) => {
+        calls.push(input as unknown as Record<string, unknown>);
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: CUSTOMER, kind: 'customer', label: 'Khan', score: 1 },
+          } satisfies EntityResolverResult;
+        }
+        if (input.kind === 'estimate' || input.kind === 'invoice') return document;
+        return { kind: 'not_found', reference: input.reference } satisfies EntityResolverResult;
+      }),
+    };
+  }
+
+  it('send_estimate_nudge with only a customer name anchors an estimate lookup on that customer', async () => {
+    const resolver = docResolver({
+      kind: 'resolved',
+      candidate: { id: 'est-1', kind: 'estimate', label: 'EST-0001', score: 1 },
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'send_estimate_nudge', {
+      customerName: 'Khan',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.customerId).toBe(CUSTOMER);
+    expect(res.refs.estimateId).toBe('est-1');
+    // Anchored on the customerId the FIRST pass resolved; the reference is
+    // the operator's own word for the customer, which is how the document was
+    // named at all ("Khan's estimate").
+    expect(resolver.calls[1]).toMatchObject({
+      kind: 'estimate',
+      reference: 'Khan',
+      customerId: CUSTOMER,
+    });
+  });
+
+  it('send_payment_reminder anchors an INVOICE lookup, not an estimate one', async () => {
+    const resolver = docResolver({
+      kind: 'resolved',
+      candidate: { id: 'inv-1', kind: 'invoice', label: 'INV-0042', score: 1 },
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'send_payment_reminder', {
+      customerName: 'Johnson',
+    });
+    expect(res.refs.invoiceId).toBe('inv-1');
+    expect(res.refs.estimateId).toBeUndefined();
+    expect(resolver.calls[1]).toMatchObject({ kind: 'invoice', customerId: CUSTOMER });
+  });
+
+  it('two open documents stay ambiguous — the existing one-tap picker', async () => {
+    const resolver = docResolver({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'inv-1', kind: 'invoice', label: 'INV-0042', hint: 'open · $450.00', score: 1 },
+        { id: 'inv-2', kind: 'invoice', label: 'INV-0043', hint: 'open · $195.00', score: 1 },
+      ],
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'send_payment_reminder', {
+      customerName: 'Johnson',
+    });
+    expect(res.status).toBe('ambiguous');
+    expect(res.ambiguous?.entityKind).toBe('invoice');
+    expect(res.refs.customerId).toBe(CUSTOMER);
+  });
+
+  it('a SPOKEN document reference keeps its own resolution path — no second pass', async () => {
+    const resolver = docResolver({ kind: 'not_found', reference: 'x' });
+    await resolveSchedulingEntities(resolver, TENANT, 'send_payment_reminder', {
+      customerName: 'Johnson',
+      jobReference: 'INV-0042',
+    });
+    // customer, then the SPOKEN invoice reference — and nothing anchored.
+    expect(resolver.calls.map((c) => c.reference)).toEqual(['Johnson', 'INV-0042']);
+  });
+
+  it('planCustomerAnchoredDocumentLookup is inert outside the two document families', () => {
+    expect(
+      planCustomerAnchoredDocumentLookup('create_appointment', {}, CUSTOMER),
+    ).toBeUndefined();
+    expect(
+      planCustomerAnchoredDocumentLookup('send_estimate', { jobTitle: 'Khan install' }, CUSTOMER),
+    ).toBeUndefined();
+    expect(planCustomerAnchoredDocumentLookup('update_invoice', {}, CUSTOMER)).toEqual({
+      kind: 'invoice',
+      reference: '',
+      refKey: 'invoiceId',
       customerId: CUSTOMER,
     });
   });

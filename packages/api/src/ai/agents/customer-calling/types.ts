@@ -249,6 +249,28 @@ export interface CallingAgentContext {
    * then leaves ai_run_id null rather than fabricating one.
    */
   lastAiRunId?: string;
+  /**
+   * The caller's RAW WORDS for the turn that produced `currentIntent`
+   * (`intent_classified.utterance`). Captured alongside `lastAiRunId` and
+   * threaded into the eventual `create_proposal` side effect, because a
+   * proposal is minted on the CONFIRM turn — by then the last transcript line
+   * is "yes", and the original request is gone from every other channel the
+   * proposal builder can see.
+   *
+   * Needed because some contracts' required fields exist ONLY in the
+   * transcript: `update_job`'s classifier entity set is `jobReference` alone,
+   * so the spoken status ("... to in progress") reaches
+   * `buildVoiceProposalPayload` nowhere else and the proposal was minted with
+   * no change in it at all (register case job-02). Read for exactly that, and
+   * never as an entity reference — a raw utterance is untrusted text and
+   * resolves to nothing on its own.
+   *
+   * Set UNCONDITIONALLY at intent_classified, for the same reason
+   * `lastAiRunId` is: a re-classification whose event carries no utterance
+   * must CLEAR the previous turn's words rather than let the `...context`
+   * spread leak them into a different request.
+   */
+  lastUtterance?: string;
   customerName?: string;
   currentIntent?: string;
   extractedEntities?: Record<string, unknown>;

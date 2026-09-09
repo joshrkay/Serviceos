@@ -2870,7 +2870,15 @@ export class InAppVoiceAdapter {
         const spoken =
           nonEmptyString(entities.brandVoiceInstruction) ?? lastCallerTranscriptLine(session) ?? '';
         brandVoiceFields = await extractBrandVoiceProposalFields(this.deps.gateway, session.tenantId, spoken);
-        built = { payload: brandVoiceFields.payload, confidence: brandVoiceFields.confidenceScore, ok: true };
+        built = {
+          payload: brandVoiceFields.payload,
+          confidence: brandVoiceFields.confidenceScore,
+          ok: true,
+          // The brand-voice pass owns its OWN gate (`brandVoiceFields
+          // .missingFields`, applied below); it never goes through
+          // `namedContractGap`, so it contributes nothing here.
+          missingFieldPaths: [],
+        };
       } else {
         built = await buildVoiceProposalPayload(
         {
@@ -2888,6 +2896,16 @@ export class InAppVoiceAdapter {
               : {}),
           },
           ...(rawConfidence !== undefined ? { confidence: rawConfidence } : {}),
+          // The operator's own words for the REQUEST turn, parked on the FSM
+          // context at intent_classified and threaded back through the
+          // create_proposal effect (transitions.ts `lastUtterance`). The
+          // proposal is minted on the CONFIRM turn, so `session.transcript`'s
+          // last caller line is "yes" by now — this is the only channel that
+          // still carries what was asked for. Read only by the deterministic
+          // update_job status/priority parse; never as an entity reference.
+          ...(typeof payload.utterance === 'string' && payload.utterance.trim().length > 0
+            ? { utterance: payload.utterance }
+            : {}),
           // DELIBERATELY NO `callerCustomerId`. On the telephony path that
           // argument is the IDENTIFIED CALLER's customer id. In-app is the
           // other way round: this envelope's top-level `payload.customerId`
@@ -2980,10 +2998,18 @@ export class InAppVoiceAdapter {
       // jobId" — live evidence, sweep row D01). Mirrors the telephony leg's
       // `gateable` decision (create-voice-turn-processor.ts) exactly, so the
       // two live surfaces stop drifting on this specific gap.
+      //
+      // The gate is read off `missingFieldPaths` INDEPENDENTLY of `ok`: a
+      // payload can satisfy its Zod contract and still be unapprovable —
+      // `updateCustomerPayloadSchema` requires only `customerId`, so an edit
+      // naming no new value validates and then executes as a silent no-op
+      // (register case cust-02). See voice-payload.ts `namedContractGap`.
       let contractMissingFields: string[] = [];
+      const degradeToClarification = !built.ok && proposalType === 'voice_clarification';
+      if (!degradeToClarification && built.missingFieldPaths.length > 0) {
+        contractMissingFields = built.missingFieldPaths;
+      }
       if (!built.ok) {
-        const degradeToClarification = proposalType === 'voice_clarification';
-        const gateable = !degradeToClarification && built.missingFieldPaths.length > 0;
         if (degradeToClarification) {
           effectivePayload = buildVoiceClarificationPayload({
             transcript: session.transcript,
@@ -2992,8 +3018,6 @@ export class InAppVoiceAdapter {
             requestedProposalType: proposalType,
             sessionId: session.id,
           });
-        } else if (gateable) {
-          contractMissingFields = built.missingFieldPaths;
         }
         await this.handleAuditLog(session, {
           type: 'audit_log',
