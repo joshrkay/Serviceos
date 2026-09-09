@@ -3,7 +3,7 @@
  *
  * Mounts a `ws.WebSocketServer` (in `noServer` mode) and attaches an
  * HTTP `upgrade` handler that:
- *   1. Filters by URL path — only /api/telephony/stream upgrades are accepted.
+ *   1. Filters by URL path — only the legacy stream path and call-scoped stream paths are accepted.
  *   2. Verifies the Twilio signature on the upgrade request — reuses the
  *      same HMAC-SHA1 algorithm as the existing webhook routes via
  *      `twilio.validateRequest` (with empty params, since Twilio signs
@@ -44,19 +44,15 @@ export interface MediaStreamServerDeps extends MediaStreamAdapterDeps {
    * server can be constructed before the env var is set (matches the
    * pattern used by `requireTwilioSignature`).
    *
-   * Note: WS upgrades don't carry AccountSid in the request — that
-   * arrives in the first `start` message after the upgrade succeeds.
-   * Implementations that want per-tenant tokens for media streams
-   * either use a global token here OR shift signature verification
-   * to the first message handler (out of scope for now).
+   * Call-scoped paths resolve AccountSid from the session created by the
+   * already-authenticated inbound webhook, before accepting the upgrade.
    */
   authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
   /**
    * Public base URL we expect Twilio to have signed against
-   * (e.g. wss://api.example.com or https://api.example.com — both are
-   * accepted; the signature algorithm doesn't care about the scheme
-   * difference, it cares about the canonical URL string the operator
-   * configured in TwiML).
+   * (e.g. https://api.example.com). Validation covers the equivalent WS
+   * transport URL and Twilio's documented trailing-slash variant, while
+   * keeping the origin and call path fixed.
    *
    * Optional. When unset, falls back to req.headers.host with the
    * scheme inferred from x-forwarded-proto (or http).
@@ -115,7 +111,8 @@ export function attachMediaStreamServer(
     // 1. Path filter — leave other upgrade paths (if any) untouched.
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0];
-    if (pathOnly !== MEDIA_STREAM_PATH) {
+    const callScoped = pathOnly.startsWith(`${MEDIA_STREAM_PATH}/`);
+    if (pathOnly !== MEDIA_STREAM_PATH && !callScoped) {
       // We don't own this path; do not destroy the socket — another
       // listener may handle it. Express has no upgrade handler by
       // default, but a future feature might.
@@ -136,6 +133,17 @@ export function attachMediaStreamServer(
       return;
     }
 
+    let authenticatedCall: { callSid: string; accountSid: string } | undefined;
+    if (callScoped) {
+      const callSid = pathOnly.slice(MEDIA_STREAM_PATH.length + 1).replace(/\/$/, '');
+      const session = /^[A-Za-z0-9_-]{1,80}$/.test(callSid) ? deps.store.findByCallSid(callSid) : undefined;
+      if (!session?.twilioAccountSid) {
+        rejectUpgrade(socket, 403);
+        return;
+      }
+      authenticatedCall = { callSid, accountSid: session.twilioAccountSid };
+    }
+
     // 2. Signature verification. Twilio signs the WS upgrade URL the
     //    same way it signs HTTP webhooks — auth_token + URL + (no
     //    params for upgrades) → HMAC-SHA1 → base64. Reject 403 on miss.
@@ -146,7 +154,9 @@ export function attachMediaStreamServer(
       // interface; production wiring never sets this flag.
       logger.warn('mediastream upgrade: authTestMode=true → signature validation BYPASSED');
     } else {
-      const authToken = await Promise.resolve(deps.authTokenGetter({}));
+      const authToken = await Promise.resolve(deps.authTokenGetter(
+        authenticatedCall ? { accountSid: authenticatedCall.accountSid } : {},
+      ));
       if (!authToken) {
         logger.error('mediastream upgrade rejected: no auth token configured');
         rejectUpgrade(socket, 500);
@@ -156,7 +166,13 @@ export function attachMediaStreamServer(
       const fullUrl = reconstructUpgradeUrl(req, deps.publicBaseUrl);
       let signatureOk = false;
       try {
-        signatureOk = twilio.validateRequest(authToken, signature, fullUrl, {});
+        // Twilio documents a trailing-slash variant for WSS handshakes.
+        // Limit candidates to this exact origin/path and HTTP/WS transport pair.
+        const transportUrl = fullUrl.startsWith('http')
+          ? fullUrl.replace(/^http/, 'ws') : fullUrl.replace(/^ws/, 'http');
+        signatureOk = [fullUrl, transportUrl].some(url =>
+          twilio.validateRequest(authToken, signature, url, {}) ||
+          twilio.validateRequest(authToken, signature, `${url.replace(/\/$/, '')}/`, {}));
       } catch {
         signatureOk = false;
       }
@@ -170,7 +186,7 @@ export function attachMediaStreamServer(
     // 3. Hand off to ws — at this point we trust the upgrade.
     wss.handleUpgrade(req, socket, head, (ws) => {
       try {
-        const adapter = new TwilioMediaStreamAdapter(deps, ws as unknown as WsLike);
+        const adapter = new TwilioMediaStreamAdapter({ ...deps, authenticatedCall }, ws as unknown as WsLike);
         adapter.start();
       } catch (err) {
         logger.error('mediastream adapter init failed', {

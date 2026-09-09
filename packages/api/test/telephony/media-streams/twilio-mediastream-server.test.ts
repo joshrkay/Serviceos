@@ -14,6 +14,8 @@ import { setDraining } from '../../../src/ws/drain-state';
 import http from 'http';
 import { AddressInfo } from 'net';
 import twilio from 'twilio';
+import { TwilioGatherAdapter } from '../../../src/telephony/twilio-adapter';
+import type { LLMGateway } from '../../../src/ai/gateway/gateway';
 import {
   attachMediaStreamServer,
   MEDIA_STREAM_PATH,
@@ -50,7 +52,7 @@ function sendUpgrade(
   port: number,
   path: string,
   signature: string | undefined,
-  host: string,
+  host = `127.0.0.1:${port}`,
 ): Promise<UpgradeResult> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {
@@ -97,6 +99,7 @@ function sendUpgrade(
       resolve({ statusCode: null, headers: {}, closed: true });
       void err;
     });
+    req.setTimeout(1000, () => req.destroy());
     req.end();
   });
 }
@@ -105,16 +108,81 @@ describe('P8-012 attachMediaStreamServer', () => {
   let server: http.Server;
   let port: number;
   let dispose: () => void = () => {};
+  const sockets = new Set<import('net').Socket>();
 
   beforeEach(async () => {
     server = http.createServer();
+    server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     port = (server.address() as AddressInfo).port;
   });
 
   afterEach(async () => {
     dispose();
+    for (const socket of sockets) socket.destroy();
     await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('authenticates a provisioned subaccount stream using its bound call account', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const callSid = 'CA' + 'a'.repeat(32);
+    const accountSid = 'AC' + 'b'.repeat(32);
+    const inbound = new TwilioGatherAdapter({
+      store, gateway: { complete: vi.fn() } as unknown as LLMGateway,
+      businessName: 'QA Business', publicBaseUrl: 'https://api.example.com',
+    });
+    const twiml = await inbound.handleInboundForStream({
+      callSid, accountSid, from: '+15125550111', tenantId: 'tenant-subaccount',
+    });
+    const authTokenGetter = vi.fn(({ accountSid: sid }: { accountSid?: string }) =>
+      sid === accountSid ? 'subaccount-token' : AUTH_TOKEN);
+    const result = attachMediaStreamServer(server, {
+      store, streamingProvider: makeStreamingProvider(), speechTurn: async () => [],
+      authTokenGetter, publicBaseUrl: `https://api.example.com`,
+    });
+    dispose = result.dispose;
+    const path = new URL(twiml.match(/<Stream url="([^"]+)"/)![1]).pathname;
+    const sig = twilio.getExpectedTwilioSignature('subaccount-token', `https://api.example.com${path}`, {});
+    const res = await sendUpgrade(port, path, sig, `127.0.0.1:${port}`);
+    expect(res.statusCode).toBe(101);
+    expect(authTokenGetter).toHaveBeenCalledWith({ accountSid });
+  });
+
+  it.each(['master-token', 'other-subaccount-token', ''])('rejects a scoped call signed with %s', async token => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const callSid = 'CA' + 'a'.repeat(32);
+    const session = store.create('tenant-subaccount', 'telephony', { callSid });
+    session.twilioAccountSid = 'AC' + 'b'.repeat(32);
+    const result = attachMediaStreamServer(server, {
+      store, streamingProvider: makeStreamingProvider(), speechTurn: async () => [],
+      authTokenGetter: () => 'correct-subaccount-token', publicBaseUrl: 'https://api.example.com',
+    });
+    dispose = result.dispose;
+    const path = `${MEDIA_STREAM_PATH}/${callSid}`;
+    const sig = token ? twilio.getExpectedTwilioSignature(token, `https://api.example.com${path}`, {}) : undefined;
+    expect((await sendUpgrade(port, path, sig)).statusCode).toBe(403);
+  });
+
+  it('rejects an unknown call before resolving any account token', async () => {
+    const authTokenGetter = vi.fn(() => AUTH_TOKEN);
+    const result = attachMediaStreamServer(server, {
+      store: new VoiceSessionStore({ startInterval: false }),
+      streamingProvider: makeStreamingProvider(), speechTurn: async () => [], authTokenGetter,
+    });
+    dispose = result.dispose;
+    expect((await sendUpgrade(port, `${MEDIA_STREAM_PATH}/CAunknown`, 'bogus')).statusCode).toBe(403);
+    expect(authTokenGetter).not.toHaveBeenCalled();
+  });
+
+  it('accepts the documented WSS trailing-slash signature variant', async () => {
+    const result = attachMediaStreamServer(server, {
+      store: new VoiceSessionStore({ startInterval: false }),
+      streamingProvider: makeStreamingProvider(), speechTurn: async () => [],
+      authTokenGetter: () => AUTH_TOKEN, publicBaseUrl: 'https://api.example.com',
+    });
+    dispose = result.dispose;
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `wss://api.example.com${MEDIA_STREAM_PATH}/`, {});
+    expect((await sendUpgrade(port, MEDIA_STREAM_PATH, sig)).statusCode).toBe(101);
   });
 
   it('rejects upgrades without a Twilio signature with 403', async () => {
