@@ -692,7 +692,9 @@ test('buildRegisterCaseRow + summarizeRegisterRun + renderRegisterSummaryMarkdow
   // Only 2/50 register cases were actually run — rule 1 must fail and name
   // what's missing from the run, not silently report PASS 2/2.
   assert.equal(gate.pass, false);
-  assert.ok(gate.reasons.some((r) => r.startsWith('PASS 2/50')));
+  // Rule 1 is reported per surface since the harness gained chat surfaces
+  // (`<surface>: PASS n/50`); a live run is the voice surface.
+  assert.ok(gate.reasons.some((r) => /^(voice: )?PASS 2\/50/.test(r)), gate.reasons.join(' | '));
 
   const md = renderRegisterSummaryMarkdown(gate, rows);
   assert.match(md, /Register — per cluster/);

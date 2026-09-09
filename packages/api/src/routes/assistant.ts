@@ -968,8 +968,22 @@ export function namedChatContractGap(
 export function contractGateMissingFields(
   proposalType: string,
   payload: Record<string, unknown>,
+  /**
+   * True when the draft is ALREADY gated on a reference id
+   * (`isGatedReferenceField`) that the operator will answer through the
+   * which-one / gated-reference loop. Every other contract error is then
+   * downstream of that reference — `update_catalog_item`'s
+   * `currentUnitPriceCents` is copied from the catalog row the moment
+   * `catalogItemId` resolves (UpdateCatalogItemTaskHandler), and gating it now
+   * would leave a card the loop can never clear. Only the NAMED gaps apply
+   * while a reference is pending; the contract-derived pass runs once the
+   * reference question is settled. Pinned by the #909 integration test
+   * `chat-entity-resolution` (duplicate-named catalog → `['catalogItemId']`).
+   */
+  pendingReference = false,
 ): string[] {
   const gaps = new Set<string>(namedChatContractGap(proposalType, payload));
+  if (pendingReference) return [...gaps];
   const result = validateProposalPayload(proposalType, payload);
   for (const error of result.valid ? [] : result.errors ?? []) {
     const path = error.slice(0, error.indexOf(':'));
@@ -997,9 +1011,10 @@ export function contractGateMissingFields(
  * Returns the fields it added (empty when the payload was already fine).
  */
 export function applyContractGate(proposal: Proposal): string[] {
-  const gaps = contractGateMissingFields(proposal.proposalType, proposal.payload);
-  if (gaps.length === 0) return [];
   const existing = new Set(missingFieldsFor(proposal));
+  const pendingReference = [...existing].some((field) => isGatedReferenceField(field));
+  const gaps = contractGateMissingFields(proposal.proposalType, proposal.payload, pendingReference);
+  if (gaps.length === 0) return [];
   const added = gaps.filter((field) => !existing.has(field));
   if (added.length === 0) return [];
   proposal.sourceContext = {
@@ -1369,6 +1384,61 @@ function trimmedString(value: unknown): string | undefined {
 
 export function isDraftCorrection(text: string): boolean {
   return DRAFT_CORRECTION_RE.test(text);
+}
+
+/**
+ * "The appointment does not exist" must be PROVEN, not inferred from a
+ * free-text miss.
+ *
+ * `GatedReferenceOutcome.notFound` says every spoken reference came back
+ * `not_found` from the appointment resolver — which is exactly what a phrase
+ * like "tune-up appointment" does against a tenant that HAS appointments
+ * (the resolver matches date phrases and job names, not adjectives). The
+ * #920 auto-pick integration test pins that case: two active appointments,
+ * an unmatched reference → the card stays gated and asks. Refusing there would
+ * throw away a real request.
+ *
+ * So the refusal below fires only when absence is corroborated by the
+ * PERSON: the customer named on the request does not exist (no customer → no
+ * appointment for them), or they exist and the customer-anchored appointment
+ * lookup (PgEntityResolver.resolveAppointmentByCustomer — the same anchor
+ * the voice session uses) finds nothing upcoming. A request naming nobody
+ * keeps its card: nothing proves the visit is not there. Failure-soft: a
+ * resolver error or an absent resolver keeps the card too.
+ */
+export async function appointmentProvablyAbsent(
+  deps: Pick<AssistantRouterDeps, 'entityResolver'>,
+  tenantId: string,
+  proposal: Pick<Proposal, 'payload'>,
+  extractedEntities: Record<string, unknown>,
+): Promise<boolean> {
+  const resolver = deps.entityResolver;
+  if (!resolver) return false;
+  const anchoredAbsent = async (customerId: string): Promise<boolean> => {
+    const anchored = await resolver.resolve({
+      tenantId,
+      reference: '',
+      kind: 'appointment',
+      customerId,
+    });
+    return anchored.kind === 'not_found';
+  };
+  try {
+    const knownCustomerId = trimmedString(proposal.payload.customerId);
+    if (knownCustomerId) return await anchoredAbsent(knownCustomerId);
+    const customerName =
+      trimmedString(extractedEntities.customerName) ??
+      trimmedString(proposal.payload.customerName) ??
+      trimmedString(proposal.payload.customerReference);
+    if (!customerName) return false;
+    const customer = await resolver.resolve({ tenantId, reference: customerName, kind: 'customer' });
+    if (customer.kind === 'not_found') return true;
+    if (customer.kind === 'resolved') return await anchoredAbsent(customer.candidate.id);
+    // ambiguous / low_confidence / skipped: somebody may well exist — keep the card.
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -3151,7 +3221,13 @@ async function generateAssistantReply(
         // still complete it by naming the document.
         if (
           APPOINTMENT_MUTATION_TYPES.has(proposal.proposalType) &&
-          notFound.includes('appointmentId')
+          notFound.includes('appointmentId') &&
+          (await appointmentProvablyAbsent(
+            deps,
+            tenantId,
+            proposal,
+            extractedEntities as Record<string, unknown>,
+          ))
         ) {
           const reference =
             trimmedString(proposal.payload.appointmentReference) ??
