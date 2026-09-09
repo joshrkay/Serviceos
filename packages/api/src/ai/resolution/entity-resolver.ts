@@ -134,6 +134,12 @@ export interface EntityResolver {
      * meaningful here (and only here): "Garcia's next appointment, whenever
      * it is". Every other kind still treats an empty reference as
      * `skipped`.
+     *
+     * For `invoice` / `estimate` the anchor scopes "that customer's open
+     * document" when the reference is empty or is the customer's own name;
+     * an explicit document number (INV-0042 / EST-0042) always resolves
+     * through the named path instead — the anchor never overrides a number
+     * the operator actually said.
      */
     customerId?: string;
   }): Promise<EntityResolverResult>;

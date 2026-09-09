@@ -353,6 +353,30 @@ describe('Postgres integration — customer-anchored estimate/invoice resolution
       expect(result.kind).toBe('skipped');
     });
 
+    it('an exact document number WITH an anchor resolves the named document, not the customer’s newest open one', async () => {
+      const customerId = await seedCustomer('Doc Explicit');
+      const jobId = await seedJob(customerId, 'Explicit job');
+      const older = await seedInvoice(jobId, 'open', 12000, 10);
+      const newer = await seedInvoice(jobId, 'open', 34000, 40);
+      const { rows } = await pool.query<{ invoice_number: string }>(
+        `SELECT invoice_number FROM invoices WHERE id = $1`,
+        [older],
+      );
+
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: rows[0].invoice_number,
+        kind: 'invoice',
+        customerId,
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(older);
+        expect(result.candidate.id).not.toBe(newer);
+      }
+    });
+
     it('an exact document number with no anchor still resolves through the named path', async () => {
       const customerId = await seedCustomer('Doc Numbered');
       const jobId = await seedJob(customerId, 'Numbered job');

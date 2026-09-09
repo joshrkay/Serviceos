@@ -497,6 +497,21 @@ function anchoredDocumentHint(status: string | null, amountCents: number): strin
   return status ? `${status} · ${amount}` : amount;
 }
 
+/**
+ * An explicitly spoken/typed document number (INV-0042 / EST-0042; a bare
+ * "#0042" is not enough — the prefix is what makes it unambiguous). When the
+ * operator names the document, a customer anchor is only context: the named
+ * path (exact-number fast path, then trigram) answers, never the anchored
+ * "that customer's open document" scope.
+ */
+export function looksLikeDocumentNumber(reference: string): boolean {
+  // Prefix + a suffix that contains at least one digit: real numbers are
+  // sequence-based ("INV-0042") but tenant prefixes and seeded fixtures can
+  // carry alphanumerics ("INV-3fa9c1d2"); the digit requirement keeps the
+  // words "estimate" / "invoice" themselves from matching.
+  return /^\s*#?\s*(?:INV|EST)\s*-?\s*(?=[A-Za-z0-9-]*\d)[A-Za-z0-9][A-Za-z0-9-]*\s*$/i.test(reference ?? '');
+}
+
 export class PgEntityResolver implements EntityResolver {
   constructor(private readonly pool: Pool) {}
 
@@ -527,18 +542,21 @@ export class PgEntityResolver implements EntityResolver {
       case 'job':
         return this.resolveJob(tenantId, reference);
       case 'invoice':
-        // A verified customer anchor IS the scope: the operator named the
-        // person and no paperwork, so there is no document reference to score
-        // (see `resolveInvoiceByCustomer`). Checked before the number/name
-        // paths for the same reason the appointment branch checks its
-        // anchors: those paths answer a reference the operator SPOKE.
-        return customerId
+        // A verified customer anchor IS the scope when the operator named the
+        // person and no paperwork ("nudge Khan", "remind Johnson"): the
+        // reference is then the customer's own name and there is no document
+        // to score (see `resolveInvoiceByCustomer`). An EXPLICIT document
+        // number always wins over the anchor — "send INV-0042 to Garcia" must
+        // resolve INV-0042, never Garcia's newest open invoice, and a named
+        // accepted/closed document is still found through the named path
+        // (review finding on PR #992).
+        return customerId && !looksLikeDocumentNumber(reference)
           ? this.resolveInvoiceByCustomer(tenantId, reference, customerId)
           : this.resolveInvoice(tenantId, reference);
       case 'appointment':
         return this.resolveAppointment(tenantId, reference, jobId, customerId);
       case 'estimate':
-        return customerId
+        return customerId && !looksLikeDocumentNumber(reference)
           ? this.resolveEstimateByCustomer(tenantId, reference, customerId)
           : this.resolveEstimate(tenantId, reference);
       case 'technician':

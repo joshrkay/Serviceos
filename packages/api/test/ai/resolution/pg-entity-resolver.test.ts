@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { Pool, PoolClient, QueryResult } from 'pg';
-import { PgEntityResolver } from '../../../src/ai/resolution/pg-entity-resolver';
+import { PgEntityResolver, looksLikeDocumentNumber } from '../../../src/ai/resolution/pg-entity-resolver';
 
 // ---------------------------------------------------------------------------
 // Mock pool helpers
@@ -1258,5 +1258,69 @@ describe('PgEntityResolver — appointment customer-anchored fallback (SCH-D2)',
 
     expect(result.kind).toBe('resolved');
     expect(calls.every((c) => !c.sql.includes('FROM appointments'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #992 review finding — an explicit document number beats the customer
+// anchor. "send INV-0042 to Garcia" carries BOTH a verified customerId and a
+// number; the number is what the operator said, so the named path answers.
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — explicit document number wins over the customer anchor', () => {
+  const CUSTOMER_ID = '22222222-2222-2222-2222-222222222222';
+
+  it.each([
+    ['INV-0042', true],
+    ['est-0042', true],
+    ['#EST 0042', true],
+    ['EST0042', true],
+    ['INV-3fa9c1d2', true],
+    ['estimate', false],
+    ['invoice', false],
+    ['Khan', false],
+    ["Khan's estimate", false],
+    ['', false],
+    ['0042', false],
+    ['invoice for the water heater', false],
+  ])('looksLikeDocumentNumber(%j) → %s', (reference, expected) => {
+    expect(looksLikeDocumentNumber(reference)).toBe(expected);
+  });
+
+  it('invoice: INV-0042 + customerId runs the exact-number query, never the anchored one', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'inv-42', doc_number: 'INV-0042', status: 'paid' }],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'INV-0042',
+      kind: 'invoice',
+      customerId: CUSTOMER_ID,
+    });
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') expect(result.candidate.id).toBe('inv-42');
+    const business = calls.find((c) => c.sql.includes('FROM invoices'));
+    expect(business).toBeDefined();
+    expect(business!.sql).toMatch(/UPPER\(invoice_number\)\s*=\s*UPPER\(\$2\)/);
+    expect(business!.sql).not.toMatch(/customer_id/);
+    expect(business!.params).toEqual([TENANT_ID, 'INV-0042']);
+  });
+
+  it('estimate: a customer NAME + customerId still takes the anchored scope', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'Khan',
+      kind: 'estimate',
+      customerId: CUSTOMER_ID,
+    });
+    expect(result.kind).toBe('not_found');
+    const business = calls.find((c) => c.sql.includes('FROM estimates'));
+    expect(business).toBeDefined();
+    expect(business!.sql).toMatch(/customer_id\s*=\s*\$2/);
+    expect(business!.params.slice(0, 2)).toEqual([TENANT_ID, CUSTOMER_ID]);
   });
 });
