@@ -495,7 +495,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         !!deps.mediaStreamsEnabled &&
         (await shouldUseRealtimeStream({ tenantId, callSid, deps }));
       const twiml = useStream
-        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId })
+        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId, accountSid: body.AccountSid })
         : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {

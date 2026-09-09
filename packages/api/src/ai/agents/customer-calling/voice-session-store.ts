@@ -165,6 +165,8 @@ export interface VoiceSession {
   channel: CallingAgentChannel;
   /** Twilio CallSid for telephony sessions; undefined for in-app. */
   callSid?: string;
+  /** Bound by the authenticated inbound webhook; never taken from a WS frame. */
+  twilioAccountSid?: string;
   /**
    * Caller's phone number (Twilio `From`), set by the inbound adapter. Lets a
    * later gather turn create/resolve a CUSTOMER for an unknown caller who books
