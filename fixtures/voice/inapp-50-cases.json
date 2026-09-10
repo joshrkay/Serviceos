@@ -1,19 +1,52 @@
 {
   "version": "inapp-50-v1",
-  "label": "In-app operator voice — 50-case register (R0)",
+  "label": "In-app operator voice \u2014 50-case register (R0)",
   "created": "2026-09-09",
   "description": "Fifty in-app operator voice/assistant cases drawn from real usage (PostHog: customer_created 634, job_created 527, estimate_created 432, proposal_approved 275) and support themes: booking, rescheduling, cancellation, status lookup / search, delay notifications, confirmations (incl. duplicate + noisy turns), estimate creation, quote acceptance status, invoice actions, dispatch handoff. Each case carries a severity (critical / core / growth), a cluster, a scripted classifier output (so the hermetic runner exercises the REAL FSM, entity resolver, payload builder and lookup dispatch without an LLM), and a machine-checkable expectation. The same file is loadable by scripts/probe-operator-voice-50-live.mjs (cases[] with id/op/utterance/expectProposal) for live runs against Development/Production.",
   "fixtureCatalog": "fixtures/voice/operator-voice-fixture-catalog.json",
   "harnessSeeds": {
     "tenantTimezone": "America/Phoenix",
     "catalogItems": [
-      { "key": "catalog.condenser-3ton", "name": "3-ton condenser replacement", "unitPriceCents": 325000, "category": "equipment" },
-      { "key": "catalog.duct-sealing", "name": "Duct sealing", "unitPriceCents": 45000, "category": "labor" },
-      { "key": "catalog.service-call-fee", "name": "Service call fee", "unitPriceCents": 5000, "category": "labor" },
-      { "key": "catalog.water-heater", "name": "Water heater replacement", "unitPriceCents": 185000, "category": "equipment" },
-      { "key": "catalog.diagnostic-fee", "name": "AC diagnostic fee", "unitPriceCents": 7900, "category": "labor" }
+      {
+        "key": "catalog.condenser-3ton",
+        "name": "3-ton condenser replacement",
+        "unitPriceCents": 325000,
+        "category": "equipment"
+      },
+      {
+        "key": "catalog.duct-sealing",
+        "name": "Duct sealing",
+        "unitPriceCents": 45000,
+        "category": "labor"
+      },
+      {
+        "key": "catalog.service-call-fee",
+        "name": "Service call fee",
+        "unitPriceCents": 5000,
+        "category": "labor"
+      },
+      {
+        "key": "catalog.water-heater",
+        "name": "Water heater replacement",
+        "unitPriceCents": 185000,
+        "category": "equipment"
+      },
+      {
+        "key": "catalog.diagnostic-fee",
+        "name": "AC diagnostic fee",
+        "unitPriceCents": 7900,
+        "category": "labor"
+      }
     ],
     "extraCustomers": [],
+    "todayAppointment": {
+      "key": "appointment.khan-today",
+      "jobKey": "job.khan-install",
+      "assignedTo": "owner",
+      "hoursFromNow": 3,
+      "durationMinutes": 60,
+      "notes": "Same-day install visit assigned to the speaking owner (en_route target)"
+    },
     "notes": "Alvarez / Patel / Hayes / Jones are deliberately NOT seeded (seed-gap negatives). The two Smith customers (104 vs 105 QA Cedar Avenue) are the ambiguity fixture."
   },
   "severityRubric": {
@@ -21,451 +54,1977 @@
     "core": "Money and CRM loop: estimates, invoices, payments, customers, jobs. Must pass for 50/50 but a failure is a P1, not a release block on its own.",
     "growth": "Nice-to-have operator conveniences (nudges, change orders, crew add). Must pass for 50/50; failures are P2."
   },
-  "clusters": ["scheduling", "search", "confirmations", "estimates", "invoices", "customers", "jobs", "dispatch"],
+  "clusters": [
+    "scheduling",
+    "search",
+    "confirmations",
+    "estimates",
+    "invoices",
+    "customers",
+    "jobs",
+    "dispatch"
+  ],
   "cases": [
     {
-      "id": 1, "key": "book-01", "cluster": "scheduling", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 1,
+      "key": "book-01",
+      "cluster": "scheduling",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book Garcia for Tuesday at 2 pm for the HVAC install",
-      "llm": [{ "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } }],
-      "fixtureRefs": ["customer.garcia", "location.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "status": "ready_for_review", "payloadContains": { "customerId": "customer.garcia" }, "payloadHas": ["scheduledStart", "scheduledEnd"] }
+      "llm": [
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.garcia",
+        "location.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "customerId": "customer.garcia"
+        },
+        "payloadHas": [
+          "scheduledStart",
+          "scheduledEnd"
+        ]
+      }
     },
     {
-      "id": 2, "key": "book-02", "cluster": "scheduling", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 2,
+      "key": "book-02",
+      "cluster": "scheduling",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Slot Carlos at Garcia Tuesday two o'clock for the install",
-      "llm": [{ "intentType": "create_appointment", "confidence": 0.92, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday two o'clock", "jobTitle": "HVAC install", "targetTechnicianName": "Carlos" } }],
-      "fixtureRefs": ["customer.garcia", "technician.carlos"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "status": "ready_for_review", "payloadContains": { "customerId": "customer.garcia", "technicianId": "technician.carlos" } },
+      "llm": [
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday two o'clock",
+            "jobTitle": "HVAC install",
+            "targetTechnicianName": "Carlos"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.garcia",
+        "technician.carlos"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "customerId": "customer.garcia",
+          "technicianId": "technician.carlos"
+        }
+      },
       "rationale": "A named technician on a booking must land as a verified technicianId, not be silently dropped."
     },
     {
-      "id": 3, "key": "book-03", "cluster": "scheduling", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 3,
+      "key": "book-03",
+      "cluster": "scheduling",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book Smith furnace maintenance Tuesday at two",
-      "llm": [{ "intentType": "create_appointment", "confidence": 0.93, "extractedEntities": { "customerName": "Smith", "dateTimeDescription": "Tuesday at two", "jobTitle": "Furnace maintenance" } }],
-      "fixtureRefs": ["customer.smith-a", "customer.smith-b"], "tags": ["ambiguous-name"],
+      "llm": [
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Smith",
+            "dateTimeDescription": "Tuesday at two",
+            "jobTitle": "Furnace maintenance"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.smith-a",
+        "customer.smith-b"
+      ],
+      "tags": [
+        "ambiguous-name"
+      ],
       "disambiguationFollowUp": "104 Cedar",
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "status": "ready_for_review", "payloadContains": { "customerId": "customer.smith-a" }, "requireClarificationTurn": true }
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "customerId": "customer.smith-a"
+        },
+        "requireClarificationTurn": true
+      }
     },
     {
-      "id": 4, "key": "book-04", "cluster": "scheduling", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 4,
+      "key": "book-04",
+      "cluster": "scheduling",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book a furnace tune-up for Elena Ruiz Thursday at 10 am",
-      "llm": [{ "intentType": "create_appointment", "confidence": 0.91, "extractedEntities": { "customerName": "Elena Ruiz", "dateTimeDescription": "Thursday at 10 am", "jobTitle": "Furnace tune-up" } }],
-      "fixtureRefs": [], "tags": ["net-new-entity"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "status": "draft", "missingFieldsContains": ["customerId"], "payloadContains": { "customerName": "Elena Ruiz" } },
+      "llm": [
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.91,
+          "extractedEntities": {
+            "customerName": "Elena Ruiz",
+            "dateTimeDescription": "Thursday at 10 am",
+            "jobTitle": "Furnace tune-up"
+          }
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "net-new-entity"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "missingFieldsContains": [
+          "customerId"
+        ],
+        "payloadContains": {
+          "customerName": "Elena Ruiz"
+        }
+      },
       "rationale": "A brand-new customer books NEW work: the proposal must surface with a pending customer reference (gated), never escalate and never approve-to-fail."
     },
     {
-      "id": 5, "key": "book-05", "cluster": "scheduling", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 5,
+      "key": "book-05",
+      "cluster": "scheduling",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book a service visit",
-      "turns": ["Book a service visit", "It's for Khan, Tuesday at 2 pm, condenser install"],
-      "llm": [
-        { "intentType": "create_appointment", "confidence": 0.9, "extractedEntities": {} },
-        { "intentType": "create_appointment", "confidence": 0.92, "extractedEntities": { "customerName": "Khan", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "Condenser install" } }
+      "turns": [
+        "Book a service visit",
+        "It's for Khan, Tuesday at 2 pm, condenser install"
       ],
-      "fixtureRefs": ["customer.khan"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "status": "ready_for_review", "payloadContains": { "customerId": "customer.khan" } },
+      "llm": [
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.9,
+          "extractedEntities": {},
+          "for": "Book a service visit"
+        },
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "Condenser install"
+          },
+          "for": "It's for Khan"
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "customerId": "customer.khan"
+        }
+      },
       "rationale": "Multi-turn slot fill: the readback is answered with more detail, not a yes/no."
     },
     {
-      "id": 6, "key": "resched-01", "cluster": "scheduling", "op": "reschedule", "cat": "schedule", "severity": "critical",
-      "intent": "reschedule_appointment", "expectProposal": "reschedule_appointment",
+      "id": 6,
+      "key": "resched-01",
+      "cluster": "scheduling",
+      "op": "reschedule",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "reschedule_appointment",
+      "expectProposal": "reschedule_appointment",
       "utterance": "Move Garcia's Tuesday appointment to Thursday at 10 am",
-      "llm": [{ "intentType": "reschedule_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "appointmentReference": "Tuesday appointment", "newDateTimeDescription": "Thursday at 10 am" } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "reschedule_appointment", "status": "ready_for_review", "payloadContains": { "appointmentId": "appointment.garcia-tuesday" }, "payloadHas": ["newScheduledStart", "newScheduledEnd"] }
+      "llm": [
+        {
+          "intentType": "reschedule_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "appointmentReference": "Garcia's Tuesday appointment",
+            "newDateTimeDescription": "Thursday at 10 am"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.garcia-tuesday",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "reschedule_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "appointmentId": "appointment.garcia-tuesday"
+        },
+        "payloadHas": [
+          "newScheduledStart",
+          "newScheduledEnd"
+        ]
+      }
     },
     {
-      "id": 7, "key": "cancel-01", "cluster": "scheduling", "op": "cancel", "cat": "schedule", "severity": "critical",
-      "intent": "cancel_appointment", "expectProposal": "cancel_appointment",
+      "id": 7,
+      "key": "cancel-01",
+      "cluster": "scheduling",
+      "op": "cancel",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "cancel_appointment",
+      "expectProposal": "cancel_appointment",
       "utterance": "Cancel Garcia's Tuesday appointment, the customer asked",
-      "llm": [{ "intentType": "cancel_appointment", "confidence": 0.95, "extractedEntities": { "customerName": "Garcia", "appointmentReference": "Tuesday appointment", "cancellationType": "customer_request", "cancellationReason": "customer asked" } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "cancel_appointment", "status": "ready_for_review", "payloadContains": { "appointmentId": "appointment.garcia-tuesday" } }
+      "llm": [
+        {
+          "intentType": "cancel_appointment",
+          "confidence": 0.95,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "appointmentReference": "Garcia's Tuesday appointment",
+            "cancellationType": "customer_request",
+            "cancellationReason": "customer asked"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.garcia-tuesday",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "cancel_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "appointmentId": "appointment.garcia-tuesday"
+        }
+      }
     },
     {
-      "id": 8, "key": "cancel-02", "cluster": "scheduling", "op": "cancel", "cat": "schedule", "severity": "critical",
-      "intent": "cancel_appointment", "expectProposal": null,
+      "id": 8,
+      "key": "cancel-02",
+      "cluster": "scheduling",
+      "op": "cancel",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "cancel_appointment",
+      "expectProposal": null,
       "utterance": "Cancel the Patel appointment",
-      "llm": [{ "intentType": "cancel_appointment", "confidence": 0.93, "extractedEntities": { "customerName": "Patel", "appointmentReference": "the Patel appointment" } }],
-      "fixtureRefs": [], "tags": ["seed-gap"],
-      "expect": { "outcome": "not_found", "proposalCount": 0, "spokenMatches": "(couldn.t|wasn.t able to|can.t|unable to) find|no .* (found|on file)", "forbidSideEffects": ["notify_oncall"], "allowedStates": ["intent_capture", "closing"] },
+      "llm": [
+        {
+          "intentType": "cancel_appointment",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Patel",
+            "appointmentReference": "the Patel appointment"
+          }
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "seed-gap"
+      ],
+      "expect": {
+        "outcome": "not_found",
+        "proposalCount": 0,
+        "spokenMatches": "(couldn.t|wasn.t able to|can.t|unable to) find|no .* (found|on file)",
+        "forbidSideEffects": [
+          "notify_oncall"
+        ],
+        "allowedStates": [
+          "intent_capture",
+          "closing"
+        ]
+      },
       "rationale": "An in-app operator asking about a record that does not exist must hear an honest not-found and stay in control of the session; paging on-call for an operator's own typo is not a recovery path."
     },
     {
-      "id": 9, "key": "confirm-01", "cluster": "scheduling", "op": "confirm", "cat": "schedule", "severity": "critical",
-      "intent": "confirm_appointment", "expectProposal": "confirm_appointment",
+      "id": 9,
+      "key": "confirm-01",
+      "cluster": "scheduling",
+      "op": "confirm",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "confirm_appointment",
+      "expectProposal": "confirm_appointment",
       "utterance": "Confirm Garcia for Tuesday",
-      "llm": [{ "intentType": "confirm_appointment", "confidence": 0.93, "extractedEntities": { "customerName": "Garcia", "appointmentReference": "Tuesday" } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "confirm_appointment", "status": "ready_for_review", "payloadContains": { "appointmentId": "appointment.garcia-tuesday" } }
+      "llm": [
+        {
+          "intentType": "confirm_appointment",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "appointmentReference": "Garcia Tuesday"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.garcia-tuesday",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "confirm_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "appointmentId": "appointment.garcia-tuesday"
+        }
+      }
     },
     {
-      "id": 10, "key": "delay-01", "cluster": "scheduling", "op": "notify_delay", "cat": "schedule", "severity": "critical",
-      "intent": "notify_delay", "expectProposal": "notify_delay",
+      "id": 10,
+      "key": "delay-01",
+      "cluster": "scheduling",
+      "op": "notify_delay",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "notify_delay",
+      "expectProposal": "notify_delay",
       "utterance": "Text Garcia that I'm running twenty minutes late",
-      "llm": [{ "intentType": "notify_delay", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "delayMinutes": 20 } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "notify_delay", "status": "ready_for_review", "payloadContains": { "appointmentId": "appointment.garcia-tuesday", "delayMinutes": 20 } },
+      "llm": [
+        {
+          "intentType": "notify_delay",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "delayMinutes": 20
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.garcia-tuesday",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "notify_delay",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "appointmentId": "appointment.garcia-tuesday",
+          "delayMinutes": 20
+        }
+      },
       "rationale": "Operators name the customer, not the appointment. With exactly one upcoming appointment for that customer the delay notice must attach to it without a clarification."
     },
     {
-      "id": 11, "key": "reassign-01", "cluster": "dispatch", "op": "reassign", "cat": "schedule", "severity": "critical",
-      "intent": "reassign_appointment", "expectProposal": "reassign_appointment",
+      "id": 11,
+      "key": "reassign-01",
+      "cluster": "dispatch",
+      "op": "reassign",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "reassign_appointment",
+      "expectProposal": "reassign_appointment",
       "utterance": "Hand Garcia's Tuesday visit to Carlos",
-      "llm": [{ "intentType": "reassign_appointment", "confidence": 0.93, "extractedEntities": { "customerName": "Garcia", "appointmentReference": "Tuesday visit", "targetTechnicianName": "Carlos" } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "technician.carlos", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "reassign_appointment", "status": "ready_for_review", "payloadContains": { "appointmentId": "appointment.garcia-tuesday", "technicianId": "technician.carlos" } }
+      "llm": [
+        {
+          "intentType": "reassign_appointment",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "appointmentReference": "Garcia's Tuesday visit",
+            "targetTechnicianName": "Carlos"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.garcia-tuesday",
+        "technician.carlos",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "reassign_appointment",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "appointmentId": "appointment.garcia-tuesday",
+          "technicianId": "technician.carlos"
+        }
+      }
     },
     {
-      "id": 12, "key": "dispatch-03", "cluster": "dispatch", "op": "en_route", "cat": "schedule", "severity": "core",
-      "intent": "en_route", "expectProposal": null,
-      "utterance": "On my way to the Garcia job",
-      "llm": [{ "intentType": "en_route", "confidence": 0.95, "extractedEntities": { "jobReference": "Garcia" } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"],
-      "expect": { "outcome": "direct_act", "proposalCount": 0, "spokenMatches": "on (your|my|the) way|en route|let .* know|heads.?up|notified|told", "forbidProposalTypes": ["voice_clarification"], "allowedStates": ["intent_capture", "closing"] },
+      "id": 12,
+      "key": "dispatch-03",
+      "cluster": "dispatch",
+      "op": "en_route",
+      "cat": "schedule",
+      "severity": "core",
+      "intent": "en_route",
+      "expectProposal": null,
+      "utterance": "On my way to the Khan install",
+      "llm": [
+        {
+          "intentType": "en_route",
+          "confidence": 0.95,
+          "extractedEntities": {
+            "jobReference": "Khan install"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.khan-today",
+        "customer.khan",
+        "job.khan-install"
+      ],
+      "expect": {
+        "outcome": "direct_act",
+        "proposalCount": 0,
+        "spokenMatches": "on[- ](your|my|the)[- ]way|marked en route|heads.?up|notified|let .* know|told .* you",
+        "forbidSpoken": "nothing was sent|don.t have an upcoming|couldn.t find|no upcoming",
+        "requireAuditEvents": [
+          "appointment.en_route_triggered"
+        ],
+        "forbidProposalTypes": [
+          "voice_clarification"
+        ],
+        "allowedStates": [
+          "intent_capture",
+          "closing"
+        ]
+      },
       "rationale": "\"On my way\" is a direct, audited status act on every other surface (chat, phone, memo). In-app must fire the same act, not mint a dead clarification card."
     },
     {
-      "id": 13, "key": "search-01", "cluster": "search", "op": "lookup", "cat": "schedule", "severity": "critical",
-      "intent": "lookup_day_overview", "expectProposal": null,
+      "id": 13,
+      "key": "search-01",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "lookup_day_overview",
+      "expectProposal": null,
       "utterance": "What's on my schedule today",
-      "llm": [{ "intentType": "lookup_day_overview", "confidence": 0.96, "extractedEntities": {} }],
-      "fixtureRefs": [], "tags": ["read-only"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "appointment|scheduled|today|nothing|no .* (scheduled|booked)", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_day_overview",
+          "confidence": 0.96,
+          "extractedEntities": {}
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "read-only"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "appointment|scheduled|today|nothing|no .* (scheduled|booked)",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 14, "key": "search-02", "cluster": "search", "op": "lookup", "cat": "schedule", "severity": "critical",
-      "intent": "lookup_appointments", "expectProposal": null,
+      "id": 14,
+      "key": "search-02",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "lookup_appointments",
+      "expectProposal": null,
       "utterance": "When is Garcia's next appointment",
-      "llm": [{ "intentType": "lookup_appointments", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia" } }],
-      "fixtureRefs": ["customer.garcia", "appointment.garcia-tuesday"], "tags": ["read-only"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "Garcia|Tuesday|appointment|scheduled", "forbidSpoken": "trouble pulling|let me get a person", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_appointments",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.garcia",
+        "appointment.garcia-tuesday"
+      ],
+      "tags": [
+        "read-only"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "Garcia|Tuesday|appointment|scheduled",
+        "forbidSpoken": "trouble pulling|let me get a person",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 15, "key": "search-03", "cluster": "search", "op": "lookup", "cat": "client", "severity": "critical",
-      "intent": "lookup_customer", "expectProposal": null,
+      "id": 15,
+      "key": "search-03",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "client",
+      "severity": "critical",
+      "intent": "lookup_customer",
+      "expectProposal": null,
       "utterance": "Pull up Khan's customer profile",
-      "llm": [{ "intentType": "lookup_customer", "confidence": 0.95, "extractedEntities": { "customerName": "Khan" } }],
-      "fixtureRefs": ["customer.khan"], "tags": ["read-only"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "Khan", "forbidSpoken": "trouble pulling|let me get a person|which customer", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_customer",
+          "confidence": 0.95,
+          "extractedEntities": {
+            "customerName": "Khan"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan"
+      ],
+      "tags": [
+        "read-only"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "Khan",
+        "forbidSpoken": "trouble pulling|let me get a person|which customer",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 16, "key": "search-04", "cluster": "search", "op": "lookup", "cat": "job", "severity": "critical",
-      "intent": "lookup_jobs", "expectProposal": null,
+      "id": 16,
+      "key": "search-04",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "job",
+      "severity": "critical",
+      "intent": "lookup_jobs",
+      "expectProposal": null,
       "utterance": "What's the status of the Johnson water heater job",
-      "llm": [{ "intentType": "lookup_jobs", "confidence": 0.93, "extractedEntities": { "customerName": "Johnson", "jobReference": "water heater" } }],
-      "fixtureRefs": ["customer.johnson", "job.johnson-water-heater"], "tags": ["read-only"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "water heater|job|scheduled|in progress|open", "forbidSpoken": "trouble pulling|let me get a person", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_jobs",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "jobReference": "water heater"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.johnson",
+        "job.johnson-water-heater"
+      ],
+      "tags": [
+        "read-only"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "water heater|job|scheduled|in progress|open",
+        "forbidSpoken": "trouble pulling|let me get a person",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 17, "key": "search-05", "cluster": "search", "op": "lookup_balance", "cat": "invoice", "severity": "critical",
-      "intent": "lookup_balance", "expectProposal": null,
+      "id": 17,
+      "key": "search-05",
+      "cluster": "search",
+      "op": "lookup_balance",
+      "cat": "invoice",
+      "severity": "critical",
+      "intent": "lookup_balance",
+      "expectProposal": null,
       "utterance": "What does Khan owe us",
-      "llm": [{ "intentType": "lookup_balance", "confidence": 0.94, "extractedEntities": { "customerName": "Khan" } }],
-      "fixtureRefs": ["customer.khan"], "tags": ["read-only"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "\\$|balance|owe|nothing|no open|paid up|zero", "forbidSpoken": "trouble pulling|let me get a person", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_balance",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Khan"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan"
+      ],
+      "tags": [
+        "read-only"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "\\$|balance|owe|nothing|no open|paid up|zero",
+        "forbidSpoken": "trouble pulling|let me get a person",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 18, "key": "search-06", "cluster": "search", "op": "lookup", "cat": "invoice", "severity": "critical",
-      "intent": "lookup_invoices", "expectProposal": null,
+      "id": 18,
+      "key": "search-06",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "invoice",
+      "severity": "critical",
+      "intent": "lookup_invoices",
+      "expectProposal": null,
       "utterance": "Which invoices are open for Johnson",
-      "llm": [{ "intentType": "lookup_invoices", "confidence": 0.93, "extractedEntities": { "customerName": "Johnson" } }],
-      "fixtureRefs": ["customer.johnson", "invoice.johnson"], "tags": ["read-only"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "INV-0042|invoice|\\$|no open", "forbidSpoken": "trouble pulling|let me get a person", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_invoices",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Johnson"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.johnson",
+        "invoice.johnson"
+      ],
+      "tags": [
+        "read-only"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "INV-0042|invoice|\\$|no open",
+        "forbidSpoken": "trouble pulling|let me get a person",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 19, "key": "search-07", "cluster": "search", "op": "lookup", "cat": "estimate", "severity": "critical",
-      "intent": "lookup_estimates", "expectProposal": null,
+      "id": 19,
+      "key": "search-07",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "estimate",
+      "severity": "critical",
+      "intent": "lookup_estimates",
+      "expectProposal": null,
       "utterance": "Did Khan accept the estimate yet",
-      "llm": [{ "intentType": "lookup_estimates", "confidence": 0.92, "extractedEntities": { "customerName": "Khan" } }],
-      "fixtureRefs": ["customer.khan", "estimate.khan"], "tags": ["read-only", "quote-acceptance"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "EST-0001|estimate|quote|accepted|sent|draft|pending", "forbidSpoken": "trouble pulling|let me get a person", "allowedStates": ["intent_capture"] },
+      "llm": [
+        {
+          "intentType": "lookup_estimates",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Khan"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan",
+        "estimate.khan"
+      ],
+      "tags": [
+        "read-only",
+        "quote-acceptance"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "EST-0001|estimate|quote|accepted|sent|draft|pending",
+        "forbidSpoken": "trouble pulling|let me get a person",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      },
       "rationale": "Quote acceptance is a customer act on the public approval page; the operator's in-app need is the STATUS of that acceptance."
     },
     {
-      "id": 20, "key": "search-08", "cluster": "search", "op": "lookup_balance", "cat": "invoice", "severity": "critical",
-      "intent": "lookup_balance", "expectProposal": null,
+      "id": 20,
+      "key": "search-08",
+      "cluster": "search",
+      "op": "lookup_balance",
+      "cat": "invoice",
+      "severity": "critical",
+      "intent": "lookup_balance",
+      "expectProposal": null,
       "utterance": "What's Smith's outstanding balance",
-      "llm": [{ "intentType": "lookup_balance", "confidence": 0.94, "extractedEntities": { "customerName": "Smith" } }],
-      "fixtureRefs": ["customer.smith-a", "customer.smith-b"], "tags": ["read-only", "ambiguous-name"],
-      "expect": { "outcome": "clarification_question", "proposalCount": 0, "spokenMatches": "more than one|which one|which Smith", "allowedStates": ["intent_capture"] },
-      "rationale": "Two Smiths: the only correct answer is a which-one question — never a silent guess, never a clarification card."
+      "llm": [
+        {
+          "intentType": "lookup_balance",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Smith"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.smith-a",
+        "customer.smith-b"
+      ],
+      "tags": [
+        "read-only",
+        "ambiguous-name"
+      ],
+      "expect": {
+        "outcome": "clarification_question",
+        "proposalCount": 0,
+        "spokenMatches": "more than one|which one|which Smith",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      },
+      "rationale": "Two Smiths: the only correct answer is a which-one question \u2014 never a silent guess, never a clarification card."
     },
     {
-      "id": 21, "key": "search-09", "cluster": "search", "op": "lookup_revenue", "cat": "ops", "severity": "core",
-      "intent": "lookup_revenue", "expectProposal": null,
+      "id": 21,
+      "key": "search-09",
+      "cluster": "search",
+      "op": "lookup_revenue",
+      "cat": "ops",
+      "severity": "core",
+      "intent": "lookup_revenue",
+      "expectProposal": null,
       "utterance": "How much revenue did we do today",
-      "llm": [{ "intentType": "lookup_revenue", "confidence": 0.95, "extractedEntities": {} }],
-      "fixtureRefs": [], "tags": ["read-only", "owner-grade"],
-      "expect": { "outcome": "lookup_answer", "proposalCount": 0, "spokenMatches": "revenue|\\$|today|collected|no revenue", "forbidSpoken": "trouble pulling|let me get a person|owner-level report", "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_revenue",
+          "confidence": 0.95,
+          "extractedEntities": {}
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "read-only",
+        "owner-grade"
+      ],
+      "expect": {
+        "outcome": "lookup_answer",
+        "proposalCount": 0,
+        "spokenMatches": "revenue|\\$|today|collected|no revenue",
+        "forbidSpoken": "trouble pulling|let me get a person|owner-level report",
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 22, "key": "search-10", "cluster": "search", "op": "lookup", "cat": "client", "severity": "core",
-      "intent": "lookup_customer", "expectProposal": null,
+      "id": 22,
+      "key": "search-10",
+      "cluster": "search",
+      "op": "lookup",
+      "cat": "client",
+      "severity": "core",
+      "intent": "lookup_customer",
+      "expectProposal": null,
       "utterance": "Pull up the Patel account",
-      "llm": [{ "intentType": "lookup_customer", "confidence": 0.93, "extractedEntities": { "customerName": "Patel" } }],
-      "fixtureRefs": [], "tags": ["read-only", "seed-gap"],
-      "expect": { "outcome": "not_found", "proposalCount": 0, "spokenMatches": "(couldn.t|didn.t|can.t) find|no customer|not find|no .*match", "forbidSideEffects": ["notify_oncall"], "allowedStates": ["intent_capture"] }
+      "llm": [
+        {
+          "intentType": "lookup_customer",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Patel"
+          }
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "read-only",
+        "seed-gap"
+      ],
+      "expect": {
+        "outcome": "not_found",
+        "proposalCount": 0,
+        "spokenMatches": "(couldn.t|didn.t|can.t) find|no customer|not find|no .*match",
+        "forbidSideEffects": [
+          "notify_oncall"
+        ],
+        "allowedStates": [
+          "intent_capture"
+        ]
+      }
     },
     {
-      "id": 23, "key": "conf-01", "cluster": "confirmations", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 23,
+      "key": "conf-01",
+      "cluster": "confirmations",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book Garcia for Tuesday at 2 pm for the HVAC install",
-      "turns": ["Book Garcia for Tuesday at 2 pm for the HVAC install", "uh yeah, go ahead"],
+      "turns": [
+        "Book Garcia for Tuesday at 2 pm for the HVAC install",
+        "uh yeah, go ahead"
+      ],
       "autoConfirm": false,
       "llm": [
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } },
-        { "intentType": "confirm", "confidence": 0.9, "extractedEntities": {} }
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Book Garcia for Tuesday"
+        },
+        {
+          "intentType": "confirm",
+          "confidence": 0.9,
+          "extractedEntities": {},
+          "for": "go ahead"
+        }
       ],
-      "fixtureRefs": ["customer.garcia"], "tags": ["noisy-affirmation"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "proposalCount": 1, "payloadContains": { "customerId": "customer.garcia" } },
-      "rationale": "A noisy but unmistakable yes (\"uh yeah, go ahead\") must commit the readback, not restart the capture."
+      "fixtureRefs": [
+        "customer.garcia"
+      ],
+      "tags": [
+        "noisy-affirmation"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "proposalCount": 1,
+        "payloadContains": {
+          "customerId": "customer.garcia"
+        }
+      },
+      "rationale": "A noisy but unmistakable yes (\"uh yeah, go ahead\") must commit the readback, not restart the capture.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          }
+        },
+        "rationale": "Chat has no spoken readback, so \"uh yeah, go ahead\" confirms nothing \u2014 there is no question on the table to answer. The typed booking IS the whole turn, and the operator's confirmation is the screen tap on the card it drafts, so the chat-equivalent bar is: one message, exactly one approvable card carrying the resolved customer."
+      }
     },
     {
-      "id": 24, "key": "conf-02", "cluster": "confirmations", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 24,
+      "key": "conf-02",
+      "cluster": "confirmations",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book Garcia for Tuesday at 2 pm for the HVAC install",
-      "turns": ["Book Garcia for Tuesday at 2 pm for the HVAC install", "yes", "yes"],
+      "turns": [
+        "Book Garcia for Tuesday at 2 pm for the HVAC install",
+        "yes",
+        "yes"
+      ],
       "autoConfirm": false,
       "llm": [
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } },
-        { "intentType": "confirm", "confidence": 0.95, "extractedEntities": {} }
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Book Garcia for Tuesday"
+        },
+        {
+          "intentType": "confirm",
+          "confidence": 0.95,
+          "extractedEntities": {},
+          "for": "yes"
+        }
       ],
-      "fixtureRefs": ["customer.garcia"], "tags": ["duplicate-turn"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "proposalCount": 1, "forbidSideEffects": ["notify_oncall"], "allowedStates": ["intent_capture", "closing"] },
-      "rationale": "A duplicated confirm (client retry / double tap) must not mint a second proposal and must not escalate."
+      "fixtureRefs": [
+        "customer.garcia"
+      ],
+      "tags": [
+        "duplicate-turn"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "proposalCount": 1,
+        "forbidSideEffects": [
+          "notify_oncall"
+        ],
+        "allowedStates": [
+          "intent_capture",
+          "closing"
+        ]
+      },
+      "rationale": "A duplicated confirm (client retry / double tap) must not mint a second proposal and must not escalate.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "Book Garcia for Tuesday at 2 pm for the HVAC install"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          }
+        },
+        "rationale": "The chat shape of voice's duplicated confirm is a DOUBLE-SUBMIT: Enter pressed twice, a client retry, a double-tapped send. The same sentence arriving twice in one conversation inside a second must not put two appointments in the inbox for the operator to approve one of by accident."
+      }
     },
     {
-      "id": 25, "key": "conf-03", "cluster": "confirmations", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 25,
+      "key": "conf-03",
+      "cluster": "confirmations",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book Garcia for Tuesday at 2 pm for the HVAC install",
-      "turns": ["Book Garcia for Tuesday at 2 pm for the HVAC install", "Book Garcia for Tuesday at 2 pm for the HVAC install", "yes"],
+      "turns": [
+        "Book Garcia for Tuesday at 2 pm for the HVAC install",
+        "Book Garcia for Tuesday at 2 pm for the HVAC install",
+        "yes"
+      ],
       "autoConfirm": false,
       "llm": [
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } },
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } }
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Book Garcia for Tuesday"
+        },
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Book Garcia for Tuesday"
+        }
       ],
-      "fixtureRefs": ["customer.garcia"], "tags": ["duplicate-turn"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "proposalCount": 1, "payloadContains": { "customerId": "customer.garcia" }, "stateAfterTurn": { "2": "intent_confirm" } },
-      "rationale": "The same sentence submitted twice (double-submit / echo) must keep the readback pending with its slots intact, then commit once on yes."
+      "fixtureRefs": [
+        "customer.garcia"
+      ],
+      "tags": [
+        "duplicate-turn"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "proposalCount": 1,
+        "payloadContains": {
+          "customerId": "customer.garcia"
+        },
+        "stateAfterTurn": {
+          "2": "intent_confirm"
+        }
+      },
+      "rationale": "The same sentence submitted twice (double-submit / echo) must keep the readback pending with its slots intact, then commit once on yes.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "yes"
+        ],
+        "llm": [
+          {
+            "intentType": "create_appointment",
+            "confidence": 0.94,
+            "extractedEntities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install"
+            },
+            "for": "Book Garcia for Tuesday"
+          },
+          {
+            "intentType": "confirm",
+            "confidence": 0.95,
+            "extractedEntities": {},
+            "for": "yes"
+          }
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          }
+        },
+        "rationale": "The same double-submit as conf-02, followed by the stray \"yes\" the voice script ends on. In chat a typed yes approves nothing (approvals are a screen tap), so the bar is that it neither mints a third card nor silently approves the one on the table."
+      }
     },
     {
-      "id": 26, "key": "conf-04", "cluster": "confirmations", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 26,
+      "key": "conf-04",
+      "cluster": "confirmations",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "Book Garcia for Tuesday at 2 pm for the HVAC install",
-      "turns": ["Book Garcia for Tuesday at 2 pm for the HVAC install", "no", "Book Garcia for Thursday at 10 am for the HVAC install"],
-      "llm": [
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } },
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Thursday at 10 am", "jobTitle": "HVAC install" } }
+      "turns": [
+        "Book Garcia for Tuesday at 2 pm for the HVAC install",
+        "no",
+        "Book Garcia for Thursday at 10 am for the HVAC install"
       ],
-      "fixtureRefs": ["customer.garcia"], "tags": ["correction"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "proposalCount": 1, "payloadContains": { "customerId": "customer.garcia" }, "scheduledStartWeekday": 4 },
-      "rationale": "A rejected readback followed by the corrected request must produce exactly one proposal carrying the corrected slot."
+      "llm": [
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Tuesday at 2 pm"
+        },
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Thursday at 10 am",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Thursday at 10 am"
+        }
+      ],
+      "fixtureRefs": [
+        "customer.garcia"
+      ],
+      "tags": [
+        "correction"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "proposalCount": 1,
+        "payloadContains": {
+          "customerId": "customer.garcia"
+        },
+        "scheduledStartWeekday": 4
+      },
+      "rationale": "A rejected readback followed by the corrected request must produce exactly one proposal carrying the corrected slot.",
+      "chat": {
+        "turns": [
+          "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "no, make it Thursday at 10 am"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          },
+          "scheduledStartWeekday": 4
+        },
+        "rationale": "A correction typed straight after the draft. The operator has ONE booking in mind, so the inbox must end up with ONE card \u2014 the corrected Thursday one. Two competing cards for the same visit is the hazard: whichever the operator taps, the other is still approvable."
+      }
     },
     {
-      "id": 27, "key": "noise-01", "cluster": "confirmations", "op": "create_appointment", "cat": "schedule", "severity": "critical",
-      "intent": "create_appointment", "expectProposal": "create_appointment",
+      "id": 27,
+      "key": "noise-01",
+      "cluster": "confirmations",
+      "op": "create_appointment",
+      "cat": "schedule",
+      "severity": "critical",
+      "intent": "create_appointment",
+      "expectProposal": "create_appointment",
       "utterance": "um... hello?",
-      "turns": ["um... hello?", "Book Garcia for Tuesday at 2 pm for the HVAC install"],
-      "llm": [
-        { "intentType": "unknown", "confidence": 0.1, "extractedEntities": {} },
-        { "intentType": "create_appointment", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "dateTimeDescription": "Tuesday at 2 pm", "jobTitle": "HVAC install" } }
+      "turns": [
+        "um... hello?",
+        "Book Garcia for Tuesday at 2 pm for the HVAC install"
       ],
-      "fixtureRefs": ["customer.garcia"], "tags": ["noisy-input"],
-      "expect": { "outcome": "proposal", "proposalType": "create_appointment", "proposalCount": 1, "forbidSideEffects": ["notify_oncall"], "stateAfterTurn": { "1": "intent_capture" } },
-      "rationale": "Filler / mic-check noise gets one gentle reprompt (no LLM needed, no escalation); the next real request proceeds normally."
+      "llm": [
+        {
+          "intentType": "unknown",
+          "confidence": 0.1,
+          "extractedEntities": {},
+          "for": "hello"
+        },
+        {
+          "intentType": "create_appointment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install"
+          },
+          "for": "Book Garcia"
+        }
+      ],
+      "fixtureRefs": [
+        "customer.garcia"
+      ],
+      "tags": [
+        "noisy-input"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_appointment",
+        "proposalCount": 1,
+        "forbidSideEffects": [
+          "notify_oncall"
+        ],
+        "stateAfterTurn": {
+          "1": "intent_capture"
+        }
+      },
+      "rationale": "Filler / mic-check noise gets one gentle reprompt (no LLM needed, no escalation); the next real request proceeds normally. LLM entries are keyed by `for` (utterance substring), so the filler entry is simply never consumed when the deterministic noise filter answers turn 1.",
+      "chat": {
+        "turns": [
+          "um... hello?",
+          "Book Garcia for Tuesday at 2 pm for the HVAC install"
+        ],
+        "expect": {
+          "outcome": "proposal",
+          "proposalType": "create_appointment",
+          "proposalCount": 1,
+          "payloadContains": {
+            "customerId": "customer.garcia"
+          },
+          "forbidProposalTypes": [
+            "voice_clarification"
+          ]
+        },
+        "rationale": "Same script as voice, scored the way chat can be scored: `stateAfterTurn` names an FSM state chat does not have, so the noise turn's \"nothing happened\" is expressed as the end-state count \u2014 one card in total means the mic-check turn minted none."
+      }
     },
     {
-      "id": 28, "key": "noise-02", "cluster": "confirmations", "op": "confirm", "cat": "schedule", "severity": "core",
-      "intent": "confirm", "expectProposal": null,
+      "id": 28,
+      "key": "noise-02",
+      "cluster": "confirmations",
+      "op": "confirm",
+      "cat": "schedule",
+      "severity": "core",
+      "intent": "confirm",
+      "expectProposal": null,
       "utterance": "yes",
-      "turns": ["yes"],
-      "llm": [{ "intentType": "confirm", "confidence": 0.95, "extractedEntities": {} }],
-      "fixtureRefs": [], "tags": ["confirm-without-pending"],
-      "expect": { "outcome": "guard", "proposalCount": 0, "spokenMatches": "anything waiting|what would you like to do", "allowedStates": ["intent_capture"], "forbidSideEffects": ["notify_oncall"] }
+      "turns": [
+        "yes"
+      ],
+      "llm": [
+        {
+          "intentType": "confirm",
+          "confidence": 0.95,
+          "extractedEntities": {}
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "confirm-without-pending"
+      ],
+      "expect": {
+        "outcome": "guard",
+        "proposalCount": 0,
+        "spokenMatches": "anything waiting|what would you like to do",
+        "allowedStates": [
+          "intent_capture"
+        ],
+        "forbidSideEffects": [
+          "notify_oncall"
+        ]
+      },
+      "chat": {
+        "turns": [
+          "yes"
+        ],
+        "expect": {
+          "outcome": "guard",
+          "proposalCount": 0,
+          "spokenMatches": "anything waiting|what would you like to do",
+          "forbidSpoken": "I(?:'ve| have) (?:booked|scheduled|created|logged|sent)|all set|that's (?:booked|scheduled|done)"
+        },
+        "rationale": "A bare typed \"yes\" with nothing pending. Chat has no readback either, so the correct answer is the SAME honest re-prompt voice gives (CONFIRM_NOTHING_PENDING_LINE) \u2014 never a generic model reply improvising around an affirmation it cannot ground."
+      }
     },
     {
-      "id": 29, "key": "est-01", "cluster": "estimates", "op": "create_estimate", "cat": "estimate", "severity": "core",
-      "intent": "draft_estimate", "expectProposal": "draft_estimate",
+      "id": 29,
+      "key": "est-01",
+      "cluster": "estimates",
+      "op": "create_estimate",
+      "cat": "estimate",
+      "severity": "core",
+      "intent": "draft_estimate",
+      "expectProposal": "draft_estimate",
       "utterance": "Quote Khan for a three-ton condenser replacement",
-      "llm": [{ "intentType": "draft_estimate", "confidence": 0.93, "extractedEntities": { "customerName": "Khan", "lineItemDescriptions": ["3-ton condenser replacement"] } }],
-      "fixtureRefs": ["customer.khan", "catalog.condenser-3ton"],
-      "expect": { "outcome": "proposal", "proposalType": "draft_estimate", "payloadContains": { "customerId": "customer.khan" }, "payloadHas": ["lineItems"] }
+      "llm": [
+        {
+          "intentType": "draft_estimate",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "lineItemDescriptions": [
+              "3-ton condenser replacement"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan",
+        "catalog.condenser-3ton"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "draft_estimate",
+        "payloadContains": {
+          "customerId": "customer.khan"
+        },
+        "payloadHas": [
+          "lineItems"
+        ]
+      }
     },
     {
-      "id": 30, "key": "est-02", "cluster": "estimates", "op": "create_estimate", "cat": "estimate", "severity": "core",
-      "intent": "draft_estimate", "expectProposal": "draft_estimate",
+      "id": 30,
+      "key": "est-02",
+      "cluster": "estimates",
+      "op": "create_estimate",
+      "cat": "estimate",
+      "severity": "core",
+      "intent": "draft_estimate",
+      "expectProposal": "draft_estimate",
       "utterance": "Prepare an estimate for Johnson's water heater job",
-      "llm": [{ "intentType": "draft_estimate", "confidence": 0.92, "extractedEntities": { "customerName": "Johnson", "jobReference": "water heater job", "lineItemDescriptions": ["Water heater replacement"] } }],
-      "fixtureRefs": ["customer.johnson", "job.johnson-water-heater", "catalog.water-heater"],
-      "expect": { "outcome": "proposal", "proposalType": "draft_estimate", "payloadContains": { "customerId": "customer.johnson", "jobId": "job.johnson-water-heater" } }
+      "llm": [
+        {
+          "intentType": "draft_estimate",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "jobReference": "water heater job",
+            "lineItemDescriptions": [
+              "Water heater replacement"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.johnson",
+        "job.johnson-water-heater",
+        "catalog.water-heater"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "draft_estimate",
+        "payloadContains": {
+          "customerId": "customer.johnson",
+          "jobId": "job.johnson-water-heater"
+        }
+      }
     },
     {
-      "id": 31, "key": "est-03", "cluster": "estimates", "op": "edit_estimate", "cat": "estimate", "severity": "core",
-      "intent": "update_estimate", "expectProposal": "update_estimate",
+      "id": 31,
+      "key": "est-03",
+      "cluster": "estimates",
+      "op": "edit_estimate",
+      "cat": "estimate",
+      "severity": "core",
+      "intent": "update_estimate",
+      "expectProposal": "update_estimate",
       "utterance": "Add duct sealing to Khan's estimate",
-      "llm": [{ "intentType": "update_estimate", "confidence": 0.92, "extractedEntities": { "customerName": "Khan", "jobReference": "Khan's estimate", "lineItemDescriptions": ["Duct sealing"] } }],
-      "fixtureRefs": ["customer.khan", "estimate.khan", "catalog.duct-sealing"],
-      "expect": { "outcome": "proposal", "proposalType": "update_estimate", "payloadContains": { "estimateId": "estimate.khan" } }
+      "llm": [
+        {
+          "intentType": "update_estimate",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "jobReference": "Khan's estimate",
+            "lineItemDescriptions": [
+              "Duct sealing"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan",
+        "estimate.khan",
+        "catalog.duct-sealing"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "update_estimate",
+        "payloadContains": {
+          "estimateId": "estimate.khan"
+        }
+      }
     },
     {
-      "id": 32, "key": "est-04", "cluster": "estimates", "op": "edit_estimate", "cat": "estimate", "severity": "core",
-      "intent": "update_estimate", "expectProposal": "update_estimate",
+      "id": 32,
+      "key": "est-04",
+      "cluster": "estimates",
+      "op": "edit_estimate",
+      "cat": "estimate",
+      "severity": "core",
+      "intent": "update_estimate",
+      "expectProposal": "update_estimate",
       "utterance": "Add a fifty dollar service call fee to EST-0001",
-      "llm": [{ "intentType": "update_estimate", "confidence": 0.94, "extractedEntities": { "jobReference": "EST-0001", "amount": 5000, "lineItemDescriptions": ["Service call fee"] } }],
-      "fixtureRefs": ["estimate.khan", "catalog.service-call-fee"],
-      "expect": { "outcome": "proposal", "proposalType": "update_estimate", "payloadContains": { "estimateId": "estimate.khan" } }
+      "llm": [
+        {
+          "intentType": "update_estimate",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "jobReference": "EST-0001",
+            "amount": 5000,
+            "lineItemDescriptions": [
+              "Service call fee"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "estimate.khan",
+        "catalog.service-call-fee"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "update_estimate",
+        "payloadContains": {
+          "estimateId": "estimate.khan"
+        }
+      }
     },
     {
-      "id": 33, "key": "est-05", "cluster": "estimates", "op": "send_estimate", "cat": "estimate", "severity": "core",
-      "intent": "send_estimate", "expectProposal": "send_estimate",
+      "id": 33,
+      "key": "est-05",
+      "cluster": "estimates",
+      "op": "send_estimate",
+      "cat": "estimate",
+      "severity": "core",
+      "intent": "send_estimate",
+      "expectProposal": "send_estimate",
       "utterance": "Send EST-0042 to Garcia by email",
-      "llm": [{ "intentType": "send_estimate", "confidence": 0.94, "extractedEntities": { "customerName": "Garcia", "jobReference": "EST-0042", "sendChannel": "email" } }],
-      "fixtureRefs": ["estimate.explicit-0042", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "send_estimate", "status": "ready_for_review", "payloadContains": { "estimateId": "estimate.explicit-0042" } }
+      "llm": [
+        {
+          "intentType": "send_estimate",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "jobReference": "EST-0042",
+            "sendChannel": "email"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "estimate.explicit-0042",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "send_estimate",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "estimateId": "estimate.explicit-0042"
+        }
+      }
     },
     {
-      "id": 34, "key": "est-06", "cluster": "estimates", "op": "send_estimate_nudge", "cat": "estimate", "severity": "growth",
-      "intent": "send_estimate_nudge", "expectProposal": "send_estimate_nudge",
+      "id": 34,
+      "key": "est-06",
+      "cluster": "estimates",
+      "op": "send_estimate_nudge",
+      "cat": "estimate",
+      "severity": "growth",
+      "intent": "send_estimate_nudge",
+      "expectProposal": "send_estimate_nudge",
       "utterance": "Nudge Khan about the pending estimate",
-      "llm": [{ "intentType": "send_estimate_nudge", "confidence": 0.91, "extractedEntities": { "customerName": "Khan" } }],
-      "fixtureRefs": ["customer.khan", "estimate.khan"],
-      "expect": { "outcome": "proposal", "proposalType": "send_estimate_nudge", "payloadContains": { "customerId": "customer.khan" } }
+      "llm": [
+        {
+          "intentType": "send_estimate_nudge",
+          "confidence": 0.91,
+          "extractedEntities": {
+            "customerName": "Khan"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan",
+        "estimate.khan"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "send_estimate_nudge",
+        "payloadContains": {
+          "customerId": "customer.khan"
+        }
+      }
     },
     {
-      "id": 35, "key": "est-07", "cluster": "estimates", "op": "change_order", "cat": "estimate", "severity": "growth",
-      "intent": "create_change_order", "expectProposal": "create_change_order",
+      "id": 35,
+      "key": "est-07",
+      "cluster": "estimates",
+      "op": "change_order",
+      "cat": "estimate",
+      "severity": "growth",
+      "intent": "create_change_order",
+      "expectProposal": "create_change_order",
       "utterance": "Khan approved the extra duct work, add a change order to the Khan install job",
-      "llm": [{ "intentType": "create_change_order", "confidence": 0.9, "extractedEntities": { "customerName": "Khan", "jobReference": "Khan install", "changeOrderDescription": "extra duct work" } }],
-      "fixtureRefs": ["customer.khan", "job.khan-install"],
-      "expect": { "outcome": "proposal", "proposalType": "create_change_order", "payloadContains": { "jobId": "job.khan-install" } }
+      "llm": [
+        {
+          "intentType": "create_change_order",
+          "confidence": 0.9,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "jobReference": "Khan install",
+            "changeOrderDescription": "extra duct work"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan",
+        "job.khan-install"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_change_order",
+        "payloadContains": {
+          "jobId": "job.khan-install"
+        }
+      }
     },
     {
-      "id": 36, "key": "inv-01", "cluster": "invoices", "op": "create_invoice", "cat": "invoice", "severity": "core",
-      "intent": "create_invoice", "expectProposal": "draft_invoice",
+      "id": 36,
+      "key": "inv-01",
+      "cluster": "invoices",
+      "op": "create_invoice",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "create_invoice",
+      "expectProposal": "draft_invoice",
       "utterance": "Invoice Johnson four hundred fifty for the capacitor work",
-      "llm": [{ "intentType": "create_invoice", "confidence": 0.94, "extractedEntities": { "customerName": "Johnson", "amount": 45000, "lineItemDescriptions": ["Capacitor work"] } }],
-      "fixtureRefs": ["customer.johnson"],
-      "expect": { "outcome": "proposal", "proposalType": "draft_invoice", "payloadContains": { "customerId": "customer.johnson" } }
+      "llm": [
+        {
+          "intentType": "create_invoice",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "amount": 45000,
+            "lineItemDescriptions": [
+              "Capacitor work"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.johnson"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "draft_invoice",
+        "payloadContains": {
+          "customerId": "customer.johnson"
+        }
+      }
     },
     {
-      "id": 37, "key": "inv-02", "cluster": "invoices", "op": "create_invoice", "cat": "invoice", "severity": "core",
-      "intent": "create_invoice", "expectProposal": "draft_invoice",
+      "id": 37,
+      "key": "inv-02",
+      "cluster": "invoices",
+      "op": "create_invoice",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "create_invoice",
+      "expectProposal": "draft_invoice",
       "utterance": "Bill Mrs Lee two eighty-five for the service visit",
-      "llm": [{ "intentType": "create_invoice", "confidence": 0.92, "extractedEntities": { "customerName": "Mrs Lee", "amount": 28500, "lineItemDescriptions": ["Service visit"] } }],
-      "fixtureRefs": ["customer.mrs-lee"],
-      "expect": { "outcome": "proposal", "proposalType": "draft_invoice", "payloadContains": { "customerId": "customer.mrs-lee" } }
+      "llm": [
+        {
+          "intentType": "create_invoice",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Mrs Lee",
+            "amount": 28500,
+            "lineItemDescriptions": [
+              "Service visit"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.mrs-lee"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "draft_invoice",
+        "payloadContains": {
+          "customerId": "customer.mrs-lee"
+        }
+      }
     },
     {
-      "id": 38, "key": "inv-03", "cluster": "invoices", "op": "edit_invoice", "cat": "invoice", "severity": "core",
-      "intent": "update_invoice", "expectProposal": "update_invoice",
+      "id": 38,
+      "key": "inv-03",
+      "cluster": "invoices",
+      "op": "edit_invoice",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "update_invoice",
+      "expectProposal": "update_invoice",
       "utterance": "Add a twenty-five dollar trip fee to INV-0042",
-      "llm": [{ "intentType": "update_invoice", "confidence": 0.94, "extractedEntities": { "jobReference": "INV-0042", "amount": 2500, "lineItemDescriptions": ["Trip fee"] } }],
-      "fixtureRefs": ["invoice.johnson"],
-      "expect": { "outcome": "proposal", "proposalType": "update_invoice", "payloadContains": { "invoiceId": "invoice.johnson" } }
+      "llm": [
+        {
+          "intentType": "update_invoice",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "jobReference": "INV-0042",
+            "amount": 2500,
+            "lineItemDescriptions": [
+              "Trip fee"
+            ]
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "invoice.johnson"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "update_invoice",
+        "payloadContains": {
+          "invoiceId": "invoice.johnson"
+        }
+      }
     },
     {
-      "id": 39, "key": "inv-04", "cluster": "invoices", "op": "send_invoice", "cat": "invoice", "severity": "core",
-      "intent": "send_invoice", "expectProposal": "send_invoice",
+      "id": 39,
+      "key": "inv-04",
+      "cluster": "invoices",
+      "op": "send_invoice",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "send_invoice",
+      "expectProposal": "send_invoice",
       "utterance": "Email invoice INV-0042 to Johnson",
-      "llm": [{ "intentType": "send_invoice", "confidence": 0.94, "extractedEntities": { "customerName": "Johnson", "jobReference": "INV-0042", "sendChannel": "email" } }],
-      "fixtureRefs": ["invoice.johnson", "customer.johnson"],
-      "expect": { "outcome": "proposal", "proposalType": "send_invoice", "status": "ready_for_review", "payloadContains": { "invoiceId": "invoice.johnson" } }
+      "llm": [
+        {
+          "intentType": "send_invoice",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "jobReference": "INV-0042",
+            "sendChannel": "email"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "invoice.johnson",
+        "customer.johnson"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "send_invoice",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "invoiceId": "invoice.johnson"
+        }
+      }
     },
     {
-      "id": 40, "key": "inv-05", "cluster": "invoices", "op": "send_invoice", "cat": "invoice", "severity": "core",
-      "intent": "send_invoice", "expectProposal": "send_invoice",
+      "id": 40,
+      "key": "inv-05",
+      "cluster": "invoices",
+      "op": "send_invoice",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "send_invoice",
+      "expectProposal": "send_invoice",
       "utterance": "Text Smith the invoice link",
-      "llm": [{ "intentType": "send_invoice", "confidence": 0.92, "extractedEntities": { "customerName": "Smith", "sendChannel": "sms" } }],
-      "fixtureRefs": ["customer.smith-a", "customer.smith-b", "invoice.smith-a"], "tags": ["ambiguous-name"],
+      "llm": [
+        {
+          "intentType": "send_invoice",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Smith",
+            "sendChannel": "sms"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.smith-a",
+        "customer.smith-b",
+        "invoice.smith-a"
+      ],
+      "tags": [
+        "ambiguous-name"
+      ],
       "disambiguationFollowUp": "104 Cedar",
-      "expect": { "outcome": "proposal", "proposalType": "send_invoice", "payloadContains": { "customerId": "customer.smith-a" }, "requireClarificationTurn": true }
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "send_invoice",
+        "payloadContains": {
+          "customerId": "customer.smith-a"
+        },
+        "requireClarificationTurn": true
+      }
     },
     {
-      "id": 41, "key": "inv-06", "cluster": "invoices", "op": "issue_invoice", "cat": "invoice", "severity": "core",
-      "intent": "issue_invoice", "expectProposal": "issue_invoice",
+      "id": 41,
+      "key": "inv-06",
+      "cluster": "invoices",
+      "op": "issue_invoice",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "issue_invoice",
+      "expectProposal": "issue_invoice",
       "utterance": "Issue Garcia's invoice",
-      "llm": [{ "intentType": "issue_invoice", "confidence": 0.93, "extractedEntities": { "customerName": "Garcia", "jobReference": "Garcia's invoice" } }],
-      "fixtureRefs": ["customer.garcia", "invoice.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "issue_invoice", "payloadContains": { "invoiceId": "invoice.garcia" } }
+      "llm": [
+        {
+          "intentType": "issue_invoice",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "jobReference": "Garcia's invoice"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.garcia",
+        "invoice.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "issue_invoice",
+        "payloadContains": {
+          "invoiceId": "invoice.garcia"
+        }
+      }
     },
     {
-      "id": 42, "key": "inv-07", "cluster": "invoices", "op": "record_payment", "cat": "invoice", "severity": "core",
-      "intent": "record_payment", "expectProposal": "record_payment",
+      "id": 42,
+      "key": "inv-07",
+      "cluster": "invoices",
+      "op": "record_payment",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "record_payment",
+      "expectProposal": "record_payment",
       "utterance": "Record a four fifty cash payment on INV-0042",
-      "llm": [{ "intentType": "record_payment", "confidence": 0.94, "extractedEntities": { "jobReference": "INV-0042", "amount": 45000, "paymentMethod": "cash" } }],
-      "fixtureRefs": ["invoice.johnson"],
-      "expect": { "outcome": "proposal", "proposalType": "record_payment", "payloadContains": { "invoiceId": "invoice.johnson" } }
+      "llm": [
+        {
+          "intentType": "record_payment",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "jobReference": "INV-0042",
+            "amount": 45000,
+            "paymentMethod": "cash"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "invoice.johnson"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "record_payment",
+        "payloadContains": {
+          "invoiceId": "invoice.johnson"
+        }
+      }
     },
     {
-      "id": 43, "key": "inv-08", "cluster": "invoices", "op": "payment_reminder", "cat": "invoice", "severity": "core",
-      "intent": "send_payment_reminder", "expectProposal": "send_payment_reminder",
+      "id": 43,
+      "key": "inv-08",
+      "cluster": "invoices",
+      "op": "payment_reminder",
+      "cat": "invoice",
+      "severity": "core",
+      "intent": "send_payment_reminder",
+      "expectProposal": "send_payment_reminder",
       "utterance": "Send Johnson a reminder on the overdue invoice",
-      "llm": [{ "intentType": "send_payment_reminder", "confidence": 0.92, "extractedEntities": { "customerName": "Johnson" } }],
-      "fixtureRefs": ["customer.johnson", "invoice.johnson"],
-      "expect": { "outcome": "proposal", "proposalType": "send_payment_reminder", "payloadContains": { "invoiceId": "invoice.johnson" } },
+      "llm": [
+        {
+          "intentType": "send_payment_reminder",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Johnson"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.johnson",
+        "invoice.johnson"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "send_payment_reminder",
+        "payloadContains": {
+          "invoiceId": "invoice.johnson"
+        }
+      },
       "rationale": "Johnson has exactly one open invoice; the reminder must attach to it, not stall on a free-text reference."
     },
     {
-      "id": 44, "key": "cust-01", "cluster": "customers", "op": "create_client", "cat": "client", "severity": "core",
-      "intent": "create_customer", "expectProposal": "create_customer",
+      "id": 44,
+      "key": "cust-01",
+      "cluster": "customers",
+      "op": "create_client",
+      "cat": "client",
+      "severity": "core",
+      "intent": "create_customer",
+      "expectProposal": "create_customer",
       "utterance": "New customer Elena Ruiz, phone 480-555-7711",
-      "llm": [{ "intentType": "create_customer", "confidence": 0.94, "extractedEntities": { "displayName": "Elena Ruiz", "phone": "480-555-7711" } }],
-      "fixtureRefs": [], "tags": ["net-new-entity"],
-      "expect": { "outcome": "proposal", "proposalType": "create_customer", "status": "ready_for_review", "payloadContains": { "name": "Elena Ruiz" } }
+      "llm": [
+        {
+          "intentType": "create_customer",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "displayName": "Elena Ruiz",
+            "phone": "480-555-7711"
+          }
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "net-new-entity"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_customer",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "name": "Elena Ruiz"
+        }
+      }
     },
     {
-      "id": 45, "key": "cust-02", "cluster": "customers", "op": "edit_client", "cat": "client", "severity": "core",
-      "intent": "update_customer", "expectProposal": "update_customer",
+      "id": 45,
+      "key": "cust-02",
+      "cluster": "customers",
+      "op": "edit_client",
+      "cat": "client",
+      "severity": "core",
+      "intent": "update_customer",
+      "expectProposal": "update_customer",
       "utterance": "Update Khan's email to accounts@khan.test",
-      "llm": [{ "intentType": "update_customer", "confidence": 0.93, "extractedEntities": { "customerName": "Khan", "updatedEmail": "accounts@khan.test" } }],
-      "fixtureRefs": ["customer.khan"],
-      "expect": { "outcome": "proposal", "proposalType": "update_customer", "status": "ready_for_review", "payloadContains": { "customerId": "customer.khan", "email": "accounts@khan.test" } }
+      "llm": [
+        {
+          "intentType": "update_customer",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "updatedEmail": "accounts@khan.test"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "update_customer",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "customerId": "customer.khan",
+          "email": "accounts@khan.test"
+        }
+      }
     },
     {
-      "id": 46, "key": "cust-03", "cluster": "customers", "op": "convert_lead", "cat": "client", "severity": "core",
-      "intent": "convert_lead", "expectProposal": "convert_lead",
+      "id": 46,
+      "key": "cust-03",
+      "cluster": "customers",
+      "op": "convert_lead",
+      "cat": "client",
+      "severity": "core",
+      "intent": "convert_lead",
+      "expectProposal": "convert_lead",
       "utterance": "Convert the Greenfield lead into a customer",
-      "llm": [{ "intentType": "convert_lead", "confidence": 0.92, "extractedEntities": { "leadReference": "Greenfield" } }],
-      "fixtureRefs": ["lead.greenfield"],
-      "expect": { "outcome": "proposal", "proposalType": "convert_lead", "payloadContains": { "leadId": "lead.greenfield" } }
+      "llm": [
+        {
+          "intentType": "convert_lead",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "leadReference": "Greenfield"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "lead.greenfield"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "convert_lead",
+        "payloadContains": {
+          "leadId": "lead.greenfield"
+        }
+      }
     },
     {
-      "id": 47, "key": "job-01", "cluster": "jobs", "op": "create_job", "cat": "job", "severity": "core",
-      "intent": "create_job", "expectProposal": "create_job",
+      "id": 47,
+      "key": "job-01",
+      "cluster": "jobs",
+      "op": "create_job",
+      "cat": "job",
+      "severity": "core",
+      "intent": "create_job",
+      "expectProposal": "create_job",
       "utterance": "Open a job for Khan, kitchen drain clog",
-      "llm": [{ "intentType": "create_job", "confidence": 0.93, "extractedEntities": { "customerName": "Khan", "jobTitle": "Kitchen drain clog" } }],
-      "fixtureRefs": ["customer.khan"],
-      "expect": { "outcome": "proposal", "proposalType": "create_job", "status": "ready_for_review", "payloadContains": { "customerId": "customer.khan", "title": "Kitchen drain clog" } }
+      "llm": [
+        {
+          "intentType": "create_job",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "jobTitle": "kitchen drain clog"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.khan"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "create_job",
+        "status": "ready_for_review",
+        "payloadContains": {
+          "customerId": "customer.khan",
+          "title": "kitchen drain clog"
+        }
+      }
     },
     {
-      "id": 48, "key": "job-02", "cluster": "jobs", "op": "edit_job", "cat": "job", "severity": "core",
-      "intent": "update_job", "expectProposal": "update_job",
+      "id": 48,
+      "key": "job-02",
+      "cluster": "jobs",
+      "op": "edit_job",
+      "cat": "job",
+      "severity": "core",
+      "intent": "update_job",
+      "expectProposal": "update_job",
       "utterance": "Set Johnson's water heater job to in progress",
-      "llm": [{ "intentType": "update_job", "confidence": 0.92, "extractedEntities": { "customerName": "Johnson", "jobReference": "water heater job" } }],
-      "fixtureRefs": ["customer.johnson", "job.johnson-water-heater"],
-      "expect": { "outcome": "proposal", "proposalType": "update_job", "payloadContains": { "jobId": "job.johnson-water-heater" } }
+      "llm": [
+        {
+          "intentType": "update_job",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "jobReference": "water heater job"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "customer.johnson",
+        "job.johnson-water-heater"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "update_job",
+        "payloadContains": {
+          "jobId": "job.johnson-water-heater"
+        }
+      }
     },
     {
-      "id": 49, "key": "dispatch-01", "cluster": "dispatch", "op": "emergency", "cat": "ops", "severity": "critical",
-      "intent": "emergency_dispatch", "expectProposal": "emergency_dispatch",
+      "id": 49,
+      "key": "dispatch-01",
+      "cluster": "dispatch",
+      "op": "emergency",
+      "cat": "ops",
+      "severity": "critical",
+      "intent": "emergency_dispatch",
+      "expectProposal": "emergency_dispatch",
       "utterance": "No heat at the Hayes house, this is an emergency, page on-call now",
-      "llm": [{ "intentType": "emergency_dispatch", "confidence": 0.97, "extractedEntities": { "customerName": "Hayes", "jobTitle": "No heat" } }],
-      "fixtureRefs": [], "tags": ["emergency", "seed-gap"],
-      "expect": { "outcome": "escalation", "requireSideEffects": ["notify_oncall"], "allowedStates": ["escalating", "terminated"], "spokenMatches": "emergency|on-call|dispatcher|911" }
+      "llm": [
+        {
+          "intentType": "emergency_dispatch",
+          "confidence": 0.97,
+          "extractedEntities": {
+            "customerName": "Hayes",
+            "jobTitle": "No heat"
+          }
+        }
+      ],
+      "fixtureRefs": [],
+      "tags": [
+        "emergency",
+        "seed-gap"
+      ],
+      "expect": {
+        "outcome": "escalation",
+        "requireSideEffects": [
+          "notify_oncall"
+        ],
+        "allowedStates": [
+          "escalating",
+          "terminated"
+        ],
+        "spokenMatches": "emergency|on-call|dispatcher|911"
+      }
     },
     {
-      "id": 50, "key": "dispatch-02", "cluster": "dispatch", "op": "add_crew", "cat": "schedule", "severity": "growth",
-      "intent": "add_crew_member", "expectProposal": "add_crew_member",
+      "id": 50,
+      "key": "dispatch-02",
+      "cluster": "dispatch",
+      "op": "add_crew",
+      "cat": "schedule",
+      "severity": "growth",
+      "intent": "add_crew_member",
+      "expectProposal": "add_crew_member",
       "utterance": "Add Carlos to the Garcia Tuesday job as a helper",
-      "llm": [{ "intentType": "add_crew_member", "confidence": 0.9, "extractedEntities": { "customerName": "Garcia", "appointmentReference": "Tuesday", "targetTechnicianName": "Carlos" } }],
-      "fixtureRefs": ["appointment.garcia-tuesday", "technician.carlos", "customer.garcia"],
-      "expect": { "outcome": "proposal", "proposalType": "add_crew_member", "payloadContains": { "appointmentId": "appointment.garcia-tuesday", "technicianId": "technician.carlos" } }
+      "llm": [
+        {
+          "intentType": "add_crew_member",
+          "confidence": 0.9,
+          "extractedEntities": {
+            "customerName": "Garcia",
+            "appointmentReference": "Garcia Tuesday job",
+            "targetTechnicianName": "Carlos"
+          }
+        }
+      ],
+      "fixtureRefs": [
+        "appointment.garcia-tuesday",
+        "technician.carlos",
+        "customer.garcia"
+      ],
+      "expect": {
+        "outcome": "proposal",
+        "proposalType": "add_crew_member",
+        "payloadContains": {
+          "appointmentId": "appointment.garcia-tuesday",
+          "technicianId": "technician.carlos"
+        }
+      }
     }
   ]
 }

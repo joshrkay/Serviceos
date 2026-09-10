@@ -61,8 +61,19 @@ import {
   sessionTerminatedEvent,
   languageSwitchedEvent,
 } from '../../voice-quality/events';
-import { TAU_INT } from './transitions';
-import type { CallingAgentContext, CallingAgentEvent, SideEffect } from './types';
+import { TAU_INT, CONFIRM_NOTHING_PENDING_LINE } from './transitions';
+// R1/R2 (#inapp-50) — per-turn action-path trace + the deterministic
+// duplicate/noise recovery helpers that run BEFORE any classifier call.
+import { deriveTurnTrace, normalizeTurnText } from './turn-trace';
+import type { TurnTrace, TurnResolution } from './turn-trace';
+import { isNoiseUtterance } from './noise-filter';
+import { selectRepairTemplate } from './repair-templates';
+import type {
+  CallingAgentContext,
+  CallingAgentEvent,
+  CallingAgentState,
+  SideEffect,
+} from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
@@ -77,8 +88,15 @@ import {
   resolveDisambiguationFollowUp,
 } from './entity-resolution';
 import type { PendingEntityAmbiguity } from './entity-resolution';
-import { withTenantConnection } from '../../../db/tenant-transaction';
 import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
+// U3 — the SHARED customer address hint (`"phone · street, city"`). This
+// adapter used to build that string itself from a private `service_locations`
+// query, so the chat surface — which cannot reach a private method — asked an
+// address-free question and could not match an address answer. ONE decorator,
+// applied where each surface composes its resolver, now feeds both in-app
+// surfaces the identical candidate shape.
+import { withCustomerAddressHints } from '../../resolution/customer-address-hint';
+import type { LocationRepository } from '../../../locations/location';
 import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
 import {
   groundLineItemPricing,
@@ -102,9 +120,17 @@ import {
   MAX_LANGUAGE_SWITCHES_PER_CALL,
 } from '../../orchestration/language-detector';
 import {
+  isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
 } from '../../orchestration/intent-classifier';
+import type { IntentType } from '../../orchestration/intent-classifier';
+// Read-only lookups answer through the SHARED dispatch, via the in-app
+// surface adapter (identity + speech + telemetry). Never a switch in here.
+import { answerInAppLookup } from '../../voice-turn/inapp-lookup-surface';
+import { answerInAppEnRoute } from '../../voice-turn/inapp-en-route-surface';
+import type { InAppEnRouteDeps } from '../../voice-turn/inapp-en-route-surface';
+import type { AssistantLookupDeps } from '../../orchestration/lookup-dispatch';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
@@ -141,6 +167,21 @@ export interface InAppAdapterDeps {
    * unresolved (proposal surfaces for operator review) — never guessed.
    */
   entityResolver?: EntityResolver;
+  /**
+   * U3 — service locations, for the customer disambiguation hint.
+   *
+   * When present, `getEntityResolver()` wraps whatever resolver this adapter
+   * ends up using in `withCustomerAddressHints`, so an ambiguous customer is
+   * spoken back as "Smith, 104 QA Cedar Avenue" and the caller's "104 Cedar"
+   * is matched against that address rather than against a phone-digit
+   * coincidence. Replaces the private pool-backed query this adapter used to
+   * carry, so the chat surface gets the identical hint from the identical
+   * code.
+   *
+   * Optional and failure-soft: absent ⇒ the phone-only question the resolver
+   * itself produces (today's behaviour on a dev boot with no DB).
+   */
+  locationRepo?: LocationRepository;
   /**
    * U4 (Part E punch #1) — tenant settings for spoken-datetime resolution.
    * The tenant's IANA zone is resolved ONCE per session and threaded into
@@ -234,14 +275,21 @@ export interface InAppAdapterDeps {
   supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
   extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
   /**
-   * Read-only owner/operator lookups bypass the mutation confirmation FSM.
-   * The authenticated in-app route supplies a tenant-scoped resolver.
+   * Read-only `lookup_*` dispatch. THE SAME bundle app.ts hands the
+   * assistant-chat router and the live phone (`phoneLookupDeps`), so the
+   * three surfaces cannot drift on which repos a skill gets. Consumed by
+   * `ai/voice-turn/inapp-lookup-surface.ts#answerInAppLookup`, which is a
+   * caller of the shared dispatch — never a copy of its switch.
+   *
+   * Replaced `ownerLookupResolver`, which was narrow twice over: only owner
+   * sessions were eligible, and the production resolver answered exactly ONE
+   * intent (`lookup_day_overview`). Every other lookup fell into the FSM and
+   * minted a dead `voice_clarification` card, because lookups are
+   * deliberately absent from `INTENT_TO_PROPOSAL_TYPE`. Optional: when
+   * absent, a lookup turn speaks the honest unavailable line (and logs the
+   * wiring gap) rather than reviving that card.
    */
-  ownerLookupResolver?: (
-    tenantId: string,
-    sessionId: string,
-    intentType: string,
-  ) => Promise<string | undefined>;
+  lookups?: AssistantLookupDeps;
   /**
    * QA-2026-07-26 — catalog item repository used to ground voice-drafted
    * estimate line items (entities.lineItemDescriptions on a draft_estimate
@@ -284,6 +332,20 @@ export interface InAppAdapterDeps {
    * payload-promotion path, which cannot draft `publicResponse`.
    */
   respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
+  /**
+   * SCH-D4 — `en_route` ("on my way") as the shared DIRECT status act. ONE
+   * optional bundle (same convention as `lookups` above and
+   * `PhoneEnRouteDeps` / `AssistantEnRouteDeps` on the sibling surfaces),
+   * wired in app.ts to the SAME objects the assistant router's `enRoute`
+   * bundle gets — including the same `DelayNotificationCoordinator` instance
+   * the app button, the SMS keyword, the memo worker and the phone branch
+   * use, so every surface fires one identical audited act.
+   *
+   * Optional: when absent the surface speaks an honest "nothing was sent,
+   * use the en-route button" line (it never falls through to the FSM, which
+   * would mint the dead clarification card this branch exists to remove).
+   */
+  enRoute?: InAppEnRouteDeps;
 }
 
 export interface StartSessionResult {
@@ -300,9 +362,43 @@ export interface HandleInputResult {
   ttsText?: string;
   proposalIds: string[];
   ended: boolean;
+  /**
+   * R1 instrumentation — how far this turn got on the action path and, when
+   * it stopped short, what stopped it. Always present (never optional): a
+   * caller that has to ask "did anything happen?" is the failure this field
+   * exists to remove. Mirrored onto the SSE `transition` event and returned
+   * by `POST /api/voice/sessions/:id/input`.
+   */
+  trace: TurnTrace;
 }
 
 const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
+
+/**
+ * R2 — how recently the SAME normalized utterance must have arrived for this
+ * turn to count as a client retry / double tap / STT echo rather than the
+ * operator deliberately repeating themselves. Long enough to cover a slow
+ * round-trip and a fat-fingered second submit; short enough that saying the
+ * same thing again a minute later is honoured as a fresh request.
+ */
+const DUPLICATE_TURN_WINDOW_MS = 15_000;
+
+/**
+ * R2 — consecutive filler/mic-check turns that get the free deterministic
+ * reprompt before the turn falls through to the normal classifier path (and
+ * therefore back under the FSM's bounded retry/escalation budget). Bounded on
+ * purpose: an operator whose microphone is genuinely dead must still reach a
+ * human rather than loop forever on a line that costs nothing to speak.
+ */
+const MAX_CONSECUTIVE_NOISE_REPROMPTS = 3;
+
+/**
+ * R2 — spoken when a turn carried no request at all. Falls back to the
+ * vertical pack's `low_audio_confidence` repair template when the tenant has
+ * one (same copy the FSM's own reprompt uses), so a noise turn and a
+ * low-confidence turn sound like the same assistant.
+ */
+const NOISE_REPROMPT_LINE = "I didn't catch that — what would you like to do?";
 
 type ClassifierFailureClass =
   | 'parse_failed'
@@ -488,10 +584,72 @@ const AFFIRMATION_PHRASES = new Set([
   'confirm', 'confirmed', 'go ahead', 'sounds good', 'that works', 'looks good',
   'do it', 'please do', 'affirmative', 'of course', 'absolutely', 'perfect',
   "that's right", 'thats right', 'that is right', 'exactly', 'yes please',
+  // R2 (#inapp-50 conf-01) — the shapes a real operator's "yes" actually
+  // takes on a live mic. Each of these previously fell through to
+  // `correction` (wiping the readback) or, for a creation intent, to a
+  // slot-fill classifier round-trip that came back `intent_detail_unclear`.
+  'go for it', 'book it', 'do that', "that's correct", 'that is correct',
+  'thats correct', 'sounds right', "that's it", 'thats it', 'yes book it',
+  'yes please book it', 'yep go ahead', 'yeah go ahead', "yes that's right",
+  'yes thats right', 'right go ahead', 'lets do it', "let's do it",
   // es
   'si', 'sí', 'claro', 'correcto', 'de acuerdo', 'está bien', 'esta bien',
   'adelante', 'perfecto', 'así es', 'asi es',
 ]);
+
+/**
+ * R2 — leading hesitation/discourse tokens stripped before matching. They
+ * carry no meaning of their own but they are what a spoken "yes" is wrapped
+ * in ("uh yeah, go ahead", "okay so, book it"), and matching only the
+ * unwrapped form is why noisy affirmations were being read as corrections.
+ * `yeah`/`yep`/`si` are deliberately ABSENT: they are affirmations, not
+ * fillers, and stripping them would make "yeah cancel it" look affirmative.
+ */
+const CONFIRM_LEADING_FILLERS: ReadonlySet<string> = new Set([
+  'uh', 'uhh', 'um', 'umm', 'ummm', 'er', 'erm', 'hmm', 'hm', 'ah', 'oh',
+  'well', 'so', 'like', 'okay', 'ok', 'alright', 'alrighty', 'right',
+]);
+
+/** R2 — trailing politeness stripped before matching ("go ahead please"). */
+const CONFIRM_TRAILING_POLITENESS: ReadonlySet<string> = new Set([
+  'please', 'thanks', 'thank', 'you', 'sir', 'maam', "ma'am", 'gracias',
+  'por', 'favor',
+]);
+
+/**
+ * Shared normalization for the deterministic confirm/negate matchers:
+ * lowercase, fold smart quotes, drop punctuation (apostrophes survive so
+ * "that's right" still matches), collapse whitespace.
+ */
+function normalizeConfirmText(text: string): string {
+  if (typeof text !== 'string') return '';
+  return text
+    .toLowerCase()
+    .replace(/[‘’]/g, "'")
+    .replace(/[.,!?;:"()[\]“”…—–¡¿-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Strip the wrapper an operator speaks around a bare yes/no. Returns '' when
+ * the utterance was ALL wrapper ("um...") — callers treat that as "no match"
+ * rather than as an affirmation, so filler can never confirm a mutation.
+ */
+function stripConfirmWrapper(normalized: string): string {
+  const tokens = normalized.split(' ').filter((token) => token.length > 0);
+  let start = 0;
+  let end = tokens.length;
+  while (start < end && CONFIRM_LEADING_FILLERS.has(tokens[start])) start += 1;
+  while (end > start && CONFIRM_TRAILING_POLITENESS.has(tokens[end - 1])) end -= 1;
+  return tokens.slice(start, end).join(' ');
+}
+
+function matchesAffirmation(value: string): boolean {
+  if (value.length === 0) return false;
+  if (AFFIRMATION_PHRASES.has(value)) return true;
+  return AFFIRMATION_LEAD_TOKENS.has(value.split(' ')[0]);
+}
 
 /** Leading affirmative tokens ("yes, that's the one" / "sí, adelante"). */
 const AFFIRMATION_LEAD_TOKENS = new Set([
@@ -506,11 +664,32 @@ const AFFIRMATION_LEAD_TOKENS = new Set([
  * off an unclear "yes".
  */
 export function isAffirmation(text: string): boolean {
-  const normalized = text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+  const normalized = normalizeConfirmText(text);
+  if (!normalized) return false;
+  if (matchesAffirmation(normalized)) return true;
+  // R2 — retry against the utterance with its spoken wrapper removed. Only
+  // ever ADDS matches: an utterance that already matched returned above.
+  const core = stripConfirmWrapper(normalized);
+  return core !== normalized && matchesAffirmation(core);
+}
+
+/**
+ * R2 — the STRICT form: the utterance is an affirmation and NOTHING ELSE.
+ *
+ * `isAffirmation` matches on the leading token, which is right at the
+ * `intent_confirm` readback ("yes, that's the one") and catastrophically
+ * wrong anywhere else — "yes, book Garcia for Tuesday" is a booking, not a
+ * confirmation. The deterministic pre-classifier guard at `intent_capture` /
+ * `closing` (where there is nothing pending to confirm) therefore gates on
+ * THIS predicate, so a repeated bare "yes" is answered without an LLM call
+ * while a request that merely opens with "yes" still reaches the classifier.
+ */
+export function isPlainAffirmation(text: string): boolean {
+  const normalized = normalizeConfirmText(text);
   if (!normalized) return false;
   if (AFFIRMATION_PHRASES.has(normalized)) return true;
-  const first = normalized.split(/\s+/)[0].replace(/[.!?,]+$/g, '');
-  return AFFIRMATION_LEAD_TOKENS.has(first);
+  const core = stripConfirmWrapper(normalized);
+  return core.length > 0 && AFFIRMATION_PHRASES.has(core);
 }
 
 /**
@@ -526,6 +705,12 @@ const NEGATION_PHRASES = new Set([
   "that's wrong", 'thats wrong', 'that is wrong', "that's not right",
   'thats not right', 'that is not right', "that's not it", 'thats not it',
   'not right', 'not correct', 'start over', 'never mind', 'nevermind',
+  // R2 (#inapp-50) — symmetric with the noisy-affirmation set: the shapes a
+  // spoken "no" actually takes. `uh no` needs no entry — the shared wrapper
+  // strip in `isNegation` handles the hesitation prefix.
+  "no that's wrong", 'no thats wrong', 'no that is wrong', "no that's not right",
+  'not that one', 'not that', 'scratch that', 'wrong one', 'forget it',
+  'hold on', 'stop',
   // es
   'no gracias', 'incorrecto', 'no es correcto', 'cancelar', 'olvídalo', 'olvidalo',
 ]);
@@ -533,13 +718,20 @@ const NEGATION_PHRASES = new Set([
 /** Leading negative tokens ("no, that's the wrong customer"). */
 const NEGATION_LEAD_TOKENS = new Set(['no', 'nope', 'nah', 'negative', 'incorrecto']);
 
+function matchesNegation(value: string): boolean {
+  if (value.length === 0) return false;
+  if (NEGATION_PHRASES.has(value)) return true;
+  return NEGATION_LEAD_TOKENS.has(value.split(' ')[0]);
+}
+
 /** True when the caller's readback response is a clear rejection. */
 export function isNegation(text: string): boolean {
-  const normalized = text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+  const normalized = normalizeConfirmText(text);
   if (!normalized) return false;
-  if (NEGATION_PHRASES.has(normalized)) return true;
-  const first = normalized.split(/\s+/)[0].replace(/[.!?,]+$/g, '');
-  return NEGATION_LEAD_TOKENS.has(first);
+  if (matchesNegation(normalized)) return true;
+  // R2 — same wrapper strip as `isAffirmation` ("uh no", "well, not that one").
+  const core = stripConfirmWrapper(normalized);
+  return core !== normalized && matchesNegation(core);
 }
 
 /**
@@ -689,6 +881,28 @@ const SLOT_DETAIL_ENTITY_KEYS: ReadonlySet<string> = new Set([
   'lineItemDescriptions',
 ]);
 
+/**
+ * The resolver speaks `label`; the FSM's `entity_ambiguous` event and the
+ * follow-up matcher speak `name`. Nothing else is translated — the hint
+ * arrives already enriched from `withCustomerAddressHints`, which is what
+ * replaced the pool-backed enrichment this mapper used to be tangled up in
+ * (the two jobs, "rename a field" and "fetch an address", had no business
+ * being one method).
+ *
+ * The twin of `toPendingAmbiguity`'s mapping in
+ * ai/resolution/gated-reference-resolution.ts, which does the same for chat.
+ */
+function toPendingCandidates(
+  candidates: readonly EntityCandidate[],
+): Array<{ id: string; name: string; score: number; hint?: string }> {
+  return candidates.map((candidate) => ({
+    id: candidate.id,
+    name: candidate.label,
+    score: candidate.score,
+    ...(candidate.hint ? { hint: candidate.hint } : {}),
+  }));
+}
+
 export class InAppVoiceAdapter {
   constructor(private readonly deps: InAppAdapterDeps) {}
 
@@ -698,19 +912,35 @@ export class InAppVoiceAdapter {
    */
   private pgResolver?: EntityResolver;
 
+  /** The resolver actually handed out — `pgResolver`/injected, plus the U3 hint decorator. */
+  private hintedResolver?: EntityResolver;
+
   /**
    * Resolve the entity resolver to use: an explicitly injected one (tests),
    * else a PgEntityResolver built from the pool (production), else undefined
    * (dev/no-DB — resolution is skipped, never guessed).
    */
   private getEntityResolver(): EntityResolver | undefined {
-    if (this.deps.entityResolver) return this.deps.entityResolver;
+    if (this.hintedResolver) return this.hintedResolver;
+    const base = this.deps.entityResolver ?? this.buildPgResolver();
+    if (!base) return undefined;
+    // U3 — the address hint is applied HERE, once, so every consumer of this
+    // resolver (the pre-draft scheduling resolution, the FSM's
+    // `entity_ambiguous` question, and `resolveDisambiguationFollowUp`'s
+    // re-resolve on the answer turn) sees the same candidate hints. Cached
+    // alongside the resolver itself — the decorator is stateless, but
+    // re-wrapping per turn would allocate one per utterance.
+    this.hintedResolver = this.deps.locationRepo
+      ? withCustomerAddressHints(base, this.deps.locationRepo)
+      : base;
+    return this.hintedResolver;
+  }
+
+  private buildPgResolver(): EntityResolver | undefined {
     if (this.pgResolver) return this.pgResolver;
-    if (this.deps.pool) {
-      this.pgResolver = new PgEntityResolver(this.deps.pool);
-      return this.pgResolver;
-    }
-    return undefined;
+    if (!this.deps.pool) return undefined;
+    this.pgResolver = new PgEntityResolver(this.deps.pool);
+    return this.pgResolver;
   }
 
   /**
@@ -803,11 +1033,7 @@ export class InAppVoiceAdapter {
       if (!refKey) {
         return { type: 'entity_resolved', refs: resolution.refs };
       }
-      const candidates = await this.enrichCandidatesForDisambiguation(
-        tenantId,
-        resolution.ambiguous.entityKind,
-        resolution.ambiguous.candidates,
-      );
+      const candidates = toPendingCandidates(resolution.ambiguous.candidates);
       return {
         type: 'entity_ambiguous',
         candidates,
@@ -839,8 +1065,17 @@ export class InAppVoiceAdapter {
     // record_payment, cancel_appointment, …) the request cannot proceed, so
     // escalate rather than silently falling through to entity_resolved with
     // no refs — that previously masked a not_found as a "success" (46a954e1).
+    // SCH-D3 — carry WHAT was not found. On telephony the FSM ignores both
+    // fields and escalates exactly as before; on this in-app operator
+    // surface they become the spoken "I couldn't find a matching customer
+    // for Patel" instead of a page to on-call (transitions.ts
+    // `escalateEntityNotFound`).
     if (resolution.status === 'not_found' && requiresExistingEntity(intent)) {
-      return { type: 'entity_not_found' };
+      return {
+        type: 'entity_not_found',
+        ...(resolution.notFound?.entityKind ? { entityKind: resolution.notFound.entityKind } : {}),
+        ...(resolution.notFound?.reference ? { reference: resolution.notFound.reference } : {}),
+      };
     }
     // Everything else — including CREATION intents (create_appointment,
     // create_job, create_customer, draft_estimate), where "no such record"
@@ -850,55 +1085,6 @@ export class InAppVoiceAdapter {
     // policy), and create_appointment auto-opens a job from jobTitle at
     // execution time (95a260cd).
     return { type: 'entity_resolved', refs: resolution.refs };
-  }
-
-  /**
-   * Attach service-location addresses to customer candidates so address-style
-   * follow-ups ("104 Cedar") can be matched deterministically.
-   */
-  private async enrichCandidatesForDisambiguation(
-    tenantId: string,
-    entityKind: EntityCandidate['kind'],
-    candidates: EntityCandidate[],
-  ): Promise<Array<{ id: string; name: string; score: number; hint?: string }>> {
-    if (entityKind !== 'customer' || !this.deps.pool || candidates.length === 0) {
-      return candidates.map((candidate) => ({
-        id: candidate.id,
-        name: candidate.label,
-        score: candidate.score,
-        hint: candidate.hint,
-      }));
-    }
-
-    const customerIds = candidates.map((candidate) => candidate.id);
-    const rows = await withTenantConnection(this.deps.pool, tenantId, (client) =>
-      client
-        .query<{ customer_id: string; street1: string; city: string }>(
-          `SELECT customer_id, street1, city
-             FROM service_locations
-            WHERE tenant_id = $1
-              AND customer_id = ANY($2::uuid[])
-              AND is_archived = false`,
-          [tenantId, customerIds],
-        )
-        .then((result) => result.rows),
-    );
-    const addressByCustomer = new Map(
-      rows.map((row) => [row.customer_id, `${row.street1}, ${row.city}`]),
-    );
-
-    return candidates.map((candidate) => {
-      const address = addressByCustomer.get(candidate.id);
-      const hintParts = [candidate.hint, address].filter(
-        (part): part is string => typeof part === 'string' && part.length > 0,
-      );
-      return {
-        id: candidate.id,
-        name: candidate.label,
-        score: candidate.score,
-        hint: hintParts.length > 0 ? hintParts.join(' · ') : undefined,
-      };
-    });
   }
 
   private buildDisambiguationRetryEvent(
@@ -948,11 +1134,7 @@ export class InAppVoiceAdapter {
     const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
     if (!refKey) return undefined;
 
-    const candidates = await this.enrichCandidatesForDisambiguation(
-      tenantId,
-      resolution.ambiguous.entityKind,
-      resolution.ambiguous.candidates,
-    );
+    const candidates = toPendingCandidates(resolution.ambiguous.candidates);
 
     return {
       entityKind: resolution.ambiguous.entityKind,
@@ -1124,20 +1306,69 @@ export class InAppVoiceAdapter {
    * `undefined` to dispatch into the FSM as normal. Never throws, never mints
    * a proposal, and never advances the FSM — the session stays where it is
    * and the next turn is captured normally, the same shape as the read-only
-   * `ownerLookupText` branch below.
+   * `lookupText` branch below.
    */
-  private handleAdapterAct(
+  private async handleAdapterAct(
     session: VoiceSession,
     intentType: string,
     utterance: string,
-  ): SideEffect[] | undefined {
+    entities: Record<string, unknown>,
+  ): Promise<SideEffect[] | undefined> {
     if (isVoiceApprovalIntent(intentType) || isVoiceEditIntent(intentType)) {
       return this.refuseVoiceApproval(session, intentType);
     }
     if (intentType === 'language_switch') {
       return this.switchSessionLanguage(session, utterance);
     }
+    // SCH-D4 — `en_route` ("on my way") is a DIRECT status act, not a
+    // proposal: the technician IS the human acting, so it fires the SAME
+    // audited act as the app's en-route button on every other surface
+    // (memo worker, both phone transports, chat). In-app was the one live
+    // surface with no branch, so it fell through to the FSM and minted the
+    // dead `voice_clarification` `proposals/voice-intent-map.ts` predicts
+    // for exactly this omission. Handled here, before the FSM, so the
+    // session stays in `intent_capture` and nothing is minted.
+    if (intentType === 'en_route') {
+      return this.fireEnRoute(session, entities);
+    }
     return undefined;
+  }
+
+  /**
+   * SCH-D4 — the in-app `en_route` act. All resolution and dispatch live in
+   * the shared surface adapter + core (`ai/voice-turn/
+   * inapp-en-route-surface.ts` → `dispatch/en-route-voice.ts#
+   * handleEnRouteForTechnician`); this method only turns the spoken line
+   * into side effects and records the act on the audit trail the way the
+   * other adapter acts do (`refuseVoiceApproval`). No proposal, no FSM
+   * dispatch — see `handleAdapterAct`'s contract.
+   */
+  private async fireEnRoute(
+    session: VoiceSession,
+    entities: Record<string, unknown>,
+  ): Promise<SideEffect[]> {
+    const spoken = await answerInAppEnRoute(this.deps.enRoute, {
+      session,
+      tenantId: session.tenantId,
+      entities,
+    });
+    return [
+      {
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.en_route_executed',
+          sessionId: session.id,
+          tenantId: session.tenantId,
+          // The core writes the authoritative `appointment.en_route_triggered`
+          // audit when it actually fires (dispatch/routes.ts `triggerEnRoute`);
+          // this row records that the VOICE surface handled the turn, so a
+          // dead branch shows up as a metric rather than as silence.
+          wired: this.deps.enRoute !== undefined,
+          ts: Date.now(),
+        },
+      },
+      { type: 'tts_play', payload: { text: spoken } },
+    ];
   }
 
   /**
@@ -1303,6 +1534,15 @@ export class InAppVoiceAdapter {
       ...(extendedIntents ? { extendedIntents: true } : {}),
       customerProtectionIntents: true,
     });
+    // The authenticated operator is this session's ACTOR — the authz subject
+    // the shared lookup RBAC gate reads (`LOOKUP_REQUIRED_PERMISSION`, via
+    // ai/voice-turn/inapp-lookup-surface.ts). Session-level, exactly like the
+    // telephony establishment core stamps the caller-ID-resolved actor
+    // (twilio-adapter.ts); the FSM transition table stays inert to it, and
+    // `classifierProfileForSession` still returns 'operator'/'owner_line'
+    // here because 'inapp' is a trusted channel (the actor is only consulted
+    // for UNTRUSTED ones).
+    session.actorUserId = userId;
     const convId = conversationId ?? session.id;
 
     // Voice-parity — resolve the tenant's opt-in language stack so the
@@ -1447,6 +1687,159 @@ export class InAppVoiceAdapter {
       session.language = 'en';
     }
 
+    // ── R2 recovery pre-checks ───────────────────────────────────────────
+    //
+    // Three deterministic answers that must be given BEFORE the classifier
+    // and BEFORE the FSM, because in each of them dispatching would be the
+    // bug. The decision order at the head of the turn is:
+    //
+    //   1. nothing-pending confirm — a bare "yes" in a capture/closing state
+    //   2. duplicate turn          — the same sentence re-sent within 15 s
+    //   3. noise                   — filler / mic check, nothing to classify
+    //   4. the confirm / entity / classify branches below (unchanged)
+    //
+    // (1) is ordered ahead of (2) because a repeated "yes" after the proposal
+    // was already queued has a BETTER answer than replaying the last line:
+    // the #846 confirm-with-nothing-pending guard, which says so out loud and
+    // — critically — cannot mint a second proposal. `isPlainAffirmation` (not
+    // `isAffirmation`) gates it so that "yes, book Garcia for Tuesday" is
+    // still a booking rather than a guard line.
+    const preTurnState = session.machine.currentState;
+    const preTurnIsCaptureOrClosing =
+      preTurnState === 'intent_capture' || preTurnState === 'closing';
+    const previousTurn = session.lastOperatorTurn;
+    const normalizedTurnText = normalizeTurnText(text);
+    const isDuplicateOperatorTurn =
+      previousTurn !== undefined &&
+      normalizedTurnText.length > 0 &&
+      previousTurn.normalizedText === normalizedTurnText &&
+      Date.now() - previousTurn.at <= DUPLICATE_TURN_WINDOW_MS &&
+      previousTurn.stateAfter === preTurnState;
+
+    if (preTurnIsCaptureOrClosing && isPlainAffirmation(text)) {
+      session.noiseTurnCount = 0;
+      const guardEventType = `agent.calling.${preTurnState}.confirm_without_pending`;
+      const guardEffects: SideEffect[] = [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: guardEventType,
+            fromState: preTurnState,
+            toState: preTurnState,
+            sessionId: session.id,
+            tenantId: session.tenantId,
+            ...(isDuplicateOperatorTurn ? { deduplicated: true } : {}),
+            ts: Date.now(),
+          },
+        },
+        { type: 'tts_play', payload: { text: CONFIRM_NOTHING_PENDING_LINE } },
+      ];
+      return this.finishDeterministicTurn(
+        session,
+        text,
+        preTurnState,
+        'confirm_without_pending',
+        guardEffects,
+        deriveTurnTrace({
+          finalState: preTurnState,
+          auditEventTypes: [guardEventType],
+          sideEffectTypes: guardEffects.map((effect) => effect.type),
+          ...(isDuplicateOperatorTurn ? { dedup: 'duplicate_turn' as const } : {}),
+        }),
+      );
+    }
+
+    if (isDuplicateOperatorTurn) {
+      session.noiseTurnCount = 0;
+      const dedupEffects: SideEffect[] = [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: 'agent.calling.turn_deduplicated',
+            sessionId: session.id,
+            tenantId: session.tenantId,
+            state: preTurnState,
+            ts: Date.now(),
+          },
+        },
+      ];
+      // Re-speak the line the operator already heard, so a client retry is
+      // idempotent end to end: same state, same prompt, same proposal ids.
+      if (previousTurn?.lastSpoken) {
+        dedupEffects.push({ type: 'tts_play', payload: { text: previousTurn.lastSpoken } });
+      }
+      return this.finishDeterministicTurn(
+        session,
+        text,
+        preTurnState,
+        'turn_deduplicated',
+        dedupEffects,
+        deriveTurnTrace({
+          finalState: preTurnState,
+          dedup: 'duplicate_turn',
+          sideEffectTypes: dedupEffects.map((effect) => effect.type),
+        }),
+      );
+    }
+
+    // Noise is only ever safe to swallow where a mis-read costs nothing:
+    // `intent_capture` and `closing`. On a confirm or disambiguation turn
+    // "ok" is a real answer to a real question, so the filter never runs there.
+    const noiseTurnStreak = session.noiseTurnCount ?? 0;
+    if (
+      preTurnIsCaptureOrClosing &&
+      noiseTurnStreak < MAX_CONSECUTIVE_NOISE_REPROMPTS &&
+      isNoiseUtterance(text)
+    ) {
+      session.noiseTurnCount = noiseTurnStreak + 1;
+      const repair = selectRepairTemplate(
+        session.machine.currentContext.repairTemplates ?? [],
+        { trigger: 'low_audio_confidence' },
+      );
+      const repromptText = repair?.text ?? NOISE_REPROMPT_LINE;
+      const noiseEventType = 'agent.calling.intent_capture.noise_reprompt';
+      const noiseEffects: SideEffect[] = [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: noiseEventType,
+            sessionId: session.id,
+            tenantId: session.tenantId,
+            state: preTurnState,
+            consecutiveNoiseTurns: session.noiseTurnCount,
+            ts: Date.now(),
+          },
+        },
+        {
+          type: 'emit_quality_event',
+          payload: {
+            eventType: 'repair_template_fired',
+            trigger: 'low_audio_confidence',
+            text: repromptText,
+          },
+        },
+        { type: 'tts_play', payload: { text: repromptText } },
+      ];
+      // No FSM dispatch: retryCount / repromptCount are untouched, so a mic
+      // check can never walk the session towards an on-call page.
+      return this.finishDeterministicTurn(
+        session,
+        text,
+        preTurnState,
+        'noise_reprompt',
+        noiseEffects,
+        deriveTurnTrace({
+          finalState: preTurnState,
+          dedup: 'noise',
+          auditEventTypes: [noiseEventType],
+          sideEffectTypes: noiseEffects.map((effect) => effect.type),
+        }),
+      );
+    }
+    // A turn that carried a real request clears the streak (and a fourth
+    // consecutive noise turn falls through to the classifier by design).
+    session.noiseTurnCount = 0;
+
     // Decide the primary FSM event for this turn:
     //  A) intent_confirm — yes/no readback answer (no classifier).
     //  A2) entity_confirm — yes/no middle-confidence-candidate answer (no classifier).
@@ -1455,7 +1848,15 @@ export class InAppVoiceAdapter {
     const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
     let classifierFailureEffect: SideEffect | undefined;
-    let ownerLookupText: string | undefined;
+    /** R1 — the classifier's own verdict for this turn, when it ran. */
+    let classifiedIntent: string | undefined;
+    let classifiedConfidence: number | undefined;
+    /**
+     * The spoken answer to a read-only `lookup_*` turn. Non-undefined means
+     * the FSM is NOT dispatched for this turn: the session stays in
+     * `intent_capture` and no proposal is minted.
+     */
+    let lookupText: string | undefined;
     /**
      * Set when this turn is an adapter act (see `handleAdapterAct`) — the
      * approve/reject/edit refusal or the language switch. Non-undefined means
@@ -1566,6 +1967,9 @@ export class InAppVoiceAdapter {
         classifierUsage = classification.tokenUsage
           ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
           : undefined;
+        // R1 — what the classifier actually said, for this turn's trace.
+        classifiedIntent = classification.intentType;
+        classifiedConfidence = classification.confidence;
         if (classification.unknownReason === 'parse_failed') {
           classifierFailureEffect = classifierFailureAuditEffect('parse_failed');
         }
@@ -1594,31 +1998,47 @@ export class InAppVoiceAdapter {
             classification.extractedEntities as Record<string, unknown> | undefined,
             text
           );
-          // Adapter acts (approve/reject/edit refusal, language switch) are
-          // decided here, before the FSM sees the turn. Gated on TAU_INT for
-          // the same reason the FSM gates on it: below the band we do not
-          // claim to know what was asked, so the bounded reprompt path answers
-          // — and it mints nothing, so the C03/C05/C07 failure cannot recur
-          // through the low-confidence door either.
+          // Adapter acts (approve/reject/edit refusal, language switch, the
+          // en_route direct status act) are decided here, before the FSM sees
+          // the turn. Gated on TAU_INT for the same reason the FSM gates on
+          // it: below the band we do not claim to know what was asked, so the
+          // bounded reprompt path answers — and it mints nothing, so the
+          // C03/C05/C07 failure cannot recur through the low-confidence door
+          // either.
           if (classification.confidence >= TAU_INT) {
-            adapterActEffects = this.handleAdapterAct(
+            adapterActEffects = await this.handleAdapterAct(
               session,
               classification.intentType,
               text,
+              (classification.extractedEntities as Record<string, unknown> | undefined) ?? {},
             );
           }
+          // Read-only lookups answer through the SHARED dispatch and never
+          // reach the FSM (`ai/voice-turn/inapp-lookup-surface.ts` →
+          // `ai/orchestration/lookup-dispatch.ts` →
+          // `workers/voice-lookup-answer.ts`), the same one-dispatch/
+          // thin-surface shape the Gather branch uses for the phone.
+          //
+          // NOT gated on `ownerSession` any more: authorization is the
+          // shared RBAC gate's job and it fails closed (a technician asking
+          // for revenue hears the refusal, never data). The old flag gated
+          // on the session's ROLE CLAIM, which — combined with a production
+          // resolver that answered only `lookup_day_overview` — is why "what
+          // does Khan owe?" minted a dead `voice_clarification` card instead
+          // of an answer. TAU_INT-gated for the same reason adapter acts
+          // are: below the band we do not claim to know what was asked.
           if (
             !adapterActEffects &&
             classification.confidence >= TAU_INT &&
-            session.machine.currentContext.ownerSession === true &&
-            classification.intentType.startsWith('lookup_') &&
-            this.deps.ownerLookupResolver
+            isLookupIntent(classification.intentType as IntentType)
           ) {
-            ownerLookupText = await this.deps.ownerLookupResolver(
-              session.tenantId,
-              session.id,
-              classification.intentType,
-            );
+            lookupText = await answerInAppLookup(this.deps.lookups, {
+              session,
+              tenantId: session.tenantId,
+              userId: session.actorUserId,
+              intent: classification.intentType as IntentType,
+              entities: classification.extractedEntities as Record<string, unknown> | undefined,
+            });
           }
         }
       } catch (error) {
@@ -1680,14 +2100,16 @@ export class InAppVoiceAdapter {
 
     // Dispatch the primary event (classifier-derived, or the confirm/correct
     // event from the intent_confirm branch).
-    // Read-only owner lookups answer immediately and leave the FSM ready for
-    // the next request. They must never enter intent_confirm, which is the
-    // safety gate for proposal-producing mutations.
-    // Adapter acts and read-only owner lookups both answer WITHOUT touching
-    // the FSM: the session stays in intent_capture/closing, ready for the
-    // next request, and no proposal can be minted for this turn.
-    const effects1: SideEffect[] = ownerLookupText
-      ? [{ type: 'tts_play', payload: { text: ownerLookupText } }]
+    // Read-only lookups answer immediately and leave the FSM ready for the
+    // next request. They must never enter intent_confirm, which is the
+    // safety gate for proposal-producing mutations — and every `lookup_*`
+    // intent is deliberately absent from `INTENT_TO_PROPOSAL_TYPE`, so an
+    // FSM round-trip could only ever end as a clarification card.
+    // Adapter acts and read-only lookups both answer WITHOUT touching the
+    // FSM: the session stays in intent_capture/closing, ready for the next
+    // request, and no proposal can be minted for this turn.
+    const effects1: SideEffect[] = lookupText
+      ? [{ type: 'tts_play', payload: { text: lookupText } }]
       : (adapterActEffects ?? session.machine.dispatch(fsmEvent));
     allSideEffects.push(...effects1);
     const aggregate1 = await this.executeSideEffects(session, effects1);
@@ -1733,6 +2155,11 @@ export class InAppVoiceAdapter {
               >,
             }
           : undefined;
+    // R1 — the resolver outcome for this turn, verbatim from
+    // `SchedulingEntityResolution['status']`. `skipped` records the honest
+    // "this intent needed no resolver pass" rather than leaving the field
+    // blank, which reads the same as "we never got that far".
+    let turnResolution: TurnResolution | undefined;
     if (session.machine.currentState === 'entity_resolution' && resolutionInput) {
       const resolution = await this.resolveEntities(
         session.tenantId,
@@ -1741,6 +2168,7 @@ export class InAppVoiceAdapter {
         session.machine.currentContext.jobId,
         session,
       );
+      turnResolution = resolution.status;
       const resolutionEvent = await this.toResolutionEvent(
         session.tenantId,
         resolutionInput.intent,
@@ -1750,6 +2178,8 @@ export class InAppVoiceAdapter {
       allSideEffects.push(...effects2);
       const aggregate2 = await this.executeSideEffects(session, effects2);
       lastProposalId = aggregate2.lastProposalId ?? lastProposalId;
+    } else if (resolutionInput) {
+      turnResolution = 'skipped';
     }
 
     // Path B — the caller confirmed at intent_confirm, so the FSM created the
@@ -1812,19 +2242,156 @@ export class InAppVoiceAdapter {
       });
     }
 
+    // ── R1 — assemble this turn's action-path trace ──────────────────────
+    // Everything below is read off what the turn ACTUALLY did: the side
+    // effects it executed, the audit events it wrote, the proposal it minted,
+    // the resolver status it got back. Nothing is re-inferred from the
+    // response shape, which is exactly the inference the register exists to
+    // stop the harness from having to make.
+    const auditEventTypes = allSideEffects
+      .filter((effect) => effect.type === 'audit_log')
+      .map((effect) =>
+        typeof effect.payload.eventType === 'string' ? effect.payload.eventType : '',
+      );
+    const lastCreateProposal = [...allSideEffects]
+      .reverse()
+      .find((effect) => effect.type === 'create_proposal');
+    const mintedProposalType =
+      lastProposalId && lastCreateProposal
+        ? intentToProposalType(
+            typeof lastCreateProposal.payload.intent === 'string'
+              ? lastCreateProposal.payload.intent
+              : undefined,
+          )
+        : undefined;
+    const classifierFailureClass =
+      classifierFailureEffect &&
+      typeof classifierFailureEffect.payload.failureClass === 'string'
+        ? classifierFailureEffect.payload.failureClass
+        : undefined;
+    // The in-app surface refuses approve/reject/edit by voice (RV-071); that
+    // refusal is a capability answer, not a fallback of the action path.
+    const refusedThisTurn = auditEventTypes.includes('agent.calling.voice_approval_denied');
+    const trace = deriveTurnTrace({
+      finalState: session.machine.currentState,
+      eventType: fsmEvent.type,
+      ...(classifiedIntent !== undefined ? { intent: classifiedIntent } : {}),
+      ...(classifiedConfidence !== undefined ? { confidence: classifiedConfidence } : {}),
+      ...(turnResolution !== undefined ? { resolution: turnResolution } : {}),
+      ...(lastProposalId ? { proposalMinted: true } : {}),
+      ...(mintedProposalType ? { proposalType: mintedProposalType } : {}),
+      // A read-only lookup answered this turn — the FSM never moved and no
+      // proposal can exist, so the stage is `answered`, not `intent_detected`.
+      ...(lookupText !== undefined ? { answered: true } : {}),
+      ...(classifierFailureClass ? { classifierFailureClass } : {}),
+      ...(refusedThisTurn ? { refused: true } : {}),
+      sideEffectTypes: allSideEffects.map((effect) => effect.type),
+      auditEventTypes,
+    });
+
     // Push transition event for SSE subscribers.
     session.events.emit('voice-event', {
       type: 'transition',
       state: session.machine.currentState,
       event: fsmEvent.type,
       sideEffects: allSideEffects,
+      trace,
     });
+
+    this.recordOperatorTurn(session, text, stateBeforeTurn, ttsText);
 
     const result: HandleInputResult = {
       state: session.machine.currentState,
       sideEffects: allSideEffects,
       proposalIds: [...session.proposalIds],
       ended: session.ended,
+      trace,
+    };
+    if (ttsAudio) result.ttsAudio = ttsAudio;
+    if (ttsText) result.ttsText = ttsText;
+    return result;
+  }
+
+  /**
+   * R2 — record the turn just handled so the NEXT one can tell a client retry
+   * from a deliberate repeat. Called at the end of every turn, including the
+   * deterministic recovery turns (a duplicate refreshes the window, so a
+   * three-times-tapped send button dedups all the way through).
+   *
+   * Stores only the operator's own normalized words and the line we spoke
+   * back — no classifier output, no entities, nothing the FSM reads.
+   */
+  private recordOperatorTurn(
+    session: VoiceSession,
+    text: string,
+    stateBefore: string,
+    lastSpoken: string | undefined,
+  ): void {
+    session.lastOperatorTurn = {
+      normalizedText: normalizeTurnText(text),
+      at: Date.now(),
+      stateBefore: stateBefore as CallingAgentState,
+      stateAfter: session.machine.currentState,
+      ...(lastSpoken ? { lastSpoken } : {}),
+    };
+  }
+
+  /**
+   * R2 — finish a turn that a deterministic recovery path answered: the
+   * nothing-pending confirm guard, the duplicate-turn replay, or the noise
+   * reprompt.
+   *
+   * The FSM is NOT dispatched on any of these paths, so none of them can
+   * advance state, touch the retry/reprompt budget, or mint a proposal. What
+   * they still owe the caller is everything else a turn owes: the side
+   * effects executed, the line rendered and synthesized, the SSE transition
+   * pushed, and the turn recorded for the next duplicate check.
+   */
+  private async finishDeterministicTurn(
+    session: VoiceSession,
+    text: string,
+    stateBefore: CallingAgentState,
+    busEventName: string,
+    effects: SideEffect[],
+    trace: TurnTrace,
+  ): Promise<HandleInputResult> {
+    await this.executeSideEffects(session, effects);
+
+    const ttsLast = [...effects].reverse().find((effect) => effect.type === 'tts_play');
+    let ttsAudio: Buffer | undefined;
+    let ttsText: string | undefined;
+    if (ttsLast && typeof ttsLast.payload.text === 'string') {
+      ttsText = renderTtsText(ttsLast.payload.text, ttsLast.payload, session.language ?? 'en');
+      session.transcript.push(`agent: ${ttsText}`);
+      if (this.deps.ttsProvider) {
+        try {
+          const synth = await this.deps.ttsProvider.synthesize({
+            text: ttsText,
+            tenantId: session.tenantId,
+          });
+          ttsAudio = synth.audio;
+        } catch {
+          // Non-fatal — text is still returned to the caller.
+        }
+      }
+    }
+
+    session.events.emit('voice-event', {
+      type: 'transition',
+      state: session.machine.currentState,
+      event: busEventName,
+      sideEffects: effects,
+      trace,
+    });
+
+    this.recordOperatorTurn(session, text, stateBefore, ttsText);
+
+    const result: HandleInputResult = {
+      state: session.machine.currentState,
+      sideEffects: effects,
+      proposalIds: [...session.proposalIds],
+      ended: session.ended,
+      trace,
     };
     if (ttsAudio) result.ttsAudio = ttsAudio;
     if (ttsText) result.ttsText = ttsText;
@@ -2306,7 +2873,15 @@ export class InAppVoiceAdapter {
         const spoken =
           nonEmptyString(entities.brandVoiceInstruction) ?? lastCallerTranscriptLine(session) ?? '';
         brandVoiceFields = await extractBrandVoiceProposalFields(this.deps.gateway, session.tenantId, spoken);
-        built = { payload: brandVoiceFields.payload, confidence: brandVoiceFields.confidenceScore, ok: true };
+        built = {
+          payload: brandVoiceFields.payload,
+          confidence: brandVoiceFields.confidenceScore,
+          ok: true,
+          // The brand-voice pass owns its OWN gate (`brandVoiceFields
+          // .missingFields`, applied below); it never goes through
+          // `namedContractGap`, so it contributes nothing here.
+          missingFieldPaths: [],
+        };
       } else {
         built = await buildVoiceProposalPayload(
         {
@@ -2324,6 +2899,16 @@ export class InAppVoiceAdapter {
               : {}),
           },
           ...(rawConfidence !== undefined ? { confidence: rawConfidence } : {}),
+          // The operator's own words for the REQUEST turn, parked on the FSM
+          // context at intent_classified and threaded back through the
+          // create_proposal effect (transitions.ts `lastUtterance`). The
+          // proposal is minted on the CONFIRM turn, so `session.transcript`'s
+          // last caller line is "yes" by now — this is the only channel that
+          // still carries what was asked for. Read only by the deterministic
+          // update_job status/priority parse; never as an entity reference.
+          ...(typeof payload.utterance === 'string' && payload.utterance.trim().length > 0
+            ? { utterance: payload.utterance }
+            : {}),
           // DELIBERATELY NO `callerCustomerId`. On the telephony path that
           // argument is the IDENTIFIED CALLER's customer id. In-app is the
           // other way round: this envelope's top-level `payload.customerId`
@@ -2416,10 +3001,18 @@ export class InAppVoiceAdapter {
       // jobId" — live evidence, sweep row D01). Mirrors the telephony leg's
       // `gateable` decision (create-voice-turn-processor.ts) exactly, so the
       // two live surfaces stop drifting on this specific gap.
+      //
+      // The gate is read off `missingFieldPaths` INDEPENDENTLY of `ok`: a
+      // payload can satisfy its Zod contract and still be unapprovable —
+      // `updateCustomerPayloadSchema` requires only `customerId`, so an edit
+      // naming no new value validates and then executes as a silent no-op
+      // (register case cust-02). See voice-payload.ts `namedContractGap`.
       let contractMissingFields: string[] = [];
+      const degradeToClarification = !built.ok && proposalType === 'voice_clarification';
+      if (!degradeToClarification && built.missingFieldPaths.length > 0) {
+        contractMissingFields = built.missingFieldPaths;
+      }
       if (!built.ok) {
-        const degradeToClarification = proposalType === 'voice_clarification';
-        const gateable = !degradeToClarification && built.missingFieldPaths.length > 0;
         if (degradeToClarification) {
           effectivePayload = buildVoiceClarificationPayload({
             transcript: session.transcript,
@@ -2428,8 +3021,6 @@ export class InAppVoiceAdapter {
             requestedProposalType: proposalType,
             sessionId: session.id,
           });
-        } else if (gateable) {
-          contractMissingFields = built.missingFieldPaths;
         }
         await this.handleAuditLog(session, {
           type: 'audit_log',

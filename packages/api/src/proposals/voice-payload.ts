@@ -38,6 +38,7 @@
  */
 import type { ProposalType } from './proposal';
 import { validateProposalPayload, type ProposalConfidenceMeta } from './contracts';
+import { parseJobEditFields } from './job-edit-phrases';
 
 /**
  * Structural view of `ai/resolution/catalog-resolver.ts`'s
@@ -115,6 +116,16 @@ export interface BuildVoiceProposalPayloadInput {
    * resolution produced no more specific customer.
    */
   callerCustomerId?: string;
+  /**
+   * The operator's OWN WORDS for the turn this proposal came from
+   * (`intent_classified.utterance`, parked on the FSM context as
+   * `lastUtterance` and threaded back through the `create_proposal` side
+   * effect). Read ONLY by the deterministic `update_job` field parse below:
+   * `update_job`'s classifier entity set is `jobReference` alone, so the
+   * STATUS the operator asked for exists nowhere but the transcript. Never
+   * used as an entity reference and never used to invent an id.
+   */
+  utterance?: string;
 }
 
 export interface BuildVoiceProposalPayloadDeps {
@@ -137,21 +148,31 @@ export type BuildVoiceProposalPayloadResult = {
   payload: Record<string, unknown>;
   confidence?: number;
   lineItemOutcome?: VoiceLineItemGrounding;
+  /**
+   * Top-level payload keys an operator must fill before this proposal can be
+   * approved, deduped — the exact flat keys `clearSatisfiedMissingFields`
+   * (proposals/actions.ts) lifts when an operator edits them, so they are safe
+   * to use as a `missingFields` approval gate.
+   *
+   * ALWAYS PRESENT, and deliberately INDEPENDENT of `ok`. Most entries come
+   * from a contract failure, but a payload can be perfectly contract-VALID and
+   * still be unapprovable: `updateCustomerPayloadSchema` requires only
+   * `customerId`, so "update Khan's ..." with no new value validates and then
+   * executes as a silent no-op (register case cust-02). `ok` answers "does
+   * Zod accept this"; this answers "can a human approve it as it stands".
+   *
+   * EMPTY on an `ok: false` result means every failure was a whole-object
+   * refine with no field path AND no `namedContractGap` entry recognised it:
+   * nothing nameable for an operator to fill, so the caller should degrade
+   * rather than gate.
+   */
+  missingFieldPaths: string[];
 } & (
   | { ok: true }
   | {
       ok: false;
       /** `path: message`, straight from `validateProposalPayload`. */
       errors: string[];
-      /**
-       * Top-level payload keys the contract complained about, deduped — the
-       * exact flat keys `clearSatisfiedMissingFields` (proposals/actions.ts)
-       * lifts when an operator edits them, so they are safe to use as a
-       * `missingFields` approval gate. EMPTY when every failure was a
-       * whole-object refine with no field path: nothing nameable for an
-       * operator to fill, so the caller should degrade instead of gating.
-       */
-      missingFieldPaths: string[];
     }
 );
 
@@ -173,6 +194,126 @@ function resolveCustomerId(
   callerCustomerId: string | undefined,
 ): string | undefined {
   return nonEmptyString(entities.customerId) ?? nonEmptyString(callerCustomerId);
+}
+
+/**
+ * classifier key → `updateCustomerPayloadSchema` / `UpdateCustomerTaskHandler`
+ * field. Ordered exactly as the task handler assigns them so the two legs
+ * cannot drift.
+ */
+const UPDATE_CUSTOMER_FIELD_ALIASES: ReadonlyArray<readonly [string, string]> = [
+  ['updatedName', 'name'],
+  ['updatedEmail', 'email'],
+  ['updatedPhone', 'phone'],
+  ['updatedAddress', 'address'],
+];
+
+/** `updateJobPayloadSchema`'s "at least one field to change" set. */
+const JOB_EDIT_FIELDS = ['status', 'priority', 'title', 'description'] as const;
+
+function hasAnyJobEditField(flat: Record<string, unknown>): boolean {
+  return JOB_EDIT_FIELDS.some((field) => flat[field] !== undefined);
+}
+
+/**
+ * `SendPaymentReminderExecutionHandler`'s `MANUAL_REMINDER_PAYLOAD_STEP_KEY`
+ * (proposals/execution/send-payment-reminder-handler.ts). Duplicated as a
+ * literal rather than imported for the same reason contracts.ts duplicates the
+ * chain-ref token regex: the payload-contract layer must not depend on an
+ * execution handler. Cross-referenced so the two can't drift silently.
+ */
+const MANUAL_REMINDER_STEP_KEY = 'manual';
+
+/**
+ * Whole-object contract refines this builder can detect BEFORE Zod runs, and
+ * the single flat payload key each one is gated on.
+ *
+ * These exist because `fieldPathsFrom` (below) keeps only the first path
+ * SEGMENT of a Zod error, and a `.refine()` on the whole object reports
+ * `path: []` — nothing nameable. A caller handed `ok: false` with an EMPTY
+ * `missingFieldPaths` has no field to gate on, so it either persists an
+ * ungated invalid payload (approve-to-fail) or throws the operator's request
+ * away. Every entry here is a condition the payload can be checked for
+ * directly, so the draft can be persisted GATED instead.
+ *
+ * Each returned key should be a real flat payload key an operator can fill:
+ * `clearSatisfiedMissingFields` (proposals/missing-fields.ts) lifts a gate
+ * only when that exact key is edited to a non-empty value. The one deliberate
+ * exception is `update_customer`'s `updatedField` sentinel — see its case.
+ */
+function namedContractGap(
+  proposalType: ProposalType,
+  flat: Record<string, unknown>,
+): string[] {
+  switch (proposalType) {
+    // D01 (2026-08-30) — `createAppointmentPayloadSchema`'s SCH-02 refine
+    // ("requires jobId (or linkedJobId), or a customerId the executor can
+    // open a job for"). A new-caller booking ("Jordan Lee, 480-555-0199...")
+    // with no resolvable jobId/customerId had NOTHING nameable to gate on:
+    // the payload either persisted unchanged with no missingFields (S2,
+    // in-app — see inapp-adapter.ts) or degraded to a bare
+    // voice_clarification (S1, telephony), and a scripted/auto approval could
+    // reach `CreateAppointmentExecutionHandler` and fail there instead
+    // ("Payload must include a valid jobId" — live evidence, sweep row D01).
+    case 'create_appointment':
+      return !flat.jobId && !flat.linkedJobId && !flat.customerId ? ['customerId'] : [];
+    // `updateJobPayloadSchema`'s "at least one field to change" refine, after
+    // the deterministic phrase parse above has had its turn. `status` is the
+    // named gate because it is the field the overwhelming majority of spoken
+    // job edits mean and the one the review card offers first — the operator
+    // picking any of the four lifts the gate the same way.
+    case 'update_job':
+      return hasAnyJobEditField(flat) ? [] : ['status'];
+    // `sendEstimateNudgePayloadSchema`'s "estimateId or estimateReference"
+    // refine. "Nudge Khan about the pending estimate" names only the
+    // customer, so when the customer-anchored estimate lookup
+    // (ai/agents/customer-calling/entity-resolution.ts
+    // `planCustomerAnchoredDocumentLookup`) finds nothing to attach, this is
+    // what keeps the card gated rather than ungated-and-invalid (register
+    // case est-06).
+    case 'send_estimate_nudge':
+      return !flat.estimateId && !flat.estimateReference ? ['estimateId'] : [];
+    // `sendInvoicePayloadSchema`'s "invoiceId or invoiceReference" refine —
+    // the same shape as `send_estimate_nudge` above, and it had no entry here.
+    //
+    // The gate is on `invoiceId`, not on the refine: `SendInvoiceExecutionHandler`
+    // (proposals/execution/voice-extended-handlers.ts) requires
+    // `payload.invoiceId` to ALREADY be a uuid and never reads
+    // `invoiceReference` at all, so a payload carrying only the spoken name is
+    // contract-valid and still cannot execute. `SendInvoiceTaskHandler` has
+    // always gated exactly this way on the memo/chat leg (`missing.push
+    // ('invoiceId')` whenever the reference is not a resolved id); the
+    // live-turn leg had no equivalent, which is the drift this module exists
+    // to prevent. The gate is liftable: `GATED_REFERENCE_SOURCES.invoiceId`
+    // resolves it from `invoiceReference` (#909 — never a gate with nothing
+    // behind it).
+    case 'send_invoice':
+      return flat.invoiceId ? [] : ['invoiceId'];
+    // NOT a refine — `updateCustomerPayloadSchema` requires only
+    // `customerId`, so an edit that changes NOTHING is contract-VALID and
+    // then executes as a silent no-op ("I updated Khan's email" and nothing
+    // moved — register case cust-02). `UpdateCustomerTaskHandler`
+    // (ai/tasks/voice-extended-tasks.ts) has always gated this on the memo
+    // leg with exactly this field name; the live-turn leg had no equivalent,
+    // which is the whole drift this module exists to prevent.
+    //
+    // `updatedField` is a SENTINEL, not a payload key, so
+    // `clearSatisfiedMissingFields` can never lift it by an edit — the card
+    // stays unapprovable until the operator re-states the request. That is
+    // deliberate and is the honest outcome: this branch is reached only when
+    // NOTHING was heard about what to change, so there is no field to name
+    // and nothing to apply. (Naming one of the four concretely would gate on
+    // a guess at which one the operator meant.) Byte-identical to the memo
+    // leg's gate, so a re-draft of the same request behaves the same way on
+    // both.
+    case 'update_customer':
+      return UPDATE_CUSTOMER_FIELD_ALIASES.some(([, target]) => flat[target] !== undefined) ||
+        nonEmptyString(flat.notes)
+        ? []
+        : ['updatedField'];
+    default:
+      return [];
+  }
 }
 
 /**
@@ -229,33 +370,91 @@ export async function buildVoiceProposalPayload(
     const title = nonEmptyString(entities.jobTitle) ?? nonEmptyString(entities.jobReference);
     if (title) flat.title = title;
   }
+  // update_customer: the classifier (and the deterministic owner-command
+  // matchers in ai/orchestration/intent-classifier.ts, which emit
+  // `updatedPhone`/`updatedAddress` for the two stereotyped phrasings) names
+  // the NEW values in `updatedName`/`updatedEmail`/`updatedPhone`/
+  // `updatedAddress`; `updateCustomerPayloadSchema` and
+  // `UpdateCustomerExecutionHandler` read `name`/`email`/`phone`/`address`.
+  // Same mapping, same precedence, as `UpdateCustomerTaskHandler`
+  // (ai/tasks/voice-extended-tasks.ts) already performs for the memo/chat
+  // leg. Without it the payload validated with NO CHANGE IN IT at all —
+  // `updateCustomerPayloadSchema` requires only `customerId` — so an approved
+  // "update Khan's email" executed as a silent no-op (register case cust-02).
+  for (const [source, target] of UPDATE_CUSTOMER_FIELD_ALIASES) {
+    const value = nonEmptyString(entities[source]);
+    if (value && flat[target] === undefined) flat[target] = value;
+  }
+
   // The resolved customer every record-linking handler reads off `customerId`.
   const customerId = resolveCustomerId(entities, input.callerCustomerId);
   if (customerId) flat.customerId = customerId;
 
-  // D01 (2026-08-30) — `createAppointmentPayloadSchema`'s SCH-02 refine
-  // ("requires jobId (or linkedJobId), or a customerId the executor can open
-  // a job for") is a WHOLE-OBJECT refine: Zod gives it `path: []`, so
-  // `fieldPathsFrom` below (which keeps only the first path SEGMENT) silently
-  // DROPS it — `missingFieldPaths` came back empty even when this exact
-  // check fails. A new-caller booking ("Jordan Lee, 480-555-0199...") with no
-  // resolvable jobId/customerId therefore had NOTHING nameable to gate on:
-  // the payload either persisted unchanged with no missingFields (S2,
-  // in-app — see inapp-adapter.ts) or degraded to a bare voice_clarification
-  // (S1, telephony), and a scripted/auto approval could reach
-  // `CreateAppointmentExecutionHandler` and fail there instead ("Payload must
-  // include a valid jobId" — live evidence, sweep row D01). Detect the SAME
-  // condition here, proactively — not by parsing Zod internals — and name it
-  // so BOTH surfaces (S1 already threads `missingFieldPaths` into
-  // `buildProposal`; S2 is wired to do the same as of this fix) can gate the
-  // draft instead of guaranteeing an execution failure downstream.
-  const contractGapFields: string[] =
-    proposalType === 'create_appointment' &&
-    !flat.jobId &&
-    !flat.linkedJobId &&
-    !flat.customerId
-      ? ['customerId']
-      : [];
+  // update_job: the operator's spoken status/priority ("... to in progress",
+  // "mark it urgent priority"). `update_job` extracts only `jobReference`, so
+  // without this the payload reached `updateJobPayloadSchema`'s whole-object
+  // "at least one field to change" refine with nothing to change — and that
+  // refine carries `path: []`, so `fieldPathsFrom` below could name nothing
+  // and the draft was persisted with an EMPTY `missingFields`: an
+  // approve-to-fail card (register case job-02). Deterministic, additive
+  // (never overwrites a field the drafting leg already set) and non-guessing
+  // — see job-edit-phrases.ts.
+  if (proposalType === 'update_job' && !hasAnyJobEditField(flat)) {
+    const parsed = parseJobEditFields(input.utterance);
+    if (parsed.status !== undefined) flat.status = parsed.status;
+    if (parsed.priority !== undefined) flat.priority = parsed.priority;
+  }
+
+  // send_payment_reminder: an ad-hoc voice reminder is the MANUAL dunning
+  // step. `sendPaymentReminderPayloadSchema` requires `stepKey`/`offsetDays`/
+  // `channel` — cadence metadata the sweep stamps and a spoken reminder never
+  // names — and `SendPaymentReminderExecutionHandler` reads `stepKey ===
+  // 'manual'` as its own documented ad-hoc shape (its 72h cooldown, rather
+  // than the ledger's per-step key). These are the SAME three defaults
+  // `SendPaymentReminderTaskHandler` (ai/tasks/voice-extended-tasks.ts)
+  // stamps, including its `sendChannel ?? 'sms'` precedence, so the live-turn
+  // and memo legs cannot disagree about what a spoken reminder is.
+  if (proposalType === 'send_payment_reminder') {
+    if (flat.stepKey === undefined) flat.stepKey = MANUAL_REMINDER_STEP_KEY;
+    if (flat.offsetDays === undefined) flat.offsetDays = 0;
+    if (flat.channel === undefined) flat.channel = 'sms';
+    // The free-text reference the review card resolves when no invoiceId
+    // came back — same `jobReference ?? customerName` precedence as the task
+    // handler (there is no `invoiceReference` extraction field in the
+    // taxonomy; every invoice-doc intent reuses jobReference).
+    if (flat.invoiceReference === undefined) {
+      const reference =
+        nonEmptyString(entities.jobReference) ?? nonEmptyString(entities.customerName);
+      if (reference) flat.invoiceReference = reference;
+    }
+  }
+
+  // send_invoice: preserve the spoken document reference, exactly as
+  // `SendInvoiceTaskHandler` does on the memo/chat leg (`ee.jobReference ??
+  // ee.customerName`; there is no `invoiceReference` extraction field in the
+  // taxonomy — every invoice-doc intent reuses `jobReference`). Without it,
+  // "text Smith the invoice link" built a payload naming NO document at all,
+  // and `sendInvoicePayloadSchema`'s whole-object refine ("Either invoiceId or
+  // invoiceReference is required") then failed with `path: []` — the exact
+  // unnameable shape `namedContractGap` exists for. It was masked only while
+  // `channel` happened to be absent too, so the gate had something else to
+  // name; the moment the classifier extracts a `sendChannel` (which it does,
+  // for "TEXT Smith…"), the live-turn leg minted a contract-INVALID
+  // send_invoice with an EMPTY gate — an approve-to-fail card, caught by the
+  // register's own "mints no approve-to-fail proposal on any surface" guard.
+  if (proposalType === 'send_invoice' && flat.invoiceReference === undefined) {
+    const reference =
+      nonEmptyString(entities.jobReference) ?? nonEmptyString(entities.customerName);
+    if (reference) flat.invoiceReference = reference;
+  }
+
+  // Whole-object contract refines carry `path: []`, so `fieldPathsFrom` below
+  // can name nothing and `missingFieldPaths` comes back EMPTY even when the
+  // check fails — leaving the caller with an invalid payload it cannot gate
+  // (D01, and the register's `proposal_generation` FAIL signature on job-02 /
+  // est-06). Detect each one proactively and name the field an operator
+  // fills. See `namedContractGap` for the per-type rationale.
+  const contractGapFields: string[] = namedContractGap(proposalType, flat);
 
   // ── 3. Line items (injected grounding) ────────────────────────────────────
   let lineItemOutcome: VoiceLineItemGrounding | undefined;
@@ -306,7 +505,10 @@ export async function buildVoiceProposalPayload(
     return { ...common, ok: false, errors, missingFieldPaths };
   }
 
-  return { ...common, ok: true };
+  // A contract-VALID payload can still be unapprovable — see
+  // `missingFieldPaths` on the result type, and `namedContractGap`'s
+  // `update_customer` case.
+  return { ...common, ok: true, missingFieldPaths: contractGapFields };
 }
 
 /**

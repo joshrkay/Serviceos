@@ -1789,6 +1789,15 @@ export function createVoiceTurnProcessor(
               : session.customerId
                 ? { callerCustomerId: session.customerId }
                 : {}),
+            // The caller's words for the REQUEST turn (the FSM parks them on
+            // `context.lastUtterance` at intent_classified and threads them
+            // back here — transitions.ts). Same reason and same single reader
+            // as the in-app leg: a contract field the classifier never
+            // extracts, like update_job's spoken status. Threaded on BOTH
+            // voice surfaces so they cannot drift apart again.
+            ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
+              ? { utterance: fx.payload.utterance }
+              : {}),
           },
           {
             tenantId,
@@ -1802,6 +1811,12 @@ export function createVoiceTurnProcessor(
         payloadConfidence = built.confidence;
         if (built.ok) {
           payload = built.payload;
+          // A payload can satisfy its Zod contract and still be unapprovable:
+          // `updateCustomerPayloadSchema` requires only `customerId`, so an
+          // edit naming no new value validates and then executes as a silent
+          // no-op. `missingFieldPaths` is therefore read independently of
+          // `ok` — see voice-payload.ts `namedContractGap`.
+          contractMissingFields = built.missingFieldPaths;
         } else {
           const gateable =
             effectiveProposalType !== 'voice_clarification' &&

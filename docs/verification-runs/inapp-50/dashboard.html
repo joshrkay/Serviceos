@@ -1,0 +1,531 @@
+<title>In-app 50-case dashboard</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ef;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6;
+  --st-pass: #0ca30c;
+  --st-partial: #fab219;
+  --st-degraded: #ec835a;
+  --st-fail: #d03b3b;
+  --st-nodata: #d8d7d1;
+  --st-ink-dark: #12140f;
+  --st-ink-light: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232322;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --st-nodata: #35342f;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232322;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5;
+  --st-nodata: #35342f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 28px 20px 64px; }
+h1 { font-size: 20px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 0 0 12px; }
+.subtitle { color: var(--text-secondary); font-size: 13px; margin: 0 0 24px; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+.scroll-x { overflow-x: auto; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.tile-label { color: var(--text-secondary); font-size: 12px; margin-bottom: 6px; }
+.tile-value { font-size: 26px; font-weight: 600; }
+.tile-sub { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+.tile-PASS .tile-value { color: var(--st-pass); }
+.tile-FAIL .tile-value { color: var(--st-fail); }
+svg text { fill: var(--text-secondary); font-size: 11px; }
+svg .axis-line { stroke: var(--baseline); stroke-width: 1; }
+svg .grid-line { stroke: var(--gridline); stroke-width: 1; }
+svg .target-line { stroke: var(--text-muted); stroke-width: 1; }
+svg .trend-line { fill: none; stroke: var(--series-1); stroke-width: 2; }
+svg .trend-point { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; cursor: pointer; }
+svg .trend-point-batch { fill: var(--surface); stroke: var(--series-1); stroke-width: 2; cursor: pointer; }
+svg .value-label { fill: var(--text-primary); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 4px; font-size: 12px; color: var(--text-secondary); }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.sw-PASS { background: var(--st-pass); }
+.sw-PARTIAL { background: var(--st-partial); }
+.sw-DEGRADED { background: var(--st-degraded); }
+.sw-FAIL { background: var(--st-fail); }
+.sw-nodata { background: var(--st-nodata); }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.heat-table th, .heat-table td { padding: 0; text-align: center; }
+.heat-table th { padding: 4px 3px; color: var(--text-secondary); font-weight: 500; white-space: nowrap; vertical-align: bottom; }
+.heat-table .case-cell { text-align: left; padding: 3px 10px 3px 2px; white-space: nowrap; color: var(--text-primary); }
+.heat-table .case-cluster { color: var(--text-muted); font-size: 10px; margin-left: 4px; }
+.heat-table td.cell { width: 22px; height: 20px; font-weight: 700; font-size: 10px; cursor: default; border-radius: 3px; }
+.heat-table td.cell + td.cell, .heat-table th + th { border-left: 2px solid var(--surface); }
+.cell-PASS { background: var(--st-pass); color: var(--st-ink-dark); }
+.cell-PARTIAL { background: var(--st-partial); color: var(--st-ink-dark); }
+.cell-DEGRADED { background: var(--st-degraded); color: var(--st-ink-dark); }
+.cell-FAIL { background: var(--st-fail); color: var(--st-ink-light); }
+.cell-empty { background: var(--st-nodata); color: var(--text-muted); }
+.sev-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.sev-critical { background: var(--st-fail); }
+.sev-core { background: var(--series-1); }
+.sev-growth { background: var(--text-muted); }
+.cluster-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.cluster-row .cl-label { width: 150px; flex: 0 0 150px; font-size: 12px; color: var(--text-secondary); }
+.cluster-row .bar { flex: 1; display: flex; gap: 2px; height: 20px; border-radius: 4px; overflow: hidden; background: var(--surface-2); }
+.cluster-row .seg { height: 100%; cursor: default; }
+.cluster-row .cl-total { width: 54px; flex: 0 0 54px; text-align: right; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.rc-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.rc-row .rc-label { width: 170px; flex: 0 0 170px; font-size: 12px; color: var(--text-secondary); }
+.rc-row .rc-bar-track { flex: 1; }
+.rc-row .rc-bar { height: 16px; background: var(--series-1); border-radius: 4px; min-width: 2px; }
+.rc-row .rc-value { width: 30px; flex: 0 0 30px; font-size: 12px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.np-table th, .np-table td { padding: 7px 10px; border-bottom: 1px solid var(--gridline); text-align: left; }
+.np-table th { color: var(--text-secondary); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+.verdict-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.verdict-pill.v-PASS { background: color-mix(in srgb, var(--st-pass) 18%, transparent); color: var(--st-pass); }
+.verdict-pill.v-PARTIAL { background: color-mix(in srgb, var(--st-partial) 22%, transparent); color: var(--text-primary); }
+.verdict-pill.v-DEGRADED { background: color-mix(in srgb, var(--st-degraded) 22%, transparent); color: var(--text-primary); }
+.verdict-pill.v-FAIL { background: color-mix(in srgb, var(--st-fail) 18%, transparent); color: var(--st-fail); }
+.callout { border: 1px solid var(--border); border-left: 4px solid var(--st-fail); border-radius: 8px; padding: 14px 16px; background: var(--surface); }
+.callout.ok { border-left-color: var(--st-pass); }
+.callout ul { margin: 8px 0 0; padding-left: 18px; }
+.callout.ok .headline { color: var(--st-pass); }
+.callout .headline { font-weight: 600; color: var(--st-fail); margin-bottom: 4px; }
+.empty-note { color: var(--text-muted); font-style: italic; }
+#tooltip {
+  position: absolute;
+  z-index: 20;
+  transform: translate(-50%, -100%);
+  background: var(--text-primary);
+  color: var(--page);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  pointer-events: none;
+  max-width: 260px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+}
+#tooltip .tt-title { font-weight: 700; margin-bottom: 2px; }
+details.table-view { margin-top: 10px; }
+details.table-view summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+footer.foot { color: var(--text-muted); font-size: 11px; margin-top: 24px; }
+</style>
+<div class="wrap">
+  <h1>In-app 50-case dashboard</h1>
+  <p class="subtitle">Hermetic voice/assistant verification — docs/plans/2026-09-09-inapp-50-cases-plan.md. Generated <span id="generated-at"></span>.</p>
+
+  <div class="tiles" id="stat-tiles"></div>
+
+  <div class="card">
+    <h2>PASS / 50 trend</h2>
+    <div class="scroll-x" id="trend-chart"></div>
+    <details class="table-view">
+      <summary>Table view</summary>
+      <table><thead><tr><th>Run</th><th>Started</th><th>Type</th><th>PASS</th><th>Gate</th></tr></thead>
+      <tbody id="trend-table-body"></tbody></table>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Case &times; run heat-map</h2>
+    <div class="legend">
+      <span class="legend-item"><span class="swatch sw-PASS"></span>Pass (P)</span>
+      <span class="legend-item"><span class="swatch sw-PARTIAL"></span>Partial (R)</span>
+      <span class="legend-item"><span class="swatch sw-DEGRADED"></span>Degraded (D)</span>
+      <span class="legend-item"><span class="swatch sw-FAIL"></span>Fail (F)</span>
+      <span class="legend-item"><span class="swatch sw-nodata"></span>Not run this batch</span>
+    </div>
+    <div class="scroll-x" id="heatmap-table"></div>
+  </div>
+
+  <div class="card">
+    <h2>Latest run — per cluster</h2>
+    <div class="legend">
+      <span class="legend-item"><span class="swatch sw-PASS"></span>Pass</span>
+      <span class="legend-item"><span class="swatch sw-PARTIAL"></span>Partial</span>
+      <span class="legend-item"><span class="swatch sw-DEGRADED"></span>Degraded</span>
+      <span class="legend-item"><span class="swatch sw-FAIL"></span>Fail</span>
+    </div>
+    <div id="cluster-bars"></div>
+  </div>
+
+  <div class="card">
+    <h2>Latest run — root-cause distribution</h2>
+    <div id="rootcause-bars"></div>
+  </div>
+
+  <div class="card">
+    <h2>Latest run — non-PASS cases</h2>
+    <p id="nonpass-empty" class="empty-note" hidden></p>
+    <div class="scroll-x">
+      <table class="np-table">
+        <thead><tr><th>Key</th><th>Severity</th><th>Cluster</th><th>Verdict</th><th>Stage</th><th>Root cause</th></tr></thead>
+        <tbody id="nonpass-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Intent-capture-only — critical scheduling / search / confirmations</h2>
+    <div id="icoc-callout"></div>
+  </div>
+
+  <footer class="foot">scripts/inapp-50/build-dashboard.mjs · fixtures/voice/inapp-50-cases.json</footer>
+</div>
+<div id="tooltip" role="tooltip" hidden></div>
+<script id="inapp50-data" type="application/json">{"generatedAt":"2026-09-09T22:48:29.727Z","registerVersion":"inapp-50-v1","clusters":["scheduling","search","confirmations","estimates","invoices","customers","jobs","dispatch"],"cases":[{"key":"book-01","cluster":"scheduling","severity":"critical"},{"key":"book-02","cluster":"scheduling","severity":"critical"},{"key":"book-03","cluster":"scheduling","severity":"critical"},{"key":"book-04","cluster":"scheduling","severity":"critical"},{"key":"book-05","cluster":"scheduling","severity":"critical"},{"key":"cancel-01","cluster":"scheduling","severity":"critical"},{"key":"cancel-02","cluster":"scheduling","severity":"critical"},{"key":"confirm-01","cluster":"scheduling","severity":"critical"},{"key":"delay-01","cluster":"scheduling","severity":"critical"},{"key":"resched-01","cluster":"scheduling","severity":"critical"},{"key":"search-01","cluster":"search","severity":"critical"},{"key":"search-02","cluster":"search","severity":"critical"},{"key":"search-03","cluster":"search","severity":"critical"},{"key":"search-04","cluster":"search","severity":"critical"},{"key":"search-05","cluster":"search","severity":"critical"},{"key":"search-06","cluster":"search","severity":"critical"},{"key":"search-07","cluster":"search","severity":"critical"},{"key":"search-08","cluster":"search","severity":"critical"},{"key":"search-09","cluster":"search","severity":"core"},{"key":"search-10","cluster":"search","severity":"core"},{"key":"conf-01","cluster":"confirmations","severity":"critical"},{"key":"conf-02","cluster":"confirmations","severity":"critical"},{"key":"conf-03","cluster":"confirmations","severity":"critical"},{"key":"conf-04","cluster":"confirmations","severity":"critical"},{"key":"noise-01","cluster":"confirmations","severity":"critical"},{"key":"noise-02","cluster":"confirmations","severity":"core"},{"key":"est-01","cluster":"estimates","severity":"core"},{"key":"est-02","cluster":"estimates","severity":"core"},{"key":"est-03","cluster":"estimates","severity":"core"},{"key":"est-04","cluster":"estimates","severity":"core"},{"key":"est-05","cluster":"estimates","severity":"core"},{"key":"est-06","cluster":"estimates","severity":"growth"},{"key":"est-07","cluster":"estimates","severity":"growth"},{"key":"inv-01","cluster":"invoices","severity":"core"},{"key":"inv-02","cluster":"invoices","severity":"core"},{"key":"inv-03","cluster":"invoices","severity":"core"},{"key":"inv-04","cluster":"invoices","severity":"core"},{"key":"inv-05","cluster":"invoices","severity":"core"},{"key":"inv-06","cluster":"invoices","severity":"core"},{"key":"inv-07","cluster":"invoices","severity":"core"},{"key":"inv-08","cluster":"invoices","severity":"core"},{"key":"cust-01","cluster":"customers","severity":"core"},{"key":"cust-02","cluster":"customers","severity":"core"},{"key":"cust-03","cluster":"customers","severity":"core"},{"key":"job-01","cluster":"jobs","severity":"core"},{"key":"job-02","cluster":"jobs","severity":"core"},{"key":"dispatch-01","cluster":"dispatch","severity":"critical"},{"key":"reassign-01","cluster":"dispatch","severity":"critical"},{"key":"dispatch-03","cluster":"dispatch","severity":"core"},{"key":"dispatch-02","cluster":"dispatch","severity":"growth"}],"trend":[{"runId":"2026-09-09T20-20-55-065Z","startedAt":"2026-09-09T20:20:55.065Z","mode":"hermetic","gitSha":"d6ff17772ecb22ba4acceb9188e0ba23d2629a4d","isBatch":false,"batch":null,"total":50,"pass":43,"gatePass":false},{"runId":"2026-09-09T22-47-29-973Z","startedAt":"2026-09-09T22:47:29.973Z","mode":"hermetic","gitSha":"f7321ab949615e891c87b4d052b683b90777e2cc","isBatch":false,"batch":null,"total":150,"pass":150,"gatePass":true}],"cells":[[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"answered","rc":null},{"v":"PASS","s":"answered","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"guarded","rc":null},{"v":"PASS","s":"guarded","rc":null}],[{"v":"PARTIAL","s":"committed","rc":{"c":"slot_capture","d":"payload.lineItems is absent or empty"}},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"FAIL","s":"committed","rc":{"c":"proposal_generation","d":"voice-minted 'send_estimate_nudge' failed validateProposalPayload with no missingFields gate: : estimateId or estimateReference is required"}},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PARTIAL","s":"committed","rc":{"c":"slot_capture","d":"payload.invoiceId is absent"}},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PARTIAL","s":"committed","rc":{"c":"slot_capture","d":"payload.email is absent"}},{"v":"PASS","s":"committed","rc":null}],[{"v":"PARTIAL","s":"committed","rc":{"c":"slot_capture","d":"payload.leadId is absent"}},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"FAIL","s":"committed","rc":{"c":"proposal_generation","d":"voice-minted 'update_job' failed validateProposalPayload with no missingFields gate: : update_job requires at least one field to change: status, priority, titl…"}},{"v":"PASS","s":"committed","rc":null}],[{"v":"PASS","s":"escalated","rc":null},{"v":"PASS","s":"escalated","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}],[{"v":"PARTIAL","s":"intent_detected","rc":{"c":"fallback","d":"spoken line did not match /on (your|my|the) way|heads.?up|notified|let .* know|told .* you/i: \"You're marked en route. Sent the customer an on-my-way text.\""}},{"v":"PASS","s":"intent_detected","rc":null}],[{"v":"PASS","s":"committed","rc":null},{"v":"PASS","s":"committed","rc":null}]],"latest":{"runId":"2026-09-09T22-47-29-973Z","startedAt":"2026-09-09T22:47:29.973Z","mode":"hermetic","gitSha":"f7321ab949615e891c87b4d052b683b90777e2cc","summary":{"total":150,"PASS":150,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"bySurface":{"voice":{"PASS":50,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"total":50},"chat":{"PASS":50,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"total":50},"chat-voice":{"PASS":50,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"total":50}},"bySeverity":{"critical":{"PASS":75,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"core":{"PASS":66,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"growth":{"PASS":9,"PARTIAL":0,"DEGRADED":0,"FAIL":0}},"byCluster":{"scheduling":{"PASS":30,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"dispatch":{"PASS":12,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"search":{"PASS":30,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"confirmations":{"PASS":18,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"estimates":{"PASS":21,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"invoices":{"PASS":24,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"customers":{"PASS":9,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"jobs":{"PASS":6,"PARTIAL":0,"DEGRADED":0,"FAIL":0}},"byRootCause":{"intent":0,"slot_capture":0,"proposal_generation":0,"fallback":0,"infra":0},"intentCaptureOnlyCritical":[]},"gate":{"pass":true,"reasons":[],"summary":{"total":150,"PASS":150,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"bySurface":{"voice":{"PASS":50,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"total":50},"chat":{"PASS":50,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"total":50},"chat-voice":{"PASS":50,"PARTIAL":0,"DEGRADED":0,"FAIL":0,"total":50}},"bySeverity":{"critical":{"PASS":75,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"core":{"PASS":66,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"growth":{"PASS":9,"PARTIAL":0,"DEGRADED":0,"FAIL":0}},"byCluster":{"scheduling":{"PASS":30,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"dispatch":{"PASS":12,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"search":{"PASS":30,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"confirmations":{"PASS":18,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"estimates":{"PASS":21,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"invoices":{"PASS":24,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"customers":{"PASS":9,"PARTIAL":0,"DEGRADED":0,"FAIL":0},"jobs":{"PASS":6,"PARTIAL":0,"DEGRADED":0,"FAIL":0}},"byRootCause":{"intent":0,"slot_capture":0,"proposal_generation":0,"fallback":0,"infra":0},"intentCaptureOnlyCritical":[]}}},"latestNonPass":[]}</script>
+<script>
+(function () {
+  var DATA = JSON.parse(document.getElementById('inapp50-data').textContent);
+  var VERDICTS = ['PASS', 'PARTIAL', 'DEGRADED', 'FAIL'];
+  var LETTER = { PASS: 'P', PARTIAL: 'R', DEGRADED: 'D', FAIL: 'F' };
+  var LABEL = { PASS: 'Pass', PARTIAL: 'Partial', DEGRADED: 'Degraded', FAIL: 'Fail' };
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  function el(tag, className, text) {
+    var e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+  function svgEl(tag, attrs) {
+    var e = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function fmtDate(iso) {
+    if (!iso) return '?';
+    return iso.slice(0, 10);
+  }
+  function fmtDateTime(iso) {
+    if (!iso) return '?';
+    return iso.slice(0, 10) + ' ' + iso.slice(11, 16) + 'Z';
+  }
+
+  var tooltip = document.getElementById('tooltip');
+  function showTooltip(anchorRect, lines) {
+    tooltip.innerHTML = '';
+    for (var i = 0; i < lines.length; i++) {
+      tooltip.appendChild(el('div', i === 0 ? 'tt-title' : 'tt-row', lines[i]));
+    }
+    tooltip.style.left = (anchorRect.left + anchorRect.width / 2 + window.scrollX) + 'px';
+    tooltip.style.top = (anchorRect.top + window.scrollY - 8) + 'px';
+    tooltip.hidden = false;
+  }
+  function hideTooltip() { tooltip.hidden = true; }
+  function wireTooltip(node, getLines) {
+    node.setAttribute('tabindex', '0');
+    node.addEventListener('pointerenter', function () { showTooltip(node.getBoundingClientRect(), getLines()); });
+    node.addEventListener('focus', function () { showTooltip(node.getBoundingClientRect(), getLines()); });
+    node.addEventListener('pointerleave', hideTooltip);
+    node.addEventListener('blur', hideTooltip);
+  }
+
+  function renderStats() {
+    var host = document.getElementById('stat-tiles');
+    var latest = DATA.latest;
+    var tiles = [];
+    if (latest) {
+      tiles.push({ label: 'Latest run PASS', value: latest.summary.PASS + '/' + latest.summary.total, sub: latest.runId, status: latest.summary.PASS === latest.summary.total ? 'PASS' : null });
+      var crit = latest.summary.bySeverity.critical || { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0 };
+      var critTotal = (crit.PASS || 0) + (crit.PARTIAL || 0) + (crit.DEGRADED || 0) + (crit.FAIL || 0);
+      tiles.push({ label: 'Critical PASS', value: (crit.PASS || 0) + '/' + critTotal, sub: 'severity: critical', status: (crit.PASS || 0) === critTotal ? 'PASS' : null });
+      tiles.push({
+        label: 'Release gate',
+        value: latest.gate.pass ? 'PASS' : 'FAIL',
+        sub: latest.gate.pass ? 'all rules satisfied' : latest.gate.reasons.join('; '),
+        status: latest.gate.pass ? 'PASS' : 'FAIL',
+      });
+    } else {
+      tiles.push({ label: 'Latest run PASS', value: '—', sub: 'no runs recorded yet' });
+      tiles.push({ label: 'Critical PASS', value: '—' });
+      tiles.push({ label: 'Release gate', value: '—' });
+    }
+    var batchCount = DATA.trend.filter(function (r) { return r.isBatch; }).length;
+    tiles.push({ label: 'Runs recorded', value: String(DATA.trend.length), sub: batchCount ? batchCount + ' batch' : 'all full runs' });
+
+    tiles.forEach(function (t) {
+      var card = el('div', 'tile' + (t.status ? ' tile-' + t.status : ''));
+      card.appendChild(el('div', 'tile-label', t.label));
+      card.appendChild(el('div', 'tile-value', t.value));
+      if (t.sub) card.appendChild(el('div', 'tile-sub', t.sub));
+      host.appendChild(card);
+    });
+  }
+
+  function renderTrend() {
+    var host = document.getElementById('trend-chart');
+    var tableHost = document.getElementById('trend-table-body');
+    var runs = DATA.trend;
+    if (!runs.length) {
+      host.appendChild(el('p', 'empty-note', 'No runs recorded yet.'));
+      return;
+    }
+    var W = Math.max(480, runs.length * 64);
+    var H = 220;
+    var mL = 34, mR = 60, mT = 16, mB = 34;
+    var plotW = W - mL - mR, plotH = H - mT - mB;
+    var xStep = runs.length > 1 ? plotW / (runs.length - 1) : 0;
+    function x(i) { return mL + i * xStep; }
+    function y(v) { return mT + plotH - (Math.min(v, 50) / 50) * plotH; }
+
+    var svg = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', height: H, role: 'img', 'aria-label': 'PASS out of 50 per run, over time' });
+
+    [0, 25, 50].forEach(function (v) {
+      svg.appendChild(svgEl('line', { class: v === 0 ? 'axis-line' : 'grid-line', x1: mL, x2: W - mR, y1: y(v), y2: y(v) }));
+      var t = svgEl('text', { x: mL - 8, y: y(v) + 3, 'text-anchor': 'end' });
+      t.textContent = String(v);
+      svg.appendChild(t);
+    });
+
+    var targetY = y(50);
+    svg.appendChild(svgEl('line', { class: 'target-line', x1: mL, x2: W - mR, y1: targetY, y2: targetY }));
+    var targetLabel = svgEl('text', { x: W - mR + 6, y: targetY + 3 });
+    targetLabel.textContent = 'target 50';
+    svg.appendChild(targetLabel);
+
+    var points = runs.map(function (r, i) { return [x(i), y(r.pass)]; });
+    var pathD = points.map(function (p, i) { return (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' ');
+    svg.appendChild(svgEl('path', { class: 'trend-line', d: pathD }));
+
+    runs.forEach(function (r, i) {
+      var cx = x(i), cy = y(r.pass);
+      var isLast = i === runs.length - 1;
+      var circle = svgEl('circle', { class: r.isBatch ? 'trend-point-batch' : 'trend-point', cx: cx, cy: cy, r: isLast ? 6 : 5 });
+      svg.appendChild(circle);
+      wireTooltip(circle, function () {
+        return [
+          r.runId,
+          'PASS ' + r.pass + '/' + r.total + (r.isBatch ? ' (batch' + (r.batch ? ' ' + r.batch.index + '/' + r.batch.size : '') + ')' : ''),
+          'gate: ' + (r.gatePass ? 'PASS' : 'FAIL') + ' · mode: ' + r.mode,
+          fmtDateTime(r.startedAt),
+        ];
+      });
+      var xl = svgEl('text', { x: cx, y: H - mB + 16, 'text-anchor': 'middle' });
+      xl.textContent = fmtDate(r.startedAt) + (r.isBatch ? '*' : '');
+      svg.appendChild(xl);
+      if (isLast) {
+        var vl = svgEl('text', { class: 'value-label', x: cx + 10, y: cy - 10, 'text-anchor': 'start' });
+        vl.textContent = r.pass + '/' + r.total;
+        svg.appendChild(vl);
+      }
+    });
+
+    host.appendChild(svg);
+    if (runs.some(function (r) { return r.isBatch; })) {
+      host.appendChild(el('p', 'tile-sub', '* batch run (a subset of the 50 cases)'));
+    }
+
+    runs.forEach(function (r) {
+      var row = el('tr');
+      row.appendChild(el('td', null, r.runId));
+      row.appendChild(el('td', null, fmtDateTime(r.startedAt)));
+      row.appendChild(el('td', null, r.isBatch ? 'batch' : 'full'));
+      row.appendChild(el('td', null, r.pass + '/' + r.total));
+      row.appendChild(el('td', null, r.gatePass ? 'PASS' : 'FAIL'));
+      tableHost.appendChild(row);
+    });
+  }
+
+  function renderHeatmap() {
+    var host = document.getElementById('heatmap-table');
+    var runs = DATA.trend, cases = DATA.cases, cells = DATA.cells;
+    if (!runs.length || !cases.length) {
+      host.appendChild(el('p', 'empty-note', 'No runs recorded yet.'));
+      return;
+    }
+    var table = el('table', 'heat-table');
+    table.setAttribute('aria-label', 'Verdict per case per run');
+    var thead = el('thead');
+    var headRow = el('tr');
+    headRow.appendChild(el('th', 'case-cell', 'Case'));
+    runs.forEach(function (r) {
+      var th = el('th', null, fmtDate(r.startedAt) + (r.isBatch ? '*' : ''));
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = el('tbody');
+    cases.forEach(function (caseRow, ci) {
+      var tr = el('tr');
+      var caseCell = el('td', 'case-cell');
+      caseCell.appendChild(document.createTextNode(caseRow.key));
+      var dot = el('span', 'sev-dot sev-' + caseRow.severity);
+      dot.title = caseRow.severity;
+      caseCell.insertBefore(dot, caseCell.firstChild);
+      var clTag = el('span', 'case-cluster', caseRow.cluster);
+      caseCell.appendChild(clTag);
+      tr.appendChild(caseCell);
+
+      runs.forEach(function (r, ri) {
+        var cell = (cells[ci] || [])[ri];
+        var td = el('td', 'cell');
+        if (!cell || !cell.v) {
+          td.className += ' cell-empty';
+          td.textContent = '·';
+          wireTooltip(td, function () { return [caseRow.key, r.runId, 'not run in this batch']; });
+        } else {
+          td.className += ' cell-' + cell.v;
+          td.textContent = LETTER[cell.v] || '?';
+          td.setAttribute('aria-label', caseRow.key + ' ' + r.runId + ' ' + (LABEL[cell.v] || cell.v));
+          wireTooltip(td, function () {
+            var lines = [caseRow.key + ' · ' + r.runId, (LABEL[cell.v] || cell.v) + (cell.s ? ' · stage: ' + cell.s : '')];
+            if (cell.rc) lines.push((cell.rc.c || 'uncategorized') + ': ' + (cell.rc.d || ''));
+            return lines;
+          });
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    host.appendChild(table);
+  }
+
+  function renderClusterBars() {
+    var host = document.getElementById('cluster-bars');
+    var latest = DATA.latest;
+    if (!latest) { host.appendChild(el('p', 'empty-note', 'No runs recorded yet.')); return; }
+    var byCluster = latest.summary.byCluster;
+    DATA.clusters.forEach(function (cluster) {
+      var counts = byCluster[cluster];
+      if (!counts) return;
+      var total = counts.PASS + counts.PARTIAL + counts.DEGRADED + counts.FAIL;
+      if (total === 0) return;
+      var row = el('div', 'cluster-row');
+      row.appendChild(el('div', 'cl-label', cluster));
+      var bar = el('div', 'bar');
+      VERDICTS.forEach(function (v) {
+        var n = counts[v] || 0;
+        if (n === 0) return;
+        var seg = el('div', 'seg');
+        seg.style.flex = '0 0 ' + ((n / total) * 100) + '%';
+        seg.style.background = 'var(--st-' + v.toLowerCase() + ')';
+        wireTooltip(seg, function () { return [cluster, LABEL[v] + ': ' + n + '/' + total]; });
+        bar.appendChild(seg);
+      });
+      row.appendChild(bar);
+      row.appendChild(el('div', 'cl-total', counts.PASS + '/' + total));
+      host.appendChild(row);
+    });
+  }
+
+  function renderRootCauseBars() {
+    var host = document.getElementById('rootcause-bars');
+    var latest = DATA.latest;
+    if (!latest) { host.appendChild(el('p', 'empty-note', 'No runs recorded yet.')); return; }
+    var byRootCause = latest.summary.byRootCause;
+    var categories = Object.keys(byRootCause);
+    var max = Math.max.apply(null, categories.map(function (c) { return byRootCause[c]; }).concat([1]));
+    categories.forEach(function (cat) {
+      var n = byRootCause[cat];
+      var row = el('div', 'rc-row');
+      row.appendChild(el('div', 'rc-label', cat));
+      var track = el('div', 'rc-bar-track');
+      var bar = el('div', 'rc-bar');
+      bar.style.width = (n === 0 ? 0 : Math.max(4, (n / max) * 100)) + '%';
+      track.appendChild(bar);
+      row.appendChild(track);
+      row.appendChild(el('div', 'rc-value', String(n)));
+      host.appendChild(row);
+    });
+  }
+
+  function renderNonPassTable() {
+    var host = document.getElementById('nonpass-table-body');
+    var rows = DATA.latestNonPass;
+    var emptyHost = document.getElementById('nonpass-empty');
+    if (!DATA.latest) { emptyHost.textContent = 'No runs recorded yet.'; emptyHost.hidden = false; return; }
+    if (!rows.length) { emptyHost.textContent = 'All 50 cases PASSed in the latest run.'; emptyHost.hidden = false; return; }
+    rows.forEach(function (c) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, c.key));
+      tr.appendChild(el('td', null, c.severity));
+      tr.appendChild(el('td', null, c.cluster));
+      var vTd = el('td');
+      var pill = el('span', 'verdict-pill v-' + c.verdict, LETTER[c.verdict] + ' ' + LABEL[c.verdict]);
+      vTd.appendChild(pill);
+      tr.appendChild(vTd);
+      tr.appendChild(el('td', null, c.stage || '—'));
+      tr.appendChild(el('td', null, c.rootCause ? (c.rootCause.category || 'uncategorized') + ': ' + (c.rootCause.detail || '') : '—'));
+      host.appendChild(tr);
+    });
+  }
+
+  function renderCallout() {
+    var host = document.getElementById('icoc-callout');
+    if (!DATA.latest) { host.appendChild(el('p', 'empty-note', 'No runs recorded yet.')); return; }
+    var gated = ['scheduling', 'search', 'confirmations'];
+    var caseByKey = {};
+    DATA.cases.forEach(function (c) { caseByKey[c.key] = c; });
+    var keys = DATA.latest.summary.intentCaptureOnlyCritical.filter(function (k) {
+      var c = caseByKey[k];
+      return c && gated.indexOf(c.cluster) !== -1;
+    });
+    var box = el('div', 'callout' + (keys.length ? '' : ' ok'));
+    box.appendChild(el('div', 'headline', keys.length ? keys.length + ' critical case(s) are intent-capture-only' : 'Gate rule 2 satisfied'));
+    box.appendChild(el('div', null, 'Zero critical scheduling/search/confirmations case may end with intent captured and nothing proposed or answered.'));
+    if (keys.length) {
+      var ul = el('ul');
+      keys.forEach(function (k) {
+        var c = caseByKey[k] || {};
+        ul.appendChild(el('li', null, k + ' — ' + (c.cluster || '?')));
+      });
+      box.appendChild(ul);
+    }
+    host.appendChild(box);
+  }
+
+  renderStats();
+  renderTrend();
+  renderHeatmap();
+  renderClusterBars();
+  renderRootCauseBars();
+  renderNonPassTable();
+  renderCallout();
+
+  document.getElementById('generated-at').textContent = new Date(DATA.generatedAt).toISOString();
+})();
+</script>

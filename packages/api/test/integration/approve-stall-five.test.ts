@@ -402,8 +402,14 @@ describe('Integration — fix/approve-stall-five (real Postgres + real resolver)
     const app = buildChatApp(
       seed,
       proposalRepo,
+      // U5 — "Add <line item> to invoice INV-NNNN" is a canonical OWNER
+      // command, so an owner caller is classified deterministically
+      // (`matchOwnerOperatorCommand`, the same path the voice session takes)
+      // and the classifier draws NO gateway call: the deterministic extract
+      // supplies `jobReference` (the invoice number the pre-draft resolver
+      // seam below resolves) and `lineItemDescriptions`. The only scripted
+      // response left is the drafting handler's own.
       scriptedGateway([
-        classifierReply('update_invoice', { jobReference: invoice.invoiceNumber, amount: 7500 }),
         JSON.stringify({
           invoiceReference: invoice.invoiceNumber,
           editActions: [
