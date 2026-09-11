@@ -364,7 +364,53 @@ describe('#909 resolveGatedReferences — outcomes', () => {
       TENANT,
       draft({ customerReference: 'Bob' }, ['customerId']),
     );
-    expect(outcome).toEqual({ filled: {}, unresolved: [] });
+    // `notFound` is empty, not populated: with no resolver wired nothing was
+    // LOOKED FOR, and "we never looked" must never read as "it isn't there".
+    expect(outcome).toEqual({ filled: {}, unresolved: [], notFound: [] });
+  });
+
+  /**
+   * `notFound` is the subset of `unresolved` the caller may act on.
+   *
+   * An unresolved gate is usually a blank on a form the operator can still
+   * fill. A gate that is unresolved because THE RECORD DOES NOT EXIST is not:
+   * "cancel the Patel appointment" with no Patel on the books can never be
+   * approved by anyone, so the surface has to say so rather than persist a card
+   * (routes/assistant.ts reads this to answer honestly). The three cases below
+   * are the distinction, and the reason it cannot just be "unresolved".
+   */
+  describe('notFound — looked, and it is not there', () => {
+    it('reports a gate whose every reference came back not_found', async () => {
+      const outcome = await resolveGatedReferences(
+        resolverFor(({ reference }) => ({ kind: 'not_found', reference })),
+        TENANT,
+        draft({ appointmentReference: 'the Patel appointment' }, ['appointmentId']),
+      );
+      expect(outcome.unresolved).toEqual(['appointmentId']);
+      expect(outcome.notFound).toEqual(['appointmentId']);
+    });
+
+    it('does NOT report a gate with no reference to look with', async () => {
+      const outcome = await resolveGatedReferences(
+        resolverFor(({ reference }) => ({ kind: 'not_found', reference })),
+        TENANT,
+        draft({}, ['appointmentId']),
+      );
+      expect(outcome.notFound).toEqual([]);
+    });
+
+    it('does NOT report a low-confidence near-match as absent', async () => {
+      const outcome = await resolveGatedReferences(
+        resolverFor(() => ({
+          kind: 'low_confidence',
+          candidate: { id: 'a1', kind: 'appointment' as EntityKind, label: 'Maybe', score: 0.7 },
+        })),
+        TENANT,
+        draft({ appointmentReference: "Garcia's visit" }, ['appointmentId']),
+      );
+      expect(outcome.unresolved).toEqual(['appointmentId']);
+      expect(outcome.notFound).toEqual([]);
+    });
   });
 
   it('anchors a later appointment lookup on a job resolved earlier in the same pass', async () => {

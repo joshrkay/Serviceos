@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+#
+# Deterministic stand-in for the `railway` CLI, used by the fixtures in this
+# directory. Never talks to the network. Behavior is entirely controlled by
+# env vars so each test scenario is reproducible.
+#
+# `railway up ... --json --detach`:
+#   FAKE_UP_EXIT_CODE   — exit code to return (default 0)
+#   FAKE_UP_STDOUT      — raw stdout to print (default: a well-formed single
+#                         JSON line using FAKE_UP_DEPLOYMENT_ID)
+#   FAKE_UP_DEPLOYMENT_ID — deploymentId to embed in the default stdout
+#
+# `railway deployment list ... --json --limit N`:
+#   FAKE_LIST_SEQUENCE_DIR — directory of NN.json fixture files (0.json,
+#                            1.json, ...) returned in order, one per call;
+#                            once exhausted, the last file repeats (models a
+#                            deployment settling into its terminal status).
+#   FAKE_LIST_CALL_COUNT_FILE — path used to track how many times list has
+#                            been invoked across the life of one test.
+
+set -euo pipefail
+
+if [ -n "${FAKE_RAILWAY_SLEEP:-}" ]; then sleep "$FAKE_RAILWAY_SLEEP"; fi
+
+cmd="${1:-}"
+sub="${2:-}"
+
+case "$cmd $sub" in
+  "up ")
+    ;;
+esac
+
+if [ "$cmd" = "up" ]; then
+  exit_code="${FAKE_UP_EXIT_CODE:-0}"
+  if [ -n "${FAKE_UP_STDOUT:-}" ]; then
+    printf '%s' "$FAKE_UP_STDOUT"
+  else
+    dep_id="${FAKE_UP_DEPLOYMENT_ID:-dep-target-1}"
+    printf '{"deploymentId":"%s","logsUrl":"https://example.invalid/logs/%s"}\n' "$dep_id" "$dep_id"
+  fi
+  exit "$exit_code"
+fi
+
+if [ "$cmd" = "deployment" ] && [ "$sub" = "list" ]; then
+  list_exit="${FAKE_LIST_EXIT_CODE:-0}"
+  if [ -n "${FAKE_LIST_GARBAGE:-}" ]; then
+    printf '%s' "$FAKE_LIST_GARBAGE"
+    exit "$list_exit"
+  fi
+  if [ "$list_exit" -ne 0 ]; then
+    echo "fake-railway: simulated transient CLI error" >&2
+    exit "$list_exit"
+  fi
+
+  count_file="${FAKE_LIST_CALL_COUNT_FILE:-}"
+  n=0
+  if [ -n "$count_file" ]; then
+    [ -f "$count_file" ] || echo 0 > "$count_file"
+    n="$(cat "$count_file")"
+    echo $((n + 1)) > "$count_file"
+  fi
+
+  seq_dir="${FAKE_LIST_SEQUENCE_DIR:-}"
+  if [ -z "$seq_dir" ]; then
+    echo "[]"
+    exit 0
+  fi
+
+  # Find the highest-indexed fixture <= n, so the sequence "sticks" on the
+  # last file once exhausted instead of erroring.
+  last_file=""
+  for f in "$seq_dir"/*.json; do
+    idx="$(basename "$f" .json)"
+    if [ "$idx" -le "$n" ] 2>/dev/null; then
+      if [ -z "$last_file" ] || [ "$idx" -gt "$(basename "$last_file" .json)" ]; then
+        last_file="$f"
+      fi
+    fi
+  done
+  if [ -z "$last_file" ]; then
+    # Before the first indexed fixture exists yet: nothing to report.
+    echo "[]"
+    exit 0
+  fi
+  cat "$last_file"
+  exit 0
+fi
+
+echo "fake-railway: unhandled invocation: $*" >&2
+exit 64

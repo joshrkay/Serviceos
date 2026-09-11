@@ -351,7 +351,6 @@ import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
-import { lookupDayOverview } from './ai/skills/lookup-day-overview';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
@@ -4421,10 +4420,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // with the dialogue stranded.
             handlePendingDialogueSilence: (session, tenantId) =>
               twilioAdapter.handlePendingDialogueSilence(session, tenantId),
-            // WS upgrades don't carry AccountSid; fall back to the master
-            // token. Per-tenant subaccount auth for media streams is a
-            // future-phase change (auth at first `start` message).
-            authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+            // Resolve the account bound by the verified inbound webhook.
+            authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
             // Section 7 (CRITICAL): wire the gather adapter's shared Map so
             // Dial TwiML built inside handleEscalateWithContext is visible to
@@ -6705,6 +6702,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // U3 — service locations for the customer disambiguation hint. The SAME
+    // repo the assistant-chat router is wired with (~5484 above), so the two
+    // in-app surfaces cannot drift on what an ambiguous "Smith" is spoken/
+    // written back as, or on what a "104 Cedar" answer is matched against.
+    // Replaces the adapter's own `service_locations` query.
+    locationRepo,
     // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
     // read once per session, so the in-app live path books "Thursday at 2pm"
     // in the tenant's zone exactly like the recorded-memo path.
@@ -6742,18 +6745,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       return s?.supportedLanguages;
     },
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
-    ownerLookupResolver: async (tenantId, sessionId, intentType) => {
-      if (intentType !== 'lookup_day_overview') return undefined;
-      const result = await lookupDayOverview(
-        { tenantId, sessionId },
-        {
-          appointmentRepo,
-          jobRepo,
-          proposalRepo,
-          userRepo,
-        },
-      );
-      return result.summary;
+    // Read-only `lookup_*` dispatch for in-app operator voice — the SAME
+    // bundle the assistant-chat router and the live phone get (see
+    // `phoneLookupDeps` above), so the surfaces cannot drift on which repos
+    // a skill gets. Replaces `ownerLookupResolver`, which answered exactly
+    // ONE intent (`lookup_day_overview`) for owner sessions only; every
+    // other lookup fell into the FSM and minted a dead `voice_clarification`
+    // card. `lookup_day_overview` is answered by the shared switch itself
+    // (workers/voice-lookup-answer.ts), so nothing is lost.
+    lookups: phoneLookupDeps,
+    // SCH-D4 — en_route ("on my way") from in-app voice. Deliberately the
+    // SAME object set as the assistant router's `enRoute` bundle above (and
+    // the same `delayNotificationCoordinator` instance `createDispatchRoutes`
+    // wires as `enRouteCoordinator` for the app button), so the app button,
+    // the SMS keyword, the recorded memo, the live phone, chat and now
+    // in-app voice all fire ONE identical audited act. Without this bundle
+    // the intent fell through the FSM and minted a dead `voice_clarification`
+    // card — the exact failure `proposals/voice-intent-map.ts` predicts for a
+    // live surface with no en_route branch.
+    enRoute: {
+      userRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      auditRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
     },
   });
   app.use(
@@ -7004,6 +7022,24 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the retired in-app paths (/pricing, /privacy, …) there before the SPA
   // catch-all can serve index.html for them.
   registerMarketingRedirects(app);
+
+  // RIVET C-1 — JSON 404 for unmatched API-shaped routes.
+  //
+  // Without this, an unmatched `/api/*`, `/public/*`, or `/webhooks/*` path
+  // fell through to the SPA catch-all below: 200 text/html (SPA shell) when
+  // packages/web/dist is built, or the "Frontend assets unavailable" 500
+  // when it isn't. Mobile hooks do `if (!res.ok) throw` then `res.json()`,
+  // so an unexpected 200 HTML body surfaces as an opaque SyntaxError.
+  //
+  // Mounted on the three API-shaped prefixes (not a bare '*') so every
+  // non-API path (client-side SPA routes like /jobs, /customers/123) still
+  // falls through unchanged to the catch-all below. Express's path-prefix
+  // matching requires a '/' or end-of-string boundary after the mount path,
+  // so this does NOT intercept `/api-docs` (Swagger UI, mounted earlier and
+  // meant to stay public).
+  app.use(['/api', '/public', '/webhooks'], (_req, res) => {
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found' });
+  });
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side.

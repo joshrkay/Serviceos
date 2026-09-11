@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { test, skipUnlessAuthedStack, dismissWhatsNewModal } from './helpers/dev-auth';
 import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
@@ -10,17 +11,23 @@ import { hasRealClerkPublishableKey } from './helpers/clerk-key';
  *
  * Gated like the UI smoke tests — these routes are auth-gated, so they need
  * a real running stack with auth (E2E_BASE_URL pointing at a deployed env,
- * or a real Clerk testing pk). `hasRealClerkPublishableKey()` returns false
- * for the CI placeholder key, so on a bare PR runner this describe SKIPS
- * rather than failing to find an authenticated settings page. The
+ * a real Clerk testing pk, or the chromium-devauth project —
+ * e2e/helpers/dev-auth.ts, D-2). `hasRealClerkPublishableKey()` returns
+ * false for the CI placeholder key, so on a bare PR runner this describe
+ * SKIPS rather than failing to find an authenticated settings page. The
  * verifiable tap-target contracts also have fast jsdom coverage in
  * packages/web/src/components/settings/SettingsPage.live-actions.test.tsx,
  * ServiceAreaSheet.test.tsx and SettingsPage.billing-portal.test.tsx.
  */
-const hasStack = hasRealClerkPublishableKey();
 
 test.describe('settings — mobile viewport', () => {
-  test.skip(!hasStack, 'Set E2E_BASE_URL or a real Clerk pk to run authenticated UI tests');
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      hasRealClerkPublishableKey(),
+      'Set E2E_BASE_URL or a real Clerk pk to run authenticated UI tests (or run under the chromium-devauth project)',
+    );
+  });
   test.use({ viewport: { width: 320, height: 720 } });
 
   async function expectNoHorizontalOverflow(pageScrollWidth: number, clientWidth: number) {
@@ -34,6 +41,7 @@ test.describe('settings — mobile viewport', () => {
     await page.goto('/settings');
     // Auth-gated route: if it bounced to login, the stack isn't authenticated.
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
 
     await expect(page.getByText('Service area', { exact: true }).first()).toBeVisible();
 
@@ -58,6 +66,7 @@ test.describe('settings — mobile viewport', () => {
   }) => {
     await page.goto('/settings');
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
 
     await page.getByRole('button', { name: /service area/i }).click();
     const dialog = page.getByRole('dialog');
@@ -111,6 +120,7 @@ test.describe('settings — mobile viewport', () => {
 
     await page.goto('/settings');
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
 
     const billingRow = page.getByRole('button', { name: /rivet subscription/i });
     if (!(await billingRow.count())) test.skip(true, 'Billing row not rendered in this env');

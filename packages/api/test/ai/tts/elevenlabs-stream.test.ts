@@ -61,9 +61,8 @@ describe('ElevenLabsStreamConnection', () => {
     expect(global.WebSocket).toHaveBeenCalledWith(
       expect.stringContaining('voice-abc')
     );
-    expect(global.WebSocket).toHaveBeenCalledWith(
-      expect.stringContaining('xi-api-key=key-123')
-    );
+    expect(global.WebSocket).not.toHaveBeenCalledWith(expect.stringContaining('key-123'));
+    expect(JSON.parse(ws.sent[0]).xi_api_key).toBe('key-123');
     // T2-F01: the endpoint DEFAULTS to mp3_44100 — the PCM pin must be in
     // the URL or every downstream consumer decodes MP3 bytes as raw PCM.
     expect(global.WebSocket).toHaveBeenCalledWith(
@@ -73,6 +72,16 @@ describe('ElevenLabsStreamConnection', () => {
     ws.close();
     const next = await iter.next();
     expect(next.done).toBe(true);
+  });
+
+  it('rejects provider error frames instead of silently ending without audio', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hello' })[Symbol.asyncIterator]();
+    const next = iter.next();
+    const assertion = expect(next).rejects.toThrow('ElevenLabs rejected the speech request');
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ error: 'invalid_api_key' }) });
+    await assertion;
   });
 
   it('yields PCM chunks for inbound audio frames and ends with isFinal=true', async () => {

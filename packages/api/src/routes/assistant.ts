@@ -15,13 +15,15 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { Proposal, ProposalRepository, ProposalType } from '../proposals/proposal';
+import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '../proposals/proposal';
 // PR-0a (#967, #962) — the shared chain-metadata stamper the voice/memo
 // path (workers/voice-action-router.ts) already uses. The chat chain block
 // below previously wrote sourceContext.chainId only, never the TOP-LEVEL
 // Proposal.chainId column this helper sets — the column findByChain and
 // the web Inbox's groupIntoFeed both key on.
 import { applyChainMetadata } from '../proposals/chain';
+import { validateProposalPayload } from '../proposals/contracts';
+import { clearSatisfiedMissingFields } from '../proposals/missing-fields';
 // Aliased — the card field this feeds is also called `undoExpiresAt`.
 import {
   undoExpiresAt as undoWindowCloseAt,
@@ -111,13 +113,21 @@ import {
   buildDisambiguationQuestion,
   buildGatedReferenceReply,
   isDisambiguationAnswer,
+  isGatedReferenceField,
   PENDING_AMBIGUITY_KEY,
 } from '../ai/resolution/gated-reference-resolution';
 import {
   resolveDisambiguationFollowUp,
+  refKeyForEntityKind,
   MAX_DISAMBIGUATION_ATTEMPTS,
   type PendingEntityAmbiguity,
 } from '../ai/agents/customer-calling/entity-resolution';
+// U1/U2 — the shared `"phone · street, city"` candidate hint. Applied ONCE at
+// composition time (`createAssistantRouter`) so every call site that reads
+// `deps.entityResolver` — pre-draft resolution, the post-draft gated-reference
+// loop, and the answer turn's re-resolve fallback — asks the question and
+// matches the answer with the address on it, with no per-call-site change.
+import { withCustomerAddressHints } from '../ai/resolution/customer-address-hint';
 // Phase 12 supervisor gate (commit 1 of the followup-autoapprove-default
 // fix) — mirrors workers/voice-action-router.ts's use of the SAME function:
 // resolve tenant-wide supervisor presence once per turn and thread it onto
@@ -346,6 +356,15 @@ const assistantChatRequestSchema = z.object({
  */
 import { VOICE_APPROVAL_REFUSAL } from '../ai/agents/customer-calling/tts-copy';
 export { VOICE_APPROVAL_REFUSAL };
+
+/**
+ * The line the voice FSM speaks for a `confirm` with nothing pending, reused
+ * verbatim here for the same turn typed instead of spoken. Imported rather
+ * than re-worded: two copies of "I don't have anything waiting on a yes" is
+ * exactly how the two surfaces start answering the same word differently.
+ */
+import { CONFIRM_NOTHING_PENDING_LINE } from '../ai/agents/customer-calling/transitions';
+export { CONFIRM_NOTHING_PENDING_LINE };
 
 /**
  * The "nothing happened" sentence is no longer assembled here.
@@ -873,6 +892,140 @@ function customerProposalToUI({
 
 
 /**
+ * `updateCustomerPayloadSchema`'s "changed nothing" set and
+ * `updateJobPayloadSchema`'s "at least one field to change" set — the two
+ * whole-object conditions `contractGateMissingFields` below can name.
+ * Mirrors `proposals/voice-payload.ts`'s private `UPDATE_CUSTOMER_FIELD_ALIASES`
+ * / `JOB_EDIT_FIELDS`.
+ */
+const CHAT_JOB_EDIT_FIELDS = ['status', 'priority', 'title', 'description'] as const;
+const CHAT_UPDATE_CUSTOMER_FIELDS = ['name', 'email', 'phone', 'address'] as const;
+
+/**
+ * Whole-object contract refines, named as a payload key an operator can fill.
+ *
+ * Zod reports a `.refine()` on the whole object with `path: []`, so the error
+ * string carries NOTHING to gate on. A caller that persists such a payload
+ * ungated has minted an approve-to-fail card: the review screen offers
+ * Approve, the execution handler then throws, and the operator is told the
+ * work is done when nothing was written.
+ *
+ * KNOWN DUPLICATION — this is the chat twin of `namedContractGap` in
+ * `proposals/voice-payload.ts` (which is private to that module). The two
+ * MUST agree: a booking drafted by voice and the same booking typed into chat
+ * have to gate on the same field or the two surfaces drift on what is
+ * approvable. Hoist both into one shared module the moment
+ * `voice-payload.ts` is free to change.
+ */
+export function namedChatContractGap(
+  proposalType: string,
+  payload: Record<string, unknown>,
+): string[] {
+  switch (proposalType) {
+    // `createAppointmentPayloadSchema`'s SCH-02 refine: "requires jobId (or
+    // linkedJobId), or a customerId the executor can open a job for".
+    case 'create_appointment':
+      return !payload.jobId && !payload.linkedJobId && !payload.customerId ? ['customerId'] : [];
+    case 'update_job':
+      return CHAT_JOB_EDIT_FIELDS.some((f) => payload[f] !== undefined) ? [] : ['status'];
+    case 'send_estimate_nudge':
+      return !payload.estimateId && !payload.estimateReference ? ['estimateId'] : [];
+    // NOT a refine: `updateCustomerPayloadSchema` needs only `customerId`, so
+    // an edit that changes nothing is contract-VALID and then executes as a
+    // silent no-op. `updatedField` is a sentinel, not a payload key — see the
+    // voice twin's note on why it is deliberately unliftable by an edit.
+    case 'update_customer':
+      return CHAT_UPDATE_CUSTOMER_FIELDS.some((f) => payload[f] !== undefined) ||
+        (typeof payload.notes === 'string' && payload.notes.trim().length > 0)
+        ? []
+        : ['updatedField'];
+    default:
+      return [];
+  }
+}
+
+/**
+ * THE CHAT CHOKEPOINT'S CONTRACT GATE — the twin of what
+ * `buildVoiceProposalPayload` does for every voice-originated proposal
+ * ("§5 The contract gate", proposals/voice-payload.ts).
+ *
+ * Voice validates the payload it just built and, when it fails, hands the
+ * caller `missingFieldPaths` so the draft is persisted GATED. Chat had no
+ * equivalent: whatever the drafting handler returned was persisted verbatim,
+ * so every chat-drafted proposal whose payload failed its own contract
+ * WITHOUT the handler happening to gate it was an approve-to-fail card. The
+ * in-app 50-case register found four families of it at once —
+ * `create_appointment` (no customerId/jobId — the model cannot invent a uuid
+ * and nothing else threaded one), `update_estimate` / `update_invoice`
+ * (`editActions` empty) and `update_job` ("at least one field to change") —
+ * i.e. every booking and every edit typed into the assistant.
+ *
+ * Returns the field names to gate on: the first path segment of each Zod
+ * error (the flat key an operator edits, which is what
+ * `clearSatisfiedMissingFields` matches on) plus the named whole-object gaps
+ * above. An empty result means the payload is approvable as drafted.
+ */
+export function contractGateMissingFields(
+  proposalType: string,
+  payload: Record<string, unknown>,
+  /**
+   * True when the draft is ALREADY gated on a reference id
+   * (`isGatedReferenceField`) that the operator will answer through the
+   * which-one / gated-reference loop. Every other contract error is then
+   * downstream of that reference — `update_catalog_item`'s
+   * `currentUnitPriceCents` is copied from the catalog row the moment
+   * `catalogItemId` resolves (UpdateCatalogItemTaskHandler), and gating it now
+   * would leave a card the loop can never clear. Only the NAMED gaps apply
+   * while a reference is pending; the contract-derived pass runs once the
+   * reference question is settled. Pinned by the #909 integration test
+   * `chat-entity-resolution` (duplicate-named catalog → `['catalogItemId']`).
+   */
+  pendingReference = false,
+): string[] {
+  const gaps = new Set<string>(namedChatContractGap(proposalType, payload));
+  if (pendingReference) return [...gaps];
+  const result = validateProposalPayload(proposalType, payload);
+  for (const error of result.valid ? [] : result.errors ?? []) {
+    const path = error.slice(0, error.indexOf(':'));
+    if (!path) continue;
+    const head = path.split('.')[0]?.replace(/\[\d+\]$/, '');
+    if (head) gaps.add(head);
+  }
+  return [...gaps];
+}
+
+/**
+ * Apply the gate to a freshly drafted proposal, in place.
+ *
+ * Two effects, both load-bearing:
+ *   1. the named fields are merged into `sourceContext.missingFields`, which
+ *      is what blocks Approve AND what the post-draft gated-reference loop
+ *      (`resolveGatedReferencesForChat`) reads to know which references to go
+ *      and resolve — so gating a booking on `customerId` is also what lets
+ *      the resolver fill it from the customer name in the same turn;
+ *   2. a proposal that had already been decided `approved` is pulled back to
+ *      `draft`. An auto-approving type whose payload cannot execute must
+ *      never reach the worker; the operator's tap is the only thing that
+ *      should move it, and only once the gate is closed.
+ *
+ * Returns the fields it added (empty when the payload was already fine).
+ */
+export function applyContractGate(proposal: Proposal): string[] {
+  const existing = new Set(missingFieldsFor(proposal));
+  const pendingReference = [...existing].some((field) => isGatedReferenceField(field));
+  const gaps = contractGateMissingFields(proposal.proposalType, proposal.payload, pendingReference);
+  if (gaps.length === 0) return [];
+  const added = gaps.filter((field) => !existing.has(field));
+  if (added.length === 0) return [];
+  proposal.sourceContext = {
+    ...(proposal.sourceContext ?? {}),
+    missingFields: [...existing, ...added],
+  };
+  if (proposal.status === 'approved') proposal.status = 'draft';
+  return added;
+}
+
+/**
  * QA-2026-06-05: the assistant accepts FREE TEXT — entity ids in LLM-built
  * payloads must literally appear in the operator's message (or classifier
  * entities); the model may not invent them (live: hallucinated textbook
@@ -926,28 +1079,148 @@ export function dropUnverifiedIds(
  * stays a gated card with a candidate picker rather than a
  * voice_clarification — the operator is already looking at a screen.
  */
+interface PreDraftResolution {
+  /** Resolver-verified ids, keyed by the payload field they fill. */
+  ids: Record<string, string>;
+  /**
+   * The gated-id fields whose free text came back AMBIGUOUS.
+   *
+   * `resolveVoiceEntityReferences` short-circuits on the first ambiguity and
+   * returns no ids at all, so before this field existed the whole outcome was
+   * flattened to `{}` and the ambiguity was silently dropped: the drafting
+   * handler wrote a payload with no id for a reference the resolver had just
+   * said it could not choose between, and — for a type whose contract does not
+   * itself require that id (`send_invoice` has no `customerId` at all) —
+   * NOTHING downstream gated on it, so no question was ever asked. That is the
+   * "silent guess" shape CLAUDE.md forbids, one layer up from where it is
+   * usually caught.
+   *
+   * Reported here so the caller can gate the fresh draft on exactly those
+   * fields (`applyAmbiguityGate`), which is what hands them to the post-draft
+   * loop that already knows how to ask ONE question and match the answer.
+   */
+  ambiguousRefKeys: string[];
+}
+
+const NO_PRE_DRAFT_RESOLUTION: PreDraftResolution = { ids: {}, ambiguousRefKeys: [] };
+
 async function resolveVerifiedIdsForDraft(
   resolver: EntityResolver | undefined,
   tenantId: string,
   intent: string,
   entities: Record<string, unknown> | undefined,
-): Promise<Record<string, string>> {
-  if (!resolver || !entities) return {};
+): Promise<PreDraftResolution> {
+  if (!resolver || !entities) return NO_PRE_DRAFT_RESOLUTION;
   try {
     const annotation = await resolveVoiceEntityReferences(resolver, {
       tenantId,
       intent,
       entities,
     });
-    if (annotation.kind !== 'ok') return {};
+    if (annotation.kind !== 'ok') {
+      // The ambiguity itself, mapped from entity KIND to the gated payload
+      // field it blocks (`refKeyForEntityKind` is the same table
+      // `planVoiceEntityLookups` assigns `refKey` from, so this cannot drift).
+      // A kind with no ref key (nothing on a payload gates on it) contributes
+      // nothing, exactly as before.
+      const kinds = [
+        annotation.entityKind,
+        ...(annotation.additionalAmbiguities ?? []).map((a) => a.entityKind),
+      ];
+      const ambiguousRefKeys = [
+        ...new Set(
+          kinds
+            .map((kind) => refKeyForEntityKind(kind))
+            .filter((key): key is string => typeof key === 'string'),
+        ),
+      ];
+      return { ids: {}, ambiguousRefKeys };
+    }
     const resolved: Record<string, string> = {};
     for (const [key, value] of Object.entries(annotation.resolved)) {
       if (typeof value === 'string' && value.length > 0) resolved[key] = value;
     }
-    return resolved;
+    return { ids: resolved, ambiguousRefKeys: [] };
   } catch {
-    return {};
+    return NO_PRE_DRAFT_RESOLUTION;
   }
+}
+
+/**
+ * Gate a freshly drafted proposal on the references the PRE-draft resolver
+ * found ambiguous, so the post-draft loop asks about them.
+ *
+ * The twin of `applyContractGate`, and it exists for the same reason: a gate is
+ * what tells `resolveGatedReferencesForChat` which references to go and
+ * resolve. `applyContractGate` covers the fields a payload's own CONTRACT
+ * requires — that is how `create_appointment` gets its `customerId` gate. It
+ * cannot cover a field the contract does not mention: `send_invoice` executes
+ * from `invoiceId` alone, so "Text Smith the invoice link" with two Smiths on
+ * file drafted a card that named neither of them and asked nothing. The
+ * operator's own words are ambiguous; the honest state is ONE question, and a
+ * question needs a gate to hang on.
+ *
+ * Narrow by construction — every condition is load-bearing:
+ *   - only fields in the gated-id vocabulary (`isGatedReferenceField`), which
+ *     is also exactly the set the resolution loop is allowed to FILL, so this
+ *     can never mint a gate with nothing behind it (#909);
+ *   - only when the payload does not already carry that id (a handler that
+ *     resolved it for itself is not ambiguous);
+ *   - only when it is not already gated (idempotent with `applyContractGate`).
+ *
+ * Returns the fields it added, so the caller can withdraw them if the
+ * post-draft pass did not in fact end up asking (`revertUnaskedAmbiguityGate`)
+ * — a gate the operator was never told about would be strictly worse than no
+ * gate at all.
+ */
+function applyAmbiguityGate(proposal: Proposal, ambiguousRefKeys: readonly string[]): string[] {
+  if (ambiguousRefKeys.length === 0) return [];
+  // A clarification is a QUESTION, not an act: it executes nothing, so it has
+  // no entity to be ambiguous ABOUT. Gating one would attach a which-one
+  // question to a card that can never use the answer.
+  if (proposal.proposalType === 'voice_clarification') return [];
+  const existing = new Set(missingFieldsFor(proposal));
+  const payload = proposal.payload ?? {};
+  const added = ambiguousRefKeys.filter(
+    (key) =>
+      isGatedReferenceField(key) &&
+      !existing.has(key) &&
+      !(typeof payload[key] === 'string' && (payload[key] as string).trim().length > 0),
+  );
+  if (added.length === 0) return [];
+  proposal.sourceContext = {
+    ...(proposal.sourceContext ?? {}),
+    missingFields: [...existing, ...added],
+  };
+  // Same reasoning as `applyContractGate`: a proposal that cannot name the
+  // record it acts on must never reach the worker on an auto-approve.
+  if (proposal.status === 'approved') proposal.status = 'draft';
+  return added;
+}
+
+/**
+ * Withdraw an ambiguity gate the post-draft pass neither filled nor asked
+ * about.
+ *
+ * `applyAmbiguityGate` is speculative: it gates on what the PRE-draft pass saw
+ * so the post-draft pass will look again. If that second look resolved the
+ * reference outright, the gate is already gone (clear-on-fill). If it asked,
+ * the gate is the question's anchor and must stay. Anything else — the
+ * resolver changed its mind, another field's ambiguity won the one question
+ * this turn allows — leaves a gate the operator was never told how to close,
+ * so it is removed and the card is exactly what it would have been before.
+ */
+function revertUnaskedAmbiguityGate(
+  proposal: Proposal,
+  added: readonly string[],
+  askedField: string | undefined,
+): void {
+  const stale = added.filter((key) => key !== askedField && missingFieldsFor(proposal).includes(key));
+  if (stale.length === 0) return;
+  proposal.sourceContext = {
+    ...(proposal.sourceContext ?? {}),
+    missingFields: missingFieldsFor(proposal).filter((key) => !stale.includes(key)),
+  };
 }
 
 /**
@@ -972,6 +1245,231 @@ function stampVerifiedIds(
     ...(proposal.sourceContext ?? {}),
     verifiedIds: { ...verifiedIds, ...existing },
   };
+}
+
+/**
+ * Put the PIPELINE's own resolved ids where the executor looks for them.
+ *
+ * `resolveVerifiedIdsForDraft` already resolved the operator's free-text
+ * references to real tenant ids before drafting, and `existingEntities` carried
+ * them into the task handler — but a handler only copies an id onto the payload
+ * if its own drafting model happened to echo it back. `create-appointment-task.ts`
+ * says exactly why that is not resolution: "A drafting leg that depends on a
+ * model repeating a UUID is not resolution." Live evidence agreed — the model
+ * echoed a job TITLE into `jobId` — and the in-app 50-case register showed the
+ * quieter half of the same defect: "Book Garcia for Tuesday at 2 pm" drafted an
+ * appointment with NO customerId at all, "Prepare an estimate for Johnson's
+ * water heater job" drafted an estimate attached to no job, and "Hand Garcia's
+ * Tuesday visit to Carlos" drafted a reassignment naming no technician.
+ *
+ * So the route writes them itself. Safety, in order:
+ *   - only the gated-id vocabulary (`isGatedReferenceField`) — the same keys
+ *     the post-draft resolution loop is allowed to fill, never an arbitrary key;
+ *   - only ids from `resolveVerifiedIdsForDraft`, which are repo lookups by
+ *     construction — never classifier or model output (the `dropUnverifiedIds`
+ *     security rule);
+ *   - never OVERWRITE a value the handler already resolved for itself;
+ *   - and reverted if writing it would make a previously valid payload invalid,
+ *     so this can only ever move a proposal toward approvable.
+ *
+ * Returns the keys it wrote.
+ */
+export function applyVerifiedIdsToPayload(
+  proposal: Pick<Proposal, 'proposalType' | 'payload' | 'sourceContext'>,
+  verifiedIds: Record<string, string>,
+): string[] {
+  const wasValid = validateProposalPayload(proposal.proposalType, proposal.payload).valid;
+  const written: string[] = [];
+  for (const [key, id] of Object.entries(verifiedIds)) {
+    if (!isGatedReferenceField(key)) continue;
+    const current = proposal.payload[key];
+    if (typeof current === 'string' && current.trim().length > 0) continue;
+    proposal.payload[key] = id;
+    written.push(key);
+  }
+  if (
+    written.length > 0 &&
+    wasValid &&
+    !validateProposalPayload(proposal.proposalType, proposal.payload).valid
+  ) {
+    for (const key of written) delete proposal.payload[key];
+    return [];
+  }
+  // Clear-on-fill, through the SAME shared helper `applyGatedReferences` uses.
+  // Writing the id without lifting the gate would be strictly worse than doing
+  // nothing: the card would carry a resolved appointmentId AND still refuse to
+  // approve, and the resolution loop skips a field that is already filled, so
+  // nothing downstream would ever lift it.
+  if (written.length > 0) {
+    const missing = missingFieldsFor(proposal as Proposal);
+    if (missing.length > 0) {
+      proposal.sourceContext = {
+        ...(proposal.sourceContext ?? {}),
+        missingFields: clearSatisfiedMissingFields(missing, written, proposal.payload),
+      };
+    }
+  }
+  return written;
+}
+
+/**
+ * ONE REQUEST, ONE CARD.
+ *
+ * The chat route has no session state, so until now every POST drafted a fresh
+ * proposal — which means the two most ordinary things an operator does to a
+ * message box both put a SECOND approvable card in the inbox for the SAME job:
+ *
+ *   a double-submit  Enter pressed twice, a client retry, a double-tapped send
+ *   a correction     "Book Garcia Tuesday at 2" … "no, make it Thursday at 10"
+ *
+ * Two cards for one visit is not a cosmetic duplicate: whichever one the
+ * operator taps, the other is still sitting there approvable, and approving it
+ * books the customer twice (or books the time they just corrected away from).
+ * The voice FSM has never had this problem — it de-duplicates the turn and
+ * keeps ONE readback pending — and the in-app 50-case register is where the
+ * chat half showed up (`conf-02`/`conf-03`/`conf-04`).
+ *
+ * Both helpers below are deliberately NARROW. A conversation that legitimately
+ * contains two bookings ("Book Garcia Tuesday" … "Book Khan Friday") must keep
+ * producing two cards, so neither a different sentence nor a merely similar one
+ * qualifies: a repeat is byte-identical to the turn immediately before it, and
+ * a correction has to OPEN with an explicit negation.
+ */
+function normalizeTurn(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[.!?]+$/, '');
+}
+
+/**
+ * Was this turn the same sentence as the one immediately before it?
+ *
+ * Reads the client's own message history (the route's input contract — the
+ * assistant page posts the running thread). A client that sends only the
+ * current message never trips this and behaves exactly as it did before.
+ */
+export function isImmediateRepeat(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+): boolean {
+  const userTurns = messages.filter((m) => m.role === 'user');
+  if (userTurns.length < 2) return false;
+  const last = normalizeTurn(userTurns[userTurns.length - 1].content);
+  const previous = normalizeTurn(userTurns[userTurns.length - 2].content);
+  return last.length > 0 && last === previous;
+}
+
+/**
+ * "Not that — this instead." Anchored at the start and requiring an explicit
+ * negation, so "actually, also book Khan for Friday" (a second request that
+ * happens to start with a softener) is NOT a correction and still drafts its
+ * own card.
+ */
+export const DRAFT_CORRECTION_RE =
+  /^\s*(?:no\b|nope\b|nah\b|not that\b|wrong\b|scratch that\b|sorry,?\s*no\b)/i;
+
+/**
+ * Proposal types whose whole purpose is to act on an appointment that ALREADY
+ * exists. For these, "there is no such appointment" is the complete answer —
+ * see the `notFound` branch on the single-intent dispatch path.
+ */
+const APPOINTMENT_MUTATION_TYPES: ReadonlySet<string> = new Set([
+  'cancel_appointment',
+  'reschedule_appointment',
+  'confirm_appointment',
+  'reassign_appointment',
+  'notify_delay',
+]);
+
+function trimmedString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+export function isDraftCorrection(text: string): boolean {
+  return DRAFT_CORRECTION_RE.test(text);
+}
+
+/**
+ * "The appointment does not exist" must be PROVEN, not inferred from a
+ * free-text miss.
+ *
+ * `GatedReferenceOutcome.notFound` says every spoken reference came back
+ * `not_found` from the appointment resolver — which is exactly what a phrase
+ * like "tune-up appointment" does against a tenant that HAS appointments
+ * (the resolver matches date phrases and job names, not adjectives). The
+ * #920 auto-pick integration test pins that case: two active appointments,
+ * an unmatched reference → the card stays gated and asks. Refusing there would
+ * throw away a real request.
+ *
+ * So the refusal below fires only when absence is corroborated by the
+ * PERSON: the customer named on the request does not exist (no customer → no
+ * appointment for them), or they exist and the customer-anchored appointment
+ * lookup (PgEntityResolver.resolveAppointmentByCustomer — the same anchor
+ * the voice session uses) finds nothing upcoming. A request naming nobody
+ * keeps its card: nothing proves the visit is not there. Failure-soft: a
+ * resolver error or an absent resolver keeps the card too.
+ */
+export async function appointmentProvablyAbsent(
+  deps: Pick<AssistantRouterDeps, 'entityResolver'>,
+  tenantId: string,
+  proposal: Pick<Proposal, 'payload'>,
+  extractedEntities: Record<string, unknown>,
+): Promise<boolean> {
+  const resolver = deps.entityResolver;
+  if (!resolver) return false;
+  const anchoredAbsent = async (customerId: string): Promise<boolean> => {
+    const anchored = await resolver.resolve({
+      tenantId,
+      reference: '',
+      kind: 'appointment',
+      customerId,
+    });
+    return anchored.kind === 'not_found';
+  };
+  try {
+    const knownCustomerId = trimmedString(proposal.payload.customerId);
+    if (knownCustomerId) return await anchoredAbsent(knownCustomerId);
+    const customerName =
+      trimmedString(extractedEntities.customerName) ??
+      trimmedString(proposal.payload.customerName) ??
+      trimmedString(proposal.payload.customerReference);
+    if (!customerName) return false;
+    const customer = await resolver.resolve({ tenantId, reference: customerName, kind: 'customer' });
+    if (customer.kind === 'not_found') return true;
+    if (customer.kind === 'resolved') return await anchoredAbsent(customer.candidate.id);
+    // ambiguous / low_confidence / skipped: somebody may well exist — keep the card.
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The still-reviewable proposal of `proposalType` on this thread, newest
+ * first — the card a repeat would duplicate or a correction would rewrite.
+ *
+ * Only `draft`/`ready_for_review` counts: a proposal the operator has already
+ * approved or rejected is a DECIDED record, and rewriting it from a later
+ * sentence would edit history. Chain members are excluded — a chain's steps are
+ * deliberately several cards and must not collapse into one.
+ */
+async function findReplaceableDraft(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  conversationId: string | undefined,
+  proposalType: string,
+): Promise<Proposal | undefined> {
+  if (!conversationId || !deps.proposalRepo.findByConversation) return undefined;
+  try {
+    const candidates = await deps.proposalRepo.findByConversation(tenantId, conversationId);
+    return candidates
+      .filter(
+        (p) =>
+          p.proposalType === proposalType &&
+          (p.status === 'draft' || p.status === 'ready_for_review') &&
+          !p.chainId,
+      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1014,7 +1512,7 @@ async function resolveGatedReferencesForChat(
    * call site there for why a chain reply deliberately does not ask.
    */
   askClarification: boolean,
-): Promise<string | undefined> {
+): Promise<{ question: string | undefined; notFound: string[]; askedField: string | undefined }> {
   const outcome = await resolveGatedReferences(
     deps.entityResolver,
     tenantId,
@@ -1046,7 +1544,17 @@ async function resolveGatedReferencesForChat(
   // the outcome (ambiguity ask, honest can't-match line, or nothing) — see
   // `buildGatedReferenceReply`'s own doc comment for why it lives in the
   // core module rather than here.
-  return buildGatedReferenceReply(outcome, askClarification);
+  return {
+    question: buildGatedReferenceReply(outcome, askClarification),
+    // Carried out so the caller can tell "this card needs a field filled in"
+    // apart from "the record you named does not exist" — see
+    // `GatedReferenceOutcome.notFound`.
+    notFound: outcome.notFound,
+    // Which gate the ONE question is anchored to, when one was actually asked
+    // — `revertUnaskedAmbiguityGate` uses it to tell a gate the operator was
+    // told about from one they were not.
+    askedField: outcome.ambiguity && askClarification ? outcome.ambiguity.refKey : undefined,
+  };
 }
 
 /**
@@ -1078,6 +1586,33 @@ async function emitResolutionAudit(
     );
   } catch {
     // Audit failures must not block the reply.
+  }
+}
+
+/**
+ * Is there still a card on this thread waiting for the operator's tap?
+ *
+ * Returns a readable label for the newest one ("appointment", "invoice") so a
+ * bare "yes" can be pointed at the tap that actually approves it, or undefined
+ * when nothing is pending. Read-only and best-effort: a repo without
+ * conversation-scoped lookup, or one that throws, simply answers "nothing
+ * pending" — the reply degrades to the honest re-prompt rather than failing
+ * the turn.
+ */
+async function findReviewableInConversation(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  conversationId: string | undefined,
+): Promise<string | undefined> {
+  if (!conversationId || !deps.proposalRepo.findByConversation) return undefined;
+  try {
+    const candidates = await deps.proposalRepo.findByConversation(tenantId, conversationId);
+    const newest = candidates
+      .filter((p) => p.status === 'draft' || p.status === 'ready_for_review')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    return newest ? newest.proposalType.replace(/_/g, ' ') : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1197,7 +1732,7 @@ async function applyDisambiguationAnswer(
     // before it — an appointment reachable only once its customer is known,
     // for instance. Run the loop once more so a two-reference utterance
     // needs one answer, not two round trips per reference.
-    const nextQuestion = await resolveGatedReferencesForChat(
+    const { question: nextQuestion } = await resolveGatedReferencesForChat(
       deps,
       tenantId,
       userId,
@@ -2020,9 +2555,26 @@ async function generateAssistantReply(
       // could never be answered here. Authorization is not weakened by this:
       // owner-grade lookups are gated downstream on the operator's
       // DB-authoritative RBAC role (`reports:view`), which fails closed.
+      // U5 — OWNER-COMMAND PARITY. `matchOwnerOperatorCommand`
+      // (ai/orchestration/intent-classifier.ts) is the deterministic
+      // short-circuit for the stereotyped owner commands ("New customer X,
+      // phone Y", "Convert the X lead into a customer", "Open a job for X,
+      // Y"), and it is gated on `context.ownerSession === true` alone. The
+      // in-app voice adapter sets it from the session's role
+      // (`ownerSession = role === 'owner'`); chat never set it at all, so the
+      // SAME sentence typed on the dashboard took an LLM round trip and
+      // whatever that returned, while spoken into the mic panel it routed
+      // deterministically. Same operator, same words, two classifiers.
+      //
+      // Keyed on `callerRole` — the DB-authoritative RBAC role already
+      // threaded into this function — and deliberately NOT on
+      // `extendedIntents` just above: that flag is unconditionally true for
+      // every caller on this route (see its comment), so keying on it would
+      // hand owner commands to technicians as well.
       const classifyContext = {
         tenantId,
         extendedIntents: true,
+        ownerSession: callerRole === 'owner',
         ...(verticalPromptSection ? { verticalPromptSection } : {}),
       };
 
@@ -2109,12 +2661,33 @@ async function generateAssistantReply(
         });
         try {
           const actor = await resolveCanonicalUser(deps.enRoute.userRepo, tenantId, userId);
-          if (!actor || actor.role !== 'technician') {
+          // NO `role === 'technician'` gate — the same decision the in-app
+          // VOICE surface already made (`ai/voice-turn/inapp-en-route-surface.ts`
+          // documents it in full) and for the same reason.
+          //
+          // That gate is an ANTI-SPOOFING rule belonging to the phone and SMS
+          // legs, which identify the actor by a caller-ID / sender number the
+          // network asserts and an attacker can forge. This surface is an
+          // authenticated Clerk session on the operator's own dashboard —
+          // there is nothing to spoof — and the real scope guard is the shared
+          // core's own: `handleEnRouteForTechnician` only ever reads THIS
+          // user's assignments, so an owner or dispatcher genuinely on today's
+          // visit (how small shops actually run — `resolveTechnician` already
+          // treats owner/dispatcher/technician alike as assignable) can say
+          // "on my way", while anyone not on the job simply has no assignment
+          // and hears the honest "nothing to mark en route" answer.
+          //
+          // Refusing an assigned owner was the dishonest outcome, and it made
+          // the two IN-APP surfaces disagree about the same act performed by
+          // the same person: the in-app 50-case register's `dispatch-03` fires
+          // the audited act when spoken into the voice panel and was told
+          // "your account isn't matched to a technician" when typed into the
+          // assistant. Identity stays default-deny: an auth subject that
+          // resolves to no canonical `users` row is still refused here.
+          if (!actor) {
             return enRouteReply(
-              "On-my-way texts are sent by the technician on the job, and your account isn't matched to one — nothing was sent.",
-              actor
-                ? `en_route requires role 'technician'; your role is '${actor.role}'.`
-                : 'en_route requires a canonical technician user; none matched your account.',
+              "On-my-way texts are sent by the person on the job, and I couldn't match your account to one — nothing was sent.",
+              'en_route requires a canonical user row; none matched your account.',
             );
           }
           const extractedEntities = (classification.extractedEntities ?? {}) as Record<
@@ -2220,6 +2793,45 @@ async function generateAssistantReply(
         };
       }
 
+      // A bare affirmation — "yes", "yep", "go ahead" — classified as
+      // `confirm`, answered deterministically.
+      //
+      // `confirm` is (correctly) a NON-action intent, so the honesty guard's
+      // layer 1 does not claim it and it fell all the way through to the
+      // generic LLM: a model with no tools, no database and no idea what is on
+      // the operator's screen, handed the single most confirmable word in the
+      // language and asked for "concise operational help". That is the exact
+      // shape of the fabrication path `assistant-honesty-guard.ts` exists to
+      // close, and it is reachable in one keystroke.
+      //
+      // Two honest answers, neither of which needs a model:
+      //   nothing on the table → the SAME line the voice FSM speaks
+      //     (`CONFIRM_NOTHING_PENDING_LINE`, transitions.ts) — one sentence,
+      //     shared, so the two surfaces cannot drift on what "yes" to nothing
+      //     means;
+      //   a card IS waiting → say so, and say what actually approves it. A
+      //     typed yes must NEVER approve: approvals on this surface are a
+      //     screen tap (RV-071/RV-225, the same posture the voice-approval
+      //     refusal above enforces), and nothing here writes a status.
+      if (classification.intentType === 'confirm') {
+        const pendingCard = await findReviewableInConversation(deps, tenantId, conversationId);
+        return {
+          taskType: 'assistant.confirm_nothing_pending',
+          model: 'policy-guard',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: pendingCard
+              ? `That one's still waiting on you — tap Approve on the ${pendingCard} card above and I'll run it. ` +
+                "I haven't approved or changed anything."
+              : CONFIRM_NOTHING_PENDING_LINE,
+            reasoning: pendingCard
+              ? 'Bare confirm with a reviewable proposal on the thread — pointed at the approval tap rather than approving from text.'
+              : 'Bare confirm with nothing pending — answered with the shared re-prompt instead of letting the generic LLM improvise around a "yes".',
+          },
+        };
+      }
+
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
       // decomposed into SEQUENTIAL linked proposals sharing a chainId in
       // sourceContext. Each step executes per its action class: capture
@@ -2271,12 +2883,20 @@ async function generateAssistantReply(
           // verified tenant ids BEFORE drafting; the resolved ids ride
           // `existingEntities` (the seam the task handlers consume) and are
           // stamped into verifiedIds below so the scrub preserves them.
-          const segVerifiedIds = await resolveVerifiedIdsForDraft(
-            deps.entityResolver,
-            tenantId,
-            segClass.intentType,
-            segEntities,
-          );
+          // The chain path takes the resolved ids only. An ambiguity here is
+          // deliberately NOT gated on: this path asks no clarification (see
+          // the `askClarification: false` argument below), so gating a chain
+          // segment on a reference nobody is going to be asked about would
+          // leave an unclosable card — the exact shape `applyAmbiguityGate`
+          // refuses to create.
+          const segVerifiedIds = (
+            await resolveVerifiedIdsForDraft(
+              deps.entityResolver,
+              tenantId,
+              segClass.intentType,
+              segEntities,
+            )
+          ).ids;
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
           const { proposal } = await factory().handle({
@@ -2326,7 +2946,11 @@ async function generateAssistantReply(
           });
           if (!proposal) continue;
           stampVerifiedIds(proposal, segVerifiedIds);
+          applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
+          // Same contract gate the single-intent path applies — a chained
+          // step is no more approvable than a standalone one.
+          applyContractGate(proposal);
           // PR-0a (#967, #962) — stamp the TOP-LEVEL chainId (the same
           // helper + column the voice/memo path uses) so
           // ProposalRepository.findByChain and the web Inbox's
@@ -2460,6 +3084,33 @@ async function generateAssistantReply(
       const handlerFactory = registryKey ? () => sharedHandlers.get(registryKey)! : undefined;
       if (handlerFactory) {
         const handler = handlerFactory();
+        // ONE REQUEST, ONE CARD — the repeat half. Checked BEFORE drafting so a
+        // double-submit costs no model call, writes no second audit trail and,
+        // above all, leaves exactly one approvable card on the thread. The
+        // operator gets the card they already have, said plainly.
+        if (registryKey && isImmediateRepeat(messages)) {
+          const existing = await findReplaceableDraft(
+            deps,
+            tenantId,
+            conversationId,
+            registryKey,
+          );
+          if (existing) {
+            const uiProposal = proposalToUI(existing, lastUserText);
+            return {
+              taskType: 'assistant.duplicate_turn',
+              model: 'policy-guard',
+              usage: { input: 0, output: 0, total: 0 },
+              message: {
+                role: 'assistant' as const,
+                content: `That's already on the table — ${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`,
+                reasoning:
+                  'Identical to the previous turn with that draft still awaiting review — returned the existing card instead of drafting a second one.',
+                proposal: uiProposal,
+              },
+            };
+          }
+        }
         // UB-A3 — thread the applicable standing instructions (≤5, keyed on
         // the classified intent) into the drafting handler.
         const standingInstructions = selectInjectedStandingInstructions(
@@ -2471,12 +3122,13 @@ async function generateAssistantReply(
         };
         // U1 — voice-worker parity: resolve free-text references to verified
         // tenant ids BEFORE drafting (see resolveVerifiedIdsForDraft).
-        const verifiedIds = await resolveVerifiedIdsForDraft(
+        const preDraft = await resolveVerifiedIdsForDraft(
           deps.entityResolver,
           tenantId,
           classification.intentType,
           extractedEntities,
         );
+        const verifiedIds = preDraft.ids;
         // I3 — resolved once (memoized).
         const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
         const { proposal } = await handler.handle({
@@ -2509,18 +3161,35 @@ async function generateAssistantReply(
             : {}),
         });
         stampVerifiedIds(proposal, verifiedIds);
+        applyVerifiedIdsToPayload(proposal, verifiedIds);
         dropUnverifiedIds(
           proposal.payload,
           lastUserText,
           extractedEntities,
           proposal.sourceContext,
         );
+        // The contract gate, BEFORE the resolution loop below on purpose: the
+        // gate is what tells that loop which references to go and resolve, so
+        // gating a booking on `customerId` here is exactly what lets the
+        // resolver fill it from the customer name in the same turn. Running it
+        // after would leave the card gated on something already resolvable.
+        applyContractGate(proposal);
+        // …and the ambiguity gate right behind it, for the references the
+        // PRE-draft pass could not choose between. Only on THIS path: it is
+        // the one that actually asks the question (the chain path below passes
+        // `askClarification: false` on purpose), and a gate nobody is told
+        // about is worse than no gate. See `applyAmbiguityGate`.
+        const ambiguityGate = applyAmbiguityGate(proposal, preDraft.ambiguousRefKeys);
         // #909 — post-draft resolution, AFTER the scrub on purpose: a
         // hallucinated id the scrub just deleted leaves the gate standing,
         // and this loop then fills it from a real DB lookup instead. Its own
         // ids are DB-verified by construction, so they are never subject to
         // the scrub.
-        const clarification = await resolveGatedReferencesForChat(
+        const {
+          question: clarification,
+          notFound,
+          askedField,
+        } = await resolveGatedReferencesForChat(
           deps,
           tenantId,
           userId,
@@ -2531,6 +3200,54 @@ async function generateAssistantReply(
           // so a pending question here is one the operator provably saw.
           true,
         );
+        revertUnaskedAmbiguityGate(proposal, ambiguityGate, askedField);
+        // AN APPOINTMENT THAT DOES NOT EXIST IS A MISS, NOT A FORM.
+        //
+        // "Cancel the Patel appointment", with no Patel on the books, drafted
+        // a `cancel_appointment` card gated on an `appointmentId` the resolver
+        // had just confirmed does not exist — a capability that can never be
+        // approved (#909's own words) sitting in the inbox, under a reply that
+        // asked the operator to supply a date for a visit nobody has. The
+        // voice surface has always answered this honestly ("I couldn't find a
+        // matching appointment for …") and handed control straight back.
+        //
+        // Narrow on purpose. Only the appointment-mutation family, and only on
+        // `notFound` — the resolver LOOKED and there is no such record (see
+        // `GatedReferenceOutcome.notFound`; a low-confidence match or a
+        // missing reference is still a card the operator can finish). These
+        // are the types that act on an appointment that must already exist, so
+        // "it isn't there" is the whole answer; an invoice or estimate draft
+        // with an unfound reference remains a card, because the operator can
+        // still complete it by naming the document.
+        if (
+          APPOINTMENT_MUTATION_TYPES.has(proposal.proposalType) &&
+          notFound.includes('appointmentId') &&
+          (await appointmentProvablyAbsent(
+            deps,
+            tenantId,
+            proposal,
+            extractedEntities as Record<string, unknown>,
+          ))
+        ) {
+          const reference =
+            trimmedString(proposal.payload.appointmentReference) ??
+            trimmedString(extractedEntities.appointmentReference) ??
+            trimmedString(extractedEntities.customerName);
+          return {
+            taskType: `assistant.${handler.taskType}.not_found`,
+            model: 'entity-resolver',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content:
+                `I couldn't find ${reference ? `a matching appointment for ${reference}` : 'a matching appointment'} — ` +
+                "so I haven't scheduled, changed, or cancelled anything. " +
+                'Tell me the customer and the day and I can take another look.',
+              reasoning:
+                'The appointment this request acts on does not exist; drafting a card gated on an id the resolver confirmed absent would be unapprovable forever.',
+            },
+          };
+        }
         // I4 (post-C1 review) — chokepoint backstop; see the identical
         // comment on the chain-segment path above. Already resolved
         // (memoized) by the dispatch call above.
@@ -2538,6 +3255,43 @@ async function generateAssistantReply(
         // A caller without the direct permission never gets a self-executing
         // proposal — their draft waits for the approval tap instead.
         downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+        // ONE REQUEST, ONE CARD — the correction half. The operator said "no,
+        // make it Thursday": they have ONE booking in mind, so the thread ends
+        // up with ONE card, rewritten in place. The row keeps its id (anything
+        // already pointing at it still resolves), keeps its created-by/at, and
+        // — because only a still-reviewable, non-chain draft of the SAME type
+        // is eligible — this can never edit a decided record or shred a chain.
+        // D-004 is untouched: the rewrite carries the fresh draft's status, so
+        // a correction can only ever leave the card waiting for the same tap.
+        const corrected = isDraftCorrection(lastUserText)
+          ? await findReplaceableDraft(deps, tenantId, conversationId, proposal.proposalType)
+          : undefined;
+        if (corrected) {
+          const rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
+            payload: proposal.payload,
+            sourceContext: proposal.sourceContext,
+            summary: proposal.summary,
+            ...(proposal.confidenceScore !== undefined
+              ? { confidenceScore: proposal.confidenceScore }
+              : {}),
+            status: proposal.status === 'draft' ? 'ready_for_review' : proposal.status,
+          });
+          const card = proposalToUI(rewritten ?? { ...corrected, ...proposal, id: corrected.id }, lastUserText);
+          return {
+            taskType: `assistant.${handler.taskType}`,
+            model: 'intent-classifier',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content: clarification
+                ? `Updated — ${card.title}.\n\n${clarification}`
+                : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`,
+              reasoning:
+                'Correction of the draft still awaiting review on this thread — rewrote it in place rather than leaving two approvable cards for one job.',
+              proposal: card,
+            },
+          };
+        }
         await deps.proposalRepo.create(proposal);
         if (proposal.status === 'draft') {
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -2846,7 +3600,29 @@ function writeSse(res: Response, event: string, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-export function createAssistantRouter(deps: AssistantRouterDeps): Router {
+/**
+ * U2 — give this surface's resolver the customer address hint, once.
+ *
+ * Substituting a shallow-copied deps here (rather than touching each call
+ * site) is what makes the enrichment unconditional on this route: pre-draft
+ * resolution, the post-draft gated-reference loop and the answer turn's
+ * re-resolve fallback all read `deps.entityResolver`, so all three ask the
+ * question and match the answer with the address on it.
+ *
+ * Degrades exactly to today's behaviour when either dep is absent (an
+ * in-memory boot with no `locationRepo`, a pipeline with no resolver): the
+ * phone-only question, no throw.
+ */
+function withAddressHintedResolver(deps: AssistantRouterDeps): AssistantRouterDeps {
+  if (!deps.entityResolver || !deps.locationRepo) return deps;
+  return {
+    ...deps,
+    entityResolver: withCustomerAddressHints(deps.entityResolver, deps.locationRepo),
+  };
+}
+
+export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
+  const deps = withAddressHintedResolver(rawDeps);
   const router = Router();
 
   // B5 — the scheduling family / create_job / invoice-follow-up intents this

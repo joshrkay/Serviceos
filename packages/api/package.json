@@ -29,6 +29,7 @@
     "check:ai-provider-config": "tsx scripts/check-ai-provider-config.ts",
     "check:fk-paths": "bash scripts/check-fk-path-coverage.sh",
     "check:migration-keys": "tsx scripts/check-migration-keys.ts",
+    "inapp-50": "tsx scripts/run-inapp-50.ts",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
@@ -61,11 +62,11 @@
     "pg": "^8.20.0",
     "posthog-node": "^5.35.14",
     "prom-client": "^15.1.3",
-    "sharp": "^0.35.1",
+    "sharp": "^0.35.4",
     "swagger-ui-express": "^5.0.1",
     "twilio": "^6.0.0",
     "uuid": "^11.1.1",
-    "ws": "^8.20.0",
+    "ws": "^8.21.3",
     "zod": "^3.22.0"
   },
   "devDependencies": {

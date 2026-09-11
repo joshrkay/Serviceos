@@ -59,6 +59,12 @@ import { dispatchInboundSms } from '../sms/inbound-dispatch';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
+// Bounds the root-provisioning `provisioningQueue.send()` await below so a
+// wedged queue client (e.g. a stalled pool.connect()) fails the webhook
+// instead of hanging the response indefinitely. Matches the 10s bound
+// already used for the Clerk metadata PATCH calls in this same handler.
+const PROVISIONING_ENQUEUE_TIMEOUT_MS = 10_000;
+
 /**
  * Best-effort mapping from a Stripe payment object to our domain
  * PaymentMethod. Prefers the actual charged method
@@ -649,10 +655,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             });
           }
 
-          // Enqueue Twilio subaccount provisioning for new tenants only.
-          // Idempotent — the worker checks tenant_integrations.status and
-          // skips if already active, so safe to re-enqueue on webhook replay.
-          if (result.created && deps.queue) {
+          // Retry enqueue even when bootstrapTenant finds an existing tenant:
+          // an earlier delivery may have persisted it before enqueue failed.
+          // Awaiting send propagates failures to the webhook retry handler.
+          // Keep the stable tenant key to dedupe a message still in the queue;
+          // the worker also checks existing provisioning before doing work.
+          if (deps.queue) {
             const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
             // Twilio callbacks land on the API origin and signatures are
             // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
@@ -715,7 +723,25 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }));
           }
 
-          if (deps.provisioningQueue && result.created) {
+          // Awaited (not fire-and-forget): `send()` is a single durable
+          // INSERT (ON CONFLICT DO NOTHING on the idempotency key below) —
+          // this awaits that durable write landing, NOT a worker receiving
+          // or completing the job. A failed enqueue THROWS so the webhook
+          // 500s and Clerk retries (same rethrow-to-retry contract as the
+          // owner-insert block below), instead of returning 200 with no
+          // durable record the send was ever attempted. Bounded by
+          // PROVISIONING_ENQUEUE_TIMEOUT_MS so a wedged queue client fails
+          // the webhook rather than hanging it.
+          //
+          // NOT gated on result.created: bootstrapTenant's idempotent
+          // re-check makes result.created false on a Clerk retry forced by a
+          // LATER failure (e.g. the owner-insert) — gating on it here would
+          // permanently skip re-enqueueing a tenant whose provisioning send
+          // never actually landed on the first attempt. The queue dedupes on
+          // the deterministic `tenant-provisioning:${tenantId}` idempotency
+          // key, so re-attempting on every retry is a harmless no-op when
+          // the first send already succeeded.
+          if (deps.provisioningQueue) {
             const queuePayload = {
               tenantId: result.tenantId,
               ownerId: userId,
@@ -724,38 +750,57 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               webhookEventId: svixId,
             };
 
-            void deps.provisioningQueue.send(
-              'tenant.provisioning.root.requested',
-              queuePayload,
-              `tenant-provisioning:${result.tenantId}`
-            ).then(async (queueMessageId) => {
-              if (deps.auditRepo) {
-                await deps.auditRepo.create(createAuditEvent({
-                  tenantId: result.tenantId,
-                  actorId: userId,
-                  actorRole: 'owner',
-                  eventType: 'tenant.signup.provisioning.enqueued',
-                  entityType: 'tenant',
-                  entityId: result.tenantId,
-                  correlationId: signupCorrelationId,
-                  metadata: {
-                    queueMessageId,
-                    queueType: 'tenant.provisioning.root.requested',
-                  },
-                }));
-              }
-              logger.info('Root provisioning orchestration enqueued', {
-                tenantId: result.tenantId,
-                queueMessageId,
-                signupCorrelationId,
-              });
-            }).catch((err) => {
-              logger.error('Failed to enqueue root provisioning orchestration', {
+            let enqueueTimer: ReturnType<typeof setTimeout> | undefined;
+            const enqueueTimedOut = new Promise<never>((_resolve, reject) => {
+              enqueueTimer = setTimeout(
+                () => reject(new Error('Root provisioning enqueue timed out')),
+                PROVISIONING_ENQUEUE_TIMEOUT_MS,
+              );
+              if (enqueueTimer && typeof enqueueTimer.unref === 'function') enqueueTimer.unref();
+            });
+
+            let queueMessageId: string;
+            try {
+              queueMessageId = await Promise.race([
+                deps.provisioningQueue.send(
+                  'tenant.provisioning.root.requested',
+                  queuePayload,
+                  `tenant-provisioning:${result.tenantId}`
+                ),
+                enqueueTimedOut,
+              ]);
+            } catch (err) {
+              logger.error('Failed to enqueue root provisioning orchestration — failing webhook so Clerk retries', {
                 tenantId: result.tenantId,
                 signupCorrelationId,
                 error: err instanceof Error ? err.message : 'Unknown error',
               });
+              throw err;
+            } finally {
+              if (enqueueTimer) clearTimeout(enqueueTimer);
+            }
+
+            logger.info('Root provisioning orchestration enqueued', {
+              tenantId: result.tenantId,
+              queueMessageId,
+              signupCorrelationId,
             });
+
+            if (deps.auditRepo) {
+              await deps.auditRepo.create(createAuditEvent({
+                tenantId: result.tenantId,
+                actorId: userId,
+                actorRole: 'owner',
+                eventType: 'tenant.signup.provisioning.enqueued',
+                entityType: 'tenant',
+                entityId: result.tenantId,
+                correlationId: signupCorrelationId,
+                metadata: {
+                  queueMessageId,
+                  queueType: 'tenant.provisioning.root.requested',
+                },
+              }));
+            }
           }
 
           // QUALITY-2026-07-12 WS4 (+ PR #669 review) — create the OWNER's

@@ -358,6 +358,24 @@ export function renderTtsText(
         ? `Encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} "${summary}" — ¿es a la que se refiere?`
         : `I found a ${entityKindLabel(entityKind, 'en')} "${summary}" — is that the one you mean?`;
     }
+    case 'entity_not_found_operator': {
+      // SCH-D3 — the AUTHENTICATED OPERATOR's honest not-found. Distinct
+      // from the caller-facing escalation line ("Let me connect you with a
+      // team member"): an operator IS the team member, so the line names
+      // what was searched for and offers the two real ways forward.
+      // Templated rather than a SENTENCE_CATALOG_ES entry because the
+      // reference is dynamic — an exact-match catalog cannot localize it.
+      const entityKind = typeof payload.entityKind === 'string' ? payload.entityKind : undefined;
+      const reference = typeof payload.reference === 'string' ? payload.reference.trim() : '';
+      if (!reference) {
+        return lang === 'es'
+          ? `No encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} que coincida. ¿Quiere intentar con otro nombre, o crearlo?`
+          : `I couldn't find a matching ${entityKindLabel(entityKind, 'en')}. Want to try a different name, or create it?`;
+      }
+      return lang === 'es'
+        ? `No encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} que coincida con ${reference}. ¿Quiere intentar con otro nombre, o crearlo?`
+        : `I couldn't find a matching ${entityKindLabel(entityKind, 'en')} for ${reference}. Want to try a different name, or create it?`;
+    }
     case 'greeting':
       return lang === 'es'
         ? '¡Hola! ¿En qué puedo ayudarle hoy?'

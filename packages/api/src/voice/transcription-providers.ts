@@ -1,3 +1,4 @@
+import NodeWebSocket from 'ws';
 import { TranscriptionProvider } from './voice-service';
 
 export type FetchLike = typeof fetch;
@@ -265,7 +266,7 @@ export interface StreamingTranscriptionProvider {
 /**
  * Deepgram Nova-3 real-time streaming transcription provider.
  *
- * Uses Node 22's native `WebSocket`. Requires DEEPGRAM_API_KEY.
+ * Uses native WebSocket where available, otherwise ws on Node 20. Requires DEEPGRAM_API_KEY.
  * Audio must be raw PCM: 16 kHz, 16-bit signed little-endian mono.
  * Deepgram fires interim_results so the state machine can detect
  * caller interruptions before the utterance is complete.
@@ -383,9 +384,13 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
     options: { keywords?: ReadonlyArray<string>; endpointingMs?: number } = {}
   ): Promise<StreamingSession> {
     // Node 22 native WebSocket follows the WHATWG spec and does not accept
-    // a headers option. Pass the API key via query param instead.
+    // a headers option. Deepgram supports authentication via subprotocols.
     const lang = language ?? this.defaultLanguage;
-    const ws = new WebSocket(`${this.buildWsUrl(lang, options)}&token=${this.apiKey}`);
+    // Node 20 (the deployed image) has no global WebSocket by default.
+    // ws implements the WHATWG event/client subset used by these providers.
+    const WebSocketClient: typeof globalThis.WebSocket = globalThis.WebSocket ??
+      (NodeWebSocket as unknown as typeof globalThis.WebSocket);
+    const ws = new WebSocketClient(this.buildWsUrl(lang, options), ['token', this.apiKey]);
 
     // Attach message listener BEFORE awaiting open to avoid missing frames
     // that Deepgram sends immediately on connection.
@@ -467,11 +472,11 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 
     return {
       send(chunk: Buffer) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+        if (ws.readyState === WebSocketClient.OPEN) ws.send(chunk);
       },
       finish() {
         // Deepgram flushes on close_stream message
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === WebSocketClient.OPEN) {
           ws.send(JSON.stringify({ type: 'CloseStream' }));
         }
       },

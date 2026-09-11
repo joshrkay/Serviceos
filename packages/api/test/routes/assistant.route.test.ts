@@ -1052,8 +1052,12 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
   }
 
   it('single-intent path: update_invoice yields an update_invoice proposal, not draft_invoice', async () => {
+    // U5 — "Add <line item> to invoice INV-NNNN" is one of the canonical
+    // OWNER commands, so an owner caller is classified deterministically
+    // (`matchOwnerOperatorCommand`, the same path the voice session takes) and
+    // the classifier draws NO gateway call. The only scripted response left is
+    // therefore the drafting handler's own.
     const gateway = scriptedGateway([
-      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
       JSON.stringify({
         invoiceReference: 'INV-0042',
         editActions: [
@@ -1086,8 +1090,12 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
   // test below — the review card must surface missingFields so Approve
   // stays blocked until the operator resolves the reference.
   it('single-intent path: a reference-only update_invoice (invoice number, no invoiceRepo wired) is gated with missingFields so it cannot be approved unresolved', async () => {
+    // U5 — "Add <line item> to invoice INV-NNNN" is one of the canonical
+    // OWNER commands, so an owner caller is classified deterministically
+    // (`matchOwnerOperatorCommand`, the same path the voice session takes) and
+    // the classifier draws NO gateway call. The only scripted response left is
+    // therefore the drafting handler's own.
     const gateway = scriptedGateway([
-      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
       JSON.stringify({
         invoiceReference: 'INV-0042',
         editActions: [
@@ -1139,8 +1147,12 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
       invoiceRepo,
     );
 
+    // U5 — "Add <line item> to invoice INV-NNNN" is one of the canonical
+    // OWNER commands, so an owner caller is classified deterministically
+    // (`matchOwnerOperatorCommand`, the same path the voice session takes) and
+    // the classifier draws NO gateway call. The only scripted response left is
+    // therefore the drafting handler's own.
     const gateway = scriptedGateway([
-      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
       JSON.stringify({
         invoiceReference: 'INV-0042',
         editActions: [

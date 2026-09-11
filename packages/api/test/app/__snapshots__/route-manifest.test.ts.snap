@@ -4,14 +4,14 @@ exports[`createApp route manifest > matches the committed layer counts 1`] = `
 {
   "byExposure": {
     "authenticated": 80,
-    "open": 21,
+    "open": 22,
     "public-token": 12,
     "webhook": 9,
   },
-  "middleware": 29,
+  "middleware": 30,
   "routers": 85,
   "routes": 8,
-  "total": 122,
+  "total": 123,
 }
 `;
 
@@ -424,6 +424,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /stream-token
          └─ POST /transcribe
 099  authenticated use    /api/onboarding    [router: router]
+         └─ GET /billing/plans
          └─ GET /operator-hours
          └─ GET /status
          └─ GET /voice/presets
@@ -507,5 +508,6 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 118  open          GET    /download    [route: bound dispatch]
 119  open          GET    /privacy    [route: bound dispatch]
 120  open          GET    /terms    [route: bound dispatch]
-121  open          GET    *    [route: bound dispatch]"
+121  open          use    (dynamic: ^\\/api\\/?(?=\\/|$)|^\\/public\\/?(?=\\/|$)|^\\/webhooks\\/?(?=\\/|$))    [middleware: <anonymous>]
+122  open          GET    *    [route: bound dispatch]"
 `;

@@ -2,7 +2,7 @@
 
 **Master Log**: Tracks all QA runs and allows comparison across 2-3 day cycles.  
 **Purpose**: Early detection of regressions, tracking of bug fixes, trend analysis.  
-**Last Updated**: 2026-07-30
+**Last Updated**: 2026-09-06
 
 ---
 
@@ -22,6 +22,7 @@
 |----------|--------|-------------|-----------|--------|----------|----------|------|--------|-----|--------|-------|-----------------|
 | 2026-07-30 | [TBD] | Staging | [%] | [X] | [X] | [X] | [X] | [X] | [X] | 🟢 HEALTHY | Initial baseline QA run | [qa-results-2026-07-30.md](qa-results-2026-07-30.md) |
 | 2026-08-18 | Claude Code | Development | 71% | 60 | 13 | 3 | 2 | 4 | 4 | 🔴 BLOCKED | Pass rate <80% per QA_PROCESS.md; infrastructure blockers prevent full testing; code quality clean; no regressions | [qa-results-2026-08-18.md](qa-results-2026-08-18.md) |
+| 2026-09-06 | Fable 5.1 + Sonnet workers | Cloud container (CI-equivalent; Docker + hermetic browser; no provider creds) | 92% (22/24 automated lanes) | 22 | 2 | 0 | 0 | 1 | 5 | 🟡 DEGRADED (automated) | All CI gates green incl. 14 158 API unit, 1 218 integration on real Postgres, 3 057 web/shared/mobile, voice-quality 73/73, Playwright hermetic 19/19; only the two documented non-blocking corpus checks red; 1 pre-existing medium defect (C-1/D-1) re-confirmed at runtime; provider legs remain STAGING | [verification/full-verification-2026-09-06.md](verification/full-verification-2026-09-06.md) |
 | [DATE] | [Name] | Prod/Staging | [%] | [X] | [X] | [X] | [X] | [X] | [X] | 🔴/🟠/🟡/🟢 | [Change summary] | [Link] |
 
 ---
@@ -62,27 +63,29 @@ Updated after each QA run. Shows which areas are stable vs. problematic.
 
 ### Health Scorecard
 
-| Section | # Tests | Pass Rate | Status | Trend | Notes |
-|---------|---------|-----------|--------|-------|-------|
-| 1. Auth | 10 | 60% | 🟡 | → Stable | Blocked: No Clerk test tokens |
-| 2. Dashboard | 4 | 0% | 🔴 | ↓ Blocked | Auth-blocked, no data |
-| 3. Appointments | 10 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
-| 4. Estimates | 14 | 0% | 🔴 | ↓ Blocked | Auth-blocked, catalog missing |
-| 5. Invoices | 12 | 0% | 🔴 | ↓ Blocked | Auth-blocked, Stripe not configured |
-| 6. Customers | 8 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
-| 7. Leads | 10 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
-| 8. Jobs | 8 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
-| 9. Voice | 9 | 0% | 🔴 | ↓ Blocked | LLM gateway keys missing |
-| 10. SMS | 8 | 0% | 🔴 | ↓ Blocked | Twilio not configured |
-| 11. Dispatch | 6 | 0% | 🔴 | → Stable | Feature not implemented |
-| 12. Reports | 8 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
-| 13. Settings | 10 | 20% | 🔴 | ↓ Blocked | Auth-blocked |
-| 14. Mobile | 10 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
-| 15. Errors | 10 | 60% | 🟡 | → Stable | Infrastructure stable |
-| 16. Performance | 6 | 67% | 🟠 | ↑ Concerning | Build/load times excellent but below threshold |
-| 17. AI Quality | 8 | 0% | 🔴 | ↓ Blocked | LLM gateway blocked |
-| 18. Security | 8 | 50% | 🟠 | → Stable | RLS policies present but below threshold |
-| **OVERALL** | **159** | **71%** | 🔴 | **→ Stable** | **Pass rate <80% per QA_PROCESS.md; code clean; infrastructure blockers explicit** |
+Updated 2026-09-06 from executed automated evidence (see `verification/full-verification-2026-09-06.md` §2 for the per-workflow table). "STAGING" means the code path is wired and proven up to the provider boundary; the provider leg needs credentials.
+
+| Section | Automated evidence executed | Status | Trend | Notes |
+|---------|-----------------------------|--------|-------|-------|
+| 1. Auth | RBAC/Clerk/RLS unit + 7 RLS integration suites + HTTP cross-tenant 404s + no-401-storm e2e | 🟢 | ↑ | Clerk-cloud sign-in UI is STAGING |
+| 2. Dashboard | 8 home component suites, analytics/digest API, portal-dashboard mobile e2e (4/4) | 🟢 | ↑ | — |
+| 3. Appointments | 9+14+4 API suites, voice reschedule/cancel/reassign integration, day-window runtime proof | 🟢 | ↑ | SMS delivery leg STAGING |
+| 4. Estimates | 29 API suites, public approval e2e (4/4), money-loop e2e, runtime integer-cents proof | 🟢 | ↑ | — |
+| 5. Invoices | 35+15+3 API suites, webhook-paid e2e, idempotency/concurrency integration, runtime payment arithmetic | 🟢 | ↑ | Live Stripe STAGING |
+| 6. Customers | 12 API suites, 11 web suites, 9 integration suites, runtime CRUD/archive/dup-warning | 🟢 | ↑ | — |
+| 7. Leads | 7 API suites, public-intake integration, voice lead-capture 7/7 | 🟡 | ↑ | No web component tests for lead pages (P2-4) |
+| 8. Jobs | 13 API suites, 17 web suites, runtime status machine new→completed with timeline | 🟢 | ↑ | — |
+| 9. Voice | 35+61+37 API suites, 73/73 voice-quality launch gate, durable-timer integration, runtime signed-webhook + no-key pipeline | 🟢 | ↑ | Real audio/LLM STAGING |
+| 10. SMS | 17 API suites, 7 conversation integration suites, MMS-to-quote integration | 🟢 | ↑ | Comms-inbox browser flow STAGING (Clerk) |
+| 11. Dispatch | 15 API + 15 web suites, 6 integration suites | 🟡 | ↑ | Feature is implemented (prior "not implemented" note was wrong); no e2e drives the board (P2-3) |
+| 12. Reports | 10+7 API suites, digest worker integration, reports e2e in qa-matrix | 🟢 | ↑ | — |
+| 13. Settings | 30 web suites, 14 API suites, packs/flags/brand-voice/onboarding integration | 🟢 | ↑ | Onboarding v2 browser journey STAGING |
+| 14. Mobile | 116 files / 826 tests, coverage gate met, typecheck green | 🟡 | ↑ | 10 responsive specs skip without Clerk (P1-2); RN jest-expo ungated |
+| 15. Errors | Middleware/webhook suites, render-stability e2e, runtime structured 400s | 🟡 | → | D-1: unmatched `/api/*` hits SPA catch-all (P1-1) |
+| 16. Performance | Index EXPLAIN integration only | 🟠 | → | Load scripts exist but unwired (P3-3) |
+| 17. AI Quality | 271+114 API suites, proposal CAS integration, runtime approve→5s undo→execute gate | 🟢 | ↑ | Real-LLM soak STAGING |
+| 18. Security | RLS audit (every table forced), signatures, log-safety, PII guard | 🟡 | → | Dependency advisories open (P2-1) |
+| **OVERALL** | **22/24 automated lanes green; 0 product regressions** | 🟡 | **↑** | **Release-ready on automated evidence; provider legs need the staging runbook** |
 
 **Legend**:
 - 🟢 **Healthy** (95%+): Area is stable, no action needed.
@@ -132,6 +135,7 @@ Persistent bugs that appear across multiple runs. Maintained to track "this is a
 |----------|---------|----------|--------|-----------|-----------|-----------|-------|
 | QA-001 | [Feature] | 🟡 MEDIUM | OPEN | 2026-07-30 | 2026-07-30 | 0 | [Description] |
 | QA-002 | [Feature] | 🟠 HIGH | BLOCKED | 2026-07-30 | 2026-07-30 | 0 | [Description] |
+| QA-003 | Unmatched `/api/*` routes fall into SPA catch-all (200 HTML or 500) | 🟡 MEDIUM | OPEN | 2026-07 (C-1) | 2026-09-06 | — | Re-confirmed at runtime; fix = JSON 404 before catch-all (plan P1-1) |
 
 ---
 

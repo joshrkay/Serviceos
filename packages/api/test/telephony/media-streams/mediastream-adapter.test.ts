@@ -160,6 +160,28 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(provider.openSession).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['matching', 'other-call', 'other-account', 'unbound'])('enforces the authenticated upgrade binding for a %s start frame', async mismatch => {
+    const session = store.create('tenant-a', 'telephony', { callSid: 'CA-bound' });
+    session.twilioAccountSid = 'AC-bound';
+    const other = store.create('tenant-b', 'telephony', { callSid: 'CA-other' });
+    other.twilioAccountSid = 'AC-other';
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter({
+      store, streamingProvider: provider, speechTurn: async () => [],
+      ...(mismatch === 'unbound' ? {} : { authenticatedCall: { callSid: 'CA-bound', accountSid: 'AC-bound' } }),
+    }, ws);
+    adapter.start();
+    ws.inboundJson({ event: 'start', streamSid: 'MZ-bound', start: {
+      callSid: mismatch === 'other-call' ? 'CA-other' : 'CA-bound',
+      accountSid: mismatch === 'other-account' ? 'AC-other' : 'AC-bound',
+      streamSid: 'MZ-bound', tracks: ['inbound'],
+    } });
+    await new Promise(r => setImmediate(r));
+    expect(provider.openSession).toHaveBeenCalledTimes(mismatch === 'matching' ? 1 : 0);
+    expect(ws.closed).toBe(mismatch !== 'matching');
+  });
+
   it('forwards base64 audio to the Deepgram session', async () => {
     store.create('t', 'telephony', { callSid: 'CA-2' });
     const ws = new FakeWs();
@@ -1661,6 +1683,15 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     );
     return { gatherAdapter, adapter, ws, tts, handle, gateway };
   }
+
+  it('binds a verified inbound account to the stream URL and refuses a different account on replay', async () => {
+    const { gatherAdapter } = makeProductionShapedSetup({});
+    const opts = { callSid: 'CA-bound-url', accountSid: 'AC-bound', from: '+15125550111', tenantId: 't' };
+    const twiml = await gatherAdapter.handleInboundForStream(opts);
+    expect(twiml).toContain('/api/telephony/stream/CA-bound-url');
+    expect(store.findByCallSid(opts.callSid)?.twilioAccountSid).toBe(opts.accountSid);
+    await expect(gatherAdapter.handleInboundForStream({ ...opts, accountSid: 'AC-other' })).rejects.toThrow('account mismatch');
+  });
 
   it('RV-130 — session init speaks greeting+disclosure over stream TTS and ledgers implicit consent', async () => {
     const consentEvents = new InMemoryConsentEventRepository();
