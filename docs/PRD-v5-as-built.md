@@ -972,7 +972,7 @@ books the wrong hour.
 | Phone number provisioning (own subaccount, messaging service, number) | 3 | Production path throws without real credentials; CI gets a magic test number |
 | Subscription + 14-day trial | 4 | Plan prices validated live against Stripe on every checkout; a plan that fails validation is **omitted, never shown wrong** |
 | AI verification + test call | 3 | |
-| Conversational onboarding (multi-turn, bounded at 15 turns) | 3 | Engine is real and tested; the shipped UX is the form wizard |
+| Conversational onboarding (multi-turn, bounded at 15 turns) | 4 | Route mounted unconditionally, real web client, reachable as a toggle on the `identity` and `pack` steps. The form wizard remains the fallback and edit surface |
 | Brand voice capture | 3 | Behind a default-off flag; six fields; edit only via explicit web action with a 15-minute cooldown, version-bumped and audited |
 | Team invites | 4 | Local invitation row written **first**, so a Clerk outage cannot lose tenant intent; refuses to demote the last owner |
 
@@ -986,7 +986,7 @@ books the wrong hour.
 | Intent + urgency classification, surface-conditional | 5 |
 | Deterministic emergency detection (E1/E2/E3), pre-LLM, bilingual | 5 |
 | Vulnerability grading → patch the owner's cell with a 5-second non-PII preface | 3 |
-| Dropped-call SMS recovery at 60 s, durable, re-evaluated at send | 4 |
+| Dropped-call SMS recovery at 60 s, durable, re-evaluated at send | 4 — **but per-tenant flag-gated and dark by default** (§12.4b) |
 | Customer photo → draft estimate (MMS) | 3 |
 | Public web booking, no login, real availability | 5 |
 | Unclaimed inbound SMS → threaded conversation | 4 |
@@ -1479,8 +1479,12 @@ Every one of these represents engineering already paid for.
   **zero production callers.**
 - **A lateness computation** with geofence, dwell, and a confidence breakdown —
   complete, unit-tested, **no worker or route invokes it.**
-- **Conversational onboarding** — a real multi-turn engine, persisted and tested;
-  **zero clients call it.** The shipped experience is the form wizard.
+- **The single-shot onboarding orchestrator** — a separate, earlier extraction
+  pipeline from the conversational one; zero non-test importers, and the task
+  types file calls it "the dormant single-shot orchestrator" in its own comment.
+  *(An earlier draft of this document listed conversational onboarding itself as
+  dormant. That was wrong — inherited from a stale audit and corrected here. The
+  conversational route is mounted and has a real web client.)*
 - **RAG retrieval** — the knowledge-chunk table, embeddings, scoping, and an
   evaluation-run table all exist; the code says plainly that **no caller in main
   reads or writes today**.
@@ -1527,6 +1531,77 @@ schema is `z.string()` with a TODO. A six-state money machine — the thing that
 drives what the owner is told about every job — is currently unvalidated at both
 the database and the contract boundary.
 
+### 12.4c Dark by default — the largest single finding
+
+The dormant-module list above is the *unreachable* case. This is the larger and
+more actionable one: **capability that is fully built, wired, and tested, and
+that no default tenant will ever experience.** A dedicated sweep found it is far
+more widespread than an earlier draft of this document implied. Every item below
+was verified directly against code.
+
+**Founding commitments currently dark.** Four of the fourteen, including three
+that the strategy documents treat as differentiators:
+
+| Commitment | Mechanism | Reachable? |
+|---|---|---|
+| #2 Digest is the dashboard | `digest_enabled` defaults false | Accepted by `PUT /api/settings` — **but no control in web or mobile writes it**, and the `/digest` page is a registered route with no nav entry |
+| #12 Brand voice configurable | `brand_voice_configurator` seeded explicitly `enabled: false` | Deliberate dark-launch (the comment says so). Platform-admin API only |
+| #8 Dropped call → SMS recovery | per-tenant `dropped_call_recovery` flag | **No per-tenant flag write path exists** (below) |
+| #9 B2B recognition first-class | context assembled, `session.b2bAccountContext` written once, **read nowhere** | Missing wiring, not missing capability |
+
+**The revenue cluster.** Four money-mechanics capabilities, each fully
+implemented with a live consumer, each defaulting false, and **none with a single
+control in web or mobile** (verified: zero UI files reference any of them):
+`auto_invoice_on_completion`, `batch_invoice_enabled`, `milestone_billing_enabled`,
+`bill_labor_from_time_entries`. All four *are* accepted by `PUT /api/settings`, so
+this is pure missing UI — the cheapest large win in the product.
+
+**The flag write path — corrected.** An earlier analysis claimed no flag could
+ever be enabled. That is wrong, and the distinction is operationally important:
+
+- **Platform-wide flags CAN be set in production.** The admin router is mounted,
+  and its default gate lazily builds a real platform-admin checker whenever
+  `DATABASE_URL` is present; it fails closed only without a database. A row in
+  `platform_admins` plus `PUT /api/admin/feature-flags/:name` works today. There
+  is no UI for it, but there is a path.
+- **Per-tenant overrides CANNOT be set at all.** `setTenantFlag` has **zero
+  callers and no route**. So any capability gated per-tenant — dropped-call
+  recovery, vulnerability triage — is all-or-nothing at the platform level, with
+  no ramp mechanism. That is the real structural gap.
+
+**Settings unreachable even by API.** `updateSettingsSchema` is `.strict()`, so
+a `PUT` carrying an unknown key is *rejected*, not ignored. Four settings exist
+in the repository interface but not in that schema, making them settable only by
+direct SQL: `speedToLeadEnabled`, `autonomousCloseEnabled`, `brandVoiceLocked`,
+`weeklyFeedbackEnabled`. The last means a tenant cannot turn *off* a recurring
+email the product sends them.
+
+**Two smaller items with outsized effect**, both one-line fixes:
+
+- **Team invitations 404.** The invite flow redirects to
+  `${appBaseUrl}/accept-invitation?invitation_id=…`; that route does not exist in
+  the web router. Every invitation email lands on a dead page — which means
+  multi-user tenants cannot be formed.
+- **Technicians are never told they were assigned a job.** The assignment
+  notifier is a module-global that `app.ts` never sets, and every producer calls
+  it through `instance?.notifyChange(...)` — so the optional chain makes a
+  permanent no-op completely silent.
+
+### 12.4d A note on method — how two of these were got wrong
+
+Two claims in earlier drafts of this document were false, and both failed the
+same way: **they were inherited from the July state audit and repeated without
+re-verification.** The review-response approval UI was said not to exist; it
+does, and is rendered in the inbox. Conversational onboarding was said to have
+zero clients; the route is mounted unconditionally and has a real web client.
+
+Both were true when Part E was written. Neither was true when this document
+repeated them. That is precisely the failure mode §0 claims this reconstruction
+exists to prevent, and it happened anyway — which is worth stating plainly,
+because it sets the correct expectation for §12 as a whole: **the gap register
+is a snapshot with a decay rate, not a standing truth.** Anything in it older
+than a sprint should be re-verified before it is acted on or quoted.
+
 ### 12.5 Parity holes — declared, not hidden
 
 Six (capability × surface) cells are marked as holes in the coverage table. The
@@ -1553,7 +1628,7 @@ the structural test now enforces even while the duplication remains.
 | "Delivery channel configurable per tenant" | Per-send choice only; no tenant-level setting |
 | "Estimate follow-up disableable" | No disable mechanism exists, per-estimate or globally |
 | "The digest is the dashboard, 6–9pm" | Digest is **default-off** with no UI toggle and no window constraint |
-| The review-response approval UI | The sub-component approval UI referenced in code comments does not exist as described |
+| ~~The review-response approval UI does not exist~~ | **This was stale and is now false.** `ReviewResponseReview.tsx` is rendered in the inbox with per-component include/exclude toggles. The claim came from a July audit and this document repeated it without re-verifying — see §12.4c |
 | Roles | Four roles specced across documents; **three exist** (`owner`, `dispatcher`, `technician`). `admin` was never built |
 | Equipment history | Named as an HVAC differentiator throughout; **no equipment entity exists** |
 | Geocoding | Described as wired; **absent entirely**. Latitude/longitude columns exist and are never populated; travel-time providers only consume them |
