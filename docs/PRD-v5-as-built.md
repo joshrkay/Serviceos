@@ -1578,13 +1578,46 @@ automation · two-way accounting reconciliation.
 **Owner hours returned per week.** Target **12+** for the median pilot by week 8,
 against a time-diary baseline taken at onboarding.
 
-The product measures this itself. A **time-given-back** report assigns explicit
-per-action minute credits under a versioned constant — 12 minutes for a drafted
-estimate, 8 for a drafted invoice, 5 for a booking, 3 for a recorded payment,
-**0 for a clarification** — and converts to dollars using the tenant's hourly
-rate, returning null rather than a guess when the rate is unset. Publishing the
-version and the credits is a requirement: the number is a *model*, and a model
-you can't inspect is a marketing claim.
+> **That sentence is the product's central claim, and the product cannot
+> currently produce it.** An earlier draft of this section said "the product
+> measures this itself." That was wrong, and the correction matters more than any
+> other in this document. The north star decomposes into three parts, and **none
+> of the three is instrumented**:
+>
+> | Part | State |
+> |---|---|
+> | **The baseline** (the denominator) | **Absent.** No code anywhere captures a pre-product time-diary. Onboarding captures `hourlyRateCents` — the *price* of an owner hour, not a *count* of admin hours. There is no field, no column, and no path to acquire one. |
+> | **Week-8 progression and "median pilot"** | **Absent.** Nothing knows what a tenant's week 8 is; there is no tenure concept, no cohort table, and no cross-tenant aggregation of any value metric. The only trend math in the product is month-over-month job counts. |
+> | **The numerator** | **A model, not a measurement.** See below. |
+
+**What does exist** is a **time-given-back** report: a versioned lookup table of
+minutes-per-action multiplied by counts of executed proposals and handled calls
+— 12 minutes for a drafted estimate, 8 for a drafted invoice, 5 for a booking,
+3 for a recorded payment, **0 for a clarification** — converted to dollars using
+the tenant's hourly rate, returning null rather than guessing when the rate is
+unset. The only measured quantities are the event counts. The hours are
+`count × constant`.
+
+Publishing the version and the credit table is therefore a requirement, not a
+courtesy: **the number is a model, and a model you can't inspect is a marketing
+claim.** Two limits belong with it:
+
+- **The table covers 24 of 53 proposal types.** The other 29 silently take a
+  blanket 3-minute default, including `send_estimate`, `batch_invoice`,
+  `convert_lead`, `create_change_order`, and `send_payment_reminder`. More than
+  half the action space is uncalibrated by construction.
+- **It is never persisted.** The report is computed live per request and
+  discarded. There is no weekly ledger, so a tenant's week-1 figure cannot be
+  recovered later — and because the credit table is versioned and can change,
+  replaying history would not reproduce it either.
+
+**What it would take** to make the headline claim true: capture a baseline at
+onboarding; persist a weekly rollup stamped with the credit version (mirroring
+the pattern the hands-free-revenue metric already uses); add tenant tenure and
+cohort aggregation; and close the credit-table coverage gap. Until then the
+honest statement of the north star is *"a modeled estimate of hours saved,
+per tenant, point-in-time"* — which is a real and useful number, and is not the
+one §13 promises. See §14, O-8.
 
 ### The hero metric
 
@@ -1637,6 +1670,7 @@ approval median latency (<10 min in business hours).
 | **O-5** | **Is e-signature a legal claim we make?** | If yes, the data model needs a document hash and a certificate |
 | **O-6** | **Which realtime transport carries voice approval?** | An approval exchange does not fit inside the resilient transport's hang timer |
 | **O-7** | **Does equipment history ship?** | Named as an HVAC differentiator in every strategy document; the entity does not exist |
+| **O-8** | **How do we measure the north star before the first pilot starts?** | §13: the baseline, the week-8 progression, and the cohort median are all absent, and the modeled numerator is never persisted. A pilot that runs without this instrumented cannot be analysed afterwards — the data simply won't exist. This is the one open decision with a **deadline attached to it**: it must be answered before a tenant goes live, not after |
 
 ### Risks
 
