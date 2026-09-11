@@ -483,13 +483,46 @@ consequence of them.
 | **I9** | **All money is integer cents**, end to end, with one shared engine as the only source of totals math and **one** percent-of-money helper so rounding cannot drift. | D-003. Line totals are recomputed server-side, discarding the client's number. |
 | **I10** | **All times stored UTC, rendered in the tenant's timezone.** | An unset tenant timezone makes booking **refuse**, never fall back to a default zone — a Phoenix mis-booking postmortem removed the column default. |
 | **I11** | **Every entity carries `tenant_id`; RLS is FORCED at the database**, under a dedicated non-bypassing runtime role the server refuses to boot without in production. | The database, not application code, is the isolation boundary. Exactly two tables are exempt, each with its rationale recorded as a SQL comment, and the runtime role is dynamically revoked from any table that would otherwise slip through. |
-| **I12** | **Every mutation emits an audit event**, attributable to actor id, role, and channel — committed in the *same transaction* as the state change. | Audit is failure-soft in the other direction: a logging failure never unwinds a successful execution. |
+| **I12** | **Every mutation emits an audit event** attributable to actor id, role, and channel. The guarantee has **two tiers, and they are not the same strength** — see below. | Execution-outcome audit is transactional on the DB-only path; handler-emitted domain audit is best-effort. |
 | **I13** | **Caller speech is untrusted data for its whole lifetime** — including when read back to the operator hours later. | Fenced with explicit hardening copy before entering any operator-facing model context; fence-closing markers in the caller's own text are neutralized. |
 | **I14** | **A revocation of contact consent blocks every channel; a grant never crosses channels.** | D-017, on an append-only ledger behind both outbound gates. |
 | **I15** | **All LLM calls route through one gateway.** No module outside it may import a provider SDK. | D-005, enforced by a CI guard. |
 | **I16** | **A capability's surface coverage is declared, not accidental.** Undeclared (capability × surface) cells fail a structural test. | The coverage table. Refusals happen on purpose; silence is impossible. |
 | **I17** | **Auto-approval is a scoped, opt-in, reversible exception — never a posture.** | D-015: two capture-class types, default OFF, stricter floor, kill switch, one-tap UNDO, digest visibility. |
 | **I18** | **No feature ships that adds admin work to the owner's day.** | The litmus test; the reason seven planned v1 phases were cut or deferred (D-011). |
+
+### 5.0b I12 in detail — the audit guarantee is two-tiered
+
+This deserves its own statement because an earlier draft of this document
+asserted a single, stronger guarantee than the code provides, and a review
+caught it. The product has **two** audit layers:
+
+**Tier 1 — execution-outcome audit (transactional).** Every proposal execution
+writes a `proposal.executed` / `proposal.execution_failed` event through the
+shared audited-command helper. On the DB-only handler path this commits in the
+**same transaction** as the handler's mutation, the idempotency record, and the
+status transition — all four succeed or none do. This is the guarantee that
+closes the crash window: a proposal cannot execute and then lose its status
+write.
+
+**Tier 2 — handler domain audit (best-effort).** A handler additionally emits
+its own domain event (`catalog_item.created`, `credit.applied`, and so on)
+*after* its mutation, and **a failure there is swallowed**. The rationale is
+sound in isolation — a logging outage should not unwind a successful customer-
+visible action — but the consequence must be stated rather than implied:
+
+> **During an audit-store outage, operational state can be created without its
+> domain audit row.** The execution-outcome row still lands on the DB-only path;
+> the domain-level event does not.
+
+Two further limits belong with it: handlers marked as performing external I/O
+run their mutation **outside** the executor's transaction by necessity (the
+network send cannot be rolled back), so Tier 1's atomicity covers the
+idempotency record, status, and audit — not the handler's own writes. And the
+tiers differ by design, not by oversight.
+
+Whether Tier 2 should be strengthened is a real product question, recorded in
+§12.2 rather than resolved here.
 
 ### 5.1 The trust thesis
 
@@ -753,11 +786,20 @@ Three details rise to requirements:
 
 ## 7. The capability catalog — what a user can actually do
 
-This is the functional heart of the PRD, and unlike every previous version it is
-**pinned to the code by a contract test**: if an intent, proposal type, action
-class, or execution handler changes and this catalog is not updated, the build
-fails. That mechanism exists because an earlier prose feature list rotted badly
-enough to mislead the team.
+This is the functional heart of the PRD. Its contents are **derived from
+`docs/reference/voice-action-catalog.md`**, which carries a machine-readable
+block that *is* pinned to the code by a contract test — if an intent, proposal
+type, action class, or execution handler changes and that file is not updated,
+the build fails. That mechanism exists because an earlier prose feature list
+rotted badly enough to mislead the team.
+
+> **This file is not itself under that test.** The section below is a
+> point-in-time transcription, accurate as of the reconstruction date, and it
+> can drift the same way every prior feature list did. **The pinned catalog is
+> the source of truth; when the two disagree, that one is right.** Extending the
+> contract test to cover this section — or replacing it with a generated include
+> — would close the gap, and is worth doing before this document is treated as
+> load-bearing.
 
 A capability is only real when it has **all three**: a classifier intent, a
 map entry, and an execution handler wired to its real dependency. A boot guard
@@ -1403,6 +1445,7 @@ documents.
 | **Two jurisdiction lists disagree** on which states require two-party recording consent (one omits Connecticut and Oregon) | Two sources of truth for a legal question |
 | **The voice approval PIN is a static per-tenant secret**, re-spoken on every approval | Redaction from transcripts shipped; per-approval codes did not. Exposure accumulates with each recorded call |
 | **No absolute per-call wall-clock cap** — the idle timer re-arms on comfort noise | A looping caller bills telephony, recognition, model, and synthesis indefinitely |
+| **Domain audit events are best-effort** (§5.0b, tier 2) | During an audit-store outage, operational state can be created without its domain audit row. The execution-outcome row still lands on the DB-only path, so the proposal trail survives — but "every mutation is auditable" is weaker than it reads. Worth deciding explicitly: strengthen tier 2, or state the limit in any compliance claim that rests on the audit trail |
 
 ### 12.3 Money — correctness defects
 
