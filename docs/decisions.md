@@ -825,3 +825,60 @@ a review card the honest equivalent is the card they already get. The chat pendi
 that row is already persisted, tenant-scoped and conversation-stamped — and is bounded by the
 voice constant `MAX_DISAMBIGUATION_ATTEMPTS`, so an operator who moves on loses at most two turns.
 The four `CHAT_DISPATCH_EXCLUDED_INTENTS` stay excluded and `missingFieldsFor` is not weakened.
+
+### D-030: Voice-primary is ratified; `docs/PRD-v5-as-built.md` is the canonical PRD; four founding commitments shipped dark
+**Date:** 2026-09-11
+**Initiative:** As-built PRD reconstruction (PR #994) and the product review that followed it.
+**Decision:** Three rulings, taken together by the product owner after a structured review of the
+reconstruction against the founding commitments.
+
+1. **Voice-primary is the ratified interface thesis.** `docs/PRD.md` v2.0 locked decision #1 says
+"SMS is the primary interface"; `docs/PRD-rivet-master.md` says "the voice channel *is* the
+product". The shipped system implements neither literally — it implements **voice directs, SMS
+approves**: the owner's command line, the three voice surfaces and the intent taxonomy carry
+direction, while SMS carries the approval rail (one-tap HMAC links, `Y`/`N`/`EDIT` replies, the
+digest). That synthesis is hereby the canonical thesis, and v2.0's SMS-primacy claim is superseded.
+This is a refinement of mechanism, not a change of goal: the north star ("owner hours returned per
+week") and the founding sentence are unchanged.
+
+2. **`docs/PRD-v5-as-built.md` supersedes** `docs/PRD.md` (v2.0), `docs/PRD-rivet-master.md`, and
+PRD v4 Parts E and F. `docs/PRD-execution-catalog.md` is explicitly RETAINED as the story-level
+engineering archive — v5 does not replace it. Part E's **rung ladder is retained as method**
+(0 Absent … 6 Live, where rung 4 requires a real-database proof including the audit event): it is
+the instrument that got its own two worst findings fixed, and v5 scores against it.
+
+3. **Four founding commitments shipped dark, and that was drift rather than staged rollout.**
+Verified against code: `digest_enabled` defaults false with **no control in web or mobile** that
+writes it; `brand_voice_configurator` is seeded explicitly `enabled: false`; dropped-call recovery
+is gated on a per-tenant flag for which **no write path exists** (`setTenantFlag` has zero callers
+and no route); and B2B account context is assembled onto the session and **read nowhere**. The
+distinguishing evidence for drift over staging is the digest: a capability with no switch cannot
+have been staged for a rollout. Remediation is a launch checklist, not an architecture change.
+
+**Rationale:** This log's own history is the argument. D-025 found that a posture everyone cited
+("approval is never voice-reachable") had never actually been decided, was attributed to an
+unrelated entry, and had been contradicted by shipped code for months. Two canonical PRDs asserting
+different primary interfaces is the same failure one step earlier. Recording the ratification is
+what stops the next reader inferring a posture from whichever document they opened first.
+
+**Constraints:**
+- The superseded documents are **not deleted and not moved**. They carry a superseded header
+  pointing at v5 and stay at their current paths: they have 31 inbound references across the repo
+  (13 to `docs/PRD.md` alone, including `CLAUDE.md`), and breaking those to make a filing point is a
+  worse trade than a header. Part E in particular remains the best record of how the rung ladder works.
+- v5 is **not** covered by the voice-action-catalog contract test; that test pins
+  `docs/reference/voice-action-catalog.md`. v5's capability section is a point-in-time
+  transcription and says so. On disagreement, the pinned catalog wins.
+- v5's §12 gap register is a **snapshot with a decay rate**. Two of its claims were inherited from
+  Part E and were already stale when repeated (the review-response approval UI does exist;
+  conversational onboarding does have clients). Anything in §12 older than a sprint is re-verified
+  before it is acted on or quoted.
+
+**Alternatives rejected:**
+- *Reassert SMS-primacy and treat the build as drift to correct.* Rejected: the code has
+  implemented voice-directs/SMS-approves consistently across four surfaces, three transports and a
+  78-intent taxonomy. The documentation is what drifted.
+- *Declare the two theses equivalent.* Rejected: they imply different answers to what a demo shows,
+  what "done" means for the digest, and where the next engineering hour goes.
+- *Move the superseded PRDs to `docs/archive/`.* Rejected on the reference count above; revisit as
+  its own link-fixing change if the headers prove insufficient.

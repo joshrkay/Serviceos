@@ -323,6 +323,31 @@ mis-citation here: owner voice approval on a caller-ID-identified owner line
 channels. No `system:` actor may ever approve. A human speaking is a human
 approving.
 
+#### The ratified thesis: voice directs, SMS approves (D-030)
+
+This is the one place the goal's *mechanism* moved, and until **D-030** the
+repository had two canonical documents asserting different answers. `PRD.md`
+v2.0 locked decision #1 said *"SMS is the primary interface."* The July master
+PRD said *"the voice channel **is** the product."* The shipped system implements
+neither literally:
+
+| | Surface | Carried by |
+|---|---|---|
+| **Direction** — the labor | Phone, in-app voice, memo, chat | The 78-intent taxonomy, the command line, the proposal drafts |
+| **Approval** — the control | SMS + one tap | One-tap HMAC links, `Y`/`N`/`EDIT` replies, the digest |
+
+**D-030 ratifies that synthesis**, and supersedes v2.0's SMS-primacy claim. The
+goal is unchanged — the north star and the founding sentence both stand. What
+changed is the answer to *"where does the owner's hand go?"*, and the code had
+already answered it consistently across four surfaces, three transports, and the
+whole intent taxonomy. **The documentation is what drifted, not the build.**
+
+Recording it matters for a reason this log has already proved once: D-025 found
+a posture everyone cited that had never actually been decided, was attributed to
+an unrelated entry, and had been contradicted by shipped code for months. Two
+PRDs disagreeing about the primary interface is that same failure, one step
+earlier.
+
 ### R12 — "Learn from my corrections" ⇒ the correction loop
 
 If Mike fixes the labor rate once and the AI repeats the mistake tomorrow, the

@@ -1,7 +1,21 @@
 # AI Service OS — Product Requirements Document
 
+> ## ⚠️ SUPERSEDED — 2026-09-11
+>
+> **This document is no longer canonical.** It is superseded by
+> [`docs/PRD-v5-as-built.md`](PRD-v5-as-built.md), the as-built PRD reconstructed
+> from the shipping code, per **D-030** in [`docs/decisions.md`](decisions.md).
+>
+> Its locked decision #1 — *"SMS is the primary interface"* — is specifically superseded: the ratified thesis is **voice directs, SMS approves**. The goal it states (owner hours returned per week) is unchanged and still canonical.
+>
+> It is kept in place (not archived) because it has inbound references across the
+> repo and remains useful history. **Do not treat statements below as current
+> product truth without re-verifying against code.**
+
+
+
 **Version**: 2.0
-**Status**: Canonical product reference (supersedes v1)
+**Status**: SUPERSEDED by `docs/PRD-v5-as-built.md` (D-030). Was: canonical product reference (superseded v1)
 **Last revised**: 2026-05-17
 **Owner**: Product
 
