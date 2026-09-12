@@ -520,15 +520,36 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
      * (Review finding, PR #1053 — the first version of this stub did exactly
      * that.)
      */
+    interface CapturedCharge {
+      url: string;
+      headers: Record<string, string>;
+      params: URLSearchParams;
+    }
+
+    /**
+     * Returns the stub plus the request it was handed. Capturing the outgoing
+     * call is the point: without it the stub answers the same success no
+     * matter what `chargeOffSession` serialized, and every downstream
+     * assertion uses the locally computed amount — so charging the wrong card,
+     * the wrong amount, or reusing a cycle's idempotency key would all stay
+     * green (review finding, PR #1053).
+     */
     function stripeFetchReturning(
       body: Record<string, unknown>,
       status = 200,
-    ): StripeFetch {
-      return (async () =>
-        new Response(JSON.stringify(body), {
+    ): { fetch: StripeFetch; calls: CapturedCharge[] } {
+      const calls: CapturedCharge[] = [];
+      const fetch = (async (
+        url: string,
+        init: { method: string; headers: Record<string, string>; body: string },
+      ) => {
+        calls.push({ url, headers: init.headers, params: new URLSearchParams(init.body) });
+        return new Response(JSON.stringify(body), {
           status,
           headers: { 'content-type': 'application/json' },
-        })) as unknown as StripeFetch;
+        });
+      }) as unknown as StripeFetch;
+      return { fetch, calls };
     }
 
     async function seedAutoCollectMembership(stripeFetch: StripeFetch) {
@@ -537,7 +558,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
         nextRunAt: new Date(Date.now() - 3600_000),
         autoCollectDues: true,
       });
-      await new PgCustomerPaymentMethodRepository(pool).create({
+      const card = {
         id: uuidv4(),
         tenantId: t.tenantId,
         customerId: t.customerId,
@@ -548,7 +569,8 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
         isDefault: true,
         createdAt: new Date(),
         updatedAt: new Date(),
-      });
+      };
+      await new PgCustomerPaymentMethodRepository(pool).create(card);
       const duesCollector = new StripeDuesCollector({
         customerPaymentMethodRepo: new PgCustomerPaymentMethodRepository(pool),
         stripeConfig: { apiKey: 'sk_test_not_a_real_key' },
@@ -566,12 +588,34 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
         logger,
       });
       const run = (await runRepo.findByAgreement(t.tenantId, membership.id))[0];
-      return { t, membership, run };
+      return { t, membership, run, card };
     }
 
     it('issues the dues invoice with a due date and records the payment when the card succeeds', async () => {
-      const { t, membership, run } = await seedAutoCollectMembership(
-        stripeFetchReturning({ id: 'pi_dues_ok', status: 'succeeded' }),
+      const stripe = stripeFetchReturning({ id: 'pi_dues_ok', status: 'succeeded' });
+      const { t, membership, run, card } = await seedAutoCollectMembership(stripe.fetch);
+
+      // What we actually ASKED Stripe to do. Without this the stub answers the
+      // same success regardless of what was serialized, and every assertion
+      // below uses our own locally computed amount — so a charge against the
+      // wrong card or for the wrong amount would read exactly the same.
+      expect(stripe.calls).toHaveLength(1);
+      const charge = stripe.calls[0];
+      expect(charge.url).toBe('https://api.stripe.com/v1/payment_intents');
+      expect(charge.params.get('amount')).toBe('19900');
+      expect(charge.params.get('currency')).toBe('usd');
+      expect(charge.params.get('customer')).toBe(card.stripeCustomerId);
+      expect(charge.params.get('payment_method')).toBe(card.stripePaymentMethodId);
+      expect(charge.params.get('off_session')).toBe('true');
+      expect(charge.params.get('confirm')).toBe('true');
+      expect(charge.params.get('metadata[invoice_id]')).toBe(run.generatedInvoiceId);
+      expect(charge.params.get('metadata[tenant_id]')).toBe(t.tenantId);
+      expect(charge.params.get('metadata[agreement_id]')).toBe(membership.id);
+      // The cycle idempotency key is the double-charge guard: if it ever stops
+      // being stable per (agreement, scheduled date), a re-run charges the
+      // member twice and nothing else in this file would notice.
+      expect(charge.headers['Idempotency-Key']).toBe(
+        `agreement_${membership.id}_${run.scheduledFor}`,
       );
 
       const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
@@ -614,7 +658,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
             },
           },
           402,
-        ),
+        ).fetch,
       );
 
       const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
@@ -679,7 +723,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
         customerPaymentMethodRepo: new PgCustomerPaymentMethodRepository(pool),
         stripeConfig: { apiKey: 'sk_test_not_a_real_key' },
         invoiceOps: productionDuesInvoiceOps(),
-        stripeFetch: stripeFetchReturning({ id: 'pi_unused', status: 'succeeded' }),
+        stripeFetch: stripeFetchReturning({ id: 'pi_unused', status: 'succeeded' }).fetch,
       });
       await runRecurringAgreementsSweep({
         agreementRepo,
