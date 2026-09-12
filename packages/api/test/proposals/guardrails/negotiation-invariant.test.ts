@@ -32,6 +32,17 @@ const ASKS: Record<NegotiationAskType | 'general', string> = {
 // A high-value repeat is the strongest temptation to concede; even then the
 // guardrail commits nothing.
 const valuedRepeat = { lifetimeValueCents: 500000, lastSeenAt: new Date(), jobsCompletedCount: 9 };
+
+/**
+ * The type-level impossibility check, as a PURE function of the registry list.
+ *
+ * #1021: extracted so the same predicate that audits `VALID_PROPOSAL_TYPES`
+ * can be pointed at a list with a PLANTED discount type. §8.0 grants
+ * STRUCTURAL only with a negative control.
+ */
+export function discountShapedTypes(types: readonly string[]): string[] {
+  return types.filter((type) => /discount|haggle|negotiat/i.test(type));
+}
 const provider: CustomerNegotiationContextProvider = { getContext: async () => valuedRepeat };
 
 function makeContext(message: string): TaskContext {
@@ -71,8 +82,44 @@ describe('P2-036 negotiation guardrail invariant', () => {
     // agreement (applied by the billing engine) or a human editing an estimate.
     // If a change adds an AI-reachable discount/negotiation proposal type, this
     // guard fails so the P2-036 invariant gets re-reviewed.
-    for (const type of VALID_PROPOSAL_TYPES) {
-      expect(type).not.toMatch(/discount|haggle|negotiat/i);
-    }
+    expect(discountShapedTypes(VALID_PROPOSAL_TYPES)).toEqual([]);
+  });
+
+  // ─── NEGATIVE CONTROL (#1021) ──────────────────────────────────────────────
+  //
+  // G1 2026-09-12: "§8.0's STRUCTURAL requires a negative control and
+  // negotiation-invariant.test.ts plants none — it asserts the registry holds
+  // no such type, and nothing shows the assertion would fail if one were
+  // added." These plant one.
+  //
+  // The plant is a type ADDED TO A COPY of the registry list, not to
+  // `VALID_PROPOSAL_TYPES` itself: the lane is test-only, and a test that
+  // mutated the live registry would be proving something about its own
+  // mutation rather than about the guard. The predicate under test is the
+  // same function the assertion above calls.
+
+  it('NEGATIVE CONTROL — a planted AI-discount proposal type is reported', () => {
+    expect(discountShapedTypes([...VALID_PROPOSAL_TYPES, 'apply_ai_discount'])).toEqual([
+      'apply_ai_discount',
+    ]);
+  });
+
+  it('NEGATIVE CONTROL — the whole forbidden vocabulary is caught, not just the word "discount"', () => {
+    const planted = [
+      ...VALID_PROPOSAL_TYPES,
+      'apply_ai_discount',
+      'haggle_with_customer',
+      'negotiate_price',
+      'AUTO_DISCOUNT',
+    ];
+    expect(discountShapedTypes(planted).sort()).toEqual(
+      ['AUTO_DISCOUNT', 'apply_ai_discount', 'haggle_with_customer', 'negotiate_price'].sort(),
+    );
+  });
+
+  it('NEGATIVE CONTROL (inverse) — the real registry is non-trivial, so the green above is not vacuous', () => {
+    // A guard over an empty list would also report nothing.
+    expect(VALID_PROPOSAL_TYPES.length).toBeGreaterThanOrEqual(40);
+    expect(discountShapedTypes(VALID_PROPOSAL_TYPES)).toEqual([]);
   });
 });
