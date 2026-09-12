@@ -216,10 +216,20 @@ deliberately flipped to `'pending'`, proposal count after deliberately flipped t
       Tests  13 passed (13)
 ```
 
+**Second review finding addressed (chatgpt-codex-connector, PR #1048):** the router-driven
+test originally asserted only the generic `answerStatus: 'answered'` / `result: 'found'`
+terminal shape — if the `lookup_jobs` adapter stopped placing the job's actual status in
+the persisted rows, this would still pass while no longer answering "where does the job
+stand." Added an assertion on the persisted answer's text row containing the job's real
+summary ("Furnace inspection") and status ("new"). RED (deliberately wrong expected
+summary): `expected 'Furnace inspection — new' to contain 'WRONG SUMMARY'`. GREEN: all 13
+pass.
+
 **Evidence class:** real Postgres negative assertion on the direct-skill-call test, PLUS a
 real-router-level negative assertion (real `PgProposalRepository`, real `voice_recordings`
-answer read-back) that also proves the routing decision, not just the skill's own
-dependency shape. T1 held per the ticket's instruction (not asked to raise tenant grade on
+answer read-back with its actual content asserted) that also proves the routing decision,
+not just the skill's own dependency shape. T1 held per the ticket's instruction (not asked
+to raise tenant grade on
 this row).
 
 **Tenant-grade grep:**
@@ -390,6 +400,14 @@ cd packages/web && npx vitest run --reporter=verbose src/hooks/useVoiceSession.t
  Test Files  1 passed (1)
       Tests  6 passed (6)
 ```
+
+**Review finding addressed (chatgpt-codex-connector, PR #1048):** the 6 cases above only
+ever fed `proposal_created`/`ended` SSE events, never a `transition` event — the ordinary
+per-turn signal the real server sends (`voice-session-store.ts`) — so a regression in
+`handleSseLine`'s `if (msg.state) setState(msg.state)` line would have left every test
+green. Added a 7th test feeding `{ type: 'transition', state: 'intent_confirm' }` and
+asserting it overrides `start()`'s own POST-set state. RED (deliberately wrong expected
+state): `expected 'intent_confirm' to be 'WRONG'`. GREEN: 7/7.
 
 **`VoiceSessionPanel.test.tsx`** mocks `useVoiceSession` (isolating rendering/interaction
 from the hook, now covered separately above) and covers: the pre-session "Start session"

@@ -219,4 +219,27 @@ describe('useVoiceSession', () => {
     });
     unmount();
   });
+
+  // Review follow-up (chatgpt-codex-connector, PR #1048): the SSE tests
+  // above only ever feed `proposal_created`/`ended` events, never the
+  // `transition` event the real server sends for an ordinary per-turn
+  // state change (voice-session-store.ts) — a regression that broke
+  // `handleSseLine`'s `if (msg.state) setState(msg.state)` line would
+  // leave every test above green. This exercises that line directly.
+  it('an SSE "transition" event applies its carried state — the ordinary per-turn signal, not just proposal/ended markers', async () => {
+    routeFetch({ events: [{ type: 'transition', state: 'intent_confirm' }] });
+    const { result, unmount } = renderHook(() => useVoiceSession());
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await flush();
+    // start()'s own POST response already set state to 'greeting' — the
+    // assertion below only holds if the SSE transition actually overrides it.
+
+    await waitFor(() => {
+      expect(result.current.state).toBe('intent_confirm');
+    });
+    unmount();
+  });
 });

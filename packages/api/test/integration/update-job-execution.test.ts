@@ -1029,6 +1029,15 @@ describe('Postgres integration — voice lookup_jobs ("where does it stand?") wr
     const answered = await voiceRepo.findById(tenant.tenantId, recording.id);
     expect(answered?.answerStatus).toBe('answered');
     expect(answered?.answer?.result).toBe('found');
+    // Review follow-up (chatgpt-codex-connector, PR #1048): a generic
+    // 'found' terminal status alone doesn't prove the answer says WHERE
+    // the job stands — the lookup_jobs adapter (voice-lookup-answer.ts)
+    // could stop placing the status in the row and this would still pass.
+    // Assert the actual content: the job's real summary and status ("new",
+    // unchanged in this describe) land on the persisted answer.
+    const jobRow = answered?.answer?.rows.find((r) => r.kind === 'text');
+    expect(jobRow?.text).toContain('Furnace inspection');
+    expect(jobRow?.text).toContain('new');
 
     // The proposals table never moved — the sharper, router-level version
     // of the negative assertion above.
