@@ -6,7 +6,7 @@
 # which need a running Docker daemon and the pgvector/pgvector:pg16 image.
 #
 # Steps (idempotent, non-interactive):
-#   1. Install workspace dependencies (npm install).
+#   1. Install workspace dependencies (npm ci — see install_dependencies).
 #   2. Start the Docker daemon if it isn't already running (clearing stale
 #      pid files left behind by a container pause/resume).
 #   3. Pre-pull the Postgres + testcontainers-reaper images so integration
@@ -22,8 +22,41 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-echo "[session-start] Installing workspace dependencies…"
-npm install
+# `npm ci` rather than `npm install`, deliberately.
+#
+# `npm install` rewrites package-lock.json on every session in this image: npm
+# 10.9.7 strips the `libc` metadata from 14 Linux native-binary optional deps
+# (@tailwindcss/oxide-linux-*, @rolldown/binding-linux-*-musl and siblings) —
+# 42 deletions, 0 additions, every single time. That field is functional: npm
+# uses it to pick the glibc vs musl build, so dropping it is a regression for
+# musl environments, not cosmetic noise. It also left every session with a
+# dirty tree, which trained the stop hook to cry wolf.
+#
+# `npm ci` installs exactly what the lockfile says and never writes to it,
+# which is the correct semantic for a bootstrap anyway. It costs ~33s against
+# ~5s for a warm `npm install` (measured in this image); that is the price of
+# a reproducible tree and a clean `git status`.
+#
+# Consequence worth keeping: with `npm ci` as the default path, a dirty
+# package-lock.json now MEANS something. Do not reflexively revert it.
+install_dependencies() {
+  echo "[session-start] Installing workspace dependencies (npm ci)…"
+  if npm ci; then
+    return 0
+  fi
+
+  # `npm ci` fails hard when package.json and package-lock.json disagree. That
+  # is a real signal, not a flake — but it must not leave the session without
+  # node_modules, and `set -e` would otherwise abort before Docker starts.
+  echo "[session-start] WARNING: npm ci failed — package-lock.json is likely out of sync"
+  echo "[session-start]          with package.json, or the registry is unreachable."
+  echo "[session-start]          Falling back to npm install so the session is usable."
+  echo "[session-start]          If package-lock.json is modified after this, the change"
+  echo "[session-start]          is REAL: review and commit it deliberately, do not revert."
+  npm install || echo "[session-start] WARNING: npm install also failed — dependencies are incomplete."
+}
+
+install_dependencies
 
 # Postgres image used by test/integration/global-setup.ts. Override-able so the
 # hook tracks the test config if the image ever changes.
