@@ -56,7 +56,7 @@ const LANG = {
   spanishDispatcherUserIds: [],
 };
 
-type Caps = Record<string, { enabled: boolean; source: string }> | null;
+type Caps = Record<string, { enabled: boolean; source: string; platformFrozen?: boolean }> | null;
 
 /**
  * Route the mount fetches by URL rather than by call order — the capabilities
@@ -77,8 +77,8 @@ function primeMount(opts: { capabilities?: Caps; capabilitiesStatus?: number } =
       return Promise.resolve(
         jsonResponse(
           opts.capabilities ?? {
-            dropped_call_recovery: { enabled: false, source: 'default' },
-            voice_vulnerability_triage: { enabled: false, source: 'default' },
+            dropped_call_recovery: { enabled: false, source: 'default', platformFrozen: false },
+            voice_vulnerability_triage: { enabled: false, source: 'default', platformFrozen: false },
           },
         ),
       );
@@ -139,8 +139,8 @@ describe('#1011 — SettingsPage capabilities', () => {
   it('hydrates each switch from its resolved state', async () => {
     primeMount({
       capabilities: {
-        dropped_call_recovery: { enabled: true, source: 'tenant' },
-        voice_vulnerability_triage: { enabled: false, source: 'default' },
+        dropped_call_recovery: { enabled: true, source: 'tenant', platformFrozen: false },
+        voice_vulnerability_triage: { enabled: false, source: 'default', platformFrozen: false },
       },
     });
     renderPage();
@@ -185,8 +185,8 @@ describe('#1011 — SettingsPage capabilities', () => {
       if (url === '/api/settings/capabilities') {
         return Promise.resolve(
           jsonResponse({
-            dropped_call_recovery: { enabled: false, source: 'default' },
-            voice_vulnerability_triage: { enabled: false, source: 'default' },
+            dropped_call_recovery: { enabled: false, source: 'default', platformFrozen: false },
+            voice_vulnerability_triage: { enabled: false, source: 'default', platformFrozen: false },
           }),
         );
       }
@@ -204,11 +204,37 @@ describe('#1011 — SettingsPage capabilities', () => {
     await waitFor(() => expect(toggleFor(dropped).className).toContain('bg-slate-200'));
   });
 
+  it('a platform flag that is ON is still the owner\'s to turn OFF', async () => {
+    // The 409 rule (routes/settings.ts) fires ONLY for a platform row with
+    // `enabled: false`. A platform row that is ON is a ramp, not a freeze —
+    // the server accepts the write, so the switch must not be disabled and the
+    // row must not claim the capability is turned off platform-wide.
+    primeMount({
+      capabilities: {
+        dropped_call_recovery: { enabled: true, source: 'platform', platformFrozen: false },
+        voice_vulnerability_triage: { enabled: false, source: 'default', platformFrozen: false },
+      },
+    });
+    renderPage();
+
+    const dropped = await screen.findByText(LABELS.dropped);
+    const button = toggleFor(dropped);
+    expect(button.disabled).toBe(false);
+    expect(dropped.closest('div')!.textContent).not.toMatch(/platform/i);
+
+    fireEvent.click(button);
+    await waitFor(() => {
+      const put = capabilityPut('dropped_call_recovery');
+      expect(put).toBeDefined();
+      expect(JSON.parse((put![1] as RequestInit).body as string)).toEqual({ enabled: false });
+    });
+  });
+
   it('D5: a platform-frozen capability is disabled, explained, and not PUT-able', async () => {
     primeMount({
       capabilities: {
-        dropped_call_recovery: { enabled: false, source: 'platform' },
-        voice_vulnerability_triage: { enabled: false, source: 'default' },
+        dropped_call_recovery: { enabled: false, source: 'platform', platformFrozen: true },
+        voice_vulnerability_triage: { enabled: false, source: 'default', platformFrozen: false },
       },
     });
     renderPage();

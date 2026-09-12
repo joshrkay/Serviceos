@@ -298,10 +298,12 @@ describe('#1011 — owner capability write reaches tenant_feature_flags (real Po
     expect(aRead.body[VOICE_VULNERABILITY_TRIAGE_FLAG]).toEqual({
       enabled: true,
       source: 'tenant',
+      platformFrozen: false,
     });
     expect(bRead.body[VOICE_VULNERABILITY_TRIAGE_FLAG]).toEqual({
       enabled: false,
       source: 'default',
+      platformFrozen: false,
     });
   });
 

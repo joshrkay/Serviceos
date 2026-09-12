@@ -202,6 +202,24 @@ export interface SettingsCapabilityDependencies {
 
 type CapabilitySource = 'tenant' | 'platform' | 'default';
 
+/**
+ * #1011 — the D5 write-boundary rule, as ONE predicate.
+ *
+ * A platform flag row only freezes a capability when it is explicitly OFF: a
+ * row that is ON is a RAMP, and the owner may still turn the capability off for
+ * their own tenant. `source === 'platform'` is NOT the same question — it only
+ * says where the current value came from — and a client that re-derived the
+ * rule from `source` alone disabled the switch on a platform row that was on,
+ * telling the owner it was "turned off platform-wide" while the server would
+ * happily have accepted the write.
+ *
+ * So the PUT's 409 and the GET's `platformFrozen` both read this, and the
+ * client is told the answer rather than recomputing it.
+ */
+function isPlatformFrozen(platformFlag: { enabled: boolean } | null): boolean {
+  return platformFlag !== null && platformFlag.enabled === false;
+}
+
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
   deps?: SettingsRouterDependencies,
@@ -221,7 +239,7 @@ export function createSettingsRouter(
     capDeps: SettingsCapabilityDependencies,
     tenantId: string,
     key: OwnerCapability,
-  ): Promise<{ enabled: boolean; source: CapabilitySource }> {
+  ): Promise<{ enabled: boolean; source: CapabilitySource; platformFrozen: boolean }> {
     const [enabled, override, platform] = await Promise.all([
       capDeps.tenantFlags.isEnabledForTenant(tenantId, key),
       capDeps.tenantFlags.getTenantOverride(tenantId, key),
@@ -229,7 +247,7 @@ export function createSettingsRouter(
     ]);
     const source: CapabilitySource =
       override !== null ? 'tenant' : platform ? 'platform' : 'default';
-    return { enabled, source };
+    return { enabled, source, platformFrozen: isPlatformFrozen(platform) };
   }
 
   router.get(
@@ -673,7 +691,7 @@ export function createSettingsRouter(
         // composition is out of scope on this ticket, and whether a tenant may
         // self-grant past a platform ramp at all is an owner decision (§E.3).
         const platformFlag = await capabilityDeps.platformFlags.get(key.data);
-        if (platformFlag && platformFlag.enabled === false) {
+        if (isPlatformFrozen(platformFlag)) {
           res.status(409).json({
             error: 'PLATFORM_DISABLED',
             message:

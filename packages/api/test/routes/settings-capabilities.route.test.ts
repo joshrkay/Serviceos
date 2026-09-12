@@ -157,6 +157,7 @@ describe('#1011 — PUT /api/settings/capabilities/:key', () => {
       key: 'dropped_call_recovery',
       enabled: true,
       source: 'tenant',
+      platformFrozen: false,
     });
     // The canonical users.id, NOT the Clerk subject on req.auth.userId.
     expect(built.tenantFlags.rows.get(`${TENANT}:dropped_call_recovery`)).toEqual({
@@ -324,8 +325,8 @@ describe('#1011 — GET /api/settings/capabilities', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      dropped_call_recovery: { enabled: true, source: 'tenant' },
-      voice_vulnerability_triage: { enabled: false, source: 'default' },
+      dropped_call_recovery: { enabled: true, source: 'tenant', platformFrozen: false },
+      voice_vulnerability_triage: { enabled: false, source: 'default', platformFrozen: false },
     });
   });
 
@@ -336,7 +337,42 @@ describe('#1011 — GET /api/settings/capabilities', () => {
     const res = await request(built.app).get('/api/settings/capabilities');
 
     expect(res.status).toBe(200);
-    expect(res.body.voice_vulnerability_triage).toEqual({ enabled: true, source: 'platform' });
+    // A platform row that is ON is a RAMP, not a freeze: the 409 rule fires
+    // only for `enabled: false`, so the owner may still turn this off.
+    expect(res.body.voice_vulnerability_triage).toEqual({
+      enabled: true,
+      source: 'platform',
+      platformFrozen: false,
+    });
+  });
+
+  it('platformFrozen is true ONLY for a platform row that is OFF', async () => {
+    const built = await buildApp();
+    await built.platformFlags.upsert({ name: 'dropped_call_recovery', enabled: false });
+    await built.platformFlags.upsert({ name: 'voice_vulnerability_triage', enabled: true });
+
+    const res = await request(built.app).get('/api/settings/capabilities');
+
+    expect(res.status).toBe(200);
+    // The frozen one is the one whose PUT would 409 — one truth, computed
+    // where the 409 rule lives instead of re-derived in the client.
+    expect(res.body.dropped_call_recovery.platformFrozen).toBe(true);
+    expect(res.body.voice_vulnerability_triage.platformFrozen).toBe(false);
+  });
+
+  it('a tenant override leaves platformFrozen false even when a platform row exists and is ON', async () => {
+    const built = await buildApp();
+    await built.platformFlags.upsert({ name: 'dropped_call_recovery', enabled: true });
+    await request(built.app)
+      .put('/api/settings/capabilities/dropped_call_recovery')
+      .send({ enabled: false });
+
+    const res = await request(built.app).get('/api/settings/capabilities');
+    expect(res.body.dropped_call_recovery).toEqual({
+      enabled: false,
+      source: 'tenant',
+      platformFrozen: false,
+    });
   });
 
   it('is readable by a dispatcher (settings:view)', async () => {

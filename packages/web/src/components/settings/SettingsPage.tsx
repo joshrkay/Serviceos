@@ -128,10 +128,19 @@ const OWNER_CAPABILITIES = [
 
 type OwnerCapabilityKey = (typeof OWNER_CAPABILITIES)[number]['key'];
 
-/** Mirrors the API response: the resolved value plus who decided it. */
+/** Mirrors the API response: the resolved value, who decided it, and whether it is ours to change. */
 interface CapabilityState {
   enabled: boolean;
   source: 'tenant' | 'platform' | 'default';
+  /**
+   * The server's own answer to "would a PUT be refused?" — true only for a
+   * platform row that is explicitly OFF. Do NOT re-derive this from `source`:
+   * a platform row that is ON is a RAMP, not a freeze, and the owner may still
+   * turn the capability off. `source === 'platform'` was the first predicate
+   * here and it disabled the switch on a ramped-ON capability while claiming it
+   * was turned off platform-wide.
+   */
+  platformFrozen?: boolean;
 }
 
 export function SettingsPage() {
@@ -494,10 +503,12 @@ export function SettingsPage() {
    */
   async function toggleCapability(key: OwnerCapabilityKey, value: boolean) {
     const previous = capabilities?.[key];
-    if (!previous || previous.source === 'platform') return;
+    if (!previous || previous.platformFrozen === true) return;
 
     setCapabilities((prev) =>
-      prev ? { ...prev, [key]: { enabled: value, source: 'tenant' } } : prev,
+      prev
+        ? { ...prev, [key]: { enabled: value, source: 'tenant', platformFrozen: false } }
+        : prev,
     );
     try {
       const res = await apiFetch(`/api/settings/capabilities/${key}`, {
@@ -508,13 +519,21 @@ export function SettingsPage() {
       if (!res.ok) throw new Error(`PUT /api/settings/capabilities/${key} ${res.status}`);
       // Trust the server's RESOLVED state over the optimistic one: the write is
       // an override and the value that matters is what the gate will read.
-      const resolved = (await res.json()) as { enabled?: boolean; source?: CapabilityState['source'] };
+      const resolved = (await res.json()) as {
+        enabled?: boolean;
+        source?: CapabilityState['source'];
+        platformFrozen?: boolean;
+      };
       if (typeof resolved.enabled === 'boolean') {
         setCapabilities((prev) =>
           prev
             ? {
                 ...prev,
-                [key]: { enabled: resolved.enabled!, source: resolved.source ?? 'tenant' },
+                [key]: {
+                  enabled: resolved.enabled!,
+                  source: resolved.source ?? 'tenant',
+                  platformFrozen: resolved.platformFrozen ?? false,
+                },
               }
             : prev,
         );
@@ -1286,8 +1305,14 @@ export function SettingsPage() {
               <p className="text-xs text-slate-400">Capabilities</p>
             </div>
             {OWNER_CAPABILITIES.map(({ key, label, description }) => {
-              const state = capabilities[key] ?? { enabled: false, source: 'default' as const };
-              const frozen = state.source === 'platform';
+              const state = capabilities[key] ?? {
+                enabled: false,
+                source: 'default' as const,
+                platformFrozen: false,
+              };
+              // The SERVER's answer, not a re-derivation: a platform row that
+              // is ON is a ramp the owner may still switch off.
+              const frozen = state.platformFrozen === true;
               return (
                 <div key={key} className="flex items-start justify-between gap-3 px-4 py-3.5">
                   <div>
