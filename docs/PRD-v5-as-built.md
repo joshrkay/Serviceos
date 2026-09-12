@@ -1541,7 +1541,7 @@ understanding than put words in a customer's mouth.
 
 | # | User story | Acceptance criterion | Rung | Confirm |
 |---|---|---|---|---|
-| **9.1** | **As M**, I want a customer thanked 2h after the job, so the last thing they remember is courtesy | **Given** two concurrent sweeps over one eligible job, **when** they run, **then** exactly one send and one `notification.thank_you_sms.sent` audit row — and a "sent" claim with a NULL stamp is **reconciled, not resent** | 4 | **D:** `thank-you-sms-worker.test.ts` |
+| **9.1** | **As M**, I want a customer thanked 2h after the job, so the last thing they remember is courtesy | **Given** two concurrent sweeps over one eligible job, **when** they run, **then** exactly one send and one `notification.thank_you_sms.sent` audit row — and a "sent" claim with a NULL stamp is **reconciled, not resent**; **and** the send survives the central consent gate in `block` mode | 4 | **D:** `thank-you-sms-worker.test.ts` · **U:** `workers/thank-you-sms-worker.test.ts` — *the gated-chain case; see §12.2, this row was **unsendable in production** until 2026-09-12* |
 | **9.2** | **As M**, I want a review asked for automatically, so my rating grows without me thinking about it | **Given** a completed job 24h old, **when** swept twice, **then** one `feedback_send` enqueued, with the setting defaulting **on** at the column level | **4−** | **D:** `review-request-sweep.test.ts` — *no audit assertion* |
 | **9.3** | **As M**, I want an unhappy customer routed to me privately and a happy one to Google, so a bad day doesn't become a permanent 2★ | **Given** `rating: 3`, **when** submitted, **then** the response persists and **no** review links return; **given** `rating: 5`, **then** the configured link returns | **3** 🚨🚨 | Proven only by a mocked-repo route test. **This is the row deciding whether a 2★ experience becomes a public Google review, and it has no real-DB proof** |
 | **9.4** | **As M**, I want new Google reviews found and a response drafted for my approval, so I reply within a day without watching for them | **Given** a connected tenant, **when** a sweep runs, **then** new reviews persist, the cursor advances, a re-sweep persists nothing new, a 429 stamps backoff, and reviews are RLS-invisible cross-tenant — with a PII-redacted draft response awaiting approval | **4 / 3** ↑ | **D:** `google-reviews-worker.test.ts`. *Classification and drafting are unit-only* |
@@ -2339,6 +2339,35 @@ documents.
 | **No absolute per-call wall-clock cap** — the idle timer re-arms on comfort noise | A looping caller bills telephony, recognition, model, and synthesis indefinitely |
 | **Domain audit events are best-effort** (§5.0b, tier 2) | During an audit-store outage, operational state can be created without its domain audit row. The execution-outcome row still lands on the DB-only path, so the proposal trail survives — but "every mutation is auditable" is weaker than it reads. Worth deciding explicitly: strengthen tier 2, or state the limit in any compliance claim that rests on the audit trail |
 
+**FIXED 2026-09-12 — the thank-you SMS could not send in production at all.**
+Kept here rather than deleted, because the way it hid is the point.
+
+`runThankYouSmsSweep` called its dispatcher with `{ to, body }`. That dispatcher
+is `MessageDeliveryFeedbackDispatcher`, which tags every send **customer-class**
+and wraps the single `GatedMessageDelivery` object. The gate's first two checks
+are `if (!message.consent) return 'missing_consent_context'` and, for the
+per-tenant DNC and ledger lookups, `if (!message.tenantId)` — the same reason
+again. `TCPA_CONSENT_ENFORCEMENT` has a zod default of `'off'`, **but
+`shared/config.ts:216` resolves it to `'block'` in prod and staging whenever an
+operator has not set it explicitly.** So in production every thank-you SMS threw
+`SmsSuppressedError('missing_consent_context')` — and, before this fix, that
+throw was caught as a *transient* failure, leaving `thank_you_sms_sent_at` null
+so the sweep re-selected the same job on every tick, forever.
+
+The worker had **already** checked `customer.smsConsent !== true` and
+`dncRepo.isOnDnc` before dispatching. It knew both answers and did not pass them
+on. Its sibling, `feedback-send.ts:69`, passes both.
+
+Nothing in the suite could see it: every unit test injected a bare
+`{ send: vi.fn() }`, the fan-out integration test did the same, and the one
+assertion that checked the payload asserted `{ to, body }` **exactly** — an
+exact-match on the defect. §12.4d files this as the sharpest instance of a
+mocked dependency capping a claim at the mock: the substitute could not fail,
+so the rung-4 row above described a capability that had never sent a message in
+production. Fixed by forwarding `tenantId` + `consent`, treating a gate
+suppression as terminal, and adding a unit test that composes the **real**
+adapter over the **real** gate in `block` mode. Caught in review (Codex P1).
+
 ### 12.3 Money — correctness defects
 
 | Gap | Effect |
@@ -2702,7 +2731,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how thirteen of these were got wrong
+### 12.4d A note on method — how fourteen of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2954,6 +2983,36 @@ an instrument can.
 
 **A harness is not exempt from the standard it enforces.** Both of these passed
 review twice before someone read what the assertions could not fail on.
+
+**The fourteenth is the only one that was a live production defect, and it is
+shape 3 at full strength.** Story 9.1 — the post-job thank-you SMS — was filed
+at rung 4 on a Docker-gated test. In production it could not send a single
+message: the worker passed `{ to, body }` to a dispatcher whose gate fails
+closed without `tenantId` and a consent snapshot, and `TCPA_CONSENT_ENFORCEMENT`
+resolves to `block` in prod and staging when unset (§12.2 has the full chain).
+
+What makes it the strongest specimen in this section is the *shape of the
+evidence*, not the size of the bug:
+
+| The proof that existed | Why it could not fail |
+|---|---|
+| `test/workers/thank-you-sms-worker.test.ts` | injected `{ send: vi.fn() }` |
+| `test/integration/thank-you-sms-worker.test.ts` (Docker-gated, rung 4) | same substitute |
+| `test/integration/sweep-tenant-fanout.test.ts` (added by this PR) | same substitute |
+| the one assertion on the payload | `toHaveBeenCalledWith({ to, body })` — an **exact match on the defect** |
+
+Three independent test files, one of them real-Postgres, and the thing they all
+replaced was the thing that was broken. **A rung measures the distance between a
+test and production, and every one of these was measuring zero because the
+substitute sat exactly where production's gate does.** The fix adds the case
+that was missing: compose the real adapter over the real gate in `block` mode
+and assert the bytes reach the base provider. Reverting the two forwarded
+arguments fails it.
+
+The rule that generalises: **when a dependency is a policy gate, a mock of it is
+not a mock of a collaborator — it is a deletion of the policy.** The other
+substitutes in this suite (repos, clocks, providers) stand in for things that
+say *yes*. This one stood in for the thing whose job is to say *no*.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading

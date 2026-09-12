@@ -41,6 +41,7 @@ import { CustomerRepository } from '../customers/customer';
 import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
+import { SmsSuppressedError } from '../notifications/gated-message-delivery';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
@@ -256,9 +257,38 @@ async function sendOneThankYou(
   // send and the thankYouSmsSentAt write can't resend on the next tick. A
   // sendFn throw releases the claim (withSendClaim) and rethrows — the outer
   // per-job catch above leaves thankYouSmsSentAt null so the next sweep retries.
-  const claimResult = await withSendClaim(pool, tenantId, thankYouClaimKey(jobId), () =>
-    deps.dispatcher.send({ to: customer.primaryPhone as string, body }),
-  );
+  // WS1 — the dispatcher tags every send customer-class, and the central
+  // GatedMessageDelivery wrapper FAILS CLOSED without both of these:
+  // `missing_consent_context` for a missing consent snapshot, and again for a
+  // missing tenantId (the DNC list and consent ledger are per-tenant). With
+  // `TCPA_CONSENT_ENFORCEMENT` unset in prod/staging the config resolves it to
+  // 'block', so omitting them suppressed EVERY thank-you SMS in production
+  // while every test passed against a substitute dispatcher. The two guards
+  // above already established consent and DNC for this customer; forwarding
+  // them is what lets the gate see what this worker already checked.
+  // Caught in review on PR #994 (Codex P1). Mirrors `feedback-send.ts:69`.
+  let claimResult: Awaited<ReturnType<typeof withSendClaim>>;
+  try {
+    claimResult = await withSendClaim(pool, tenantId, thankYouClaimKey(jobId), () =>
+      deps.dispatcher.send({
+        to: customer.primaryPhone as string,
+        body,
+        tenantId,
+        consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+      }),
+    );
+  } catch (err) {
+    if (err instanceof SmsSuppressedError) {
+      // Terminal, not transient. The gate consults the consent ledger, which
+      // this worker does not read, so a cross-channel revocation can suppress a
+      // send whose local consent + DNC checks both passed. That verdict will
+      // not change on the next tick: stamp it like the `on_dnc` path above
+      // rather than leaving the row to be re-selected forever.
+      await markHandled(deps, tenantId, jobId, customer.id, `consent_gate:${err.reason}`);
+      return 'suppressed';
+    }
+    throw err;
+  }
   if (claimResult.outcome === 'duplicate') {
     if (claimResult.priorStatus === 'sent') {
       // The send for this job already went out (a prior attempt completed the
