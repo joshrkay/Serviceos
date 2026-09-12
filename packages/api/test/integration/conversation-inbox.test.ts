@@ -231,10 +231,39 @@ describe('Postgres integration — U5 inbox thread listing', () => {
    * turn this test red (failing to fail), not green.
    */
   it.fails('story claim not met in code: a neighbour tenant’s draft reply is never visible', async () => {
+    // A real seeded thread, not an empty listing — otherwise threads[0] is
+    // `undefined` and this sentinel fails for "no thread exists" rather than
+    // "no replyDraft field exists", and would keep passing (vacuously) even
+    // after a real draft feature is wired. Caught in review on this PR.
     const neighbourTenant = await createTestTenant(pool);
+    const neighbourCustomer = await customerRepo.create(
+      baseCustomer(neighbourTenant.tenantId, neighbourTenant.userId, {
+        displayName: 'Sentinel Sam',
+        primaryPhone: '+15555554001',
+      }),
+    );
+    const neighbourThread = await conversationRepo.createConversation({
+      tenantId: neighbourTenant.tenantId,
+      title: 'Sentinel Sam',
+      entityType: 'customer',
+      entityId: neighbourCustomer.id,
+      createdBy: neighbourTenant.userId,
+    });
+    await conversationRepo.addMessage({
+      tenantId: neighbourTenant.tenantId,
+      conversationId: neighbourThread.id,
+      messageType: 'text',
+      content: 'can you fit me in tomorrow?',
+      senderId: '+15555554001',
+      senderRole: 'customer',
+      source: 'sms',
+      metadata: { direction: 'inbound', channel: 'sms' },
+    });
+
     const threads = await conversationRepo.listInboxThreads(neighbourTenant.tenantId);
+    const thread = threads.find((t) => t.conversation.id === neighbourThread.id);
     // No such field exists today — this assertion is what a real
     // reply-draft feature would need to satisfy.
-    expect(threads[0]).toHaveProperty('replyDraft');
+    expect(thread).toHaveProperty('replyDraft');
   });
 });

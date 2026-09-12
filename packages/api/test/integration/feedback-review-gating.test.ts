@@ -195,7 +195,15 @@ describe('Postgres integration — 9.3 review-gating (rating >= 4 ⇒ review lin
     const token = await mintRequest();
     const res = await request(app).post(`/public/feedback/${token}`).send({ rating: 2 });
     const found = await requestRepo.findByToken(token);
-    const events = await auditRepo.findByEntity(tenant.tenantId, 'feedback_response', found!.id);
+    // The route's OWN audit write keys on the response id, not the request id
+    // (`feedback_response.submitted` is written with `entityId: response.id`
+    // — see routes/public-feedback.ts). Querying by the request id here meant
+    // this sentinel would keep failing — and it.fails would keep vacuously
+    // passing — even after a real owner-notification event were added,
+    // because it would never look at the right row. Caught in review on this
+    // PR. Match the real contract: resolve the response first.
+    const response = await responseRepo.findByRequest(tenant.tenantId, found!.id);
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'feedback_response', response!.id);
     // No event type for an owner notification exists in the codebase today —
     // this is the assertion a real implementation would need to satisfy.
     expect(events.map((e) => e.eventType)).toContain('feedback_response.owner_notified');
