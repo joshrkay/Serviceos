@@ -19,11 +19,22 @@ per PRD §5.0c (a) + (b):
 
 ## What counts as an owner action here
 
-**The derived set is every owner-only route the booted app serves.** A route is
-owner-only when the guard chain Express actually runs for it admits `owner` and
-refuses **both** `dispatcher` and `technician`. That is decided by *executing*
-the mounted guards against each role, not by reading source — see the contract
-test's header for the mechanism.
+**The derived set is every owner-only route the booted app serves**, from two
+arms of deliberately different strength:
+
+1. **Executed guards** — the guard chain Express actually runs for the route
+   admits `owner` and refuses **both** `dispatcher` and `technician`. Decided by
+   *executing* the mounted guards against each role, not by reading source.
+2. **Declared in-handler** — a handful of routes gate on owner *inside* the
+   handler (`req.auth!.role !== 'owner'`), where the guard walker cannot see
+   them. These are declared in the test and cross-checked from both sides: the
+   route must still be mounted, and the source must still contain the check. A
+   scan fails the build if any **new** file starts gating this way.
+
+The app is booted **with a database URL** — a pool must exist or ~20 routers
+never mount, and the owner-only `/api/entity-aliases` is one of them. The pool
+connects lazily and no query is ever issued; the test only walks the router
+stack. See the contract test's header.
 
 **Known limit of this derivation, stated rather than hidden.** In the ICP (a
 1–3-truck shop) the owner is frequently the *only* user, so they personally
@@ -83,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **53** |
+| Owner-only routes in code | **54** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **6** |
-| `cadence: occasional` | **45** |
+| `cadence: occasional` | **46** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **6** |
 
@@ -98,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 53,
+  "ownerOnlyRoutes": 54,
   "daily": 2,
   "onboarding": 6,
-  "occasional": 45,
+  "occasional": 46,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 6
 }
@@ -130,6 +141,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `DELETE /api/notes/:id` | occasional | Cleanup of a note the day already captured. | false | none | |
 | `DELETE /api/settings/packs/:packId` | occasional | Vertical-pack configuration. | false | none | |
 | `DELETE /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken money/irreversible challenge. | false | none | |
+| `PATCH /api/entity-aliases/:id/deactivate` | occasional | Revokes a learned tenant alias — a correction to what the AI inferred, not a step in a normal day. Owner-only per the router's own header ("Owner-only revoke path for learned tenant aliases"). **Gated inside the handler, not by a middleware guard**, so the executed-guard derivation cannot see it; declared in `IN_HANDLER_OWNER_ROUTES` and cross-checked against the mounted app and the source. | false | none | |
 | `GET /api/evaluation/shadow-comparisons` | occasional | Internal AI-evaluation surface; not part of running the business. | false | none | |
 | `GET /api/settings/packs/` | occasional | Configuration read. | false | none | |
 | `PATCH /api/job-forms/templates/:id` | occasional | Job-form template configuration. | false | none | |

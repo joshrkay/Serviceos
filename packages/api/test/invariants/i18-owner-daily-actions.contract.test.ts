@@ -14,9 +14,13 @@
  *
  * ── The definition this test enforces ────────────────────────────────────────
  *
- * DERIVED SET — every **owner-only** route the booted app serves. A route is
- * owner-only when the guard chain Express actually runs for it admits `owner`
- * and refuses BOTH `dispatcher` and `technician`.
+ * DERIVED SET — every **owner-only** route the booted app serves, from two arms
+ * of deliberately different strength:
+ *   (1) EXECUTED GUARDS — the guard chain Express actually runs for the route
+ *       admits `owner` and refuses BOTH `dispatcher` and `technician`;
+ *   (2) DECLARED IN-HANDLER — the route gates on owner inside its handler,
+ *       where the walker cannot see it. Declared, then cross-checked against
+ *       the mounted app and the source. See IN_HANDLER_OWNER_ROUTES.
  *
  * REQUIRED ON A NORMAL DAY — a row's `cadence`:
  *   `daily`      the ordinary flow of a day's jobs and calls forces the owner
@@ -33,9 +37,12 @@
  *
  * ── How the derivation works, and why it is not a grep ───────────────────────
  *
- * `createApp()` is booted hermetically (no Postgres, no Clerk, no AI key —
- * identical to route-manifest.test.ts) and its real Express layer stack is
- * walked. For every route, the guards Express would actually run are collected
+ * `createApp()` is booted with no Clerk instance and no AI key, but WITH a
+ * DATABASE_URL — a pool must exist or ~20 routers never mount (`app.ts` guards
+ * several with `if (pool)` / `if (<pool-backed repo>)`, and the owner-only
+ * `/api/entity-aliases` is one of them). pg.Pool connects lazily and this test
+ * only walks the router stack, so no query is ever issued. Its real Express
+ * layer stack is then walked. For every route, the guards Express would actually run are collected
  * — router-level `use` middleware registered ahead of it plus the route's own
  * stack — and each is EXECUTED against a synthetic request for `owner`,
  * `dispatcher` and `technician` in turn. A guard is recognised as a role guard
@@ -58,13 +65,18 @@
  * `keyword:` against the inbound-SMS registry as the booted app populated it,
  * `one_tap:` against a route the booted app actually mounts.
  *
- * TWO KNOWN LIMITS, stated rather than hidden:
+ * THREE KNOWN LIMITS, stated rather than hidden:
  *
  *  1. In a 1–3-truck shop the owner is often the only user, so they perform
  *     plenty of actions that are not owner-ONLY and therefore never enter this
  *     inventory. §5.0c specifies this derivation ("every `role: owner` route");
  *     it is a lower bound on I18's real surface, not the whole of it.
- *  2. A channel claim is checked for EXISTENCE and for UNIQUENESS across rows,
+ *  2. Arm (2) is source-declared, not executed: `asyncRoute` hides the handler
+ *     inside a wrapper, and the handler cannot be safely probed (it reaches a
+ *     repository and throws for unrelated reasons). It is weaker evidence, and
+ *     `filesWithInHandlerOwnerChecks` fails the build when a NEW file starts
+ *     gating this way so the weakness cannot spread unnoticed.
+ *  3. A channel claim is checked for EXISTENCE and for UNIQUENESS across rows,
  *     not for performing that row's specific action — proving voice intent X
  *     does the same thing as HTTP route Y would need a route → action → channel
  *     map, and the two universes (Express handler vs. proposal type + execution
@@ -95,7 +107,7 @@ const INVENTORY_PATH = path.resolve(REPO_ROOT, 'docs/reference/owner-daily-actio
 /** PRD §5.0c (b) — the budget. A PR that moves one of these is self-documenting. */
 const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 6;
-const OWNER_ONLY_ROUTES = 53;
+const OWNER_ONLY_ROUTES = 54;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
@@ -246,6 +258,72 @@ export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
 
   walk(root.stack, '', []);
   return [...found].sort();
+}
+
+/**
+ * Routes that gate on owner INSIDE the handler, where the guard walker cannot
+ * see them.
+ *
+ * `asyncRoute(fn)` returns a wrapper whose source contains neither refusal
+ * string, and `fn` itself cannot be safely executed by a probe (it would reach
+ * a repository, and it throws for unrelated reasons — a missing param, a
+ * missing canonical user — so "did it admit the owner?" is not answerable by
+ * running it). So this arm is DECLARED, and then checked from two sides so the
+ * declaration cannot rot:
+ *
+ *   - the route must actually be mounted by the booted app (it cannot be
+ *     fictional, or left behind after a route is deleted);
+ *   - the file must still contain an unconditional owner comparison (it cannot
+ *     be left behind after the check moves into a middleware guard).
+ *
+ * And `inHandlerOwnerCheckFiles` below fails the build when any NEW file starts
+ * gating on owner this way, so a future one cannot slip in unnoticed.
+ *
+ * This is weaker evidence than the executed-guard arm and is labelled as such.
+ * (Codex, #1073: `PATCH /api/entity-aliases/:id/deactivate` is owner-only —
+ * "Owner-only revoke path for learned tenant aliases" — and the first version
+ * of this test missed it on both counts, being DB-gated at the mount AND
+ * in-handler at the check.)
+ */
+const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{ route: string; source: string }> = [
+  {
+    route: 'PATCH /api/entity-aliases/:id/deactivate',
+    source: 'packages/api/src/routes/entity-aliases.ts',
+  },
+];
+
+/**
+ * Every file with an UNCONDITIONAL `req.auth.role` owner comparison — the shape
+ * that makes a whole route owner-only.
+ *
+ * A conditional one (`targetId !== actor.id && req.auth!.role !== 'owner'`, as
+ * in `routes/users.ts`) does NOT make a route owner-only: a technician reaches
+ * it for their own record, so it is self-service with an owner escalation, and
+ * it correctly stays out of the inventory. The distinction is the `&&`, so the
+ * scan records every hit and the assertion below classifies them.
+ */
+async function filesWithInHandlerOwnerChecks(): Promise<string[]> {
+  const srcRoot = path.resolve(__dirname, '../../src');
+  const pattern = /req\.auth!?\??\.role\s*[!=]==\s*'owner'/;
+  const found: string[] = [];
+
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.ts')) continue;
+      const text = await fs.readFile(full, 'utf8');
+      if (pattern.test(text)) {
+        found.push(path.relative(path.resolve(__dirname, '../../../..'), full));
+      }
+    }
+  };
+
+  await walk(srcRoot);
+  return found.sort();
 }
 
 /** Every `METHOD /path` the booted app mounts, owner-only or not. */
@@ -445,13 +523,26 @@ describe('I18: owner daily actions ↔ code contract', () => {
     process.env.NODE_ENV = 'dev';
     process.env.DEV_AUTH_BYPASS = 'true';
     process.env.PROCESS_ROLE = 'web';
-    delete process.env.DATABASE_URL;
+    // A pool must EXIST or ~20 routers never mount — `app.ts` guards several
+    // with `if (pool)` / `if (<pool-backed repo>)`, and `/api/entity-aliases`
+    // (owner-only) is one of them. pg.Pool connects lazily, so constructing it
+    // opens no socket, and this test only walks the router stack: no query is
+    // ever issued against this URL. Booting without it derived a route set that
+    // silently excluded every DB-gated owner surface. (Codex, #1073.)
+    process.env.DATABASE_URL = 'postgres://i18-contract:unused@127.0.0.1:1/unused';
     delete process.env.AI_PROVIDER_API_KEY;
     delete process.env.CLERK_PUBLISHABLE_KEY;
     resetConfig();
 
     app = createApp();
-    derived = deriveOwnerOnlyRoutes(app);
+    // Two arms, deliberately distinct in strength: routes proven owner-only by
+    // EXECUTING their guards, plus the declared in-handler ones the walker
+    // cannot see. Both are checked against the doc; the second is additionally
+    // checked for still being mounted and still containing its check.
+    derived = [
+      ...deriveOwnerOnlyRoutes(app),
+      ...IN_HANDLER_OWNER_ROUTES.map((r) => r.route),
+    ].sort();
     mounted = allMountedRoutes(app);
     inventory = await loadInventory();
   });
@@ -473,6 +564,44 @@ describe('I18: owner daily actions ↔ code contract', () => {
     expect(derived.length).toBeGreaterThan(40);
     expect(derived).toContain('PUT /api/onboarding/identity'); // requireRole('owner')
     expect(derived).toContain('PUT /api/settings/'); // requirePermission('settings:update')
+  });
+
+  it('keeps every declared in-handler owner route mounted and still gated', async () => {
+    // The declaration cannot be fictional: the app must really mount it.
+    for (const { route } of IN_HANDLER_OWNER_ROUTES) {
+      expect(
+        mounted,
+        `${route} is declared in-handler owner-only but not mounted`,
+      ).toContain(route);
+    }
+    // …and it cannot be stale: the check must still be in the source. If it
+    // moved into a middleware guard, the executed-guard arm now covers it and
+    // this declaration must be deleted, or the route is counted twice.
+    for (const { route, source } of IN_HANDLER_OWNER_ROUTES) {
+      const text = await fs.readFile(path.resolve(REPO_ROOT, source), 'utf8');
+      expect(text, `${route}: ${source} no longer gates on owner in the handler`).toMatch(
+        /req\.auth!?\??\.role\s*[!=]==\s*'owner'/,
+      );
+      expect(
+        deriveOwnerOnlyRoutes(app),
+        `${route} is now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES`,
+      ).not.toContain(route);
+    }
+  });
+
+  it('notices any NEW route that gates on owner inside its handler', async () => {
+    // The walker cannot see these, so the build has to. A new file here means:
+    // decide whether its check is unconditional (the route is owner-only → it
+    // belongs in the inventory and in IN_HANDLER_OWNER_ROUTES) or conditional
+    // (self-service with an owner escalation → not owner-only, annotate here).
+    expect(await filesWithInHandlerOwnerChecks()).toEqual([
+      // Unconditional — owner-only. Declared in IN_HANDLER_OWNER_ROUTES.
+      'packages/api/src/routes/entity-aliases.ts',
+      // Conditional (`targetId !== actor.id && … !== 'owner'`): a technician
+      // reaches these for their OWN record, so they are self-service with an
+      // owner escalation, not owner-only actions. Deliberately not inventory.
+      'packages/api/src/routes/users.ts',
+    ]);
   });
 
   it('lists every owner-only route in code (no undocumented owner surface)', () => {

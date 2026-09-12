@@ -586,3 +586,107 @@ design work, and the second follow-up this lane has surfaced without taking.
 npx tsc --project tsconfig.build.json --noEmit → clean
 neighbouring suites → 24 files, 323 tests passed
 ```
+
+---
+
+## 11. Review round 3 — the inventory was incomplete in two ways (Codex, PR #1073)
+
+Two findings, both correct, both verified against source before acting. Together
+they mean the earlier claim *"every owner-only route the booted app serves"* was
+true of the app **as this test booted it** and not of the app **as it deploys**
+— the honest word for which is incomplete. One real production route was
+missing.
+
+### 11.1 DB-gated routers never mounted
+
+`createApp()` guards ~20 mounts behind `if (pool)` / `if (<pool-backed repo>)`.
+Deleting `DATABASE_URL` for the hermetic boot meant those routers never entered
+the walker at all, so any owner-only route among them was invisible — and
+future DB-gated owner routes could be added without touching the budget.
+
+Fixed by booting **with** a `DATABASE_URL`. `pg.Pool` connects lazily, so
+constructing it opens no socket, and this test only walks the router stack, so
+no query is ever issued against it. Boot logs a connection refusal from the
+pack-seeding path and carries on; the router table is complete.
+
+**On its own this changed no number** — the extra routers contain no
+*guard-gated* owner-only route, so the executed-guard arm still derived 53. It
+matters because it removes the blind spot, and because the route the next
+finding is about lives in exactly that set.
+
+### 11.2 Owner checks inside the handler
+
+`PATCH /api/entity-aliases/:id/deactivate` is owner-only — its router's own
+header says *"Owner-only revoke path for learned tenant aliases"* — but it
+enforces that with `req.auth!.role !== 'owner'` **inside** the handler
+(`routes/entity-aliases.ts:24`), and `asyncRoute` wraps the handler in a
+function whose source contains neither refusal string. So it never entered
+`guards`, and the executed-guard arm could not see it even once mounted.
+
+It cannot be probed by execution either: the handler reaches a repository and
+throws for unrelated reasons (a missing `canonicalUserId`, a non-UUID param), so
+*"did it admit the owner?"* is not answerable by running it. The honest fix is
+therefore a **second arm, declared rather than executed, and labelled as weaker
+evidence** — with both ends nailed down so the declaration cannot rot:
+
+- the route must still be **mounted** by the booted app (it cannot be fictional
+  or outlive a deleted route);
+- its source must still contain the check (it cannot outlive the check moving
+  into a middleware guard — and if it does move, the test demands the
+  declaration be deleted so the route is not counted twice);
+- a source scan asserts the exact set of files with `req.auth.role` owner
+  comparisons, so a **new** one fails the build rather than slipping in.
+
+**The conditional/unconditional distinction matters and is encoded.**
+`routes/users.ts` also compares `req.auth!.role` to `'owner'`, but as
+`targetId !== actor.id && req.auth!.role !== 'owner'` — a technician reaches
+those routes for their **own** record. That is self-service with an owner
+escalation, not an owner-only action, so it correctly stays out of the
+inventory; the scan's pinned list annotates it as such rather than leaving a
+future reader to re-derive the judgment.
+
+### 11.3 What changed in the numbers
+
+| | Before | After |
+|---|---|---|
+| Owner-only routes | 53 | **54** |
+| `cadence: occasional` | 45 | **46** |
+| `ownerRequiredDailyWebActions` | 1 | **1** (unchanged) |
+| `ownerRequiredOnboardingWebActions` | 6 | **6** (unchanged) |
+
+The new row is `PATCH /api/entity-aliases/:id/deactivate`, classified
+`occasional`: revoking a learned alias is a correction to what the AI inferred,
+not a step in a normal day. **The headline I18 numbers are unchanged** — the
+owner's day still costs one forced web action — but the inventory is one route
+more honest, and the count of what the derivation can no longer hide is what
+actually moved.
+
+RED before GREEN, as the contract catching its own blind spot:
+
+```
+ FAIL  … > lists every owner-only route in code (no undocumented owner surface)
+AssertionError: expected [ Array(1) ] to deeply equal []
++ [ "PATCH /api/entity-aliases/:id/deactivate" ]
+
+ FAIL  … > holds the owner-only route budget
+AssertionError: expected [ Array(54) ] to have a length of 53 but got 54
+```
+
+```
+ Test Files  1 passed (1) · Tests 22 passed (22)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 325 tests passed
+```
+
+### 11.4 The lesson worth carrying
+
+Three review rounds found three holes, and all three failed in the **same
+direction**: a real owner-only surface not entering the derived set, so no doc
+row was demanded, no divergence fired, and the budget stayed flattering. A
+completeness claim is the hard part of a pin like this — asserting that what you
+found is *all* there is. §8.0's negative controls test that the machinery
+catches what it looks at; they cannot test what the machinery never looks at.
+The three arms now in place (executed guards, declared in-handler, and a scan
+that fails on a new gating style) each close one such blind spot, and the KNOWN
+LIMITS block in the test header names what is still open rather than implying
+nothing is.
