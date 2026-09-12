@@ -85,6 +85,7 @@ function srcFilesReferencing(symbol: string, declaredIn: string): string[] {
 
 interface SeededTenant {
   tenant: TestTenant;
+  customerId: string;
   appointmentId: string;
   technicianId: string;
   dateStr: string;
@@ -128,6 +129,14 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
       state: 'AZ',
       postalCode: '85001',
       country: 'USA',
+      // The pings below sit on these exact coordinates. Without them the
+      // fixture only LOOKS like a dwell signal on the service location: a
+      // geofence evaluator keyed on a located address would skip this
+      // appointment entirely, and both the `lateness === undefined` assertion
+      // and the it.fails would stay green while real wiring worked fine for
+      // located customers.
+      latitude: SITE.lat,
+      longitude: SITE.lng,
       isPrimary: true,
       addressType: 'service',
       isArchived: false,
@@ -174,6 +183,7 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
 
     return {
       tenant,
+      customerId,
       appointmentId: appointment.id,
       technicianId: tenant.userId,
       dateStr,
@@ -226,6 +236,14 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     // zero pings and fail before reaching the behaviour it claims to pin.
     expect(await seedDwellPings(tenantA, 6)).toBe(6);
     expect(await seedDwellPings(tenantB, 4)).toBe(4);
+    // The service location really carries the coordinates the pings dwell on,
+    // so the fixture is a geofence signal and not merely a set of rows.
+    const [site] = await locationRepo.findByCustomer(
+      tenantA.tenant.tenantId,
+      tenantA.customerId,
+    );
+    expect(site.latitude).toBeCloseTo(SITE.lat, 5);
+    expect(site.longitude).toBeCloseTo(SITE.lng, 5);
   }, 120_000);
 
   afterAll(async () => {

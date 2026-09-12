@@ -286,6 +286,21 @@ return `[]` cannot pass as proof.
       Tests  5 passed | 1 expected fail (6)
 ```
 
+### Review round 2 — the re-propose leg bypassed the production action (Codex, P2)
+
+Correct. The test minted a fresh proposal through `proposalRepo.create`, which
+proves a new card survives a sweep and says nothing about the criterion's second
+clause — "and can be re-proposed". If `reproposeProposal`
+(`src/proposals/actions.ts:830`, behind `POST /api/proposals/:id/re-propose`)
+stopped accepting expired cards, copying their intent, applying a fresh expiry or
+emitting `proposal.reproposed`, the test would still have passed.
+
+Now it calls the real action on the expired card and asserts what it produces:
+intent carried forward (type, payload, summary), a live `draft` with a fresh 48 h
+window, persisted (not just returned), `proposal.reproposed` audited against the
+NEW card naming `sourceProposalId`, and the action REFUSING a card that is not
+expired (`Only an expired proposal can be re-proposed`).
+
 ### Evidence class / tenant grade
 
 **PROVEN-REAL-DB** (status change + audit event at real Postgres) **plus STRUCTURAL**
@@ -431,6 +446,20 @@ previous `it` happened to create. Re-verified per test under `-t`:
 -t "carries NO lateness"                 → 1 passed | 5 skipped
 -t "audit trail reads back"              → 1 passed | 5 skipped
 ```
+
+### Review round 2 — the fixture was not actually a geofence signal (Codex, P2)
+
+Correct, and a good catch about what a future green would mean. The service
+location was seeded with no `latitude`/`longitude`, so the pings sat on `SITE`
+while the address they were supposed to be dwelling at had no coordinates at all.
+An evaluator keyed on a located address would skip this appointment entirely —
+and then BOTH the `lateness === undefined` assertion and the `it.fails` would stay
+green while the wiring worked correctly for every located customer. The test would
+have quietly stopped meaning anything at the exact moment the row was closed.
+
+The location now carries `SITE.lat`/`SITE.lng`, and `beforeAll` asserts they
+round-tripped, so the fixture is a geofence signal rather than a set of rows that
+resemble one.
 
 ### Judgment calls
 

@@ -43,6 +43,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { listAllTenantIds } from '../../src/tenants/list-tenant-ids';
 import { runProposalExpirySweep } from '../../src/workers/proposal-expiry-worker';
+import { reproposeProposal } from '../../src/proposals/actions';
 import {
   createProposal,
   defaultProposalExpiry,
@@ -218,16 +219,59 @@ describe('Postgres integration — §8.3 row 3.11 stale schedule proposals expir
     await sweep();
     expect((await proposalRepo.findById(tenantA.tenantId, stale.id))?.status).toBe('expired');
 
-    const reproposed = await seedProposal(tenantA, 'create_appointment', { ageHours: 0 });
+    // The PRODUCTION re-propose action (`proposals/actions.ts:830`), the one
+    // `POST /api/proposals/:id/re-propose` calls — not a hand-rolled fresh
+    // proposal, which would keep passing even if the real action stopped
+    // accepting expired cards, copying their intent, or applying a new expiry.
+    const reproposed = await reproposeProposal(
+      proposalRepo,
+      tenantA.tenantId,
+      stale.id,
+      tenantA.userId,
+      'owner',
+      auditRepo,
+    );
     expect(reproposed.id).not.toBe(stale.id);
+    // The intent is carried forward…
+    expect(reproposed.proposalType).toBe(stale.proposalType);
+    expect(reproposed.payload).toEqual(stale.payload);
+    expect(reproposed.summary).toBe(stale.summary);
+    // …the card is live again, with a fresh 48 h window…
+    expect(reproposed.status).toBe('draft');
     expect(reproposed.expiresAt!.getTime() - reproposed.createdAt.getTime()).toBe(
       SCHEDULE_PROPOSAL_EXPIRY_MS,
     );
+    expect(reproposed.expiresAt!.getTime()).toBeGreaterThan(Date.now());
+    // …and it is persisted, not just returned.
+    expect((await proposalRepo.findById(tenantA.tenantId, reproposed.id))?.status).toBe('draft');
+
+    // `proposal.reproposed` is audited against the NEW card, naming the source.
+    const reproposeEvents = await auditRepo.findByEntity(
+      tenantA.tenantId,
+      'proposal',
+      reproposed.id,
+    );
+    expect(reproposeEvents.map((e) => e.eventType)).toContain('proposal.reproposed');
+    expect(
+      reproposeEvents.find((e) => e.eventType === 'proposal.reproposed')?.metadata,
+    ).toMatchObject({ sourceProposalId: stale.id });
+
+    // The action refuses to re-propose a card that is not expired — so a
+    // second call on the fresh one is rejected, and the expired source is the
+    // only valid input.
+    await expect(
+      reproposeProposal(
+        proposalRepo,
+        tenantA.tenantId,
+        reproposed.id,
+        tenantA.userId,
+        'owner',
+        auditRepo,
+      ),
+    ).rejects.toThrow(/Only an expired proposal can be re-proposed/);
 
     await sweep();
-    expect((await proposalRepo.findById(tenantA.tenantId, reproposed.id))?.status).toBe(
-      'ready_for_review',
-    );
+    expect((await proposalRepo.findById(tenantA.tenantId, reproposed.id))?.status).toBe('draft');
     // The already-expired card stays terminal — the sweep does not re-expire it
     // or write a second audit row.
     const events = await auditRepo.findByEntity(tenantA.tenantId, 'proposal', stale.id);
