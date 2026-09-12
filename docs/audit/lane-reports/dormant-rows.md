@@ -22,6 +22,10 @@ This is evidence for that decision, not the decision.
 | 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + REAL-DB-WRITE-ONLY for ingestion | T1 |
 | 9.5 | `service-credit-cap-9-5.test.ts` | the only test stubs `pool.connect()` | **Confirmed.** Replaced with a real-Postgres proof; the cap holds at draft and **fails at execute** | PROVEN-REAL-DB | T1 |
 
+Counts below are from the first evidence run (25 tests). One ordinary test was
+added to row 9.5 in review round 1, so the current total is **22 passed | 4
+expected fail (26)**; the SQL dumps are unchanged in shape.
+
 Command for every file (from `packages/api/`):
 
 ```
@@ -357,6 +361,30 @@ the claim the row turns on. The ingestion leg is **REAL-DB-WRITE-ONLY (4−)**: 
 is proven at real Postgres and there is no audit leg to prove, because location pings
 emit no audit event. **T1** for both.
 
+### Review round 1 — order-dependent fixtures (xhawk-ai, medium)
+
+The bot found that `seedDwellPings(tenantA)` was called inside the first
+behavioural `it`, and three later tests asserted against those pings — so a
+filtered or reordered run failed before exercising what it claimed to pin.
+Verified by reproducing it:
+
+```
+$ npx vitest run … -t "neighbour tenant" test/integration/lateness-from-truck-location-4-7.test.ts
+ × CURRENT (T1): a neighbour tenant`s pings are invisible to tenant A …
+   → expected [] to have a length of 6 but got +0
+```
+
+Correct, and squarely this file's fault. Both tenants' pings now seed in
+`beforeAll`, and every test asserts against fixture data rather than data a
+previous `it` happened to create. Re-verified per test under `-t`:
+
+```
+-t "technician location update persists" → 1 passed | 5 skipped
+-t "neighbour tenant"                    → 1 passed | 5 skipped
+-t "carries NO lateness"                 → 1 passed | 5 skipped
+-t "audit trail reads back"              → 1 passed | 5 skipped
+```
+
 ### Judgment calls
 
 - The structural test asserts on the *symbol*, not the import specifier. `board-query.ts`
@@ -509,6 +537,44 @@ cap**, written to the ledger at execute.
 `review_response.executed` audit event are all proven against real Postgres. **T1** — a
 neighbour tenant's ledger is both uncounted and unreadable.
 
+### Review round 1 — the `it.fails` could green for the wrong reason (xhawk-ai, medium)
+
+The bot's second finding is the sharper one, and it generalises past this file:
+**assertions inside an `it.fails` cannot protect it.** The execute-time `it.fails`
+ignored the execution result, so a future FK, schema or RLS error inside
+`executeServiceCredit` — caught by the handler as `{kind: 'credit', ok: false}` —
+would leave the ledger under the cap and turn the test green while proving
+nothing. That is the exact trap this lane already fell into once during
+development; the bot is right that nothing stopped it recurring.
+
+The bot suggested asserting the execution outcome before the ledger total. Adding
+those assertions *inside* the `it.fails` would not have worked — `it.fails` passes
+when **any** assertion throws, the guard included. So the scenario moved into a
+shared helper that asserts nothing, and the guard now lives in an **ordinary
+passing test** where a broken precondition fails loudly:
+
+```
+CURRENT: the cap is enforced at DRAFT time only — a credit approved after the customer
+crossed the cap IS inserted at execution, and the credit sub-action reports ok
+  → result.success === true
+  → the review_response.executed audit sub-result is {kind:'credit', ok:true}, no error, with an id
+  → that row is really in service_credits, $50, review_id not null
+  → total === 14000, and > CREDIT_CAP_CENTS_PER_12_MONTHS
+```
+
+The `it.fails` now calls the same helper and asserts only `total <= cap`.
+
+**Proof the guard works.** Temporarily patched the helper to pass an unpersisted
+`reviewId`, reproducing the swallowed-FK case the bot described:
+
+```
+ × CURRENT: the cap is enforced at DRAFT time only … → expected false to be true
+ × DESIRED (row 9.5): … → Expect test to fail
+```
+
+The ordinary test fails loudly on `creditSubResult.ok`; the `it.fails` would have
+silently greened on its own. Patch reverted; both green again.
+
 ### Judgment calls
 
 - The LLM classifier, customer matcher and the two drafting calls are stubbed through
@@ -574,7 +640,7 @@ cd packages/api && RLS_RUNTIME_ROLE=true \
   test/integration/service-credit-cap-9-5.test.ts
 
  Test Files  4 passed (4)
-      Tests  21 passed | 4 expected fail (25)
+      Tests  22 passed | 4 expected fail (26)
    Duration  5.57s
 ```
 

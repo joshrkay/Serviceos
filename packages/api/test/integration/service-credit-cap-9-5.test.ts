@@ -200,6 +200,97 @@ describe('Postgres integration — §8.9 row 9.5 service credits without over-gi
     });
   }
 
+  /**
+   * The delayed-approval scenario, on a tenant of its own: a $50 credit
+   * legitimately drafted while the customer sat at $40, then another $50 issued
+   * before the owner gets round to approving, then the approved proposal
+   * executed. Returns everything a caller needs to judge what happened, and
+   * asserts nothing itself — deliberately.
+   *
+   * Why a helper and not one test: `it.fails` passes when ANY assertion inside
+   * it throws, so preconditions asserted THERE cannot protect it. An unrelated
+   * failure before the credit insert (a future FK, schema or RLS error, caught
+   * by the handler as `{kind:'credit', ok:false}`) would leave the ledger under
+   * the cap and turn the `it.fails` green for the wrong reason. The guard has
+   * to sit in an ordinary test, where a broken preconditon FAILS instead of
+   * being swallowed — that is the test directly below.
+   */
+  async function runDelayedApprovalScenario(label: string): Promise<{
+    seeded: SeededTenant;
+    result: Awaited<ReturnType<ProposalExecutor['execute']>>['result'];
+    proposalId: string;
+    creditSubResult?: { kind: string; ok: boolean; id?: string; error?: string };
+    total: number;
+  }> {
+    const seeded = await seedTenant(label);
+    // Drafted when the customer sat at $40 — under the cap, so a $50 credit is
+    // legitimately proposed.
+    await issueCredit(seeded, 4000, new Date(Date.now() - 10 * DAY_MS));
+    const payload = await buildProposalPayload(seeded);
+    expect(payload.serviceCredit?.amountCents).toBe(DOLLARS_50);
+
+    // …then another $50 is issued before the owner gets round to approving.
+    await issueCredit(seeded, DOLLARS_50, new Date(Date.now() - 1 * DAY_MS));
+    expect(
+      await creditRepo.sumIssuedInLast12Months(seeded.tenant.tenantId, seeded.customerId),
+    ).toBe(9000);
+
+    const registry = createExecutionHandlerRegistry({
+      serviceCreditRepo: creditRepo,
+      auditRepo,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      googleReplyResolver: { resolve: async () => null as any } as any,
+      reviewPrivateMessageSender: {
+        send: async () => ({ ok: true as const, messageId: 'noop' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    });
+    const guard = new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo);
+    const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
+
+    const approvedPayload = {
+      ...payload,
+      serviceCredit: { ...payload.serviceCredit!, approved: true },
+    };
+    let proposal: Proposal = createProposal({
+      tenantId: seeded.tenant.tenantId,
+      proposalType: 'review_response_proposal',
+      payload: approvedPayload as unknown as Record<string, unknown>,
+      summary: 'Respond, with the credit approved',
+      createdBy: seeded.tenant.userId,
+    });
+    proposal = transitionProposal(proposal, 'ready_for_review', seeded.tenant.userId);
+    proposal = transitionProposal(proposal, 'approved', seeded.tenant.userId);
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    await proposalRepo.create(proposal);
+
+    const { result } = await executor.execute(proposal, {
+      tenantId: seeded.tenant.tenantId,
+      executedBy: seeded.tenant.userId,
+    });
+
+    const events = await auditRepo.findByEntity(
+      seeded.tenant.tenantId,
+      'proposal',
+      proposal.id,
+    );
+    const executed = events.find((e) => e.eventType === 'review_response.executed');
+    const subResults =
+      (executed?.metadata as { subResults?: Array<{ kind: string; ok: boolean; id?: string; error?: string }> })
+        ?.subResults ?? [];
+
+    return {
+      seeded,
+      result,
+      proposalId: proposal.id,
+      creditSubResult: subResults.find((r) => r.kind === 'credit'),
+      total: await creditRepo.sumIssuedInLast12Months(
+        seeded.tenant.tenantId,
+        seeded.customerId,
+      ),
+    };
+  }
+
   beforeAll(async () => {
     pool = await getSharedTestDb();
     customerRepo = new PgCustomerRepository(pool);
@@ -385,61 +476,40 @@ describe('Postgres integration — §8.9 row 9.5 service credits without over-gi
    * Whether to close it (re-check at execute) or keep it (draft-time only,
    * accepted) is Josh's call — see the drafted issue in the lane report.
    */
+  it('CURRENT: the cap is enforced at DRAFT time only — a credit approved after the customer crossed the cap IS inserted at execution, and the credit sub-action reports ok', async () => {
+    const { seeded, result, creditSubResult, total } =
+      await runDelayedApprovalScenario('Echo');
+
+    // The execution genuinely ran and the credit genuinely landed. These are
+    // the assertions that make the it.fails below meaningful: if a future FK,
+    // schema or RLS error ever swallows the insert, THIS test fails loudly
+    // instead of the it.fails quietly greening on a ledger that stayed small.
+    expect(result.success).toBe(true);
+    expect(creditSubResult).toBeDefined();
+    expect(creditSubResult?.ok).toBe(true);
+    expect(creditSubResult?.error).toBeUndefined();
+    expect(creditSubResult?.id).toBeDefined();
+
+    // The row is really in the ledger, carrying its review linkage.
+    const { rows } = await pool.query(
+      `SELECT amount_cents, review_id FROM service_credits WHERE id = $1 AND tenant_id = $2`,
+      [creditSubResult!.id, seeded.tenant.tenantId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].amount_cents)).toBe(DOLLARS_50);
+    expect(rows[0].review_id).not.toBeNull();
+
+    // $40 + $50 + $50 = $140 against a $100 cap. This is the gap, stated
+    // positively as current behaviour.
+    expect(total).toBe(14000);
+    expect(total).toBeGreaterThan(CREDIT_CAP_CENTS_PER_12_MONTHS);
+  });
+
   it.fails(
     'DESIRED (row 9.5): a $50 credit approved after the customer crossed the cap is refused at EXECUTION time too, not just omitted at draft time',
     async () => {
-      const seeded = await seedTenant('Delta');
-      // Drafted when the customer sat at $40 — under the cap, so a $50 credit
-      // is legitimately proposed.
-      await issueCredit(seeded, 4000, new Date(Date.now() - 10 * DAY_MS));
-      const payload = await buildProposalPayload(seeded);
-      expect(payload.serviceCredit?.amountCents).toBe(DOLLARS_50);
-
-      // …then another $50 is issued before the owner gets round to approving.
-      await issueCredit(seeded, DOLLARS_50, new Date(Date.now() - 1 * DAY_MS));
-      expect(
-        await creditRepo.sumIssuedInLast12Months(seeded.tenant.tenantId, seeded.customerId),
-      ).toBe(9000);
-
-      const registry = createExecutionHandlerRegistry({
-        serviceCreditRepo: creditRepo,
-        auditRepo,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        googleReplyResolver: { resolve: async () => null as any } as any,
-        reviewPrivateMessageSender: {
-          send: async () => ({ ok: true as const, messageId: 'noop' }),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any,
-      });
-      const guard = new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo);
-      const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
-
-      const approvedPayload = {
-        ...payload,
-        serviceCredit: { ...payload.serviceCredit!, approved: true },
-      };
-      let proposal: Proposal = createProposal({
-        tenantId: seeded.tenant.tenantId,
-        proposalType: 'review_response_proposal',
-        payload: approvedPayload as unknown as Record<string, unknown>,
-        summary: 'Respond, with the credit approved',
-        createdBy: seeded.tenant.userId,
-      });
-      proposal = transitionProposal(proposal, 'ready_for_review', seeded.tenant.userId);
-      proposal = transitionProposal(proposal, 'approved', seeded.tenant.userId);
-      proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
-      await proposalRepo.create(proposal);
-
-      await executor.execute(proposal, {
-        tenantId: seeded.tenant.tenantId,
-        executedBy: seeded.tenant.userId,
-      });
-
+      const { total } = await runDelayedApprovalScenario('Delta');
       // DESIRED: the rolling total never exceeds the cap.
-      const total = await creditRepo.sumIssuedInLast12Months(
-        seeded.tenant.tenantId,
-        seeded.customerId,
-      );
       expect(total).toBeLessThanOrEqual(CREDIT_CAP_CENTS_PER_12_MONTHS);
     },
   );

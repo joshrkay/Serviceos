@@ -220,6 +220,12 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     pingRepo = new PgTechnicianLocationPingRepository(pool);
     tenantA = await seedTenant('Alpha');
     tenantB = await seedTenant('Bravo');
+    // Seeded HERE, not inside an `it`. Every test below asserts against these
+    // pings, so seeding them in one test would make the rest order-dependent:
+    // a filtered run (`vitest -t "neighbour tenant"`) would find tenant A with
+    // zero pings and fail before reaching the behaviour it claims to pin.
+    expect(await seedDwellPings(tenantA, 6)).toBe(6);
+    expect(await seedDwellPings(tenantB, 4)).toBe(4);
   }, 120_000);
 
   afterAll(async () => {
@@ -245,9 +251,6 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
   });
 
   it('CURRENT: a technician location update persists to technician_location_pings and reads back tenant-scoped through the repository the route wires', async () => {
-    const written = await seedDwellPings(tenantA);
-    expect(written).toBe(6);
-
     const byAppointment = await pingRepo.listByAppointment(
       tenantA.tenant.tenantId,
       tenantA.appointmentId,
@@ -265,8 +268,6 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
   });
 
   it('CURRENT (T1): a neighbour tenant`s pings are invisible to tenant A — each tenant reads only its own truck', async () => {
-    await seedDwellPings(tenantB, 4);
-
     const aSeesOwn = await pingRepo.listByTechnician(
       tenantA.tenant.tenantId,
       tenantA.technicianId,
