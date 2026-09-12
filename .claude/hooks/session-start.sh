@@ -73,7 +73,7 @@ install_dependencies() {
   # developer has deliberately deleted package-lock.json, the snapshot is empty,
   # the guard is false, and `npm install` below RECREATES the file — the hook
   # writing a lockfile on the very path that claimed never to (Codex P2, #994).
-  local snapshot had_lockfile=0
+  local snapshot had_lockfile=0 restored=0
   snapshot="$(mktemp)"
   if [ -f package-lock.json ]; then
     # If the snapshot cannot be taken there is no way to honour the invariant,
@@ -96,6 +96,9 @@ install_dependencies() {
   # SIGTERM rather than by a code path (Codex P2, #994). Bash scoping is
   # dynamic, so this sees $snapshot and $had_lockfile from the caller.
   _restore_lockfile() {
+    # Idempotent: the signal handler calls this and so does the normal path.
+    [ "$restored" -eq 1 ] && return 0
+    restored=1
     if [ "$had_lockfile" -eq 1 ]; then
       # No `-s` test on the snapshot: `had_lockfile` already proves the file
       # existed and was copied. Testing for non-empty here silently exempted a
@@ -121,7 +124,21 @@ install_dependencies() {
     fi
     rm -f "$snapshot"
   }
-  trap _restore_lockfile EXIT INT TERM HUP
+  # A trap handler that RETURNS does not terminate the script — bash resumes
+  # where it left off, so trapping INT/TERM/HUP on the restore alone would undo
+  # the lockfile and then carry on into Docker setup as if the cancellation had
+  # not happened (Codex P2, #994 — fifth hole, and a consequence of the fourth
+  # fix). Signals restore once and then re-exit with the conventional 128+n;
+  # EXIT keeps handling ordinary termination.
+  _on_signal() {
+    _restore_lockfile
+    trap - EXIT INT TERM HUP
+    exit $((128 + $1))
+  }
+  trap _restore_lockfile EXIT
+  trap '_on_signal 2' INT
+  trap '_on_signal 15' TERM
+  trap '_on_signal 1' HUP
 
   npm install || echo "[session-start] WARNING: npm install also failed — dependencies are incomplete."
 
