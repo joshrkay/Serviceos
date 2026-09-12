@@ -604,6 +604,22 @@ describe('I18: owner daily actions ↔ code contract', () => {
     ]);
   });
 
+  it('lists each route exactly once, and exactly as many rows as routes', () => {
+    // Both divergence checks below compare SETS, which silently collapse a
+    // route listed twice — and a duplicate is not harmless: the two copies can
+    // carry contradictory cadence or reachability, and the cadence counts are
+    // taken from the ROWS while the route budget is taken from `derived`, so a
+    // duplicate `daily` copy claiming an otherwise-unused intent could ride
+    // along once the JSON counts were updated to match. Pin the row count to
+    // the route count so the two can never drift. (Codex, #1073.)
+    const seen = new Set<string>();
+    const duplicates = inventory.rows
+      .map((r) => r.route)
+      .filter((route) => (seen.has(route) ? true : (seen.add(route), false)));
+    expect(duplicates).toEqual([]);
+    expect(inventory.rows).toHaveLength(derived.length);
+  });
+
   it('lists every owner-only route in code (no undocumented owner surface)', () => {
     const documented = new Set(inventory.rows.map((r) => r.route));
     const missingFromDoc = derived.filter((route) => !documented.has(route));

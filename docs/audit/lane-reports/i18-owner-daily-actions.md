@@ -690,3 +690,67 @@ The three arms now in place (executed guards, declared in-handler, and a scan
 that fails on a new gating style) each close one such blind spot, and the KNOWN
 LIMITS block in the test header names what is still open rather than implying
 nothing is.
+
+---
+
+## 12. Review round 4 — a duplicate doc row was invisible (Codex, PR #1073)
+
+**Finding (P2, correct):** both divergence checks compare **sets**
+(`new Set(inventory.rows.map(r => r.route))`), which silently collapse a route
+listed twice. A duplicate is not harmless: the two copies can carry
+contradictory `cadence` or reachability, the cadence counts are taken from the
+**rows** while the route budget is taken from `derived`, and nothing tied the
+two together — so a duplicate `daily` copy claiming an otherwise-unused voice
+intent could ride along once the JSON counts were updated to match it.
+
+Verified by reading the assertions rather than assuming: `missingFromDoc` and
+`stale` both pass (the Set has one entry, and both copies exist in `derived`),
+and `OWNER_ONLY_ROUTES` is checked against `derived.length`, never against the
+row count. Nothing closed the loop.
+
+Fixed by pinning both ends: routes in the table must be unique, and the row
+count must equal the derived route count. RED first:
+
+```
+ FAIL  … > lists each route exactly once, and exactly as many rows as routes
+AssertionError: expected [] to not deeply equal []
+```
+
+then GREEN, 23/23.
+
+```
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 326 tests passed
+```
+
+---
+
+## 13. What four review rounds actually showed
+
+Four rounds, five findings, and **every one failed in the same direction**: the
+contract could be satisfied while the inventory was incomplete or wrong, with
+the budget left flattering.
+
+| Round | Hole | Shape |
+|---|---|---|
+| 1 | any-guard instead of guard-chain | an owner-only route never enters `derived` |
+| 2 | channel claim checked for existence only | a row escapes the required budget |
+| 3a | DB-gated routers never mounted | a whole class of routes never enters `derived` |
+| 3b | owner check inside the handler | an owner-only route never enters `derived` |
+| 4 | duplicate doc row collapsed by a `Set` | rows and routes drift apart unnoticed |
+
+That is the real lesson of this lane, and it is worth more than the headline
+number. **§8.0 negative controls prove the machinery catches what it looks at;
+they cannot prove the machinery looks at everything.** Every finding here lived
+in the gap between those two statements — not in the assertions, which were
+sound, but in the enumeration feeding them. A completeness claim ("this is
+*every* owner-only route") is the load-bearing part of a pin like this and the
+part no single negative control can establish.
+
+What the file now does about it: three derivation arms (executed guards,
+declared in-handler, and a source scan that fails the build when a new gating
+style appears), row/route counts pinned to each other, and a KNOWN LIMITS block
+in the test header naming what is still open instead of implying nothing is. The
+headline I18 budgets never moved through any of it —
+`ownerRequiredDailyWebActions` is still **1** — but the number is now
+considerably harder to be wrong by accident.
