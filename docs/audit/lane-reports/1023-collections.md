@@ -66,19 +66,35 @@ cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integrat
       Tests  4 failed (4)
 ```
 
-**GREEN**
+**GREEN** (after the boundary correction below — 5 tests, not the original 4)
 ```
- ✓ writes the cadence step keys 3:sms / 7:sms / 14:sms as real ledger rows, and audits each proposal 135ms
- ✓ rejects a duplicate cadence key at the INDEX — a raw INSERT that runs no application code 59ms
- ✓ re-sweeping the same overdue invoice raises no second reminder for an already-recorded step 93ms
- ✓ T1 — each tenant is chased on its OWN cadence in one pass, and neither can read the other ledger 109ms
+ ✓ writes the cadence step keys 3:sms / 7:sms / 14:sms as real ledger rows, and audits each proposal 147ms
+ ✓ fires each step ON its offset day and not before — the 13/14-day boundary 123ms
+ ✓ rejects a duplicate cadence key at the INDEX — a raw INSERT that runs no application code 48ms
+ ✓ re-sweeping the same overdue invoice raises no second reminder for an already-recorded step 81ms
+ ✓ T1 — each tenant is chased on its OWN cadence in one pass, and neither can read the other ledger 111ms
 
  Test Files  1 passed (1)
-      Tests  4 passed (4)
+      Tests  5 passed (5)
+```
+
+**Boundary correction (review finding, PR #1053).** The first test originally
+seeded **20** days overdue and swept once. The §8.9 acceptance criterion says
+*"an invoice 15 days past due, when swept twice"* — so the boundary the
+criterion names was never exercised: at 20 days the 14-day step has six days of
+slack, and a regression delaying it to day 16+ would have kept the suite green
+while breaking the row. It now matches the criterion verbatim, plus a boundary
+pair (13 days → two steps; exactly 14 → three) that pins
+`elapsed < step.offsetDays` (`dunning-schedule.ts:56`) in both directions:
+
+```
+ × fires each step ON its offset day and not before — the 13/14-day boundary
+   → expected [ '3:sms', '7:sms' ] to deeply equal [ '14:sms', '3:sms', '7:sms' ]   (RED)
 ```
 
 What each test pins:
-1. A 20-day-overdue invoice on a tenant whose persisted cadence is 3/7/14 SMS
+1. A **15-day-overdue** invoice (the criterion's own figure), **swept twice**,
+   on a tenant whose persisted cadence is 3/7/14 SMS
    yields three `invoice_dunning_events` rows keyed `3:sms`, `7:sms`, `14:sms`
    (read back both through `PgDunningEventRepository.findByInvoice` and by raw
    `SELECT`), three `ready_for_review` `send_payment_reminder` proposals, and
@@ -555,6 +571,17 @@ neighbour (run rows and `service_agreement.run.generated` both absent). As in
 the dunning entry, the two seam tests carry the reach claim on the real
 enumerator and the writing test asserts the enumerator reaches its tenants, then
 confines the sweep to them.
+
+Isolation here needed a second case (review finding, PR #1053). The worker
+wraps renewal and billing in **separate** try/catch blocks
+(`recurring-agreements-worker.ts:60` and `:79`), and the seam injects failures
+only through `findDue` — so it exercised the billing catch and said nothing
+about the renewal one, which could have been deleted with the suite still
+green. A fourth test drives the renewal phase directly and pins the promise
+that catch's own comment makes at `:58` — *"a renewal failure must not block
+this tenant's run sweep"*: the tenant whose `findRenewable` throws is still
+billed, and so is every other tenant. Verified load-bearing (asserting the
+doomed tenant is NOT billed fails).
 
 ```
  × recurring-agreements (membership) sweep > reaches every tenant through the real enumerator 19ms
