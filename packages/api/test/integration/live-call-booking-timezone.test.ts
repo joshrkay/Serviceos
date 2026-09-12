@@ -297,6 +297,11 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
     expect(liveRow!.scheduledStart.toISOString()).toBe(EXPECTED_START_UTC);
     expect(liveRow!.scheduledStart.toISOString()).not.toBe(UTC_FRAME_DECOY);
 
+    // The audit leg: ProposalExecutor's real proposal.executed row, not just
+    // the persisted appointment (§8.0 PROVEN-REAL-DB needs both).
+    const liveAuditRows = await auditRepo.findByEntity(seed.tenantId, 'proposal', proposal.id);
+    expect(liveAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
+
     // ── Memo-path parity leg (same tenant, same phrase) ───────────────────
     const memoProposalRepo = new InMemoryProposalRepository();
     const worker = createVoiceActionRouterWorker({
@@ -360,6 +365,13 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
     expect(memoRow!.scheduledStart.toISOString()).toBe(
       liveRow!.scheduledStart.toISOString(),
     );
+
+    const memoAuditRows = await auditRepo.findByEntity(
+      seed.tenantId,
+      'proposal',
+      memoDrafts[0]!.id,
+    );
+    expect(memoAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
   });
 
   it('no-tz tenant: the live-call draft gates on the missing window, approval REFUSES, and no appointment row exists (never silent UTC)', async () => {
@@ -440,5 +452,24 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
     );
     expect(chicagoCount.rows[0].n).toBe(1);
     expect(laCount.rows[0].n).toBe(1);
+
+    // Both tenants' proposal.executed audit rows are real, and neither
+    // tenant's audit query sees the other's row.
+    const chicagoAuditRows = await auditRepo.findByEntity(
+      chicago.tenantId,
+      'proposal',
+      chicagoDraft.id,
+    );
+    const laAuditRows = await auditRepo.findByEntity(
+      losAngeles.tenantId,
+      'proposal',
+      laDraft.id,
+    );
+    expect(chicagoAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
+    expect(laAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
+    expect(await auditRepo.findByEntity(losAngeles.tenantId, 'proposal', chicagoDraft.id)).toHaveLength(
+      0,
+    );
+    expect(await auditRepo.findByEntity(chicago.tenantId, 'proposal', laDraft.id)).toHaveLength(0);
   });
 });
