@@ -25,6 +25,8 @@ import { createOnboardingRouter } from '../../src/routes/onboarding';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgPackActivationRepository } from '../../src/settings/pg-pack-activation';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { createCustomerRouter } from '../../src/routes/customers';
+import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 describe('GET /api/onboarding/status — the derived "look around before finishing" gate (1.5)', () => {
@@ -52,6 +54,14 @@ describe('GET /api/onboarding/status — the derived "look around before finishi
       next();
     });
     app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool }));
+    // A representative CRM route, on the SAME auth pipeline as /status — no
+    // onboarding-derived server-side gate wraps requireAuth/requireTenant/
+    // requirePermission anywhere in this codebase (that check lives only in
+    // the web client's ProtectedRoute/OnboardingGuard); this proves the
+    // BACKEND half of "look around" holds too, not just the status endpoint
+    // itself reporting accurately.
+    const customerRepo = new PgCustomerRepository(pool);
+    app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   });
 
   beforeEach(async () => {
@@ -70,6 +80,12 @@ describe('GET /api/onboarding/status — the derived "look around before finishi
     expect(res.body.currentStep).toBe('identity');
     const identityStep = res.body.steps.find((s: { id: string }) => s.id === 'identity');
     expect(identityStep.status).toBe('current');
+  });
+
+  it('a brand-new tenant, with onboarding not even started, can hit a real CRM route (not just /status) — no server-side "finish setup first" block anywhere in the auth pipeline', async () => {
+    const res = await request(app).get('/api/customers');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
   });
 
   it('completing pack BEFORE identity still derives correctly — proves status reads real facts, not a stored linear wizard-progress pointer', async () => {

@@ -11,6 +11,11 @@ import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
 import { PgEstimateTemplateRepository } from '../../src/templates/pg-estimate-template';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
+// Provisioned globally by test/integration/global-setup.ts's
+// ensureRlsRuntimeRole — used to actually exercise catalog_items' RLS
+// policy (the superuser pool bypasses RLS unconditionally, FORCE or not).
+const APP_ROLE = 'rls_app_runtime';
+
 describe('POST /api/onboarding/pack', () => {
   let pool: Pool;
   let app: express.Express;
@@ -203,11 +208,26 @@ describe('POST /api/onboarding/pack', () => {
     expect(templatesA.rows.length).toBeGreaterThan(0);
     expect(templatesB.rows.length).toBeGreaterThan(0);
 
-    // Neither tenant's price book is visible under the other's id.
-    const catalogAUnderB = await pool.query(
-      `SELECT id FROM catalog_items WHERE tenant_id=$1 AND name = ANY($2::text[])`,
-      [tenantB.tenantId, [...namesA]],
-    );
-    expect(catalogAUnderB.rows).toHaveLength(0);
+    // Neither tenant's price book is visible under the other's id — proven
+    // under RLS enforcement (rls_app_runtime + tenant B's GUC), not the
+    // superuser pool. A raw `WHERE tenant_id = tenantB` query through the
+    // superuser connection would return empty here regardless of whether
+    // RLS/tenant scoping actually works (it's an explicit filter, not an
+    // access-control proof) — querying WITHOUT that filter, but under
+    // tenant B's RLS context, is what actually exercises the policy.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantB.tenantId]);
+      const visibleToB = await client.query<{ id: string; name: string }>(
+        `SELECT id, name FROM catalog_items WHERE name = ANY($1::text[])`,
+        [[...namesA]],
+      );
+      expect(visibleToB.rows).toHaveLength(0);
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+    }
   });
 });

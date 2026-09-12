@@ -154,5 +154,11 @@ describe('onboarding AI self-check', () => {
     );
     expect(row.rows[0].ai_verification_status).toBe('pending');
     expect(row.rows[0].ai_verification_error).toBeNull();
+
+    // The retry itself is AUDITED — read it back, not just inferred from
+    // the enqueue + status-reset side effects above.
+    const auditRows = await auditRepo.findByEntity(currentTenant.tenantId, 'tenant_settings', currentTenant.tenantId);
+    const retried = auditRows.filter((r) => r.eventType === 'tenant.ai_verification_retry');
+    expect(retried).toHaveLength(1);
   });
 });
