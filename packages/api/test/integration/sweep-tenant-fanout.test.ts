@@ -35,6 +35,7 @@ import { runWeeklyFeedbackSweep } from '../../src/workers/weekly-feedback-worker
 import { runHoldReaperSweep } from '../../src/workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from '../../src/workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from '../../src/workers/estimate-expiry-worker';
+import { runOverdueInvoiceSweep } from '../../src/workers/overdue-invoice-worker';
 import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
@@ -42,6 +43,13 @@ import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import {
+  PgDunningConfigRepository,
+  PgDunningEventRepository,
+} from '../../src/invoices/pg-dunning-config';
+import { defaultDunningConfig } from '../../src/invoices/dunning-config';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
@@ -614,6 +622,129 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       expect((await estimateRepo.findById(untouched.tenantId, untouched.estimateId))!.status).toBe('sent');
       const untouchedEvents = await expiryAuditRepo.findByEntity(untouched.tenantId, 'estimate', untouched.estimateId);
       expect(untouchedEvents.map((e) => e.eventType)).not.toContain('estimate.expired');
+    });
+  });
+
+  // §8.8 G1 (ticket #1023) — the overdue-invoice / dunning sweep iterates
+  // tenants (workers/overdue-invoice-worker.ts:129) and had NO entry in this
+  // file: its own tests all hand it `listTenantIds: async () => [oneId]`,
+  // which replaces the production selector with the thing under test. The two
+  // seam tests below mirror 'estimate-expiry sweep' above; the third runs the
+  // REAL repositories so "untouched" is a concrete absence of rows for a
+  // second tenant whose invoice is not yet due.
+  describe('overdue-invoice (dunning) sweep', () => {
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
+      const result = await runOverdueInvoiceSweep({
+        jobRepo: {} as never,
+        estimateRepo: {} as never,
+        invoiceRepo: { findByTenant: fn } as never,
+        auditRepo: {} as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed, doomed: doomed() };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+
+    // T4's third promise: a tenant the sweep reaches but that has nothing
+    // overdue is left alone. Real PgInvoiceRepository / PgDunningEventRepository
+    // / PgProposalRepository, so "untouched" means no ledger row and no
+    // proposal — in the SAME pass through the real enumerator that chases
+    // another tenant's genuinely overdue invoice.
+    it('chases the overdue tenant and leaves another tenant with nothing overdue untouched in the same pass', async () => {
+      const dunningInvoiceRepo = new PgInvoiceRepository(pool);
+      const dunningJobRepo = new PgJobRepository(pool);
+      const dunningEstimateRepo = new PgEstimateRepository(pool);
+      const dunningAuditRepo = new PgAuditRepository(pool);
+      const proposalRepo = new PgProposalRepository(pool);
+      const dunningEventRepo = new PgDunningEventRepository(pool);
+      const dunningConfigRepo = new PgDunningConfigRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const customerRepo = new PgCustomerRepository(pool);
+      const asOf = new Date('2026-07-15T12:00:00.000Z');
+
+      const seedInvoice = async (dueDate: Date) => {
+        const { tenantId, userId } = await createTestTenant(pool);
+        const customerId = uuidv4();
+        await customerRepo.create({
+          id: customerId, tenantId, firstName: 'Fan', lastName: 'Due', displayName: 'Fan Due',
+          preferredChannel: 'phone', smsConsent: false, isArchived: false,
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const locationId = uuidv4();
+        await locationRepo.create({
+          id: locationId, tenantId, customerId, street1: '1 Main St', city: 'Austin', state: 'TX',
+          postalCode: '78701', country: 'USA', addressType: 'service', isPrimary: true, isArchived: false,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+        const jobId = uuidv4();
+        await dunningJobRepo.create({
+          id: jobId, tenantId, customerId, locationId, jobNumber: `J-${jobId.slice(0, 8)}`,
+          summary: 'Fan-out dunning job', status: 'completed', priority: 'normal',
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const lineItems = [buildLineItem(uuidv4(), 'Labor', 1, 40000, 0, false)];
+        const totals = calculateDocumentTotals(lineItems, 0, 0);
+        const invoiceId = uuidv4();
+        await dunningInvoiceRepo.create({
+          id: invoiceId, tenantId, jobId, invoiceNumber: `INV-${invoiceId.slice(0, 8)}`,
+          status: 'open', lineItems, totals, amountPaidCents: 0, amountDueCents: totals.totalCents,
+          dueDate, createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        await dunningConfigRepo.upsert({
+          ...defaultDunningConfig(tenantId),
+          reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+        });
+        return { tenantId, invoiceId };
+      };
+
+      // 20 days past due — this one IS chaseable.
+      const overdue = await seedInvoice(new Date(asOf.getTime() - 20 * 86_400_000));
+      // Another tenant, same cadence, invoice not due for another 10 days.
+      const tenantB = await seedInvoice(new Date(asOf.getTime() + 10 * 86_400_000));
+
+      await runOverdueInvoiceSweep({
+        jobRepo: dunningJobRepo,
+        estimateRepo: dunningEstimateRepo,
+        invoiceRepo: dunningInvoiceRepo,
+        auditRepo: dunningAuditRepo,
+        proposalRepo,
+        dunningEventRepo,
+        dunningConfigRepo,
+        listTenantIds: () => listAllTenantIds(pool),
+        now: () => asOf,
+        logger,
+      });
+
+      const chased = await dunningEventRepo.findByInvoice(overdue.tenantId, overdue.invoiceId);
+      expect(chased.map((e) => e.stepKey)).toEqual(['3:sms']);
+      const chasedAudit = await dunningAuditRepo.findByEntity(overdue.tenantId, 'invoice', overdue.invoiceId);
+      expect(chasedAudit.map((e) => e.eventType)).toContain('invoice.dunning_proposed');
+
+      // T1 — the other tenant has NO ledger row and NO reminder proposal, in
+      // the same pass that chased its neighbour above.
+      expect(await dunningEventRepo.findByInvoice(tenantB.tenantId, tenantB.invoiceId)).toEqual([]);
+      const tenantBProposals = await proposalRepo.findByStatus(tenantB.tenantId, 'ready_for_review');
+      expect(tenantBProposals.filter((p) => p.proposalType === 'send_payment_reminder')).toEqual([]);
+      const tenantBAudit = await dunningAuditRepo.findByEntity(tenantB.tenantId, 'invoice', tenantB.invoiceId);
+      expect(tenantBAudit.map((e) => e.eventType)).not.toContain('invoice.dunning_proposed');
     });
   });
 
