@@ -39,19 +39,33 @@ import type {
 } from '../../src/ai/agents/customer-calling/types';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 
-// The FSM's live (non-terminal, pre-escalation) states — matches
-// emergency-tier-transitions.test.ts's NON_TERMINAL_STATES. Complaint
-// escalation must fire the FSM's global guard from every one of these.
-const LIVE_STATES: CallingAgentState[] = [
-  'greeting',
-  'identifying',
-  'ask_caller',
-  'intent_capture',
-  'entity_resolution',
-  'intent_confirm',
-  'proposal_draft',
-  'closing',
-];
+// Every FSM state, so LIVE_STATES below is exhaustive by construction: if
+// CallingAgentState ever gains a member without a corresponding key here,
+// this object literal fails to compile (missing property).
+const ALL_STATES: Record<CallingAgentState, true> = {
+  idle: true,
+  greeting: true,
+  identifying: true,
+  ask_caller: true,
+  intent_capture: true,
+  entity_resolution: true,
+  entity_confirm: true,
+  intent_confirm: true,
+  proposal_draft: true,
+  closing: true,
+  escalating: true,
+  degraded: true,
+  terminated: true,
+};
+
+// The FSM's live states — the complaint global guard (transitions.ts,
+// checkGlobalGuards) only no-ops for 'escalating' and 'terminated'
+// (`if (state === 'escalating' || state === 'terminated') { ... }`), so
+// every other state, 'idle'/'entity_confirm'/'degraded' included, is
+// legitimately live and must be exercised here.
+const LIVE_STATES: CallingAgentState[] = (Object.keys(ALL_STATES) as CallingAgentState[]).filter(
+  (s) => s !== 'escalating' && s !== 'terminated',
+);
 
 function neverCalledGateway(): LLMGateway {
   return {
@@ -128,6 +142,14 @@ describe('I8 — E1 + complaint escalation write their audit event through the r
       tenantId: tenant.tenantId,
       toState: 'terminated',
     });
+  });
+
+  it('LIVE_STATES is exhaustive: every CallingAgentState except escalating/terminated', () => {
+    // 13-member CallingAgentState union minus escalating/terminated = 11.
+    expect(LIVE_STATES).toHaveLength(11);
+    expect(LIVE_STATES).toEqual(expect.arrayContaining(['idle', 'entity_confirm', 'degraded']));
+    expect(LIVE_STATES).not.toContain('escalating');
+    expect(LIVE_STATES).not.toContain('terminated');
   });
 
   it('complaint escalation fires the global guard from EVERY live FSM state, each with its own real audit row', async () => {

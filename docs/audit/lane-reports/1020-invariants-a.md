@@ -790,13 +790,138 @@ more finding, this lane's row, fixed and pushed:
   I3/I12′ thread first (wrong comment ID) and immediately corrected with a
   note; harmless, flagged here for the record.
 
+**Third round (`fdb5257`):** Codex's re-review on `af7b601` raised three
+more findings, all this lane's rows, all fixed and pushed:
+
+- **I13 (P2, fixed):** the round-2 fix derived `contentProvenance` from
+  the real FSM `injectionFlagged` context, but still hand-copied that
+  spread into the test's own `markEnded` call — a regression breaking the
+  corresponding spread in `create-voice-turn-processor.ts`'s
+  `persistSessionEnded` would have left the test green. Both the main test
+  and the T1 tenant-A leg now terminate through the exposed
+  `VoiceTurnProcessor.finalizeTerminatedSession` seam (which internally
+  fires `persistSessionEnded`) instead. That write is fire-and-forget
+  (`void persistSessionEnded(...)`), so a short poll helper
+  (`waitForSessionEnded`) was added rather than asserting immediately
+  after the synchronous call returns. RED confirmed the row was genuinely
+  absent before dispatching through the real seam; GREEN after.
+- **I4 (P2, fixed):** the neighbour-tenant test called
+  `PgInvoiceRepository.create()` directly — write-only, no audit leg.
+  Switched to the same audited `createInvoice` domain function I9 already
+  uses, asserting the `invoice.created` row and its cross-tenant
+  isolation.
+- **I17 (P2, fixed):** the neighbour-tenant test called
+  `PgSettingsRepository.update()` directly, but the
+  `settings.tenant.updated` audit event only exists in the
+  `PUT /api/settings` route handler — no settings domain function audits
+  on its own. Adopted the existing `createSettingsRouter` + supertest
+  harness (precedented in `test/integration/settings-owner-toggles.test.ts`)
+  to drive the real route and assert the audit row, confirming tenant B's
+  settings and audit trail stay untouched.
+- All three: RED/GREEN-verified against real Postgres, `tsc` clean, no new
+  gaps introduced.
+
+**Fourth round (`3809785`):** Codex's re-review on `63f9ac9` raised two
+more findings — one this lane's row (fixed), one cross-lane PRD prose
+(flagged, not fixed, same reasoning as the I3/I12′ finding above):
+
+- **I2 (P2, fixed):** the T1 test only ever read tenant B's OWN proposal
+  (`proposalB`) — it never attempted a cross-tenant read or approval
+  lookup against tenant A's proposal under tenant B's scope, so a
+  regression that dropped the `tenant_id` predicate from
+  `PgProposalRepository.findById` or `approveProposal`'s lookup would
+  have left the test green. Added
+  `proposalRepo.findById(tenantB.tenantId, proposalA.id)` → asserts
+  `null`, plus an `approveProposal` attempt against `proposalA.id` under
+  tenant B's scope → asserts `NotFoundError`. RED/GREEN-verified against
+  real Postgres.
+- **PRD overview reconciliation (P2, not this lane's to fix):** the
+  overview paragraph above the invariant table (`docs/PRD-v5-as-built.md`
+  lines 578-580) still says only five invariants clear the bar and lists
+  I4/I10/I12/I17/I9 as remaining at rung 3 — stale relative to the table
+  Fable's own stamp commit (`c434dcf`) just updated below it. Same
+  reasoning as the I3/I12′ finding: this prose spans all ten #1020 rows
+  across both lanes, and rewriting a rung/count summary is explicitly
+  Fable's call at G7, not this lane's. Answered on the thread, left
+  unresolved, flagged here for Fable/the orchestrator.
+
+**Fifth round (`0b2ae16`):** Codex's re-review on `154efec` raised one
+more finding on this lane's row (fixed):
+
+- **I8 (P2, fixed):** `LIVE_STATES` skipped `entity_confirm` between
+  `entity_resolution` and `intent_confirm` — the `it.each` matrix never
+  exercised complaint escalation from that phase. Re-reading the
+  complaint global guard in `transitions.ts` showed its only no-op
+  condition is `state === 'escalating' || state === 'terminated'`,
+  meaning `idle` and `degraded` were ALSO wrongly excluded, not just
+  `entity_confirm`. Replaced the manual 8-state array with one derived
+  from an exhaustive `Record<CallingAgentState, true>` literal (a
+  compile error if the union gains a member without a corresponding key)
+  filtered to exclude only `escalating`/`terminated`, plus an
+  exhaustiveness assertion test (`toHaveLength(11)` + explicit membership
+  checks for `idle`/`entity_confirm`/`degraded`). RED: temporarily
+  re-excluded `idle`/`entity_confirm`/`degraded` to reproduce the
+  pre-fix bug — the new assertion failed as expected (`expected length
+  11, got 8`). GREEN after restoring the correct filter: all 11 live
+  states now each produce their own `agent.calling.<state>.complaint_guardrail`
+  audit row, verified against real Postgres. Full 8-file touched-file
+  suite re-run together afterward: 39/39 passing, no regressions. `tsc
+  --noEmit -p tsconfig.json` clean for this file.
+
+**Sixth round (`dab9c23`):** Codex's re-review on `0b2ae16` raised two
+more findings, both this lane's rows (fixed):
+
+- **I2 (P2, fixed):** `ALL_STATUSES` was a plain `ProposalStatus[]`
+  literal — valid, but not exhaustive-by-construction; a future status
+  added to the union would compile without updating the array, silently
+  under-testing the "all statuses" claim. Replaced with the same
+  `Record<ProposalStatus, true>`-derived pattern used for I8's
+  `LIVE_STATES`, plus an exhaustiveness assertion test. RED: temporarily
+  dropped `undone` from the map to reproduce the class of bug — the new
+  assertion failed as expected (`expected length 9, got 8`). GREEN after
+  restoring the full map: 12/12 tests passing against real Postgres (was
+  11/11 before the added assertion test).
+- **I8 PRD row (P2, fixed):** `docs/PRD-v5-as-built.md`'s I8 confirmation
+  still said "all 8 live FSM states" and "3/3" after the fifth-round fix
+  expanded `LIVE_STATES` to 11 states / 4 tests. Corrected both counts.
+  Proactively also updated I2's own PRD row count (11/11 → 12/12) to
+  match this same commit's added exhaustiveness test, rather than
+  waiting for a follow-up round to catch the identical staleness
+  pattern there too.
+
+Full 8-file touched-file suite re-run together afterward: 40/40 passing,
+no regressions. `tsc --noEmit -p tsconfig.json` clean for both changed
+files.
+
+**Seventh round (`3760245`):** Codex's re-review on `dab9c23` raised one
+more finding, this lane's row (fixed):
+
+- **I10 (P2, fixed):** `live-call-booking-timezone.test.ts` wires a real
+  `PgAuditRepository` into `ProposalExecutor` for every `approveAndExecute`
+  call, but never read or asserted an audit row anywhere in the file —
+  only appointment rows. Under §8.0, PROVEN-REAL-DB requires both the
+  write and its audit event; a regression that stopped appointment
+  execution from emitting `proposal.executed` would have left all three
+  tests in this file green. Added `proposal.executed` assertions (via
+  `PgAuditRepository.findByEntity`) at all three call sites — the
+  live-call leg, the memo-path parity leg, and both T3 tenants — plus
+  cross-tenant audit-isolation checks for the T3 pair. RED: temporarily
+  flipped the live-call leg's assertion to expect no audit row — failed
+  as expected (`expected false, got true`). GREEN after restoring the
+  correct assertion: 3/3 passing against real Postgres.
+
+Full 8-file touched-file suite re-run together afterward: 40/40 passing,
+no regressions. `tsc --noEmit -p tsconfig.json` clean for both changed
+files.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus two follow-up commits (`cfe12f1`, `b033257`)
-  fixing the three Codex findings above.
+  this report committed, plus seven follow-up commits (`cfe12f1`,
+  `b033257`, `fdb5257`, `3809785`, `0b2ae16`, `dab9c23`, `3760245`)
+  fixing the eleven Codex findings above across seven review rounds.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
