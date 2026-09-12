@@ -66,10 +66,21 @@ import { transitionProposal } from '../../src/proposals/lifecycle';
 class Tier2FailingAuditRepository implements AuditRepository {
   public attemptedTier2 = 0;
 
-  constructor(private readonly inner: PgAuditRepository) {}
+  /**
+   * `failForTenantId` scopes the outage to one tenant. The T1 test runs BOTH
+   * tenants through a single failure-injected executor — one wired handler
+   * instance serving many tenants, which is the production shape — so that a
+   * process-wide outage could not pass as tenant isolation.
+   */
+  constructor(
+    private readonly inner: PgAuditRepository,
+    private readonly failForTenantId?: string,
+  ) {}
 
   async create(event: AuditEvent): Promise<AuditEvent> {
-    if (event.eventType === 'callback.acknowledged') {
+    const inScope =
+      this.failForTenantId === undefined || event.tenantId === this.failForTenantId;
+    if (event.eventType === 'callback.acknowledged' && inScope) {
       this.attemptedTier2 += 1;
       throw new Error('audit store unavailable (I12′ simulated tier-2 outage)');
     }
@@ -209,30 +220,37 @@ describe('I12′ — §5.0b tier-2 handler audit is best-effort, proven at real 
   });
 
   it('T1 — a second tenant executing the same proposal type is unaffected by the first tenant’s outage', async () => {
-    const failing = new Tier2FailingAuditRepository(realAuditRepo);
+    // ONE failure-injected executor — one wired CallbackExecutionHandler
+    // instance, as in production — with the outage scoped to tenant A. Running
+    // tenant B through a SEPARATE healthy executor would also pass if the
+    // outage were process-wide, which would prove nothing about isolation.
+    const failing = new Tier2FailingAuditRepository(realAuditRepo, tenantA.tenantId);
+    const executor = makeExecutor(failing);
 
-    // Tenant A runs through the outage; tenant B runs healthy, in the same
-    // process, against the same database.
     const outageProposal = await makeApprovedCallback(
       proposalRepo,
       tenantA.tenantId,
       tenantA.userId,
     );
-    await makeExecutor(failing).execute(outageProposal, {
+    await executor.execute(outageProposal, {
       tenantId: tenantA.tenantId,
       executedBy: tenantA.userId,
     });
+    expect(failing.attemptedTier2).toBe(1);
 
     const healthyProposal = await makeApprovedCallback(
       proposalRepo,
       tenantB.tenantId,
       tenantB.userId,
     );
-    const { result } = await makeExecutor(realAuditRepo).execute(healthyProposal, {
+    const { result } = await executor.execute(healthyProposal, {
       tenantId: tenantB.tenantId,
       executedBy: tenantB.userId,
     });
     expect(result.success).toBe(true);
+    // Tenant B's tier-2 write went through the SAME wrapper and was not
+    // knocked out — the counter is still 1.
+    expect(failing.attemptedTier2).toBe(1);
 
     // Tenant B kept BOTH tiers.
     const bTypes = (

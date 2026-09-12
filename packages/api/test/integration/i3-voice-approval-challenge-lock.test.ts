@@ -9,6 +9,7 @@ import { hashVoiceApprovalPin } from '../../src/settings/voice-approval-pin';
 import {
   startVoiceApproval,
   continueVoiceApproval,
+  spokenDigits,
   type VoiceApprovalDeps,
   type VoiceApprovalSessionState,
   type PendingVoiceApproval,
@@ -191,7 +192,12 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     let pending = await reachChallengeStage(deps, ref, 'the Acme payment');
     let sessionState: VoiceApprovalSessionState | undefined;
 
+    // Every wrong code actually spoken this test, kept so the leak assertion
+    // below checks these exact strings rather than a hand-written copy.
+    const spoken: string[] = [];
+
     for (let attempt = 1; attempt <= 2; attempt++) {
+      spoken.push('0 0 0 0');
       const failed = await continueVoiceApproval(deps, {
         ...ref,
         ...(sessionState ? { sessionState } : {}),
@@ -204,6 +210,7 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
       sessionState = { ...sessionState, ...failed.sessionState };
     }
 
+    spoken.push('9 9 9 9');
     const lockout = await continueVoiceApproval(deps, {
       ...ref,
       ...(sessionState ? { sessionState } : {}),
@@ -227,12 +234,20 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     expect(types.filter((t) => t === 'proposal.voice_approval_challenge_failed')).toHaveLength(2);
     expect(types.filter((t) => t === 'proposal.voice_challenge_lockout')).toHaveLength(1);
 
-    // The spoken codes must never reach the audit trail.
+    // The spoken codes must never reach the audit trail — in EITHER form. The
+    // codes are spoken as "0 0 0 0" / "9 9 9 9", so checking only the
+    // normalized "0000" / "9999" would sail past a regression that logged the
+    // raw utterance verbatim. Both forms, driven off the strings actually
+    // spoken above so the two can never drift apart.
     const rows = await auditRepo.findByEntity(tenantA.tenantId, 'proposal', proposal.id);
     const lockoutRow = rows.find((r) => r.eventType === 'proposal.voice_challenge_lockout')!;
     expect(lockoutRow.metadata).toMatchObject({ attemptCount: 3 });
-    expect(JSON.stringify(rows.map((r) => r.metadata))).not.toContain('0000');
-    expect(JSON.stringify(rows.map((r) => r.metadata))).not.toContain('9999');
+    const metadataJson = JSON.stringify(rows.map((r) => r.metadata));
+    expect(spoken).toHaveLength(3);
+    for (const utterance of spoken) {
+      expect(metadataJson).not.toContain(utterance);
+      expect(metadataJson).not.toContain(spokenDigits(utterance));
+    }
   });
 
   it('the lock survives the dialogue being CANCELLED and restarted — the third wrong code across three dialogues still locks', async () => {

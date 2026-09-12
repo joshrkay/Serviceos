@@ -278,10 +278,16 @@ would not.
 
 ### Tenant grade — T1
 
-Two tenants: tenant A executes through the simulated outage, tenant B executes
-healthy in the same run against the same database. Tenant B keeps both tiers,
-tenant A loses only its own tier-2 row, and neither tenant can read the other's
-proposal or audit rows.
+Two tenants through **one** failure-injected executor — a single wired
+`CallbackExecutionHandler` instance serving both, which is the production shape
+— with the outage scoped to tenant A by tenant id. Tenant B's tier-2 write goes
+through the same wrapper and is not knocked out (`attemptedTier2` stays at 1);
+tenant B keeps both tiers, tenant A loses only its own tier-2 row, and neither
+tenant can read the other's proposal or audit rows.
+
+The first version of this test ran tenant B through a *separate* healthy
+executor, which would have passed just as well if the outage were process-wide.
+Caught by `xhawk-ai` on PR #1050 and fixed — see "Review findings" below.
 
 Not T3: both tenants are identically configured.
 
@@ -458,6 +464,36 @@ npx tsc --noEmit   # includes tests
 git status --porcelain
 # → empty
 ```
+
+---
+
+## Review findings addressed (PR #1050, `xhawk-ai`)
+
+Two Medium/Testing findings, both correct, both false-negatives in this lane's
+own tests. Verified, fixed RED-first, and pushed:
+
+1. **I12′ tenant isolation was not exercised under the same wiring**
+   (`i12-prime-tier2-audit-best-effort.test.ts:231`). Tenant B ran through a
+   separate healthy executor, so a process-wide outage would still have passed.
+   `Tier2FailingAuditRepository` now takes an optional `failForTenantId` and the
+   T1 test drives **both** tenants through one failure-injected executor.
+   RED (`expect(failing.attemptedTier2).toBe(2)` — asserting tenant B's write
+   was knocked out too): `AssertionError: expected 1 to be 2`. GREEN: 3 passed.
+
+2. **The I3 PIN-leak assertion could not catch the leak it guards against**
+   (`i3-voice-approval-challenge-lock.test.ts:234-235`). The wrong codes are
+   spoken as `"0 0 0 0"` / `"9 9 9 9"` but the assertion searched only for the
+   normalized `"0000"` / `"9999"`, so a regression writing the raw utterance
+   into audit metadata would have passed. The test now records every code it
+   actually speaks and asserts neither the raw utterance nor
+   `spokenDigits(utterance)` appears — driven off the same array, so the two
+   cannot drift. RED (`toContain` instead of `not.toContain`):
+   `expected '[{"channel":"voice","sessionId":"i3-s…' to contain '0 0 0 0'`,
+   with the full metadata dump showing no PIN in either form. GREEN: 4 passed
+   + 1 expected fail.
+
+Neither fix changes what either row claims; both make the existing claims
+actually falsifiable. `tsc --project tsconfig.build.json --noEmit` still clean.
 
 ---
 
