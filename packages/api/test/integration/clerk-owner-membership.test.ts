@@ -139,6 +139,17 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
     // row count and role alone would otherwise slip past this test
     // (Codex review, PR #1074).
     const tenantBRowBefore = { ...tenantBRow.rows[0] };
+    // The `tenants` row too, not just `users` — a regression that mutates
+    // tenant B's name/owner_email/subscription_status while leaving its
+    // membership untouched would otherwise slip past this test (Codex
+    // review, PR #1074).
+    const tenantBTenantRow = await pool.query(
+      `SELECT name, owner_id, owner_email, subscription_status, stripe_subscription_id
+       FROM tenants WHERE id = $1`,
+      [tenantBId],
+    );
+    expect(tenantBTenantRow.rowCount).toBe(1);
+    const tenantBTenantBefore = { ...tenantBTenantRow.rows[0] };
 
     // Tenant A: two SEPARATE deliveries (distinct svix ids, as a real Clerk
     // redelivery would use) of the same user.created event. bootstrapTenant's
@@ -208,6 +219,14 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
     );
     expect(tenantBAfter.rowCount).toBe(1);
     expect(tenantBAfter.rows[0]).toEqual(tenantBRowBefore);
+
+    const tenantBTenantAfter = await pool.query(
+      `SELECT name, owner_id, owner_email, subscription_status, stripe_subscription_id
+       FROM tenants WHERE id = $1`,
+      [tenantBId],
+    );
+    expect(tenantBTenantAfter.rowCount).toBe(1);
+    expect(tenantBTenantAfter.rows[0]).toEqual(tenantBTenantBefore);
   });
 
   it('rejects a Clerk webhook whose svix-timestamp is outside the 5-minute replay window', async () => {
@@ -254,6 +273,12 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
   let usersApp: express.Express;
   let tenantA: { tenantId: string; userId: string };
   let tenantB: { tenantId: string; userId: string };
+  // Populated by the clerkFetch stub below — lets tests assert not just
+  // that the local row survives a Clerk outage, but that it was ALREADY
+  // durably written at the moment the (failing) Clerk call fired, pinning
+  // inviteTeamMember's "local row first" ordering rather than merely its
+  // outcome (Codex review, PR #1074).
+  const clerkFetchCalls: Array<{ pendingRowExistedAtCallTime: boolean }> = [];
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -289,8 +314,20 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
           // always rejects — simulates a Clerk-down invite, per row 1.11's
           // "when Clerk is down" clause. Only this network call is stubbed;
           // the local invitation write below is the real production path.
+          // Before throwing, the stub itself queries Postgres for the
+          // pending_invitations row keyed by the invitation_id it was just
+          // handed — proving the row was ALREADY committed at the moment
+          // Clerk was called, not merely present afterward.
           clerkSecretKey: 'sk_test_down',
-          clerkFetch: (async () => {
+          clerkFetch: (async (_url: string, init: { body?: string }) => {
+            const body = JSON.parse(init?.body ?? '{}') as {
+              public_metadata?: { invitation_id?: string };
+            };
+            const invitationId = body.public_metadata?.invitation_id;
+            const existing = invitationId
+              ? await pool.query('SELECT id FROM pending_invitations WHERE id = $1', [invitationId])
+              : { rowCount: 0 };
+            clerkFetchCalls.push({ pendingRowExistedAtCallTime: (existing.rowCount ?? 0) > 0 });
             throw new Error('Clerk API unreachable (simulated outage)');
           }) as unknown as typeof fetch,
         },
@@ -306,6 +343,7 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
   it('writes the local invitation row even when Clerk is down, and audits it', async () => {
     const auditRepo = new PgAuditRepository(pool);
     const email = `invitee-${crypto.randomUUID()}@example.com`;
+    clerkFetchCalls.length = 0;
 
     const res = await request(usersApp)
       .post('/api/users/invitations')
@@ -321,6 +359,13 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
     expect(row.rows[0].tenant_id).toBe(tenantA.tenantId);
     expect(row.rows[0].email).toBe(email.toLowerCase());
     expect(row.rows[0].accepted_at).toBeNull();
+
+    // Pins ORDER, not just outcome: the stubbed Clerk call itself observed
+    // the pending_invitations row already committed at call time — proving
+    // inviteTeamMember writes the local row BEFORE calling Clerk, not just
+    // that the row happens to exist once the request has finished.
+    expect(clerkFetchCalls).toHaveLength(1);
+    expect(clerkFetchCalls[0].pendingRowExistedAtCallTime).toBe(true);
 
     const auditEvents = await auditRepo.findByEntity(
       tenantA.tenantId,
