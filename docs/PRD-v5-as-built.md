@@ -1817,10 +1817,11 @@ In the order they should be written:
 7. Void → link deactivation + intent cancellation at real Postgres.
 8. Uncatalogued line → confidence capped below the auto-approve floor, on disk.
 
-**A ninth, added 2026-09-12 and arguably first:** extract `listAllTenantIds(pool)`
-and write one shared sweep harness that runs every tenant-iterating worker through
-the **real** selector against 3 divergently-configured tenants. It is the only
-item on this list that earns a grade for seven rows at once — see §11.0e.
+**A ninth, added 2026-09-12 and arguably first — now partly landed:**
+`listAllTenantIds(pool)` is extracted and proven against real Postgres, and the
+fan-out harness proves the digest sweep's per-tenant contract. **Six sweeps still
+stub their enumerators** and need one entry each in
+`test/integration/sweep-tenant-fanout.test.ts` — see §11.0e.
 
 ### 11.0d Keeping this document honest
 
@@ -1972,7 +1973,62 @@ review request (9.2), hold reaper (3.5), estimate nudge (7.10), Google review
 monitoring (9.4) and weekly summary (9.7) rows are **T0 sweeps** regardless of
 the rung printed beside them.
 
-#### The cheapest fix, and it is structural
+#### The fix, landed 2026-09-12
+
+**Step 1 is done.** The fifteen inlined copies (not ten — the first count came
+from a truncated listing) are now one exported, tested function,
+`src/tenants/list-tenant-ids.ts`:
+
+| Site | Was |
+|---|---|
+| 13 sweeps | `if (!pool) return []` + the `SELECT` + the `.map` |
+| weekly-feedback | the same against its own `weeklyFeedbackPool` |
+| hold reaper | an IIFE resolving once and feeding two sweeps |
+
+All fifteen now call `listAllTenantIds(...)`; `app.ts` lost 58 lines net, with no
+behaviour change, `tsc --project tsconfig.build.json` clean and the file's lint
+count unchanged at 57 problems / 20 errors (all pre-existing).
+
+`test/integration/list-all-tenant-ids.test.ts` runs the **production selector**
+against real Postgres: three seeded tenants all returned, ids unique and
+UUID-shaped, a tenant created between two calls visible to the second (no
+caching), and no pool yielding `[]` rather than a throw. It asserts a **superset**
+rather than a count — the shared container carries every other file's tenants,
+and asserting a count would couple this test to unrelated files.
+
+**Step 2 is done for the digest sweep.**
+`test/integration/sweep-tenant-fanout.test.ts` drives `runDailyDigestSweep`
+through the real enumerator against three divergently-configured tenants and
+proves both halves of the sweep contract:
+
+- **T3 — each tenant on its own clock.** `2026-06-11T23:05Z` is *simultaneously*
+  18:05 in Chicago (CDT) and 16:05 in Phoenix (MST, no DST). A Chicago tenant at
+  `digest_time 18:00` and a Phoenix tenant at `16:00` are therefore both due at
+  one instant, and a third tenant with `digest_enabled = false` is not. A sweep
+  assuming one shared timezone serves at most one of them — the Phoenix bug (I10)
+  in sweep form.
+- **T4 — one tenant's failure does not abort the rest.** With compute reads
+  throwing for one tenant, that tenant gets no digest and the other two still do.
+  `daily-digest-worker.ts:250` carries the comment *"Failure isolation: one
+  tenant's failure never breaks the sweep"* — implemented, commented, and until
+  now never proven.
+
+**Both assertions were mutation-tested**, because a test that passes for the
+wrong reason is worse than no test:
+
+| Mutation | Result |
+|---|---|
+| Delete the per-tenant `catch` so the throw escapes the loop | failure-isolation test **fails** ✓ |
+| Hard-code `localMinutesOfDay` to one shared timezone | **both** tests fail ✓ |
+
+**What is still open.** The other six sweeps — thank-you SMS (9.1), review
+request (9.2), hold reaper (3.5), estimate nudge (7.10), Google review
+monitoring (9.4), weekly summary (9.7) — **still stub their enumerators** and
+remain T0. The selector half of T4 is now shared and proven for all of them; the
+per-sweep half needs one entry each in the fan-out file, following the digest
+pattern. That is the remaining work, and it is now cheap.
+
+#### The original argument for the fix
 
 The ten inlined copies should be one exported, tested function —
 `listAllTenantIds(pool)` — used at every sweep site. That converts an untested
@@ -1983,12 +2039,9 @@ while the production selector exists only as ten anonymous closures inside
 
 Order of work:
 
-1. **Extract `listAllTenantIds(pool)`** and replace the ten copies. One commit,
-   no behaviour change.
-2. **One shared sweep harness test**: seed 3 tenants with divergent config, run
-   each sweep through the *real* enumerator, assert 3 correct outcomes and that a
-   thrown error on tenant 1 still processes 2 and 3. Earns T4 for every sweep at
-   once.
+1. ~~**Extract `listAllTenantIds(pool)`**~~ — **done**, fifteen sites.
+2. ~~**One shared sweep harness test**~~ — **done for the digest sweep**; six
+   sweeps remain, one entry each.
 3. **Grade the remaining rows.** §5 and §8 carry rungs; they do not yet carry
    T-grades per row. The aggregate above is measured; the per-row grading is not
    done, and should not be asserted until it is.
