@@ -720,10 +720,50 @@ spoken phrase.
 
 ---
 
+## Post-review fixes (Codex bot, PR #1049)
+
+Codex's automated review on the Fable-gated commit raised three findings.
+Two were this lane's rows and were fixed and pushed (`cfe12f1`); the third
+is a cross-lane coordination call outside this lane's authority and was
+answered on the thread rather than fixed unilaterally:
+
+- **I9 (P2, fixed):** the original test called `createInvoice` with only
+  `invoiceRepo`, never exercising or asserting the `invoice.created` audit
+  event — a real-DB write without its audit leg doesn't clear the PRD's
+  own §8.0 evidence bar. Both I9 tests now pass a real `PgAuditRepository`
+  and assert the `invoice.created` row (plus cross-tenant isolation on the
+  audit query in the T1 case). RED confirmed the row was genuinely absent
+  before the fix; GREEN after.
+- **I12 (P2, fixed):** the T1 cross-tenant test fully `await`ed tenant A's
+  rejected execution before starting tenant B's — sequential, not
+  concurrent — so the "concurrently" language in the test/report wasn't
+  backed by the code. Both executions are now dispatched together via
+  `Promise.allSettled` so their transactions are genuinely in flight on
+  the shared pool at the same time. Same outcome (A rejected, B
+  fulfilled), re-verified against real Postgres.
+- **I3/I12′ PRD stamp (P1, not this lane's to fix):** Fable's PRD-stamp
+  commit (`c434dcf`, on this branch) claims rung 4 for I3/I12′, whose
+  test files live on the sibling lane-B branch (PR #1050), not here.
+  Fable's commit message says it ran the union of both lane branches
+  locally before stamping; Codex is correct that THIS PR's tree alone
+  cannot run those commands. This is a cross-lane merge-order decision
+  (#1020 explicitly reserves the rung-5 reading for Fable at G7), so it
+  was answered on the review thread rather than reverted here — flagging
+  that `main` would carry an unbacked claim if #1050 doesn't land in the
+  same window.
+- A pre-existing (unrelated to Codex's findings) `tsc` gap was also fixed
+  while touching the I9 file: the `seedJob` helper's `locationRepo.create`
+  literal was missing the required `addressType` field (caught by the
+  default `tsconfig.json`, not the mandated `tsconfig.build.json`, which
+  excludes test files and was already clean).
+
+---
+
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed last.
+  this report committed, plus one follow-up commit (`cfe12f1`) fixing the
+  two Codex findings above.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
