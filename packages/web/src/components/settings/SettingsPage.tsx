@@ -89,6 +89,12 @@ export function SettingsPage() {
   // spanishMode derives from /api/settings/language (P11-002).
   const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
+  // 9.6 — digestEnabled/digestTime/digestChannel are already accepted by
+  // PUT /api/settings and mapped by PgSettingsRepository (RV-063); the gap
+  // was purely "no client control" (map #995 correction). Toggle-only for
+  // now — this page has no existing time/channel picker pattern to mirror,
+  // so digestTime/digestChannel stay server defaults until one exists.
+  const [digestEnabled, setDigestEnabledState] = useState(false);
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
   // #874 — live service-area data for the RESOURCES row (null until the
@@ -124,6 +130,7 @@ export function SettingsPage() {
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
+          digestEnabled?: boolean;
           businessName?: string;
           googleReviewUrl?: string | null;
           yelpReviewUrl?: string | null;
@@ -136,6 +143,9 @@ export function SettingsPage() {
         }
         if (typeof data.autoSendAppointmentReminders === 'boolean') {
           setReminders(data.autoSendAppointmentReminders);
+        }
+        if (typeof data.digestEnabled === 'boolean') {
+          setDigestEnabledState(data.digestEnabled);
         }
         if (typeof data.businessName === 'string' && data.businessName.trim()) {
           setBusinessName(data.businessName.trim());
@@ -209,7 +219,10 @@ export function SettingsPage() {
     }
   }
 
-  async function persistToggle(field: 'aiAuto' | 'reminders' | 'spanishMode', value: boolean) {
+  async function persistToggle(
+    field: 'aiAuto' | 'reminders' | 'spanishMode' | 'digestEnabled',
+    value: boolean,
+  ) {
     if (field === 'spanishMode') {
       try {
         await updateLanguageSettings({ defaultLanguage: value ? 'es' : 'en' });
@@ -222,7 +235,9 @@ export function SettingsPage() {
     const body =
       field === 'aiAuto'
         ? { autoApplyInternalUpdates: value }
-        : { autoSendAppointmentReminders: value };
+        : field === 'reminders'
+          ? { autoSendAppointmentReminders: value }
+          : { digestEnabled: value };
     try {
       const res = await apiFetch('/api/settings', {
         method: 'PUT',
@@ -234,7 +249,8 @@ export function SettingsPage() {
       toast.error('Could not save preference');
       // revert on failure
       if (field === 'aiAuto') setAiAuto(!value);
-      else setReminders(!value);
+      else if (field === 'reminders') setReminders(!value);
+      else setDigestEnabledState(!value);
     }
   }
 
@@ -249,6 +265,10 @@ export function SettingsPage() {
   function toggleSpanishMode(value: boolean) {
     setSpanishMode(value);
     void persistToggle('spanishMode', value);
+  }
+  function toggleDigestEnabled(value: boolean) {
+    setDigestEnabledState(value);
+    void persistToggle('digestEnabled', value);
   }
   const [qbOpen, setQbOpen] = useState(false);
   const [qbIntegration, setQbIntegration] = useState<AccountingIntegrationSummary | null>(null);
@@ -890,6 +910,11 @@ export function SettingsPage() {
               label: 'Spanish language mode',
               description: 'Customer messages & AI phone calls in Español',
               value: spanishMode, onChange: toggleSpanishMode,
+            },
+            {
+              label: 'Daily digest',
+              description: 'One text at the end of the day summarizing what happened',
+              value: digestEnabled, onChange: toggleDigestEnabled,
             },
           ].map(({ label, description, value, onChange }) => (
             <div key={label} className="flex items-start justify-between gap-3 px-4 py-3.5">

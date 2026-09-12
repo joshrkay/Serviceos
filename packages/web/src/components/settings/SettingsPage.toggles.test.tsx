@@ -126,6 +126,48 @@ describe('SettingsPage Quick toggles persistence', () => {
     });
   });
 
+  it('9.6 — hydrates the Daily digest toggle from /api/settings on mount', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ digestEnabled: true }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Daily digest')).toBeInTheDocument());
+  });
+
+  it('9.6 — persists the Daily digest toggle via PUT /api/settings when flipped', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ digestEnabled: false }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ digestEnabled: true }));
+
+    renderPage();
+    const digestLabel = await screen.findByText('Daily digest');
+    const toggleButton = digestLabel.closest('div')?.parentElement?.querySelector('button');
+    expect(toggleButton).toBeTruthy();
+    fireEvent.click(toggleButton!);
+
+    await waitFor(() => {
+      const putCall = apiFetchMock.mock.calls.find(
+        (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+      );
+      expect(putCall).toBeDefined();
+      const body = JSON.parse((putCall![1] as RequestInit).body as string);
+      expect(body.digestEnabled).toBe(true);
+    });
+  });
+
   it('persists spanishMode via /api/settings/language when toggled', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
