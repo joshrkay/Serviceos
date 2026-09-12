@@ -2377,9 +2377,6 @@ Every one of these represents engineering already paid for.
   *(An earlier draft of this document listed conversational onboarding itself as
   dormant. That was wrong — inherited from a stale audit and corrected here. The
   conversational route is mounted and has a real web client.)*
-- **RAG retrieval** — the knowledge-chunk table, embeddings, scoping, and an
-  evaluation-run table all exist; the code says plainly that **no caller in main
-  reads or writes today**.
 - **A workflow-trigger subsystem** with modes and configuration — **zero callers
   anywhere**, not even tests.
 - **A guardrail expiration module** — superseded by the worker, still present with
@@ -2395,6 +2392,18 @@ Every one of these represents engineering already paid for.
   through to draft. The ledger that would graduate them does not exist. The data
   is attached so it *can* be built retroactively, which is the right call, but
   the product currently has one trust tier and four names for it.
+
+> **RAG retrieval was on this list and has been removed** *(corrected
+> 2026-09-12, Codex review)*. It does not belong here: it has **production
+> writers and a real reader**, both gated, and is therefore a staged rollout —
+> see §12.4c. The claim as published read *"the code says plainly that no caller
+> in main reads or writes today,"* and that phrasing is the tell: **the evidence
+> was a doc-comment**, `transcript-ingestion-worker.ts:47`, which says *"Until
+> 4a-2 lands the reader…"*. Phase 4a-2 has landed —
+> `app.ts:2107` builds the adapter and `app.ts:5362` hands it to the mounted
+> conversations router. The comment was true when written and stale when quoted,
+> which is the **first** shape §12.4d lists (*documentation is never evidence*),
+> making its third appearance on this PR.
 
 ### 12.4b Schema debt
 
@@ -2454,6 +2463,20 @@ more actionable one: **capability that is fully built, wired, and tested, and
 that no default tenant will ever experience.** A dedicated sweep found it is far
 more widespread than an earlier draft of this document implied. Every item below
 was verified directly against code.
+
+**Staged rather than dark by accident: RAG retrieval.** The one item here whose
+gating reads as a deliberate rollout rather than an omission, and the reason it
+is filed under *dark* and not *unreachable*:
+
+| Half | Gate | State |
+|---|---|---|
+| **Writers** (`transcript-ingestion`, `proposal-correction` workers) | registered `if (embeddingProvider)` — `app.ts:1580`, `app.ts:2083` | Both `insert` into `knowledge_chunks` whenever an embedder is configured |
+| **Reader** (`createRetrieveAdapter`) | `RAG_RETRIEVAL_ENABLED === 'true'` **and** an embedder — `app.ts:2106` | Passed to the mounted conversations router (`app.ts:5362`); `conversations.ts:342` feeds it into `buildSourceContext` for suggest-reply drafts |
+
+Corpus first, reader second, on an explicit flag — which is what the wiring
+comment says it is doing, and what a staged rollout looks like when it is
+genuine. Nothing here needs building; the open question is only whether the flag
+has ever been turned on for a tenant, which no code check can answer.
 
 **Founding commitments currently dark.** Four of the fourteen, including three
 that the strategy documents treat as differentiators:
@@ -2679,7 +2702,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how twelve of these were got wrong
+### 12.4d A note on method — how thirteen of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2693,6 +2716,19 @@ exists to prevent, and it happened anyway — which is worth stating plainly,
 because it sets the correct expectation for §12 as a whole: **the gap register
 is a snapshot with a decay rate, not a standing truth.** Anything in it older
 than a sprint should be re-verified before it is acted on or quoted.
+
+**A third instance, caught in review, and the decay was two phases rather than
+two months.** §12.4 filed **RAG retrieval** as unreachable on the words *"the
+code says plainly that no caller in main reads or writes today."* Those words
+are a `transcript-ingestion-worker.ts` doc-comment — *"Until 4a-2 lands the
+reader…"* — and 4a-2 had landed: two registered workers write `knowledge_chunks`
+whenever an embedder is configured, and `createRetrieveAdapter` feeds the mounted
+conversations router's suggest-reply path behind `RAG_RETRIEVAL_ENABLED`.
+Reclassified as staged (§12.4c). **This document quotes source comments as
+evidence in the one section whose entire subject is that source comments are not
+evidence** — and did it three times. A comment describing *future* work
+("until X lands") has a shorter half-life than any other kind, because the
+sentence that falsifies it is a commit somebody else writes.
 
 **Two more failed differently, and the acceptance audit caught them.** Both were
 errors of *evidence*, not of currency:
