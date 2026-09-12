@@ -882,3 +882,60 @@ what stops the next reader inferring a posture from whichever document they open
   what "done" means for the digest, and where the next engineering hour goes.
 - *Move the superseded PRDs to `docs/archive/`.* Rejected on the reference count above; revisit as
   its own link-fixing change if the headers prove insufficient.
+
+---
+
+## D-031 — A rung is derived from evidence, never from reading the source
+
+**Date:** 2026-09-11
+**Status:** Accepted
+**Supersedes:** nothing. Amends the status convention in `docs/PRD-v5-as-built.md` §0 and the
+verification standard in §11.
+
+**Context.** PRD v5 scored roughly 100 capabilities and 18 invariants on the 0–6 ladder Part E
+invented. Every score was assigned by reading the implementation. That is a prediction of what a
+test would find, and the repository already forbids exactly this substitution — `packages/api/test/qa/matrix.ts`
+says of its own `expected` field: *"It is NOT the pass criterion — actual pass/fail comes from
+runtime checks."* A full re-derivation against the test suite found **28 rows overclaimed and 16
+underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
+
+**Decision.**
+
+1. **A rung is earned by an evidence class, not assigned by inspection.** The mapping is fixed:
+   NO EVIDENCE / CODE-ONLY → at most 2; PROVEN-UNIT (mocked or in-memory deps) → at most 3;
+   STRUCTURAL guard *with a negative control* → up to 4; real-Postgres write with an in-memory
+   audit repo → **4−**; real-Postgres write **and** audit event → 4; plus reachability → 5.
+2. **Three rules bind that mapping**, each earned by a mistake already made here:
+   - *Documentation is never evidence.* `assignment-notifications.ts:252` claims `app.ts` registers
+     a notifier; `app.ts` never imports the module.
+   - *Directory location is not evidence.* Three files in `packages/api/test/integration/` never
+     open a pool, and one was carrying a rung-5 claim on a `vi.fn()`.
+   - *A mocked dependency caps the claim at the mock.* This restates CLAUDE.md's existing rule; it
+     is what demoted the dunning cadence, the 4★ review gate and the service-credit cap.
+3. **Every rung carries a command.** Acceptance criteria, evidence classes and confirming commands
+   live in `docs/PRD-v5-acceptance.md`, one falsifiable sentence per row. A rung published without a
+   command behind it is a prediction and is to be read as one.
+4. **Reachability is part of the score, and "dark by default" is not its weakest form.** Four
+   capabilities are *unlit-able*: no product surface can enable them at all
+   (`setTenantFlag` and `setTechnicianAssignmentNotifier` have zero production callers;
+   `digest_enabled` has no route or UI writer). Those cap at 4 regardless of test quality.
+
+**Consequences.**
+- §8 of the PRD now carries verified rungs and a per-row reason. §5 distinguishes invariants that
+  are enforced from those merely true today — five carry a universal quantifier nothing proves, one
+  (I6) has a test pinning the opposite behaviour, and I18 has no enforcement at all.
+- Eight named tests would close the most ground; the first, `test/ai/supervisor/review-coverage.test.ts`,
+  is the only one that changes an architecture decision rather than a score (see O-9).
+- The register is itself prose and will rot. Its defence is that every row is runnable, and the
+  `S:`-prefixed shell falsifiers are cheap enough to run as a batch — the natural next step is a
+  script that diffs them against the expectations recorded there, the same trick
+  `voice-action-catalog.contract.test.ts` plays on the capability catalog.
+
+**Alternatives rejected:**
+- *Leave the asserted rungs and add a caveat.* Rejected: a caveat on a number people quote does not
+  travel with the number.
+- *Score only what has a Docker-gated test and mark the rest unknown.* Rejected: it discards real
+  information about unit-proven and structurally-guarded behaviour, and would have hidden that
+  eleven of eighteen invariants are genuinely strong.
+- *Delete the ladder and describe capabilities in prose.* Rejected: prose is what rotted in
+  `docs/remaining-features.md`, which is why the ladder exists.
