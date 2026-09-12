@@ -22,6 +22,7 @@ import { PublicEstimateService } from '../../src/estimates/public-estimate-servi
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
 import { createLogger } from '../../src/logging/logger';
 import { ConflictError } from '../../src/shared/errors';
+import { ensureTenantSettings } from '../../src/settings/settings';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -131,6 +132,18 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
     locationRepo = new PgLocationRepository(pool);
     auditRepo = new PgAuditRepository(pool);
     tenant = await createTestTenant(pool);
+    // createTestTenant only inserts tenants/users — PgSettingsRepository.update()
+    // is a bare UPDATE (no upsert), so a fresh tenant needs a settings row
+    // before the Tier-4 deposit-rule tests below can write depositStrategy
+    // etc. onto it. Without this, those settingsRepo.update() calls silently
+    // no-op (0 rows), and only pass today because an EARLIER test in this
+    // file ('Phase 2 — convert to invoice') happens to create the row first
+    // via ensureTenantSettings inside createInvoiceWithNextNumber — an
+    // accidental ordering dependency, confirmed by re-running the
+    // after_approval/7.9 tests in isolation (they fail with depositRequiredCents
+    // 0 instead of the expected value when no earlier test has run). Bootstrapping
+    // here explicitly makes every test in this file order-independent.
+    await ensureTenantSettings(tenant.tenantId, settingsRepo);
 
     customerId = crypto.randomUUID();
     await customerRepo.create({
