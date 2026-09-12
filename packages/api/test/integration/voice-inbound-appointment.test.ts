@@ -56,12 +56,14 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgPhoneNumberRepository } from '../../src/integrations/twilio/phone-number-repository';
 import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { findBookableSlots } from '../../src/scheduling/booking-availability';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import {
   createProposal,
   CreateProposalInput,
   InMemoryProposalRepository,
   Proposal,
 } from '../../src/proposals/proposal';
+import { createAppointmentPayloadSchema, validateProposalPayload } from '../../src/proposals/contracts';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
@@ -524,6 +526,12 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
     expect(payload.scheduledStart).toBe(BOOKING_START_UTC);
     expect(payload.scheduledEnd).toBe(BOOKING_END_UTC);
     expect(payload.timezone).toBe(BOOKING_TZ);
+    // #1019 6.2 (G1 3, T0) — "so a mumble can't become a malformed
+    // invoice" is a claim about the CONTRACT, not just what the handler
+    // happened to draft. Prove the drafted payload is a typed proposal
+    // that actually PASSES its Zod contract (proposals/contracts.ts),
+    // the same schema the P2-002 AI-safety gate enforces in production.
+    expect(createAppointmentPayloadSchema.safeParse(payload).success).toBe(true);
 
     // Gate: drafting a booking books nothing. No job was opened either — the
     // executor opens it (SCH-02) only once a human approves.
@@ -746,5 +754,111 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
     const afterA = await appointmentRepo.findByJob(tenant.tenantId, jobId);
     expect(afterA).toEqual(beforeA);
     expect(await appointmentRepo.findById(tenant.tenantId, bookedB!.id)).toBeNull();
+  });
+
+  // #1019 6.2 (G1 3, T0) — the OTHER half of "so a mumble can't become a
+  // malformed invoice": what happens when the classifier itself can't
+  // confidently place the utterance. The router's final guardrail
+  // (intent-classifier.ts: "low confidence → unknown, even if the LLM
+  // picked an intent") must turn this into a voice_clarification, never a
+  // create_appointment proposal built from a guess. Driven at REAL
+  // Postgres via PgProposalRepository — not the InMemoryProposalRepository
+  // the golden-path tests above use — so "no malformed proposal row" is a
+  // real SELECT against the `proposals` table, not an in-memory array.
+  it('refuses a low-confidence ("malformed") utterance: no create_appointment row, only a contract-validated voice_clarification, isolated per tenant', async () => {
+    const mumbleTenant = await createTestTenant(pool);
+    const otherTenant = await createTestTenant(pool);
+    const pgProposalRepo = new PgProposalRepository(pool);
+
+    // The classifier heard SOMETHING appointment-shaped but is not
+    // confident — exactly `intent-classifier.ts`'s
+    // `parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD` (0.6) branch,
+    // which downgrades ANY picked intent to 'unknown' before the router
+    // ever sees a routable intentType.
+    const gateway = scriptedGateway([
+      {
+        intentType: 'create_appointment',
+        confidence: 0.3,
+        reasoning: 'garbled — background noise over most of the utterance',
+      },
+    ]);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo: pgProposalRepo,
+      entityResolver: new PgEntityResolver(pool),
+      jobRepo,
+      tenantSchedulingResolver: async () => ({ timezone: BOOKING_TZ }),
+      now: () => BOOKING_NOW,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: mumbleTenant.tenantId,
+        userId: mumbleTenant.userId,
+        transcript: 'mmf— yeah so uh— Thursd— [inaudible] —book it',
+      }),
+      silentLogger(),
+    );
+
+    // No malformed proposal row: exactly ONE proposal exists for this
+    // tenant, and it is the clarification — never a create_appointment
+    // built from a low-confidence guess.
+    const drafted = await pgProposalRepo.findByTenant(mumbleTenant.tenantId);
+    expect(drafted).toHaveLength(1);
+    expect(drafted[0]!.proposalType).toBe('voice_clarification');
+    expect(drafted[0]!.status).toBe('draft');
+
+    // The real Postgres row, not just the in-process object: confirms this
+    // is a genuine SELECT against `proposals`, not an artifact of the
+    // repository's own in-memory bookkeeping.
+    const { rows: proposalRows } = await pool.query(
+      `SELECT proposal_type FROM proposals WHERE tenant_id = $1`,
+      [mumbleTenant.tenantId],
+    );
+    expect(proposalRows).toHaveLength(1);
+    expect(proposalRows[0].proposal_type).toBe('voice_clarification');
+    expect(
+      proposalRows.some((r: { proposal_type: string }) => r.proposal_type === 'create_appointment'),
+    ).toBe(false);
+
+    // Typed and validated: the clarification is not a bare guess either —
+    // it passes the SAME Zod contract gate (P2-002) the router calls
+    // before persisting it (assertValidProposalPayload('voice_clarification', ...)
+    // in voice-action-router.ts).
+    expect(
+      validateProposalPayload('voice_clarification', drafted[0]!.payload).valid,
+    ).toBe(true);
+
+    // Audit read-back: a clarification never executes anything, so the
+    // negative assertion IS the proof — no audit event of any kind was
+    // written for this tenant (nothing mutated, nothing to narrate).
+    const auditRows = await pool.query(
+      `SELECT event_type FROM audit_events WHERE tenant_id = $1`,
+      [mumbleTenant.tenantId],
+    );
+    expect(auditRows.rows).toHaveLength(0);
+
+    // Second tenant: the clarification is invisible across the tenant
+    // boundary, and a SECOND mumble in the other tenant gets its OWN
+    // clarification rather than colliding with (or being blocked by) the
+    // first tenant's.
+    expect(await pgProposalRepo.findByTenant(otherTenant.tenantId)).toHaveLength(0);
+
+    await worker.handle(
+      msg({
+        tenantId: otherTenant.tenantId,
+        userId: otherTenant.userId,
+        transcript: 'uh— [static] —Tuesd— can you—',
+      }),
+      silentLogger(),
+    );
+    const otherDrafted = await pgProposalRepo.findByTenant(otherTenant.tenantId);
+    expect(otherDrafted).toHaveLength(1);
+    expect(otherDrafted[0]!.proposalType).toBe('voice_clarification');
+    expect(otherDrafted[0]!.id).not.toBe(drafted[0]!.id);
+    // The first tenant's clarification is unaffected/unduplicated by the
+    // second tenant's mumble.
+    expect(await pgProposalRepo.findByTenant(mumbleTenant.tenantId)).toHaveLength(1);
   });
 });
