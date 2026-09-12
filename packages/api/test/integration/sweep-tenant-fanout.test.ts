@@ -62,7 +62,9 @@ import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
-import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+// (PgInvoiceRepository is imported above with the other invoice repos — the
+// appointment-reminder lane added its own copy here and this branch added one
+// at the top, which git merged cleanly into a duplicate declaration.)
 import { createAppointment } from '../../src/appointments/appointment';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
