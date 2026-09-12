@@ -50,7 +50,13 @@ import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
-import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import {
+  InMemoryDeliveryProvider,
+  type MessageDeliveryProvider,
+} from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { PgDncRepository } from '../../src/compliance/dnc';
+import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
 import { AppointmentConfirmationNotifier } from '../../src/notifications/appointment-confirmation-notifier';
 import type { SchedulingConfirmationNotifier } from '../../src/proposals/execution/scheduling-notifications';
@@ -92,7 +98,10 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
   let tenantA: SeededTenant;
   let tenantB: SeededTenant;
 
-  async function seedTenant(label: string): Promise<SeededTenant> {
+  async function seedTenant(
+    label: string,
+    contact: { phone?: boolean; email?: boolean } = { phone: true, email: true },
+  ): Promise<SeededTenant> {
     const tenant = await createTestTenant(pool);
     const customerId = crypto.randomUUID();
     const phone = `+1602555${Math.floor(1000 + Math.random() * 8999)}`;
@@ -103,13 +112,14 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
       firstName: label,
       lastName: 'Customer',
       displayName: `${label} Customer`,
-      primaryPhone: phone,
-      email,
+      ...(contact.phone === false ? {} : { primaryPhone: phone }),
+      ...(contact.email === false ? {} : { email }),
       preferredChannel: 'sms',
-      // The GatedMessageDelivery consent gate is NOT in play here (the tests
-      // wire the raw provider, exactly as app.ts does before wrapping), but
-      // the stored flag is forwarded by sendCustomerMessage, so set it true so
-      // a later wrapping change cannot silently turn these into suppressions.
+      // The GatedMessageDelivery consent gate IS in play (see gatedDelivery()
+      // below — the tests wrap the provider exactly as app.ts:1328 does, in the
+      // strictest 'block' mode), and it reads this stored flag. A consenting
+      // customer is the case these rows are about; the gate's own suppression
+      // behaviour is proven in customer-message-delivery.test.ts.
       smsConsent: true,
       isArchived: false,
       createdBy: tenant.userId,
@@ -211,9 +221,11 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
   async function confirmationRows(
     tenantId: string,
     appointmentId?: string,
-  ): Promise<Array<{ id: string; channel: string; recipient: string; entity_id: string }>> {
+  ): Promise<
+    Array<{ id: string; channel: string; recipient: string; entity_id: string; provider: string }>
+  > {
     const { rows } = await pool.query(
-      `SELECT id, channel, recipient, entity_id
+      `SELECT id, channel, recipient, entity_id, provider
          FROM message_dispatches
         WHERE tenant_id = $1
           AND entity_type = 'appointment_confirmation'
@@ -224,12 +236,47 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     return rows;
   }
 
-  function liveTransactionalComms(): TransactionalCommsService {
+  /**
+   * The delivery object app.ts actually hands to `TransactionalCommsService`:
+   * the selected provider wrapped in `GatedMessageDelivery` (app.ts:1328-1335),
+   * with the same five deps — the Pg DNC lookup, the audit repo, the
+   * `TCPA_CONSENT_ENFORCEMENT` mode, and the Pg consent ledger. Passing the raw
+   * provider would make every send unconditionally succeed, which is not what
+   * the production path does: consent, DNC and the kill switches all sit in
+   * this wrapper.
+   *
+   * `enforcement: 'block'` is deliberately the STRICTEST mode — what
+   * `shared/config.ts:210-217` resolves to in prod/staging — so these rows are
+   * proven against the gate production actually runs, not a permissive one.
+   */
+  function gatedDelivery(base: MessageDeliveryProvider = new InMemoryDeliveryProvider()): GatedMessageDelivery {
+    return new GatedMessageDelivery({
+      base,
+      dnc: new PgDncRepository(pool),
+      auditRepo,
+      enforcement: 'block',
+      consentLedger: new PgConsentEventRepository(pool),
+      // `GatedMessageDeliveryDeps.env` defaults to `process.env`
+      // (gated-message-delivery.ts:190), and the kill switches are read per
+      // send (`isOutboundChannelEnabled`, line 112). Left to default, a shell
+      // or CI job exporting TELEPHONY_ENABLED=false or EMAIL_ENABLED=false
+      // would suppress the send and fail the POSITIVE assertions below — the
+      // rows would look unwritten for a reason that has nothing to do with
+      // this row. Both channels are pinned on explicitly so these cases are
+      // about the confirmation path and nothing else. The kill switches'
+      // own behaviour is covered in killswitch-production-config.test.ts.
+      env: { ...process.env, TELEPHONY_ENABLED: 'true', EMAIL_ENABLED: 'true' },
+    });
+  }
+
+  function liveTransactionalComms(
+    base: MessageDeliveryProvider = new InMemoryDeliveryProvider(),
+  ): TransactionalCommsService {
     // The construction app.ts:1771 performs whenever `messageDelivery` is
     // non-null. `invoiceRepo` is only reached by the overdue-reminder path,
     // which this row never touches, so it is stubbed rather than wired.
     return new TransactionalCommsService({
-      delivery: new InMemoryDeliveryProvider(),
+      delivery: gatedDelivery(base),
       appointmentRepo,
       jobRepo,
       customerRepo,
@@ -248,7 +295,7 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     // `AppointmentConfirmationNotifierDeps` declares
     // (src/notifications/appointment-confirmation-notifier.ts:12).
     return new AppointmentConfirmationNotifier({
-      delivery: new InMemoryDeliveryProvider(),
+      delivery: gatedDelivery(),
       appointmentRepo,
       jobRepo,
       customerRepo,
@@ -366,6 +413,120 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
    * the dead notifier?) — see the drafted issue in the lane report. This test
    * only pins that the criterion does not hold today on that wiring.
    */
+  it('CURRENT (T3): a delivery provider is NOT sufficient — a tenant with autoSendAppointmentReminders=false gets no confirmation row, while a differently-configured neighbour in the same run does', async () => {
+    // The second silent-skip path, and unlike delivery mode 'none' this one is
+    // reachable by the owner from settings. Both live notifier implementations
+    // return early on it: transactional-comms-service.ts:355 and the dormant
+    // appointment-confirmation-notifier.ts:42.
+    const quiet = await seedTenant('Quiet');
+    await settingsRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: quiet.tenant.tenantId,
+      businessName: 'Quiet Heating',
+      timezone: 'America/Phoenix',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      laborRateCentsPerHour: 11500,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // The flag goes through `update`, not `create`: PgSettingsRepository.create
+    // does not list auto_send_appointment_reminders among its INSERT columns
+    // (pg-settings.ts:274-280), so the row lands at the column's TRUE default
+    // and only the update path (pg-settings.ts:369) can turn it off — which is
+    // also how an owner toggles it.
+    await settingsRepo.update(quiet.tenant.tenantId, {
+      autoSendAppointmentReminders: false,
+    });
+    expect(
+      (await settingsRepo.findByTenant(quiet.tenant.tenantId))?.autoSendAppointmentReminders,
+    ).toBe(false);
+
+    const quietAppointment = await executeApprovedCreateAppointment(
+      quiet,
+      liveTransactionalComms(),
+    );
+    expect(await confirmationRows(quiet.tenant.tenantId, quietAppointment)).toHaveLength(0);
+
+    // T3 — the neighbour tenant, differently configured (no settings row, so
+    // the flag is unset rather than false), books in the SAME run through the
+    // SAME notifier and DOES get its confirmation.
+    const loudAppointment = await executeApprovedCreateAppointment(
+      tenantB,
+      liveTransactionalComms(),
+    );
+    expect(
+      (await settingsRepo.findByTenant(tenantB.tenant.tenantId))?.autoSendAppointmentReminders,
+    ).toBeUndefined();
+    expect(
+      (await confirmationRows(tenantB.tenant.tenantId, loudAppointment)).map((r) => r.channel),
+    ).toEqual(['email', 'sms']);
+
+    // The dormant class agrees — it carries the same early return, so
+    // promoting it would not close this path either.
+    const quietAgain = await executeApprovedCreateAppointment(quiet, dormantNotifier());
+    expect(await confirmationRows(quiet.tenant.tenantId, quietAgain)).toHaveLength(0);
+  });
+
+  it('CURRENT: a configured provider is still not sufficient — a customer with only ONE contact method gets only that channel`s confirmation', async () => {
+    // `sendCustomerMessage` skips a channel whose recipient is missing, so the
+    // row's criterion depends on the CUSTOMER too, not just the tenant and the
+    // boot. Both of these are ordinary production shapes.
+    const emailOnly = await seedTenant('Mailonly', { phone: false });
+    const emailAppt = await executeApprovedCreateAppointment(emailOnly, liveTransactionalComms());
+    const emailRows = await confirmationRows(emailOnly.tenant.tenantId, emailAppt);
+    expect(emailRows.map((r) => r.channel)).toEqual(['email']);
+    expect(emailRows[0].recipient).toBe(emailOnly.email);
+
+    const phoneOnly = await seedTenant('Phoneonly', { email: false });
+    const phoneAppt = await executeApprovedCreateAppointment(phoneOnly, liveTransactionalComms());
+    const phoneRows = await confirmationRows(phoneOnly.tenant.tenantId, phoneAppt);
+    expect(phoneRows.map((r) => r.channel)).toEqual(['sms']);
+    expect(phoneRows[0].recipient).toBe(phoneOnly.phone);
+  });
+
+  it('CURRENT: with only ONE credential leg configured, the working channel still confirms and the unconfigured one writes nothing — and a customer reachable only on the dead leg gets no confirmation at all', async () => {
+    // `createMessageDeliveryProvider` keeps the SMS and email credential legs
+    // INDEPENDENT (delivery-provider-factory.ts:212-240), so prod/staging with
+    // Twilio credentials and no SendGrid gets a NON-NULL provider whose email
+    // leg throws at send time. `sendCustomerMessage` swallows that per channel.
+    // Modelled here by a base whose sendEmail throws, which is what
+    // TwilioDeliveryProvider does on an unconfigured leg.
+    const smsOnlyProvider: MessageDeliveryProvider = {
+      sendSms: async () => ({
+        providerMessageId: 'sms-leg-1',
+        provider: 'twilio',
+        channel: 'sms' as const,
+      }),
+      sendEmail: async () => {
+        throw new Error('email channel is not configured');
+      },
+    };
+
+    // A customer with both contact methods still gets the SMS confirmation.
+    const both = await executeApprovedCreateAppointment(
+      tenantA,
+      liveTransactionalComms(smsOnlyProvider),
+    );
+    const bothRows = await confirmationRows(tenantA.tenant.tenantId, both);
+    expect(bothRows.map((r) => r.channel)).toEqual(['sms']);
+    // The provider recorded on the row is the real one the send returned, not
+    // a placeholder — so the row reflects an actual dispatch attempt.
+    expect(bothRows[0].provider).toBeTruthy();
+
+    // A customer reachable ONLY by email, on that same boot, gets nothing —
+    // approved booking, non-null provider, reminders enabled, and no row.
+    const emailOnly = await seedTenant('Deadleg', { phone: false });
+    const stranded = await executeApprovedCreateAppointment(
+      emailOnly,
+      liveTransactionalComms(smsOnlyProvider),
+    );
+    expect(await confirmationRows(emailOnly.tenant.tenantId, stranded)).toHaveLength(0);
+  });
+
   it.fails(
     'DESIRED (row 3.8): an approved create_appointment writes an appointment_confirmation dispatch row even when app.ts resolves NO delivery provider, so a booked customer is never silently left unconfirmed',
     async () => {
