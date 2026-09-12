@@ -60,7 +60,8 @@ the whole point of this edition:**
 - It is **measured in aggregate** for the existing suite (§11.0e): 52% of
   Docker-gated files carry a genuine multi-tenant proof.
 - It is **published per row only where it was actually earned** — today the
-  seven tenant-iterating sweeps, graded and mutation-tested in §11.0e.
+  seven sweep-backed rows (covered by eight sweep workers), graded and
+  mutation-tested in §11.0e.
 - **Every other row in §5 and §8 is ungraded**, and its printed rung should be
   read as un-capped and therefore provisional. The scan behind the aggregate is
   a keyword heuristic: sound across 217 files, not sound row by row. Publishing
@@ -2039,8 +2040,12 @@ wrong reason is worse than no test:
 | Delete the per-tenant `catch` so the throw escapes the loop | failure-isolation test **fails** ✓ |
 | Hard-code `localMinutesOfDay` to one shared timezone | **both** tests fail ✓ |
 
-**All seven sweeps now carry fan-out coverage** — 16 tests in
-`sweep-tenant-fanout.test.ts`. They are not all proven to the same depth, and
+**All eight sweeps now carry fan-out coverage** — 16 tests in
+`sweep-tenant-fanout.test.ts`. Eight sweep *workers*, seven requirement *rows*:
+weekly feedback and HFCR weekly send are two separate sweeps both serving 9.7,
+whose evidence line cites both. Earlier drafts said "seven sweeps" throughout,
+which left it ambiguous whether a worker had been left out of the T4 claim.
+None was. They are not all proven to the same depth, and
 the difference matters:
 
 | Sweep | Shape | What is proven |
@@ -2096,18 +2101,18 @@ truncated listing. There were fifteen.)*
 Order of work:
 
 1. ~~**Extract `listAllTenantIds(pool)`**~~ — **done**, fifteen sites.
-2. ~~**One shared sweep harness test**~~ — **done for all seven sweeps**, 16
-   tests, every isolation assertion mutation-tested.
+2. ~~**One shared sweep harness test**~~ — **done for all eight sweeps**
+   (seven rows), 16 tests, every isolation assertion mutation-tested.
 3. **Grade the remaining rows.** §5 and §8 carry rungs; they do not yet carry
    T-grades per row. The aggregate above is measured; the per-row grading is not
    done, and should not be asserted until it is.
 
 #### Graded so far, and what remains
 
-**Earned and published (7 rows):** the tenant-iterating sweeps in the table
-above — digest (9.6) and weekly feedback (9.7) at **T3+T4**, hold reaper (3.5),
-estimate nudge (7.10), HFCR weekly, Google reviews (9.4), thank-you SMS (9.1)
-and review request (9.2) at **T4**. Each was proven against the real enumerator
+**Earned and published (7 rows, 8 sweeps):** the sweeps in the table above —
+digest (9.6) and weekly feedback (9.7) at **T3+T4**, hold reaper (3.5),
+estimate nudge (7.10), HFCR weekly send (also 9.7), Google reviews (9.4),
+thank-you SMS (9.1) and review request (9.2) at **T4**. Each was proven against the real enumerator
 and mutation-tested.
 
 **Ungraded (everything else in §5 and §8).** Their printed rungs are
@@ -2277,19 +2282,44 @@ so a `PUT` carrying one returns **200 with the key silently discarded**. That is
 worse than the rejection this document claimed, because the caller is told the
 write succeeded.
 
-Four settings exist in the repository interface and its column map but not in
-that schema, making them settable only by direct SQL: `speedToLeadEnabled`,
-`autonomousCloseEnabled`, `brandVoiceLocked`, `weeklyFeedbackEnabled`. The last
-means a tenant cannot turn *off* a recurring email the product sends them — and
-receives a success response for trying.
+**Three** settings exist in the repository interface *and* its write column map
+but not in that schema, making them settable only by direct SQL:
+`speedToLeadEnabled`, `autonomousCloseEnabled`, `weeklyFeedbackEnabled`. The
+last means a tenant cannot turn *off* a recurring email the product sends them
+— and receives a success response for trying.
+
+*An earlier draft listed a fourth, `brandVoiceLocked`, and was wrong about it.*
+It appears in `pg-settings.ts` only as a **read projection** (row → object); it
+is **not** in the write column map, because it has a dedicated write path:
+`PgBrandVoiceRepository.bumpVersion`, behind the mounted
+`PUT /api/settings/brand-voice` (app.ts:5399). `bumpVersion` takes
+`SELECT … FOR UPDATE` on the settings row and makes three things atomic with the
+write: the 15-minute cool-down check (`BRAND_VOICE_COOLDOWN_MS`, checked under
+the lock as an explicit TOCTOU fix), the `brand_voice_versions` history insert,
+and the `tenant_settings` update.
+
+The audit is **not** in that transaction — `bumpVersion` contains no audit
+reference at all. `brand-voice-service.ts` builds the event and the router
+persists it after the bump returns, and only `if (auditRepo)`. That is Tier 2
+by §5.0b, not Tier 1, and the router's own doc-comment — *"the lock + cool-down
++ version-bump + audit"* — reads as though it were Tier 1. *(This document
+asserted the same thing one draft ago, from the same doc-comment. §12.4d's first
+rule caught it: a doc-comment claiming a module is wired is a claim, not a
+wiring.)*
+
+Adding `brandVoiceLocked` to the generic settings `PUT` would either stay a
+silent no-op or — with a column mapping added — bypass the lock, the cool-down
+and the version history, and emit **no brand-voice audit at all**. Its write
+path is correct as it stands.
 
 Blanket `.strict()` is **not** the remediation. The schema relies on strip
 semantics deliberately: `voice_approval_pin_hash` is omitted **on purpose** so a
 raw hash can never be injected through the generic settings `PUT`, and the
 schema says exactly that in its own comment. Going strict would convert that
 designed-silent drop into a 400 and newly reject every client that sends an
-extra key. The narrow fix is to add the four missing keys, with the same
-route-boundary validation their siblings already get.
+extra key. The narrow fix is to add the **three** missing keys, with the same
+route-boundary validation their siblings already get — and to leave
+`brandVoiceLocked` on its dedicated workflow.
 
 > **S:** `awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' packages/api/src/shared/contracts.ts | grep -c 'strict()'`
 > → **1**, and that one is the nested `autoApproveThreshold` object, not the
@@ -2359,7 +2389,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how six of these were got wrong
+### 12.4d A note on method — how seven of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2427,6 +2457,41 @@ route writes it at all. **An internal contradiction is a free falsifier and this
 edition did not run one.** A `grep` for each capability's name across this file,
 reading every hit together, would have caught it — as it later caught the
 tenant-grade contradiction in §0 and D-032.
+
+**The seventh is the only one that would have done damage if believed**, and it
+deserves its own line. `brandVoiceLocked` was listed among the settings
+"settable only by direct SQL," with the prescribed fix being to add all of them
+to the generic settings `PUT`. It has a dedicated write path —
+`PgBrandVoiceRepository.bumpVersion`, behind `PUT /api/settings/brand-voice`,
+which under a row lock makes the cool-down check, the version-history insert and
+the settings update atomic. Wiring it into the generic settings path as this
+document instructed would have **bypassed all three**, and emitted no
+brand-voice audit at all.
+
+The mistake underneath was small and mechanical: `brandVoiceLocked` appears in
+`pg-settings.ts` once, and I read that single hit as membership in the write
+column map. It is in the row-to-object **read projection**. A field's presence
+in a repository file says nothing about which direction it travels — and
+`settings.ts` says so in a comment, calling those fields projections, which I
+had already read.
+
+The correction to that correction is worth recording too, because it happened in
+the same sitting. Writing this up, I described `bumpVersion` as committing its
+audit event in the same transaction — taking it from the router's doc-comment,
+*"the lock + cool-down + version-bump + audit"*. `bumpVersion` contains no audit
+reference; the router writes the event afterwards and only when an `auditRepo`
+was passed. I caught it by grepping the function instead of trusting the
+sentence above it, which is the only reason it is not the eighth entry in this
+list. **The first finding on this PR was this same Tier-1-versus-Tier-2 audit
+confusion (§5.0b), and I made it again nine commits later** — a documented
+lesson does not transfer on its own.
+
+Every other entry here is a wrong *description*, which costs a reader their
+trust. This one was a wrong *instruction*, which would have cost a tenant their
+audit trail. **A document that grades its own claims owes a higher standard to
+the sentences that tell someone what to change than to the ones that tell them
+what is true.** The remediations in §12 have had no falsifier of any kind
+attached to them; the rungs at least have commands.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading

@@ -993,7 +993,8 @@ entity resolver shipping with nonexistent column names because its `Pool` was mo
 - Seven sweep-backed rows — digest (9.6), thank-you SMS (9.1), review request (9.2), hold reaper
   (3.5), estimate nudge (7.10), Google review monitoring (9.4), weekly summary (9.7) — were **T0 and
   capped at rung 4** until the enumerator was real in their tests.
-  **Status 2026-09-12: closed.** `listAllTenantIds` is extracted and proven, and all seven sweeps
+  **Status 2026-09-12: closed.** `listAllTenantIds` is extracted and proven, and all **eight**
+  sweep workers covering those seven rows — weekly feedback and HFCR weekly send both serve 9.7 —
   carry fan-out coverage in `test/integration/sweep-tenant-fanout.test.ts` (16 tests). Digest and
   weekly-feedback reach T3+T4; the rest reach T4. See PRD §11.0e for the per-sweep depth, including
   the second sweep shape (cross-tenant query, no enumerator) that this decision did not anticipate.
