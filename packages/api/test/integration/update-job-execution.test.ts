@@ -24,7 +24,12 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
-import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import { getSharedTestDb, createTestTenant, createTestFile, closeSharedTestDb } from './shared';
+import { PgVoiceRepository } from '../../src/voice/pg-voice';
+import { createVoiceRecording } from '../../src/voice/voice-service';
+import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
+import type { QueueMessage } from '../../src/queues/queue';
+import type { Logger } from '../../src/logging/logger';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgJobTimelineRepository } from '../../src/jobs/pg-job-lifecycle';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
@@ -801,12 +806,27 @@ describe('Postgres integration — B7.7 drafting leg: spoken "Mark the Garcia jo
  * answer, not a proposal, so a question doesn't create work." This suite's
  * two describes above prove the WRITE leg (`update_job`) end to end; this
  * one proves the companion READ leg never touches the proposals pipeline at
- * all, against the SAME real Postgres. `lookup_jobs` (ai/skills/lookup-jobs.ts,
- * "Read-only, bypasses the proposals pipeline") has no proposalRepo in its
- * dependency bag by construction — this pins that architectural claim with a
- * real negative assertion on the `proposals` table (before AND after), not
- * just an absence of a dependency parameter. T1 kept, not raised — this is a
- * grep+negative-assertion pass, not a reachability upgrade.
+ * all, against the SAME real Postgres.
+ *
+ * TWO tests, two different claims — a review finding on this row (xhawk-ai,
+ * PR #1048) is worth stating explicitly:
+ *
+ *   1. `lookupJobs()` called DIRECTLY proves the SKILL itself
+ *      (ai/skills/lookup-jobs.ts, "Read-only, bypasses the proposals
+ *      pipeline") has no proposalRepo in its dependency bag by construction
+ *      — real negative assertion on `proposals`, but it bypasses
+ *      `voice-action-router.ts` entirely. It CANNOT catch a ROUTING
+ *      regression: if the classifier's `isLookupIntent('lookup_jobs')`
+ *      branch broke and a `lookup_jobs` transcript fell through to the
+ *      proposal-drafting path instead, this test would still pass, because
+ *      it never asks the router anything.
+ *   2. The second test below closes that gap: it drives the REAL
+ *      `createVoiceActionRouterWorker` with a scripted `lookup_jobs`
+ *      classification and a REAL `PgProposalRepository`, so a routing
+ *      regression of that shape would show up as a non-zero proposal count.
+ *
+ * T1 kept, not raised — this is a grep+negative-assertion pass, not a
+ * reachability upgrade.
  */
 describe('Postgres integration — voice lookup_jobs ("where does it stand?") writes no proposal, no mutation (#1019 6.4)', () => {
   let pool: Pool;
@@ -912,5 +932,110 @@ describe('Postgres integration — voice lookup_jobs ("where does it stand?") wr
     expect(new Date(jobAfter.rows[0].updated_at).toISOString()).toBe(
       new Date(jobBefore.rows[0].updated_at).toISOString(),
     );
+  });
+
+  /** Replays scripted JSON classifier replies in call order; repeats the last one. */
+  function scriptedGateway(responses: unknown[]): LLMGateway {
+    let i = 0;
+    return {
+      complete: vi.fn(async () => ({
+        content: JSON.stringify(responses[Math.min(i++, responses.length - 1)]),
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 10, output: 10, total: 20 },
+        latencyMs: 1,
+      } satisfies LLMResponse)),
+    } as unknown as LLMGateway;
+  }
+
+  function silentLogger(): Logger {
+    const noop = (..._args: unknown[]) => {};
+    const base = {
+      debug: noop,
+      info: noop,
+      warn: noop,
+      error: noop,
+      child: () => base,
+    } as unknown as Logger;
+    return base;
+  }
+
+  function msg<T>(payload: T): QueueMessage<T> {
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 10)}`,
+      type: 'voice_action_router',
+      payload,
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: `idem-${Math.random().toString(36).slice(2, 10)}`,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  // Review follow-up (xhawk-ai, PR #1048) — see this describe's doc comment.
+  // The direct lookupJobs() call above proves the skill; this proves the
+  // ROUTER actually sends a `lookup_jobs` transcript there instead of down
+  // the proposal-drafting path. Real Postgres on both legs: a real
+  // PgProposalRepository (so a routing regression shows up as a non-zero
+  // row) and a real voice_recordings row (so "the worker returns an
+  // answer" is a real column read-back, not an inferred side effect).
+  it('the REAL router routes a "how is the Garcia job" transcript to the answer path — the proposals table never moves', async () => {
+    const voiceRepo = new PgVoiceRepository(pool);
+    const pgProposalRepo = new PgProposalRepository(pool);
+    const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
+    const recording = await voiceRepo.create(
+      createVoiceRecording({ tenantId: tenant.tenantId, fileId, createdBy: tenant.userId }),
+    );
+
+    const proposalsBefore = await pool.query(
+      `SELECT count(*) FROM proposals WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(Number(proposalsBefore.rows[0].count)).toBe(0);
+
+    const gateway = scriptedGateway([
+      { intentType: 'lookup_jobs', confidence: 0.95 },
+    ]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo: pgProposalRepo,
+      jobRepo,
+      voiceRepo,
+      // Truthy marker that activates the E-lane answer surface at all
+      // (voice-action-router.ts's isLookupIntent gate: `!lookupDeps` skips
+      // straight past). lookup_jobs itself only needs `shared.jobRepo`
+      // (executeLookupAnswer's switch), so this stays empty.
+      lookupAnswers: {},
+      now: () => new Date(),
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: tenant.tenantId,
+        userId: tenant.userId,
+        transcript: 'How is the Garcia job doing?',
+        recordingId: recording.id,
+        // Caller-ID-verified identity (the memo/inbound-call shape) — the
+        // router resolves this straight through without needing an entity
+        // resolver dependency, matching CUSTOMER_SCOPED_LOOKUP_INTENTS'
+        // contract for lookup_jobs.
+        customerId,
+      }),
+      silentLogger(),
+    );
+
+    // The worker returns an answer: a real voice_recordings row, read back
+    // through the same two-phase contract voice-lookup-answer.test.ts pins.
+    const answered = await voiceRepo.findById(tenant.tenantId, recording.id);
+    expect(answered?.answerStatus).toBe('answered');
+    expect(answered?.answer?.result).toBe('found');
+
+    // The proposals table never moved — the sharper, router-level version
+    // of the negative assertion above.
+    const proposalsAfter = await pool.query(
+      `SELECT count(*) FROM proposals WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(Number(proposalsAfter.rows[0].count)).toBe(0);
   });
 });

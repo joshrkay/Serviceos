@@ -133,44 +133,81 @@ in `ai/skills/lookup-jobs.ts` (doc comment: *"Read-only, bypasses the proposals
 pipeline"*), which had a unit test (`test/ai/skills/lookup-jobs.test.ts`, mocked repo) but
 no real-Postgres proof and no negative assertion on the `proposals` table. Added a new
 describe block to `update-job-execution.test.ts` (the file the map names) so the WRITE and
-READ legs for the same "Garcia job" story sit side by side, calling `lookupJobs()` directly
-against a real `PgJobRepository`.
+READ legs for the same "Garcia job" story sit side by side.
 
-**What was added:** seed a real job; call `lookupJobs()`; assert the answer is `found` with
-the real status; assert `SELECT count(*) FROM proposals WHERE tenant_id = $1` is `0` both
-BEFORE and AFTER the call; assert the job row (`status`, `updated_at`) is byte-for-byte
-unchanged after.
+**What was added (first pass):** seed a real job; call `lookupJobs()` directly against a
+real `PgJobRepository`; assert the answer is `found` with the real status; assert
+`SELECT count(*) FROM proposals WHERE tenant_id = $1` is `0` both BEFORE and AFTER the
+call; assert the job row (`status`, `updated_at`) is byte-for-byte unchanged after.
+
+**Review finding addressed (xhawk-ai bot, PR #1048, Medium/Testing,
+`update-job-execution.test.ts:886-889`):** *"This calls `lookupJobs()` directly, so the
+test cannot catch the production regression it claims to guard:
+`voice-action-router` could route a `lookup_jobs` utterance into `proposalRepo` before
+or instead of `executeLookupAnswer`, and this test would still pass because the raw skill
+has no proposal repository dependency to write through."* Verified as real: the router's
+`isLookupIntent(...)` branch (`voice-action-router.ts`) is exactly the routing decision the
+direct-call test cannot see. **Fix pushed:** a second test drives the REAL
+`createVoiceActionRouterWorker` with a scripted `lookup_jobs` classification and a REAL
+`PgProposalRepository`, plus a real `voice_recordings` row so "the worker returns an
+answer" is a real column read-back (mirroring `voice-lookup-answer.test.ts`'s two-phase
+contract) rather than an inferred side effect. Building this test surfaced an
+undocumented-to-me wiring requirement — the E-lane answer surface only activates when
+`deps.lookupAnswers` (a separate `VoiceLookupAnswerDeps` bag) is truthy; omitting it makes
+the router silently `'skipped'` instead of answering, which is itself the reason the fix's
+own RED run below is informative (it caught a *test wiring* gap, not a production one,
+before the assertions were even meaningful).
 
 **Command:**
 ```
 cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts --reporter=verbose test/integration/update-job-execution.test.ts
 ```
 
-**RED** (proposal count after flipped to expect `1`):
+**RED, first pass** (proposal count after flipped to expect `1`):
 ```
  × ... answers "where does the Garcia job stand?" with no proposal row and no mutation to the job
    → expected +0 to be 1 // Object.is equality
  Tests  1 failed | 11 passed (12)
 ```
 
-**GREEN:**
+**RED, router-driven test — attempt 1** (`lookupAnswers` omitted; caught before the
+deliberate-wrongness even mattered):
 ```
- ✓ ... answers "where does the Garcia job stand?" with no proposal row and no mutation to the job
- Test Files  1 passed (1)
-      Tests  12 passed (12)
+ × ... the REAL router routes a "how is the Garcia job" transcript to the answer path — the proposals table never moves
+   → expected 'skipped' to be 'pending' // Object.is equality
 ```
 
-**Evidence class:** real Postgres negative assertion (`SELECT count(*) FROM proposals`
-before/after, real job row before/after) — T1 held per the ticket's instruction (not asked
-to raise tenant grade on this row).
+**RED, router-driven test — attempt 2** (`lookupAnswers: {}` added; `answerStatus`
+deliberately flipped to `'pending'`, proposal count after deliberately flipped to `1`):
+```
+ × ... the REAL router routes a "how is the Garcia job" transcript to the answer path — the proposals table never moves
+   → expected 'answered' to be 'pending' // Object.is equality
+ Tests  1 failed | 12 passed (13)
+```
+
+**GREEN (final, both tests):**
+```
+ ✓ ... answers "where does the Garcia job stand?" with no proposal row and no mutation to the job
+ ✓ ... the REAL router routes a "how is the Garcia job" transcript to the answer path — the proposals table never moves
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+```
+
+**Evidence class:** real Postgres negative assertion on the direct-skill-call test, PLUS a
+real-router-level negative assertion (real `PgProposalRepository`, real `voice_recordings`
+answer read-back) that also proves the routing decision, not just the skill's own
+dependency shape. T1 held per the ticket's instruction (not asked to raise tenant grade on
+this row).
 
 **Tenant-grade grep:**
 ```
 11: * completion effects, the job.updated audit event, and the cross-tenant
-229:  it('does not expose the job to another tenant (scoped read) and a cross-tenant jobId fails cleanly', ...
-760:  it('cross-tenant: the same sentence resolves to nothing for another tenant, and a borrowed jobId stays GATED', ...
+234:  it('does not expose the job to another tenant (scoped read) and a cross-tenant jobId fails cleanly', ...
+248:        summary: 'cross-tenant attempt',
+258:    // The row is untouched — no cross-tenant write leaked through.
+765:  it('cross-tenant: the same sentence resolves to nothing for another tenant, and a borrowed jobId stays GATED', ...
 ```
-(pre-existing on the WRITE leg; the new READ-leg test has no cross-tenant assertion of its
+(pre-existing on the WRITE leg; neither READ-leg test has a cross-tenant assertion of its
 own — consistent with "keep T1", not raise it)
 
 ---
