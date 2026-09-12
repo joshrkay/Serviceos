@@ -29,6 +29,8 @@ The **only** thing stubbed is Stripe's own REST API, at the `StripeFetch` seam t
 
 Everything else is real: real Postgres (testcontainer or a kept plain container), the real terminal router with its real `requireAuth`/`requireTenant`/`requirePermission` chain, the real `StripeConnectService` reading and writing the real `tenants.stripe_connect_*` / `stripe_terminal_location_id` columns, real `PgInvoiceRepository` / `PgPaymentRepository` / `PgAuditRepository` / `PgWebhookRepository`, and the **real signed `createWebhookRouter` settlement path** (HMAC per `invoice-webhook-paid.test.ts`). No DB is mocked. The webhook is not stubbed. **On the 409 leg the Stripe stub is asserted to have received zero calls** — the gate closes before the network.
 
+**The stub fails closed** (xhawk-ai review on PR #1097, finding accepted). It matches method **and** exact URL for those four calls and throws on anything else. The first cut fell through to a successful PaymentIntent for every *unmatched* URL, so a fifth Stripe call or a wrong endpoint would have been silently absorbed while this report claimed the boundary was exactly four — the stub would have been quietly widening the claim it exists to back. Negative control in §2.7.
+
 ---
 
 ## 2. Commands and raw output
@@ -118,6 +120,24 @@ cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integrat
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit   # exit 0
 cd packages/api && npx tsc --noEmit | grep stripe-terminal-doorstep # no output
 ```
+
+### 2.7 RED — negative control on the fail-closed stub (post-review)
+
+With the stub's `POST /v1/payment_intents` matcher pointed at a deliberately wrong URL, the route's real call goes unmatched, the stub throws instead of fabricating an intent, and the route 500s:
+
+```
+ × … > connected tenant: card_present intent → signed webhook settles the invoice at real Postgres 29ms
+   → expected 500 to be 200 // Object.is equality
+ × … > an UNSIGNED delivery of the same terminal capture credits nothing 22ms
+   → expected 500 to be 200 // Object.is equality
+ × … > T1 cross-tenant on settlement: a terminal intent naming another tenant credits nothing 22ms
+   → expected 500 to be 200 // Object.is equality
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 4 passed (7)
+```
+
+Control reverted; re-run GREEN — `stripe-terminal-doorstep` + `invoice-webhook-paid` **2 files · 11 passed**, unit lane **16 files · 132 passed**, `tsc --project tsconfig.build.json --noEmit` exit 0.
 
 ---
 
@@ -220,6 +240,46 @@ The ticket's "no `payment_intents` row" resolves to: the card_present intent exi
 `grep -rn '"stripe"' packages/*/package.json package.json` → no match. Every Stripe call is a hand-rolled `fetch` to `https://api.stripe.com/v1/…`, and no `Stripe-Version` header is set anywhere (`grep -rn "Stripe-Version" packages/api/src/` → empty), so the account's default API version applies. The research question's premise ("the `stripe` npm version pinned in `packages/api/package.json`") has no referent; §6 answers it for the REST surface instead.
 
 ---
+
+**F5 — 🚨 A CONNECTED ACCOUNT CAN MARK ANOTHER TENANT'S INVOICE PAID. `event.account` is never validated.** *(Raised by Codex on PR #1097, verified against source, pinned by an `it.fails` test.)*
+
+The settlement branch (`webhooks/routes.ts:1519`) reads `pi.metadata.tenant_id` and `pi.metadata.invoice_id` and **nothing else**. `event.account` — the connected account the money actually landed in — is never compared against that tenant's own `tenants.stripe_connect_account_id`. The only `event.account` read in the file (`:1095`) is the unrelated `payment_method.attached` branch. The HMAC check does not help: it attests that *Stripe* sent the event, not whose account earned it.
+
+Any tenant holding a connected account on this platform can therefore create a PaymentIntent **on their own account** carrying a neighbour's `tenant_id` + `invoice_id` in metadata. Stripe delivers a genuine, correctly-signed `payment_intent.succeeded`, and this handler credits the neighbour's invoice while the money sits in the attacker's Stripe balance.
+
+The `it.fails` leg proves it at real Postgres, with the starkest victim available — a tenant that **never enabled Connect at all**:
+
+```
+ ✓ … > PRODUCT DEFECT: a connected account can settle ANOTHER tenant's invoice — event.account is never validated 45ms
+ Tests  7 passed | 1 expected fail (8)
+```
+
+```
+               tenant               | invoice_number | status | amount_paid_cents | amount_due_cents
+------------------------------------+----------------+--------+-------------------+------------------
+ A (VICTIM — never enabled Connect) | INV-e7effb0a   | open   |                 0 |            24500
+ A (VICTIM — never enabled Connect) | INV-280fef96   | open   |                 0 |            24500
+ A (VICTIM — never enabled Connect) | INV-25f6cebc   | paid   |             24500 |                0   ← credited by tenant B's account
+
+        check         | amount_cents |  status   |       reference_number        |   created_by
+----------------------+--------------+-----------+-------------------------------+----------------
+ VICTIM payments rows |        24500 | completed | pi_term_attacker_7d7a0eb66ddd | stripe_webhook
+
+       check       |       event_type       | actor_role
+-------------------+------------------------+------------
+ VICTIM audit rows | payment.recorded       | system
+ VICTIM audit rows | invoice.status_changed | system
+```
+
+A $245.00 invoice reads **paid**, with a completed payments row and a full audit trail saying the money arrived. It did not.
+
+**Not fixed here** — `webhooks/routes.ts` is money code and outside this lane's scope (the brief permits a product fix only on the 409 path, in `routes/terminal.ts` / `payments/stripe-terminal.ts`). The assertions in the `it.fails` leg are what the product *should* do, so it flips green by itself once the handler validates the account. **Needs an issue and a decision from Josh.** The likely fix is small — resolve the tenant's `stripe_connect_account_id` and refuse (or skip) when a connected-origin event's `account` does not match — but it is a money-path change with a blast radius across every settlement branch, including the platform-origin events where `event.account` is absent by design.
+
+**This also corrects the T1 claim on the settlement leg in §3, and contests the row's rung.** The T1 leg proves the *weak* cross-tenant case (one tenant's id paired with another's invoice, which the tenant-scoped lookup rejects for free). The consistent-pair-with-foreign-account case is **not** isolated, and now has a failing test saying so.
+
+Codex put the consequence plainly on the second review round, and it is right: D-032 defines T1 as *"a second tenant cannot see or touch the first's rows"* and **caps rung 4 on T1**. F5 is a test in this very commit showing a second tenant *can* touch the first's rows on the settlement path. So the `T1 → 4` stamped on the 5.5 cell at `6d8f53e` — before F5 existed — is contradicted by this branch's own evidence. The **409 half's T1 is untouched** and stands on its own proof. The likely honest shape is to grade the two legs separately: the 409 half on its evidence, the settlement half held down until the account mismatch is rejected. **This lane does not restate the number** — only Fable does — so the cell is flagged `🚨 RUNG CONTESTED — re-grade required` with the reasoning, and left as stamped.
+
+**F6 — the file does not exercise `createApp()`.** *(Codex, P2 — correct.)* The PRD stamp said these routes run "through `createApp()`"; they do not. The test mounts the real `createTerminalRouter` with the production wiring copied from `app.ts:5122`, injects `req.auth`, and supplies deps directly. A regression in the production mount, in the env-based Stripe configuration, or in `app.ts`'s dependency wiring would leave this file green. The PRD cell has been corrected to say so rather than restated. §1 of this report was already accurate on this point; the stamp was not.
 
 ## 6. Research (report-only, nothing run against Stripe)
 

@@ -101,6 +101,13 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
   /**
    * The ONLY stub in this file: Stripe's REST API. Records every call so the
    * 409 leg can prove the gate closes BEFORE Stripe is ever dialled.
+   *
+   * FAILS CLOSED (xhawk-ai review, PR #1097): it matches method AND exact URL
+   * for the four calls named in the file header, and throws on anything else.
+   * An earlier cut fell through to a successful PaymentIntent for every
+   * unmatched URL, which would have masked a fifth Stripe call or a wrong
+   * endpoint while the report claimed the boundary was exactly those four —
+   * the stub would have been quietly widening the very claim it backs.
    */
   const stripeFetch: StripeFetch = async (url, init) => {
     stripeCalls.push({
@@ -109,6 +116,9 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       body: String(init.body ?? ''),
     });
     if (url.includes('/v1/accounts/')) {
+    const method = (init.method ?? '').toUpperCase();
+
+    if (method === 'GET' && /^https:\/\/api\.stripe\.com\/v1\/accounts\/[^/?]+$/.test(url)) {
       return {
         ok: true,
         status: 200,
@@ -127,6 +137,7 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       };
     }
     if (url.includes('/v1/terminal/locations')) {
+    if (method === 'POST' && url === 'https://api.stripe.com/v1/terminal/locations') {
       return {
         ok: true,
         status: 200,
@@ -135,6 +146,7 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       };
     }
     if (url.includes('/v1/terminal/connection_tokens')) {
+    if (method === 'POST' && url === 'https://api.stripe.com/v1/terminal/connection_tokens') {
       return {
         ok: true,
         status: 200,
@@ -142,21 +154,29 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         json: async () => ({ secret: 'pst_doorstep_secret' }),
       };
     }
-    // POST /v1/payment_intents — the card_present intent.
-    const params = new URLSearchParams(String(init.body ?? ''));
-    const id = `pi_term_${randomUUID().replace(/-/g, '').slice(0, 18)}`;
-    return {
-      ok: true,
-      status: 200,
-      text: async () => '',
-      json: async () => ({
-        id,
-        client_secret: `${id}_secret_test`,
-        amount: Number(params.get('amount')),
-        currency: params.get('currency'),
-        payment_method_types: ['card_present'],
-      }),
-    };
+    if (method === 'POST' && url === 'https://api.stripe.com/v1/payment_intents') {
+      const params = new URLSearchParams(String(init.body ?? ''));
+      const id = `pi_term_${randomUUID().replace(/-/g, '').slice(0, 18)}`;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          id,
+          client_secret: `${id}_secret_test`,
+          amount: Number(params.get('amount')),
+          currency: params.get('currency'),
+          payment_method_types: ['card_present'],
+        }),
+      };
+    }
+
+    throw new Error(
+      `Unstubbed Stripe call: ${method} ${url}. The stub boundary in this file is ` +
+        'exactly four calls (see the header); a fifth means the route changed and ' +
+        'the boundary claim in docs/audit/lane-reports/execute-8-5-terminal.md ' +
+        'must be re-stated, not silently widened.',
+    );
   };
 
   async function seedOpenInvoice(t: TestTenant): Promise<string> {
@@ -675,6 +695,15 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     const cross = await postSignedStripe(
       terminalSucceededEvent(crossEventId, paymentIntentId, noConnect.tenantId, invoiceId),
     );
+    // 500 is TODAY'S behaviour, pinned as an observation, not endorsed: the
+    // handler throws 'Invoice not found', so the delivery is not ACKed and
+    // Stripe retries an event that can never succeed. The same shape is
+    // already pinned for the online path at invoice-webhook-paid.test.ts:320.
+    // Raised by xhawk-ai on PR #1097, and it has a point — a 200-with-skipped
+    // would be kinder to the retry queue — but changing it is a money-surface
+    // webhook change this test-only lane is barred from making, so the row's
+    // real invariant is asserted independently of the status code below:
+    // whatever the response, NOTHING is credited to either tenant.
     expect(cross.status).toBe(500);
 
     const untouched = await invoiceRepo.findById(connected.tenantId, invoiceId);
@@ -700,4 +729,64 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       await auditRepo.findByEntity(noConnect.tenantId, 'invoice', invoiceId),
     ).toEqual([]);
   });
+
+  // ───────────── PRODUCT DEFECT — pinned, not fixed here ─────────────
+  //
+  // Raised by Codex on PR #1097 and verified against source. The leg above is
+  // the WEAK cross-tenant case: it pairs one tenant's id with another's
+  // invoice, which the tenant-scoped lookup rejects for free. The case that
+  // matters is a *consistent* pair — the victim's own tenant_id AND the
+  // victim's own invoice_id — arriving on a connected-account event whose
+  // `event.account` belongs to SOMEBODY ELSE.
+  //
+  // `webhooks/routes.ts:1519` reads `pi.metadata.tenant_id` / `.invoice_id`
+  // and nothing else: `event.account` is never compared against the tenant's
+  // own `tenants.stripe_connect_account_id`. (The only `event.account` read in
+  // the file, `:1095`, is the payment_method.attached branch.) Stripe signs
+  // the delivery with OUR platform webhook secret, so the signature check
+  // passes — it attests that Stripe sent it, not whose account earned it.
+  //
+  // Consequence: any tenant with a connected account on this platform can
+  // create a card_present (or any) PaymentIntent on their OWN account carrying
+  // a neighbour's tenant_id + invoice_id in metadata. Stripe delivers a
+  // genuine, correctly-signed `payment_intent.succeeded`, and this handler
+  // marks the neighbour's invoice PAID while the money sits in the attacker's
+  // Stripe balance. The victim below never even enabled Connect.
+  //
+  // `it.fails` per the repo convention (cf. i3-voice-approval-challenge-lock,
+  // #1051): the assertions are what the product SHOULD do, so this goes green
+  // by itself the day the handler validates the account. Not fixed in this
+  // lane — `webhooks/routes.ts` is money code and out of its scope. Surfaced
+  // on the PR and in docs/audit/lane-reports/execute-8-5-terminal.md.
+  it.fails(
+    'PRODUCT DEFECT: a connected account can settle ANOTHER tenant\'s invoice — event.account is never validated',
+    async () => {
+      // The victim is the tenant that never enabled Connect at all.
+      const victimInvoiceId = await seedOpenInvoice(noConnect);
+      expect((await connectService.getAccount(noConnect.tenantId)).accountId).toBeNull();
+
+      // A capture on the OTHER tenant's connected account, whose metadata
+      // names the victim's own tenant and the victim's own invoice.
+      const eventId = `evt_${randomUUID()}`;
+      const attackerIntentId = `pi_term_attacker_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+      const event = terminalSucceededEvent(
+        eventId,
+        attackerIntentId,
+        noConnect.tenantId,
+        victimInvoiceId,
+      );
+      expect((event as { account: string }).account).toBe(CONNECT_ACCOUNT_ID);
+
+      await postSignedStripe(event);
+
+      // WHAT SHOULD HAPPEN — the event is refused or skipped and nothing moves.
+      // WHAT HAPPENS TODAY — the invoice is 'paid' and a payments row exists.
+      const victimInvoice = await invoiceRepo.findById(noConnect.tenantId, victimInvoiceId);
+      expect(victimInvoice?.status).toBe('open');
+      expect(victimInvoice?.amountPaidCents).toBe(0);
+      expect(
+        await paymentRepo.findByInvoice(noConnect.tenantId, victimInvoiceId),
+      ).toHaveLength(0);
+    },
+  );
 });
