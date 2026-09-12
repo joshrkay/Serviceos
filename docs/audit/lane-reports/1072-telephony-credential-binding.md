@@ -408,6 +408,20 @@ actually on per-tenant credentials rather than silently riding the fallback.
    router's middleware, so it could not be excluded without weakening it). Its `To` is the
    dispatcher's number, which owns no integration row, so it resolves through the
    AccountSid path exactly as before.
+
+   This is also why the AccountSid path is NOT skipped whenever the payload names a
+   dialled number — a tempting tightening, proposed by the Fable gate on PR #1082 as its
+   F1. "An unowned DID can only ever mean the deployment token" does not hold: it can also
+   mean a leg dialled OUT to a number we do not own, on a call a tenant's credential
+   legitimately signs. Whisper is exactly that — a GET, where Twilio sends the standard
+   call params as QUERY parameters, so `readDialedNumber` sees a `To` that is present and
+   unowned. Under that rule it would resolve to the deployment token while Twilio signed
+   with the tenant's subaccount token: 403, and the dispatcher hears nothing.
+
+   The residue F1 actually names (an unowned DID resolving to `TWILIO_DEFAULT_TENANT_ID`
+   after a foreign tenant's credential verified) is real but confined to dev/test, because
+   `resolveInboundTenantId` refuses that fallback in production and staging. Closing it
+   belongs in that dev seam, not in the credential resolver.
 5. **The e2e spec was vendored, then reconciled.** Lane B's branch landed on main (#1069)
    while this PR was open; the add/add conflict was resolved in favour of main's copy of
    the spec with the flipped security pair re-applied, and the whole spec re-run on the
