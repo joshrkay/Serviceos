@@ -868,14 +868,39 @@ more finding on this lane's row (fixed):
   suite re-run together afterward: 39/39 passing, no regressions. `tsc
   --noEmit -p tsconfig.json` clean for this file.
 
+**Sixth round (`dab9c23`):** Codex's re-review on `0b2ae16` raised two
+more findings, both this lane's rows (fixed):
+
+- **I2 (P2, fixed):** `ALL_STATUSES` was a plain `ProposalStatus[]`
+  literal — valid, but not exhaustive-by-construction; a future status
+  added to the union would compile without updating the array, silently
+  under-testing the "all statuses" claim. Replaced with the same
+  `Record<ProposalStatus, true>`-derived pattern used for I8's
+  `LIVE_STATES`, plus an exhaustiveness assertion test. RED: temporarily
+  dropped `undone` from the map to reproduce the class of bug — the new
+  assertion failed as expected (`expected length 9, got 8`). GREEN after
+  restoring the full map: 12/12 tests passing against real Postgres (was
+  11/11 before the added assertion test).
+- **I8 PRD row (P2, fixed):** `docs/PRD-v5-as-built.md`'s I8 confirmation
+  still said "all 8 live FSM states" and "3/3" after the fifth-round fix
+  expanded `LIVE_STATES` to 11 states / 4 tests. Corrected both counts.
+  Proactively also updated I2's own PRD row count (11/11 → 12/12) to
+  match this same commit's added exhaustiveness test, rather than
+  waiting for a follow-up round to catch the identical staleness
+  pattern there too.
+
+Full 8-file touched-file suite re-run together afterward: 40/40 passing,
+no regressions. `tsc --noEmit -p tsconfig.json` clean for both changed
+files.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus five follow-up commits (`cfe12f1`,
-  `b033257`, `fdb5257`, `3809785`, `0b2ae16`) fixing the eight Codex
-  findings above across five review rounds.
+  this report committed, plus six follow-up commits (`cfe12f1`,
+  `b033257`, `fdb5257`, `3809785`, `0b2ae16`, `dab9c23`) fixing the ten
+  Codex findings above across six review rounds.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
