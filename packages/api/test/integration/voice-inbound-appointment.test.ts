@@ -531,9 +531,21 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
    * #1014 row 2.1 — T2. Every negative above proves "tenant B cannot read
    * tenant A's row" (T1). This proves the stronger claim: tenant B running
    * its OWN complete inbound-call flow — its own DID, its own customer, its
-   * own booking — never so much as CHANGES tenant A's rows or availability,
-   * not merely that it can't be read from tenant A's context. Snapshotted
-   * before/after so the assertion is a real equality, not a fresh count.
+   * OWN SPOKEN transcript driven through the SAME production chain as test 5
+   * above (`createVoiceActionRouterWorker` → `PgEntityResolver` → the
+   * drafting task → approve → the production execution registry) — never so
+   * much as CHANGES tenant A's rows or availability, not merely that it
+   * can't be read from tenant A's context. Snapshotted before/after so the
+   * assertion is a real equality, not a fresh count.
+   *
+   * Review finding (chatgpt-codex-connector, PR #1043): the original version
+   * of this test hand-built a `create_appointment` proposal and ran it
+   * through `ProposalExecutor` directly with in-memory repos — no inbound
+   * adapter, caller identification, or voice-action worker touched tenant
+   * B's data at all, so a break in tenant B's actual voice path could not
+   * have failed this test. Fixed to drive the real worker chain, mirroring
+   * test 5, and to read back tenant B's own `appointment.created` audit
+   * event (not just tenant A's, which test 2 already covers).
    */
   it("T2: tenant B's own inbound call to its own DID books its own appointment without touching tenant A's rows or availability", async () => {
     const tenantB = await createTestTenant(pool);
@@ -550,56 +562,79 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
     const hitA = await phoneRepo.findByNumber(TENANT_DID);
     expect(hitA?.tenantId).toBe(tenant.tenantId);
 
-    const { customerId: bCustomerId, locationId: bLocationId } = await seedBookableCustomer(
+    const SPOKEN_CUSTOMER_B = 'Priya Shah';
+    const { customerId: bCustomerId } = await seedBookableCustomer(
       tenantB.tenantId,
       tenantB.userId,
-      'Tenant B Caller',
+      SPOKEN_CUSTOMER_B,
     );
-    const bJobId = crypto.randomUUID();
-    await jobRepo.create({
-      id: bJobId,
-      tenantId: tenantB.tenantId,
-      customerId: bCustomerId,
-      locationId: bLocationId,
-      jobNumber: 'JOB-B1',
-      summary: 'Tenant B job',
-      status: 'scheduled',
-      priority: 'normal',
-      createdBy: tenantB.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+
+    // The ONLY scripted inputs are the two LLM replies, exactly as test 5 —
+    // no literal ids, the classifier emits the customer's name as free text.
+    const gatewayB = scriptedGateway([
+      {
+        intentType: 'create_appointment',
+        confidence: 0.93,
+        extractedEntities: {
+          customerName: SPOKEN_CUSTOMER_B,
+          dateTimeDescription: 'Thursday at 10 AM',
+        },
+      },
+      {
+        dateTimePhrase: 'Thursday at 10 AM',
+        customerId: HALLUCINATED_CUSTOMER_ID,
+        summary: 'Tenant B leaking faucet',
+        appointmentType: 'repair',
+        confidence_score: 0.72,
+      },
+    ]);
+
+    const bDraftProposalRepo = new InMemoryProposalRepository();
+    const workerB = createVoiceActionRouterWorker({
+      gateway: gatewayB,
+      proposalRepo: bDraftProposalRepo,
+      entityResolver: new PgEntityResolver(pool),
+      jobRepo,
+      tenantSchedulingResolver: async () => ({ timezone: BOOKING_TZ }),
+      now: () => BOOKING_NOW,
     });
 
-    const start = new Date(Date.now() + 48 * 60 * 60 * 1000);
-    const end = new Date(start.getTime() + 60 * 60 * 1000);
-    const input: CreateProposalInput = {
-      tenantId: tenantB.tenantId,
-      proposalType: 'create_appointment',
-      payload: {
-        jobId: bJobId,
-        scheduledStart: start.toISOString(),
-        scheduledEnd: end.toISOString(),
-        timezone: 'America/Chicago',
-        summary: 'Tenant B leaking faucet',
-      },
-      summary: 'Tenant B leaking faucet — appointment',
-      createdBy: tenantB.userId,
-    };
-    let bProposal: Proposal = createProposal(input);
+    await workerB.handle(
+      msg({
+        tenantId: tenantB.tenantId,
+        userId: tenantB.userId,
+        transcript: `Book ${SPOKEN_CUSTOMER_B} for a leaking faucet Thursday at 10 AM`,
+      }),
+      silentLogger(),
+    );
+
+    const draftedB = await bDraftProposalRepo.findByTenant(tenantB.tenantId);
+    expect(draftedB).toHaveLength(1);
+    let bProposal: Proposal = draftedB[0]!;
+    expect((bProposal.payload as Record<string, unknown>).customerId).toBe(bCustomerId);
+    expect((bProposal.payload as Record<string, unknown>).customerId).not.toBe(
+      HALLUCINATED_CUSTOMER_ID,
+    );
+
     bProposal = transitionProposal(bProposal, 'ready_for_review', tenantB.userId);
     bProposal = transitionProposal(bProposal, 'approved', tenantB.userId);
     bProposal = { ...bProposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
 
-    const bProposalRepo = new InMemoryProposalRepository();
+    const bExecutionProposalRepo = new InMemoryProposalRepository();
     const bExecutionRepo = new InMemoryProposalExecutionRepository();
-    const bHandlers = createExecutionHandlerRegistry({ appointmentRepo, jobRepo, auditRepo });
+    const bHandlers = createExecutionHandlerRegistry({
+      appointmentRepo,
+      jobRepo,
+      locationRepo,
+      auditRepo,
+    });
     const bExecutor = new ProposalExecutor(
       bHandlers,
-      bProposalRepo,
-      new IdempotencyGuard(bExecutionRepo, bProposalRepo),
+      bExecutionProposalRepo,
+      new IdempotencyGuard(bExecutionRepo, bExecutionProposalRepo),
       auditRepo,
     );
-    await bProposalRepo.create(bProposal);
+    await bExecutionProposalRepo.create(bProposal);
     const { result: bResult } = await bExecutor.execute(bProposal, {
       tenantId: tenantB.tenantId,
       executedBy: tenantB.userId,
@@ -608,6 +643,16 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
 
     const bookedB = await appointmentRepo.findById(tenantB.tenantId, bResult.resultEntityId!);
     expect(bookedB).not.toBeNull();
+
+    // Tenant B's OWN audit event, read back through PgAuditRepository — not
+    // just tenant A's (test 2 already covers that).
+    const bAuditRows = await pool.query(
+      `SELECT event_type FROM audit_events
+        WHERE tenant_id = $1 AND event_type = 'appointment.created'
+          AND entity_type = 'appointment' AND entity_id = $2`,
+      [tenantB.tenantId, bookedB!.id],
+    );
+    expect(bAuditRows.rows).toHaveLength(1);
 
     // Tenant A's availability for its own job is byte-for-byte unchanged —
     // not merely "not visible from tenant A", but genuinely untouched.
