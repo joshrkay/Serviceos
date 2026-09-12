@@ -80,27 +80,38 @@ install_dependencies() {
     cp package-lock.json "$snapshot"
   fi
 
+  # The restore runs from a trap, not just inline after npm. Remote startup can
+  # be cancelled or time out mid-install; a signal would then skip an inline
+  # restore and leave a half-rewritten lockfile — the invariant broken by a
+  # SIGTERM rather than by a code path (Codex P2, #994). Bash scoping is
+  # dynamic, so this sees $snapshot and $had_lockfile from the caller.
+  _restore_lockfile() {
+    if [ "$had_lockfile" -eq 1 ]; then
+      if [ -s "$snapshot" ] && ! cmp -s package-lock.json "$snapshot"; then
+        cp "$snapshot" package-lock.json
+        echo "[session-start]          NOTE: the fallback modified package-lock.json and the change"
+        echo "[session-start]          was REVERTED — it cannot be distinguished from the libc"
+        echo "[session-start]          stripping this hook exists to prevent. If package.json really"
+        echo "[session-start]          did change, regenerate the lockfile deliberately (npm install)"
+        echo "[session-start]          and review the diff before committing."
+      fi
+    elif [ -f package-lock.json ]; then
+      # There was no lockfile when this hook started; the fallback made one.
+      # Absence was someone's choice — restoring it means deleting the new file.
+      rm -f package-lock.json
+      echo "[session-start]          NOTE: package-lock.json did not exist when this session"
+      echo "[session-start]          started and the fallback created one. It was REMOVED —"
+      echo "[session-start]          a bootstrap hook does not get to decide that a repo has a"
+      echo "[session-start]          lockfile. node_modules is installed either way."
+    fi
+    rm -f "$snapshot"
+  }
+  trap _restore_lockfile EXIT INT TERM HUP
+
   npm install || echo "[session-start] WARNING: npm install also failed — dependencies are incomplete."
 
-  if [ "$had_lockfile" -eq 1 ]; then
-    if ! cmp -s package-lock.json "$snapshot"; then
-      cp "$snapshot" package-lock.json
-      echo "[session-start]          NOTE: the fallback modified package-lock.json and the change"
-      echo "[session-start]          was REVERTED — it cannot be distinguished from the libc"
-      echo "[session-start]          stripping this hook exists to prevent. If package.json really"
-      echo "[session-start]          did change, regenerate the lockfile deliberately (npm install)"
-      echo "[session-start]          and review the diff before committing."
-    fi
-  elif [ -f package-lock.json ]; then
-    # There was no lockfile when this hook started; the fallback made one.
-    # Absence was someone's choice — restoring it means deleting the new file.
-    rm -f package-lock.json
-    echo "[session-start]          NOTE: package-lock.json did not exist when this session"
-    echo "[session-start]          started and the fallback created one. It was REMOVED —"
-    echo "[session-start]          a bootstrap hook does not get to decide that a repo has a"
-    echo "[session-start]          lockfile. node_modules is installed either way."
-  fi
-  rm -f "$snapshot"
+  trap - EXIT INT TERM HUP
+  _restore_lockfile
 }
 
 install_dependencies

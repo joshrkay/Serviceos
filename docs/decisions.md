@@ -933,8 +933,12 @@ underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
 
 **Consequences.**
 - §8 of the PRD now carries verified rungs and a per-row reason. §5 distinguishes invariants that
-  are enforced from those merely true today — five carry a universal quantifier nothing proves, one
-  (I6) has a test pinning the opposite behaviour, and I18 has no enforcement at all.
+  are enforced from those merely true today — **six sub-clauses** carry a universal quantifier
+  nothing proves (I1′, I3′, I5′, I8′, I9′, I13′), one (I6) has a test pinning the opposite
+  behaviour, and I18 has no enforcement at all. *— corrected 2026-09-12: six, not five. This was
+  the third copy of that count; the PRD's two were fixed first and this one was missed because the
+  sweep grepped the number rather than the concept. Enumerating the six inline so the next reader
+  can check the claim against the list instead of against another sentence.*
 - Eight named tests would close the most ground; the first, `test/ai/supervisor/review-coverage.test.ts`,
   is the only one that changes an architecture decision rather than a score (see O-9).
 - The register is itself prose and will rot. Its defence is that every row is runnable, and the
