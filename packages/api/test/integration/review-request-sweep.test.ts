@@ -207,6 +207,13 @@ describe('review-request sweep (US-345, DB-level)', () => {
       dnc: dncRepo,
       auditRepo,
       enforcement: 'block',
+      // Pin the SMS kill switch explicitly ON. sendSms() checks this BEFORE
+      // evaluating consent (gated-message-delivery.ts) — an inherited
+      // TELEPHONY_ENABLED=false from a developer's shell or a CI env would
+      // short-circuit to `channel_disabled` and skip the audit write
+      // entirely, so this test would silently stop proving anything rather
+      // than fail loud. Caught in review (Codex) on this PR.
+      env: { ...process.env, TELEPHONY_ENABLED: 'true' },
     });
     const dispatcher = new MessageDeliveryFeedbackDispatcher(gated);
     const worker = createFeedbackSendWorker({
