@@ -2515,7 +2515,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how eight of these were got wrong
+### 12.4d A note on method — how nine of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2661,6 +2661,35 @@ useful form — and it would have failed this PR before review did.
 **A third line is a real defect.** 114 distinct test files are cited across §5
 and §8; 112 of them exist and 2 are deliberate. That is the baseline this
 command is worth running against.
+
+**The ninth is the cleanest specimen of the recurring shape**, and the reason
+this section should stop growing by hand. Story 2.12 and founding commitment #9
+both credited the B2B call context as *"read by one supervisor check."* It is
+read by nothing: `session.b2bAccountContext` is written once and has no
+consumer, and `buildAccountContextPromptSection` has zero production callers.
+The supervisor's `resolveAccountType` reloads `customer.accountType` from the
+customer row — a path that behaves identically whether or not the call
+recognised a portfolio account. An unrelated path's evidence had been borrowed.
+
+What makes it the specimen is the distribution:
+
+| Said "read nowhere" — correct | Said "read by one supervisor check" — wrong |
+|---|---|
+| §12.4's flag table | §8 row 2.12 |
+| D-030 in `docs/decisions.md` | the founding-commitments table |
+
+**Two and two, and the correct version was already there before this edition.**
+That is the shape of seven of the seventeen findings raised against this
+document: one claim, two files, opposite verdicts, the truth already present
+somewhere. §11.0d's third defence asks a human to grep the subject on every
+status change — and a human forgetting is precisely what it cannot prevent, as
+this row proves after two review passes over the same section.
+
+**So the honest conclusion of this section is that it should not exist as
+prose.** Every entry above is a check a machine could run: does a cited file
+exist (published, §12.4d), does a cited test open a pool, does a claim appear
+twice with opposite verdicts. The first is now one line of shell. The third is
+the one that would have caught the most, and it is still unwritten.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
