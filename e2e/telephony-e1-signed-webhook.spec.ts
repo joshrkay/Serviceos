@@ -54,13 +54,24 @@ import crypto from 'node:crypto';
 import twilio from 'twilio';
 import { encrypt } from '../packages/api/src/integrations/crypto';
 
-const API_URL = process.env.E2E_API_URL ?? 'http://localhost:3000';
+/**
+ * Trailing slashes are stripped exactly as `reconstructWebhookUrl`
+ * (packages/api/src/telephony/twilio-signature.ts:61) strips them. Without
+ * this, a `PUBLIC_API_URL` ending in `/` makes the spec sign
+ * `http://host//api/telephony/voice` while the server verifies
+ * `http://host/api/telephony/voice` — the HMACs differ, every signed request
+ * comes back 403, and it reads as the product rejecting valid signatures
+ * rather than as a test bug. (Codex review, PR #1054.)
+ */
+const stripTrailingSlash = (url: string): string => url.replace(/\/+$/, '');
+
+const API_URL = stripTrailingSlash(process.env.E2E_API_URL ?? 'http://localhost:3000');
 /**
  * The URL the API itself signs against — `requireTwilioSignature`
  * reconstructs it from PUBLIC_API_URL, so the spec must compute the HMAC over
  * exactly that string, not over API_URL, when the two differ.
  */
-const SIGNING_BASE = process.env.PUBLIC_API_URL ?? API_URL;
+const SIGNING_BASE = stripTrailingSlash(process.env.PUBLIC_API_URL ?? API_URL);
 
 /**
  * The DID → tenant lookup (`PgPhoneNumberRepository.findByNumber`) is a
