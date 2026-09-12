@@ -22,6 +22,20 @@ import {
 } from './shared';
 import { PgMaterialItemRepository } from '../../src/materials/pg-material-item';
 import { ValidationError } from '../../src/shared/errors';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-execution';
+import { missingFieldsFor, Proposal } from '../../src/proposals/proposal';
+import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
+import { approveProposal } from '../../src/proposals/actions';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import {
+  createExecutionHandlerRegistry,
+  ExecutionContext,
+} from '../../src/proposals/execution/handlers';
+import { AddMaterialTaskHandler } from '../../src/ai/tasks/add-material-task';
+import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 
 /**
  * Insert the customer -> location -> job FK chain under tenant RLS context.
@@ -532,6 +546,91 @@ describe('Postgres integration — material items', () => {
       // Untouched — still pending under its real tenant.
       const stillPending = await repo.listPending(other.tenantId);
       expect(stillPending.map((i) => i.id)).toContain(theirs.id);
+    });
+  });
+
+  // #1019 row 6.9 (G1 4−) — material-items.test.ts wrote at real Postgres
+  // (T1) but never proved the `material.requested` audit event Task 9's
+  // AddMaterialExecutionHandler emits. This drives the REAL voice-drafted
+  // payload ("three-quarter copper, twenty feet") through the task
+  // handler -> approval gate -> production execution registry, the same
+  // shape as add-note-voice-execution.test.ts, then reads the audit event
+  // back through `PgAuditRepository.findByEntity` — proving BOTH the
+  // number (quantity, a real integer column) and the unit ("feet", carried
+  // in the free-text description — material_items has no separate unit
+  // column) survive the full round trip, not just the description string
+  // alone.
+  describe('add_material end-to-end: task -> approve -> execute -> material_items + audit (#1019 6.9)', () => {
+    it('persists quantity and the spoken unit, and emits a readable material.requested audit event', async () => {
+      const t = await createTestTenant(pool);
+      const auditRepo = new PgAuditRepository(pool);
+      const proposalRepo = new PgProposalRepository(pool);
+      const registry = createExecutionHandlerRegistry({ materialItemRepo: repo, auditRepo });
+      const guard = new IdempotencyGuard(new PgProposalExecutionRepository(pool), proposalRepo);
+      const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
+
+      // 1) Draft via the REAL task handler from the entities a spoken
+      // "three-quarter copper, twenty feet" would extract to.
+      const taskContext: TaskContext = {
+        tenantId: t.tenantId,
+        userId: t.userId,
+        message: 'three-quarter copper, twenty feet',
+        existingEntities: {
+          materialDescription: '3/4" copper pipe, sold by the foot',
+          materialQuantity: 20,
+        },
+      };
+      const { proposal: drafted } = await new AddMaterialTaskHandler().handle(taskContext);
+      expect(drafted.proposalType).toBe('add_material');
+      expect(missingFieldsFor(drafted)).toEqual([]);
+      await proposalRepo.create(drafted);
+
+      // 2) Real approval gate.
+      const approved: Proposal = await approveProposal(
+        proposalRepo,
+        t.tenantId,
+        drafted.id,
+        t.userId,
+        'owner',
+        auditRepo,
+        'ui',
+      );
+      expect(approved.status).toBe('approved');
+
+      // 3) Execute past the undo window via the production registry.
+      const backdated: Proposal = {
+        ...approved,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      };
+      const context: ExecutionContext = { tenantId: t.tenantId, executedBy: t.userId };
+      const { result } = await executor.execute(backdated, context);
+      expect(result.success).toBe(true);
+      const itemId = result.resultEntityId as string;
+
+      // 4) The number: quantity persisted as a real integer column on the
+      // material_items row (not folded into text, not dropped).
+      const { rows } = await pool.query(
+        `SELECT quantity, description FROM material_items WHERE id = $1`,
+        [itemId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].quantity).toBe(20);
+      expect(typeof rows[0].quantity).toBe('number');
+      // The unit: "feet" survives on the row — there is no separate unit
+      // column, so it must ride along in description.
+      expect(rows[0].description).toContain('foot');
+      expect(rows[0].description).toContain('3/4');
+
+      // 5) The audit-event read-back G1 flagged as missing: read through
+      // PgAuditRepository.findByEntity, not a raw SELECT, since the read
+      // path is exactly what a real caller (the activity feed) uses.
+      const events = await auditRepo.findByEntity(t.tenantId, 'material_item', itemId);
+      expect(events).toHaveLength(1);
+      expect(events[0].eventType).toBe('material.requested');
+      expect(events[0].actorId).toBe(t.userId);
+      // The audit metadata also carries the number, independently of the
+      // material_items row itself.
+      expect(events[0].metadata?.quantity).toBe(20);
     });
   });
 
