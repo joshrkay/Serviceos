@@ -958,7 +958,8 @@ have both.** About half the Docker-gated suite has never seen a neighbour.
 
 The sharpest instance: seven integration files inject the tenant enumerator and **six pass exactly
 one tenant id**. Production supplies `SELECT id FROM tenants` at ten inlined call sites in
-`app.ts`, and **no test exercises it.** `daily-digest-worker.test.ts` creates one tenant, stubs the
+`app.ts` — *corrected 2026-09-12: fifteen, not ten; this count came from a truncated listing and
+the error is left visible rather than silently patched* — and **no test exercises it.** `daily-digest-worker.test.ts` creates one tenant, stubs the
 enumerator to that id, and proves "skips a tenant whose `digest_enabled` is false" by toggling the
 flag on *the same tenant*. The stub replaces precisely the thing under test — the same shape as the
 entity resolver shipping with nonexistent column names because its `Pool` was mocked.
