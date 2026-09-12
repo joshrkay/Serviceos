@@ -31,6 +31,15 @@ import { v4 as uuidv4 } from 'uuid';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { listAllTenantIds } from '../../src/tenants/list-tenant-ids';
 import { runDailyDigestSweep } from '../../src/workers/daily-digest-worker';
+import { runWeeklyFeedbackSweep } from '../../src/workers/weekly-feedback-worker';
+import { runHoldReaperSweep } from '../../src/workers/hold-reaper-worker';
+import { runEstimateReminderSweep } from '../../src/workers/estimate-reminder-worker';
+import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
+import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
+import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
+import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import type { WeeklyFeedbackSnapshot } from '../../src/digest/weekly-feedback';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgDailyDigestRepository } from '../../src/digest/pg-daily-digest';
 import type { DigestComputeDeps } from '../../src/digest/digest-service';
@@ -172,5 +181,433 @@ describe('Postgres integration — per-tenant sweep fan-out (T4)', () => {
     // The point of the test: the sweep did not abort at the first throw.
     expect(await digestRepo.findByTenantAndDate(survivorA, LOCAL_DATE)).not.toBeNull();
     expect(await digestRepo.findByTenantAndDate(survivorB, LOCAL_DATE)).not.toBeNull();
+  });
+});
+
+/**
+ * A note on what these blocks do and do not claim.
+ *
+ * Each sweep below already has its own integration test covering its business
+ * logic and its Postgres writes. These blocks prove something those tests
+ * cannot: the FAN-OUT contract — that the sweep runs on the production tenant
+ * enumerator, honours each tenant's own configuration in a single pass, and
+ * survives one tenant throwing. Data repositories are therefore stubbed where
+ * the sweep's own test already proves them; the enumerator never is, because
+ * the enumerator is the thing under test.
+ */
+
+function snapshotWithWork(weekStartIso: string, weekEndIso: string): WeeklyFeedbackSnapshot {
+  // isEmptyWeek() skips a tenant whose week is all zeroes ("no dead-week spam"),
+  // so the snapshot has to carry at least one non-zero signal to reach a send.
+  return {
+    weekStartIso,
+    weekEndIso,
+    revenueCents: 125_00,
+    priorRevenueCents: 100_00,
+    jobsCompleted: 3,
+    priorJobsCompleted: 2,
+    jobsBooked: 4,
+    estimatesSent: 2,
+    estimatesSentValueCents: 400_00,
+    invoicesPaidCount: 1,
+    callsAnswered: 5,
+    newLeads: 2,
+  } as unknown as WeeklyFeedbackSnapshot;
+}
+
+describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
+  let pool: Pool;
+  let auditRepo: PgAuditRepository;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    auditRepo = new PgAuditRepository(pool);
+  });
+
+  /**
+   * Builds a sweep run scoped to the tenants this test seeded. Tenants belonging
+   * to other integration files are enumerated for real and then skipped at the
+   * opt-out gate — which is exactly how a stranger tenant behaves in production.
+   */
+  async function runWeekly(opts: {
+    enabled: string[];
+    emailOf: Map<string, string>;
+    failFor?: string;
+  }): Promise<{ sentTo: string[]; failed: number }> {
+    const sentTo: string[] = [];
+    const result = await runWeeklyFeedbackSweep({
+      auditRepo,
+      listTenantIds: () => listAllTenantIds(pool),
+      isFeedbackEnabled: async (tenantId) => opts.enabled.includes(tenantId),
+      resolveOwnerEmail: async (tenantId) => opts.emailOf.get(tenantId) ?? null,
+      buildSnapshot: async (tenantId, weekStart, weekEnd) => {
+        if (opts.failFor && tenantId === opts.failFor) {
+          throw new Error(`synthetic failure for tenant ${tenantId}`);
+        }
+        return snapshotWithWork(weekStart.toISOString(), weekEnd.toISOString());
+      },
+      sendEmail: async (args) => {
+        sentTo.push(args.to);
+        return undefined;
+      },
+      logger,
+    });
+    return { sentTo, failed: result.failed };
+  }
+
+  it('serves each enabled tenant at its OWN address and skips the opted-out one', async () => {
+    const a = (await createTestTenant(pool)).tenantId;
+    const b = (await createTestTenant(pool)).tenantId;
+    const optedOut = (await createTestTenant(pool)).tenantId;
+    const emailOf = new Map([
+      [a, `a-${a.slice(0, 8)}@example.com`],
+      [b, `b-${b.slice(0, 8)}@example.com`],
+      [optedOut, `c-${optedOut.slice(0, 8)}@example.com`],
+    ]);
+
+    const { sentTo } = await runWeekly({ enabled: [a, b], emailOf });
+
+    // T3: two tenants, two different recipients, one pass — no mixing.
+    expect(sentTo).toContain(emailOf.get(a));
+    expect(sentTo).toContain(emailOf.get(b));
+    expect(sentTo).not.toContain(emailOf.get(optedOut));
+  });
+
+  it('keeps going when one tenant throws — the other tenants are still served', async () => {
+    const doomed = (await createTestTenant(pool)).tenantId;
+    const survivor = (await createTestTenant(pool)).tenantId;
+    const emailOf = new Map([
+      [doomed, `doomed-${doomed.slice(0, 8)}@example.com`],
+      [survivor, `alive-${survivor.slice(0, 8)}@example.com`],
+    ]);
+
+    const { sentTo, failed } = await runWeekly({
+      enabled: [doomed, survivor],
+      emailOf,
+      failFor: doomed,
+    });
+
+    expect(failed).toBeGreaterThanOrEqual(1);
+    expect(sentTo).not.toContain(emailOf.get(doomed));
+    expect(sentTo).toContain(emailOf.get(survivor));
+  });
+});
+
+/**
+ * Every tenant-iterating sweep has a FIRST per-tenant call inside its loop.
+ * Wrapping that one seam records which tenants the loop actually reached, and
+ * lets exactly one of them throw — which is precisely the T4 contract: every
+ * eligible tenant is processed, and one failure does not abort the rest.
+ *
+ * The sweeps below are driven through this seam rather than through fully
+ * seeded business data on purpose. Their own integration tests already prove
+ * what they *do* for a tenant; these prove *which tenants they reach*, on the
+ * real enumerator, which no other test covers.
+ */
+function recordingSeam<T>(failFor: string | null, result: T) {
+  const visited: string[] = [];
+  return {
+    visited,
+    fn: async (tenantId: string): Promise<T> => {
+      visited.push(tenantId);
+      if (tenantId === failFor) throw new Error(`synthetic failure for tenant ${tenantId}`);
+      return result;
+    },
+  };
+}
+
+/** Seeds three tenants and returns their ids. */
+async function seedTrio(pool: Pool): Promise<[string, string, string]> {
+  const a = (await createTestTenant(pool)).tenantId;
+  const b = (await createTestTenant(pool)).tenantId;
+  const c = (await createTestTenant(pool)).tenantId;
+  return [a, b, c];
+}
+
+describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => {
+  let pool: Pool;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+  });
+
+  describe('hold-reaper sweep', () => {
+    const run = async (failFor: string | null) => {
+      const { visited, fn } = recordingSeam(failFor, []);
+      const result = await runHoldReaperSweep({
+        appointmentRepo: { findExpiredHolds: fn } as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const [doomed, x, y] = await seedTrio(pool);
+      const { visited, failed } = await run(doomed);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+    });
+  });
+
+  describe('estimate-reminder sweep', () => {
+    const run = async (failFor: string | null) => {
+      const { visited, fn } = recordingSeam(failFor, []);
+      const result = await runEstimateReminderSweep({
+        estimateRepo: { findByTenant: fn } as never,
+        sendService: {} as never,
+        pool: null,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const [doomed, x, y] = await seedTrio(pool);
+      const { visited, failed } = await run(doomed);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+    });
+  });
+
+  describe('hfcr weekly-send sweep', () => {
+    const run = async (failFor: string | null) => {
+      const { visited, fn } = recordingSeam(failFor, null);
+      const result = await runHfcrWeeklySendSweep({
+        hfcrSendRepo: { findByWeek: fn } as never,
+        paymentRepo: { findByTenant: async () => [] } as never,
+        proposalRepo: { findByTenant: async () => [] } as never,
+        auditRepo: { findByEntity: async () => [], create: async () => undefined } as never,
+        resolveOwnerPhone: async () => null,
+        sendSms: async () => undefined,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const [doomed, x, y] = await seedTrio(pool);
+      const { visited, failed } = await run(doomed);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+    });
+  });
+
+  describe('google-reviews sweep', () => {
+    const run = async (failFor: string | null) => {
+      const { visited, fn } = recordingSeam(failFor, null);
+      const result = await runGoogleReviewsSweep({
+        pollStateRepo: { getPollState: fn } as never,
+        credentialResolver: { getCredential: async () => null } as never,
+        proposalRepo: {} as never,
+        buildProposalDeps: {} as never,
+        reviewRepo: {} as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const [doomed, x, y] = await seedTrio(pool);
+      const { visited, failed } = await run(doomed);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+    });
+  });
+});
+
+/**
+ * The other sweep shape: no enumerator at all.
+ *
+ * thank-you-SMS and review-request do not take `listTenantIds`. They run ONE
+ * cross-tenant SQL query, group the rows by tenant, and loop. They are
+ * therefore multi-tenant by construction — but that construction had never been
+ * exercised with more than one tenant's rows in the result set, so nothing
+ * proved the grouping keeps tenants apart or that one tenant's failure spares
+ * the others. T4 for this shape reads: the cross-tenant query returns rows for
+ * several tenants, each is handled under its own settings, and a failure on one
+ * does not abort the rest.
+ */
+describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () => {
+  let pool: Pool;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+  });
+
+  // Both sweeps below select `ORDER BY j.completed_at ASC LIMIT 500`. In a
+  // full-suite run the shared container holds other files' completed jobs, so
+  // these fixtures are dated far in the past to sort first and stay inside the
+  // limit deterministically.
+  const FIXTURE_COMPLETED_AT = new Date('2020-01-01T00:00:00.000Z');
+  const seededJobIds: string[] = [];
+
+  afterAll(async () => {
+    // Stamp the fixtures so they drop out of BOTH eligibility queries. Without
+    // this they stay eligible forever and would leak into the assertions of
+    // thank-you-sms-worker.test.ts and review-request-sweep.test.ts.
+    if (seededJobIds.length > 0) {
+      await pool.query(
+        `UPDATE jobs SET thank_you_sms_sent_at = NOW(), review_request_sent_at = NOW()
+          WHERE id = ANY($1::uuid[])`,
+        [seededJobIds],
+      );
+    }
+    await closeSharedTestDb();
+  });
+
+  /** A tenant with settings and one long-completed job, eligible for both sweeps. */
+  async function seedEligibleTenant(): Promise<{ tenantId: string; jobId: string }> {
+    const { tenantId, userId } = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone)
+       VALUES ($1,$2,$3,$4)`,
+      [uuidv4(), tenantId, 'Fan-out Plumbing', 'America/Phoenix'],
+    );
+    const customerId = uuidv4();
+    await pool.query(
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name,
+         primary_phone, preferred_channel, sms_consent, is_archived, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        customerId, tenantId, 'Mary', 'Johnson', 'Mary Johnson',
+        `+1555${tenantId.replace(/-/g, '').slice(0, 7)}`, 'sms', true, false, userId,
+      ],
+    );
+    const locationId = uuidv4();
+    await pool.query(
+      `INSERT INTO service_locations (id, tenant_id, customer_id, street1, city, state, postal_code, country)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [locationId, tenantId, customerId, '1 Main St', 'Phoenix', 'AZ', '85001', 'US'],
+    );
+    const jobId = uuidv4();
+    await pool.query(
+      `INSERT INTO jobs (id, tenant_id, customer_id, location_id, job_number, summary,
+         status, priority, created_by, completed_at, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'completed','normal',$7,$8, NOW(), NOW())`,
+      [
+        jobId, tenantId, customerId, locationId,
+        `J-${jobId.slice(0, 8)}`, 'Fan-out job', userId, FIXTURE_COMPLETED_AT,
+      ],
+    );
+    seededJobIds.push(jobId);
+    return { tenantId, jobId };
+  }
+
+  describe('thank-you-SMS sweep', () => {
+    const run = async (tenantsOfInterest: string[], failFor: string | null) => {
+      const visited: string[] = [];
+      const dispatched: string[] = [];
+      const result = await runThankYouSmsSweep({
+        pool,
+        settingsRepo: {
+          findByTenant: async (tenantId: string) => {
+            // Only record the tenants this test seeded; the shared container
+            // carries other files' eligible jobs and they are not our business.
+            if (tenantsOfInterest.includes(tenantId)) visited.push(tenantId);
+            if (tenantId === failFor) throw new Error(`synthetic failure for ${tenantId}`);
+            return { businessName: 'Fan-out Plumbing', sendThankYouSms: true } as never;
+          },
+        } as never,
+        jobRepo: {} as never,
+        customerRepo: { findById: async () => null } as never,
+        dncRepo: { isSuppressed: async () => false } as never,
+        dispatcher: {
+          dispatch: async (args: { tenantId?: string }) => {
+            if (args.tenantId) dispatched.push(args.tenantId);
+            return undefined;
+          },
+        } as never,
+        logger,
+      });
+      return { visited, dispatched, failed: result.failed, tenants: result.tenants };
+    };
+
+    it('groups a multi-tenant result set and reaches each tenant under its own settings', async () => {
+      const a = await seedEligibleTenant();
+      const b = await seedEligibleTenant();
+
+      const { visited, tenants } = await run([a.tenantId, b.tenantId], null);
+
+      expect(tenants).toBeGreaterThanOrEqual(2);
+      expect(visited).toEqual(expect.arrayContaining([a.tenantId, b.tenantId]));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const doomed = await seedEligibleTenant();
+      const survivor = await seedEligibleTenant();
+
+      const { visited, failed } = await run([doomed.tenantId, survivor.tenantId], doomed.tenantId);
+
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(visited).toEqual(expect.arrayContaining([doomed.tenantId, survivor.tenantId]));
+    });
+  });
+
+  describe('review-request sweep', () => {
+    const run = async (failForJobId: string | null) => {
+      const enqueued: string[] = [];
+      const result = await runReviewRequestSweep({
+        pool,
+        jobRepo: { update: async () => undefined } as never,
+        queue: {
+          send: async (_kind: string, payload: { jobId?: string }) => {
+            const jobId = payload.jobId;
+            if (jobId === failForJobId) throw new Error(`synthetic failure for job ${jobId}`);
+            if (jobId) enqueued.push(jobId);
+            return undefined;
+          },
+        } as never,
+        logger,
+      });
+      return { enqueued, failed: result.failed };
+    };
+
+    it('enqueues across tenants from one cross-tenant query', async () => {
+      const a = await seedEligibleTenant();
+      const b = await seedEligibleTenant();
+
+      const { enqueued } = await run(null);
+
+      expect(enqueued).toEqual(expect.arrayContaining([a.jobId, b.jobId]));
+    });
+
+    it('keeps going when one row throws', async () => {
+      const doomed = await seedEligibleTenant();
+      const survivor = await seedEligibleTenant();
+
+      const { enqueued, failed } = await run(doomed.jobId);
+
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(enqueued).not.toContain(doomed.jobId);
+      expect(enqueued).toContain(survivor.jobId);
+    });
   });
 });

@@ -2021,12 +2021,49 @@ wrong reason is worse than no test:
 | Delete the per-tenant `catch` so the throw escapes the loop | failure-isolation test **fails** ✓ |
 | Hard-code `localMinutesOfDay` to one shared timezone | **both** tests fail ✓ |
 
-**What is still open.** The other six sweeps — thank-you SMS (9.1), review
-request (9.2), hold reaper (3.5), estimate nudge (7.10), Google review
-monitoring (9.4), weekly summary (9.7) — **still stub their enumerators** and
-remain T0. The selector half of T4 is now shared and proven for all of them; the
-per-sweep half needs one entry each in the fan-out file, following the digest
-pattern. That is the remaining work, and it is now cheap.
+**All seven sweeps now carry fan-out coverage** — 16 tests in
+`sweep-tenant-fanout.test.ts`. They are not all proven to the same depth, and
+the difference matters:
+
+| Sweep | Shape | What is proven |
+|---|---|---|
+| Daily digest (9.6) | enumerator | **T3 + T4** — two tenants due simultaneously on different timezones *and* different digest times, a third opted out, and a throw isolated |
+| Weekly feedback (9.7) | enumerator | **T3 + T4** — each enabled tenant emailed at **its own address**, the opted-out one skipped, and a throw isolated |
+| Hold reaper (3.5) | enumerator | **T4** — every tenant reached through the real selector; a throw isolated |
+| Estimate nudge (7.10) | enumerator | **T4** — same |
+| HFCR weekly send | enumerator | **T4** — same |
+| Google reviews (9.4) | enumerator | **T4** — same |
+| Thank-you SMS (9.1) | cross-tenant query | **T4** — a multi-tenant result set grouped per tenant, each handled under its own settings, a throw isolated |
+| Review request (9.2) | cross-tenant query | **T4** — enqueues across tenants from one query; a throwing row does not stop the rest |
+
+**Two sweep shapes, not one.** Thank-you SMS and review request take **no
+enumerator at all** — they run one cross-tenant `SELECT`, group by tenant, and
+loop. They are multi-tenant by construction, but that construction had never
+been exercised with more than one tenant's rows in the result set, so nothing
+proved the grouping kept tenants apart. T4 for that shape reads differently and
+the tests say so.
+
+**The four T4-only sweeps are driven through their first per-tenant seam** —
+`findExpiredHolds`, `findByTenant`, `findByWeek`, `getPollState` — rather than
+through fully seeded business data. That is deliberate: each sweep's own
+integration test already proves what it *does* for a tenant; these prove *which
+tenants it reaches*, on the real enumerator, which no other test covered. The
+enumerator is never stubbed, because the enumerator is the thing under test.
+
+**Every isolation assertion was mutation-tested.** Deleting the per-tenant
+`catch` in the digest, hold-reaper, thank-you-SMS and review-request workers
+each made the corresponding test fail; hard-coding a shared timezone failed both
+digest tests. A fan-out test that cannot fail is worse than no fan-out test.
+
+**Two fixture hazards the tests had to handle**, both from the shared container:
+
+- Both cross-tenant queries select `ORDER BY completed_at ASC LIMIT 500`, so
+  fixtures are dated to 2020 to sort first and stay inside the limit
+  deterministically in a full-suite run.
+- Those fixtures stay eligible forever unless stamped, and would leak into
+  `thank-you-sms-worker.test.ts` and `review-request-sweep.test.ts`. An
+  `afterAll` stamps both columns. Verified: the eleven affected integration
+  files run green together, 77 tests.
 
 #### The original argument for the fix
 
