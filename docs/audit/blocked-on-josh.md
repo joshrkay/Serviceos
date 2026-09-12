@@ -63,7 +63,9 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
   move is *the audit read-back*, and there is nothing to read; it stays where the #1009 entry audit put it
   (4−, T1, no audit) until someone lands the emission in a money-class branch. Full evidence:
   `docs/audit/lane-reports/1022-payments.md` (row 8.5b).
-- **Stripe test-mode credentials** (none in the cloud sandbox, no recorded cassettes in the repo): `chargeOffSession`
+- **Stripe test-mode credentials** (none in the cloud sandbox; the repo's only record/replay layer,
+  `CassetteLLMGateway` in `src/ai/voice-quality/cassette-gateway.ts`, records LLM exchanges — nothing records
+  Stripe HTTP): `chargeOffSession`
   (`src/payments/stripe-saved-card.ts:184`) is proven only against a hand-written `StripeFetch` stub. **Row
   waiting:** §8.5's off-session-charge half — a mocked client is not proof, so it stays at 3.
 - **Card-present hardware + Terminal credentials:** `src/payments/stripe-terminal.ts` is likewise stubbed-fetch

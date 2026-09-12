@@ -230,9 +230,11 @@ the row's audit bar, so it is left for whoever lands the audit emission. Flagged
 - **Card-present (Terminal):** `createTerminalPaymentIntent` (`src/payments/stripe-terminal.ts:236`) and friends
   are tested the same way (`test/payments/stripe-terminal.test.ts`, `vi.fn()` fetcher). Per the ticket, **no
   Stripe Terminal proof was built** — it shares #1018's 5.5 finding (hardware + credentials).
-- There are no Stripe test-mode credentials in this sandbox and **no recorded cassettes anywhere in the repo**
-  (searched: no fixture/cassette module backs any Stripe call). Both halves are appended to
-  `docs/audit/blocked-on-josh.md`.
+- There are no Stripe test-mode credentials in this sandbox and **no Stripe cassette seam exists**: the repo's
+  only record/replay layer is `CassetteLLMGateway` (`src/ai/voice-quality/cassette-gateway.ts`), which records
+  **LLM** exchanges for the voice-quality runner — nothing under `src/payments`, `src/webhooks` or
+  `src/invoices` references a cassette, and no HTTP-level recorder backs any Stripe call. Both halves are
+  appended to `docs/audit/blocked-on-josh.md`.
 
 ---
 
@@ -253,8 +255,9 @@ minted through the real `createInvoicePaymentLink` (`invoice-payment-link.ts:22`
 - The Mock deliberately does **not** implement the optional `listInvoicePaymentIntents` / `cancelPaymentIntent`
   capability, so the PI sweep no-ops through it (`invoice-payment-link.ts:308-310`). The PI half therefore uses a
   test-local subclass (`PaymentIntentCapableFake`) that implements them and records the calls.
-- **The Stripe-side call is RECORDED, not proven.** No test-mode key, no cassette. Everything on our side of that
-  seam — the SQL, the cleared columns, the audit rows, the tenant scoping — is real.
+- **The Stripe-side call is RECORDED against the fake, not proven.** No test-mode key, and no Stripe cassette to
+  replay (the repo's cassette layer is LLM-only — see 8.5c). Everything on our side of that seam — the SQL, the
+  cleared columns, the audit rows, the tenant scoping — is real.
 
 **RED** (deliberate: the link claimed to survive the void; the terminal `succeeded` PI claimed to be cancelled too;
 the neighbour's link claimed to die with this tenant's):
@@ -674,8 +677,10 @@ touched file (full output in the run log):
    lock the gap in). The row stays as G1 marked it.
 2. **No Stripe Terminal proof was built** (explicitly out of scope per the ticket; shares #1018's 5.5 finding), and
    **no off-session charge proof** — both are credential/hardware blocked, appended to `blocked-on-josh.md`.
-3. **No cassette layer was introduced.** The repo has none, and inventing one for a money lane is a product/infra
-   decision, not a test change. Where a fake is the only seam, the report says "recorded, not proven".
+3. **No Stripe cassette layer was introduced.** The repo's only record/replay layer is `CassetteLLMGateway`
+   (LLM exchanges for the voice-quality runner); nothing records Stripe HTTP. Building an HTTP recorder for a
+   money lane is a product/infra decision, not a test change. Where a fake is the only seam, the report says
+   "recorded, not proven".
 4. **No rung is stated anywhere in this report**, per the map's rule — including for rows whose evidence obviously
    improved. Fable grades; the §12.4d checks (*evidence not source · directory is not proof · mocked is not proven
    · a doc-comment is not a wiring*) should find every claim above tied to a command and its raw output.
