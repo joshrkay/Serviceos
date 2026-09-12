@@ -1,11 +1,25 @@
 # Rivet — Master PRD
+
+> ## ⚠️ SUPERSEDED — 2026-09-11
+>
+> **This document is no longer canonical.** It is superseded by
+> [`docs/PRD-v5-as-built.md`](PRD-v5-as-built.md), the as-built PRD reconstructed
+> from the shipping code, per **D-030** in [`docs/decisions.md`](decisions.md).
+>
+> Its positioning and voice-interaction thesis were ratified by D-030 and carried into v5. Its build-status claims date from 2026-07-12 and are stale.
+>
+> It is kept in place (not archived) because it has inbound references across the
+> repo and remains useful history. **Do not treat statements below as current
+> product truth without re-verifying against code.**
+
+
 ## Voice AI That Runs the Business
 
 **Brand:** Rivet · **Product:** ServiceOS
 **Version:** 1.0 (consolidated)
 **Date:** 2026-07-12
 **Owner:** Product
-**Status:** Canonical positioning + interaction spec. Companion to the live `docs/PRD.md` (v2.0); this doc consolidates and supersedes the positioning sections of the archived `docs/PRD-v3.md` (see Appendix C), and supersedes the separate competitive, voice, decision, and story drafts from this cycle.
+**Status:** SUPERSEDED by `docs/PRD-v5-as-built.md` (D-030). Was: canonical positioning + interaction spec. Companion to the live `docs/PRD.md` (v2.0); this doc consolidates and supersedes the positioning sections of the archived `docs/PRD-v3.md` (see Appendix C), and supersedes the separate competitive, voice, decision, and story drafts from this cycle.
 **Build-status claims code-verified 2026-07-12 against `/packages`.**
 
 ---

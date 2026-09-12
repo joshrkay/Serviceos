@@ -95,6 +95,7 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
+import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
@@ -253,6 +254,11 @@ import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
 import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
 import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
 import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
+import {
+  resolveTenantOwnerEmail,
+  isWeeklyFeedbackEnabledForTenant,
+  resolveTenantBusinessName,
+} from './digest/weekly-feedback-config';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { runReviewRequestSweep } from './workers/review-request-worker';
@@ -5747,11 +5753,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           runRepo: agreementRunRepo,
           jobsService: agreementsJobsService,
           invoicesService: agreementsInvoicesService,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           duesCollector,
           logger: agreementsLogger,
@@ -5812,11 +5814,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 },
               }
             : {}),
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           logger: callMeBackLogger,
         });
@@ -5959,11 +5957,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           settingsRepo,
           runRepo: batchInvoiceRunRepo,
           txRunner: batchInvoiceTxRunner,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           logger: batchInvoiceLogger,
         });
@@ -6011,11 +6005,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // WS22 — "K fixed" (flagged proposal edited after review).
             auditRepo,
           },
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           // Narrative through the brand-voice composer ONLY when a real LLM
           // provider is configured — the mock gateway's canned JSON must not
           // become an owner-facing narrative. Composer failures fall back to
@@ -6108,11 +6098,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           dunningEventRepo,
           // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
           customerRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: overdueInvoiceLogger,
         });
       }).catch((err) => {
@@ -6156,11 +6142,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // In-memory dev (no pool): no reader, no tenants — the sweep no-ops.
             ...(moneyReconciliationReader ? { reader: moneyReconciliationReader } : {}),
             auditRepo,
-            listTenantIds: async () => {
-              if (!pool) return [];
-              const r = await pool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(pool),
             logger: moneyReconciliationLogger,
           });
         }).catch((err) => {
@@ -6197,11 +6179,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             hfcrSendRepo: hfcrWeeklySendRepo,
             resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
             sendSms: (args) => oneTapOwnerSms(args.to, args.body),
-            listTenantIds: async () => {
-              if (!pool) return [];
-              const r = await pool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(pool),
             logger: hfcrWeeklyLogger,
           });
         }).catch((err) => {
@@ -6233,21 +6211,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // WS22 — "same mistake twice" weekly rate (repeatCorrections).
             buildSnapshot: (tenantId, weekStart, weekEnd) =>
               buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
-            resolveOwnerEmail: async (tenantId) => {
-              const r = await weeklyFeedbackPool.query(
-                'SELECT owner_email FROM tenants WHERE id = $1',
-                [tenantId],
-              );
-              return (r.rows[0]?.owner_email as string | undefined) ?? null;
-            },
-            isFeedbackEnabled: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.weeklyFeedbackEnabled !== false;
-            },
-            resolveBusinessName: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.businessName ?? null;
-            },
+            // Extracted to digest/weekly-feedback-config.ts so the per-tenant
+            // scoping is exercised by the sweep fan-out integration test
+            // against real rows, rather than substituted by it (D-032).
+            resolveOwnerEmail: (tenantId) =>
+              resolveTenantOwnerEmail(weeklyFeedbackPool, tenantId),
+            isFeedbackEnabled: (tenantId) =>
+              isWeeklyFeedbackEnabledForTenant(settingsRepo, tenantId),
+            resolveBusinessName: (tenantId) =>
+              resolveTenantBusinessName(settingsRepo, tenantId),
             sendEmail: (args) =>
               weeklyFeedbackDelivery.sendEmail({
                 to: args.to,
@@ -6255,10 +6227,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 text: args.text,
                 html: args.html,
               }),
-            listTenantIds: async () => {
-              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(weeklyFeedbackPool),
             logger: weeklyFeedbackLogger,
             ...(config.AI_PROVIDER_API_KEY
               ? {
@@ -6331,11 +6300,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           customerRepo,
           settingsRepo,
           dispatchRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: appointmentReminderLogger,
         });
       }).catch((err) => {
@@ -6363,11 +6328,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
         // Resolved once and shared by both sweeps below (one SELECT per tick).
-        const tenantIds = await (async (): Promise<string[]> => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        })();
+        const tenantIds = await listAllTenantIds(pool);
         await runHoldReaperSweep({
           appointmentRepo,
           auditRepo,
@@ -6422,11 +6383,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           sendService,
           auditRepo,
           pool: pool ?? null,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: estimateReminderLogger,
         });
       }).catch((err) => {
@@ -6452,11 +6409,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           estimateRepo,
           auditRepo,
           moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: estimateExpiryLogger,
         });
       }).catch((err) => {
@@ -6482,11 +6435,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         await runProposalExpirySweep({
           proposalRepo,
           auditRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: proposalExpiryLogger,
         });
       }).catch((err) => {
@@ -6556,11 +6505,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           reviewRepo: googleReviewsReviewRepo,
           pollStateRepo: googleReviewsPollStateRepo,
           credentialResolver: googleReviewsCredResolver,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: googleReviewsLogger,
           // Refresh-token handling: on 401 the sweep refreshes via the
           // stored refresh token, persists the rotated access token to
@@ -6956,11 +6901,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
         await runSupervisorAnnotationSweep({
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           proposalRepo,
           gateway: llmGateway,
           ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
