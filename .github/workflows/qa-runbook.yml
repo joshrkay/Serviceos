@@ -54,7 +54,7 @@ jobs:
 
       - name: Upload qa-runner reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-runbook-runner-${{ github.run_id }}
           path: qa-runner/reports/
@@ -62,7 +62,7 @@ jobs:
 
       - name: Upload QA matrix reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-runbook-matrix-${{ github.run_id }}
           path: qa/reports/
@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-runbook-playwright-${{ github.run_id }}
           path: playwright-report/
