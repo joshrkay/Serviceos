@@ -78,6 +78,7 @@ async function seedSentEstimate(
     postalCode: '78701',
     country: 'USA',
     isPrimary: true,
+    addressType: 'service',
     isArchived: false,
     createdAt: new Date(),
     updatedAt: new Date(),
