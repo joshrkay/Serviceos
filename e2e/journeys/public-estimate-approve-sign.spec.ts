@@ -270,32 +270,60 @@ async function queryAsTenant(
   }
 }
 
+/**
+ * The signature canvas (EstimateApprovalPage.tsx's SignatureCanvas) binds
+ * only onMouseDown/onMouseMove/onMouseUp — no pointer events — so it must be
+ * driven with real `mousedown`/`mousemove`/`mouseup` DOM events, not
+ * `page.mouse.*`'s OS-level virtual-input trajectory. `page.mouse` proved
+ * flaky in review (a real bug report, not a planted one): its stroke can
+ * land while the approval sheet's own slide-up transition is still running,
+ * or simply miss the canvas's attached listeners in headless Chromium.
+ * Dispatching the events directly on the element — same technique the
+ * component itself listens for, just skipping the OS input layer — is
+ * deterministic instead of retried.
+ */
 async function drawSignature(page: Page): Promise<void> {
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
+  // Let the sheet's own CSS transition (sheetUp, 0.3s) finish before the
+  // canvas's bounding box is read — a stroke computed mid-transition can
+  // target coordinates the canvas hasn't settled into yet.
+  await page.waitForTimeout(350);
   const box = await canvas.boundingBox();
   expect(box).not.toBeNull();
-  const startX = box!.x + box!.width * 0.2;
-  const startY = box!.y + box!.height * 0.5;
-  // Retry the stroke: headless mousemove dispatch is occasionally lost
-  // before the canvas's pointer handlers attach, leaving hasSig=false and
-  // the Approve button disabled. The "Clear" button only renders once
-  // onChange(true) has fired, so it is a real signal, not a guess.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await page.mouse.move(startX, startY);
-    await page.mouse.down();
-    await page.mouse.move(startX + box!.width * 0.15, startY - 15, { steps: 8 });
-    await page.mouse.move(startX + box!.width * 0.3, startY + 15, { steps: 8 });
-    await page.mouse.move(startX + box!.width * 0.45, startY - 10, { steps: 8 });
-    await page.mouse.up();
-    try {
-      await expect(page.getByRole('button', { name: /^Clear$/i })).toBeVisible({ timeout: 2_000 });
-      return;
-    } catch {
-      // try again
-    }
+  const points = [
+    { x: box!.x + box!.width * 0.2, y: box!.y + box!.height * 0.5 },
+    { x: box!.x + box!.width * 0.35, y: box!.y + box!.height * 0.35 },
+    { x: box!.x + box!.width * 0.5, y: box!.y + box!.height * 0.65 },
+    { x: box!.x + box!.width * 0.65, y: box!.y + box!.height * 0.4 },
+  ];
+  await canvas.dispatchEvent('mousedown', {
+    clientX: points[0].x,
+    clientY: points[0].y,
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    buttons: 1,
+  });
+  for (const p of points.slice(1)) {
+    await canvas.dispatchEvent('mousemove', {
+      clientX: p.x,
+      clientY: p.y,
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+    });
   }
-  await expect(page.getByRole('button', { name: /^Clear$/i })).toBeVisible({ timeout: 2_000 });
+  await canvas.dispatchEvent('mouseup', {
+    clientX: points[points.length - 1].x,
+    clientY: points[points.length - 1].y,
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    buttons: 0,
+  });
+  await expect(page.getByRole('button', { name: /^Clear$/i })).toBeVisible({ timeout: 5_000 });
 }
 
 test.describe('public estimate approve + sign (7.6) — real Postgres', () => {
