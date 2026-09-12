@@ -55,7 +55,7 @@ import { PgTechnicianLocationPingRepository } from '../../src/telemetry/pg-techn
 import { createTechnicianLocationPing } from '../../src/telemetry/technician-location-ping';
 import { createAppointment } from '../../src/appointments/appointment';
 import { assignTechnician } from '../../src/appointments/assignment';
-import { getDispatchBoardData, BoardQueryDependencies } from '../../src/dispatch/board-query';
+import { createDispatchRoutes } from '../../src/dispatch/routes';
 import { createTechnicianLocationRouter } from '../../src/routes/technician-location';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -301,12 +301,54 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
   }
 
   /**
-   * The board dependencies the PRODUCTION route builds
-   * (src/dispatch/routes.ts) — note there is no `getAppointmentLateness`
-   * to pass, because `DispatchRouteDeps` does not declare one.
+   * The REAL dispatch board endpoint — `createDispatchRoutes` mounted at
+   * `/api/dispatch`, exactly as app.ts:4938 mounts it, reached over HTTP.
+   *
+   * Calling `getDispatchBoardData` directly with a hand-built deps object was
+   * the wrong shape for this row: the whole question is whether the PRODUCTION
+   * route supplies `getAppointmentLateness`, and a locally hard-coded deps
+   * literal can never answer that. Worse, it froze the answer — wire the
+   * adapter into `DispatchRouteDeps` tomorrow and the old assertions would not
+   * have noticed, so the `it.fails` would stay red and the "no lateness"
+   * characterization stay green while the shipped board worked.
+   *
+   * Going through `createDispatchRoutes` means both flip on their own the day
+   * someone closes the row.
    */
-  function productionBoardDeps(): BoardQueryDependencies {
-    return { appointmentRepo, assignmentRepo };
+  function productionBoardApp(seeded: SeededTenant) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: seeded.tenant.userId,
+        canonicalUserId: seeded.tenant.userId,
+        sessionId: 'row-4-7-board',
+        tenantId: seeded.tenant.tenantId,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/dispatch',
+      createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo, auditRepo }),
+    );
+    return app;
+  }
+
+  /** Every board item the real endpoint serves for that tenant and day. */
+  async function boardItems(seeded: SeededTenant): Promise<Array<Record<string, unknown>>> {
+    const res = await request(productionBoardApp(seeded))
+      .get('/api/dispatch/board')
+      .query({ date: seeded.dateStr });
+    expect(res.status).toBe(200);
+    const body = res.body as {
+      unassignedAppointments?: Array<Record<string, unknown>>;
+      technicianLanes?: Array<{ appointments: Array<Record<string, unknown>> }>;
+    };
+    return [
+      ...(body.unassignedAppointments ?? []),
+      ...(body.technicianLanes ?? []).flatMap((lane) => lane.appointments ?? []),
+    ];
   }
 
   beforeAll(async () => {
@@ -411,17 +453,7 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
   });
 
   it('CURRENT: with those pings in the database, the dispatch board built the way the production route builds it carries NO lateness on any item', async () => {
-    const board = await getDispatchBoardData(
-      tenantA.tenant.tenantId,
-      tenantA.dateStr,
-      productionBoardDeps(),
-      'America/Phoenix',
-    );
-
-    const items = [
-      ...board.unassignedAppointments,
-      ...board.technicianLanes.flatMap((lane) => lane.appointments),
-    ];
+    const items = await boardItems(tenantA);
     expect(items.some((item) => item.id === tenantA.appointmentId)).toBe(true);
     expect(items.every((item) => item.lateness === undefined)).toBe(true);
   });
@@ -561,17 +593,10 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
   it.fails(
     'DESIRED (row 4.7): with dwell pings on the service location, the dispatch board item for that appointment carries a lateness state and a confidence breakdown',
     async () => {
-      const board = await getDispatchBoardData(
-        tenantA.tenant.tenantId,
-        tenantA.dateStr,
-        productionBoardDeps(),
-        'America/Phoenix',
-      );
-      const items = [
-        ...board.unassignedAppointments,
-        ...board.technicianLanes.flatMap((lane) => lane.appointments),
-      ];
-      const item = items.find((i) => i.id === tenantA.appointmentId);
+      const items = await boardItems(tenantA);
+      const item = items.find((i) => i.id === tenantA.appointmentId) as
+        | { lateness?: { latenessState?: string; confidenceBreakdown?: unknown } }
+        | undefined;
       expect(item?.lateness?.latenessState).toBeDefined();
       expect(item?.lateness?.confidenceBreakdown).toBeDefined();
     },

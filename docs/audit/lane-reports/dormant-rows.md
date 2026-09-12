@@ -179,6 +179,40 @@ where a delivery provider is configured", which is now known incomplete.** That
 cell is Fable's and carries the rung, so this lane has not edited it — raised on
 the PR for Fable to amend, and it belongs in issue #1077.
 
+### Review round 7 — three corrections (Codex, three P2s)
+
+**(a) The 4.7 `it.fails` could not detect the row being closed.** The board
+assertions called `getDispatchBoardData` with a locally hard-coded deps literal
+`{appointmentRepo, assignmentRepo}` — but the whole question this row turns on is
+whether the PRODUCTION route supplies `getAppointmentLateness`, and a hand-built
+literal can never answer that. Worse, it froze the answer: wire the adapter into
+`DispatchRouteDeps` tomorrow and neither assertion would notice — the `it.fails`
+would stay red and the "no lateness" characterization stay green while the
+shipped board worked.
+
+Both now go through `createDispatchRoutes` mounted at `/api/dispatch`, exactly as
+`app.ts:4938` mounts it, reached over HTTP. They flip on their own the day
+someone closes the row. **This is the third instance of one root cause** — a
+fixture or harness that production could not produce, or could not be changed
+by. The coordinates, the assignment gate, and now the board deps.
+
+**(b) The PRD's per-row command results were stale.** The cells cited `5/5 ✓`
+for 3.8 (now 8/8), `5/5 ✓` for 4.7 (now 6/6), `6/6 ✓` for 9.5 (now 7/7). Those
+cells are the authoritative rung record, so a reader could not reproduce them
+from the checked-in files. Refreshed. Rungs and grades untouched.
+
+**(c) The #1077 parking-lot entry described the wrong mechanism.** It said the
+`EMAIL_ENABLED`/`TELEPHONY_ENABLED` launch flags cause the no-op fallback. They
+do not — those flags never reach `createMessageDeliveryProvider` (the only
+mention in that file is a historical comment). With credentials present the
+factory returns a **non-null** provider and `GatedMessageDelivery` suppresses at
+runtime instead, so the live notifier is wired and still writes nothing.
+
+The entry now lists **four distinct boots** that each produce no confirmation and
+no signal, only one of which involves the no-op, with the warning that a fix
+aimed at that one leaves the other three untouched. That distinction is the
+difference between closing #1077 and appearing to.
+
 ### Review round 6 — "a provider is configured" is still not sufficient (Codex, P2)
 
 Correct, and it completes the picture the previous two rounds started.
