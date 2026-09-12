@@ -34,6 +34,7 @@ import { runDailyDigestSweep } from '../../src/workers/daily-digest-worker';
 import { runWeeklyFeedbackSweep } from '../../src/workers/weekly-feedback-worker';
 import { runHoldReaperSweep } from '../../src/workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from '../../src/workers/estimate-reminder-worker';
+import { runEstimateExpirySweep } from '../../src/workers/estimate-expiry-worker';
 import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
@@ -485,6 +486,40 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
         estimateRepo: { findByTenant: fn } as never,
         sendService: {} as never,
         pool: null,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed, doomed: doomed() };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+  });
+
+  // §8.7 G1 (ticket #1012) — the estimate-expiry sweep (row 7.1/Phase 1 in
+  // estimate-phases.test.ts) is not one of the sweeps this file otherwise
+  // covers; its own test only ever proved a single hand-picked tenant. This
+  // block mirrors 'estimate-reminder sweep' immediately above: real
+  // enumerator reach + failure isolation, on the SAME `findByTenant` seam.
+  describe('estimate-expiry sweep', () => {
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
+      const result = await runEstimateExpirySweep({
+        estimateRepo: { findByTenant: fn } as never,
         listTenantIds: () => listAllTenantIds(pool),
         logger,
       });
