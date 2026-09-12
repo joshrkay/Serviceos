@@ -5436,6 +5436,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       },
       // D2-1c — audit-log tenant-settings + language mutations.
       auditRepo,
+      // #1011 — owner-settable per-tenant capabilities (rows 2.6, 2.7). The
+      // FIRST route wiring of setTenantFlag, which shipped with zero call
+      // sites. Reuses the single shared PgTenantFeatureFlagRepository built
+      // above so the route and the capability gates read one cache. OPTIONAL:
+      // without a pool there is no tenant_feature_flags table, the dep is
+      // omitted, and both routes answer 503 — the in-memory boot and every
+      // app-booting test are unaffected.
+      tenantFeatureFlags
+        ? { tenantFlags: tenantFeatureFlags, platformFlags: featureFlagRepo, userRepo }
+        : undefined,
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
