@@ -46,12 +46,29 @@ using the ladder this repository itself invented in PRD v4 Part E:
 | **5 Reachable** | Proven *and* reachable by a real user on the surface the requirement names |
 | **6 Live** | Observed working in production, with real tenants |
 
-**A rung alone is not the definition of done.** It answers *"is this proven?"* for
-one tenant. Rivet is a multi-tenant product whose isolation boundary is the
-database, so every requirement also carries a **tenant grade T0–T4** saying how
-many tenants the proof has actually met. The two compose: **the tenant grade caps
-the rung.** §8.0 defines both and the capping rules; §11.0e reports the measured
-baseline.
+**A rung alone is not the definition of done.** It answers *"is this proven?"*
+for one tenant. Rivet is a multi-tenant product whose isolation boundary is the
+database, so the definition of done now also **requires a tenant grade T0–T4**
+saying how many tenants the proof has actually met, and **the tenant grade caps
+the rung** (D-032). §8.0 defines both and the capping rules.
+
+**Where those grades stand today, stated precisely because the distinction is
+the whole point of this edition:**
+
+- The grade is **required of any new or revised requirement** — that is the
+  standard from here.
+- It is **measured in aggregate** for the existing suite (§11.0e): 52% of
+  Docker-gated files carry a genuine multi-tenant proof.
+- It is **published per row only where it was actually earned** — today the
+  seven tenant-iterating sweeps, graded and mutation-tested in §11.0e.
+- **Every other row in §5 and §8 is ungraded**, and its printed rung should be
+  read as un-capped and therefore provisional. The scan behind the aggregate is
+  a keyword heuristic: sound across 217 files, not sound row by row. Publishing
+  a guessed grade would repeat the exact error this edition exists to correct
+  (§12.4d), so the rows say nothing rather than something unverified.
+
+So: **do not apply the capping rules to an ungraded row** — there is no grade to
+apply yet. Grading the remainder is tracked as the open item in §11.0e.
 
 
 **Every rung in §5 and §8 was re-derived from the test suite on 2026-09-11.**
@@ -2084,9 +2101,24 @@ Order of work:
    T-grades per row. The aggregate above is measured; the per-row grading is not
    done, and should not be asserted until it is.
 
-> **Deliberately not claimed.** Per-row T-grades are absent from §5 and §8 on
-> purpose. Publishing a grade per row without running the falsifier for that row
-> would repeat the exact error this edition exists to correct — see §12.4d.
+#### Graded so far, and what remains
+
+**Earned and published (7 rows):** the tenant-iterating sweeps in the table
+above — digest (9.6) and weekly feedback (9.7) at **T3+T4**, hold reaper (3.5),
+estimate nudge (7.10), HFCR weekly, Google reviews (9.4), thank-you SMS (9.1)
+and review request (9.2) at **T4**. Each was proven against the real enumerator
+and mutation-tested.
+
+**Ungraded (everything else in §5 and §8).** Their printed rungs are
+**un-capped and therefore provisional** — §0 says so, so a reader does not try
+to apply a capping rule to a row that has no grade.
+
+> **Deliberately not claimed.** Per-row T-grades are absent from the remaining
+> rows on purpose. The scan behind the aggregate above is a keyword heuristic —
+> sound across 217 files, not sound row by row — and publishing a guessed grade
+> would repeat the exact error this edition exists to correct (§12.4d). An
+> unstated grade costs a reader one lookup; a wrong one costs them the trust
+> that makes the whole document worth reading.
 
 ## 12. What is not built — the honest register
 

@@ -965,8 +965,11 @@ entity resolver shipping with nonexistent column names because its `Pool` was mo
 
 **Decision.**
 
-1. **Every requirement carries a tenant grade T0–T4 alongside its rung**, defined in
-   `docs/PRD-v5-as-built.md` §8.0:
+1. **The definition of done requires a tenant grade T0–T4 alongside the rung**, defined in
+   `docs/PRD-v5-as-built.md` §8.0. It is required of any new or revised requirement, measured in
+   aggregate for the existing suite, and **published per row only where it has actually been
+   earned** — a row with no grade has an un-capped, provisional rung, and the capping rules below
+   do not apply to it until it is graded:
    - **T0 Single** — one tenant existed; nothing about neighbours is known.
    - **T1 Isolated** — a second tenant cannot see or touch the first's rows.
    - **T2 Non-interfering** — a second tenant's *data* does not change the first's answer.
