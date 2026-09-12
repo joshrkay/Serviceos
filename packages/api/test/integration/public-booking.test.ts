@@ -29,6 +29,7 @@ import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 function isoDate(days: number): string {
   return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
@@ -134,6 +135,11 @@ describe('Postgres integration — public self-service booking route', () => {
         appointmentRepo,
         assignmentRepo,
         proposalRepo,
+        // Wired exactly as app.ts wires it — without this the router falls
+        // back to InMemoryTransactionRunner and never exercises the real
+        // tenant-scoped transaction / advisory-lock path (review finding,
+        // xhawk-ai on PR #1043).
+        transactionRunner: new PgTenantTransactionRunner(pool),
         settingsRepo,
         auditRepo,
       }),

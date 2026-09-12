@@ -139,6 +139,31 @@ async function waitForSilenceArmMark(ws: FakeWs, timeoutMs = 2000): Promise<stri
   }
 }
 
+/**
+ * Poll for the consent_events row rather than reading once. Review finding
+ * (xhawk-ai, PR #1043): `TwilioMediaStreamAdapter` commits recording consent
+ * via `void this.deps.commitRecordingConsent(...)` (mediastream-adapter.ts)
+ * — fire-and-forget, not awaited by the caller that enqueues the completion
+ * mark — so an immediate read right after the mark appears can intermittently
+ * see zero rows under normal Postgres scheduling even when production is
+ * correct. Polling with a bounded timeout removes that flake while still
+ * failing loudly (never silently) if the row genuinely never lands.
+ */
+async function waitForConsentRow(
+  consentRepo: PgConsentEventRepository,
+  tenantId: string,
+  phone: string,
+  timeoutMs = 2000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await consentRepo.listByPhone(tenantId, phone);
+    if (rows.length > 0) return rows;
+    if (Date.now() > deadline) return rows; // let the assertion report the (empty) mismatch
+    await sleep(10);
+  }
+}
+
 const startFrame = (callSid: string, streamSid: string) => ({
   event: 'start' as const,
   streamSid,
@@ -228,7 +253,7 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
     // point of evidence) — the ledger row is committed to real Postgres here,
     // BEFORE capture has opened. Proven two ways at once: the DB row exists,
     // and caller audio arriving right now is still dropped (not yet armed).
-    const rowsAtDisclosurePlayed = await consentRepo.listByPhone(tenantA.tenantId, phone);
+    const rowsAtDisclosurePlayed = await waitForConsentRow(consentRepo, tenantA.tenantId, phone);
     expect(rowsAtDisclosurePlayed).toHaveLength(1);
     expect(rowsAtDisclosurePlayed[0]).toMatchObject({
       tenantId: tenantA.tenantId,
@@ -289,7 +314,7 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
     await flush();
     await flush();
 
-    const tenantBRows = await consentRepo.listByPhone(tenantB.tenantId, sharedPhone);
+    const tenantBRows = await waitForConsentRow(consentRepo, tenantB.tenantId, sharedPhone);
     expect(tenantBRows).toHaveLength(1);
 
     // Tenant A has never seen this caller. Its own gate — a listByPhone

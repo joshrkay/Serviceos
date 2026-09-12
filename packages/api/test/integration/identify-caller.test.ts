@@ -14,13 +14,14 @@
  * This test inserts real rows and drives the real SQL to prove the
  * generated column and the lookup now agree for BOTH storage forms.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
 import { identifyCaller } from '../../src/ai/skills/identify-caller';
-import { findOrCreateLeadByPhone } from '../../src/ai/skills/find-or-create-lead';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
+import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 
 async function insertCustomer(
   pool: Pool,
@@ -158,10 +159,17 @@ describe('Postgres integration — identifyCaller phone_normalized reconciliatio
 
 /**
  * #1014 row 2.3 — the voice UNKNOWN → LEAD leg at real Postgres. Only the SMS
- * caller path (`inbound-sms-capture.test.ts`) had this proven; the voice
- * adapter's `else` branch (twilio-adapter.ts, no `callerKnown`) calls the same
- * production `findOrCreateLeadByPhone` skill, which this suite now drives
- * directly against real `leads` + `audit_events` tables.
+ * caller path (`inbound-sms-capture.test.ts`) had this proven.
+ *
+ * Review finding (xhawk-ai, PR #1043): the original version of this block
+ * called `findOrCreateLeadByPhone` directly — it would keep passing even if
+ * the voice adapter's unknown-caller branch (twilio-adapter.ts) stopped
+ * calling that skill, stopped passing `auditRepo`, or were constructed
+ * without `leadRepo`. That WIRING is exactly what this row is supposed to
+ * prove. Fixed: drives the real `TwilioGatherAdapter.handleInbound` (the
+ * same production entry Twilio's POST /voice route calls), with
+ * `leadRepo`/`auditRepo` wired, for a phone `identifyCaller` cannot match —
+ * the lead + `lead.created` audit row are then read back from Postgres.
  */
 describe('Postgres integration — voice unknown-caller lead capture (findOrCreateLeadByPhone)', () => {
   let pool: Pool;
@@ -185,66 +193,59 @@ describe('Postgres integration — voice unknown-caller lead capture (findOrCrea
     await closeSharedTestDb();
   });
 
+  /** Drives the real production inbound-call establishment path. */
+  async function driveInboundCall(tenantId: string, callSid: string, fromPhone: string): Promise<void> {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: { complete: vi.fn() } as never,
+      pool,
+      leadRepo,
+      auditRepo,
+      businessName: 'Test Co',
+    });
+    await adapter.handleInbound({ callSid, from: fromPhone, to: '+15125550000', tenantId });
+  }
+
   it('a stranger calling in creates a real lead row and an audited lead.created event', async () => {
     const strangerPhone = '+15125550301';
 
-    const result = await findOrCreateLeadByPhone({
-      tenantId: tenantA.tenantId,
-      fromPhone: strangerPhone,
-      leadRepo,
-      auditRepo,
-      systemActorId: 'system:inbound-call',
-    });
+    await driveInboundCall(tenantA.tenantId, 'CA-unknown-lead-1', strangerPhone);
 
-    expect(result.status).toBe('created');
-
-    // The row is real — read it back straight from Postgres, not from the
-    // in-process result object.
+    // The row is real — read it back straight from Postgres.
     const persisted = await leadRepo.findByPhoneNormalized(tenantA.tenantId, '5125550301');
     expect(persisted).not.toBeNull();
-    expect(persisted?.id).toBe(result.leadId);
     expect(persisted?.source).toBe('phone_call');
 
-    // The audit leg — read back through PgAuditRepository, not the in-memory
-    // result of the call.
-    const events = await auditRepo.findByEntity(tenantA.tenantId, 'lead', result.leadId);
+    // The audit leg — read back through PgAuditRepository.
+    const events = await auditRepo.findByEntity(tenantA.tenantId, 'lead', persisted!.id);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       tenantId: tenantA.tenantId,
       eventType: 'lead.created',
       entityType: 'lead',
-      entityId: result.leadId,
+      entityId: persisted!.id,
     });
   });
 
   it('a repeat call from the same unknown number reuses the lead instead of duplicating it', async () => {
     const strangerPhone = '+15125550302';
 
-    const first = await findOrCreateLeadByPhone({
-      tenantId: tenantA.tenantId,
-      fromPhone: strangerPhone,
-      leadRepo,
-      auditRepo,
-    });
-    expect(first.status).toBe('created');
+    await driveInboundCall(tenantA.tenantId, 'CA-unknown-lead-2a', strangerPhone);
+    const first = await leadRepo.findByPhoneNormalized(tenantA.tenantId, '5125550302');
+    expect(first).not.toBeNull();
 
-    const second = await findOrCreateLeadByPhone({
-      tenantId: tenantA.tenantId,
-      fromPhone: strangerPhone,
-      leadRepo,
-      auditRepo,
-    });
-    expect(second.status).toBe('found');
-    expect(second.leadId).toBe(first.leadId);
+    await driveInboundCall(tenantA.tenantId, 'CA-unknown-lead-2b', strangerPhone);
 
-    // Only ONE audit event and ONE lead row exist for this phone — the
-    // second call did not re-create or re-audit.
+    // Only ONE lead row and ONE audit event exist for this phone — the
+    // second inbound call did not re-create or re-audit.
     const rows = await pool.query('SELECT id FROM leads WHERE tenant_id = $1 AND phone_normalized = $2', [
       tenantA.tenantId,
       '5125550302',
     ]);
     expect(rows.rows).toHaveLength(1);
-    const events = await auditRepo.findByEntity(tenantA.tenantId, 'lead', first.leadId);
+    expect(rows.rows[0].id).toBe(first!.id);
+    const events = await auditRepo.findByEntity(tenantA.tenantId, 'lead', first!.id);
     expect(events).toHaveLength(1);
   });
 
@@ -267,28 +268,15 @@ describe('Postgres integration — voice unknown-caller lead capture (findOrCrea
     expect(bIdentify.status).toBe('matched');
     if (bIdentify.status === 'matched') expect(bIdentify.customerId).toBe(customerId);
 
-    // Tenant A has never seen this number — identifyCaller must say unknown,
-    // and the voice adapter's unknown-caller branch creates a LEAD for tenant
-    // A rather than silently resolving tenant B's customer.
-    const aIdentify = await identifyCaller({
-      tenantId: tenantA.tenantId,
-      fromPhone: sharedPhone,
-      pool,
-    });
-    expect(aIdentify.status).toBe('unknown');
-
-    const leadResult = await findOrCreateLeadByPhone({
-      tenantId: tenantA.tenantId,
-      fromPhone: sharedPhone,
-      leadRepo,
-      auditRepo,
-    });
-    expect(leadResult.status).toBe('created');
+    // Tenant A has never seen this number — the real inbound-call path must
+    // create a LEAD for tenant A rather than silently resolving tenant B's
+    // customer.
+    await driveInboundCall(tenantA.tenantId, 'CA-unknown-lead-t1', sharedPhone);
 
     // Tenant A's lead never leaks into tenant B's leads, and tenant B's
     // customer is never visible as a lead under tenant A.
     const tenantALead = await leadRepo.findByPhoneNormalized(tenantA.tenantId, '5125550303');
-    expect(tenantALead?.id).toBe(leadResult.leadId);
+    expect(tenantALead).not.toBeNull();
     const tenantBLead = await leadRepo.findByPhoneNormalized(tenantB.tenantId, '5125550303');
     expect(tenantBLead).toBeNull();
   });
