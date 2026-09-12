@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, request as pwRequest, type APIRequestContext } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -93,12 +93,12 @@ interface CreatedEntity {
 }
 
 async function postJson(
-  page: import('@playwright/test').Page,
+  request: APIRequestContext,
   url: string,
   authHeaders: Record<string, string>,
   body: unknown,
 ): Promise<CreatedEntity> {
-  const res = await page.request.post(url, {
+  const res = await request.post(url, {
     headers: { 'content-type': 'application/json', ...authHeaders },
     data: JSON.stringify(body),
   });
@@ -161,7 +161,7 @@ function todayInTz(timezone: string): string {
 }
 
 async function bootstrapOwnerTenant(
-  page: import('@playwright/test').Page,
+  request: APIRequestContext,
   label: string,
 ): Promise<{ sub: string; jwt: string; authHeaders: Record<string, string>; tenantId: string }> {
   const sub = `user_e2e_${label}_${randomUUID().replace(/-/g, '')}`;
@@ -169,19 +169,19 @@ async function bootstrapOwnerTenant(
   const jwt = unsignedJwt(sub);
   const authHeaders = { Authorization: `Bearer ${jwt}` };
 
-  const webhookRes = await postSignedWebhook(page.request, {
+  const webhookRes = await postSignedWebhook(request, {
     type: 'user.created',
     data: { id: sub, email_addresses: [{ email_address: email }] },
   });
   expect(webhookRes.status(), `${label} bootstrap webhook -> ${await webhookRes.text()}`).toBe(200);
 
-  const meRes = await page.request.get(`${API_URL}/api/me`, { headers: authHeaders });
+  const meRes = await request.get(`${API_URL}/api/me`, { headers: authHeaders });
   expect(meRes.status()).toBe(200);
   const me = (await meRes.json()) as { tenant_id?: string };
   expect(me.tenant_id).toMatch(UUID_RE);
   const tenantId = me.tenant_id!;
 
-  const identityRes = await page.request.put(`${API_URL}/api/onboarding/identity`, {
+  const identityRes = await request.put(`${API_URL}/api/onboarding/identity`, {
     headers: { 'content-type': 'application/json', ...authHeaders },
     data: JSON.stringify({
       businessName: `Technician Day E2E ${label.toUpperCase()}`,
@@ -197,13 +197,13 @@ async function bootstrapOwnerTenant(
 }
 
 async function inviteAndJoinTechnician(
-  page: import('@playwright/test').Page,
+  request: APIRequestContext,
   ownerHeaders: Record<string, string>,
   tenantId: string,
   label: string,
 ): Promise<{ sub: string; token: string; techId: string }> {
   const techEmail = `${label}-${Date.now()}@serviceos-hermetic.test`;
-  const inviteRes = await page.request.post(`${API_URL}/api/users/invitations`, {
+  const inviteRes = await request.post(`${API_URL}/api/users/invitations`, {
     headers: { 'content-type': 'application/json', ...ownerHeaders },
     data: JSON.stringify({ email: techEmail, role: 'technician' }),
   });
@@ -212,7 +212,7 @@ async function inviteAndJoinTechnician(
   const invitationId = invitation.id!;
 
   const techSub = `user_e2e_${label}_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(page.request, {
+  const joinRes = await postSignedWebhook(request, {
     type: 'user.created',
     data: {
       id: techSub,
@@ -223,7 +223,7 @@ async function inviteAndJoinTechnician(
   expect(joinRes.status(), `invitee-join webhook (${label}) -> ${await joinRes.text()}`).toBe(200);
 
   const token = hmacToken(techSub, tenantId, 'technician');
-  const techMeRes = await page.request.get(`${API_URL}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
+  const techMeRes = await request.get(`${API_URL}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
   expect(techMeRes.status(), `technician /api/me (${label}) -> ${await techMeRes.text()}`).toBe(200);
   const techMe = (await techMeRes.json()) as { internal_user_id?: string };
   expect(techMe.internal_user_id).toMatch(UUID_RE);
@@ -243,20 +243,26 @@ test.describe('technician day view (4.4) — real Postgres', () => {
       'pointing at the test container.',
   );
 
-  test('Carlos sees only his own day, including a 23:00-local appointment; tenant B\'s technician id is refused', async ({
-    page,
-    baseURL,
-  }) => {
-    const pageErrors: string[] = [];
-    page.on('pageerror', (err) => pageErrors.push(err.message));
+  // Shared across both tests below via beforeAll so the KNOWN-GAP test
+  // (test.fail(), see its own comment) doesn't need to re-seed a whole
+  // owner/technician/job graph just to hit one endpoint.
+  let apiCtx: APIRequestContext;
+  let laToday: string;
+  let ownerA: Awaited<ReturnType<typeof bootstrapOwnerTenant>>;
+  let carlos: Awaited<ReturnType<typeof inviteAndJoinTechnician>>;
+  let techB: Awaited<ReturnType<typeof inviteAndJoinTechnician>>;
+  let lateJob: CreatedEntity;
 
-    const laToday = todayInTz('America/Los_Angeles');
+  test.beforeAll(async () => {
+    if (!canRun) return;
+    apiCtx = await pwRequest.newContext();
+    laToday = todayInTz('America/Los_Angeles');
 
     // ── Tenant A: Carlos with a 23:00-local appointment ─────────────────────
-    const ownerA = await bootstrapOwnerTenant(page, 'ownera');
-    const carlos = await inviteAndJoinTechnician(page, ownerA.authHeaders, ownerA.tenantId, 'carlos');
+    ownerA = await bootstrapOwnerTenant(apiCtx, 'ownera');
+    carlos = await inviteAndJoinTechnician(apiCtx, ownerA.authHeaders, ownerA.tenantId, 'carlos');
 
-    const customer = await postJson(page, `${API_URL}/api/customers`, ownerA.authHeaders, {
+    const customer = await postJson(apiCtx, `${API_URL}/api/customers`, ownerA.authHeaders, {
       firstName: 'LateNight',
       lastName: `Customer ${Date.now()}`,
       primaryPhone: '555-0177',
@@ -265,7 +271,7 @@ test.describe('technician day view (4.4) — real Postgres', () => {
       smsConsent: true,
       source: 'referral',
     });
-    const location = await postJson(page, `${API_URL}/api/locations`, ownerA.authHeaders, {
+    const location = await postJson(apiCtx, `${API_URL}/api/locations`, ownerA.authHeaders, {
       customerId: customer.id,
       label: 'Home',
       street1: '3 Late Night Ave',
@@ -275,7 +281,7 @@ test.describe('technician day view (4.4) — real Postgres', () => {
       isPrimary: true,
     });
     const lateStartIso = tenantWallClockToUtc(laToday, '23:00', 'America/Los_Angeles').toISOString();
-    const lateJob = await postJson(page, `${API_URL}/api/jobs`, ownerA.authHeaders, {
+    lateJob = await postJson(apiCtx, `${API_URL}/api/jobs`, ownerA.authHeaders, {
       customerId: customer.id,
       locationId: location.id,
       summary: 'Carlos late-night job',
@@ -287,8 +293,8 @@ test.describe('technician day view (4.4) — real Postgres', () => {
     });
 
     // ── Tenant B, same run: its own technician, never visible to Carlos ────
-    const ownerB = await bootstrapOwnerTenant(page, 'ownerb');
-    const techB = await inviteAndJoinTechnician(page, ownerB.authHeaders, ownerB.tenantId, 'techb');
+    const ownerB = await bootstrapOwnerTenant(apiCtx, 'ownerb');
+    techB = await inviteAndJoinTechnician(apiCtx, ownerB.authHeaders, ownerB.tenantId, 'techb');
 
     pollDbSnapshot(
       '4.4-technician-day-appointment',
@@ -296,6 +302,18 @@ test.describe('technician day view (4.4) — real Postgres', () => {
         `FROM appointments a JOIN appointment_assignments aa ON aa.appointment_id = a.id ` +
         `WHERE a.job_id = '${lateJob.id}';`,
     );
+  });
+
+  test.afterAll(async () => {
+    await apiCtx?.dispose();
+  });
+
+  test('Carlos sees only his own day, including a 23:00-local appointment; tenant B\'s technician id is refused', async ({
+    page,
+    baseURL,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
 
     // ── API proof: the 23:00-local job lands on Carlos's tenant-local day.
     //    Read through the OWNER's session (owner/dispatcher are exempt from
@@ -325,51 +343,16 @@ test.describe('technician day view (4.4) — real Postgres', () => {
     const forgedBody = (await forgedRes.json()) as { error?: string };
     expect(forgedBody.error).toBe('FORBIDDEN');
 
-    // ── Judgment call / documented gap — NOT invented around: Carlos's OWN
-    //    id ALSO 403s in this harness. Root cause (packages/api/src/app.ts,
-    //    "wire the DB-authoritative authorization loader"): the loader that
-    //    populates req.auth.canonicalUserId is wired only when
-    //    `pool && !isDevAuthBypassEnabled()`. The `chromium` Playwright
-    //    project's api webServer runs with DEV_AUTH_BYPASS=true UNCONDITIONALLY
-    //    (playwright.config.ts apiWebServerEnv — required for the owner's
-    //    hermetic unsigned-JWT bootstrap every real-Postgres journey in this
-    //    repo depends on), so the loader is NEVER wired for this whole lane.
-    //    Carlos's session is authenticated via a real, verified HMAC token
-    //    (CLERK_DEV_HMAC_TOKENS), so `devAuthBypass` skips him too
-    //    (`if (req.auth) return next()` in dev-auth-bypass.ts) — meaning
-    //    canonicalUserId is undefined for EVERY technician-role request in
-    //    this harness, and the SEC-22 guard's
-    //    `technicianId !== req.auth!.canonicalUserId` is vacuously true for
-    //    ANY id, including a technician's own. This is a real, confirmed gap
-    //    in what this hermetic lane can reach — NOT a production defect: in
-    //    production DEV_AUTH_BYPASS is never enabled, so the authorization
-    //    loader is always wired and canonicalUserId always DB-resolved. It
-    //    means this lane can prove the REFUSAL (above) but not that a
-    //    technician's own request SUCCEEDS — asserted honestly below rather
-    //    than skipped silently.
-    const ownRequestRes = await page.request.get(
-      `${API_URL}/api/dispatch/technician/${carlos.techId}/appointments?date=${laToday}`,
-      { headers: carlosHeaders },
-    );
-    expect(
-      ownRequestRes.status(),
-      'KNOWN LANE GAP: Carlos\'s own request also 403s under DEV_AUTH_BYPASS (see comment above) — ' +
-        'canonicalUserId is never populated in this harness, so this is NOT proof the guard positively ' +
-        'admits a matching technician, only that it fails closed. Production is unaffected.',
-    ).toBe(403);
-
     // ── Browser reachability: Carlos's real /technician/day page. The SPA
     //    route/shell renders (data-testid="technician-day-view"), but the
-    //    appointments FETCH surfaces the same 403 as above — asserted
-    //    honestly as the last reachable step, not papered over. ─────────────
+    //    appointments FETCH 403s in THIS harness (see the KNOWN-GAP test
+    //    below for why) — asserted honestly as the last reachable step for
+    //    Carlos's own browser session, not papered over. ─────────────────────
     await installClerkStub(page, { signedIn: true, sub: carlos.sub, token: carlos.token });
     await blockExternalHosts(page, baseURL!);
     await page.goto('/technician/day');
     await expect(page.getByTestId('technician-day-view')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('technician-day-loading')).toHaveCount(0, { timeout: 15_000 });
-    // Honest last-reachable-step assertion (see the KNOWN LANE GAP comment
-    // above): the fetch 403s in this harness, so the page shows its error
-    // state, not the populated appointment list.
     await expect(page.getByTestId('technician-day-error')).toBeVisible({ timeout: 15_000 });
 
     await page.screenshot({
@@ -385,5 +368,49 @@ test.describe('technician day view (4.4) — real Postgres', () => {
     });
 
     expect(pageErrors, 'no uncaught page errors on the technician day view').toEqual([]);
+  });
+
+  test('KNOWN GAP — Carlos\'s own technician-day request should succeed (expected to fail under this harness)', async () => {
+    // This test asserts the CORRECT/desired behavior, not the current bug —
+    // test.fail() tells Playwright "this is expected to fail right now"; if
+    // it ever starts PASSING, Playwright reports that as an error, which is
+    // exactly the signal needed to remove test.fail() once the gap below is
+    // closed. (CLAUDE.md / testing-strategy.md's own convention for a real,
+    // confirmed defect: "a real defect gets a failing test marked
+    // test.fail() and a report line" — this is that report line.)
+    //
+    // Root cause (packages/api/src/app.ts, "wire the DB-authoritative
+    // authorization loader"): the loader that populates
+    // req.auth.canonicalUserId is wired only when `pool &&
+    // !isDevAuthBypassEnabled()`. The `chromium` Playwright project's api
+    // webServer runs with DEV_AUTH_BYPASS=true UNCONDITIONALLY
+    // (playwright.config.ts apiWebServerEnv — required for the owner's
+    // hermetic unsigned-JWT bootstrap every real-Postgres journey in this
+    // repo depends on), so the loader is NEVER wired for this whole lane.
+    // Carlos's session is authenticated via a real, verified HMAC token
+    // (CLERK_DEV_HMAC_TOKENS), so `devAuthBypass` skips him too (`if
+    // (req.auth) return next()` in dev-auth-bypass.ts) — meaning
+    // canonicalUserId is undefined for EVERY technician-role request in
+    // this harness, and the SEC-22 guard's `technicianId !==
+    // req.auth!.canonicalUserId` is vacuously true for ANY id, including a
+    // technician's own. This is a test-harness artifact, not a production
+    // defect: production never sets DEV_AUTH_BYPASS=true, so the loader is
+    // always wired there and canonicalUserId always DB-resolved from the
+    // real Clerk session.
+    test.fail(
+      true,
+      'KNOWN LANE GAP: canonicalUserId is never populated under this repo\'s forced ' +
+        'DEV_AUTH_BYPASS=true, so the SEC-22 guard 403s a technician\'s own request too. ' +
+        'See the comment above this test for the full root cause.',
+    );
+
+    const carlosHeaders = { Authorization: `Bearer ${carlos.token}` };
+    const ownRequestRes = await apiCtx.get(
+      `${API_URL}/api/dispatch/technician/${carlos.techId}/appointments?date=${laToday}`,
+      { headers: carlosHeaders },
+    );
+    expect(ownRequestRes.status(), 'once fixed, Carlos\'s own request should succeed').toBe(200);
+    const ownBody = (await ownRequestRes.json()) as { appointments: Array<{ jobId: string }> };
+    expect(ownBody.appointments.some((a) => a.jobId === lateJob.id)).toBe(true);
   });
 });

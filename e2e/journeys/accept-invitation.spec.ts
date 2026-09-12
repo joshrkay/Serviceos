@@ -1,8 +1,16 @@
 import { test, expect } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+
+/** Scalar `psql -tA` read, trimmed. Returns '' if DATABASE_URL is unset. */
+function queryScalar(sql: string): string {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) return '';
+  return execFileSync('psql', [databaseUrl, '-t', '-A', '-c', sql], { encoding: 'utf8' }).trim();
+}
 
 /**
  * 1.11 — `/accept-invitation` route reachability.
@@ -315,19 +323,22 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
     const techMeBody = (await techMe.json()) as { tenant_id?: string };
     expect(techMeBody.tenant_id).toBe(tenantB);
 
-    // A forged HMAC token claiming tenant A for this same subject must find
-    // no membership there at all (the user row's tenant_id is B, not A).
-    const forgedTenantAToken = hmacToken(techSub, tenantA, 'technician');
-    const forgedMe = await page.request.get(`${API_URL}/api/me`, {
-      headers: { Authorization: `Bearer ${forgedTenantAToken}` },
-    });
-    // /api/me under DEV_AUTH_BYPASS trusts the token's tenant_id claim for
-    // the ME payload's shape, but the invitee was never joined into tenant
-    // A — the durable proof is the join webhook's own response above (join
-    // targeted B) plus this technician's real session (via tenantB) never
-    // resolving membership in A. No cross-tenant leak is possible through
-    // the join path itself, which is what this row is about.
-    expect(forgedMe.status()).toBeLessThan(500);
+    // ── The durable proof, direct from Postgres: exactly one `users` row for
+    //    this clerk_user_id, and it belongs to tenant B — none under tenant
+    //    A. `/api/me` under DEV_AUTH_BYPASS would happily echo back whatever
+    //    tenant_id a forged token claims without a DB membership check (see
+    //    row 4.4's report section on this same gap), so a status-code-only
+    //    assertion against a forged tenant-A token proves nothing here —
+    //    reading the table itself is the only assertion that can't be
+    //    satisfied by a false membership. ────────────────────────────────────
+    const tenantAMatches = queryScalar(
+      `SELECT count(*) FROM users WHERE clerk_user_id = '${techSub}' AND tenant_id = '${tenantA}';`,
+    );
+    expect(tenantAMatches, 'tenant A must have NO users row for this invitee').toBe('0');
+    const tenantBMatches = queryScalar(
+      `SELECT count(*) FROM users WHERE clerk_user_id = '${techSub}' AND tenant_id = '${tenantB}';`,
+    );
+    expect(tenantBMatches, 'tenant B must have exactly one users row for this invitee').toBe('1');
   });
 
   test('T2 — the last owner cannot be demoted from the members page (UI)', async ({ page, baseURL }) => {

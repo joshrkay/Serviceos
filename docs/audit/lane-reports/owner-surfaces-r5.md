@@ -245,15 +245,23 @@ product defect):**
   artifact, not a production behavior: production never sets
   `DEV_AUTH_BYPASS=true`, so the loader is always wired there and
   `canonicalUserId` is always DB-resolved from the real Clerk session.
-  Asserted explicitly (`ownRequestRes` expected `403`, with the reasoning
-  in the assertion message) rather than silently skipped — per the
-  routing note's "if a technician session genuinely cannot be minted
-  hermetically, say so and stop at the last reachable step," extended
-  here to "if a specific authorization codepath can't be positively
-  exercised hermetically, say so."
   The underlying data guarantee (23:00-local inclusion) is instead proven
   through the OWNER's session, which the same guard exempts entirely
   (`role === 'technician'` is the only gate).
+  **Post-review revision:** this gap is now captured as its own test —
+  `'KNOWN GAP — Carlos's own technician-day request should succeed
+  (expected to fail under this harness)'` — using `test.fail(true,
+  reason)` around the CORRECT/desired assertion (`200` + the appointment
+  visible), per CLAUDE.md/testing-strategy.md's own convention for a
+  confirmed defect ("a real defect gets a failing test marked
+  `test.fail()`"). An automated reviewer (xhawk-ai) correctly flagged the
+  original version — a hard `expect(...).toBe(403)` on the main test —
+  for locking the bug in as the "passing" contract: if the harness gap is
+  ever closed, that assertion would keep passing on the NEW, wrong
+  reason, or need a manual update. `test.fail()` inverts this: the test
+  now asserts what SHOULD happen, currently fails as expected, and will
+  flip to an "unexpectedly passed" CI failure the moment the gap closes —
+  a self-flagging TODO instead of a silently stale assertion.
 - The browser assertion for Carlos's own `/technician/day` page therefore
   honestly asserts `technician-day-error` is visible (the 403 surfaces as
   the page's error state) rather than a populated appointment list — a
@@ -482,6 +490,16 @@ which is what the row asks for.
   `tenant_id: B` — the join webhook's own `{ joined: tenantId }` response
   is the primary evidence, this is corroboration through a second, unrelated
   code path.
+- **Post-review revision:** the same automated reviewer (xhawk-ai) flagged
+  that the original "tenant A never sees this user" check
+  (`expect(forgedMe.status()).toBeLessThan(500)`, hitting `/api/me` with a
+  forged tenant-A-claiming token) proves nothing — `/api/me` under
+  `DEV_AUTH_BYPASS` would happily echo a `200` for a forged tenant claim
+  with no DB membership check, so a false membership could pass the same
+  assertion. Replaced with a direct Postgres read: `count(*) FROM users
+  WHERE clerk_user_id = techSub AND tenant_id = tenantA` must be `0`, and
+  the same query against tenant B must be `1` — the only assertion a false
+  membership could not also satisfy.
 
 ---
 
@@ -513,7 +531,9 @@ $ cd packages/api && npx tsc --project tsconfig.build.json --noEmit
    lane cannot positively prove a technician's OWN request succeeds,
    only that the guard fails closed for everyone under
    `DEV_AUTH_BYPASS=true`. Not invented around; the day-boundary data
-   guarantee is proven via the owner's session instead.
+   guarantee is proven via the owner's session instead, and the gap
+   itself is now a `test.fail()`-marked test that will flag itself
+   (as an unexpected pass) once fixed.
 2. **Row 4.2's `cancel_appointment` gap** (§2 above) — dropping a card
    into the unassigned queue would 400 `UNSUPPORTED_PROPOSAL_TYPE`
    server-side (`routes/proposals.ts`'s `SUPPORTED_TYPES` allowlist
