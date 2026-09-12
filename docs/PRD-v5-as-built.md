@@ -1836,16 +1836,20 @@ In the order they should be written:
 7. Void → link deactivation + intent cancellation at real Postgres.
 8. Uncatalogued line → confidence capped below the auto-approve floor, on disk.
 
-**A ninth, added 2026-09-12 and arguably first — now partly landed:**
-`listAllTenantIds(pool)` is extracted and proven against real Postgres, and the
-fan-out harness proves the digest sweep's per-tenant contract. **Six sweeps still
-stub their enumerators** and need one entry each in
-`test/integration/sweep-tenant-fanout.test.ts` — see §11.0e.
+~~**A ninth, added 2026-09-12 and arguably first:**~~ **done the same day, and
+no longer part of this backlog.** `listAllTenantIds(pool)` is extracted and
+proven against real Postgres, and `test/integration/sweep-tenant-fanout.test.ts`
+now carries **all eight sweeps** in 16 tests, every isolation assertion
+mutation-tested. Do not write these — see §11.0e for the per-sweep depth.
+
+*Left in place, struck through, rather than deleted: this list is the backlog's
+record of what was open and when, and an item that vanishes tells a later reader
+nothing about whether it was done or dropped. Items 1–8 above are still open.*
 
 ### 11.0d Keeping this document honest
 
 This document has the same failure mode as every document it replaces: it is
-prose, and prose drifts. Two defences:
+prose, and prose drifts. Three defences:
 
 1. **Every rung carries its command.** A claim you cannot run is a claim you
    should not trust — including the claims here.
@@ -1854,9 +1858,26 @@ prose, and prose drifts. Two defences:
    different, the row is stale. The natural next step is a script that runs them
    as a batch and diffs against the expectations recorded here — the same trick
    `voice-action-catalog.contract.test.ts` plays on the capability catalog.
+3. **A status change is never one edit.** This document states the same fact in
+   four to six places — §0, the §5/§8 row, §11.0c, §11.0e, §12, and often a
+   D-NNN entry in `docs/decisions.md`. Every single status correction on this
+   PR has had to be applied more than once, and **three were caught only
+   because a reviewer found the copy I missed**: D-032's consequences after its
+   first clause was fixed, §11.0c's backlog after §11.0e's was, and the T0
+   verdict after the grades that retired it were published. So when a status
+   changes, the edit is not done until this returns nothing unexpected:
+
+   ```bash
+   # every place the old status could still be asserted
+   grep -rn "<the old claim, and its paraphrases>" docs/
+   ```
+
+   Fixing the line a reviewer pointed at is the *start* of the fix. **An
+   incomplete correction is worse than none: it leaves two statements that
+   disagree, and the reader cannot tell which one is current.**
 
 Until that script exists, §5, §8 and §12 are a **snapshot with a decay rate, not
-a standing truth.** They were accurate on 2026-09-11.
+a standing truth.** They were accurate on 2026-09-12.
 
 **Current state, 2026-09-06 full verification** — every automated gate green:
 
@@ -1986,11 +2007,19 @@ tenant, stubs the enumerator to that id, and its *"skips a tenant whose
 re-runs. Nothing proves the sweep sends A's digest to A and B's to B, continues
 to B when A throws, or honours two different `digest_time` values in one pass.
 
-**Consequently, under §8.0's capping rules, every tenant-iterating sweep is
-capped at rung 4 until T4 is earned**, and the digest (9.6), thank-you SMS (9.1),
-review request (9.2), hold reaper (3.5), estimate nudge (7.10), Google review
-monitoring (9.4) and weekly summary (9.7) rows are **T0 sweeps** regardless of
-the rung printed beside them.
+**That was the finding, as measured on 2026-09-12 before the fix below.** Under
+§8.0's capping rules it made every tenant-iterating sweep capped at rung 4 until
+T4 was earned, and the digest (9.6), thank-you SMS (9.1), review request (9.2),
+hold reaper (3.5), estimate nudge (7.10), Google review monitoring (9.4) and
+weekly summary (9.7) rows **T0 sweeps** regardless of the rung printed beside
+them.
+
+> ⚠️ **This verdict no longer governs those rows.** The fix landed the same day:
+> all seven now carry published T-grades — digest and weekly feedback at
+> **T3+T4**, the rest at **T4** — and those grades cap their rungs. The
+> measurement above is kept in the present tense of its own moment because the
+> diagnosis is what justifies the harness; do not read it as the current state.
+> **§11.0e's "Graded so far" list is authoritative for that.**
 
 #### The fix, landed 2026-09-12
 
