@@ -950,10 +950,26 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       return tenantId;
     }
 
-    const run = async (failForTenant: string | null) => {
+    /**
+     * All three rows below share one `scheduled_for` (DC_SCHEDULED_FOR), and
+     * `findDueForTenants` orders only by `scheduled_for ASC` — Postgres is
+     * free to return them in any order among the tie. Pre-selecting which
+     * tenant "doomed" is (and asserting the OTHER two survive) would only
+     * catch a worker that aborts its whole batch on the first error when the
+     * doomed tenant happens to sort before both survivors; on the other
+     * orderings the test would pass whether or not the implementation
+     * aborted, since the abort would have nothing left to cut short. Instead,
+     * `doomed` is whichever tenant THIS run's `sendSms` seam reaches first —
+     * the same `recordingSeam`/`computeDepsFailingForFirstOf` idiom already
+     * used above for the digest and enumerator-driven sweeps — so "the
+     * failure preceded the surviving work" is true by construction, not by
+     * luck of the sort. Caught in PR review (xhawk-ai) on this PR.
+     */
+    const run = async (failFirstOf: string[] | null) => {
       const repo = new PgDroppedCallRecoveryRepository(pool);
       const auditRepo = new PgAuditRepository(pool);
       const sent: string[] = [];
+      let doomed: string | null = null;
       const result = await runDroppedCallRecoverySweep({
         repo,
         handlerDeps: {
@@ -963,7 +979,8 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
           resolvedSince: async () => null,
           compose: async () => 'We got cut off — reply to pick back up.',
           sendSms: async (input) => {
-            if (input.tenantId === failForTenant) {
+            if (failFirstOf?.includes(input.tenantId) && (doomed === null || doomed === input.tenantId)) {
+              doomed = input.tenantId;
               throw new Error(`synthetic failure for tenant ${input.tenantId}`);
             }
             sent.push(input.tenantId);
@@ -973,7 +990,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
         logger,
         now: () => DC_DUE_AT,
       });
-      return { sent, failed: result.failed };
+      return { sent, failed: result.failed, doomed: () => doomed };
     };
 
     it('reaches every tenant with a due row through the REAL cross-tenant selector', async () => {
@@ -985,16 +1002,19 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
     });
 
     it('keeps going when one tenant throws — the other tenants are still SENT', async () => {
-      const doomed = await seedDueRecovery();
-      const survivorA = await seedDueRecovery();
-      const survivorB = await seedDueRecovery();
+      const ours = [await seedDueRecovery(), await seedDueRecovery(), await seedDueRecovery()];
 
-      const { sent, failed } = await run(doomed);
+      const { sent, failed, doomed } = await run(ours);
 
+      // Whichever of ours the sweep reached first is the one that threw, so
+      // every surviving assertion below describes work done AFTER a failure.
       expect(failed).toBeGreaterThanOrEqual(1);
-      expect(sent).not.toContain(doomed);
-      expect(sent).toContain(survivorA);
-      expect(sent).toContain(survivorB);
+      expect(doomed()).not.toBeNull();
+      expect(ours).toContain(doomed());
+      expect(sent).not.toContain(doomed());
+      for (const survivor of ours.filter((t) => t !== doomed())) {
+        expect(sent).toContain(survivor);
+      }
     });
 
     it('leaves a tenant with nothing scheduled untouched while its neighbour sends in the same pass', async () => {
