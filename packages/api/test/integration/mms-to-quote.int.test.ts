@@ -213,4 +213,72 @@ describe('Postgres integration — MMS-to-quote (U2)', () => {
     expect(stored!.proposalType).toBe('voice_clarification');
     expect(stored!.tenantId).toBe(tenant.tenantId);
   });
+
+  /**
+   * #1014 row 2.8 — T1. Tenant B has its own catalog price for the SAME
+   * item name; its MMS quote must ground against ITS OWN catalog row, never
+   * tenant A's, and tenant A's own customer/proposal set must be unchanged
+   * by tenant B's independent intake.
+   */
+  it("T1: tenant B's catalog price and customer set never leak into tenant A's MMS quote", async () => {
+    const tenantB = await createTestTenant(pool);
+    const catalogRepoB = new PgCatalogItemRepository(pool);
+    const auditRepoB = new PgAuditRepository(pool);
+    // Same item NAME, a DIFFERENT price than tenant A's 15000¢ seed.
+    await persistCatalogItem(
+      catalogRepoB,
+      createCatalogItem({
+        tenantId: tenantB.tenantId,
+        name: 'Drywall patch',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 15900,
+      }),
+      { userId: tenantB.userId, role: 'owner' },
+      auditRepoB,
+    );
+
+    const depsB: CustomerMmsIntakeDeps = {
+      ...deps,
+      catalogRepo: catalogRepoB,
+      auditRepo: auditRepoB,
+    };
+
+    // Snapshot tenant A's customer count before tenant B's independent MMS.
+    const beforeA = await pool.query('SELECT count(*) FROM customers WHERE tenant_id = $1', [
+      tenant.tenantId,
+    ]);
+
+    const ctxB = inbound({ tenantId: tenantB.tenantId, fromE164: '+15125550654' });
+    const resultB = await ingestCustomerMms(ctxB, depsB);
+    expect(resultB.outcome).toBe('drafted');
+
+    const storedB = await (depsB.proposalRepo as PgProposalRepository).findById(
+      tenantB.tenantId,
+      resultB.proposalId!,
+    );
+    const lineItemsB = storedB!.payload.lineItems as Array<Record<string, unknown>>;
+    const patchB = lineItemsB.find((li) => String(li.description).includes('Drywall'));
+    // Grounded against TENANT B's catalog price (15900), not tenant A's (15000).
+    expect(patchB?.unitPrice).toBe(15900);
+    expect(patchB?.pricingSource).toBe('catalog');
+
+    // Tenant A never sees tenant B's proposal or customer.
+    expect(await (deps.proposalRepo as PgProposalRepository).findById(
+      tenant.tenantId,
+      resultB.proposalId!,
+    )).toBeNull();
+    expect(
+      await (deps.customerRepo as PgCustomerRepository).findById(
+        tenant.tenantId,
+        resultB.customerId!,
+      ),
+    ).toBeNull();
+
+    // Tenant A's own customer count is exactly unchanged by tenant B's intake.
+    const afterA = await pool.query('SELECT count(*) FROM customers WHERE tenant_id = $1', [
+      tenant.tenantId,
+    ]);
+    expect(afterA.rows[0].count).toBe(beforeA.rows[0].count);
+  });
 });
