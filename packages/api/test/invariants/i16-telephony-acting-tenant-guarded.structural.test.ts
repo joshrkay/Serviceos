@@ -30,8 +30,13 @@
  * For each `router.get`/`router.post` handler in the telephony webhook
  * modules: if its body binds a tenant from a session (`session.tenantId`,
  * `findByCallSid`, `store.get`) or from a payload-alias resolver
- * (`resolveTenantId`, `resolveTenantIdFallback`), then its body must also call
- * `sessionBelongsToAnotherTenant(` or `actingTenantMismatchesCredential(`.
+ * (`resolveTenantId`, `resolveTenantIdFallback`), then its body must call
+ * `sessionBelongsToAnotherTenant(` or `actingTenantMismatchesCredential(`
+ * — and must call it BEFORE its first tenant-scoped effect.
+ *
+ * The ordering half is not decoration. A presence-only rule (this guard's
+ * first cut, caught by Codex review on PR #1082) would sit green on a handler
+ * that writes and then checks, which has already done the cross-tenant thing.
  *
  * ## The one exception, named rather than pattern-matched away
  *
@@ -84,6 +89,44 @@ const GUARD_CALLS = [
   /sessionBelongsToAnotherTenant\(/,
   /actingTenantMismatchesCredential\(/,
 ] as const;
+
+/**
+ * Tenant-scoped effects — the work the guard has to come BEFORE.
+ *
+ * Presence of the guard is not enough: a handler that writes and then checks
+ * has already done the cross-tenant thing, and would sit green under a
+ * presence-only rule (Codex review on PR #1082, which was right — the first
+ * cut of this guard had exactly that hole). So the rule is ordering: the
+ * first guard call must precede the first effect below.
+ *
+ * Deliberately a list of EFFECTS, not "any await": these handlers legitimately
+ * await the tenant lookup itself before they can possibly check it, and a rule
+ * that forbade that would be unsatisfiable.
+ */
+const TENANT_SCOPED_EFFECTS = [
+  /\badapter\.handle\w+\(/,
+  /\bhandleInboundForStream\(/,
+  /\brecordInboundCall\(/,
+  /\bcreateAuditEvent\(/,
+  /\b\w*[Rr]epo\.(?:create|update|insert|record)\w*\(/,
+  /\bwebhookEventRepo\.recordReceipt\(/,
+  /\bstore\.appendTranscript\(/,
+  /\bmachine\.dispatch\(/,
+  /\buploadObject\(/,
+  /\bfetchRecording\(/,
+  /\bescalateToHuman\(/,
+  /\bfinalizeTerminatedSession\(/,
+] as const;
+
+/** Index of the first match of any pattern, or -1. */
+function firstIndexOf(body: string, patterns: readonly RegExp[]): number {
+  let best = -1;
+  for (const rx of patterns) {
+    const m = rx.exec(body);
+    if (m && (best === -1 || m.index < best)) best = m.index;
+  }
+  return best;
+}
 
 interface Handler {
   readonly rel: string;
@@ -175,14 +218,29 @@ export function unguardedHandlers(
     for (const handler of extractHandlers(file.rel, file.text)) {
       const bindsCallerTenant = TENANT_FROM_CALLER.some((rx) => rx.test(handler.body));
       if (!bindsCallerTenant) continue;
-      const guarded = GUARD_CALLS.some((rx) => rx.test(handler.body));
-      if (guarded) continue;
-      out.push({
-        at: `${handler.rel}:${handler.line}`,
-        file: handler.rel,
-        line: handler.line,
-        snippet: `${handler.name} binds a caller-supplied tenant without sessionBelongsToAnotherTenant/actingTenantMismatchesCredential`,
-      });
+
+      const guardAt = firstIndexOf(handler.body, GUARD_CALLS);
+      const effectAt = firstIndexOf(handler.body, TENANT_SCOPED_EFFECTS);
+
+      if (guardAt === -1) {
+        out.push({
+          at: `${handler.rel}:${handler.line}`,
+          file: handler.rel,
+          line: handler.line,
+          snippet: `${handler.name} binds a caller-supplied tenant without sessionBelongsToAnotherTenant/actingTenantMismatchesCredential`,
+        });
+        continue;
+      }
+      // Ordering, not presence: a guard after the first tenant-scoped effect
+      // has already let the cross-tenant work happen.
+      if (effectAt !== -1 && effectAt < guardAt) {
+        out.push({
+          at: `${handler.rel}:${handler.line}`,
+          file: handler.rel,
+          line: handler.line,
+          snippet: `${handler.name} performs a tenant-scoped effect BEFORE its guard — the check must precede the work`,
+        });
+      }
     }
   }
   return out;
@@ -282,6 +340,54 @@ describe('I16 — a telephony handler may not act as a caller-chosen tenant unch
         const found = unguardedHandlers([{ rel: 'planted.ts', text }]);
         expect(found).toHaveLength(1);
         expect(found[0]!.snippet).toContain("post '/bad'");
+      } finally {
+        removeTree(dir);
+      }
+    });
+
+    it('flags a handler whose guard comes AFTER a tenant-scoped write', () => {
+      // The presence-only hole: every symbol the rule looks for is here, in
+      // the right handler — but the write already happened. Caught by Codex
+      // review on PR #1082 against the first cut of this guard.
+      const dir = plantTree('i16-ordering', {
+        'planted.ts': `
+          router.post('/writes-first', async (req: Request, res: Response) => {
+            const session = deps.store.findByCallSid(body.CallSid);
+            const tenantId = session?.tenantId;
+            await leadRepo.create({ tenantId, phone: body.From });
+            if (sessionBelongsToAnotherTenant(req, session, tenantId)) {
+              res.status(403).end();
+              return;
+            }
+          });
+        `,
+      });
+      try {
+        const text = fs.readFileSync(path.join(dir, 'planted.ts'), 'utf8');
+        const found = unguardedHandlers([{ rel: 'planted.ts', text }]);
+        expect(found).toHaveLength(1);
+        expect(found[0]!.snippet).toContain('BEFORE its guard');
+      } finally {
+        removeTree(dir);
+      }
+    });
+
+    it('does not flag a handler that guards before the write', () => {
+      const dir = plantTree('i16-ordered-ok', {
+        'planted.ts': `
+          router.post('/guards-first', async (req: Request, res: Response) => {
+            const session = deps.store.findByCallSid(body.CallSid);
+            if (sessionBelongsToAnotherTenant(req, session, tenantId)) {
+              res.status(403).end();
+              return;
+            }
+            await leadRepo.create({ tenantId: session.tenantId, phone: body.From });
+          });
+        `,
+      });
+      try {
+        const text = fs.readFileSync(path.join(dir, 'planted.ts'), 'utf8');
+        expect(unguardedHandlers([{ rel: 'planted.ts', text }])).toEqual([]);
       } finally {
         removeTree(dir);
       }

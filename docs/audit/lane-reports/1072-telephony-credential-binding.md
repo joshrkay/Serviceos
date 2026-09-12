@@ -609,11 +609,24 @@ away: it resolves the tenant from the dialled number, which is the field the cre
 bound to, so the agreement is structural. `/voice` and the fresh branch of
 `/voice/gather-fallback` use it.
 
-Negative controls are the evidence, not the green run. Three planted trees (a session-bound
+The rule is ORDERING, not presence: the first guard call must precede the handler's first
+tenant-scoped effect. The first cut of this guard checked only that the guard appeared
+somewhere in the body — Codex review on PR #1082 pointed out that a handler which writes and
+then checks would sit green under it, having already done the cross-tenant thing. That is a
+hole in the artifact whose whole job is to close the class, so it was fixed rather than
+noted: `TENANT_SCOPED_EFFECTS` lists the work (adapter dispatch, repo writes, audit events,
+receipts, transcript appends, uploads) and the guard must come first. Deliberately a list of
+effects rather than "any await" — these handlers must await the tenant lookup itself before
+they can possibly check it, and a rule forbidding that would be unsatisfiable.
+
+Negative controls are the evidence, not the green run. Four planted trees (a session-bound
 handler with no check; a fallback-bound handler with no check; a compliant handler beside a
-non-compliant one, proving per-handler granularity) and two planted non-violations (a
-handler touching no tenant; the named exception). Then the real one — the guard was pointed
-at `src` with the `/gather` check deleted:
+non-compliant one, proving per-handler granularity; a handler whose guard comes AFTER its
+write) and three planted non-violations (a handler touching no tenant; the named exception;
+a handler that guards before writing). The ordering control was itself shown meaningful —
+with the rule weakened back to presence-only it fails (`expected [] to have a length of 1`)
+and the other nine still pass, so it is testing the ordering and nothing else. Then the real
+one — the guard was pointed at `src` with the `/gather` check deleted:
 
 ```
 AssertionError: a telephony handler resolves a tenant from a session or payload alias and
@@ -623,7 +636,7 @@ never checks it against the credential that verified the request
  Tests  1 failed | 7 passed (8)
 ```
 
-restored byte-identically afterwards, and green: 8/8. This is the only thing on the branch
+restored byte-identically afterwards, and green: 10/10. This is the only thing on the branch
 that would have caught findings 2, 3 and 5 before review did.
 
 
