@@ -2067,18 +2067,19 @@ digest tests. A fan-out test that cannot fail is worse than no fan-out test.
 
 #### The original argument for the fix
 
-The ten inlined copies should be one exported, tested function —
+The inlined copies should be one exported, tested function —
 `listAllTenantIds(pool)` — used at every sweep site. That converts an untested
 duplicated literal into a single function a test can cover, and it is the
 precondition for any T4 proof: a sweep test cannot run the production selector
-while the production selector exists only as ten anonymous closures inside
-`app.ts`.
+while the production selector exists only as anonymous closures inside
+`app.ts`. *(The original count of "ten" was itself wrong — it came from a
+truncated listing. There were fifteen.)*
 
 Order of work:
 
 1. ~~**Extract `listAllTenantIds(pool)`**~~ — **done**, fifteen sites.
-2. ~~**One shared sweep harness test**~~ — **done for the digest sweep**; six
-   sweeps remain, one entry each.
+2. ~~**One shared sweep harness test**~~ — **done for all seven sweeps**, 16
+   tests, every isolation assertion mutation-tested.
 3. **Grade the remaining rows.** §5 and §8 carry rungs; they do not yet carry
    T-grades per row. The aggregate above is measured; the per-row grading is not
    done, and should not be asserted until it is.
