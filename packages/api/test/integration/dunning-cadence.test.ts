@@ -258,14 +258,25 @@ describe('Postgres integration — dunning cadence at the real UNIQUE index (§8
 
   it('rejects a duplicate cadence key at the INDEX — a raw INSERT that runs no application code', async () => {
     const now = new Date('2026-04-10T12:00:00.000Z');
-    const seeded = await seedOverdueInvoice(10, now);
-    await seedCadence(seeded.tenantId, [{ offsetDays: 3, channel: 'sms' }]);
+    // The criterion names `'7:sms'` as the duplicated key, so seed the full
+    // cadence 15 days out and duplicate THAT row (review finding, PR #1053).
+    // The constraint is a plain composite UNIQUE (tenant_id, invoice_id, kind,
+    // step_key) with no WHERE clause, so it cannot treat one step_key value
+    // differently from another — this matches the criterion exactly rather
+    // than covering a distinct risk.
+    const seeded = await seedOverdueInvoice(15, now);
+    await seedCadence(seeded.tenantId, [
+      { offsetDays: 3, channel: 'sms' },
+      { offsetDays: 7, channel: 'sms' },
+      { offsetDays: 14, channel: 'sms' },
+    ]);
 
     await sweepFor([seeded.tenantId], now);
     const before = await dunningEventRepo.findByInvoice(seeded.tenantId, seeded.invoiceId);
-    expect(before.map((e) => e.stepKey)).toEqual(['3:sms']);
+    expect(before.map((e) => e.stepKey).sort()).toEqual(['14:sms', '3:sms', '7:sms']);
 
-    // The second send attempt for the SAME cadence key. This is raw SQL: no
+    // The second send attempt for the SAME cadence key — `'7:sms'`, the key the
+    // §8.9 criterion names. This is raw SQL: no
     // repository, no worker, no in-memory guard — if the row lands, a duplicate
     // reminder is possible in production. It must be the database that refuses.
     //
@@ -285,7 +296,7 @@ describe('Postgres integration — dunning cadence at the real UNIQUE index (§8
       await client.query(
         `INSERT INTO invoice_dunning_events
            (id, tenant_id, invoice_id, kind, step_key, channel, sent_at)
-         VALUES ($1, $2, $3, 'reminder', '3:sms', 'sms', NOW())`,
+         VALUES ($1, $2, $3, 'reminder', '7:sms', 'sms', NOW())`,
         [uuidv4(), seeded.tenantId, seeded.invoiceId],
       );
       await client.query('COMMIT');
@@ -301,7 +312,7 @@ describe('Postgres integration — dunning cadence at the real UNIQUE index (§8
 
     // And the ledger still holds exactly one row for that step.
     const after = await dunningEventRepo.findByInvoice(seeded.tenantId, seeded.invoiceId);
-    expect(after.filter((e) => e.stepKey === '3:sms')).toHaveLength(1);
+    expect(after.filter((e) => e.stepKey === '7:sms')).toHaveLength(1);
   });
 
   it('re-sweeping the same overdue invoice raises no second reminder for an already-recorded step', async () => {
