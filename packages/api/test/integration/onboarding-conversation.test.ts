@@ -231,6 +231,11 @@ describe('onboarding_session — integration', () => {
     const auditRows = await auditRepo.findByEntity(tenant.tenantId, 'onboarding_session', sessionId);
     expect(auditRows.length).toBeGreaterThan(0);
     expect(auditRows.some((r) => r.eventType === 'agent.onboarding.extractor_called')).toBe(true);
+    // The scripted extraction succeeds within this same turn (confidence
+    // 0.9, above MIN_EXTRACTION_CONFIDENCE), so the FSM also advances
+    // profile_capture → category_capture and emits its OWN audit_log side
+    // effect (agent.onboarding.advanced) — asserted here, not just implied.
+    expect(auditRows.some((r) => r.eventType === 'agent.onboarding.advanced')).toBe(true);
     expect(auditRows[0].actorId).toBe(tenant.userId);
 
     // Cross-tenant negative: the same query under the second tenant's id

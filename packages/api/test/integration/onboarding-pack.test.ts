@@ -178,12 +178,12 @@ describe('POST /api/onboarding/pack', () => {
     expect(resB.status).toBe(200);
     activeTenant = currentTenant;
 
-    const catalogA = await pool.query<{ name: string }>(
-      `SELECT name FROM catalog_items WHERE tenant_id=$1 ORDER BY name`,
+    const catalogA = await pool.query<{ name: string; unit_price_cents: number }>(
+      `SELECT name, unit_price_cents FROM catalog_items WHERE tenant_id=$1 ORDER BY name`,
       [currentTenant.tenantId],
     );
-    const catalogB = await pool.query<{ name: string }>(
-      `SELECT name FROM catalog_items WHERE tenant_id=$1 ORDER BY name`,
+    const catalogB = await pool.query<{ name: string; unit_price_cents: number }>(
+      `SELECT name, unit_price_cents FROM catalog_items WHERE tenant_id=$1 ORDER BY name`,
       [tenantB.tenantId],
     );
     // Both tenants actually got a non-empty price book...
@@ -196,6 +196,19 @@ describe('POST /api/onboarding/pack', () => {
     const namesB = new Set(catalogB.rows.map((r) => r.name));
     const overlap = [...namesA].filter((n) => namesB.has(n));
     expect(overlap).toEqual([]);
+
+    // The row's own acceptance criterion is "the pack's SKUs at the pack's
+    // prices" — not just disjoint names. Pin the canonical dollar figures
+    // from verticals/packs/{hvac,plumbing}.ts so a regression that zeroes
+    // out or swaps HVAC/plumbing prices fails here.
+    const priceByName = (rows: { name: string; unit_price_cents: number }[]) =>
+      Object.fromEntries(rows.map((r) => [r.name, r.unit_price_cents]));
+    const pricesA = priceByName(catalogA.rows);
+    const pricesB = priceByName(catalogB.rows);
+    expect(pricesA['HVAC Labor']).toBe(12500); // $125/hr, HVAC_LINE_ITEM_DEFAULTS.laborRatePerHourCents
+    expect(pricesA['HVAC Diagnostic Fee']).toBe(8900); // $89
+    expect(pricesB['Plumbing Labor']).toBe(11500); // $115/hr, PLUMBING_LINE_ITEM_DEFAULTS.laborRatePerHourCents
+    expect(pricesB['Plumbing Diagnostic Fee']).toBe(7500); // $75
 
     const templatesA = await pool.query<{ name: string }>(
       `SELECT name FROM estimate_templates WHERE tenant_id=$1`,
