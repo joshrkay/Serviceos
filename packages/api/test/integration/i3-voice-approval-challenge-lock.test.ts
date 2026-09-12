@@ -142,6 +142,8 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
   let settingsRepo: PgSettingsRepository;
   let tenantA: { tenantId: string; userId: string };
   let tenantB: { tenantId: string; userId: string };
+  /** Enrolled with tenant A's digest verbatim — see the replayed-digest test. */
+  let tenantC: { tenantId: string; userId: string };
   let previousSecret: string | undefined;
 
   beforeAll(async () => {
@@ -155,6 +157,7 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
 
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
+    tenantC = await createTestTenant(pool);
 
     // createTestTenant inserts tenants/users only; PgSettingsRepository.update
     // is a bare UPDATE, so the settings row must exist first.
@@ -171,6 +174,23 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
         },
       });
     }
+
+    // Tenant C is enrolled with tenant A's digest COPIED VERBATIM — the exact
+    // shape of a leaked hash replayed into another tenant's settings row. It
+    // must not verify under tenant C, because verification re-derives the HMAC
+    // with tenant C's id (voice-approval-pin.ts: the tenantId is the salt).
+    const existingC = await ensureTenantSettings(tenantC.tenantId, settingsRepo);
+    await settingsRepo.update(tenantC.tenantId, {
+      escalationSettings: {
+        ...DEFAULT_ESCALATION_SETTINGS,
+        ...existingC.escalationSettings,
+        voice_approval_pin_hash: hashVoiceApprovalPin(
+          TENANT_A_PIN,
+          tenantA.tenantId,
+          PIN_SECRET,
+        ),
+      },
+    });
   });
 
   afterAll(async () => {
@@ -451,8 +471,10 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     expect(await proposalRepo.findById(tenantA.tenantId, moneyB.id)).toBeNull();
     expect(await proposalRepo.findById(tenantB.tenantId, moneyA.id)).toBeNull();
 
-    // And the reverse leak: tenant A's PIN does not open tenant B's challenge
-    // (the HMAC is salted by tenantId — voice-approval-pin.ts:hashVoiceApprovalPin).
+    // And the reverse direction: tenant A's PIN spoken at tenant B's challenge
+    // is refused. NOTE this proves only that a WRONG pin is rejected — the two
+    // tenants hold different PIN values, so it says nothing about the HMAC
+    // salt. The salt is proven separately, in the replayed-digest test below.
     const moneyB2 = await seedPending(proposalRepo, tenantB.tenantId, {
       proposalType: 'record_payment',
       summary: 'Record $150 payment from Garnet',
@@ -472,6 +494,49 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     expect(crossPin.outcome).toBe('challenge_failed');
     expect((await proposalRepo.findById(tenantB.tenantId, moneyB2.id))?.status).toBe(
       'ready_for_review',
+    );
+  });
+
+  it('T1 — a leaked PIN digest cannot be replayed into another tenant: the HMAC is salted by tenantId', async () => {
+    // The claim under test is voice-approval-pin.ts's own: "a per-tenant SALT
+    // is folded in via `tenantId` in the HMAC input, so the same PIN under two
+    // tenants yields different digests and a leaked digest cannot be replayed
+    // across tenants." Asserting a *wrong* PIN is rejected (as the T1 test
+    // above does) would stay green even if the salt were dropped, so this
+    // pins the salt directly.
+
+    // Same PIN material, two tenants → different digests.
+    expect(hashVoiceApprovalPin(TENANT_A_PIN, tenantA.tenantId, PIN_SECRET)).not.toBe(
+      hashVoiceApprovalPin(TENANT_A_PIN, tenantC.tenantId, PIN_SECRET),
+    );
+
+    // …and the behavioural half, through the real dialogue at real Postgres:
+    // tenant C's settings row literally holds tenant A's digest (seeded in
+    // beforeAll), and tenant A's PIN still does not open tenant C's challenge.
+    const { deps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550106');
+    const money = await seedPending(proposalRepo, tenantC.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $260 payment from Ipswich',
+      payload: { customerName: 'Ipswich Builders', amountCents: 26000 },
+    });
+    const ref = {
+      tenantId: tenantC.tenantId,
+      sessionId: 'i3-sess-replayed-digest',
+      ownerSession: true,
+    } as const;
+
+    const pending = await reachChallengeStage(deps, ref, 'the Ipswich payment');
+    const replayed = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'four two seven one',
+      pending,
+    });
+    expect(replayed.outcome).toBe('challenge_failed');
+    expect((await proposalRepo.findById(tenantC.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+    expect(await eventTypesFor(auditRepo, tenantC.tenantId, money.id)).toContain(
+      'proposal.voice_approval_challenge_failed',
     );
   });
 

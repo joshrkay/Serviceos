@@ -20,7 +20,7 @@ O-4 (static PIN) and O-6 (transport) — untouched here, and not answered.
 
 | | |
 |---|---|
-| Added | `packages/api/test/integration/i3-voice-approval-challenge-lock.test.ts` (5 tests, all passing — the fifth pins the durability gap as its current value; see finding 3 below) |
+| Added | `packages/api/test/integration/i3-voice-approval-challenge-lock.test.ts` (6 tests, all passing — one pins the HMAC salt via a replayed digest, one pins the durability gap as its current value; see findings 3 and 4 below) |
 | Changed | none |
 
 ### Seams driven (file:line)
@@ -97,11 +97,18 @@ mocked pool, not an in-memory repository, not a directory path.
 
 ### Tenant grade — T1
 
-Two tenants provisioned, each with its own enrolled PIN, and explicit isolation
-assertions in both directions: tenant B locks out while tenant A, in its own
-session, still reaches the challenge and approves; neither tenant reads the
-other's proposal row or audit rows; and tenant A's PIN does **not** open tenant
-B's challenge (the HMAC is salted by `tenantId`).
+Three tenants provisioned. A and B each hold their own enrolled PIN, with
+explicit isolation assertions in both directions: tenant B locks out while
+tenant A, in its own session, still reaches the challenge and approves, and
+neither tenant reads the other's proposal row or audit rows.
+
+Tenant **C** exists to pin the HMAC salt: its settings row holds tenant A's
+digest **copied verbatim** — the shape of a leaked hash replayed into another
+tenant — and tenant A's PIN still does not open tenant C's challenge, because
+verification re-derives the HMAC with tenant C's id. Paired with a direct
+assertion that identical PIN material yields different digests under the two
+tenant ids. (Asserting only that a *wrong* PIN is rejected, as the A/B pair
+does, would stay green even if the salt were dropped — see finding 4.)
 
 Not T3: both tenants are configured the same way apart from the PIN value. No
 tenant-iterating sweep is involved, so no `sweep-tenant-fanout.test.ts` entry
@@ -342,7 +349,7 @@ docker run -d --rm -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
 EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/serviceos_test \
 RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
   --reporter=verbose test/integration/i3-voice-approval-challenge-lock.test.ts
-# → Tests  4 passed | 1 expected fail (5)   [before finding 3; now 5 passed (5)]
+# → Tests  4 passed | 1 expected fail (5)   [before findings 3-4; now 6 passed (6)]
 
 EXTERNAL_TEST_DB_URL=… (same) … test/integration/i12-prime-tier2-audit-best-effort.test.ts
 # → Tests  3 passed (3)
@@ -472,7 +479,7 @@ git status --porcelain
 
 ## Review findings addressed (PR #1050 — `xhawk-ai`, `chatgpt-codex-connector`)
 
-Three findings across two review bots, all correct, all false-negatives in this
+Four findings across two review bots, all correct, all false-negatives in this
 lane's own tests. Verified, fixed RED-first, and pushed:
 
 1. **I12′ tenant isolation was not exercised under the same wiring**
@@ -513,10 +520,28 @@ lane's own tests. Verified, fixed RED-first, and pushed:
    'THIS_SETUP_ASSERTION_IS_DELIBERATELY_…'`, `Tests 1 failed | 4 passed (5)` —
    the hole is closed. GREEN with the assertion restored: `Tests 5 passed (5)`.
 
-Neither fix changes what either row claims; all three make the existing claims
+4. **The cross-tenant PIN check was insensitive to the salt**
+   (`i3-voice-approval-challenge-lock.test.ts:469`, Codex P2). Tenant A holds
+   PIN `4271` and tenant B holds `5382`, so speaking A's PIN at B's challenge
+   and getting `challenge_failed` proved only that a *wrong* PIN is rejected.
+   If `hashVoiceApprovalPin` regressed to drop the `tenantId` salt, that
+   assertion would have stayed green while the report claimed the salt as
+   proven.
+
+   Fixed by testing the module's own claim directly — *"a leaked digest cannot
+   be replayed across tenants"*. A third tenant C is enrolled with tenant A's
+   digest copied verbatim, and tenant A's PIN still fails C's challenge;
+   alongside a direct assertion that the same PIN material hashes differently
+   under the two tenant ids. RED on both halves: `expected
+   'fb3d48722ff8bb2d…' to be 'c8831d31452f9942…'` for the digest pair, and
+   `expected 'challenge_failed' to be 'approved'` for the replayed-digest
+   dialogue. GREEN: `Tests 6 passed (6)`. The A/B assertion stays, with its
+   comment corrected to claim only what it proves.
+
+Neither fix changes what either row claims; all four make the existing claims
 actually falsifiable. `tsc --project tsconfig.build.json --noEmit` still clean.
-The I3 file now reports `5 passed (5)` rather than `4 passed | 1 expected fail
-(5)` — the same five tests, with no expected-failure mechanism left.
+The I3 file now reports `6 passed (6)` rather than `4 passed | 1 expected fail
+(5)`: no expected-failure mechanism left, plus the new salt test.
 
 ---
 
