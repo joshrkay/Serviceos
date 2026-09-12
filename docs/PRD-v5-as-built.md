@@ -2339,11 +2339,35 @@ exists, so the reader was designed and the cache never wired),
 never connected to provisioning), and `digest_entries` — which has its own RLS
 policy and is superseded by `daily_digests`.
 
-Roughly a dozen more are **schema-only or single-writer**, superseded by a later
-design but never removed: `prompt_versions` (with `ai_runs.prompt_version_id`
-pointing at it *without a foreign key*), `llm_cache`, `provider_health`,
-`estimate_provenance`, `evaluation_snapshots`, `wording_preferences`,
-`quality_metrics`, `service_bundles`.
+**Six are schema-only**, superseded by a later design but never removed:
+`prompt_versions` (with `ai_runs.prompt_version_id` pointing at it *without a
+foreign key*), `llm_cache`, `provider_health`, `estimate_provenance`,
+`evaluation_snapshots`, `wording_preferences`.
+
+> 🚨 **Two were on that list and are live APIs. Do not remove them.** This
+> section reads as a cleanup backlog, so naming a live table here is an
+> instruction to delete a working endpoint — the second time on this PR that a
+> remediation, not a description, was the wrong part (§12.4d's seventh entry was
+> the first).
+>
+> | Table | Repository | Mounted at |
+> |---|---|---|
+> | `service_bundles` | `PgServiceBundleRepository` (`verticals/pg-bundles.ts`) | `app.use('/api/bundles', …)` — **app.ts:5407**, authenticated GET ×2 / POST ×2 / PUT |
+> | `quality_metrics` | `PgQualityMetricsRepository` (`quality/pg-metrics.ts`) | `app.use('/api/quality', …)` — **app.ts:5408** |
+>
+> Codex caught `service_bundles`; `quality_metrics` came from sweeping the
+> other seven rather than fixing only the flagged one. They are mounted on
+> **adjacent lines**. The real gap for both is the familiar one — an API with no
+> client — not a dead table.
+>
+> **S:** the check that separates the two cases, per table:
+> ```bash
+> grep -rln "<table>" packages/api/src --include=*.ts | grep -v db/schema.ts
+> ```
+> → empty for all six above; returns a repository for both rows in this box.
+> *The grep that produced the original list must have searched `src/routes/`,
+> where none of these table names appear — routes name the repository, not the
+> table. Same mis-scoping as the digest falsifier (§12.4d).*
 
 And three concepts are **modeled twice**: `job_photos` alongside `attachments`
 (the newer migration explicitly keeps both for back-compatibility),
