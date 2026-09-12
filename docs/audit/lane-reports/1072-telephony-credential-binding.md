@@ -527,6 +527,26 @@ takes the session each route already holds, and `sessionStoreFor` reads the rout
 declared `voiceSessionStore` dep first. A guard must never be the thing that throws inside
 a webhook handler.
 
+**HIGH, fifth — the alias-precedence split on the status callbacks.** Codex review again,
+on the whisper-fix head. The credential binding reads the dialled number as `To` first then
+`Called` (`readDialedNumber`); both status-callback handlers resolve their FALLBACK tenant
+as `Called` first then `To` (`recording-webhook.ts:281`, `voicemail-status-route.ts:228`).
+A payload carrying BOTH, pointing at two different tenants, therefore verified against the
+attacker's own DID in `To` and then acted as the tenant owning `Called` — the victim.
+#1072's original defect in miniature, two fixes later, on the no-session fallback path that
+exists precisely for callbacks landing on a fresh instance or past the reap window (and
+`sessionBelongsToAnotherTenant` deliberately permits a missing session, so nothing else
+stood in the way).
+
+Closed by checking the acting tenant directly rather than by aligning the two alias orders:
+`actingTenantMismatchesCredential(req, tenantId)` refuses when the tenant a handler is about
+to act as is not the tenant whose credential verified the request. Both handlers run it
+after the fallback resolves — before the storage key and rows on `/recording`, before the
+lead leg on `/voicemail-status`. Aligning the orders would have worked today and rotted the
+first time someone touched either; `readDialedNumber` now carries a note saying so. RED
+`(f6)`/`(f7)` at 500 — accepted, acting as the victim, failing later — green after.
+
+
 **And one the binding BROKE, found by Codex review — `/api/telephony/whisper`.** Not a
 hole: a regression I introduced. Whisper is the OUTBOUND dispatcher leg of an escalation,
 so its `To` is the dispatcher's number, not the tenant's inbound DID — and Twilio sends the
@@ -566,11 +586,11 @@ the one item in this family left open.
 
 Full sweep on the fixed head: telephony + routes + invariants + app + webhooks + voice —
 **287 files, 3249 passed** (4 expected fail, all lane B's own pins); ten telephony
-integration files **93 passed** (1 expected fail); the new integration file **16 passed**;
-e2e **6 passed (33.2s)**; `tsc --project tsconfig.build.json --noEmit` clean; eslint on the
+integration files **95 passed** (1 expected fail); the new integration file **18 passed**;
+e2e **6 passed (30.7s)**; `tsc --project tsconfig.build.json --noEmit` clean; eslint on the
 changed source files byte-identical to main's baseline.
 
-**Four findings in this family now, all from review, none found by my own tests** — three
+**Five findings in this family now, all from review, none found by my own tests** — four
 holes the binding missed and one working path the binding broke. The
 lesson is in the shape rather than any one route: I bound the credential to the dialled
 number and treated that as the binding, when the routes take their target from a SECOND

@@ -118,6 +118,31 @@ export function getVerifiedTwilioTenantId(req: Request): string | undefined {
  * handling for a reaped or unknown id, and answering 403 there would turn an
  * ordinary expiry into a hard failure — and would leak which ids exist.
  */
+/**
+ * #1072 — the same check for handlers that resolve their tenant from the
+ * PAYLOAD rather than from a session: is the tenant this handler is about to
+ * act as the tenant whose credential actually verified the request?
+ *
+ * Needed because the credential binding and the handlers read the dialled
+ * number through different aliases — the binding prefers `To`, the status
+ * callbacks prefer `Called`. A payload carrying BOTH, pointing at two
+ * different tenants, therefore verified against one and acted as the other,
+ * which is #1072's original defect in miniature (found by Codex review on
+ * PR #1082). Rather than rely on two alias orders staying in step forever,
+ * the acting tenant is checked directly.
+ *
+ * Stands down when no tenant credential answered (the deployment-wide token —
+ * no tenant is implied), exactly like its session-shaped sibling below.
+ */
+export function actingTenantMismatchesCredential(
+  req: Request,
+  tenantId: string | undefined,
+): boolean {
+  if (!tenantId) return false;
+  const verified = getVerifiedTwilioTenantId(req);
+  return verified !== undefined && verified !== tenantId;
+}
+
 export function sessionBelongsToAnotherTenant(
   req: Request,
   session: { tenantId: string } | undefined,
@@ -145,6 +170,11 @@ function readDialedNumber(req: Request): string | undefined {
   // `To` on call webhooks, `Called` on recording/status callbacks, and the
   // query param the voicemail callback URL mints for itself when Twilio's
   // recordingStatusCallback body carries neither.
+  //
+  // NOTE: the status-callback handlers resolve their fallback tenant with the
+  // OPPOSITE precedence (`Called` before `To`). That divergence is safe only
+  // because those handlers also run `actingTenantMismatchesCredential` before
+  // writing — do not remove that check on the assumption these orders agree.
   const query = req.query as Record<string, unknown>;
   return firstString([body.To, body.Called, query.To, query.Called]);
 }

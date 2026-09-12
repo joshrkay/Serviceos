@@ -35,6 +35,7 @@ import type { Pool } from 'pg';
 import {
   requireTwilioSignature,
   sessionBelongsToAnotherTenant,
+  actingTenantMismatchesCredential,
   type TwilioAuthTokenGetter,
 } from './twilio-signature';
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
@@ -289,6 +290,19 @@ export function createRecordingRouter(
         });
       }
     }
+    // #1072 — the fallback resolved this tenant from the payload's `Called`,
+    // while the credential was checked against `To`; a payload carrying both,
+    // pointing at two tenants, would otherwise verify as one and write as the
+    // other. Refuse before the storage key and the rows.
+    if (actingTenantMismatchesCredential(req, tenantId)) {
+      logger.warn('recording: resolved tenant is not the credential\'s tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (!tenantId) {
       logger.warn('recording: no tenant resolvable for CallSid — refusing to insert', {
         callSid,

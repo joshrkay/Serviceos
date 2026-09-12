@@ -679,6 +679,73 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     expect(res.status).toBe(200);
   });
 
+  /**
+   * (f6)/(f7) — the alias-precedence gap, found by Codex review on PR #1082.
+   *
+   * The credential binding reads the dialled number as `To` first, then
+   * `Called`; both status-callback handlers resolve their FALLBACK tenant as
+   * `Called` first, then `To`. Send both, pointing at different tenants, and
+   * the two disagree: the credential is checked against the attacker's own DID
+   * in `To` (so it verifies), while the handler acts as the tenant owning
+   * `Called` — the victim. #1072's original defect in a narrower form.
+   *
+   * It needs no session, which is exactly the path the fallback exists for: a
+   * callback landing on a fresh instance, after a restart, or past the reap
+   * window. `sessionBelongsToAnotherTenant` deliberately permits a missing
+   * session, so nothing else stood in the way.
+   */
+  it('(f6) /recording — To and Called naming different tenants cannot write under the one in Called', async () => {
+    const before = await victimCounts(tenantB.tenantId);
+    // A CallSid with no in-process session, so the handler takes the fallback path.
+    const callSid = `CA-1072-alias-rec-${crypto.randomUUID().slice(0, 8)}`;
+
+    const forged = await signedPost(
+      '/api/telephony/recording',
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        To: A_DID, // binds the credential to the attacker…
+        Called: B_DID, // …while the handler resolves the victim
+        Caller: CALLER,
+        RecordingSid: `RE-1072-alias-${crypto.randomUUID().slice(0, 8)}`,
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-attacker-alias',
+        RecordingDuration: '17',
+      },
+      A_TOKEN,
+    );
+
+    expect(forged.status).toBe(403);
+    await settle();
+    expect(await victimCounts(tenantB.tenantId)).toEqual(before);
+    expect(await recordingCount(tenantB.tenantId)).toBe(0);
+  });
+
+  it('(f7) /voicemail-status — the same alias split cannot mint a lead under the tenant in Called', async () => {
+    const before = await victimCounts(tenantB.tenantId);
+    const callSid = `CA-1072-alias-vm-${crypto.randomUUID().slice(0, 8)}`;
+
+    const forged = await signedPost(
+      '/api/telephony/voicemail-status',
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        To: A_DID,
+        Called: B_DID,
+        Caller: CALLER,
+        RecordingSid: `RE-1072-alias-vm-${crypto.randomUUID().slice(0, 8)}`,
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-attacker-alias-vm',
+        RecordingStatus: 'completed',
+        RecordingDuration: '19',
+      },
+      A_TOKEN,
+    );
+
+    expect(forged.status).toBe(403);
+    await settle();
+    // The lead leg runs before any fetch, so a lead under B is the sharp tell.
+    expect(await victimCounts(tenantB.tenantId)).toEqual(before);
+  });
+
   it('(e) a number with NO tenant integration row still verifies with the deployment fallback token', async () => {
     const callSid = `CA-1072-fallback-${crypto.randomUUID().slice(0, 8)}`;
     const res = await signedPost(
