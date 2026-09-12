@@ -227,7 +227,9 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
   ): Promise<T> {
     let last: T = await read();
     for (let i = 0; i < 50 && !ok(last); i += 1) {
-      await new Promise((r) => setTimeout(r, 40));
+      await new Promise((r) => {
+        setTimeout(r, 40);
+      });
       last = await read();
     }
     if (!ok(last)) throw new Error(`waitFor timed out: ${label}`);
@@ -371,7 +373,9 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     expect(twiml).not.toContain('leave the building');
     expect(twiml).toContain('on-call dispatcher');
     // 3. the booking drafted on this call is STILL LIVE.
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => {
+      setTimeout(r, 600);
+    });
     const booking = await proposalRepo.findById(c.tenantId, bookingId);
     expect(booking?.status).toBe('draft');
     const revokeRows = await auditRepo.findByEntity(c.tenantId, 'proposal', bookingId);
