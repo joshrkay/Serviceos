@@ -288,12 +288,20 @@ test.describe('pay from a link (8.4) — real Postgres', () => {
     });
     const invoiceAfterLink = (await afterLink.json()) as {
       status: string;
+      stripePaymentLinkId?: string;
       stripePaymentLinkUrl?: string;
       amountDueCents: number;
     };
     expect(invoiceAfterLink.status).toBe('open');
     expect(invoiceAfterLink.stripePaymentLinkUrl).toBe(link1.url);
     expect(invoiceAfterLink.amountDueCents).toBe(50_000);
+    // The id of the SPECIFIC link that was minted and persisted — read back
+    // from the invoice row, not re-derived. This proves the mint call
+    // returned and persisted a real id. It does NOT prove settlement is
+    // tied to that id — see the correction in the comment above the
+    // webhook body below (Codex re-review, PR #1087).
+    const issuedLinkId = invoiceAfterLink.stripePaymentLinkId;
+    expect(issuedLinkId).toBeTruthy();
 
     // ── T2 — tenant B's public page shows ONLY tenant B, never tenant A ─────
     await page.goto(`/pay/${invoiceB.viewToken}`);
@@ -324,13 +332,49 @@ test.describe('pay from a link (8.4) — real Postgres', () => {
 
     // ── The hosted Stripe checkout cannot be hermetic — settle the SAME way
     //    packages/api/test/integration/invoice-webhook-paid.test.ts does: a
-    //    SIGNED checkout.session.completed webhook straight to the real API. ─
+    //    SIGNED checkout.session.completed webhook straight to the real API.
+    //
+    //    Second reachability boundary (review finding on PR #1087): this
+    //    sandbox has no way to mint a REAL Stripe Payment Link (no
+    //    STRIPE_SECRET_KEY — createPaymentLinkProvider falls back to the
+    //    app's own MockPaymentLinkProvider, which — like real Stripe would —
+    //    discards the request it was minted with once it returns a
+    //    {url, linkId}; it exposes no way to read back the metadata a real
+    //    Stripe object would carry). So this event's `metadata` cannot be
+    //    read off the issued link the way it could with a live key; it is
+    //    asserted from the same tenantId/invoiceId this test itself minted
+    //    the link for.
+    //
+    //    Correction (Codex re-review, PR #1087): an earlier version of this
+    //    comment claimed that threading `stripePaymentLinkId` into
+    //    `payment_link` below "ties" settlement to the exact minted link,
+    //    so a webhook naming the wrong link would fail. That was wrong.
+    //    Verified against packages/api/src/webhooks/routes.ts's
+    //    checkout.session.completed branch: it reads only `metadata`,
+    //    `payment_status`, `amount_total` and `payment_intent` off the
+    //    session object — it never reads `payment_link`. The field below
+    //    is inert in production; this test would still pass today if
+    //    `issuedLinkId` were replaced with an arbitrary string. It's left
+    //    in only as documentation of intent, not as a working seam.
+    //    Actually closing this gap needs production code that validates
+    //    the incoming session's link (or its metadata) against the
+    //    invoice's persisted `stripePaymentLinkId` — a product-code
+    //    change, out of scope for this test-only, no-product-code-change
+    //    lane. This traceability gap is OPEN, not partially closed.
+    //    The mint call's own metadata correctness
+    //    (invoice-payment-link.ts's `metadata: {tenant_id, invoice_id}`) is
+    //    unverified by any test in this repo against a real Stripe
+    //    object — a gap that predates this lane and needs either a
+    //    Stripe test-mode key or a spy-capable fake provider to close,
+    //    neither of which this test-only, no-product-code-change lane can
+    //    add. Flagged, not silently assumed.
     const eventId = `evt_${randomUUID()}`;
     const webhookBody = JSON.stringify({
       id: eventId,
       type: 'checkout.session.completed',
       data: {
         object: {
+          payment_link: issuedLinkId,
           metadata: { tenant_id: tenantA.tenantId, invoice_id: invoiceA.invoiceId },
           amount_total: invoiceA.totalCents,
           payment_status: 'paid',
