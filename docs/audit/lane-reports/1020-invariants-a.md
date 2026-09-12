@@ -790,13 +790,45 @@ more finding, this lane's row, fixed and pushed:
   I3/I12′ thread first (wrong comment ID) and immediately corrected with a
   note; harmless, flagged here for the record.
 
+**Third round (`fdb5257`):** Codex's re-review on `af7b601` raised three
+more findings, all this lane's rows, all fixed and pushed:
+
+- **I13 (P2, fixed):** the round-2 fix derived `contentProvenance` from
+  the real FSM `injectionFlagged` context, but still hand-copied that
+  spread into the test's own `markEnded` call — a regression breaking the
+  corresponding spread in `create-voice-turn-processor.ts`'s
+  `persistSessionEnded` would have left the test green. Both the main test
+  and the T1 tenant-A leg now terminate through the exposed
+  `VoiceTurnProcessor.finalizeTerminatedSession` seam (which internally
+  fires `persistSessionEnded`) instead. That write is fire-and-forget
+  (`void persistSessionEnded(...)`), so a short poll helper
+  (`waitForSessionEnded`) was added rather than asserting immediately
+  after the synchronous call returns. RED confirmed the row was genuinely
+  absent before dispatching through the real seam; GREEN after.
+- **I4 (P2, fixed):** the neighbour-tenant test called
+  `PgInvoiceRepository.create()` directly — write-only, no audit leg.
+  Switched to the same audited `createInvoice` domain function I9 already
+  uses, asserting the `invoice.created` row and its cross-tenant
+  isolation.
+- **I17 (P2, fixed):** the neighbour-tenant test called
+  `PgSettingsRepository.update()` directly, but the
+  `settings.tenant.updated` audit event only exists in the
+  `PUT /api/settings` route handler — no settings domain function audits
+  on its own. Adopted the existing `createSettingsRouter` + supertest
+  harness (precedented in `test/integration/settings-owner-toggles.test.ts`)
+  to drive the real route and assert the audit row, confirming tenant B's
+  settings and audit trail stay untouched.
+- All three: RED/GREEN-verified against real Postgres, `tsc` clean, no new
+  gaps introduced.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus two follow-up commits (`cfe12f1`, `b033257`)
-  fixing the three Codex findings above.
+  this report committed, plus three follow-up commits (`cfe12f1`,
+  `b033257`, `fdb5257`) fixing the six Codex findings above across three
+  review rounds.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
