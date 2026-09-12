@@ -43,6 +43,47 @@ const valuedRepeat = { lifetimeValueCents: 500000, lastSeenAt: new Date(), jobsC
 export function discountShapedTypes(types: readonly string[]): string[] {
   return types.filter((type) => /discount|haggle|negotiat/i.test(type));
 }
+
+/**
+ * Proposal types that move value in the CUSTOMER's favour — a concession, by
+ * any name.
+ *
+ * Reviewed on PR #1063 (round 3): `discountShapedTypes` recognises three name
+ * fragments, so `apply_concession`, `reduce_price` or `issue_credit` would
+ * pass it while providing exactly the forbidden capability. That critique is
+ * correct, and checking the registry proves the sharper version of it —
+ * **`apply_credit` and `record_refund` are already registered and already
+ * AI-reachable** (`voice-intent-map.ts:190`). A guard keyed on the words
+ * "discount / haggle / negotiate" was never going to see them.
+ *
+ * So the vocabulary check is kept only as a cheap tripwire, and the real
+ * enforcement is this: EVERY registered proposal type is classified, and any
+ * type that can move value toward the customer must be `money`-class, because
+ * `decideInitialStatus` never auto-approves money-class — the owner approves
+ * it by hand. That is what actually makes I7 true, and it is what the
+ * acceptance criterion should say (see the lane report's wording proposal).
+ */
+const CONCESSION_CAPABLE_TYPES: ReadonlyArray<{ type: string; why: string }> = [
+  {
+    type: 'apply_credit',
+    why: 'Reduces an issued invoice\'s amount due — "it moves money (down, but money nonetheless)", per its own classification comment. Money-class, never auto-approves; the handler floors at zero.',
+  },
+  {
+    type: 'record_refund',
+    why: 'Returns money already collected. Money-class, never auto-approves.',
+  },
+];
+
+/**
+ * Types whose name is concession-shaped but which move value AWAY from the
+ * customer, so they are not the thing I7 guards against.
+ */
+const NOT_A_CONCESSION: ReadonlyArray<{ type: string; why: string }> = [
+  {
+    type: 'apply_late_fee',
+    why: 'Adds to what the customer owes — the opposite direction. Still money-class.',
+  },
+];
 const provider: CustomerNegotiationContextProvider = { getContext: async () => valuedRepeat };
 
 function makeContext(message: string): TaskContext {
@@ -115,6 +156,67 @@ describe('P2-036 negotiation guardrail invariant', () => {
     expect(discountShapedTypes(planted).sort()).toEqual(
       ['AUTO_DISCOUNT', 'apply_ai_discount', 'haggle_with_customer', 'negotiate_price'].sort(),
     );
+  });
+
+  it('every concession-capable proposal type is money-class, so none of them can auto-approve', () => {
+    // The real I7 enforcement, and the honest one: the registry DOES contain
+    // types that move value toward the customer. What makes the invariant
+    // hold is the money-class human-approval rail, not the absence of such a
+    // type — `decideInitialStatus` never auto-approves money-class.
+    for (const entry of [...CONCESSION_CAPABLE_TYPES, ...NOT_A_CONCESSION]) {
+      expect(VALID_PROPOSAL_TYPES, `${entry.type} must still be a registered type`).toContain(
+        entry.type,
+      );
+      expect(
+        actionClassForProposalType(entry.type as never),
+        `${entry.type}: ${entry.why}`,
+      ).toBe('money');
+    }
+  });
+
+  it('no UNCLASSIFIED proposal type moves money — every money-class type is reviewed by name', () => {
+    // Turns the vocabulary tripwire into an exhaustive check: a new
+    // `apply_concession` lands here the moment it is registered, whatever it
+    // is called, because it has to be money-class to move money at all — and
+    // if it is NOT money-class while moving money, that is a far worse bug
+    // than a naming miss.
+    const moneyTypes = VALID_PROPOSAL_TYPES.filter(
+      (t) => actionClassForProposalType(t as never) === 'money',
+    );
+    const reviewed = new Set([
+      ...CONCESSION_CAPABLE_TYPES.map((e) => e.type),
+      ...NOT_A_CONCESSION.map((e) => e.type),
+      // Money-class types that move money at the OWNER's direction on their
+      // own books, carrying no concession to a customer.
+      'record_payment',
+      'issue_invoice',
+      'send_invoice',
+      'draft_invoice',
+      'update_invoice',
+      'create_invoice_schedule',
+      'batch_invoice',
+      'send_payment_reminder',
+      'log_expense',
+      'log_time_entry',
+      'create_service_agreement',
+    ]);
+    const unreviewed = moneyTypes.filter((t) => !reviewed.has(t));
+    expect(
+      unreviewed,
+      'A money-class proposal type is registered that nobody has classified. If it can move ' +
+        'value toward the customer it is a concession — say so in CONCESSION_CAPABLE_TYPES ' +
+        'with the reason; if not, add it to the reviewed set.',
+    ).toEqual([]);
+  });
+
+  it('NEGATIVE CONTROL — a concession-capable type that is NOT money-class is caught', () => {
+    // The failure this exists for: someone adds `apply_concession` as
+    // capture-class, where the trust tier could auto-approve it.
+    const classOf = (t: string): string =>
+      t === 'plant_apply_concession' ? 'capture' : actionClassForProposalType(t as never);
+    const planted = [...CONCESSION_CAPABLE_TYPES, { type: 'plant_apply_concession', why: 'planted' }];
+    const notMoney = planted.filter((e) => classOf(e.type) !== 'money');
+    expect(notMoney.map((e) => e.type)).toEqual(['plant_apply_concession']);
   });
 
   it('NEGATIVE CONTROL (inverse) — the real registry is non-trivial, so the green above is not vacuous', () => {

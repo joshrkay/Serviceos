@@ -115,23 +115,67 @@ export function literalGateKeyEmitters(
   for (const file of listSourceFiles(roots)) {
     const lines = file.code.split('\n');
     for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (!line.includes('issingFields')) continue;
-      for (const arr of line.matchAll(/\[([^[\]]*)\]/g)) {
+      if (!lines[i].includes('issingFields')) continue;
+
+      // A WINDOW, not a line. Reviewed on PR #1063 (round 3): a gate written
+      // as `const missingFields = [\n  'routeId',\n]` puts the identifier on
+      // one line and the literal on the next, so a line-at-a-time scan saw
+      // neither the array nor the key — exactly the hand-written case this
+      // secondary sweep exists to cover. Offsets are tracked so each key is
+      // still reported on the line it actually sits on.
+      const slice = lines.slice(i, i + LITERAL_WINDOW_LINES);
+      const starts: number[] = [];
+      let cursor = 0;
+      const window = slice
+        .map((line, n) => {
+          const collapsed = line.replace(/\s+/g, ' ').trim();
+          starts[n] = cursor;
+          cursor += collapsed.length + 1;
+          return collapsed;
+        })
+        .join(' ');
+
+      const lineFor = (index: number): number => {
+        let offset = 0;
+        for (let n = starts.length - 1; n >= 0; n -= 1) {
+          if (index >= starts[n]) {
+            offset = n;
+            break;
+          }
+        }
+        return i + offset + 1;
+      };
+
+      for (const arr of window.matchAll(/\[([^[\]]*)\]/g)) {
+        const arrStart = (arr.index ?? 0) + 1;
         for (const lit of arr[1].matchAll(/['"`]([^'"`]+)['"`]/g)) {
-          out.push({ key: lit[1], at: `${file.rel}:${i + 1}` });
+          out.push({ key: lit[1], at: `${file.rel}:${lineFor(arrStart + (lit.index ?? 0))}` });
         }
       }
-      for (const push of line.matchAll(/\.push\(\s*['"]([^'"]+)['"]\s*\)/g)) {
-        out.push({ key: push[1], at: `${file.rel}:${i + 1}` });
+      for (const push of window.matchAll(/\.push\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+        out.push({ key: push[1], at: `${file.rel}:${lineFor(push.index ?? 0)}` });
       }
-      for (const push of line.matchAll(/\.push\(\s*`([^`]*)`\s*\)/g)) {
-        out.push({ key: push[1].replace(/\$\{[^}]*\}/g, ''), at: `${file.rel}:${i + 1}` });
+      for (const push of window.matchAll(/\.push\(\s*`([^`]*)`\s*\)/g)) {
+        out.push({
+          key: push[1].replace(/\$\{[^}]*\}/g, ''),
+          at: `${file.rel}:${lineFor(push.index ?? 0)}`,
+        });
       }
     }
   }
-  return out;
+  // The window overlaps, so the same key/line pair is reached from several
+  // starting lines; dedupe on the resolved citation.
+  const seen = new Set<string>();
+  return out.filter((e) => {
+    const key = `${e.key}@${e.at}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
+
+/** Lines folded into each literal-sweep window (a wrapped array literal). */
+const LITERAL_WINDOW_LINES = 5;
 
 // ─── Classification ─────────────────────────────────────────────────────────
 
@@ -470,6 +514,30 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
       const unliftable = unliftableEntityIdGates({}, [dir]);
       expect(unliftable.map((u) => u.key)).toEqual(['warrantyClaimId']);
       expect(unliftable[0].where).toMatch(/planted-task\.ts:3$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL — a gate written as a WRAPPED array literal is reported', () => {
+    // The false negative reviewed on PR #1063 (round 3): the identifier and
+    // the key sit on different lines, so a line-at-a-time scan saw neither.
+    const dir = plantTree('i6-wrapped-array', {
+      'planted-wrapped.ts': [
+        'export function draft() {',
+        '  const missingFields = [',
+        "    'warrantyClaimId',",
+        '  ];',
+        '  return { missingFields };',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const unliftable = unliftableEntityIdGates({}, [dir]);
+      expect(unliftable.map((u) => u.key)).toEqual(['warrantyClaimId']);
+      // Reported on line 3 — where the key actually sits, not the window head.
+      expect(unliftable[0].where).toMatch(/planted-wrapped\.ts:3$/);
     } finally {
       removeTree(dir);
     }

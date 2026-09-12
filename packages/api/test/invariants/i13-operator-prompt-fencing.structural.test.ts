@@ -160,6 +160,31 @@ export function unfencedStructuredChannelConsumers(roots: readonly string[]): st
 
 // ─── Clause B ───────────────────────────────────────────────────────────────
 
+/**
+ * Every module that actually SENDS a prompt to the gateway.
+ *
+ * Reviewed on PR #1063 (round 3): clause B's domain is "names a caller-text
+ * identifier", and extracting the transcription prompt into
+ * `buildCorrection(raw)` would match `PROMPT_ASSEMBLY` but not `CALLER_TEXT` —
+ * so the helper would never need classification. The critique is right, and
+ * the real fix (tracing provenance through a rename) needs dataflow a text
+ * scan does not have.
+ *
+ * What IS reachable is the chokepoint. Every prompt reaches a model through
+ * `gateway.complete(...)`, and that call cannot be renamed away — it is the
+ * gateway's own API, pinned by I15. So the set of gateway-calling modules is
+ * pinned instead: extracting a prompt builder cannot move the `complete` call
+ * out of a classified module, and introducing a NEW sender fails here
+ * regardless of what its local identifiers are called.
+ */
+export function gatewayCallingModules(roots: readonly string[]): string[] {
+  return listSourceFiles(roots)
+    .filter((f) => /\.complete\s*\(/.test(f.code))
+    .filter((f) => /gateway|llm/i.test(f.code))
+    .map((f) => f.rel)
+    .sort();
+}
+
 export function promptBuildersNamingCallerText(roots: readonly string[]): string[] {
   return listSourceFiles(roots)
     .filter((f) => !isFenceModule(f.rel))
@@ -167,6 +192,16 @@ export function promptBuildersNamingCallerText(roots: readonly string[]): string
     .filter((f) => PROMPT_ASSEMBLY.test(f.code))
     .map((f) => f.rel);
 }
+
+/**
+ * How many modules send a prompt to the gateway today.
+ *
+ * A budget assertion, in the shape §5.0c(b) recommends for I18: cheap,
+ * mechanical, and a PR that changes it is self-documenting in review. It is
+ * what closes the round-3 rename hole — a new prompt sender cannot appear
+ * without a human looking at where its text comes from.
+ */
+const PINNED_GATEWAY_SENDER_COUNT = 48;
 
 type Classification =
   | 'fenced'
@@ -369,6 +404,18 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
         'violation: route it through buildUntrustedContentSection.',
       ].join('\n'),
     ).toEqual([]);
+  });
+
+  it('B — the set of modules that SEND a prompt is pinned (a rename cannot move the send)', () => {
+    const senders = gatewayCallingModules([SRC]);
+    // Not vacuous, and bounded: if this count moves, a module started or
+    // stopped talking to the gateway and its caller-text provenance needs a
+    // look — whatever its local identifiers happen to be called.
+    expect(senders.length).toBeGreaterThan(20);
+    expect(senders).toContain('src/workers/transcription.ts');
+    expect(senders).toContain('src/ai/skills/summarize-session.ts');
+    expect(senders).toContain('src/ai/tasks/suggest-reply-task.ts');
+    expect(PINNED_GATEWAY_SENDER_COUNT).toBe(senders.length);
   });
 
   it('B — the recorded violation is still exactly where the report says it is', () => {

@@ -856,6 +856,9 @@ Ranked by what a defect would cost, not by how hard it is to fix. **None are fix
 
 ## PRD edits proposed (additive, §8/§12 — not made here)
 
+- **I7** — replace the criterion: two registered types (`apply_credit`, `record_refund`) already move
+  value toward the customer, so "no registered proposal type can even express an AI-applied discount"
+  is false. The invariant holds on the money-class approval rail instead. Wording above.
 - **I5′** — replace the acceptance criterion with the four-clause relationship above; keep the
   "FALSE AS WRITTEN" note but restate it as *the gate is deliberately asymmetric in both directions*,
   since the broad-⊇ reading is also wrong.
@@ -971,6 +974,56 @@ Suite after the round: **`105 passed | 4 expected fail`** (round 1: 98 | 4; init
 `tsconfig.build.json` clean; `packages/api/src` still byte-identical to `origin/main`.
 
 **Revised violation counts: I1′ 6 sites (was 5), I9′ 4 sites (was 3).**
+
+## Review round 3 (PR #1063, Codex) — four more, and a correction to I7's criterion
+
+**1. I6's literal sweep could not read a wrapped array.** `const missingFields = [\n 'routeId',\n]`
+puts the identifier on one line and the key on the next — the same shape as round 2's I9′ miss, in the
+sweep whose whole job is catching hand-written gates. Now a five-line window with offsets mapped back
+to the key's real line, plus a control.
+
+**2. 🚨 I7's criterion is wrong, and the registry proves it.** Codex's point was that
+`/discount|haggle|negotiat/` would miss `apply_concession` or `issue_credit`. Checking the registry
+gives the sharper version:
+
+> **`apply_credit` and `record_refund` are already registered and already AI-reachable**
+> (`voice-intent-map.ts:190`). A guard keyed on the words "discount / haggle / negotiate" was never
+> going to see them.
+
+I7's stated criterion — *"no registered proposal type can even express an AI-applied discount"* — is
+therefore **false as written**, in the same way I5′ was. What makes I7 actually hold is that both types
+are **money-class**, and `decideInitialStatus` never auto-approves money-class: the owner approves the
+concession by hand. `apply_credit`'s own comment says it plainly — *"it moves money (down, but money
+nonetheless), so money-class: never auto-approves."*
+
+The guard now enforces that instead: every concession-capable type is asserted money-class, and every
+money-class type must be reviewed by name, so a new `apply_concession` lands in the guard the moment it
+is registered whatever it is called. The vocabulary check stays as a cheap tripwire.
+
+> **Proposed I7 criterion replacement:** *Given no configured discount policy, then zero concession on
+> every ask — and every registered proposal type that can move value toward the customer is
+> money-class, so none of them can auto-approve at any trust tier.*
+> (Not "no such type exists": two do.)
+
+**3. I15's vendor list was a list someone remembered.** Codex: *"iterating over this same list in the
+negative control is circular and cannot reveal omissions"* — correct. The list is widened (Azure,
+Bedrock, HuggingFace, Fireworks, Portkey, the rest of `@ai-sdk/*`) and, more usefully, **audited
+against `package.json`**: a provider SDK cannot be imported unless it is installed, so every
+provider-shaped dependency must be either a known provider SDK or explicitly declared not to be one.
+Adding `@azure/openai` to `dependencies` now fails *before* any module imports it. That does not make
+the list complete in the abstract — only a curated registry would — but it makes it complete with
+respect to what this repo can reach, which is the property I15 needs.
+
+**4. I13′ clause B keys on identifier spelling.** Extracting the transcription prompt into
+`buildCorrection(raw)` would match `PROMPT_ASSEMBLY` but not `CALLER_TEXT`. Correct, and tracing
+provenance through a rename needs dataflow. What *is* reachable is the **chokepoint**: every prompt
+reaches a model through `gateway.complete(...)`, which cannot be renamed away — it is the gateway's own
+API, pinned by I15. The set of gateway-calling modules (48) is now pinned with a budget assertion, in
+the shape §5.0c(b) recommends for I18. Extracting a builder cannot move the `complete` call out of a
+classified module, and a new sender fails regardless of its local identifiers.
+
+Suite after the round: **`111 passed | 4 expected fail`** (round 2: 105 | 4; round 1: 98 | 4; initial:
+95 | 4). `tsconfig.build.json` clean; `packages/api/src` still byte-identical to `origin/main`.
 
 ## Not done / judgment calls
 
