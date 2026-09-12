@@ -54,3 +54,124 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **What:** `TechnicianAssignmentNotifier` is now registered (PR #1029). Every assign/unassign/reassign texts the technician whenever a delivery provider is wired; the only switches are the global `SMS_ENABLED` kill switch and whether the tech has a mobile on file. Dispatch churn sends one text per hop.
 - **Josh's call:** add a per-tenant `notifyTechniciansBySms` (default on or off?) and/or a churn window? Push notifications are unaffected (per-user mutes apply).
 - **Until decided:** nothing to build; issue #1033 holds the analysis.
+
+### §8.12 memberships — what does "bills itself" minimally mean? (from #1023, issue #1058)
+- **What:** the recurring-agreements sweep renews and bills on real rows (proven, `membership-renewal-sweep.test.ts`). **Corrected on review (PR #1053) — an earlier version of this entry said *every* dues invoice is an undunnable draft, which is wrong.** On the CONFIGURED path (`autoCollectDues` + a saved default card + a Stripe key) `app.ts:5760-5766` issues the invoice with a 30-day due date *before* charging, so a decline leaves an open, dunnable invoice — proven at real Postgres, and the real overdue sweep then chases it. The gap is the **DEFAULT** path (`autoCollectDues` defaults to false in `createAgreement`) and the **no-saved-card** case (`no_card` returns before issuance, `dues-collector.ts:85`): there the invoice is `draft` with no `due_date`, so dues are not collectable without a human and the 8.9 cadence cannot reach them. Numbering as `AGREEMENT-<epoch ms>` outside the tenant sequence holds on both paths. The gaps are pinned by ordinary tests asserting the current wrong value.
+- **Josh's call:** does "recurring revenue is actually recurring" require (a) issuing the dues invoice, (b) a due date so the cadence chases it, (c) numbering off the tenant sequence — all three, or a different minimum? The correction above sharpens this into a concrete choice: the configured path already does (a) and (b), so is the answer *"auto-collect IS the intended path, and the default should flip / onboarding must drive owners to it"*, or *"the default path must stand on its own and issue dues regardless"*? The severity turns on how many real memberships sit on the default path or have no saved card — which only you can see.
+- **Until decided:** row 8.12 stays at 3 STORY NOT MET; #1058 holds the analysis with file:line.
+
+### Stripe test-mode key for `StripeDuesCollector` (from #1023) — Credentials
+- **What:** **narrowed on review (PR #1053).** The orchestration is now proven at real Postgres by injecting `stripeFetch` — the HTTPS boundary only, as the deposit-checkout path already does — leaving the real collector, invoice ops, `issueInvoice`, `recordPayment` and repositories in the path; success, 402 decline (with decline metadata surviving to the audit row) and no-card are all covered. The earlier claim that "any injected collector is *mocked is not proven*" conflated injecting a fake `DuesCollector` (which would be) with injecting the HTTP boundary (which is not). What a test-mode credential would still add is narrower: that Stripe's API accepts our PaymentIntent request shape and that real decline codes come back in the shape we parse. Same credential unblocks §8.5's off-session-charge half (see the #1022 entry above).
+- **Row waiting:** 8.12's "dues collect" clause; 8.5b/c.
+
+### Spanish E1 life-safety gap — who owns the fix? (from #1014 lane B, issue #1056)
+- **What:** "fuga de gas" classifies **E2**, not E1: the caller is bridged to the dispatcher, never told to evacuate, the call is not closed, and a booking drafted earlier in the call stays live (`emergency-tier.ts:213/265`, English-only `E1_HAZARD_PHRASES` at `:73`). Proven end to end at the real handler; pinned as a characterization test plus an `it.fails`.
+- **Josh's call:** name the owner for a life-safety change to `emergency-tier.ts` semantics (the fix shape is small — carry the detector's `language` into the E1 candidate, or add the Spanish hazard phrases — but it sits next to O-2 and needs trade standing, not a test lane).
+- **Until decided:** row 2.5 is graded on the English path with the Spanish gap named; #1056 holds the analysis.
+
+### §8.5 payments — three blockers surfaced by the #1022 lane (branch `cloud/payments-8-8`, 2026-09-12)
+- **Saving a card on file writes no audit event** (engineering gap that needs a money-code change, so no lane on
+  this map may close it): `packages/api/src/webhooks/routes.ts:1074-1139` stores the PaymentMethod (ids, brand,
+  last4, expiry, default flag, Connect account) and records it with `logger.info` only. No
+  `entityType: 'payment_method'` event exists anywhere in `src`. **Row waiting:** §8.5's stored-card half — its
+  move is *the audit read-back*, and there is nothing to read; it stays where the #1009 entry audit put it
+  (4−, T1, no audit) until someone lands the emission in a money-class branch. Full evidence:
+  `docs/audit/lane-reports/1022-payments.md` (row 8.5b).
+- **Stripe test-mode credentials** (none in the cloud sandbox; the repo's only record/replay layer,
+  `CassetteLLMGateway` in `src/ai/voice-quality/cassette-gateway.ts`, records LLM exchanges — nothing records
+  Stripe HTTP): `chargeOffSession`
+  (`src/payments/stripe-saved-card.ts:184`) is proven only against a hand-written `StripeFetch` stub. **Row
+  waiting:** §8.5's off-session-charge half — a mocked client is not proof, so it stays at 3.
+- **Card-present hardware + Terminal credentials:** `src/payments/stripe-terminal.ts` is likewise stubbed-fetch
+  only (`test/payments/stripe-terminal.test.ts`). Per #1022 no Terminal proof was built; shares #1018's 5.5
+  finding. **Row waiting:** §8.5's card-present half — stays at 3.
+
+### #1011 §E parking lot (per-tenant flag write path + strict-schema settings, issue #995)
+
+Surfaced by the design pass (#1011, 2026-09-12) and this PR-3 lane. Each is
+named, not answered — see this file's own rule at the top.
+
+- **(E1) O-2, narrower question: may an owner ever EDIT the spoken E1
+  life-safety script, and behind what gate?** O-2 above asks who *signs off*
+  on the placeholder script; this is the separate write-path question the
+  design pass raised when it kept `e1ReviewedScript` out of the generic
+  settings PUT (decision #7, PR-2): if an owner is ever allowed to edit it,
+  the write needs its own reviewed/gated path (legal + trade sign-off,
+  per O-2), not a bare boolean/string field on `PUT /api/settings`. **Until
+  decided:** `e1ReviewedScript` stays unreachable from every settings
+  surface; rows 2.5/I8 are unaffected (they speak the placeholder either way).
+- **(E2) `aiModel` after provisioning — ever owner-editable, or fixed for the
+  tenant's lifetime?** PRD §12.4c (decision #8) leaves `aiModel` as a
+  dedicated-writer / not-user-settable field, untouched by this ticket's
+  scope. Open question: should an owner ever be able to switch which model
+  backs their tenant's AI after initial provisioning, and if so through what
+  surface (settings, support-assisted, platform-admin only)? **Until
+  decided:** no write path exists or is planned; `aiModel` stays
+  provisioning-time-only.
+- **(E3) Is owner consent sovereign over the platform ramp?** `_resolve` in
+  `pg-tenant-feature-flags.ts` returns a tenant override **before** the
+  platform fallback (verified, decision #1's evidence) — so a tenant that has
+  explicitly opted in or out always wins over a platform-level ramp or
+  kill-switch for that flag. Open question: should that hold unconditionally,
+  or should a platform-level safety kill-switch be able to override a
+  tenant's own consent in an emergency (e.g., a defect discovered in a
+  capability a tenant has already turned on)? **Until decided:** the current,
+  shipped precedent is tenant-override-wins, unconditionally, for both
+  `dropped_call_recovery` and `voice_vulnerability_triage`.
+- **(E4) The Settings label for `autonomousCloseEnabled` is a placeholder.**
+  The shipped copy — "One approval for phone-quoted work" — was written to
+  ship something legible, not as a considered product label; the design pass
+  flagged it may need a rename (and, separately, whether the underlying
+  column name should change to match). **Until decided:** the copy and
+  column stay as shipped; do not treat "One approval for phone-quoted work"
+  as a finalized product name in specs, docs, or comms.
+- **(E5) Speed-to-lead: wire it or retire it.** `sendSpeedToLeadResponse` is a
+  complete module (`leads/speed-to-lead.ts`) with zero production callers
+  outside its own unit test (decision #6, PR-2 design pass:
+  `git grep -l sendSpeedToLeadResponse` → 2 files). It is not a schema gap —
+  its keys were deliberately kept out of `updateSettingsSchema` — it is a
+  built-and-never-wired module, the exact shape CLAUDE.md's Code Hygiene
+  section asks to either wire or delete. **Josh's call:** wire it into a real
+  trigger site (which one?) or delete the module and its test. **Until
+  decided:** the module stays dormant; no row on this map claims it.
+- **(E6) Which Playwright runner counts for rung 5 — ratify.** Map research
+  #1004 and this ticket's design pass (§C) both settled on **chromium +
+  a local Postgres testcontainer** (docs/testing-strategy.md "Real-Postgres
+  Playwright locally") as the rung-5 reachability runner, explicitly NOT
+  `chromium-devauth` (in-memory repos, fails "mocked is not proven") and NOT
+  `qa-matrix` (needs a deployed environment, not hermetic). This PR-3 lane
+  used exactly that runner for `weekly-feedback-toggle.spec.ts` and
+  `capabilities-toggle.spec.ts`. **Josh's call:** formally ratify
+  chromium+testcontainer as the map's one rung-5 runner definition (issue
+  #995) so future lanes stop re-litigating it per ticket. **Until decided:**
+  treated as adopted-but-not-ratified; this lane followed it.
+- **(E7) Can 2.7 claim rung 5 without a live Twilio line?** Row 2.7
+  (dropped-call recovery) is a phone-surface capability. This lane proved the
+  owner-facing settings write path reaches real Postgres end-to-end
+  (`capabilities-toggle.spec.ts`), but the capability itself only fires from
+  a real dropped call on a live Twilio line — §8.2's lane, not this one. Open
+  question, same shape as 2.6's telephony gap: does an owner-facing write
+  path plus a hermetic Postgres proof cap at 4, with 5 reserved for a signed
+  Twilio-shaped webhook driving the real `/api/telephony/*` routes (per map
+  research #1004), or does some other proof satisfy 5 for a phone-surface
+  row? **Until decided:** 2.7's rung is Fable's call per the ticket's
+  resolution comment; this lane does not claim 5.
+### 3.8 customer confirmation — what happens when no delivery provider is configured? (from the dormant-rows lane, issue #1077)
+- **What:** the confirmation path IS wired (`TransactionalCommsService` as `schedulingNotifier`, `app.ts:1910`) and proven at real Postgres — but there are **four distinct boots on which an approved booking produces no dispatch row, no audit event and no owner-visible signal**, and they are NOT the same failure. Corrected in review (PR #1076): an earlier version of this entry said the launch flags cause the no-op fallback. They do not — `TELEPHONY_ENABLED`/`EMAIL_ENABLED` never reach `createMessageDeliveryProvider`.
+  1. **mode `'none'`** — no Twilio and no SendGrid credentials at all: `messageDelivery` is null, the handler falls back to `NoopSchedulingConfirmationNotifier` (`handlers.ts:381`). *This is the only one that involves the no-op.*
+  2. **both launch flags off, credentials present** — the factory returns a NON-NULL provider (the flags are invisible to it); `GatedMessageDelivery` then suppresses every send at runtime and `sendCustomerMessage` swallows it per channel. Live notifier, no rows.
+  3. **`autoSendAppointmentReminders = false`** — owner-reachable from settings; one flag governs both reminders and booking confirmations.
+  4. **one credential leg only** — SMS creds and no SendGrid boots a non-null provider whose email leg throws at send time, so a customer reachable only by email gets nothing (proven at real Postgres, tenant `Deadleg`).
+  A second, never-constructed implementation (`AppointmentConfirmationNotifier`) duplicates the live one and carries the same (3) early return.
+- **Josh's call:** record a failed dispatch row / emit an audit event / refuse to execute / accept and document — **and note a fix aimed only at (1) leaves (2), (3) and (4) untouched**; plus delete or promote the dead class.
+- **Until decided:** row 3.8 is graded on the wired path (4, T1) with the condition named in its cell; #1077 holds the analysis.
+
+### 4.7 lateness from truck location — wire or retire? (from the dormant-rows lane, issue #1079)
+- **What:** `computeDispatchLateness` is complete and unit-tested but has no runtime caller; pings are ingested and the board has a ready `lateness` seam the route never supplies. One adapter wires it; one deletion retires it.
+- **Josh's call:** wire (and decide where the owner sees it, that `autoNotifyCustomer` never fires without approval, and the per-query cost) or retire (delete the evaluator, its tests, the field and the hook; mark 4.7 not-built).
+- **Until decided:** row 4.7 stays at 2 (dormant, pinned); #1079 holds the analysis.
+
+### 9.5 service-credit cap at execute time (from the dormant-rows lane, issue #1080) — money
+- **What:** the cap holds at draft (credit omitted, proven) but `executeServiceCredit` never re-reads the rolling sum, so a delayed approval can execute past $100 (proven: $140). The source header claims an at-execute cap that does not exist.
+- **Josh's call:** refuse-and-surface at execute (recommended), or accept the window and document it.
+- **Until decided:** row 9.5 is at 4 on its criterion; #1080 holds the analysis.

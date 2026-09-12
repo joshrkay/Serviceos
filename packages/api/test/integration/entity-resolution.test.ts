@@ -1671,6 +1671,60 @@ describe('Postgres integration — entity resolution (P8)', () => {
         expect(result.kind).toBe('not_found');
       });
 
+      // #1019 6.3 (G1 4, T1 → T2) — the test above only proves a STRANGER
+      // tenant with NO Henderson job gets not_found. That leaves the sharper
+      // claim unpinned: what if the NEIGHBOUR tenant genuinely HAS a
+      // same-named job? A query that forgot a `tenant_id` filter on one leg
+      // of the customer → job traversal (or an appointment JOIN, see
+      // `seedRealisticTenant`'s planted-row check above) could UNION the
+      // neighbour's row in — and a bare `not_found` test against an empty
+      // stranger tenant would never catch that. Both tenants below carry a
+      // REAL "Henderson" job; tenant A must resolve to ITS OWN and never
+      // even list the neighbour's as a candidate.
+      it('a neighbour tenant\'s "Henderson" job is never a resolution candidate for tenant A (#1019 6.3)', async () => {
+        const tenantA = await seedRealisticTenant({
+          displayName: 'Pat Henderson',
+          jobSummary: 'Roof repair',
+        });
+        const neighbour = await seedRealisticTenant({
+          displayName: 'Pat Henderson',
+          jobSummary: 'Water heater replacement',
+        });
+
+        const resolved = await resolver.resolve({
+          tenantId: tenantA.tenantId,
+          reference: 'the Henderson job',
+          kind: 'job',
+        });
+        expect(resolved.kind).toBe('resolved');
+        if (resolved.kind === 'resolved') {
+          expect(resolved.candidate.id).toBe(tenantA.jobId);
+          expect(resolved.candidate.id).not.toBe(neighbour.jobId);
+        }
+
+        // Sharper still: force tenant A's OWN reference into 'ambiguous' (a
+        // second same-surname customer inside tenant A) and prove the
+        // neighbour's Henderson job still never rides along in the
+        // candidate list, even when the resolver is actively assembling a
+        // multi-row picker rather than taking the single-row fast path.
+        const secondHendersonJobId = await addRealisticJob(tenantA, {
+          displayName: 'Casey Henderson',
+          jobSummary: 'Gutter cleaning',
+        });
+
+        const ambiguous = await resolver.resolve({
+          tenantId: tenantA.tenantId,
+          reference: 'the Henderson job',
+          kind: 'job',
+        });
+        expect(ambiguous.kind).toBe('ambiguous');
+        if (ambiguous.kind === 'ambiguous') {
+          const candidateIds = ambiguous.candidates.map((c) => c.id).sort();
+          expect(candidateIds).toEqual([tenantA.jobId, secondHendersonJobId].sort());
+          expect(candidateIds).not.toContain(neighbour.jobId);
+        }
+      });
+
       it('an ARCHIVED customer cannot answer a job reference', async () => {
         const seed = await seedRealisticTenant({
           displayName: 'Jamie Garcia',
