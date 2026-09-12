@@ -145,7 +145,10 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
     await closeSharedTestDb();
   });
 
-  async function seedTenant(withTimezone: boolean): Promise<{
+  async function seedTenant(
+    withTimezone: boolean,
+    tzOverride: string = TZ,
+  ): Promise<{
     tenantId: string;
     userId: string;
     customerId: string;
@@ -155,7 +158,7 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
       await pool.query(
         `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region)
          VALUES ($1, $2, 'Chicago HVAC', $3, 'TX')`,
-        [crypto.randomUUID(), t.tenantId, TZ],
+        [crypto.randomUUID(), t.tenantId, tzOverride],
       );
     }
 
@@ -294,6 +297,11 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
     expect(liveRow!.scheduledStart.toISOString()).toBe(EXPECTED_START_UTC);
     expect(liveRow!.scheduledStart.toISOString()).not.toBe(UTC_FRAME_DECOY);
 
+    // The audit leg: ProposalExecutor's real proposal.executed row, not just
+    // the persisted appointment (§8.0 PROVEN-REAL-DB needs both).
+    const liveAuditRows = await auditRepo.findByEntity(seed.tenantId, 'proposal', proposal.id);
+    expect(liveAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
+
     // ── Memo-path parity leg (same tenant, same phrase) ───────────────────
     const memoProposalRepo = new InMemoryProposalRepository();
     const worker = createVoiceActionRouterWorker({
@@ -357,6 +365,13 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
     expect(memoRow!.scheduledStart.toISOString()).toBe(
       liveRow!.scheduledStart.toISOString(),
     );
+
+    const memoAuditRows = await auditRepo.findByEntity(
+      seed.tenantId,
+      'proposal',
+      memoDrafts[0]!.id,
+    );
+    expect(memoAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
   });
 
   it('no-tz tenant: the live-call draft gates on the missing window, approval REFUSES, and no appointment row exists (never silent UTC)', async () => {
@@ -384,5 +399,77 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
       [seed.tenantId],
     );
     expect(rows[0].n).toBe(0);
+  });
+
+  it('T3 — two tenants in two DIFFERENT zones each resolve the SAME spoken phrase to their own zone, with no cross-tenant leakage', async () => {
+    const LA_TZ = 'America/Los_Angeles';
+    // "2:00 PM" on 2027-08-20 is PDT (UTC-7) in Los Angeles — a full 2-hour
+    // offset apart from the Chicago (CDT, UTC-5) tenant's expected instant.
+    const LA_EXPECTED_START_UTC = '2027-08-20T21:00:00.000Z';
+
+    const chicago = await seedTenant(true, TZ);
+    const losAngeles = await seedTenant(true, LA_TZ);
+
+    const { proposal: chicagoDraft } = await driveLiveCallBooking(chicago);
+    const { proposal: laDraft } = await driveLiveCallBooking(losAngeles);
+
+    expect(chicagoDraft.payload.scheduledStart).toBe(EXPECTED_START_UTC);
+    expect(laDraft.payload.scheduledStart).toBe(LA_EXPECTED_START_UTC);
+    // The two tenants' zones really do produce different UTC instants for
+    // the identical spoken phrase — proves this isn't coincidentally both
+    // resolving to the same (wrong, e.g. server-local) frame.
+    expect(laDraft.payload.scheduledStart).not.toBe(chicagoDraft.payload.scheduledStart);
+
+    const chicagoAppointmentId = await approveAndExecute(
+      chicagoDraft,
+      chicago.tenantId,
+      chicago.userId,
+    );
+    const laAppointmentId = await approveAndExecute(
+      laDraft,
+      losAngeles.tenantId,
+      losAngeles.userId,
+    );
+
+    const chicagoRow = await appointmentRepo.findById(chicago.tenantId, chicagoAppointmentId);
+    const laRow = await appointmentRepo.findById(losAngeles.tenantId, laAppointmentId);
+    expect(chicagoRow!.scheduledStart.toISOString()).toBe(EXPECTED_START_UTC);
+    expect(laRow!.scheduledStart.toISOString()).toBe(LA_EXPECTED_START_UTC);
+
+    // T1/T3 isolation: neither tenant can read the other's appointment, and
+    // each tenant's appointment count is exactly its own booking — the two
+    // zones' bookings never cross tenants.
+    expect(await appointmentRepo.findById(losAngeles.tenantId, chicagoAppointmentId)).toBeNull();
+    expect(await appointmentRepo.findById(chicago.tenantId, laAppointmentId)).toBeNull();
+
+    const chicagoCount = await pool.query(
+      `SELECT count(*)::int AS n FROM appointments WHERE tenant_id = $1`,
+      [chicago.tenantId],
+    );
+    const laCount = await pool.query(
+      `SELECT count(*)::int AS n FROM appointments WHERE tenant_id = $1`,
+      [losAngeles.tenantId],
+    );
+    expect(chicagoCount.rows[0].n).toBe(1);
+    expect(laCount.rows[0].n).toBe(1);
+
+    // Both tenants' proposal.executed audit rows are real, and neither
+    // tenant's audit query sees the other's row.
+    const chicagoAuditRows = await auditRepo.findByEntity(
+      chicago.tenantId,
+      'proposal',
+      chicagoDraft.id,
+    );
+    const laAuditRows = await auditRepo.findByEntity(
+      losAngeles.tenantId,
+      'proposal',
+      laDraft.id,
+    );
+    expect(chicagoAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
+    expect(laAuditRows.some((r) => r.eventType === 'proposal.executed')).toBe(true);
+    expect(await auditRepo.findByEntity(losAngeles.tenantId, 'proposal', chicagoDraft.id)).toHaveLength(
+      0,
+    );
+    expect(await auditRepo.findByEntity(chicago.tenantId, 'proposal', laDraft.id)).toHaveLength(0);
   });
 });

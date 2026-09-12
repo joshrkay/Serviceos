@@ -1,5 +1,19 @@
 # PRD v4 — Part E: State Table
 
+> ## ⚠️ SUPERSEDED — 2026-09-11
+>
+> **This document is no longer canonical.** It is superseded by
+> [`docs/PRD-v5-as-built.md`](PRD-v5-as-built.md), the as-built PRD reconstructed
+> from the shipping code, per **D-030** in [`docs/decisions.md`](decisions.md).
+>
+> **Its rung ladder survives as method** and v5 scores against it. The 117 scored rows are a 2026-07-29 snapshot: two of its worst findings have since been fixed (live-call timezone, `add_note` approve-then-fail) and at least two of its gap claims are now false (the review-response approval UI exists; conversational onboarding has clients).
+>
+> It is kept in place (not archived) because it has inbound references across the
+> repo and remains useful history. **Do not treat statements below as current
+> product truth without re-verifying against code.**
+
+
+
 **Generated:** 2026-07-29, by the read-only state-verification run (`projects/rivet-part-e/master-prompt.md`).
 **Input:** PRD v4 Part B (117 requirements, B1.1–B10.10; 19 tagged 🎙️).
 **Method:** 10 lifecycle-section verification agents + a voice-reachability trace + a runtime-truth track, adjudicated centrally. Every verdict cites `file:line`, a test run and observed passing, a command output, or a probe result. Documentation was never accepted as evidence. Full per-section evidence: `projects/rivet-part-e/reports/`. This run modified nothing outside `projects/rivet-part-e/` and this file.

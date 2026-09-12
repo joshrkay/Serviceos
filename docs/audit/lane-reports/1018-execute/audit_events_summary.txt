@@ -1,0 +1,6 @@
+   left   |         event_type         | entity_type | count 
+----------+----------------------------+-------------+-------
+ 2c1cb377 | job.photo.attached         | job         |     1
+ 2c1cb377 | job.photo.upload_requested | job         |     1
+(2 rows)
+

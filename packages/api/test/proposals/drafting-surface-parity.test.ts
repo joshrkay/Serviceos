@@ -59,6 +59,45 @@ for (const [intent, proposalType] of Object.entries(INTENT_TO_PROPOSAL_TYPE)) {
 const chatReachableTypes = new Set<string>(Object.values(CHAT_INTENT_TO_REGISTRY_KEY));
 const chatIntents = new Set<string>(Object.keys(CHAT_INTENT_TO_REGISTRY_KEY));
 
+/**
+ * The two drift predicates, as PURE functions of their inputs.
+ *
+ * #1021: extracted so the same code that audits the real maps can be pointed
+ * at maps with PLANTED drift. §8.0 grants STRUCTURAL only with a negative
+ * control, and G1 2026-09-12 marked I16 PROVEN-UNIT precisely because this
+ * file plants none — "the parity audit's 'not vacuously green' check guards
+ * vacuity, not drift".
+ */
+export function silentChatHandlers(input: {
+  registryKeys: readonly string[];
+  chatReachableTypes: ReadonlySet<string>;
+  memoPreimage: ReadonlyMap<string, string[]>;
+  dedicatedBranchIntents: ReadonlySet<string>;
+  excludedIntents: ReadonlySet<string>;
+}): string[] {
+  return input.registryKeys.filter((key) => {
+    if (input.chatReachableTypes.has(key)) return false;
+    const feeders = input.memoPreimage.get(key) ?? [];
+    if (feeders.some((i) => input.dedicatedBranchIntents.has(i))) return false;
+    if (feeders.length > 0 && feeders.every((i) => input.excludedIntents.has(i))) return false;
+    return true;
+  });
+}
+
+export function intentsWithNoChatDisposition(input: {
+  memoIntents: readonly string[];
+  chatIntents: ReadonlySet<string>;
+  excludedIntents: ReadonlySet<string>;
+  dedicatedBranchIntents: ReadonlySet<string>;
+}): string[] {
+  return input.memoIntents.filter(
+    (intent) =>
+      !input.chatIntents.has(intent) &&
+      !input.excludedIntents.has(intent) &&
+      !input.dedicatedBranchIntents.has(intent),
+  );
+}
+
 describe('spanning drafting-parity — every registry handler, every drafting surface (#962)', () => {
   it('sanity: the registry is non-trivial (the audit is not vacuously green)', () => {
     expect(registryKeys.length).toBeGreaterThanOrEqual(40);
@@ -73,17 +112,12 @@ describe('spanning drafting-parity — every registry handler, every drafting su
   });
 
   it('chat: EVERY registry handler is reachable (map or dedicated branch) or refused-on-purpose (every feeding intent chat-excluded)', () => {
-    const silent = registryKeys.filter((key) => {
-      if (chatReachableTypes.has(key)) return false; // reachable via the map
-      const feeders = memoPreimage.get(key) ?? [];
-      // Reachable via a dedicated chat branch (create_customer today).
-      if (feeders.some((i) => CHAT_DEDICATED_BRANCH_INTENTS.has(i))) return false;
-      // Refused on purpose: every intent that could feed it is excluded by
-      // declaration (emergency_dispatch today).
-      if (feeders.length > 0 && feeders.every((i) => CHAT_DISPATCH_EXCLUDED_INTENTS.has(i))) {
-        return false;
-      }
-      return true; // neither reachable nor declared — a silent chat miss
+    const silent = silentChatHandlers({
+      registryKeys,
+      chatReachableTypes,
+      memoPreimage,
+      dedicatedBranchIntents: CHAT_DEDICATED_BRANCH_INTENTS,
+      excludedIntents: CHAT_DISPATCH_EXCLUDED_INTENTS,
     });
     expect(
       silent,
@@ -92,12 +126,12 @@ describe('spanning drafting-parity — every registry handler, every drafting su
   });
 
   it('intent level: EVERY voice/memo-mapped intent is chat-dispatched, chat-excluded, or dedicated-branch — never silently missing', () => {
-    const silent = Object.keys(INTENT_TO_PROPOSAL_TYPE).filter(
-      (intent) =>
-        !chatIntents.has(intent) &&
-        !CHAT_DISPATCH_EXCLUDED_INTENTS.has(intent) &&
-        !CHAT_DEDICATED_BRANCH_INTENTS.has(intent),
-    );
+    const silent = intentsWithNoChatDisposition({
+      memoIntents: Object.keys(INTENT_TO_PROPOSAL_TYPE),
+      chatIntents,
+      excludedIntents: CHAT_DISPATCH_EXCLUDED_INTENTS,
+      dedicatedBranchIntents: CHAT_DEDICATED_BRANCH_INTENTS,
+    });
     expect(
       silent,
       `voice/memo intents with no declared chat disposition:\n  ${silent.join('\n  ')}`,
@@ -144,5 +178,67 @@ describe('spanning drafting-parity — every registry handler, every drafting su
         `${intent} must still be voice/memo-mapped`,
       ).toBe(true);
     }
+  });
+
+  // ─── NEGATIVE CONTROLS (#1021) ─────────────────────────────────────────────
+  //
+  // The audit's own "not vacuously green" test proves the registry is
+  // non-empty. It does not prove the audit would NOTICE drift. These plant it.
+
+  it('NEGATIVE CONTROL — a new registry handler wired to neither surface is reported as a silent chat miss', () => {
+    const planted = [...registryKeys, 'plant_dispatch_route'];
+    const silent = silentChatHandlers({
+      registryKeys: planted,
+      chatReachableTypes,
+      memoPreimage,
+      dedicatedBranchIntents: CHAT_DEDICATED_BRANCH_INTENTS,
+      excludedIntents: CHAT_DISPATCH_EXCLUDED_INTENTS,
+    });
+    expect(silent).toEqual(['plant_dispatch_route']);
+  });
+
+  it('NEGATIVE CONTROL — un-wiring an existing handler from the chat map makes it silent', () => {
+    // Pick a handler that is reachable today ONLY through the chat map, and
+    // take it back out: exactly the drift a PR that renames a map key causes.
+    const viaMapOnly = registryKeys.find((key) => {
+      if (!chatReachableTypes.has(key)) return false;
+      const feeders = memoPreimage.get(key) ?? [];
+      if (feeders.some((i) => CHAT_DEDICATED_BRANCH_INTENTS.has(i))) return false;
+      if (feeders.length > 0 && feeders.every((i) => CHAT_DISPATCH_EXCLUDED_INTENTS.has(i))) {
+        return false;
+      }
+      return true;
+    });
+    expect(viaMapOnly, 'fixture: at least one handler must be chat-reachable via the map alone').toBeDefined();
+
+    const withoutIt = new Set([...chatReachableTypes].filter((t) => t !== viaMapOnly));
+    const silent = silentChatHandlers({
+      registryKeys,
+      chatReachableTypes: withoutIt,
+      memoPreimage,
+      dedicatedBranchIntents: CHAT_DEDICATED_BRANCH_INTENTS,
+      excludedIntents: CHAT_DISPATCH_EXCLUDED_INTENTS,
+    });
+    expect(silent).toEqual([viaMapOnly]);
+  });
+
+  it('NEGATIVE CONTROL — a new voice/memo intent with no declared chat disposition is reported', () => {
+    const silent = intentsWithNoChatDisposition({
+      memoIntents: [...Object.keys(INTENT_TO_PROPOSAL_TYPE), 'plant_dispatch_route_intent'],
+      chatIntents,
+      excludedIntents: CHAT_DISPATCH_EXCLUDED_INTENTS,
+      dedicatedBranchIntents: CHAT_DEDICATED_BRANCH_INTENTS,
+    });
+    expect(silent).toEqual(['plant_dispatch_route_intent']);
+  });
+
+  it('NEGATIVE CONTROL — DECLARING the planted intent clears it, so the audit rewards declaration, not silence', () => {
+    const silent = intentsWithNoChatDisposition({
+      memoIntents: [...Object.keys(INTENT_TO_PROPOSAL_TYPE), 'plant_dispatch_route_intent'],
+      chatIntents,
+      excludedIntents: new Set([...CHAT_DISPATCH_EXCLUDED_INTENTS, 'plant_dispatch_route_intent']),
+      dedicatedBranchIntents: CHAT_DEDICATED_BRANCH_INTENTS,
+    });
+    expect(silent).toEqual([]);
   });
 });

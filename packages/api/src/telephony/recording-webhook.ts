@@ -32,7 +32,12 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
 import type { Pool } from 'pg';
-import { requireTwilioSignature } from './twilio-signature';
+import {
+  requireTwilioSignature,
+  sessionBelongsToAnotherTenant,
+  actingTenantMismatchesCredential,
+  type TwilioAuthTokenGetter,
+} from './twilio-signature';
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
@@ -56,11 +61,12 @@ export interface RecordingWebhookDeps {
   twilioAccountSid?: string;
   twilioAuthToken?: string;
   /**
-   * Auth token getter used by the signature middleware. Receives the
-   * AccountSid from the Twilio webhook body so per-tenant subaccount
-   * tokens can be looked up; legacy callers may ignore it.
+   * Credential resolver used by the signature middleware. #1072: it receives
+   * the callback's `Called`/`To` as well as the AccountSid, so a callback
+   * naming a number is verified with the credential of the tenant that owns
+   * that number; legacy callers may ignore the argument.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   /** Optional public base URL used to reconstruct the signed URL. */
   publicBaseUrl?: string;
   /**
@@ -255,6 +261,22 @@ export function createRecordingRouter(
     // no less safe than trusting any signed field — but the in-process
     // session is preferred when available.
     const session = deps.store.findByCallSid(callSid);
+
+    // #1072 — the comment above is right that the in-process session cannot be
+    // forged, but that answers WHICH tenant, not WHO may ask: the CallSid that
+    // selects the session is the caller's to choose. A tenant signing with its
+    // own DID and own token, naming the victim's live CallSid, would otherwise
+    // get its own RecordingUrl attached to the victim's call — the victim's
+    // storage key, the victim's rows. Refuse before any of that.
+    if (sessionBelongsToAnotherTenant(req, session)) {
+      logger.warn('recording: session belongs to another tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     let tenantId: string | undefined = session?.tenantId;
     if (!tenantId && deps.resolveTenantIdFallback) {
       const to = body.Called ?? body.To ?? '';
@@ -268,6 +290,19 @@ export function createRecordingRouter(
         });
       }
     }
+    // #1072 — the fallback resolved this tenant from the payload's `Called`,
+    // while the credential was checked against `To`; a payload carrying both,
+    // pointing at two tenants, would otherwise verify as one and write as the
+    // other. Refuse before the storage key and the rows.
+    if (actingTenantMismatchesCredential(req, tenantId)) {
+      logger.warn('recording: resolved tenant is not the credential\'s tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (!tenantId) {
       logger.warn('recording: no tenant resolvable for CallSid — refusing to insert', {
         callSid,

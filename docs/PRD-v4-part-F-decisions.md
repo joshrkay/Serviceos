@@ -1,5 +1,19 @@
 # PRD v4 — Part F: Decisions Register (Phase 1 voice run entries)
 
+> ## ⚠️ SUPERSEDED — 2026-09-11
+>
+> **This document is no longer canonical.** It is superseded by
+> [`docs/PRD-v5-as-built.md`](PRD-v5-as-built.md), the as-built PRD reconstructed
+> from the shipping code, per **D-030** in [`docs/decisions.md`](decisions.md).
+>
+> Its ratified entries (F-1 two-step invoice issuance, F-2 brand-voice lock stays tap-only) remain in force and are reflected in v5 and D-023.
+>
+> It is kept in place (not archived) because it has inbound references across the
+> repo and remains useful history. **Do not treat statements below as current
+> product truth without re-verifying against code.**
+
+
+
 Companion to `docs/PRD-v4-part-E-state.md`. Each entry below was recorded by the Phase 1 voice
 run (`projects/rivet-voice-19/`) under its never-ask rule: the run makes the call, logs it here
 and in the run log, and continues. Entries marked **PROPOSED** are recommendations awaiting
