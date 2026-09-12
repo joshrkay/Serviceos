@@ -62,25 +62,33 @@ It was reverted by hand four times in one session before being fixed properly.
 `.claude/hooks/session-start.sh` now uses `npm ci`, wrapped so a failure cannot
 abort the rest of the hook:
 
-```bash
-install_dependencies() {
-  echo "[session-start] Installing workspace dependencies (npm ci)…"
-  if npm ci; then
-    return 0
-  fi
-  # npm ci fails for two reasons the hook cannot tell apart: a genuine
-  # package.json/lockfile mismatch, OR an unreachable registry. Run the
-  # fallback for its node_modules, then put the lockfile back.
-  echo "[session-start] WARNING: npm ci failed — …falling back to npm install…"
-  local snapshot; snapshot="$(mktemp)"
-  cp package-lock.json "$snapshot" 2>/dev/null || true
-  npm install || echo "[session-start] WARNING: npm install also failed…"
-  if [ -s "$snapshot" ] && ! cmp -s package-lock.json "$snapshot"; then
-    cp "$snapshot" package-lock.json   # …and say so, loudly
-  fi
-  rm -f "$snapshot"
-}
-```
+**The implementation is `install_dependencies()` in
+`.claude/hooks/session-start.sh`. Read it there; it is not reproduced here.**
+
+An earlier draft of this note pasted the function inline, and that copy was
+still the **first** version after the shipping hook had been through five more
+rounds of fixes — so the "reusable snippet" in the knowledge base was the one
+with the known bugs in it. Caught in review (Codex P2, PR #994).
+
+A solutions note that duplicates code becomes a second thing to keep correct,
+and the copy nobody runs is the one that rots. What is worth recording here is
+the *shape* of the problem and the cases the implementation has to handle —
+that list is durable, the code is not:
+
+| Case | Required behaviour |
+|---|---|
+| `npm ci` succeeds | nothing else happens |
+| ci fails, `npm install` rewrites the lockfile | restore the snapshot |
+| ci fails, lockfile untouched | leave it |
+| both fail | leave it |
+| **lockfile absent** before the hook ran | delete one the fallback created |
+| **lockfile zero bytes** before the hook ran | restore it; do not treat empty as missing |
+| snapshot cannot be taken | **skip the fallback** — an install with no undo is worse than no install |
+| `INT`/`TERM`/`HUP` mid-install | restore from a trap, then **exit** `128+n`; do not resume |
+| signal *during* the restore | re-entrant call must redo it, not skip it |
+
+Every row after the fourth was a separate review finding, and four of them were
+introduced by the fix before them.
 
 ### The fallback needed a second pass
 
