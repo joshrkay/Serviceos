@@ -55,6 +55,7 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import {
   requireTwilioSignature,
+  sessionBelongsToAnotherTenant,
   type TwilioAuthTokenGetter,
 } from './twilio-signature';
 import {
@@ -240,6 +241,20 @@ export function createVoicemailStatusRouter(
     }
 
     const session = deps.store.findByCallSid(callSid);
+
+    // #1072 — the CallSid that selects the session is the caller's to choose,
+    // so a valid signature on the caller's OWN number must not let it act
+    // inside another tenant's call. Refuse before the lead leg, which would
+    // otherwise mint a lead under the victim from attacker-supplied content.
+    if (sessionBelongsToAnotherTenant(req, session)) {
+      logger.warn('voicemail-status: session belongs to another tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     let tenantId: string | undefined = session?.tenantId;
     if (!tenantId && deps.resolveTenantIdFallback && to) {
       try {

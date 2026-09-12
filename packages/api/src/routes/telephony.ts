@@ -32,7 +32,7 @@ import type { Pool } from 'pg';
 import { TwilioGatherAdapter, xmlEscape } from '../telephony/twilio-adapter';
 import {
   requireTwilioSignature,
-  getVerifiedTwilioTenantId,
+  sessionBelongsToAnotherTenant,
   type TwilioAuthTokenGetter,
 } from '../telephony/twilio-signature';
 import {
@@ -1258,35 +1258,6 @@ function technicalDifficultiesTwiml(): string {
     `<Hangup/>` +
     `</Response>`
   );
-}
-
-/**
- * #1072 (second half, found by review on PR #1082) — the session-scoped
- * callbacks are named by a `?sid=` (or a CallSid) the caller supplies, while
- * the signature only proves the caller owns the number in `To`. Owning a
- * number is not owning a call: without this check a tenant could sign a
- * `/gather` with its OWN DID and token, name another tenant's live session,
- * and drive that call — appending to its transcript, advancing its FSM, and
- * choosing the TwiML the victim's caller hears.
- *
- * The authority is the tenant whose credential actually VERIFIED the request
- * when one did; only when the deployment-wide fallback token answered (no
- * tenant implied — single-account deployments, where no tenant holds the
- * token) does it fall back to the tenant the route resolved from the payload.
- *
- * A session that does not exist is NOT a violation: the routes have their own
- * "your session has ended" handling for a reaped or unknown id, and answering
- * 403 there would turn an ordinary expiry into a hard failure — and would leak
- * which session ids exist.
- */
-function sessionBelongsToAnotherTenant(
-  req: Request,
-  session: { tenantId: string } | undefined,
-  resolvedTenantId: string,
-): boolean {
-  if (!session) return false;
-  const authority = getVerifiedTwilioTenantId(req) ?? resolvedTenantId;
-  return session.tenantId !== authority;
 }
 
 /**

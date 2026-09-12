@@ -467,6 +467,26 @@ missing `TENANT_ENCRYPTION_KEY` fell through to the deployment token: a tenant c
 quietly replaced by the master one, inconsistent with the owning-tenant path six lines
 above it. Now fails closed with `tenant_encryption_key_missing`.
 
+**HIGH again, third leg — `/recording` and `/voicemail-status`.** Raised by the Fable gate
+on the same PR, verified the same way, and the same shape once more.
+`recording-webhook.ts` and `voicemail-status-route.ts` resolve the tenant with
+`store.findByCallSid(callSid)` and act as whatever tenant that session belongs to. The
+file's own comment called that "immune to forged payloads" — true about WHICH tenant, but
+the wrong invariant: the `CallSid` that selects the session is the caller's to choose. So a
+tenant signing with its OWN DID in `Called` and its OWN token, naming the victim's live
+`CallSid`, got its attacker-supplied `RecordingUrl` attached to the victim's call —
+downloaded, written under the victim's storage key (`buildRecordingStorageKey`), inserted
+into the victim's `voice_recordings` / `files` rows, and on the voicemail leg minted into a
+**lead under the victim** from attacker-controlled content. That is a write INTO the
+victim, not only a hijack of their call.
+
+Closed with the same primitive. `sessionBelongsToAnotherTenant` now lives in
+`twilio-signature.ts` beside the verified-tenant concept it depends on, and all six
+session-scoped entry points share it: `/gather`, `/dial-result`, `/callback-message`,
+`/voice/gather-fallback`, `/recording`, `/voicemail-status`. The two webhook handlers pass
+no fallback tenant — when a session exists they have not resolved one — so under the
+deployment token the guard stands down rather than guessing, exactly as elsewhere.
+
 RED before green, as with everything else here. Against the already-credential-bound code:
 
 ```
@@ -479,11 +499,23 @@ RED before green, as with everything else here. Against the already-credential-b
    AssertionError: expected { outcome: 'verify', …(2) } to match object { outcome: 'misconfigured', …(1) }
 ```
 
+and then, with those closed but the webhook handlers still unguarded:
+
+```
+ × (f4) /recording — the attacker's OWN credential cannot attach a recording to the VICTIM's call 216ms
+ × (f5) /voicemail-status — the same hijack cannot mint a lead under the VICTIM 129ms
+   AssertionError: expected 500 to be 403        ← not refused; the 500 is the handler
+                                                    failing later, having already accepted
+                                                    the request AS THE VICTIM
+ Tests  2 failed | 13 passed (15)
+```
+
 After:
 
 ```
  ✓ (f1) … 1567ms   ✓ (f2) … 1557ms   ✓ (f3) a tenant driving its OWN session is untouched 73ms
- Tests  13 passed (13)
+ ✓ (f4) … 1550ms   ✓ (f5) … 1547ms
+ Tests  15 passed (15)
 ```
 
 A note on process, since it cost a cycle: the first cut of the session guard looked the
@@ -495,11 +527,19 @@ takes the session each route already holds, and `sessionStoreFor` reads the rout
 declared `voiceSessionStore` dep first. A guard must never be the thing that throws inside
 a webhook handler.
 
-Full sweep on the fixed head: telephony + invariants + telephony-tenant-lookup **642
-passed** (4 expected fail); app + webhooks + voice **1476 passed**; the nine telephony
-integration files **84 passed** (1 expected fail); the new integration file **13 passed**;
-e2e **6 passed (32.2s)**; `tsc --project tsconfig.build.json --noEmit` clean; eslint on the
-three changed source files unchanged from main's baseline.
+Full sweep on the fixed head: telephony + invariants + telephony-tenant-lookup + app +
+webhooks + voice — **193 files, 2118 passed** (4 expected fail, all lane B's own pins); ten
+telephony integration files **92 passed** (1 expected fail); the new integration file
+**15 passed**; e2e **6 passed (32.2s)**; `tsc --project tsconfig.build.json --noEmit`
+clean; eslint on all five changed source files byte-identical to main's baseline
+(6 / 2 / 2 / 0 / 0 pre-existing errors, none added).
+
+**Three findings in this family now, all from review, none found by my own tests.** The
+lesson is in the shape rather than any one route: I bound the credential to the dialled
+number and treated that as the binding, when the routes take their target from a SECOND
+caller-supplied identifier — a `?sid=`, a `CallSid` — and act as whoever owns it. Every
+place that pattern appears needed the same check, and "the session map cannot be forged"
+read as safety when it only ever answered which tenant, never who may ask.
 
 ---
 

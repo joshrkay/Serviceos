@@ -34,6 +34,7 @@ import express from 'express';
 import type { Pool } from 'pg';
 import {
   requireTwilioSignature,
+  sessionBelongsToAnotherTenant,
   type TwilioAuthTokenGetter,
 } from './twilio-signature';
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
@@ -259,6 +260,22 @@ export function createRecordingRouter(
     // no less safe than trusting any signed field — but the in-process
     // session is preferred when available.
     const session = deps.store.findByCallSid(callSid);
+
+    // #1072 — the comment above is right that the in-process session cannot be
+    // forged, but that answers WHICH tenant, not WHO may ask: the CallSid that
+    // selects the session is the caller's to choose. A tenant signing with its
+    // own DID and own token, naming the victim's live CallSid, would otherwise
+    // get its own RecordingUrl attached to the victim's call — the victim's
+    // storage key, the victim's rows. Refuse before any of that.
+    if (sessionBelongsToAnotherTenant(req, session)) {
+      logger.warn('recording: session belongs to another tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     let tenantId: string | undefined = session?.tenantId;
     if (!tenantId && deps.resolveTenantIdFallback) {
       const to = body.Called ?? body.To ?? '';

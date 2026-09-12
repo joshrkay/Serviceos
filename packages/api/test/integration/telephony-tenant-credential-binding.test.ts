@@ -181,6 +181,15 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     };
   }
 
+  /** The rows the recording/voicemail callbacks would plant under a victim. */
+  async function recordingCount(tenantId: string): Promise<number> {
+    const { rows } = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM voice_recordings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    return Number(rows[0]!.n);
+  }
+
   async function sessionsForCall(callSid: string): Promise<Array<{ tenant_id: string }>> {
     const { rows } = await pool.query<{ tenant_id: string }>(
       `SELECT tenant_id FROM voice_sessions WHERE call_sid = $1`,
@@ -542,6 +551,85 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
 
     expect(gather.status).toBe(200);
     expect(gather.text).toContain('911');
+  });
+
+  /**
+   * (f4)/(f5) — the third leg of the same shape, found by the Fable gate on
+   * PR #1082.
+   *
+   * `/recording` and `/voicemail-status` resolve the tenant from the session
+   * the payload's `CallSid` names ("immune to forged payloads" — true about
+   * WHICH tenant, but the caller picks the session). So an attacker signing
+   * with its OWN DID and OWN token, naming the VICTIM's live CallSid, gets its
+   * attacker-supplied `RecordingUrl` attached to the victim's call: stored
+   * under the victim's storage key, written into the victim's rows, and — on
+   * the voicemail leg — minted into a lead under the victim from
+   * attacker-controlled content. That is a write INTO the victim, not just a
+   * hijack of their call.
+   */
+  it('(f4) /recording — the attacker\'s OWN credential cannot attach a recording to the VICTIM\'s call', async () => {
+    const callSid = `CA-1072-rec-hijack-${crypto.randomUUID().slice(0, 8)}`;
+    const voice = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: B_SUBACCOUNT, From: CALLER, To: B_DID },
+      B_TOKEN,
+    );
+    expect(voice.status).toBe(200);
+
+    const before = await victimCounts(tenantB.tenantId);
+
+    // A's own DID in `Called`, A's own AccountSid, A's own token — every
+    // credential legitimately A's. The hostile field is the victim's CallSid.
+    const forged = await signedPost(
+      '/api/telephony/recording',
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        Called: A_DID,
+        Caller: CALLER,
+        RecordingSid: `RE-1072-hijack-${crypto.randomUUID().slice(0, 8)}`,
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-attacker',
+        RecordingDuration: '11',
+      },
+      A_TOKEN,
+    );
+
+    expect(forged.status).toBe(403);
+    await settle();
+    expect(await victimCounts(tenantB.tenantId)).toEqual(before);
+    expect(await recordingCount(tenantB.tenantId)).toBe(0);
+  });
+
+  it('(f5) /voicemail-status — the same hijack cannot mint a lead under the VICTIM', async () => {
+    const callSid = `CA-1072-vm-hijack-${crypto.randomUUID().slice(0, 8)}`;
+    const voice = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: B_SUBACCOUNT, From: CALLER, To: B_DID },
+      B_TOKEN,
+    );
+    expect(voice.status).toBe(200);
+
+    const before = await victimCounts(tenantB.tenantId);
+
+    const forged = await signedPost(
+      '/api/telephony/voicemail-status',
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        Called: A_DID,
+        Caller: CALLER,
+        RecordingSid: `RE-1072-vm-hijack-${crypto.randomUUID().slice(0, 8)}`,
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-attacker-vm',
+        RecordingStatus: 'completed',
+        RecordingDuration: '13',
+      },
+      A_TOKEN,
+    );
+
+    expect(forged.status).toBe(403);
+    await settle();
+    // The lead leg is what this callback mints; it must not have run under B.
+    expect(await victimCounts(tenantB.tenantId)).toEqual(before);
   });
 
   it('(e) a number with NO tenant integration row still verifies with the deployment fallback token', async () => {

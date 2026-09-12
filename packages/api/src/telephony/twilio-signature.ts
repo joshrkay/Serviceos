@@ -97,6 +97,38 @@ export function getVerifiedTwilioTenantId(req: Request): string | undefined {
   return (req as Request & { [VERIFIED_TENANT]?: string })[VERIFIED_TENANT];
 }
 
+/**
+ * #1072 — the guard every session-scoped telephony callback shares.
+ *
+ * These routes name their target with an identifier the CALLER supplies (a
+ * `?sid=`, or a `CallSid` the handler resolves a session from) and then act as
+ * whatever tenant that session belongs to. A valid signature proves the caller
+ * owns the number it dialled; it never proves the caller owns the call. Without
+ * this check a tenant can sign with its OWN credential, name another tenant's
+ * live call, and act inside it — driving the conversation on `/gather`, or
+ * attaching its own recording to the victim's call on `/recording`.
+ *
+ * The authority is the tenant whose credential actually verified the request.
+ * `fallbackTenantId` is consulted only when no tenant credential answered (the
+ * deployment-wide token — single-account deployments, where no tenant holds the
+ * token and there is no tenant-attacker); with neither, there is nothing to
+ * check against and the guard stands down rather than guessing.
+ *
+ * A session that does not exist is NOT a violation: the callers have their own
+ * handling for a reaped or unknown id, and answering 403 there would turn an
+ * ordinary expiry into a hard failure — and would leak which ids exist.
+ */
+export function sessionBelongsToAnotherTenant(
+  req: Request,
+  session: { tenantId: string } | undefined,
+  fallbackTenantId?: string,
+): boolean {
+  if (!session) return false;
+  const authority = getVerifiedTwilioTenantId(req) ?? fallbackTenantId;
+  if (!authority) return false;
+  return session.tenantId !== authority;
+}
+
 /** First defined string among a Twilio payload's dialled-number aliases. */
 function readDialedNumber(req: Request): string | undefined {
   const body = (req.body && typeof req.body === 'object'
