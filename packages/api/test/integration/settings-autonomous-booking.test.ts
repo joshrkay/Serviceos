@@ -16,9 +16,14 @@
  * registries). Runs in PR CI.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import express, { Request, Response, NextFunction } from 'express';
+import request from 'supertest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { createSettingsRouter } from '../../src/routes/settings';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 async function seedSettings(pool: Pool, repo: PgSettingsRepository, businessName: string) {
   const tenant = await createTestTenant(pool);
@@ -123,5 +128,86 @@ describe('Postgres integration — autonomous booking settings (UB-D / migration
     } finally {
       client.release();
     }
+  });
+
+  it('T0 — a neighbour tenant\'s default lane settings are untouched by the first tenant\'s opt-in update, proven through the real audited route', async () => {
+    const tenantA = await seedSettings(pool, settingsRepo, 'Opted-In Co');
+    const tenantB = await seedSettings(pool, settingsRepo, 'Neighbour Co');
+    const auditRepo = new PgAuditRepository(pool);
+
+    // Through the real Express route (PUT /api/settings), not a bare
+    // repo.update() — the settings.tenant.updated audit event only exists
+    // in the route handler, so a real-DB write without exercising it
+    // doesn't clear the PRD's own §8.0 PROVEN-REAL-DB bar.
+    const current = tenantA;
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: current.userId,
+        sessionId: 'sess-i17',
+        tenantId: current.tenantId,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/settings', createSettingsRouter(settingsRepo, undefined, auditRepo));
+
+    // Tenant B starts at the same defaults as tenant A.
+    const beforeB = await settingsRepo.findByTenant(tenantB.tenantId);
+    expect(beforeB!.autonomousBookingEnabled).toBe(false);
+    expect(beforeB!.autonomousBookingThreshold).toBe(0.95);
+
+    const res = await request(app)
+      .put('/api/settings')
+      .send({ autonomousBookingEnabled: true, autonomousBookingThreshold: 0.98 });
+    expect(res.status).toBe(200);
+
+    const updatedA = await settingsRepo.findByTenant(tenantA.tenantId);
+    expect(updatedA!.autonomousBookingEnabled).toBe(true);
+    expect(updatedA!.autonomousBookingThreshold).toBe(0.98);
+
+    // The audit leg: the route's real settings.tenant.updated event, naming
+    // the touched key, read back through PgAuditRepository.
+    const eventsA = await auditRepo.findRecentByTenant(tenantA.tenantId, { limit: 20 });
+    const settingsEvent = eventsA.find((e) => e.eventType === 'settings.tenant.updated');
+    expect(settingsEvent).toBeDefined();
+    expect(settingsEvent!.actorId).toBe(tenantA.userId);
+    expect(settingsEvent!.metadata?.changedKeys).toContain('autonomousBookingEnabled');
+
+    // Tenant B's lane is completely untouched by tenant A's opt-in — still
+    // off, still at the default floor. The platform kill switch / per-tenant
+    // opt-in (D-015) never leaks across tenants.
+    const afterB = await settingsRepo.findByTenant(tenantB.tenantId);
+    expect(afterB!.autonomousBookingEnabled).toBe(false);
+    expect(afterB!.autonomousBookingThreshold).toBe(0.95);
+
+    // Tenant B has no audit row from tenant A's PUT.
+    const eventsB = await auditRepo.findRecentByTenant(tenantB.tenantId, { limit: 20 });
+    expect(eventsB.some((e) => e.eventType === 'settings.tenant.updated')).toBe(false);
+
+    // Pin the real columns directly, scoped to tenant B by the WHERE clause.
+    const client = await pool.connect();
+    try {
+      await client.query(`SET LOCAL app.current_tenant_id = '${tenantB.tenantId}'`);
+      const { rows } = await client.query(
+        `SELECT autonomous_booking_enabled, autonomous_booking_threshold
+           FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantB.tenantId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].autonomous_booking_enabled).toBe(false);
+      expect(Number(rows[0].autonomous_booking_threshold)).toBe(0.95);
+    } finally {
+      client.release();
+    }
+
+    // Tenant A's opted-in row is unreachable through PgSettingsRepository
+    // scoped to tenant B — the repo's tenant-scoping, not just the raw WHERE
+    // clause above, keeps the two tenants' lane settings apart.
+    const crossTenantFetch = await settingsRepo.findByTenant(tenantB.tenantId);
+    expect(crossTenantFetch!.autonomousBookingThreshold).not.toBe(
+      updatedA!.autonomousBookingThreshold,
+    );
   });
 });

@@ -35,6 +35,7 @@ import { runWeeklyFeedbackSweep } from '../../src/workers/weekly-feedback-worker
 import { runHoldReaperSweep } from '../../src/workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from '../../src/workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from '../../src/workers/estimate-expiry-worker';
+import { runOverdueInvoiceSweep } from '../../src/workers/overdue-invoice-worker';
 import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
@@ -42,13 +43,28 @@ import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import {
+  PgDunningConfigRepository,
+  PgDunningEventRepository,
+} from '../../src/invoices/pg-dunning-config';
+import { defaultDunningConfig } from '../../src/invoices/dunning-config';
+import { runRecurringAgreementsSweep } from '../../src/workers/recurring-agreements-worker';
+import { PgAgreementRepository } from '../../src/agreements/pg-agreement';
+import { PgAgreementRunRepository } from '../../src/agreements/pg-agreement-run';
+import { createAgreement } from '../../src/agreements/agreement-service';
+import { createJob } from '../../src/jobs/job';
+import { createInvoice } from '../../src/invoices/invoice';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
-import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+// (PgInvoiceRepository is imported above with the other invoice repos — the
+// appointment-reminder lane added its own copy here and this branch added one
+// at the top, which git merged cleanly into a duplicate declaration.)
 import { createAppointment } from '../../src/appointments/appointment';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
@@ -763,6 +779,336 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       expect((await estimateRepo.findById(untouched.tenantId, untouched.estimateId))!.status).toBe('sent');
       const untouchedEvents = await expiryAuditRepo.findByEntity(untouched.tenantId, 'estimate', untouched.estimateId);
       expect(untouchedEvents.map((e) => e.eventType)).not.toContain('estimate.expired');
+    });
+  });
+
+  // §8.8 G1 (ticket #1023) — the overdue-invoice / dunning sweep iterates
+  // tenants (workers/overdue-invoice-worker.ts:129) and had NO entry in this
+  // file: its own tests all hand it `listTenantIds: async () => [oneId]`,
+  // which replaces the production selector with the thing under test. The two
+  // seam tests below mirror 'estimate-expiry sweep' above; the third runs the
+  // REAL repositories so "untouched" is a concrete absence of rows for a
+  // second tenant whose invoice is not yet due.
+  describe('overdue-invoice (dunning) sweep', () => {
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
+      const result = await runOverdueInvoiceSweep({
+        jobRepo: {} as never,
+        estimateRepo: {} as never,
+        invoiceRepo: { findByTenant: fn } as never,
+        auditRepo: {} as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed, doomed: doomed() };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+
+    // T4's third promise: a tenant the sweep reaches but that has nothing
+    // overdue is left alone. Real PgInvoiceRepository / PgDunningEventRepository
+    // / PgProposalRepository, so "untouched" means no ledger row and no
+    // proposal — in the SAME pass through the real enumerator that chases
+    // another tenant's genuinely overdue invoice.
+    it('chases the overdue tenant and leaves another tenant with nothing overdue untouched in the same pass', async () => {
+      const dunningInvoiceRepo = new PgInvoiceRepository(pool);
+      const dunningJobRepo = new PgJobRepository(pool);
+      const dunningEstimateRepo = new PgEstimateRepository(pool);
+      const dunningAuditRepo = new PgAuditRepository(pool);
+      const proposalRepo = new PgProposalRepository(pool);
+      const dunningEventRepo = new PgDunningEventRepository(pool);
+      const dunningConfigRepo = new PgDunningConfigRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const customerRepo = new PgCustomerRepository(pool);
+      const asOf = new Date('2026-07-15T12:00:00.000Z');
+
+      const seedInvoice = async (dueDate: Date) => {
+        const { tenantId, userId } = await createTestTenant(pool);
+        const customerId = uuidv4();
+        await customerRepo.create({
+          id: customerId, tenantId, firstName: 'Fan', lastName: 'Due', displayName: 'Fan Due',
+          preferredChannel: 'phone', smsConsent: false, isArchived: false,
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const locationId = uuidv4();
+        await locationRepo.create({
+          id: locationId, tenantId, customerId, street1: '1 Main St', city: 'Austin', state: 'TX',
+          postalCode: '78701', country: 'USA', addressType: 'service', isPrimary: true, isArchived: false,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+        const jobId = uuidv4();
+        await dunningJobRepo.create({
+          id: jobId, tenantId, customerId, locationId, jobNumber: `J-${jobId.slice(0, 8)}`,
+          summary: 'Fan-out dunning job', status: 'completed', priority: 'normal',
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const lineItems = [buildLineItem(uuidv4(), 'Labor', 1, 40000, 0, false)];
+        const totals = calculateDocumentTotals(lineItems, 0, 0);
+        const invoiceId = uuidv4();
+        await dunningInvoiceRepo.create({
+          id: invoiceId, tenantId, jobId, invoiceNumber: `INV-${invoiceId.slice(0, 8)}`,
+          status: 'open', lineItems, totals, amountPaidCents: 0, amountDueCents: totals.totalCents,
+          dueDate, createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        await dunningConfigRepo.upsert({
+          ...defaultDunningConfig(tenantId),
+          reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+        });
+        return { tenantId, invoiceId };
+      };
+
+      // 20 days past due — this one IS chaseable.
+      const overdue = await seedInvoice(new Date(asOf.getTime() - 20 * 86_400_000));
+      // Another tenant, same cadence, invoice not due for another 10 days.
+      const tenantB = await seedInvoice(new Date(asOf.getTime() + 10 * 86_400_000));
+
+      // The production selector really returns both of our tenants — that is
+      // the D-032 claim, and the two seam tests above prove reach across the
+      // whole database. The sweep itself is then driven with just our two ids:
+      // this one WRITES (ledger rows, proposals, audit) through real
+      // repositories, and handing it every tenant in the shared container
+      // would chase other integration files' invoices and make the suite
+      // order-dependent (review finding, PR #1053).
+      const allTenantIds = await listAllTenantIds(pool);
+      expect(allTenantIds).toEqual(
+        expect.arrayContaining([overdue.tenantId, tenantB.tenantId]),
+      );
+
+      await runOverdueInvoiceSweep({
+        jobRepo: dunningJobRepo,
+        estimateRepo: dunningEstimateRepo,
+        invoiceRepo: dunningInvoiceRepo,
+        auditRepo: dunningAuditRepo,
+        proposalRepo,
+        dunningEventRepo,
+        dunningConfigRepo,
+        listTenantIds: async () => [overdue.tenantId, tenantB.tenantId],
+        now: () => asOf,
+        logger,
+      });
+
+      const chased = await dunningEventRepo.findByInvoice(overdue.tenantId, overdue.invoiceId);
+      expect(chased.map((e) => e.stepKey)).toEqual(['3:sms']);
+      const chasedAudit = await dunningAuditRepo.findByEntity(overdue.tenantId, 'invoice', overdue.invoiceId);
+      expect(chasedAudit.map((e) => e.eventType)).toContain('invoice.dunning_proposed');
+
+      // T1 — the other tenant has NO ledger row and NO reminder proposal, in
+      // the same pass that chased its neighbour above.
+      expect(await dunningEventRepo.findByInvoice(tenantB.tenantId, tenantB.invoiceId)).toEqual([]);
+      const tenantBProposals = await proposalRepo.findByStatus(tenantB.tenantId, 'ready_for_review');
+      expect(tenantBProposals.filter((p) => p.proposalType === 'send_payment_reminder')).toEqual([]);
+      const tenantBAudit = await dunningAuditRepo.findByEntity(tenantB.tenantId, 'invoice', tenantB.invoiceId);
+      expect(tenantBAudit.map((e) => e.eventType)).not.toContain('invoice.dunning_proposed');
+    });
+  });
+
+  // §8.12 G1 (ticket #1023) — the recurring-agreements sweep
+  // (workers/recurring-agreements-worker.ts:38, wired at app.ts:5793) iterates
+  // tenants and had no entry here either. Note its isolation shape differs
+  // from the sweeps above: a tenant's failure is logged and swallowed WITHOUT
+  // a counter (recurring-agreements-worker.ts:103-108), so `failed` counts
+  // failed RUNS, not failed tenants — the proof that the loop survived is that
+  // every later tenant was still reached.
+  describe('recurring-agreements (membership) sweep', () => {
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
+      await runRecurringAgreementsSweep({
+        agreementRepo: { findRenewable: async () => [], findDue: fn } as never,
+        runRepo: {} as never,
+        jobsService: {} as never,
+        invoicesService: {} as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, doomed: doomed() };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    // The worker wraps renewal and billing in SEPARATE try/catch blocks
+    // (recurring-agreements-worker.ts:60 and :79). The seam above injects
+    // failures only through `findDue`, so it exercises the billing catch and
+    // says nothing about the renewal one — deleting that catch would leave it
+    // green (review finding, PR #1053). This drives the renewal phase
+    // directly and pins the promise its own comment makes at :58: "a renewal
+    // failure must not block this tenant's run sweep".
+    it("a renewal failure does not block that tenant's OWN billing phase, nor the rest of the sweep", async () => {
+      const ours = await seedTrio(pool);
+      const billed: string[] = [];
+      let doomed: string | null = null;
+
+      await runRecurringAgreementsSweep({
+        agreementRepo: {
+          findRenewable: async (tenantId: string) => {
+            // Whoever the enumerator reaches first, as elsewhere in this file.
+            if (ours.includes(tenantId) && (doomed === null || doomed === tenantId)) {
+              doomed = tenantId;
+              throw new Error(`synthetic renewal failure for tenant ${tenantId}`);
+            }
+            return [];
+          },
+          findDue: async (tenantId: string) => {
+            billed.push(tenantId);
+            return [];
+          },
+        } as never,
+        runRepo: {} as never,
+        jobsService: {} as never,
+        invoicesService: {} as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      // The tenant whose RENEWAL threw still reaches billing — the separate
+      // catch is what buys this, and nothing else in the suite covers it.
+      expect(billed).toContain(doomed);
+      // And every other tenant is billed too, so the loop did not abort.
+      expect(billed).toEqual(expect.arrayContaining(ours));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const ours = await seedTrio(pool);
+      const { visited, doomed } = await run(ours);
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+
+    // Real repositories and the PRODUCTION ports (app.ts:5658-5713), so
+    // "untouched" is a concrete absence: another tenant whose membership is
+    // not due yet gets no run row and no dues invoice in the same pass that
+    // bills its neighbour's cycle.
+    it('bills the due membership and leaves another tenant whose cycle is not due untouched', async () => {
+      const agreementRepo = new PgAgreementRepository(pool);
+      const runRepo = new PgAgreementRunRepository(pool);
+      const memberInvoiceRepo = new PgInvoiceRepository(pool);
+      const memberJobRepo = new PgJobRepository(pool);
+      const memberAuditRepo = new PgAuditRepository(pool);
+      const customerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+
+      const jobsService = {
+        async createJob(input: {
+          tenantId: string; customerId: string; locationId: string;
+          summary: string; createdBy: string;
+        }) {
+          const job = await createJob({ ...input, actorRole: 'system' }, memberJobRepo, memberAuditRepo);
+          return { id: job.id };
+        },
+      };
+      const invoicesService = {
+        async createDraftInvoice(input: {
+          tenantId: string; jobId: string; priceCents: number;
+          description: string; createdBy: string;
+        }) {
+          const invoice = await createInvoice(
+            {
+              tenantId: input.tenantId,
+              jobId: input.jobId,
+              invoiceNumber: `AGREEMENT-${uuidv4()}`,
+              lineItems: [{
+                id: uuidv4(), description: input.description, quantity: 1,
+                unitPriceCents: input.priceCents, totalCents: input.priceCents,
+                sortOrder: 0, taxable: false,
+              }],
+              customerMessage: undefined,
+              createdBy: input.createdBy,
+            },
+            memberInvoiceRepo,
+            memberAuditRepo,
+          );
+          return { id: invoice.id };
+        },
+      };
+
+      const seedMembership = async (nextRunAt: Date) => {
+        const { tenantId, userId } = await createTestTenant(pool);
+        const customerId = uuidv4();
+        await customerRepo.create({
+          id: customerId, tenantId, firstName: 'Fan', lastName: 'Member', displayName: 'Fan Member',
+          preferredChannel: 'phone', smsConsent: false, isArchived: false,
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const locationId = uuidv4();
+        await locationRepo.create({
+          id: locationId, tenantId, customerId, street1: '1 Main St', city: 'Austin', state: 'TX',
+          postalCode: '78701', country: 'USA', addressType: 'service', isPrimary: true, isArchived: false,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+        const agreement = await createAgreement(
+          {
+            tenantId, customerId, locationId, name: 'Comfort Club',
+            recurrenceRule: 'FREQ=MONTHLY;INTERVAL=1', priceCents: 9900,
+            startsOn: new Date(Date.now() - 400 * 86_400_000).toISOString().slice(0, 10),
+            createdBy: userId,
+          },
+          agreementRepo,
+          memberAuditRepo,
+        );
+        await agreementRepo.update(tenantId, agreement.id, { nextRunAt });
+        return { tenantId, agreementId: agreement.id };
+      };
+
+      // Due an hour ago — this cycle bills.
+      const due = await seedMembership(new Date(Date.now() - 3600_000));
+      // Another tenant, same membership shape, not due for another 20 days.
+      const tenantB = await seedMembership(new Date(Date.now() + 20 * 86_400_000));
+
+      // As in the dunning entry above: the production selector is asserted to
+      // reach both of our tenants (reach across the whole database is the two
+      // seam tests' job), then the WRITING sweep is confined to them, so it
+      // cannot bill other integration files' due agreements.
+      const allTenantIds = await listAllTenantIds(pool);
+      expect(allTenantIds).toEqual(
+        expect.arrayContaining([due.tenantId, tenantB.tenantId]),
+      );
+
+      await runRecurringAgreementsSweep({
+        agreementRepo,
+        runRepo,
+        jobsService,
+        invoicesService,
+        listTenantIds: async () => [due.tenantId, tenantB.tenantId],
+        auditRepo: memberAuditRepo,
+        logger,
+      });
+
+      const dueRuns = await runRepo.findByAgreement(due.tenantId, due.agreementId);
+      expect(dueRuns).toHaveLength(1);
+      expect(dueRuns[0].status).toBe('generated');
+      expect(
+        (await memberInvoiceRepo.findById(due.tenantId, dueRuns[0].generatedInvoiceId!))!.totals.totalCents,
+      ).toBe(9900);
+
+      // T1 — the other tenant billed nothing in the same pass.
+      expect(await runRepo.findByAgreement(tenantB.tenantId, tenantB.agreementId)).toEqual([]);
+      const tenantBAudit = await memberAuditRepo.findByEntity(
+        tenantB.tenantId, 'service_agreement', tenantB.agreementId,
+      );
+      expect(tenantBAudit.map((e) => e.eventType)).not.toContain('service_agreement.run.generated');
     });
   });
 
