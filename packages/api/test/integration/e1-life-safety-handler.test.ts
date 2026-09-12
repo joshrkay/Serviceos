@@ -248,11 +248,30 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
       await turn(c, 'Casey Rivera, 12 Oak Street');
     }
 
-    // "Before any AI thinks about it", made falsifiable: from here on EVERY
-    // gateway call rejects. If any part of E1 recognition needed a model,
-    // this turn could not produce the life-safety outcome.
+    // "Before any AI thinks about it" needs BOTH halves, because either alone
+    // is too weak (Codex review, PR #1054):
+    //
+    //   1. every gateway call rejects from here on — so the outcome cannot
+    //      depend on a model answering; and
+    //   2. the turn consults no model AT ALL for the decision. Rejection
+    //      alone would not prove this: a handler that called the model,
+    //      caught the rejection and fell back to the deterministic path
+    //      would satisfy every other assertion in this test.
+    //
+    // The gateway IS called once during the turn, by the post-call summary
+    // (`taskType: 'summarize_conversation'`) that `runSummary` fires after
+    // the FSM has already terminated — it cannot influence the life-safety
+    // decision, so it is the one call excluded below. Anything else,
+    // classification above all, would be a model in the safety path.
     c.llm.mockRejectedValue(new Error('LLM gateway is down'));
+    const llmCallsBefore = c.llm.mock.calls.length;
     const twiml = await turn(c, EN_GAS);
+
+    const llmCallsDuring = c.llm.mock.calls.slice(llmCallsBefore);
+    const nonSummaryCalls = llmCallsDuring.filter(
+      ([req]) => (req as { taskType?: string })?.taskType !== 'summarize_conversation',
+    );
+    expect(nonSummaryCalls).toHaveLength(0);
 
     expect(c.session.machine.currentState).toBe('terminated');
     expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
