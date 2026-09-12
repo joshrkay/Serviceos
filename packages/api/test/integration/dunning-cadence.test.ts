@@ -181,13 +181,19 @@ describe('Postgres integration — dunning cadence at the real UNIQUE index (§8
 
   it('writes the cadence step keys 3:sms / 7:sms / 14:sms as real ledger rows, and audits each proposal', async () => {
     const now = new Date('2026-03-20T12:00:00.000Z');
-    const seeded = await seedOverdueInvoice(20, now);
+    // 15 days past due, swept TWICE — the §8.9 acceptance criterion verbatim.
+    // (An earlier revision seeded 20 days and swept once, which left the
+    // criterion's boundary untested: at 20 days the 14-day step has six days
+    // of slack, so a regression delaying it to day 16+ would still have passed.
+    // Review finding, PR #1053.)
+    const seeded = await seedOverdueInvoice(15, now);
     await seedCadence(seeded.tenantId, [
       { offsetDays: 3, channel: 'sms' },
       { offsetDays: 7, channel: 'sms' },
       { offsetDays: 14, channel: 'sms' },
     ]);
 
+    await sweepFor([seeded.tenantId], now);
     await sweepFor([seeded.tenantId], now);
 
     const events = await dunningEventRepo.findByInvoice(seeded.tenantId, seeded.invoiceId);
@@ -217,6 +223,37 @@ describe('Postgres integration — dunning cadence at the real UNIQUE index (§8
     const proposals = await proposalRepo.findByStatus(seeded.tenantId, 'ready_for_review');
     const reminders = proposals.filter((p) => p.proposalType === 'send_payment_reminder');
     expect(reminders).toHaveLength(3);
+  });
+
+  it('fires each step ON its offset day and not before — the 13/14-day boundary', async () => {
+    const now = new Date('2026-03-25T12:00:00.000Z');
+    const steps = [
+      { offsetDays: 3, channel: 'sms' as const },
+      { offsetDays: 7, channel: 'sms' as const },
+      { offsetDays: 14, channel: 'sms' as const },
+    ];
+
+    // One day SHORT of the 14-day step: it must not fire yet.
+    const dayThirteen = await seedOverdueInvoice(13, now);
+    await seedCadence(dayThirteen.tenantId, steps);
+    await sweepFor([dayThirteen.tenantId], now);
+    expect(
+      (await dunningEventRepo.findByInvoice(dayThirteen.tenantId, dayThirteen.invoiceId))
+        .map((e) => e.stepKey)
+        .sort(),
+    ).toEqual(['3:sms', '7:sms']);
+
+    // Exactly ON the offset day: it must fire. Together these pin the
+    // comparison in selectDueReminderSteps (dunning-schedule.ts:56,
+    // `elapsed < step.offsetDays`) against an off-by-one in either direction.
+    const dayFourteen = await seedOverdueInvoice(14, now);
+    await seedCadence(dayFourteen.tenantId, steps);
+    await sweepFor([dayFourteen.tenantId], now);
+    expect(
+      (await dunningEventRepo.findByInvoice(dayFourteen.tenantId, dayFourteen.invoiceId))
+        .map((e) => e.stepKey)
+        .sort(),
+    ).toEqual(['14:sms', '3:sms', '7:sms']);
   });
 
   it('rejects a duplicate cadence key at the INDEX — a raw INSERT that runs no application code', async () => {
