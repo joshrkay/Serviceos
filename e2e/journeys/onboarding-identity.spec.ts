@@ -256,10 +256,25 @@ test.describe('onboarding identity (1.2) — real Postgres', () => {
       businessName?: string;
       hourlyRateCents?: number;
       serviceAreaRadius?: number;
+      timezone?: string;
+      businessHours?: Record<string, { open: string; close: string } | null>;
+      jobBufferMinutes?: number;
     };
     expect(settingsBBody.businessName).toBe('Tenant B Untouched HVAC');
     expect(settingsBBody.hourlyRateCents).toBe(9900);
     expect(settingsBBody.serviceAreaRadius).toBe(99);
+    // ── Codex review: the T2 claim is that B's ENTIRE divergent
+    //    configuration survived A's onboarding untouched, not just these
+    //    three fields — a regression clobbering B's timezone, hours, or
+    //    buffer would otherwise stay green. ─────────────────────────────────
+    expect(settingsBBody.timezone, 'B\'s timezone must remain its divergent America/Denver').toBe('America/Denver');
+    expect(settingsBBody.jobBufferMinutes, 'B\'s job buffer must be untouched').toBe(30);
+    expect(settingsBBody.businessHours?.mon, 'B\'s business hours must be untouched').toEqual({
+      open: '08:00',
+      close: '17:00',
+    });
+    expect(settingsBBody.businessHours?.sat ?? null, 'B\'s business hours (sat) must be untouched').toBeNull();
+    expect(settingsBBody.businessHours?.sun ?? null, 'B\'s business hours (sun) must be untouched').toBeNull();
 
     // ── Browser reachability: reload and confirm the onboarding gate has
     //    moved past the identity step onto a CONCRETE next step (not just

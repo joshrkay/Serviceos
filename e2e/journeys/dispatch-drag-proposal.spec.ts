@@ -133,7 +133,7 @@ interface TenantDragFixture {
   tenantId: string;
   techId: string;
   jobEarly: CreatedEntity;
-  earlyAppt: { id: string; jobId: string; scheduledStart: string; status: string };
+  earlyAppt: { id: string; jobId: string; scheduledStart: string; scheduledEnd: string; status: string };
   todayStr: string;
 }
 
@@ -247,7 +247,7 @@ async function seedOwnerTechAndTwoAppointments(
   );
   expect(boardBeforeRes.ok()).toBeTruthy();
   const boardBefore = (await boardBeforeRes.json()) as {
-    technicianLanes: Array<{ technicianId: string; appointments: Array<{ id: string; jobId: string; scheduledStart: string; status: string }> }>;
+    technicianLanes: Array<{ technicianId: string; appointments: Array<{ id: string; jobId: string; scheduledStart: string; scheduledEnd: string; status: string }> }>;
   };
   const laneBefore = boardBefore.technicianLanes.find((l) => l.technicianId === techId);
   expect(laneBefore, `${label}'s technician lane must exist on the board`).toBeTruthy();
@@ -264,7 +264,7 @@ async function dragEarlyCardAndConfirm(
   baseURL: string,
   fixture: TenantDragFixture,
   beforeDragScreenshotPath?: string,
-): Promise<{ id: string; status: string; proposalType: string }> {
+): Promise<{ id: string; status: string; proposalType: string; payload: Record<string, unknown> }> {
   await installClerkStub(page, { signedIn: true, sub: fixture.ownerSub, token: fixture.ownerJwt });
   await page.addInitScript(
     ({ welcomeKey, whatsNewKey }) => {
@@ -306,7 +306,7 @@ async function dragEarlyCardAndConfirm(
   await page.getByTestId('confirm-proposal-confirm').click();
   const proposalRes = await proposalPromise;
   expect(proposalRes.status(), `POST /api/proposals -> ${proposalRes.status()}`).toBe(200);
-  return (await proposalRes.json()) as { id: string; status: string; proposalType: string };
+  return (await proposalRes.json()) as { id: string; status: string; proposalType: string; payload: Record<string, unknown> };
 }
 
 /**
@@ -375,6 +375,26 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     );
     expect(proposalA.status, 'A\'s drag-created proposal must land in draft').toBe('draft');
     expect(proposalA.proposalType).toBe('reschedule_appointment');
+    // ── Codex review: a wrong appointmentId or a no-op destination time
+    //    would still satisfy every assertion above. Assert the payload
+    //    actually targets the DRAGGED appointment, at a genuinely
+    //    different time (the final gap, not a no-op), for the same
+    //    duration as the original slot. ───────────────────────────────────
+    expect(proposalA.payload.appointmentId, 'A\'s proposal payload must target the dragged appointment').toBe(
+      fixtureA.earlyAppt.id,
+    );
+    expect(
+      proposalA.payload.newScheduledStart,
+      'A\'s proposal must propose a genuinely different start time (the final gap), not a no-op',
+    ).not.toBe(fixtureA.earlyAppt.scheduledStart);
+    const aOriginalDurationMs =
+      new Date(fixtureA.earlyAppt.scheduledEnd).getTime() - new Date(fixtureA.earlyAppt.scheduledStart).getTime();
+    const aProposedDurationMs =
+      new Date(proposalA.payload.newScheduledEnd as string).getTime() -
+      new Date(proposalA.payload.newScheduledStart as string).getTime();
+    expect(aProposedDurationMs, 'A\'s proposed slot must preserve the original appointment duration').toBe(
+      aOriginalDurationMs,
+    );
     await page.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-after-drag.png',
       fullPage: true,
@@ -383,6 +403,21 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     const proposalB = await dragEarlyCardAndConfirm(bPage, baseURL!, fixtureB);
     expect(proposalB.status, 'B\'s drag-created proposal must land in draft').toBe('draft');
     expect(proposalB.proposalType).toBe('reschedule_appointment');
+    expect(proposalB.payload.appointmentId, 'B\'s proposal payload must target the dragged appointment').toBe(
+      fixtureB.earlyAppt.id,
+    );
+    expect(
+      proposalB.payload.newScheduledStart,
+      'B\'s proposal must propose a genuinely different start time (the final gap), not a no-op',
+    ).not.toBe(fixtureB.earlyAppt.scheduledStart);
+    const bOriginalDurationMs =
+      new Date(fixtureB.earlyAppt.scheduledEnd).getTime() - new Date(fixtureB.earlyAppt.scheduledStart).getTime();
+    const bProposedDurationMs =
+      new Date(proposalB.payload.newScheduledEnd as string).getTime() -
+      new Date(proposalB.payload.newScheduledStart as string).getTime();
+    expect(bProposedDurationMs, 'B\'s proposed slot must preserve the original appointment duration').toBe(
+      bOriginalDurationMs,
+    );
     await bPage.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-tenant-b-after-drag.png',
       fullPage: true,
@@ -431,6 +466,11 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     expect(inboxA.data.some((p) => p.proposal.id === proposalB.id), 'B\'s proposal must NEVER be in A\'s inbox').toBe(
       false,
     );
+    // ── Codex review: `.some()` alone doesn't prove EXACTLY one proposal
+    //    exists — these are freshly seeded tenants with no other proposal
+    //    activity, so the inbox must hold precisely the one drag produced. ──
+    expect(inboxA.data.length, 'A\'s inbox must hold EXACTLY one proposal (this drag\'s)').toBe(1);
+    expect(inboxA.data[0].proposal.id, 'A\'s sole inbox entry must be this drag\'s proposal').toBe(proposalA.id);
 
     const inboxBRes = await page.request.get(`${API_URL}/api/proposals/inbox`, { headers: fixtureB.ownerHeaders });
     expect(inboxBRes.ok(), `GET /api/proposals/inbox (B) -> ${inboxBRes.status()}`).toBeTruthy();
@@ -439,6 +479,8 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     expect(inboxB.data.some((p) => p.proposal.id === proposalA.id), 'A\'s proposal must NEVER be in B\'s inbox').toBe(
       false,
     );
+    expect(inboxB.data.length, 'B\'s inbox must hold EXACTLY one proposal (this drag\'s)').toBe(1);
+    expect(inboxB.data[0].proposal.id, 'B\'s sole inbox entry must be this drag\'s proposal').toBe(proposalB.id);
 
     expect(pageErrors, 'no uncaught page errors during the drag-to-propose journey').toEqual([]);
   });

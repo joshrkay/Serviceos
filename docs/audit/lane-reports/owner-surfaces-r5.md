@@ -244,6 +244,19 @@ redundant, not new information.
 
 **Screenshots:** `4.2-drag-proposal-before-drag.png`, `4.2-drag-proposal-after-drag.png`.
 
+**Post-review addition (Codex, round 3):** three findings on the drag
+assertions, all verified and fixed, re-run GREEN:
+- The payload-shape checks (`status`, `proposalType`) would still pass if
+  the browser wiring submitted the WRONG appointment id or a no-op
+  destination time. Added assertions that `payload.appointmentId` matches
+  the dragged appointment and that `payload.newScheduledStart` differs
+  from the original start (a genuine reschedule, not a no-op), with the
+  proposed duration checked against the original slot's duration.
+- The two inbox checks used `.some(...)`, which does not establish
+  "EXACTLY one proposal" for these freshly seeded tenants — a duplicate-
+  insert regression would stay green. Added `inbox.data.length === 1` and
+  a direct id check on the sole entry, for both tenants.
+
 **Judgment calls:**
 - Dragged within the SAME lane (`reschedule_appointment`) rather than
   across lanes or into the unassigned queue: `routes/proposals.ts`'s
@@ -442,6 +455,14 @@ Audit (`1.2-onboarding-identity-audit-events.snapshot.txt`):
 ```
 
 **Screenshots:** `1.2-onboarding-identity-before-submit.png`, `1.2-onboarding-identity-after-reload.png`.
+
+**Post-review addition (Codex, round 3):** the T2 "untouched" claim for
+tenant B only checked `businessName`/`hourlyRateCents`/`serviceAreaRadius`
+— three of B's several distinctly-seeded fields — so a regression clobbering
+B's `timezone`, `businessHours`, or `jobBufferMinutes` would have stayed
+green. Added assertions on all three: `timezone` still `America/Denver`,
+`jobBufferMinutes` still `30`, and `businessHours` (mon/sat/sun) still
+B's original seeded shape. Re-run GREEN.
 
 **Judgment calls:**
 - `timezone` ended up `UTC` in the persisted row for tenant A even though
