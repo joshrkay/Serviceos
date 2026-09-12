@@ -16,8 +16,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
 import { identifyCaller } from '../../src/ai/skills/identify-caller';
+import { findOrCreateLeadByPhone } from '../../src/ai/skills/find-or-create-lead';
+import { PgLeadRepository } from '../../src/leads/pg-lead';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 async function insertCustomer(
   pool: Pool,
@@ -150,5 +153,143 @@ describe('Postgres integration — identifyCaller phone_normalized reconciliatio
     });
     expect(nanp.status).toBe('matched');
     if (nanp.status === 'matched') expect(nanp.customerId).toBe(usId);
+  });
+});
+
+/**
+ * #1014 row 2.3 — the voice UNKNOWN → LEAD leg at real Postgres. Only the SMS
+ * caller path (`inbound-sms-capture.test.ts`) had this proven; the voice
+ * adapter's `else` branch (twilio-adapter.ts, no `callerKnown`) calls the same
+ * production `findOrCreateLeadByPhone` skill, which this suite now drives
+ * directly against real `leads` + `audit_events` tables.
+ */
+describe('Postgres integration — voice unknown-caller lead capture (findOrCreateLeadByPhone)', () => {
+  let pool: Pool;
+  let leadRepo: PgLeadRepository;
+  let auditRepo: PgAuditRepository;
+  let tenantA: TestTenant;
+  let tenantB: TestTenant;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    leadRepo = new PgLeadRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    tenantA = await createTestTenant(pool);
+    tenantB = await createTestTenant(pool);
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM leads WHERE tenant_id = ANY($1)', [
+      [tenantA.tenantId, tenantB.tenantId],
+    ]);
+    await closeSharedTestDb();
+  });
+
+  it('a stranger calling in creates a real lead row and an audited lead.created event', async () => {
+    const strangerPhone = '+15125550301';
+
+    const result = await findOrCreateLeadByPhone({
+      tenantId: tenantA.tenantId,
+      fromPhone: strangerPhone,
+      leadRepo,
+      auditRepo,
+      systemActorId: 'system:inbound-call',
+    });
+
+    expect(result.status).toBe('created');
+
+    // The row is real — read it back straight from Postgres, not from the
+    // in-process result object.
+    const persisted = await leadRepo.findByPhoneNormalized(tenantA.tenantId, '5125550301');
+    expect(persisted).not.toBeNull();
+    expect(persisted?.id).toBe(result.leadId);
+    expect(persisted?.source).toBe('phone_call');
+
+    // The audit leg — read back through PgAuditRepository, not the in-memory
+    // result of the call.
+    const events = await auditRepo.findByEntity(tenantA.tenantId, 'lead', result.leadId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId: tenantA.tenantId,
+      eventType: 'lead.created',
+      entityType: 'lead',
+      entityId: result.leadId,
+    });
+  });
+
+  it('a repeat call from the same unknown number reuses the lead instead of duplicating it', async () => {
+    const strangerPhone = '+15125550302';
+
+    const first = await findOrCreateLeadByPhone({
+      tenantId: tenantA.tenantId,
+      fromPhone: strangerPhone,
+      leadRepo,
+      auditRepo,
+    });
+    expect(first.status).toBe('created');
+
+    const second = await findOrCreateLeadByPhone({
+      tenantId: tenantA.tenantId,
+      fromPhone: strangerPhone,
+      leadRepo,
+      auditRepo,
+    });
+    expect(second.status).toBe('found');
+    expect(second.leadId).toBe(first.leadId);
+
+    // Only ONE audit event and ONE lead row exist for this phone — the
+    // second call did not re-create or re-audit.
+    const rows = await pool.query('SELECT id FROM leads WHERE tenant_id = $1 AND phone_normalized = $2', [
+      tenantA.tenantId,
+      '5125550302',
+    ]);
+    expect(rows.rows).toHaveLength(1);
+    const events = await auditRepo.findByEntity(tenantA.tenantId, 'lead', first.leadId);
+    expect(events).toHaveLength(1);
+  });
+
+  it("T1: a number known to tenant B (an existing customer) is still a STRANGER to tenant A", async () => {
+    const sharedPhone = '+15125550303';
+
+    // Tenant B already knows this caller as a customer.
+    const customerId = await insertCustomer(
+      pool,
+      tenantB.tenantId,
+      tenantB.userId,
+      'Known To B',
+      sharedPhone,
+    );
+    const bIdentify = await identifyCaller({
+      tenantId: tenantB.tenantId,
+      fromPhone: sharedPhone,
+      pool,
+    });
+    expect(bIdentify.status).toBe('matched');
+    if (bIdentify.status === 'matched') expect(bIdentify.customerId).toBe(customerId);
+
+    // Tenant A has never seen this number — identifyCaller must say unknown,
+    // and the voice adapter's unknown-caller branch creates a LEAD for tenant
+    // A rather than silently resolving tenant B's customer.
+    const aIdentify = await identifyCaller({
+      tenantId: tenantA.tenantId,
+      fromPhone: sharedPhone,
+      pool,
+    });
+    expect(aIdentify.status).toBe('unknown');
+
+    const leadResult = await findOrCreateLeadByPhone({
+      tenantId: tenantA.tenantId,
+      fromPhone: sharedPhone,
+      leadRepo,
+      auditRepo,
+    });
+    expect(leadResult.status).toBe('created');
+
+    // Tenant A's lead never leaks into tenant B's leads, and tenant B's
+    // customer is never visible as a lead under tenant A.
+    const tenantALead = await leadRepo.findByPhoneNormalized(tenantA.tenantId, '5125550303');
+    expect(tenantALead?.id).toBe(leadResult.leadId);
+    const tenantBLead = await leadRepo.findByPhoneNormalized(tenantB.tenantId, '5125550303');
+    expect(tenantBLead).toBeNull();
   });
 });
