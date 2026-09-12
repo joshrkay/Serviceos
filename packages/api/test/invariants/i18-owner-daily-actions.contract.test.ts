@@ -74,7 +74,7 @@
  *  2. Arm (2) is source-declared, not executed: `asyncRoute` hides the handler
  *     inside a wrapper, and the handler cannot be safely probed (it reaches a
  *     repository and throws for unrelated reasons). It is weaker evidence, and
- *     `filesWithInHandlerOwnerChecks` fails the build when a NEW file starts
+ *     `ownerComparisons` fails the build when a NEW owner comparison appears
  *     gating this way so the weakness cannot spread unnoticed.
  *  3. A channel claim is checked for EXISTENCE and for UNIQUENESS across rows,
  *     not for performing that row's specific action — proving voice intent X
@@ -85,6 +85,7 @@
  *     not close.
  */
 import { promises as fs } from 'fs';
+import os from 'os';
 import path from 'path';
 import express from 'express';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -276,8 +277,10 @@ export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
  *   - the file must still contain an unconditional owner comparison (it cannot
  *     be left behind after the check moves into a middleware guard).
  *
- * And `inHandlerOwnerCheckFiles` below fails the build when any NEW file starts
- * gating on owner this way, so a future one cannot slip in unnoticed.
+ * And `ownerComparisons` below fails the build when any NEW owner comparison
+ * appears anywhere in `src` — per occurrence, so one cannot hide behind a
+ * neighbour in a file already listed, and matched on the comparison itself so
+ * an aliased or destructured role does not evade it.
  *
  * This is weaker evidence than the executed-guard arm and is labelled as such.
  * (Codex, #1073: `PATCH /api/entity-aliases/:id/deactivate` is owner-only —
@@ -285,26 +288,81 @@ export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
  * of this test missed it on both counts, being DB-gated at the mount AND
  * in-handler at the check.)
  */
-const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{ route: string; source: string }> = [
+const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{
+  method: string;
+  /** Router-RELATIVE path, as declared inside the router module. */
+  routerPath: string;
+  /**
+   * Mount-qualified suffix — the router's own segment plus `routerPath`. Used
+   * to find EVERY mount. `routerPath` alone would be too loose: another
+   * router's `PATCH /api/standing-instructions/:id/deactivate` ends with the
+   * same `/:id/deactivate` and is guard-gated, so it would be double-counted.
+   */
+  pathSuffix: string;
+  source: string;
+}> = [
   {
-    route: 'PATCH /api/entity-aliases/:id/deactivate',
+    method: 'PATCH',
+    routerPath: '/:id/deactivate',
+    pathSuffix: '/entity-aliases/:id/deactivate',
     source: 'packages/api/src/routes/entity-aliases.ts',
   },
 ];
 
 /**
- * Every file with an UNCONDITIONAL `req.auth.role` owner comparison — the shape
- * that makes a whole route owner-only.
+ * Every MOUNTED route a declared in-handler gate covers.
  *
- * A conditional one (`targetId !== actor.id && req.auth!.role !== 'owner'`, as
- * in `routes/users.ts`) does NOT make a route owner-only: a technician reaches
- * it for their own record, so it is self-service with an owner escalation, and
- * it correctly stays out of the inventory. The distinction is the `&&`, so the
- * scan records every hit and the assertion below classifies them.
+ * Deliberately derived from the booted app rather than hard-coded as one full
+ * path: a router can be mounted more than once (a versioned or compatibility
+ * prefix), and every mount enforces the same in-handler check. Hard-coding one
+ * path would leave the second mount out of `derived`, so it would need no
+ * inventory row and move no budget — with everything green. (Codex, #1073.)
  */
-async function filesWithInHandlerOwnerChecks(): Promise<string[]> {
-  const srcRoot = path.resolve(__dirname, '../../src');
-  const pattern = /req\.auth!?\??\.role\s*[!=]==\s*'owner'/;
+function mountedInHandlerOwnerRoutes(mountedRoutes: Set<string>): string[] {
+  const found: string[] = [];
+  for (const { method, pathSuffix } of IN_HANDLER_OWNER_ROUTES) {
+    for (const route of mountedRoutes) {
+      if (route.startsWith(`${method} `) && route.endsWith(pathSuffix)) found.push(route);
+    }
+  }
+  return [...new Set(found)].sort();
+}
+
+/**
+ * Every owner COMPARISON in the tree, one entry per occurrence, with
+ * `requireRole(…)` / `requirePermission(…)` call lines excluded — those are the
+ * discoverable middleware that arm (1) already settles by execution.
+ *
+ * Deliberately matches the comparison (`… === 'owner'`, `… !== 'owner'`) rather
+ * than `req.auth.role` specifically. A handler that aliases or destructures
+ * first —
+ *
+ *     const { role } = req.auth!;
+ *     if (role !== 'owner') throw new ForbiddenError(…);
+ *
+ * — is invisible to a `req.auth.role` pattern but still gates the whole route,
+ * and would ship with no inventory row and no budget change. Matching the
+ * comparison catches it however the role got into the variable. (Codex, #1073,
+ * against the narrower version of this scan.)
+ *
+ * The cost is that this also catches owner comparisons that are NOT route
+ * gates — domain rules, prompt flags, a recipient class. That is the point: the
+ * expectation below classifies every one, so a new occurrence of any kind has
+ * to be looked at and labelled rather than landing silently.
+ *
+ * RESIDUAL CEILING, stated rather than implied: a source scan cannot be
+ * exhaustive against every spelling. Comparing against a constant
+ * (`ROLE_OWNER`), or computing the string, would evade it. The durable fix is
+ * the convention — owner gating belongs in the discoverable middleware, where
+ * arm (1) sees it by execution — and changing that convention is product-code
+ * work, outside this docs-and-tests lane.
+ */
+async function ownerComparisons(rootOverride?: string): Promise<string[]> {
+  const srcRoot = rootOverride ?? path.resolve(__dirname, '../../src');
+  // Both quote styles: the repo does not enforce one, and `role !== "owner"`
+  // gates a route exactly as well as `role !== 'owner'`. (Codex, #1073.)
+  const comparison = /[!=]==\s*['"]owner['"]|['"]owner['"]\s*[!=]==/;
+  const viaMiddleware = /requireRole\(|requirePermission\(/;
   const found: string[] = [];
 
   const walk = async (dir: string): Promise<void> => {
@@ -315,15 +373,61 @@ async function filesWithInHandlerOwnerChecks(): Promise<string[]> {
         continue;
       }
       if (!entry.name.endsWith('.ts')) continue;
+      const relative = path.relative(
+        rootOverride ?? path.resolve(__dirname, '../../../..'),
+        full,
+      );
       const text = await fs.readFile(full, 'utf8');
-      if (pattern.test(text)) {
-        found.push(path.relative(path.resolve(__dirname, '../../../..'), full));
+      for (const line of text.split('\n')) {
+        if (comparison.test(line) && !viaMiddleware.test(line)) {
+          found.push(`${relative} :: ${line.trim()}`);
+        }
       }
     }
   };
 
   await walk(srcRoot);
   return found.sort();
+}
+
+/**
+ * Locates the unconditional owner comparison in a route file and reports the
+ * `router.<verb>('<path>', …)` it sits inside.
+ *
+ * Binds a declared in-handler gate to the route it actually guards, so moving
+ * the check to a sibling handler in the same file fails the build instead of
+ * leaving the file-level text — and therefore the contract — unchanged.
+ * Deliberately simple: walk back from the matched line to the nearest
+ * `router.<verb>(` and take its first string literal. This repo declares every
+ * route that way; if that ever stops being true, this returns undefined and the
+ * assertion fails loudly rather than passing on a bad parse.
+ */
+async function enclosingRouteOfOwnerCheck(
+  source: string,
+): Promise<{ method: string; path: string } | undefined> {
+  const text = await fs.readFile(path.resolve(REPO_ROOT, source), 'utf8');
+  const lines = text.split('\n');
+  // Unconditional only: a `&&` before the comparison makes it self-service.
+  const hit = lines.findIndex(
+    (line) =>
+      /(?:req\.auth!?\??\.)?role\s*[!=]==\s*['"]owner['"]/.test(line) &&
+      !line.includes('&&'),
+  );
+  if (hit < 0) return undefined;
+
+  for (let i = hit; i >= 0; i -= 1) {
+    const declaration =
+      /router\.(get|post|put|patch|delete)\(\s*$|router\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/.exec(
+        lines[i],
+      );
+    if (!declaration) continue;
+    const method = (declaration[1] ?? declaration[2]).toUpperCase();
+    // `router.patch(` on its own line puts the path on the next one.
+    const inline = declaration[3];
+    const path_ = inline ?? /['"]([^'"]+)['"]/.exec(lines[i + 1] ?? '')?.[1];
+    return path_ ? { method, path: path_ } : undefined;
+  }
+  return undefined;
 }
 
 /** Every `METHOD /path` the booted app mounts, owner-only or not. */
@@ -404,11 +508,19 @@ function duplicateChannelClaims(rows: InventoryRow[]): string[] {
   const duplicates: string[] = [];
   for (const row of rows) {
     if (!row.smsReachable) continue;
-    const prior = claimedBy.get(row.reachedVia);
+    // Canonicalize first: `channelReaches` lowercases a keyword token and the
+    // registry trims and lowercases on registration, so `keyword:Y` and
+    // `keyword:y` are ONE channel. Comparing the raw strings would let two rows
+    // hold the same SMS action with the uniqueness check still green.
+    // (Codex, #1073.)
+    const claim = row.reachedVia.startsWith('keyword:')
+      ? `keyword:${row.reachedVia.slice('keyword:'.length).trim().toLowerCase()}`
+      : row.reachedVia;
+    const prior = claimedBy.get(claim);
     if (prior !== undefined) {
-      duplicates.push(`${row.reachedVia} claimed by both ${prior} and ${row.route}`);
+      duplicates.push(`${claim} claimed by both ${prior} and ${row.route}`);
     } else {
-      claimedBy.set(row.reachedVia, row.route);
+      claimedBy.set(claim, row.route);
     }
   }
   return duplicates;
@@ -539,11 +651,11 @@ describe('I18: owner daily actions ↔ code contract', () => {
     // EXECUTING their guards, plus the declared in-handler ones the walker
     // cannot see. Both are checked against the doc; the second is additionally
     // checked for still being mounted and still containing its check.
+    mounted = allMountedRoutes(app);
     derived = [
       ...deriveOwnerOnlyRoutes(app),
-      ...IN_HANDLER_OWNER_ROUTES.map((r) => r.route),
+      ...mountedInHandlerOwnerRoutes(mounted),
     ].sort();
-    mounted = allMountedRoutes(app);
     inventory = await loadInventory();
   });
 
@@ -568,39 +680,86 @@ describe('I18: owner daily actions ↔ code contract', () => {
 
   it('keeps every declared in-handler owner route mounted and still gated', async () => {
     // The declaration cannot be fictional: the app must really mount it.
-    for (const { route } of IN_HANDLER_OWNER_ROUTES) {
-      expect(
-        mounted,
-        `${route} is declared in-handler owner-only but not mounted`,
-      ).toContain(route);
-    }
-    // …and it cannot be stale: the check must still be in the source. If it
-    // moved into a middleware guard, the executed-guard arm now covers it and
-    // this declaration must be deleted, or the route is counted twice.
-    for (const { route, source } of IN_HANDLER_OWNER_ROUTES) {
-      const text = await fs.readFile(path.resolve(REPO_ROOT, source), 'utf8');
-      expect(text, `${route}: ${source} no longer gates on owner in the handler`).toMatch(
-        /req\.auth!?\??\.role\s*[!=]==\s*'owner'/,
+    for (const { method, pathSuffix } of IN_HANDLER_OWNER_ROUTES) {
+      const mounts = mountedInHandlerOwnerRoutes(mounted).filter(
+        (route) => route.startsWith(`${method} `) && route.endsWith(pathSuffix),
       );
+      // At least one — a declaration for a route the app does not serve is
+      // stale. All of them enter `derived`, so a second mount cannot hide.
       expect(
-        deriveOwnerOnlyRoutes(app),
-        `${route} is now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES`,
-      ).not.toContain(route);
+        mounts.length,
+        `${method} …${pathSuffix} is declared in-handler owner-only but not mounted`,
+      ).toBeGreaterThan(0);
+    }
+    // …and it cannot be stale: the check must still gate THIS route. Asserting
+    // only that the FILE still contains the comparison is not enough — moving
+    // the same check from `/deactivate` to a sibling handler in the same file
+    // leaves the file-level text identical, so the contract would keep
+    // documenting a route that is no longer owner-gated while missing the one
+    // that now is. (Codex, #1073.) So the check is located and bound to the
+    // `router.<verb>('<path>', …)` it sits inside.
+    for (const { method, routerPath, source } of IN_HANDLER_OWNER_ROUTES) {
+      const label = `${method} …${routerPath}`;
+      const enclosing = await enclosingRouteOfOwnerCheck(source);
+      expect(
+        enclosing,
+        `${label}: no owner comparison found inside a route in ${source}`,
+      ).not.toBeUndefined();
+      expect(
+        enclosing!.method,
+        `${label}: the owner check now sits in a ${enclosing!.method} handler`,
+      ).toBe(method);
+      expect(
+        enclosing!.path,
+        `${label}: the owner check moved to '${enclosing!.path}' — update IN_HANDLER_OWNER_ROUTES and the inventory`,
+      ).toBe(routerPath);
+      for (const route of mountedInHandlerOwnerRoutes(mounted)) {
+        expect(
+          deriveOwnerOnlyRoutes(app),
+          `${route} is now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES`,
+        ).not.toContain(route);
+      }
     }
   });
 
-  it('notices any NEW route that gates on owner inside its handler', async () => {
+  it('classifies every owner comparison in the tree, in any spelling', async () => {
     // The walker cannot see these, so the build has to. A new file here means:
     // decide whether its check is unconditional (the route is owner-only → it
     // belongs in the inventory and in IN_HANDLER_OWNER_ROUTES) or conditional
     // (self-service with an owner escalation → not owner-only, annotate here).
-    expect(await filesWithInHandlerOwnerChecks()).toEqual([
-      // Unconditional — owner-only. Declared in IN_HANDLER_OWNER_ROUTES.
-      'packages/api/src/routes/entity-aliases.ts',
-      // Conditional (`targetId !== actor.id && … !== 'owner'`): a technician
-      // reaches these for their OWN record, so they are self-service with an
-      // owner escalation, not owner-only actions. Deliberately not inventory.
-      'packages/api/src/routes/users.ts',
+    expect(await ownerComparisons()).toEqual([
+      // Prompt-shaping flag (in-app voice), plus its explanatory comment.
+      "packages/api/src/ai/agents/customer-calling/inapp-adapter.ts :: * sets it for `role === 'owner'`), and gating on it would read as \"we would",
+      "packages/api/src/ai/agents/customer-calling/inapp-adapter.ts :: const ownerSession = role === 'owner';",
+      // Recipient CLASS on an outbound message — not a caller role at all.
+      "packages/api/src/notifications/gated-message-delivery.ts :: if (message.recipientClass === 'owner') {",
+      // Proposal-level gate for the `adopt_entity_alias` manual type (§5.2),
+      // enforced in the approval path, not on an HTTP route.
+      "packages/api/src/proposals/actions.ts :: if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {",
+      // Prompt-shaping flag again (chat surface), plus its comment.
+      "packages/api/src/routes/assistant.ts :: // (`ownerSession = role === 'owner'`); chat never set it at all, so the",
+      "packages/api/src/routes/assistant.ts :: ownerSession: callerRole === 'owner',",
+      // ── THE ONE ROUTE GATE: unconditional, whole-route, owner-only.
+      //    Declared in IN_HANDLER_OWNER_ROUTES and carried in the inventory.
+      "packages/api/src/routes/entity-aliases.ts :: if (req.auth!.role !== 'owner') {",
+      // `can_field_serve` default for the caller's own profile.
+      "packages/api/src/routes/me.ts :: auth.role === 'owner' || user?.can_field_serve === true;",
+      "packages/api/src/routes/me.ts :: user?.can_field_serve ?? auth.role === 'owner';",
+      // Grants owner OR dispatcher — by definition not owner-only.
+      "packages/api/src/routes/time-entries.ts :: return role === 'owner' || role === 'dispatcher';",
+      // Last-owner protection inside a delete handler — a domain rule about the
+      // TARGET user, not a gate on the caller.
+      "packages/api/src/routes/users.ts :: const anotherOwner = users.some((u) => u.id !== actor.id && u.role === 'owner');",
+      "packages/api/src/routes/users.ts :: if (actor.role === 'owner') {",
+      // CONDITIONAL (`targetId !== actor.id && …`): a technician reaches these
+      // for their OWN record — self-service with an owner escalation, not an
+      // owner-only action. Both occurrences listed; a third must be classified.
+      "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
+      "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
+      // Domain rules on the target user (role changes, last-owner protection).
+      "packages/api/src/users/user.ts :: if (target?.role === 'owner') {",
+      "packages/api/src/users/user.ts :: if (u.role === 'owner') {",
+      "packages/api/src/users/user.ts :: other.role === 'owner' &&",
     ]);
   });
 
@@ -818,6 +977,96 @@ describe('I18: owner daily actions ↔ code contract', () => {
           { ...row('POST /b', 'none'), smsReachable: false },
         ]),
       ).toHaveLength(0);
+    });
+
+    it('sees an ALIASED owner gate, and every occurrence of it', async () => {
+      // Two things at once, both of which earlier versions of this scan missed:
+      //   - the role is DESTRUCTURED first, so a `req.auth.role` pattern never
+      //     matches it even though the gate is unconditional and whole-route;
+      //   - there are TWO of them in one file, which a file-level scan
+      //     collapsed to a single entry.
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'i18-aliased-'));
+      await fs.writeFile(
+        path.join(dir, 'aliased.ts'),
+        [
+          "router.patch('/a', asyncRoute(async (req, res) => {",
+          '  const { role } = req.auth!;',
+          "  if (role !== 'owner') throw new ForbiddenError('a');",
+          '}));',
+          "router.patch('/b', asyncRoute(async (req, res) => {",
+          '  const { role } = req.auth!;',
+          "  if (role !== 'owner') throw new ForbiddenError('b');",
+          '}));',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const occurrences = await ownerComparisons(dir);
+      expect(occurrences).toHaveLength(2);
+      expect(occurrences.every((o) => o.startsWith('aliased.ts :: '))).toBe(true);
+    });
+
+    it('binds a declared owner check to the route it actually sits in', async () => {
+      // If the check moves to a sibling handler in the same file, the
+      // file-level text is unchanged — so only a route-level binding notices.
+      // Here it sits in the SECOND handler; the binding must say so.
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'i18-binding-'));
+      const file = path.join(dir, 'moved.ts');
+      await fs.writeFile(
+        file,
+        [
+          "router.patch('/:id/deactivate', requireAuth, asyncRoute(async (req, res) => {",
+          '  res.json({});',
+          '}));',
+          "router.post('/:id/reactivate', requireAuth, asyncRoute(async (req, res) => {",
+          "  if (req.auth!.role !== 'owner') throw new ForbiddenError('nope');",
+          '}));',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const enclosing = await enclosingRouteOfOwnerCheck(file);
+      expect(enclosing).toEqual({ method: 'POST', path: '/:id/reactivate' });
+    });
+
+    it('sees a DOUBLE-QUOTED owner gate', async () => {
+      // The repo enforces no quote style, and `role !== "owner"` gates a route
+      // exactly as well as the single-quoted form. (Codex, #1073.)
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'i18-quotes-'));
+      await fs.writeFile(
+        path.join(dir, 'double.ts'),
+        [
+          'router.patch("/:id/deactivate", asyncRoute(async (req, res) => {',
+          '  const { role } = req.auth!;',
+          '  if (role !== "owner") throw new ForbiddenError("nope");',
+          '}));',
+        ].join('\n'),
+        'utf8',
+      );
+
+      expect(await ownerComparisons(dir)).toHaveLength(1);
+      expect(await enclosingRouteOfOwnerCheck(path.join(dir, 'double.ts'))).toEqual({
+        method: 'PATCH',
+        path: '/:id/deactivate',
+      });
+    });
+
+    it('covers EVERY mount of a declared in-handler route', () => {
+      // A router mounted twice (a versioned or compatibility prefix) enforces
+      // the same in-handler check on both paths. Taking one hard-coded full
+      // path would leave the second out of `derived` — no inventory row, no
+      // budget move, everything green. (Codex, #1073.)
+      const twoMounts = new Set([
+        'PATCH /api/entity-aliases/:id/deactivate',
+        'PATCH /api/v2/entity-aliases/:id/deactivate',
+        // Same router-relative path, a DIFFERENT router, and guard-gated — must
+        // not be swept in by a loose suffix match.
+        'PATCH /api/standing-instructions/:id/deactivate',
+      ]);
+      expect(mountedInHandlerOwnerRoutes(twoMounts)).toEqual([
+        'PATCH /api/entity-aliases/:id/deactivate',
+        'PATCH /api/v2/entity-aliases/:id/deactivate',
+      ]);
     });
 
     it('rejects a reached_via claim no channel actually reaches', () => {

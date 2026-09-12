@@ -17,14 +17,20 @@ This is evidence for that decision, not the decision.
 
 | Row | File (new) | What the audit said | What the code says | Evidence class | Tenant grade |
 |---|---|---|---|---|---|
-| 3.8 | `appointment-confirmation-dispatch-3-8.test.ts` | "only live instantiation is a no-op notifier" | **Half true.** The dormant class is real; the confirmation path is *not* dead — a second implementation is wired and writes the row | PROVEN-REAL-DB | T1 |
+| 3.8 | `appointment-confirmation-dispatch-3-8.test.ts` | "only live instantiation is a no-op notifier" | **Half true.** The dormant class is real; the confirmation path is *not* dead — a second implementation is wired and writes the row. But it skips silently on **three** conditions, one of them owner-reachable | PROVEN-REAL-DB | T1 + T3 |
 | 3.11 | `proposal-expiry-sweep-3-11.test.ts` | "two TTL regimes"; guardrail has zero callers | **Confirmed.** 48 h worker is the only live regime; guardrail is dead code | PROVEN-REAL-DB + STRUCTURAL (negative control) | T2 |
-| 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + REAL-DB-WRITE-ONLY for ingestion | T1 |
+| 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + PROVEN-REAL-DB for ingestion | T1 |
 | 9.5 | `service-credit-cap-9-5.test.ts` | the only test stubs `pool.connect()` | **Confirmed.** Replaced with a real-Postgres proof; the cap holds at draft and **fails at execute** | PROVEN-REAL-DB | T1 |
 
-Counts below are from the first evidence run (25 tests). One ordinary test was
-added to row 9.5 in review round 1, so the current total is **22 passed | 4
-expected fail (26)**; the SQL dumps are unchanged in shape.
+**Current totals: 26 passed | 4 expected fail (30)** — 3.8 is 8+1, 3.11 is 5+1,
+4.7 is 6+1, 9.5 is 7+1. The Evidence section at the bottom was regenerated from a
+single run of this head and is the reproducible record.
+
+The per-row **RED / GREEN blocks below are historical** — each is the raw output
+captured at the moment that row's TDD cycle ran, kept because the rung ladder asks
+for red-before-green. Six review rounds have since added six ordinary tests, so
+those per-file counts are lower than the file's current count. They are a log, not
+a claim about the checked-in suite.
 
 Command for every file (from `packages/api/`):
 
@@ -129,12 +135,140 @@ Everything runs through the production execution registry
       Tests  5 passed | 1 expected fail (6)
 ```
 
+### Review round 2 — the wired path was narrower than claimed (Codex, two P2s)
+
+Both findings correct, and together they narrow this row's positive claim. Fixed
+on the same head.
+
+**(a) The gate was missing.** `app.ts:1328-1335` wraps the selected provider in
+`GatedMessageDelivery` before `TransactionalCommsService` ever sees it; the tests
+passed the raw `InMemoryDeliveryProvider`, so every send succeeded
+unconditionally. That is not the production path — consent, DNC and the
+`TELEPHONY_ENABLED`/`EMAIL_ENABLED` kill switches all live in that wrapper. Both
+helpers now wrap it with the same five deps (`base`, `PgDncRepository`,
+`auditRepo`, `enforcement`, `PgConsentEventRepository`), in
+**`enforcement: 'block'`** — the strictest mode, the one `shared/config.ts:210-217`
+resolves to in prod/staging. The rows still pass, so the claim now holds against
+the gate production actually runs.
+
+**(b) A configured provider is NOT sufficient — and this one is owner-reachable.**
+`sendAppointmentNotice` returns early when the tenant has
+`autoSendAppointmentReminders === false` (`transactional-comms-service.ts:355`),
+and the dormant class carries the identical early return
+(`appointment-confirmation-notifier.ts:42`). Every test here used tenants with no
+settings row, so this path was invisible. Now pinned as a **T3** case — two
+tenants, configured differently, in the same run:
+
+- the tenant with the flag off gets **no** confirmation row, provider wired and all
+- its differently-configured neighbour, same run, same notifier, **does**
+- and the dormant class agrees, so promoting it would not close this path either
+
+That RED came for free: the first version asserted the flag through
+`settingsRepo.create`, which does not list `auto_send_appointment_reminders`
+among its INSERT columns (`pg-settings.ts:274-280`), so the row landed at the
+column's `TRUE` default — `expected true to be false`. The flag only moves
+through `update` (`pg-settings.ts:369`), which is also how an owner toggles it.
+
+**This changes the shape of the row's gap.** There are **two** silent skips, not
+one: delivery mode `'none'` (a deploy-time condition) and
+`autoSendAppointmentReminders = false` (a setting the owner can flip). The second
+is arguably worse, because an owner who turns off *reminders* almost certainly
+does not intend to turn off *booking confirmations* — one flag governs both, and
+nothing tells them. **The PRD cell stamped at `5f93a9d` says the row "holds only
+where a delivery provider is configured", which is now known incomplete.** That
+cell is Fable's and carries the rung, so this lane has not edited it — raised on
+the PR for Fable to amend, and it belongs in issue #1077.
+
+### Review round 7 — three corrections (Codex, three P2s)
+
+**(a) The 4.7 `it.fails` could not detect the row being closed.** The board
+assertions called `getDispatchBoardData` with a locally hard-coded deps literal
+`{appointmentRepo, assignmentRepo}` — but the whole question this row turns on is
+whether the PRODUCTION route supplies `getAppointmentLateness`, and a hand-built
+literal can never answer that. Worse, it froze the answer: wire the adapter into
+`DispatchRouteDeps` tomorrow and neither assertion would notice — the `it.fails`
+would stay red and the "no lateness" characterization stay green while the
+shipped board worked.
+
+Both now go through `createDispatchRoutes` mounted at `/api/dispatch`, exactly as
+`app.ts:4938` mounts it, reached over HTTP. They flip on their own the day
+someone closes the row. **This is the third instance of one root cause** — a
+fixture or harness that production could not produce, or could not be changed
+by. The coordinates, the assignment gate, and now the board deps.
+
+**(b) The PRD's per-row command results were stale.** The cells cited `5/5 ✓`
+for 3.8 (now 8/8), `5/5 ✓` for 4.7 (now 6/6), `6/6 ✓` for 9.5 (now 7/7). Those
+cells are the authoritative rung record, so a reader could not reproduce them
+from the checked-in files. Refreshed. Rungs and grades untouched.
+
+**(c) The #1077 parking-lot entry described the wrong mechanism.** It said the
+`EMAIL_ENABLED`/`TELEPHONY_ENABLED` launch flags cause the no-op fallback. They
+do not — those flags never reach `createMessageDeliveryProvider` (the only
+mention in that file is a historical comment). With credentials present the
+factory returns a **non-null** provider and `GatedMessageDelivery` suppresses at
+runtime instead, so the live notifier is wired and still writes nothing.
+
+The entry now lists **four distinct boots** that each produce no confirmation and
+no signal, only one of which involves the no-op, with the warning that a fix
+aimed at that one leaves the other three untouched. That distinction is the
+difference between closing #1077 and appearing to.
+
+### Review round 6 — "a provider is configured" is still not sufficient (Codex, P2)
+
+Correct, and it completes the picture the previous two rounds started.
+`createMessageDeliveryProvider` keeps the SMS and email credential legs
+**independent** (`delivery-provider-factory.ts:212-240`): prod/staging with
+Twilio credentials and no SendGrid boots a **non-null** provider whose email leg
+throws at send time, and `sendCustomerMessage` swallows that per channel. A
+customer reachable only by email then gets nothing. A customer simply missing a
+contact method is skipped on that channel for the same reason.
+
+So the criterion is conditional **three** ways, not two, and only the third is
+about the customer rather than the tenant. Two ordinary tests added:
+
+- a customer with only ONE contact method gets exactly that channel's
+  confirmation — email-only → one `email` row, phone-only → one `sms` row
+- with one credential leg down (a base whose `sendEmail` throws, which is what
+  `TwilioDeliveryProvider` does on an unconfigured leg): the working channel
+  still confirms, the dead one writes nothing, and a customer reachable **only**
+  on the dead leg gets **no confirmation at all** — approved booking, non-null
+  provider, reminders on, nothing sent and nothing recorded
+
+That last tenant (`Deadleg`) is visible in the evidence dump: one
+`appointment.created`, one `proposal.executed`, zero rows in
+`message_dispatches`.
+
+The PRD qualification is corrected accordingly — "holds only where the tenant has
+not set `autoSendAppointmentReminders = false` **and** the customer is reachable
+on at least one channel that is both credentialed at boot and enabled". Rung and
+grade untouched, as before.
+
+**Declined, with reasons:** Codex also suggested kill-switch cases. Those have a
+dedicated home in `killswitch-production-config.test.ts`, and the gate is now
+wired faithfully with both switches explicitly pinned on, so this file exercises
+the real path without re-proving the switch's own behaviour. Adding the full
+matrix (provider legs × switches × contact × consent) would make this a
+delivery-layer file rather than a row-3.8 file.
+
+### Review round 3 — the gate inherited ambient kill switches (Codex, P2)
+
+Correct, and a direct consequence of round 2's fix. `GatedMessageDeliveryDeps.env`
+defaults to `process.env` (`gated-message-delivery.ts:190`) and the switches are
+read per send (`isOutboundChannelEnabled`, line 112), so a shell or CI job
+exporting `TELEPHONY_ENABLED=false` or `EMAIL_ENABLED=false` would suppress the
+send and fail the POSITIVE assertions — the rows would look unwritten for a
+reason with nothing to do with this row. Both channels are now pinned on
+explicitly via an injected `env`. The kill switches' own behaviour stays where it
+already lives, `killswitch-production-config.test.ts`.
+
 ### Evidence class / tenant grade
 
 **PROVEN-REAL-DB** — the dispatch write and the `appointment.created` audit event are
-both proven against real Postgres. **T1** — a second tenant exists and its write is
-invisible to the first. (The "tenant A's row set is byte-identical after tenant B
-writes" assertion is T2-shaped but narrow; graded T1 conservatively.)
+both proven against real Postgres, now through `GatedMessageDelivery` in `'block'`
+mode as production wires it. **T1**, and **T3** after review round 2 — two tenants
+with different `autoSendAppointmentReminders` settings each get their own correct
+result in the same run. (The "tenant A's row set is byte-identical after tenant B
+writes" assertion is T2-shaped but narrow; not claimed.)
 
 ### Judgment calls
 
@@ -239,6 +373,21 @@ return `[]` cannot pass as proof.
       Tests  5 passed | 1 expected fail (6)
 ```
 
+### Review round 2 — the re-propose leg bypassed the production action (Codex, P2)
+
+Correct. The test minted a fresh proposal through `proposalRepo.create`, which
+proves a new card survives a sweep and says nothing about the criterion's second
+clause — "and can be re-proposed". If `reproposeProposal`
+(`src/proposals/actions.ts:830`, behind `POST /api/proposals/:id/re-propose`)
+stopped accepting expired cards, copying their intent, applying a fresh expiry or
+emitting `proposal.reproposed`, the test would still have passed.
+
+Now it calls the real action on the expired card and asserts what it produces:
+intent carried forward (type, payload, summary), a live `draft` with a fresh 48 h
+window, persisted (not just returned), `proposal.reproposed` audited against the
+NEW card naming `sourceProposalId`, and the action REFUSING a card that is not
+expired (`Only an expired proposal can be re-proposed`).
+
 ### Evidence class / tenant grade
 
 **PROVEN-REAL-DB** (status change + audit event at real Postgres) **plus STRUCTURAL**
@@ -326,9 +475,11 @@ confidence breakdown.
   technician *and* tenant B's appointment gets nothing, both ways
 - with those pings in the database, a board built the way the production route builds
   it carries `lateness === undefined` on **every** item
-- audit: `appointment.created` reads back via `findByEntity`; no lateness event has
-  ever been emitted; the pings themselves are **unaudited** (`findByEntity` for
-  `technician_location_ping` returns nothing); the neighbour tenant reads none of it
+- audit: ingestion through the **real router** emits
+  `technician_location.batch_ingested` against the `technician` entity, read back
+  via `findByEntity`; `appointment.created` reads back too; **no** lateness or
+  delay event has ever been emitted on either entity; the neighbour tenant reads
+  none of it
 
 ### RED (deliberately wrong: asserted the board *does* carry lateness)
 
@@ -357,9 +508,10 @@ confidence breakdown.
 ### Evidence class / tenant grade
 
 **STRUCTURAL** (guard test with a negative control) for the absent runtime edge —
-the claim the row turns on. The ingestion leg is **REAL-DB-WRITE-ONLY (4−)**: the write
-is proven at real Postgres and there is no audit leg to prove, because location pings
-emit no audit event. **T1** for both.
+the claim the row turns on. The ingestion leg is **PROVEN-REAL-DB** (corrected in
+review round 3, below): the write AND its `technician_location.batch_ingested`
+audit event are both proven at real Postgres, through the production router.
+**T1** for both.
 
 ### Review round 1 — order-dependent fixtures (xhawk-ai, medium)
 
@@ -384,6 +536,92 @@ previous `it` happened to create. Re-verified per test under `-t`:
 -t "carries NO lateness"                 → 1 passed | 5 skipped
 -t "audit trail reads back"              → 1 passed | 5 skipped
 ```
+
+### Review round 2 — the fixture was not actually a geofence signal (Codex, P2)
+
+Correct, and a good catch about what a future green would mean. The service
+location was seeded with no `latitude`/`longitude`, so the pings sat on `SITE`
+while the address they were supposed to be dwelling at had no coordinates at all.
+An evaluator keyed on a located address would skip this appointment entirely —
+and then BOTH the `lateness === undefined` assertion and the `it.fails` would stay
+green while the wiring worked correctly for every located customer. The test would
+have quietly stopped meaning anything at the exact moment the row was closed.
+
+The location now carries `SITE.lat`/`SITE.lng`, and `beforeAll` asserts they
+round-tripped, so the fixture is a geofence signal rather than a set of rows that
+resemble one.
+
+### Review round 3 — I asserted an absence that does not hold (Codex, P2). **Correction.**
+
+This one was my error, not a fragility. The test read
+`findByEntity(tenant, 'technician_location_ping', pings[0].id)`, got nothing, and
+concluded "the pings are unaudited". But **no such entity type exists**: the
+production route emits `technician_location.batch_ingested` against the
+`technician` entity (`emitLocationBatchAudit`,
+`routes/technician-location.ts:106`, with `auditRepo` supplied by `app.ts`). The
+test also bypassed the route entirely via `pingRepo.insertMany`, so it could not
+have seen the event even had it queried the right entity. An empty result from a
+query that can only ever return empty is not evidence of anything.
+
+That wrong claim propagated: into this report, and from it into the PRD cell for
+4.7 ("real Postgres, T1, **no audit event**"). Both are corrected here; the PRD
+cell is Fable's and is flagged on the PR rather than edited.
+
+The test now drives the **real router** (express + the same `auditRepo` app.ts
+passes), asserts a 201, and reads `technician_location.batch_ingested` back via
+`findByEntity` on the `technician` entity, with the neighbour tenant reading none
+of it. The absence that genuinely belongs to this row is stated separately and
+correctly: **no lateness or delay event on either the appointment or the
+technician**, because nothing evaluates the pings.
+
+**This upgrades the ingestion leg from REAL-DB-WRITE-ONLY (4−) to
+PROVEN-REAL-DB** — the write and its audit event are both proven. It does not
+move the row: 4.7 turns on the evaluation half, which is still absent.
+
+### Review round 4 — the dwell fixture was not production-shaped (Codex, P2)
+
+Correct, and the same class of defect as the coordinates one — a fixture that
+looks right and could not have come from production. `app.ts:5528-5531` supplies
+`isAppointmentAssignedToTechnician` to the location router, so
+`sanitizeAppointmentIds` (`routes/technician-location.ts:50`) STRIPS the
+`appointmentId` from any ping naming an appointment the submitting technician is
+not assigned to. Neither seeded appointment had an assignment, and the pings were
+inserted directly via `insertMany` — so the fixture held appointment-linked pings
+production could never produce, and an evaluator reading pings by appointment
+would find nothing. The `it.fails` could have stayed red after the row was
+correctly wired.
+
+Fixed on three fronts:
+- each tenant now seeds a **real technician user** (`assignTechnician` refuses any
+  other role) and a **primary assignment** on the appointment
+- `seedDwellPings` ingests through the **production router** — the same
+  repository, assignment gate and audit repo `app.ts` wires — not `insertMany`
+- `beforeAll` asserts the six pings came back still linked to the appointment,
+  i.e. they survived the gate
+
+And, because "the ids survived" would also be true of an ABSENT gate, a
+**positive control**: a ping naming an appointment this technician is not
+assigned to is accepted (201) with its `appointment_id` stripped to NULL, read
+raw from the table. If the gate ever stops being wired in this harness, that
+assertion fails.
+
+### Review round 4 — the two PRD cells, corrected (Codex, two P2s)
+
+Both cells were wrong, both traceable to this report, and Codex asked for them to
+be fixed rather than only flagged. Corrected — **factual clauses only. Every rung
+number and tenant grade is exactly as Fable set it** (3.8 stays `4 (T1)`, 4.7
+stays `2 — dormant, pinned`). Codex's alternative for 3.8, "or lower the
+unconditional criterion's grade", is a rung judgement and was NOT taken; it stays
+Fable's.
+
+- **3.8** — the qualification now reads "holds only where a delivery provider is
+  configured **and** the tenant has not set `autoSendAppointmentReminders =
+  false`", and the note body carries the T3 evidence plus the point that this
+  second skip is owner-reachable.
+- **4.7** — "no audit event" replaced with what the router actually does
+  (`technician_location.batch_ingested` on the `technician` entity, ingestion leg
+  PROVEN-REAL-DB), naming the correction and what the absent audit really is
+  (lateness/delay, on either entity).
 
 ### Judgment calls
 
@@ -619,138 +857,193 @@ silently greened on its own. Patch reverted; both green again.
 
 ## Evidence — plain container, all four files, then SQL
 
+**Regenerated after every round that changed the suite** (rounds 5 and 6 — an
+audit artifact that cannot be reproduced from its own stated command is not
+evidence). Every number and row below comes from ONE run of the current head
+against a fresh container.
+
 Container:
 
 ```
 docker run -d --rm -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=serviceos_test -p 127.0.0.1:0:5432 \
   pgvector/pgvector:pg16 -c max_connections=300
-→ ce9245cb313a…  port 32768
+→ port 32770
 ```
 
-Re-run of all four files against it:
+All four files against it:
 
 ```
 cd packages/api && RLS_RUNTIME_ROLE=true \
-  EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/serviceos_test \
-  npx vitest run --config vitest.integration.config.ts --reporter=verbose \
+  EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32770/serviceos_test \
+  npx vitest run --config vitest.integration.config.ts \
   test/integration/appointment-confirmation-dispatch-3-8.test.ts \
   test/integration/proposal-expiry-sweep-3-11.test.ts \
   test/integration/lateness-from-truck-location-4-7.test.ts \
   test/integration/service-credit-cap-9-5.test.ts
 
  Test Files  4 passed (4)
-      Tests  22 passed | 4 expected fail (26)
-   Duration  5.57s
+      Tests  26 passed | 4 expected fail (30)
+   Duration  5.64s
 ```
 
 ### `audit_events`, grouped by tenant and event
 
 ```
-              tenant_id               |        event_type        | entity_type | n
---------------------------------------+--------------------------+-------------+---
- 34a4bd46-aba9-4546-a7d1-ef8e2812857d | appointment.created      | appointment | 1
- 90623f3c-24ae-46d0-8e82-9ed88a6feb7e | appointment.created      | appointment | 1
- 92ad1d66-a532-4714-95f3-3df81605ded9 | appointment.created      | appointment | 1
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment.created      | appointment | 5
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | proposal.executed        | proposal    | 1
- 92ad1d66-a532-4714-95f3-3df81605ded9 | proposal.executed        | proposal    | 1
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | proposal.executed        | proposal    | 5
- fa90ad5f-d712-407e-9f70-63883e1aba7c | proposal.executed        | proposal    | 1
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | proposal.expired         | proposal    | 3
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | review_response.executed | proposal    | 1
- fa90ad5f-d712-407e-9f70-63883e1aba7c | review_response.executed | proposal    | 1
-(11 rows)
+              tenant_id               |             event_type             | entity_type | n
+--------------------------------------+------------------------------------+-------------+---
+ 3f0261d9-f91f-4411-aacd-6a7a2a192af2 | appointment.created                | appointment | 1
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment.created                | appointment | 6
+ 6d20e425-8f7c-44e7-81e0-e359ab7c7e53 | appointment.created                | appointment | 2
+ a57fd446-5789-4f02-b362-301bfde3d539 | appointment.created                | appointment | 1
+ d4d7b6fe-eca6-4b8b-9d04-e29ad2d38fc6 | appointment.created                | appointment | 1
+ d77b8ec2-0b44-4bf6-ad39-8070c3521e33 | appointment.created                | appointment | 1
+ eeb22714-b0d2-4611-b88c-8f32865519a6 | appointment.created                | appointment | 2
+ f0b55760-9c26-4e6e-a5fd-9e9c7f8ba24a | appointment.created                | appointment | 1
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | proposal.executed                  | proposal    | 6
+ 6d20e425-8f7c-44e7-81e0-e359ab7c7e53 | proposal.executed                  | proposal    | 2
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 | proposal.executed                  | proposal    | 1
+ a57fd446-5789-4f02-b362-301bfde3d539 | proposal.executed                  | proposal    | 1
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 | proposal.executed                  | proposal    | 1
+ d4d7b6fe-eca6-4b8b-9d04-e29ad2d38fc6 | proposal.executed                  | proposal    | 1
+ eeb22714-b0d2-4611-b88c-8f32865519a6 | proposal.executed                  | proposal    | 2
+ f0b55760-9c26-4e6e-a5fd-9e9c7f8ba24a | proposal.executed                  | proposal    | 1
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 | proposal.executed                  | proposal    | 1
+ 4411193e-c364-48b4-81fe-1f8de689f808 | proposal.expired                   | proposal    | 3
+ 4411193e-c364-48b4-81fe-1f8de689f808 | proposal.reproposed                | proposal    | 1
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 | review_response.executed           | proposal    | 1
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 | review_response.executed           | proposal    | 1
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 | review_response.executed           | proposal    | 1
+ 3f0261d9-f91f-4411-aacd-6a7a2a192af2 | technician_location.batch_ingested | technician  | 1
+ d77b8ec2-0b44-4bf6-ad39-8070c3521e33 | technician_location.batch_ingested | technician  | 3
+(24 rows)
 ```
 
-Tenant map: `a90be2f5…`/`92ad1d66…` = row 3.8 Alpha/Bravo. `34a4bd46…`/`90623f3c…` =
-row 4.7 Alpha/Bravo. `ed629ea8…`/`cd8b513f…` = row 3.11 A/B. `52af7079…`/`d8df4575…`/
-`291b5199…` = row 9.5 Alpha/Bravo/Charlie; `fa90ad5f…` = row 9.5 "Delta", the
-`it.fails` tenant. Note the expiry audit rows land in **exactly one** tenant — the
-neighbour's fresh card was never touched.
+Tenant map — **3.8**: `6a1f9c15…` Alpha, `6d20e425…` Bravo, `eeb22714…` Quiet
+(`autoSendAppointmentReminders = false`), `d4d7b6fe…` Mailonly, `a57fd446…`
+Phoneonly, `f0b55760…` Deadleg (email-only customer on an SMS-only boot).
+**3.11**: `4411193e…` A, `1d232e8c…` B. **4.7**: `d77b8ec2…` Alpha,
+`3f0261d9…` Bravo. **9.5**: `a1d50691…` Alpha, `5f289ecb…` Bravo,
+`0d704170…` Charlie, `cc8655ef…` Echo, `fe8fb4c0…` Delta.
+
+Four rows read on their own:
+- `proposal.expired` and `proposal.reproposed` land in **exactly one** tenant —
+  the neighbour's fresh card was never touched, and the re-propose went through
+  the production action
+- `technician_location.batch_ingested` appears for **both** 4.7 tenants: the
+  audit leg this lane originally, and wrongly, reported as absent
+- **Quiet** (`eeb22714…`) has two `appointment.created`, two `proposal.executed`
+  and **no dispatch rows at all** — the owner-reachable silent skip
+- **Deadleg** (`f0b55760…`) has one of each and **no dispatch row either** — a
+  non-null provider, reminders enabled, and a customer reachable only on the
+  credential leg that boot did not have
 
 ### `message_dispatches` (row 3.8)
 
 ```
-              tenant_id               |       entity_type        | channel |         recipient          | provider  | status
---------------------------------------+--------------------------+---------+----------------------------+-----------+--------
- 92ad1d66-a532-4714-95f3-3df81605ded9 | appointment_confirmation | email   | bravo-edc320f7@example.com | in-memory | sent
- 92ad1d66-a532-4714-95f3-3df81605ded9 | appointment_confirmation | sms     | +16025551851               | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | email   | alpha-5750da06@example.com | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | sms     | +16025554620               | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | email   | alpha-5750da06@example.com | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | sms     | +16025554620               | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | email   | alpha-5750da06@example.com | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | sms     | +16025554620               | in-memory | sent
-(8 rows)
+              tenant_id               |       entity_type        | channel |           recipient           | provider
+--------------------------------------+--------------------------+---------+-------------------------------+-----------
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | email   | alpha-9857c61a@example.com    | in-memory
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | sms     | +16025559623                  | in-memory
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | email   | alpha-9857c61a@example.com    | in-memory
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | sms     | +16025559623                  | in-memory
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | sms     | +16025559623                  | twilio
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | email   | alpha-9857c61a@example.com    | in-memory
+ 6a1f9c15-c069-40bd-b24f-428e1d593fc2 | appointment_confirmation | sms     | +16025559623                  | in-memory
+ 6d20e425-8f7c-44e7-81e0-e359ab7c7e53 | appointment_confirmation | email   | bravo-56691fbf@example.com    | in-memory
+ 6d20e425-8f7c-44e7-81e0-e359ab7c7e53 | appointment_confirmation | sms     | +16025551155                  | in-memory
+ 6d20e425-8f7c-44e7-81e0-e359ab7c7e53 | appointment_confirmation | email   | bravo-56691fbf@example.com    | in-memory
+ 6d20e425-8f7c-44e7-81e0-e359ab7c7e53 | appointment_confirmation | sms     | +16025551155                  | in-memory
+ a57fd446-5789-4f02-b362-301bfde3d539 | appointment_confirmation | sms     | +16025557598                  | in-memory
+ d4d7b6fe-eca6-4b8b-9d04-e29ad2d38fc6 | appointment_confirmation | email   | mailonly-fe5422e6@example.com | in-memory
+(13 rows)
 ```
 
-Alpha ran **five** executions (`appointment.created` n=5, `proposal.executed` n=5):
-three with a notifier wired (live, dormant, audit test) and two with none (the
-`mode: 'none'` test and the `it.fails`). Three × two channels = the six rows above.
-The two no-provider executions contributed **nothing** — that is the row's gap, in the
-table.
+Written through `GatedMessageDelivery` in `enforcement: 'block'` with both
+channel kill switches explicitly on, as production wires it. Reading the table:
+
+- Alpha ran six executions and shows seven rows. Three pairs came from the
+  fully-configured notifier; the single `twilio` row is the **one-credential-leg**
+  case — SMS delivered, email threw and was swallowed, so no email row. The two
+  executions with no notifier (mode `'none'` and the `it.fails`) contributed
+  nothing.
+- **Mailonly** has exactly one row, on `email`; **Phoneonly** exactly one, on
+  `sms` — the confirmation degrades per channel to whatever contact the customer
+  actually has.
+- **Quiet** and **Deadleg** are absent from this table entirely. Both booked,
+  both had a provider, neither customer was told.
 
 ### `proposals` (row 3.11 + the 9.5 anchors)
 
 ```
               tenant_id               |      proposal_type       |      status      | past_ttl
 --------------------------------------+--------------------------+------------------+----------
- 291b5199-30e2-4d05-b27f-67ead1feeef7 | review_response_proposal | draft            |
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | review_response_proposal | draft            |
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | review_response_proposal | executed         |
- cd8b513f-5e42-405b-b53f-ad9ab5becbe9 | create_appointment       | ready_for_review | f
- d8df4575-6ec8-4157-9698-9c1548175cbc | review_response_proposal | draft            |
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | create_appointment       | expired          | t
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | create_appointment       | expired          | t
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | create_appointment       | ready_for_review | f
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | draft_estimate           | ready_for_review |
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | reschedule_appointment   | expired          | t
- fa90ad5f-d712-407e-9f70-63883e1aba7c | review_response_proposal | draft            |
- fa90ad5f-d712-407e-9f70-63883e1aba7c | review_response_proposal | executed         |
-(12 rows)
+ 0d704170-9d90-47b2-8424-de44b078dc3f | review_response_proposal | draft            |
+ 1d232e8c-8957-45f1-8348-bb254097d729 | create_appointment       | ready_for_review | f
+ 4411193e-c364-48b4-81fe-1f8de689f808 | create_appointment       | draft            | f
+ 4411193e-c364-48b4-81fe-1f8de689f808 | create_appointment       | expired          | t
+ 4411193e-c364-48b4-81fe-1f8de689f808 | create_appointment       | expired          | t
+ 4411193e-c364-48b4-81fe-1f8de689f808 | draft_estimate           | ready_for_review |
+ 4411193e-c364-48b4-81fe-1f8de689f808 | reschedule_appointment   | expired          | t
+ 5f289ecb-7cf4-4f3b-9f39-394b6c80469d | review_response_proposal | draft            |
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 | review_response_proposal | draft            |
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 | review_response_proposal | executed         |
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 | review_response_proposal | draft            |
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 | review_response_proposal | executed         |
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 | review_response_proposal | draft            |
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 | review_response_proposal | executed         |
+(14 rows)
 ```
 
-Every `past_ttl = t` row is `expired`; every `past_ttl = f` row is still
-`ready_for_review` — including the neighbour tenant's (`cd8b513f…`). The
-`draft_estimate` has a NULL `expires_at` and was never a candidate.
+Every `past_ttl = t` row is `expired`; every `past_ttl = f` row is still live,
+including the neighbour tenant's (`bd211398…`). The `draft` `create_appointment`
+on `bc16aaf2…` is the card `reproposeProposal` minted — a fresh 48 h window, and
+it survived the next sweep. The `draft_estimate` carries a NULL `expires_at` and
+was never a candidate.
 
 ### `service_credits` (row 9.5)
 
 ```
-              tenant_id               |             customer_id              | amount_cents | issued_on  | in_window | has_review
---------------------------------------+--------------------------------------+--------------+------------+-----------+------------
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | b334ab29-1ea8-4fb1-a64a-c28f5f87ac0c |         8000 | 2025-08-12 | f         | f
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | b334ab29-1ea8-4fb1-a64a-c28f5f87ac0c |         3000 | 2026-02-24 | t         | f
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | b334ab29-1ea8-4fb1-a64a-c28f5f87ac0c |         5000 | 2026-08-13 | t         | f
- d8df4575-6ec8-4157-9698-9c1548175cbc | dd368c7f-2c61-4bb6-9119-5b8ff8b31e91 |         8000 | 2026-08-13 | t         | f
- fa90ad5f-d712-407e-9f70-63883e1aba7c | 28a27709-d58b-4d84-af6b-e51a42672d8c |         4000 | 2026-09-02 | t         | f
- fa90ad5f-d712-407e-9f70-63883e1aba7c | 28a27709-d58b-4d84-af6b-e51a42672d8c |         5000 | 2026-09-11 | t         | f
- fa90ad5f-d712-407e-9f70-63883e1aba7c | 28a27709-d58b-4d84-af6b-e51a42672d8c |         5000 | 2026-09-12 | t         | t
-(7 rows)
+              tenant_id               | amount_cents | issued_on  | in_window | has_review
+--------------------------------------+--------------+------------+-----------+------------
+ 5f289ecb-7cf4-4f3b-9f39-394b6c80469d |         8000 | 2026-08-13 | t         | f
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 |         8000 | 2025-08-12 | f         | f
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 |         3000 | 2026-02-24 | t         | f
+ a1d50691-9f8d-43a4-b227-b2b1a9096767 |         5000 | 2026-08-13 | t         | f
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 |         4000 | 2026-09-02 | t         | f
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 |         5000 | 2026-09-11 | t         | f
+ cc8655ef-91b0-4656-97e3-63b96f896fe5 |         5000 | 2026-09-12 | t         | t
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 |         4000 | 2026-09-02 | t         | f
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 |         5000 | 2026-09-11 | t         | f
+ fe8fb4c0-272d-4f38-81c4-4dc939ca2d73 |         5000 | 2026-09-12 | t         | t
+(10 rows)
 ```
 
-Tenant `52af7079…` (Alpha): $30 + $50 in window = **$80**, with the 2025-08-12 $80 out
-of window — and **no fourth row**, because the $50 tier was omitted rather than issued.
-Tenant `d8df4575…` (Bravo): its own $80, which did not count against Alpha. Tenant
-`fa90ad5f…` (Delta, the `it.fails`): $40 + $50 + $50 = **$140 in window against a $100
-cap**, the last row carrying a `review_id` — that is the over-cap credit written at
-execution time, visible in SQL.
+Alpha (`67e8da85…`): $30 + $50 in window = **$80**, with the 2025-08-12 $80 out
+of window — and **no fourth row**, because the $50 tier was omitted rather than
+issued. Bravo (`82bd9117…`): its own $80, uncounted against Alpha. Charlie
+(`b994700b…`) drew the full $50 at draft and has **no ledger row** — a proposal
+is not an issuance. Echo (`452b471a…`) and Delta (`116b71da…`) each hold
+$40 + $50 + $50 = **$140 in window against a $100 cap**, the last row carrying a
+`review_id`: the over-cap credit written at execution time, once as the ordinary
+guard test and once as the `it.fails`.
 
 ### `technician_location_pings` (row 4.7)
 
 ```
-              tenant_id               |            technician_id             | pings | acc | avg_lat  |  avg_lng
---------------------------------------+--------------------------------------+-------+-----+----------+------------
- 34a4bd46-aba9-4546-a7d1-ef8e2812857d | c7efe14d-16f5-4951-9c61-d99b0ceb7a5f |     6 |   8 | 33.44843 | -112.07398
- 90623f3c-24ae-46d0-8e82-9ed88a6feb7e | d8aa60ba-81f6-4cab-bf1c-792fa21fab80 |     4 |   8 | 33.44842 | -112.07399
+              tenant_id               | pings | linked | unlinked
+--------------------------------------+-------+--------+----------
+ 3f0261d9-f91f-4411-aacd-6a7a2a192af2 |     4 |      4 |        0
+ d77b8ec2-0b44-4bf6-ad39-8070c3521e33 |     8 |      6 |        2
 (2 rows)
 ```
 
-Six dwell pings for tenant A parked on the service location, four for the neighbour —
-and, per the board assertion above, not one lateness state derived from any of them.
-
----
+All ingested through the production router. Tenant Alpha's 8 = the 6 dwell pings
+(still **linked**, so they survived the assignment gate), plus one that never
+named an appointment, plus the positive control naming an appointment this
+technician is not assigned to — **stripped to NULL by `sanitizeAppointmentIds`**,
+which is the gate visible in the table. And, per the board assertion above, not
+one lateness state derived from any of them.
 
 ## Falsifier greps (§8.0's "how to confirm a grade")
 

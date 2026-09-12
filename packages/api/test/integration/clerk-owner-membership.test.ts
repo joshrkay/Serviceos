@@ -19,6 +19,7 @@ import { PgTenantRepository } from '../../src/auth/pg-tenant';
 import { InMemoryWebhookRepository } from '../../src/webhooks/webhook-handler';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
+import type { PendingInvitationRepository } from '../../src/users/pending-invitation';
 import { PgUserRepository } from '../../src/users/pg-user';
 import { createUsersRouter } from '../../src/routes/users';
 import type { AppConfig } from '../../src/shared/config';
@@ -139,6 +140,17 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
     // row count and role alone would otherwise slip past this test
     // (Codex review, PR #1074).
     const tenantBRowBefore = { ...tenantBRow.rows[0] };
+    // The `tenants` row too, not just `users` — a regression that mutates
+    // tenant B's name/owner_email/subscription_status while leaving its
+    // membership untouched would otherwise slip past this test (Codex
+    // review, PR #1074).
+    const tenantBTenantRow = await pool.query(
+      `SELECT name, owner_id, owner_email, subscription_status, stripe_subscription_id
+       FROM tenants WHERE id = $1`,
+      [tenantBId],
+    );
+    expect(tenantBTenantRow.rowCount).toBe(1);
+    const tenantBTenantBefore = { ...tenantBTenantRow.rows[0] };
 
     // Tenant A: two SEPARATE deliveries (distinct svix ids, as a real Clerk
     // redelivery would use) of the same user.created event. bootstrapTenant's
@@ -208,6 +220,14 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
     );
     expect(tenantBAfter.rowCount).toBe(1);
     expect(tenantBAfter.rows[0]).toEqual(tenantBRowBefore);
+
+    const tenantBTenantAfter = await pool.query(
+      `SELECT name, owner_id, owner_email, subscription_status, stripe_subscription_id
+       FROM tenants WHERE id = $1`,
+      [tenantBId],
+    );
+    expect(tenantBTenantAfter.rowCount).toBe(1);
+    expect(tenantBTenantAfter.rows[0]).toEqual(tenantBTenantBefore);
   });
 
   it('rejects a Clerk webhook whose svix-timestamp is outside the 5-minute replay window', async () => {
@@ -254,6 +274,17 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
   let usersApp: express.Express;
   let tenantA: { tenantId: string; userId: string };
   let tenantB: { tenantId: string; userId: string };
+  // Populated by the instrumented repo/stub below — proves the CODE ORDER
+  // inviteTeamMember actually runs in (local row awaited, THEN Clerk
+  // called), rather than the local row's visibility to a separate DB
+  // connection. Production wraps every /api request in a request-scoped
+  // transaction (`withTenantTransaction`, app.ts) that only commits on
+  // res.finish — i.e. AFTER this whole handler (Clerk call included) — so
+  // asserting the row was already durably COMMITTED at Clerk-call time
+  // would be false in production even though the code order is correct;
+  // asserting code order directly is what's actually true and portable
+  // (Codex review, PR #1074, round 3).
+  const inviteCallOrder: string[] = [];
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -261,7 +292,22 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
     tenantB = await createTestTenant(pool);
 
     const userRepo = new PgUserRepository(pool);
-    const pendingInvitationRepo = new PgPendingInvitationRepository(pool);
+    const realPendingInvitationRepo = new PgPendingInvitationRepository(pool);
+    // Delegates every method to the real Pg repo, instrumenting only
+    // `create` so GET /invitations (findByTenant) and the cross-tenant
+    // test below still exercise the genuine tenant-scoped queries.
+    const pendingInvitationRepo: PendingInvitationRepository = {
+      create: async (input) => {
+        const result = await realPendingInvitationRepo.create(input);
+        inviteCallOrder.push('local-row-created');
+        return result;
+      },
+      findByTenant: (...args) => realPendingInvitationRepo.findByTenant(...args),
+      findPendingByEmail: (...args) => realPendingInvitationRepo.findPendingByEmail(...args),
+      findById: (...args) => realPendingInvitationRepo.findById(...args),
+      markAccepted: (...args) => realPendingInvitationRepo.markAccepted(...args),
+      delete: (...args) => realPendingInvitationRepo.delete(...args),
+    };
     const auditRepo = new PgAuditRepository(pool);
 
     usersApp = express();
@@ -291,6 +337,7 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
           // the local invitation write below is the real production path.
           clerkSecretKey: 'sk_test_down',
           clerkFetch: (async () => {
+            inviteCallOrder.push('clerk-called');
             throw new Error('Clerk API unreachable (simulated outage)');
           }) as unknown as typeof fetch,
         },
@@ -306,6 +353,7 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
   it('writes the local invitation row even when Clerk is down, and audits it', async () => {
     const auditRepo = new PgAuditRepository(pool);
     const email = `invitee-${crypto.randomUUID()}@example.com`;
+    inviteCallOrder.length = 0;
 
     const res = await request(usersApp)
       .post('/api/users/invitations')
@@ -321,6 +369,16 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
     expect(row.rows[0].tenant_id).toBe(tenantA.tenantId);
     expect(row.rows[0].email).toBe(email.toLowerCase());
     expect(row.rows[0].accepted_at).toBeNull();
+
+    // Pins ORDER at the code level: inviteTeamMember awaits
+    // invitationRepo.create() BEFORE calling clerkFetch. This deliberately
+    // does NOT assert the row was already durably COMMITTED (visible to a
+    // separate connection) at Clerk-call time — production wraps /api
+    // requests in a request-scoped transaction that only commits on
+    // res.finish, i.e. after this whole handler including the Clerk call,
+    // so that claim would be false there even though the code order is
+    // correct.
+    expect(inviteCallOrder).toEqual(['local-row-created', 'clerk-called']);
 
     const auditEvents = await auditRepo.findByEntity(
       tenantA.tenantId,

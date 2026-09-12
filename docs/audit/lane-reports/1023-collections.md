@@ -133,13 +133,13 @@ finding on PR #1053; see **Review follow-ups** at the end.
  × overdue-invoice (dunning) sweep > keeps going when one tenant throws 8ms      (RED)
  × overdue-invoice (dunning) sweep > chases the overdue tenant and leaves another tenant
    with nothing overdue untouched in the same pass 343ms                          (RED)
- Tests  3 failed | 19 passed (22)
+ Tests  3 failed | 19 passed (22)   [at the time of the RED run]
 ---
  ✓ overdue-invoice (dunning) sweep > reaches every tenant through the real enumerator 5ms
  ✓ overdue-invoice (dunning) sweep > keeps going when one tenant throws 5ms
  ✓ overdue-invoice (dunning) sweep > chases the overdue tenant and leaves another tenant
    with nothing overdue untouched in the same pass 306ms
- Tests  22 passed (22)
+ Tests  27 passed (27)   [current: the file has grown to 27 with the later entries]
 ```
 
 **Evidence class:** D — real Postgres, production repositories, production
@@ -458,15 +458,18 @@ the gap itself is shown failing rather than asserted in prose:
 
 **GREEN**
 ```
- ✓ renews a lapsed auto-renew membership: ends_on rolls forward, renewal_count bumps, and it is audited 87ms
- ✓ catches up several missed terms in ONE pass rather than leaving the member lapsed 36ms
- ✓ bills the due cycle: a job, an invoice and a run row land, next_run_at advances, and a re-sweep does not double-bill 90ms
- ✓ member pricing resolves from real agreement rows — the best EFFECTIVE discount, never a lapsed one 51ms
- ✓ T1 — two tenants are renewed and billed on their own memberships in one pass, with no cross-tenant reach 109ms
- ✓ the dues invoice is ISSUED so the customer can pay it — today it is left a draft 54ms
- ✓ the dues invoice carries a due date so the collections cadence can chase it — today it has none 51ms
- ✓ the dues invoice is numbered off the tenant invoice sequence — today it is AGREEMENT-<epoch ms> 59ms
- ✓ the tenant invoice sequence is NOT advanced by a membership cycle (the numbering gap, asserted positively) 57ms
+ ✓ what the sweep does do > renews a lapsed auto-renew membership: ends_on rolls forward, renewal_count bumps, and it is audited 89ms
+ ✓ what the sweep does do > catches up several missed terms in ONE pass rather than leaving the member lapsed 31ms
+ ✓ what the sweep does do > bills the due cycle: a job, an invoice and a run row land, next_run_at advances, and a re-sweep does not double-bill 75ms
+ ✓ what the sweep does do > member pricing resolves from real agreement rows — the best EFFECTIVE discount, never a lapsed one 58ms
+ ✓ what the sweep does do > T1 — two tenants are renewed and billed on their own memberships in one pass, with no cross-tenant reach 119ms
+ ✓ the auto-collect branch — dues that DO collect themselves > issues the dues invoice with a due date and records the payment when the card succeeds 146ms
+ ✓ the auto-collect branch — dues that DO collect themselves > leaves a DECLINED dues invoice open WITH a due date, so the collections cadence can chase it 157ms
+ ✓ the auto-collect branch — dues that DO collect themselves > leaves the invoice an undunnable draft when auto-collect is on but no card is saved 64ms
+ ✓ story-not-met: what "bills itself" does not do on the DEFAULT (no auto-collect) path > leaves the dues invoice a DRAFT — nothing issues or sends it, so a human must open it 46ms
+ ✓ story-not-met: what "bills itself" does not do on the DEFAULT (no auto-collect) path > leaves the dues invoice with NO due date, so the collections cadence can never select it 44ms
+ ✓ story-not-met: what "bills itself" does not do on the DEFAULT (no auto-collect) path > numbers the dues invoice AGREEMENT-<epoch ms>, outside the tenant sequence 55ms
+ ✓ story-not-met: what "bills itself" does not do on the DEFAULT (no auto-collect) path > the tenant invoice sequence is NOT advanced by a membership cycle (the numbering gap, asserted positively) 57ms
 
  Test Files  1 passed (1)
       Tests  12 passed (12)
@@ -591,13 +594,13 @@ doomed tenant is NOT billed fails).
  × recurring-agreements (membership) sweep > bills the due membership and leaves another
    tenant whose cycle is not due untouched 285ms
    → expected 'generated' to be 'failed'                                          (RED)
- Tests  3 failed | 22 passed (25)
+ Tests  3 failed | 22 passed (25)   [at the time of the RED run]
 ---
  ✓ recurring-agreements (membership) sweep > reaches every tenant through the real enumerator 7ms
  ✓ recurring-agreements (membership) sweep > keeps going when one tenant throws 5ms
  ✓ recurring-agreements (membership) sweep > bills the due membership and leaves another
    tenant whose cycle is not due untouched 239ms
- Tests  25 passed (25)
+ Tests  27 passed (27)
 ```
 
 **Observation recorded in that entry, not fixed:** this worker's isolation shape
@@ -676,7 +679,7 @@ $ cd packages/api && EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/s
   test/integration/membership-renewal-sweep.test.ts test/integration/sweep-tenant-fanout.test.ts
 
  Test Files  6 passed (6)
-      Tests  51 passed (51)
+      Tests  54 passed (54)
    Duration  7.50s
 ```
 
@@ -923,17 +926,17 @@ and none totals 82500 (the whole sheet).
 === the dues invoices the sweep wrote (BOTH paths) ===
   tenant  |            invoice_number             | status | total | paid  |  due  | has_due_date
 ----------+---------------------------------------+--------+-------+-------+-------+--------------
- 26bc45f3 | AGREEMENT-1789239749318               | draft  | 19900 |     0 | 19900 | f
- 43f6bd6d | AGREEMENT-1789239749671               | draft  | 19900 |     0 | 19900 | f
- 530b498f | AGREEMENT-1789239749177               | draft  | 19900 |     0 | 19900 | f
- 54c2f791 | AGREEMENT-1789239749772               | draft  | 19900 |     0 | 19900 | f
- 83515550 | AGREEMENT-1789239749872               | draft  | 19900 |     0 | 19900 | f
- d2773538 | AGREEMENT-1789239749344               | draft  |  4900 |     0 |  4900 | f
- d8c34481 | AGREEMENT-6ec063d1-…                  | draft  |  9900 |     0 |  9900 | f
- e782c1d9 | AGREEMENT-1789239749725               | draft  | 19900 |     0 | 19900 | f
- fe3d5403 | AGREEMENT-1789239749819               | draft  | 19900 |     0 | 19900 | f
- 79ac0a1b | AGREEMENT-1789239749544               | open   | 19900 |     0 | 19900 | t   ← auto-collect, DECLINED
- fba47f2f | AGREEMENT-1789239749412               | paid   | 19900 | 19900 |     0 | t   ← auto-collect, collected
+ 01ed3a5e | AGREEMENT-1789243094886               | draft  | 19900 |     0 | 19900 | f
+ 3003dfd2 | AGREEMENT-1789243094262               | draft  | 19900 |     0 | 19900 | f
+ 4848fce6 | AGREEMENT-5e209b58-…                  | draft  |  9900 |     0 |  9900 | f
+ 86dcc676 | AGREEMENT-1789243094431               | draft  | 19900 |     0 | 19900 | f
+ 9ea1455d | AGREEMENT-1789243094458               | draft  |  4900 |     0 |  4900 | f
+ 9f007395 | AGREEMENT-1789243094978               | draft  | 19900 |     0 | 19900 | f
+ bf510cd7 | AGREEMENT-1789243094793               | draft  | 19900 |     0 | 19900 | f
+ d47be8ce | AGREEMENT-1789243094843               | draft  | 19900 |     0 | 19900 | f
+ e440a115 | AGREEMENT-1789243094928               | draft  | 19900 |     0 | 19900 | f
+ b71e479b | AGREEMENT-1789243094676               | open   | 19900 |     0 | 19900 | t   ← auto-collect, DECLINED
+ 3af4f86d | AGREEMENT-1789243094536               | paid   | 19900 | 19900 |     0 | t   ← auto-collect, collected
 (11 rows)
 ```
 
@@ -1046,8 +1049,13 @@ assertion in the T1 test — `rawAgreement(tenantB, agreementA)` must be
    → expected { ends_on: '2027-09-11', …(3) } to be undefined
  Tests  1 failed | 8 passed (9)
 ---
- Tests  12 passed (12)
+ Tests  6 passed | 3 expected fail (9)
 ```
+
+(Counts as they stood at `30bd03a`: the file had 9 tests and still used `it.fails`.
+It is 12 ordinary tests now — see the current GREEN transcript above. An earlier
+revision of this report replaced this historical figure with the current one,
+which made the RED and GREEN halves of the same pair describe different files.)
 
 The same bare-`SET LOCAL` pattern in `dunning-cadence.test.ts`'s raw duplicate
 INSERT got the same treatment. That test's evidence is unaffected either way —

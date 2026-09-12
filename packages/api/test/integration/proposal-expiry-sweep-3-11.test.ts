@@ -43,6 +43,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { listAllTenantIds } from '../../src/tenants/list-tenant-ids';
 import { runProposalExpirySweep } from '../../src/workers/proposal-expiry-worker';
+import { reproposeProposal } from '../../src/proposals/actions';
 import {
   createProposal,
   defaultProposalExpiry,
@@ -75,12 +76,27 @@ function srcFiles(dir: string, acc: string[] = []): string[] {
  * tail ('../ai/guardrails/expiration') and the same-directory spelling
  * ('./expiration' from inside ai/guardrails), so a relative importer cannot
  * hide from the scan.
+ *
+ * FOUR syntaxes, not two. An earlier version matched only `from` and
+ * `require(`, which meant a module wired by `await import('./x')` — a form
+ * `src/` really does use (`ai/gateway/tenant-quota.ts:303`,
+ * `void import('./redis-tenant-quota')`) — would be reported as having no
+ * importer. That is the precise false negative that would let a live TTL
+ * regime pass as dormant. Side-effect imports (`import './x'`, no `from`)
+ * were invisible for the same reason. The second control in the test below
+ * pins the dynamic case.
+ *
+ * Deliberately over-inclusive: `import('./x').SomeType` in a TYPE position
+ * matches too, even though it carries no runtime edge. That errs toward
+ * REPORTING an importer, which makes a dormancy claim FAIL loudly rather than
+ * pass wrongly — the safe direction for a guard whose whole job is to refuse
+ * to call live code dead.
  */
 function runtimeImportersOf(moduleSuffix: string): string[] {
   const srcRoot = resolve(__dirname, '../../src');
   const basename = moduleSuffix.split('/').pop() as string;
   const dirOfModule = resolve(srcRoot, moduleSuffix, '..');
-  const specifier = /(?:from|require\()\s*['"]([^'"]+)['"]/g;
+  const specifier = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)['"]([^'"]+)['"]/g;
   const hits: string[] = [];
 
   for (const file of srcFiles(srcRoot)) {
@@ -218,16 +234,59 @@ describe('Postgres integration — §8.3 row 3.11 stale schedule proposals expir
     await sweep();
     expect((await proposalRepo.findById(tenantA.tenantId, stale.id))?.status).toBe('expired');
 
-    const reproposed = await seedProposal(tenantA, 'create_appointment', { ageHours: 0 });
+    // The PRODUCTION re-propose action (`proposals/actions.ts:830`), the one
+    // `POST /api/proposals/:id/re-propose` calls — not a hand-rolled fresh
+    // proposal, which would keep passing even if the real action stopped
+    // accepting expired cards, copying their intent, or applying a new expiry.
+    const reproposed = await reproposeProposal(
+      proposalRepo,
+      tenantA.tenantId,
+      stale.id,
+      tenantA.userId,
+      'owner',
+      auditRepo,
+    );
     expect(reproposed.id).not.toBe(stale.id);
+    // The intent is carried forward…
+    expect(reproposed.proposalType).toBe(stale.proposalType);
+    expect(reproposed.payload).toEqual(stale.payload);
+    expect(reproposed.summary).toBe(stale.summary);
+    // …the card is live again, with a fresh 48 h window…
+    expect(reproposed.status).toBe('draft');
     expect(reproposed.expiresAt!.getTime() - reproposed.createdAt.getTime()).toBe(
       SCHEDULE_PROPOSAL_EXPIRY_MS,
     );
+    expect(reproposed.expiresAt!.getTime()).toBeGreaterThan(Date.now());
+    // …and it is persisted, not just returned.
+    expect((await proposalRepo.findById(tenantA.tenantId, reproposed.id))?.status).toBe('draft');
+
+    // `proposal.reproposed` is audited against the NEW card, naming the source.
+    const reproposeEvents = await auditRepo.findByEntity(
+      tenantA.tenantId,
+      'proposal',
+      reproposed.id,
+    );
+    expect(reproposeEvents.map((e) => e.eventType)).toContain('proposal.reproposed');
+    expect(
+      reproposeEvents.find((e) => e.eventType === 'proposal.reproposed')?.metadata,
+    ).toMatchObject({ sourceProposalId: stale.id });
+
+    // The action refuses to re-propose a card that is not expired — so a
+    // second call on the fresh one is rejected, and the expired source is the
+    // only valid input.
+    await expect(
+      reproposeProposal(
+        proposalRepo,
+        tenantA.tenantId,
+        reproposed.id,
+        tenantA.userId,
+        'owner',
+        auditRepo,
+      ),
+    ).rejects.toThrow(/Only an expired proposal can be re-proposed/);
 
     await sweep();
-    expect((await proposalRepo.findById(tenantA.tenantId, reproposed.id))?.status).toBe(
-      'ready_for_review',
-    );
+    expect((await proposalRepo.findById(tenantA.tenantId, reproposed.id))?.status).toBe('draft');
     // The already-expired card stays terminal — the sweep does not re-expire it
     // or write a second audit row.
     const events = await auditRepo.findByEntity(tenantA.tenantId, 'proposal', stale.id);
@@ -240,6 +299,15 @@ describe('Postgres integration — §8.3 row 3.11 stale schedule proposals expir
     const control = runtimeImportersOf('workers/proposal-expiry-worker');
     expect(control).toContain('app.ts');
     expect(control.length).toBeGreaterThan(0);
+
+    // SECOND control, for the DYNAMIC-import syntax specifically. A scanner
+    // that only understands `from` / `require(` would report a module wired by
+    // `await import('./x')` as dormant — the exact false negative that would
+    // let a live TTL regime hide. `ai/gateway/tenant-quota.ts:303` really does
+    // `void import('./redis-tenant-quota')`, so the scan must find it.
+    expect(runtimeImportersOf('ai/gateway/redis-tenant-quota')).toContain(
+      'ai/gateway/tenant-quota.ts',
+    );
 
     // The claim under test.
     expect(runtimeImportersOf('ai/guardrails/expiration')).toEqual([]);
