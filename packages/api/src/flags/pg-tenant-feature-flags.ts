@@ -131,6 +131,32 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
     return defaultEnabled;
   }
 
+  /**
+   * #1011 — the tenant override ALONE: `true`/`false` when this tenant has a
+   * `tenant_feature_flags` row for the key, `null` when it does not.
+   *
+   * `isEnabledForTenant` answers *"is it on?"*, which is the only question the
+   * capability gates ask. The owner-facing Capabilities surface asks a second
+   * one — *"who decided that?"* — because "you turned this off" and "the
+   * platform has this frozen off" are different things to show an operator,
+   * and only the first is theirs to change.
+   *
+   * Deliberately a separate query rather than a refactor of `_resolve`:
+   * `_resolve` is the hot read behind every capability gate and its
+   * composition order (override → platform → false) is load-bearing (D5).
+   * Uncached — this runs once per Settings page load, not per call turn.
+   */
+  async getTenantOverride(tenantId: string, flagKey: string): Promise<boolean | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT enabled FROM tenant_feature_flags WHERE tenant_id = $1 AND flag_key = $2`,
+        [tenantId, flagKey],
+      );
+      if (result.rows.length === 0) return null;
+      return result.rows[0].enabled as boolean;
+    });
+  }
+
   private async _resolve(tenantId: string, flagKey: string): Promise<boolean> {
     // 1. Check tenant override (RLS-scoped, belt-and-braces composite PK lookup)
     const tenantOverride = await this.withTenant(tenantId, async (client) => {
