@@ -95,6 +95,14 @@ export function SettingsPage() {
   // now — this page has no existing time/channel picker pattern to mirror,
   // so digestTime/digestChannel stay server defaults until one exists.
   const [digestEnabled, setDigestEnabledState] = useState(false);
+  // 8.3/8.11 — revenue-cluster settings: already accepted by PUT
+  // /api/settings and referenced by zero UI (map #995 correction). Pure UI
+  // over an already-accepted contract — the diff below is toggles + tests
+  // only, no change to what any of these four flags DO.
+  const [autoInvoiceOnCompletion, setAutoInvoiceOnCompletionState] = useState(false);
+  const [billLaborFromTimeEntries, setBillLaborFromTimeEntriesState] = useState(false);
+  const [batchInvoiceEnabled, setBatchInvoiceEnabledState] = useState(false);
+  const [milestoneBillingEnabled, setMilestoneBillingEnabledState] = useState(false);
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
   // #874 — live service-area data for the RESOURCES row (null until the
@@ -131,6 +139,10 @@ export function SettingsPage() {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
           digestEnabled?: boolean;
+          autoInvoiceOnCompletion?: boolean;
+          billLaborFromTimeEntries?: boolean;
+          batchInvoiceEnabled?: boolean;
+          milestoneBillingEnabled?: boolean;
           businessName?: string;
           googleReviewUrl?: string | null;
           yelpReviewUrl?: string | null;
@@ -146,6 +158,18 @@ export function SettingsPage() {
         }
         if (typeof data.digestEnabled === 'boolean') {
           setDigestEnabledState(data.digestEnabled);
+        }
+        if (typeof data.autoInvoiceOnCompletion === 'boolean') {
+          setAutoInvoiceOnCompletionState(data.autoInvoiceOnCompletion);
+        }
+        if (typeof data.billLaborFromTimeEntries === 'boolean') {
+          setBillLaborFromTimeEntriesState(data.billLaborFromTimeEntries);
+        }
+        if (typeof data.batchInvoiceEnabled === 'boolean') {
+          setBatchInvoiceEnabledState(data.batchInvoiceEnabled);
+        }
+        if (typeof data.milestoneBillingEnabled === 'boolean') {
+          setMilestoneBillingEnabledState(data.milestoneBillingEnabled);
         }
         if (typeof data.businessName === 'string' && data.businessName.trim()) {
           setBusinessName(data.businessName.trim());
@@ -269,6 +293,43 @@ export function SettingsPage() {
   function toggleDigestEnabled(value: boolean) {
     setDigestEnabledState(value);
     void persistToggle('digestEnabled', value);
+  }
+
+  /**
+   * 8.3/8.11 — shared persist path for the four revenue-cluster booleans.
+   * Each writes `{ [field]: value }` through the same PUT /api/settings
+   * every other quick-toggle uses; `setLocal` flips the optimistic UI state
+   * and reverts it on failure, mirroring persistToggle's contract.
+   */
+  async function persistBillingToggle(
+    field: 'autoInvoiceOnCompletion' | 'billLaborFromTimeEntries' | 'batchInvoiceEnabled' | 'milestoneBillingEnabled',
+    value: boolean,
+    setLocal: (v: boolean) => void,
+  ) {
+    setLocal(value);
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [field]: value }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      setLocal(!value);
+    }
+  }
+  function toggleAutoInvoiceOnCompletion() {
+    void persistBillingToggle('autoInvoiceOnCompletion', !autoInvoiceOnCompletion, setAutoInvoiceOnCompletionState);
+  }
+  function toggleBillLaborFromTimeEntries() {
+    void persistBillingToggle('billLaborFromTimeEntries', !billLaborFromTimeEntries, setBillLaborFromTimeEntriesState);
+  }
+  function toggleBatchInvoiceEnabled() {
+    void persistBillingToggle('batchInvoiceEnabled', !batchInvoiceEnabled, setBatchInvoiceEnabledState);
+  }
+  function toggleMilestoneBillingEnabled() {
+    void persistBillingToggle('milestoneBillingEnabled', !milestoneBillingEnabled, setMilestoneBillingEnabledState);
   }
   const [qbOpen, setQbOpen] = useState(false);
   const [qbIntegration, setQbIntegration] = useState<AccountingIntegrationSummary | null>(null);
@@ -617,6 +678,41 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
+        // 8.3/8.11 — already-accepted PUT /api/settings booleans, no client
+        // control before this. UI + persistence only — none of these four
+        // change what the underlying automation does.
+        {
+          kind: 'toggle',
+          icon: FileText,
+          label: 'Auto-draft invoice on completion',
+          description: 'Draft an invoice for your approval when a job is marked complete',
+          checked: autoInvoiceOnCompletion,
+          onToggle: toggleAutoInvoiceOnCompletion,
+        },
+        {
+          kind: 'toggle',
+          icon: Clock,
+          label: 'Bill labor from time entries',
+          description: 'Recompute labor cost on auto-drafted invoices from logged time',
+          checked: billLaborFromTimeEntries,
+          onToggle: toggleBillLaborFromTimeEntries,
+        },
+        {
+          kind: 'toggle',
+          icon: FileText,
+          label: 'Daily batch invoicing',
+          description: 'Include eligible jobs in the daily batch-invoice sweep',
+          checked: batchInvoiceEnabled,
+          onToggle: toggleBatchInvoiceEnabled,
+        },
+        {
+          kind: 'toggle',
+          icon: FileText,
+          label: 'Milestone billing',
+          description: 'Draft an invoice for your approval at each completed billing milestone',
+          checked: milestoneBillingEnabled,
+          onToggle: toggleMilestoneBillingEnabled,
+        },
         { kind: 'external', icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices in the Stripe billing portal', action: () => setConfirmPortalOpen(true) },
       ],
     },

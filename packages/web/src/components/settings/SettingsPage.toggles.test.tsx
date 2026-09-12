@@ -168,6 +168,88 @@ describe('SettingsPage Quick toggles persistence', () => {
     });
   });
 
+  it('8.3/8.11 — hydrates the revenue-cluster toggles from /api/settings on mount', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        autoInvoiceOnCompletion: true,
+        billLaborFromTimeEntries: false,
+        batchInvoiceEnabled: true,
+        milestoneBillingEnabled: false,
+      }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+    renderPage();
+    expect(await screen.findByRole('switch', { name: 'Auto-draft invoice on completion' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    expect(screen.getByRole('switch', { name: 'Bill labor from time entries' })).toHaveAttribute(
+      'aria-checked',
+      'false',
+    );
+    expect(screen.getByRole('switch', { name: 'Daily batch invoicing' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('switch', { name: 'Milestone billing' })).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('8.3/8.11 — persists each revenue-cluster toggle via PUT /api/settings when flipped', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        autoInvoiceOnCompletion: false,
+        billLaborFromTimeEntries: false,
+        batchInvoiceEnabled: false,
+        milestoneBillingEnabled: false,
+      }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+    // One PUT response queued per toggle click below, same order.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ autoInvoiceOnCompletion: true }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ billLaborFromTimeEntries: true }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ batchInvoiceEnabled: true }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ milestoneBillingEnabled: true }));
+
+    renderPage();
+    const rows: Array<[string, string]> = [
+      ['Auto-draft invoice on completion', 'autoInvoiceOnCompletion'],
+      ['Bill labor from time entries', 'billLaborFromTimeEntries'],
+      ['Daily batch invoicing', 'batchInvoiceEnabled'],
+      ['Milestone billing', 'milestoneBillingEnabled'],
+    ];
+    for (const [name] of rows) {
+      const toggle = await screen.findByRole('switch', { name });
+      fireEvent.click(toggle);
+    }
+
+    await waitFor(() => {
+      const putCalls = apiFetchMock.mock.calls.filter(
+        (c) => c[1] && (c[1] as RequestInit).method === 'PUT' && c[0] === '/api/settings',
+      );
+      expect(putCalls.length).toBe(4);
+      for (const [, field] of rows) {
+        const match = putCalls.find((c) => {
+          const body = JSON.parse((c[1] as RequestInit).body as string);
+          return field in body;
+        });
+        expect(match, `expected a PUT /api/settings call carrying ${field}`).toBeDefined();
+        const body = JSON.parse((match![1] as RequestInit).body as string);
+        expect(body[field]).toBe(true);
+      }
+    });
+  });
+
   it('persists spanishMode via /api/settings/language when toggled', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
