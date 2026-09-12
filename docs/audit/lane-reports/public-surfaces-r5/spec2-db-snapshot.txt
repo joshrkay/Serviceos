@@ -1,0 +1,57 @@
+Last real-Postgres snapshot polled during the GREEN run of
+e2e/journeys/public-invoice-pay-link.spec.ts (1.5s-interval `docker exec <pg
+container> psql` poller; the E2E teardown truncates every table at the end of
+the run). Tenant c58e3a0a = "Acme HVAC 8.4" (tenant A, under test); tenant
+166c38f7 = "Bexar Plumbing 8.4" (tenant B, untouched). a5aeb750 / c60f7ecd are
+the always-on hermetic journey's own seeded fixtures.
+
+=== 2026-09-12T20:18:18Z ===
+  tenant  |            event_type             |   entity_type   | count
+----------+-----------------------------------+-----------------+-------
+ 166c38f7 | customer.created                  | customer        |     1
+ c58e3a0a | customer.created                  | customer        |     1
+ 166c38f7 | invoice.created                   | invoice         |     1
+ c58e3a0a | invoice.created                   | invoice         |     1
+ c58e3a0a | invoice.payment_link_deactivated  | invoice         |     1
+ c58e3a0a | invoice.status_changed            | invoice         |     1
+ 166c38f7 | job.created                       | job             |     1
+ c58e3a0a | job.created                       | job             |     1
+ 166c38f7 | job.money_state_changed           | job             |     1
+ c58e3a0a | job.money_state_changed           | job             |     2
+ 166c38f7 | location.created                  | location        |     1
+ c58e3a0a | location.created                  | location        |     1
+ 166c38f7 | notification.lifecycle_email.sent | tenant          |     1
+ c58e3a0a | notification.lifecycle_email.sent | tenant          |     1
+ c58e3a0a | payment.recorded                  | invoice         |     1
+ 166c38f7 | tenant.identity_set               | tenant_settings |     1
+ c58e3a0a | tenant.identity_set               | tenant_settings |     1
+ 166c38f7 | tenant.signup.bootstrap.completed | tenant          |     1
+ c58e3a0a | tenant.signup.bootstrap.completed | tenant          |     1
+(19 rows)
+
+  tenant  | invoice_number | status | stripe_payment_link_url
+----------+----------------+--------+-------------------------
+ c58e3a0a | INV-0001       | paid   |
+ 166c38f7 | INV-0001       | open   |
+(2 rows)
+
+Notes:
+- c58e3a0a's INV-0001 flips draft->open->paid across the run: issue (open),
+  payment-link mint (idempotent on re-call — asserted equal), signed
+  checkout.session.completed webhook -> paid, amount_paid_cents 50000,
+  amount_due_cents 0. `invoice.status_changed` (newStatus: 'paid') and
+  `payment.recorded` both fire exactly once (idempotency for a webhook
+  replay is proven in packages/api/test/integration/invoice-webhook-paid.test.ts,
+  not re-proven here to keep this reachability spec to a single delivery).
+  `invoice.payment_link_deactivated` fires as a side effect of settlement —
+  the now-paid invoice's stale link is killed so nobody can pay it twice.
+  The stripe_payment_link_url column shows blank in this dump only because
+  deactivation clears it (deactivateInvoicePaymentLink clears the columns on
+  success) — the link's mint + idempotent re-mint were asserted directly via
+  the API response (`link1.url === link2.url`) before settlement.
+- 166c38f7's INV-0001 stayed 'open', amountPaidCents 0 — completely untouched
+  by tenant A's webhook, confirming the tenant_id/invoice_id metadata match
+  in the settlement path is scoped correctly.
+- A POST /api/invoices/:id/payment-link against the now-paid tenant-A invoice
+  was refused 409 (PAYABLE_STATUSES no longer includes 'paid') — asserted in
+  the spec, not separately dumped here.
