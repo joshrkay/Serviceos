@@ -128,12 +128,17 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
       .send(tenantBPayload);
     expect(tenantBRes.status).toBe(200);
     const tenantBRow = await pool.query(
-      `SELECT tenant_id, role FROM users WHERE clerk_user_id = $1`,
+      `SELECT tenant_id, role, email, clerk_user_id, status, first_name, last_name, deleted_at
+       FROM users WHERE clerk_user_id = $1`,
       [tenantBClerkUserId],
     );
     expect(tenantBRow.rowCount).toBe(1);
     const tenantBId = tenantBRow.rows[0].tenant_id as string;
-    const tenantBRoleBefore = tenantBRow.rows[0].role as string;
+    // Full membership-row snapshot (not just count+role) — a regression
+    // that mutates tenant B's email/clerk_user_id/status while leaving the
+    // row count and role alone would otherwise slip past this test
+    // (Codex review, PR #1074).
+    const tenantBRowBefore = { ...tenantBRow.rows[0] };
 
     // Tenant A: two SEPARATE deliveries (distinct svix ids, as a real Clerk
     // redelivery would use) of the same user.created event. bootstrapTenant's
@@ -192,14 +197,17 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
     );
     expect(bootstrapEvents.length).toBeGreaterThanOrEqual(1);
 
-    // Neighbour (tenant B) membership is untouched by tenant A's re-delivery.
+    // Neighbour (tenant B) membership is untouched by tenant A's re-delivery
+    // — compare the FULL row, not just count+role, so a regression that
+    // mutates email/clerk_user_id/status while preserving the single owner
+    // row would still be caught.
     const tenantBAfter = await pool.query(
-      `SELECT count(*)::int AS n, role FROM users WHERE tenant_id = $1 GROUP BY role`,
+      `SELECT tenant_id, role, email, clerk_user_id, status, first_name, last_name, deleted_at
+       FROM users WHERE tenant_id = $1`,
       [tenantBId],
     );
     expect(tenantBAfter.rowCount).toBe(1);
-    expect(tenantBAfter.rows[0].n).toBe(1);
-    expect(tenantBAfter.rows[0].role).toBe(tenantBRoleBefore);
+    expect(tenantBAfter.rows[0]).toEqual(tenantBRowBefore);
   });
 
   it('rejects a Clerk webhook whose svix-timestamp is outside the 5-minute replay window', async () => {
@@ -211,16 +219,22 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
     };
     const svixId = `evt_${crypto.randomUUID()}`;
     // 10 minutes stale — outside the 300s SVIX_TOLERANCE_SECONDS tolerance
-    // enforced in webhooks/routes.ts BEFORE signature verification.
+    // enforced in webhooks/routes.ts BEFORE signature verification. The
+    // signature is deliberately INVALID (not computed for this payload) —
+    // if the handler were ever reordered to verify the signature first, an
+    // invalid signature would 401 here instead of the timestamp-specific
+    // 400, so this pins the check ORDER, not just that both reject
+    // eventually (Codex review, PR #1074).
     const staleTs = String(Math.floor(Date.now() / 1000) - 600);
 
     const res = await request(app)
       .post('/webhooks/clerk')
       .set('svix-id', svixId)
       .set('svix-timestamp', staleTs)
-      .set('svix-signature', signSvixPayload(payload, svixId, staleTs))
+      .set('svix-signature', 'v1,not-a-real-signature')
       .send(payload);
     expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Timestamp outside tolerance');
 
     const rows = await pool.query(`SELECT count(*)::int AS n FROM users WHERE clerk_user_id = $1`, [
       clerkUserId,
