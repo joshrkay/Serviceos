@@ -427,4 +427,95 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
 
     expect(pageErrors, 'no uncaught page errors during the last-owner demotion attempt').toEqual([]);
   });
+
+  test('T1 — an owner cannot PATCH another tenant\'s user (the last-owner guard\'s endpoint is itself tenant-scoped)', async ({
+    page,
+  }) => {
+    // ── CONFIRMED SECURITY DEFECT, NOT a test-harness artifact ──────────────
+    // `PgUserRepository.update` (packages/api/src/users/pg-user.ts:299-335)
+    // runs `UPDATE users SET ... WHERE id = $N AND deleted_at IS NULL` with
+    // NO `tenant_id` predicate — unlike every sibling method in the SAME
+    // file (`findById`, `findByMobileNumber` — whose own doc-comment reads
+    // "Defense-in-depth: the WHERE clause filters on tenant_id explicitly
+    // in addition to RLS... even if this runs in a context where RLS were
+    // ever misconfigured" — and `demoteOwnerIfAnotherExists`, all of which
+    // DO include `AND tenant_id = $N`). This is the repository backing
+    // `PATCH /api/users/:id` (routes/users.ts, gated only by
+    // `requirePermission('users:edit_role')`), so today ANY owner in ANY
+    // tenant can change the role (or name/canFieldServe) of ANY user id in
+    // ANY OTHER tenant — up to and including demoting another tenant's
+    // sole owner, a direct tenant-isolation break on a role-mutation
+    // endpoint. `packages/api/src/db/rls-runtime-role.ts` documents that
+    // Postgres RLS is the intended second layer (`RLS_RUNTIME_ROLE=true` is
+    // a hard prod/staging requirement) and would likely mask this in a
+    // correctly configured deployment, but the explicit predicate is
+    // supposed to hold as defense-in-depth regardless — this test proves
+    // it currently does NOT, empirically: this run performed the
+    // cross-tenant PATCH against real Postgres and confirmed via a direct
+    // DB read that tenant B's owner's `role` column was actually changed
+    // to `dispatcher` by tenant A's request.
+    //
+    // Product code is out of scope for this lane (no changes under
+    // packages/api/src) — reported here instead of invented around, per
+    // CLAUDE.md's own convention for a real, confirmed defect: "a real
+    // defect gets a failing test marked test.fail() and a report line."
+    // Recommended fix (one line, matching every sibling method): add
+    // `AND tenant_id = $N` to the UPDATE's WHERE clause.
+    test.fail(
+      true,
+      'CONFIRMED SECURITY DEFECT: PgUserRepository.update has no tenant_id predicate — see the comment above this test.',
+    );
+    // ── Tenant A ──────────────────────────────────────────────────────────
+    const ownerASub = `user_e2e_ownera2_${randomUUID().replace(/-/g, '')}`;
+    const ownerAEmail = `ownera2-${Date.now()}@serviceos-hermetic.test`;
+    const ownerAHeaders = { Authorization: `Bearer ${unsignedJwt(ownerASub)}` };
+    const bootstrapA = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: { id: ownerASub, email_addresses: [{ email_address: ownerAEmail }] },
+    });
+    expect(bootstrapA.status()).toBe(200);
+    const meA = await page.request.get(`${API_URL}/api/me`, { headers: ownerAHeaders });
+    expect(meA.status()).toBe(200);
+
+    // ── Tenant B, same run: its own sole owner. ──────────────────────────────
+    const ownerBSub = `user_e2e_ownerb2_${randomUUID().replace(/-/g, '')}`;
+    const ownerBEmail = `ownerb2-${Date.now()}@serviceos-hermetic.test`;
+    const ownerBHeaders = { Authorization: `Bearer ${unsignedJwt(ownerBSub)}` };
+    const bootstrapB = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: { id: ownerBSub, email_addresses: [{ email_address: ownerBEmail }] },
+    });
+    expect(bootstrapB.status()).toBe(200);
+    const meBRes = await page.request.get(`${API_URL}/api/me`, { headers: ownerBHeaders });
+    expect(meBRes.status()).toBe(200);
+    const meB = (await meBRes.json()) as { internal_user_id?: string };
+    expect(meB.internal_user_id).toMatch(UUID_RE);
+    const ownerBInternalId = meB.internal_user_id!;
+
+    // ── Tenant A's owner PATCHes tenant B's owner id directly. Per
+    //    routes/users.ts, `updateUser(req.auth!.tenantId, req.params.id, ...)`
+    //    scopes the lookup by the CALLER's OWN tenant — B's user row simply
+    //    isn't visible under A's tenant_id, so this is a 404, not the 400
+    //    the SAME-tenant last-owner guard returns. ────────────────────────────
+    const crossTenantPatch = await page.request.patch(`${API_URL}/api/users/${ownerBInternalId}`, {
+      headers: { 'content-type': 'application/json', ...ownerAHeaders },
+      data: JSON.stringify({ role: 'dispatcher' }),
+    });
+    expect(
+      crossTenantPatch.status(),
+      'tenant A must not be able to reach (let alone change the role of) tenant B\'s user',
+    ).toBe(404);
+
+    // ── B's owner role must be completely unaffected — checked both via the
+    //    API and by reading the row directly from Postgres. ─────────────────
+    const meBAfter = await page.request.get(`${API_URL}/api/me`, { headers: ownerBHeaders });
+    const meBAfterBody = (await meBAfter.json()) as { role?: string };
+    expect(meBAfterBody.role, 'tenant B\'s owner role must be unchanged after the cross-tenant PATCH attempt').toBe(
+      'owner',
+    );
+    expect(
+      queryScalar(`SELECT role FROM users WHERE id = '${ownerBInternalId}';`),
+      'tenant B\'s owner role column in Postgres must be unchanged',
+    ).toBe('owner');
+  });
 });

@@ -1,5 +1,55 @@
 # Owner-surfaces rung-5 browser reachability — Sonnet lane report
 
+## 🚨 CRITICAL SECURITY FINDING — read this first
+
+While adding the 1.11 T1 leg below (an owner PATCHing another tenant's
+user), this lane found and empirically confirmed a **live cross-tenant
+privilege-escalation defect**, not a test artifact:
+
+**`PgUserRepository.update`** (`packages/api/src/users/pg-user.ts:299-335`)
+runs `UPDATE users SET ... WHERE id = $N AND deleted_at IS NULL` — **no
+`tenant_id` predicate**. This is the repository backing `PATCH
+/api/users/:id` (`routes/users.ts`), gated only by
+`requirePermission('users:edit_role')` — no per-row ownership check. As
+written, **any owner in any tenant can change the role (or name /
+canFieldServe) of any user id in any other tenant**, including demoting
+another tenant's sole owner.
+
+Every sibling method in the SAME file — `findById`, `findByMobileNumber`
+(whose own doc-comment reads *"Defense-in-depth: the WHERE clause filters
+on tenant_id explicitly in addition to RLS... even if this runs in a
+context where RLS were ever misconfigured"*), and
+`demoteOwnerIfAnotherExists` — all correctly include `AND tenant_id = $N`.
+Only plain `update()` is missing it. This is an isolated omission, not an
+intentional design choice.
+
+**Empirically confirmed, not theoretical:** the new test
+(`e2e/journeys/accept-invitation.spec.ts`, `'T1 — an owner cannot PATCH
+another tenant's user...'`) had tenant A's owner PATCH tenant B's owner's
+user id with `{role: 'dispatcher'}` against real Postgres. The API
+returned `200` with the updated user (`tenantId` = B, `role: dispatcher`),
+and a direct `SELECT role FROM users WHERE id = ...` confirmed the column
+was actually changed. `packages/api/src/db/rls-runtime-role.ts` documents
+that Postgres RLS is meant to be the second layer (`RLS_RUNTIME_ROLE=true`
+is a hard prod/staging boot requirement) and would likely mask this in a
+correctly configured deployment — but the explicit predicate is supposed
+to hold as defense-in-depth regardless, per this file's own stated
+convention, and empirically it does not.
+
+**Recommended fix** (one line, matching every sibling method): add `AND
+tenant_id = $N` to the `UPDATE`'s `WHERE` clause and pass `tenantId` as a
+parameter.
+
+**Not fixed here** — `packages/api/src` is out of scope for this
+test-only lane. The test asserts the CORRECT/secure behavior (`404`, role
+unchanged) wrapped in `test.fail(true, reason)` so it fails today for the
+right, documented reason and will self-flag (an unexpected pass) the
+moment someone lands the fix. Reported immediately to the user via
+notification on discovery, in addition to this report and the PR/issue
+comments below.
+
+---
+
 Branch: `cloud/owner-surfaces-r5` off `origin/main` (`137dc559ed8f87a02a9345554c57cc5c44cf65c3`).
 
 Scope: **BROWSER-REACHABILITY only** — hermetic Playwright, real Postgres,
@@ -71,10 +121,25 @@ Received: false
 ```
 
 **Reached:** full reachability — real `/dispatch` page, real
-`GET /api/dispatch/board`, real Postgres. **Tenant grade: T2** — a second
-tenant (B) exists in the same run and its job never appears in, nor
-changes the count of, A's board (`boardAJobIds.size === 2` asserted
-explicitly, not just "contains A's jobs").
+`GET /api/dispatch/board`, real Postgres. **Tenant grade: T3** (upgraded
+post-review, see below) — a second tenant (B) exists in the same run and
+its job never appears in, nor changes the count of, A's board
+(`boardAJobIds.size === 2` asserted explicitly, not just "contains A's
+jobs").
+
+**Post-review addition (T2 → T3):** the repo owner asked for the T3 leg
+§8.0 requires wherever a capability reads per-tenant config — the board's
+"today" is computed in the TENANT's timezone, so two tenants on
+*different* zones must each get their own correct answer in the same run
+(the Phoenix case). Added: tenant B now runs on `America/Los_Angeles`
+(not `Etc/UTC`) with a job at 23:00 B-local — a UTC-next-day instant a
+naive UTC-only window would drop. A's board stays correct and unaffected
+by B's different config; B's OWN board (`GET
+/api/dispatch/board?date=<B's LA-local today>&timezone=America/Los_Angeles`)
+correctly includes the 23:00-local job, confirmed both via the API and via
+the real `/dispatch` page (jumped straight to B's date with the
+`date-nav-picker` input, since `DispatchBoard.tsx` computes its default
+date from the BROWSER's local clock, not the tenant's timezone).
 
 **DB snapshot** (`4.1-dispatch-board-appointments.snapshot.txt`):
 ```
@@ -149,8 +214,19 @@ the real `POST /api/proposals`, real Postgres before/after comparison, and
 the real `/api/proposals/inbox` read.
 `test/integration/dispatch-drag-proposal.test.ts` (#1017) already proved
 this at the router level (stamped `req.auth`, no browser); this spec adds
-the same proof from the actual UI gesture. **Tenant grade: T1** — tenant B
-(bootstrapped in the same run) never sees the proposal.
+the same proof from the actual UI gesture. **Tenant grade: T2** (upgraded
+post-review, see below).
+
+**Post-review addition (T1 → T2):** the repo owner asked for tenant B to
+perform its OWN drag in the same run rather than sitting as a passive
+bystander. Refactored the seeding/drag logic into two reusable helpers
+(`seedOwnerTechAndTwoAppointments`, `dragEarlyCardAndConfirm`) and ran the
+full flow for BOTH tenants, in two isolated browser contexts, in the same
+test: each tenant gets its own draft `reschedule_appointment` proposal,
+each tenant's `appointments` row is confirmed unchanged regardless of the
+OTHER tenant's concurrent drag, and each tenant's `/api/proposals/inbox`
+holds EXACTLY its own one proposal (asserted both directions: A's inbox
+has A's proposal and not B's; B's inbox has B's and not A's).
 
 No audit-event assertion is made on this path: `test/integration/dispatch-drag-proposal.test.ts`
 already carries a documented, `it.skip`'d RED for this (issue #1040 —
@@ -476,6 +552,18 @@ guard (b) is inherently single-tenant (there's no cross-tenant angle to
 "can the sole owner demote themselves") — T0 by the map's own vocabulary,
 which is what the row asks for.
 
+**Post-review addition (T0 → T1 leg on the guard's endpoint):** the repo
+owner asked whether `PATCH /api/users/:id` — the SAME endpoint the
+last-owner guard sits on — is itself tenant-scoped, since the story's
+single-tenant framing doesn't mean the endpoint is. Added test `'T1 — an
+owner cannot PATCH another tenant's user...'`: tenant A's owner PATCHes
+tenant B's owner's user id directly. **This is where the critical
+security finding at the top of this report was discovered** — the PATCH
+succeeded (200, role actually changed in Postgres) instead of being
+refused. The test asserts the CORRECT behavior (`404`, unchanged role) via
+`test.fail()`, per the top-of-report finding; see there for the full
+root-cause and recommended fix.
+
 **Screenshots:** `1.11-last-owner-demote-before.png`, `1.11-last-owner-demote-after.png`.
 
 **Judgment calls:**
@@ -527,6 +615,11 @@ $ cd packages/api && npx tsc --project tsconfig.build.json --noEmit
 
 ## Not done / open items for the map owner
 
+0. **🚨 The security finding at the top of this report** — highest
+   priority. `PgUserRepository.update` needs the one-line `tenant_id`
+   predicate fix; this lane's `test.fail()`'d test will confirm it once
+   landed (an unexpected pass on that test is the signal to remove
+   `test.fail()` and this note).
 1. **Row 4.4's technician-self-access gap** (§3 above) — this hermetic
    lane cannot positively prove a technician's OWN request succeeds,
    only that the guard fails closed for everyone under

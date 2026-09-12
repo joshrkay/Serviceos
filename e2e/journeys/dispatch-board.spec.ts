@@ -35,14 +35,20 @@ function pollDbSnapshot(label: string, sql: string): void {
  * board data" proves this at the function level). This spec proves the
  * SAME guarantee reachable from the real browser at `/dispatch`: an owner
  * sees today's jobs and not tomorrow's, and a second tenant in the SAME
- * run never appears in the first tenant's board — T2 (non-interference),
- * not just T1 (isolation) — per docs/PRD-v5-as-built.md §8.0.
+ * run never appears in the first tenant's board — T2 (non-interference)
+ * — per docs/PRD-v5-as-built.md §8.0.
+ *
+ * Also proves **T3** (divergently configured tenants): the board's "today"
+ * is computed in the TENANT'S timezone, so two tenants on DIFFERENT zones
+ * must each get their own correct answer in the same run — the Phoenix
+ * case §8.0 names. Tenant A stays on 'Etc/UTC'; tenant B is on
+ * 'America/Los_Angeles' with a job at 23:00 B-local (a UTC-next-day
+ * instant a naive UTC-only window would drop). A's board is unaffected by
+ * B's different config, and B's own board correctly includes its
+ * 23:00-local job when queried with B's own date + timezone.
  *
  * Bootstrap pattern mirrors e2e/journeys/digest-toggle.spec.ts /
- * signup-to-first-estimate.hermetic.spec.ts. Both tenants use timezone
- * 'Etc/UTC' so "today"/"tomorrow" bucketing needs no DST arithmetic —
- * dispatch.test.ts's own cross-tenant test uses the same UTC-calendar-day
- * convention (`new Date().toISOString().split('T')[0]`).
+ * signup-to-first-estimate.hermetic.spec.ts.
  */
 
 const API_URL = process.env.E2E_API_URL ?? 'http://localhost:3000';
@@ -114,6 +120,7 @@ async function postJson(
 async function bootstrapOwnerTenant(
   page: import('@playwright/test').Page,
   label: string,
+  timezone: string = 'Etc/UTC',
 ): Promise<{ sub: string; jwt: string; authHeaders: Record<string, string>; tenantId: string }> {
   const sub = `user_e2e_${label}_${randomUUID().replace(/-/g, '')}`;
   const email = `${label}-${Date.now()}@serviceos-hermetic.test`;
@@ -136,10 +143,10 @@ async function bootstrapOwnerTenant(
     headers: { 'content-type': 'application/json', ...authHeaders },
     data: JSON.stringify({
       businessName: `Dispatch Board E2E ${label.toUpperCase()}`,
-      businessHours: { mon: { open: '08:00', close: '17:00' }, sat: null, sun: null },
+      businessHours: { mon: { open: '00:00', close: '23:59' }, sat: { open: '00:00', close: '23:59' }, sun: { open: '00:00', close: '23:59' } },
       jobBufferMinutes: 30,
       hourlyRateCents: 12500,
-      timezone: 'Etc/UTC',
+      timezone,
     }),
   });
   expect(identityRes.ok(), `PUT /api/onboarding/identity (${label}) -> ${identityRes.status()}`).toBeTruthy();
@@ -152,6 +159,7 @@ async function seedJobAt(
   authHeaders: Record<string, string>,
   label: string,
   scheduledStartIso: string,
+  timezone: string = 'Etc/UTC',
 ): Promise<CreatedEntity> {
   const stamp = Date.now();
   const customer = await postJson(page, `${API_URL}/api/customers`, authHeaders, {
@@ -180,13 +188,48 @@ async function seedJobAt(
     priority: 'normal',
     scheduledStart: scheduledStartIso,
     durationMin: 60,
-    timezone: 'Etc/UTC',
+    timezone,
   });
   return job;
 }
 
 function isoDateOnly(d: Date): string {
   return d.toISOString().split('T')[0];
+}
+
+/** Today's calendar date in `timezone`, as YYYY-MM-DD. */
+function todayInTz(timezone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(new Date());
+}
+
+/**
+ * Tenant-local wall-clock -> UTC instant, mirroring
+ * packages/web/src/utils/formatInTenantTz.ts's `tenantWallClockToUtc`
+ * (duplicated here rather than imported across the web/e2e package
+ * boundary — pure Intl-based arithmetic, no React).
+ */
+function tenantWallClockToUtc(date: string, time: string, timezone: string): Date {
+  const [y, mo, d] = date.split('-').map(Number);
+  const [h = 0, mi = 0, s = 0] = time.split(':').map(Number);
+  const wallClockAsUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  const offsetAt = (ts: number): number => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(ts));
+    const get = (type: string): number => Number(parts.find((p) => p.type === type)?.value ?? NaN);
+    const rendered = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'), get('second'));
+    return rendered - ts;
+  };
+  let ts = wallClockAsUtc - offsetAt(wallClockAsUtc);
+  ts = wallClockAsUtc - offsetAt(ts);
+  return new Date(ts);
 }
 
 test.describe('dispatch board (4.1) — real Postgres', () => {
@@ -219,9 +262,17 @@ test.describe('dispatch board (4.1) — real Postgres', () => {
     const jobA2 = await seedJobAt(page, ownerA.authHeaders, 'A2', `${todayStr}T14:00:00.000Z`);
     const jobA3Tomorrow = await seedJobAt(page, ownerA.authHeaders, 'A3', `${tomorrowStr}T12:00:00.000Z`);
 
-    // ── Tenant B, same run: one job today ───────────────────────────────────
-    const ownerB = await bootstrapOwnerTenant(page, 'ownerb');
-    const jobB1 = await seedJobAt(page, ownerB.authHeaders, 'B1', `${todayStr}T10:00:00.000Z`);
+    // ── Tenant B, same run: DIFFERENT timezone config (T3 — divergently
+    //    configured tenants each get their own correct result). B's job is
+    //    scheduled at 23:00 America/Los_Angeles LOCAL time on B's own
+    //    tenant-local calendar day — the Phoenix-style case: in UTC terms
+    //    that instant falls on the NEXT UTC day, so it would be invisible to
+    //    a naive UTC-only day query, yet must appear as "today" on B's own
+    //    board when queried with B's date + timezone. ────────────────────────
+    const ownerB = await bootstrapOwnerTenant(page, 'ownerb', 'America/Los_Angeles');
+    const laTodayStr = todayInTz('America/Los_Angeles');
+    const jobB1StartIso = tenantWallClockToUtc(laTodayStr, '23:00', 'America/Los_Angeles').toISOString();
+    const jobB1 = await seedJobAt(page, ownerB.authHeaders, 'B1', jobB1StartIso, 'America/Los_Angeles');
 
     // ── API-level proof: A's board for today has A's 2 jobs, not tomorrow's,
     //    and not tenant B's — the T2 (non-interference) leg. ────────────────
@@ -242,7 +293,31 @@ test.describe('dispatch board (4.1) — real Postgres', () => {
     expect(boardAJobIds.has(jobA2.id), 'today job A2 must be on A\'s board').toBe(true);
     expect(boardAJobIds.has(jobA3Tomorrow.id), 'tomorrow\'s job A3 must NOT be on today\'s board').toBe(false);
     expect(boardAJobIds.has(jobB1.id), 'tenant B\'s job must never appear on A\'s board').toBe(false);
-    expect(boardAJobIds.size, 'A\'s board for today must show exactly the 2 seeded jobs').toBe(2);
+    expect(
+      boardAJobIds.size,
+      'A\'s board for today must show exactly the 2 seeded jobs, unaffected by B\'s different timezone config',
+    ).toBe(2);
+
+    // ── T3 second half: B's OWN board, queried with B's date + timezone,
+    //    must include B's 23:00-local job — the same instant a naive
+    //    UTC-only day window would have dropped. ─────────────────────────────
+    const boardBRes = await page.request.get(
+      `${API_URL}/api/dispatch/board?date=${laTodayStr}&timezone=America/Los_Angeles`,
+      { headers: ownerB.authHeaders },
+    );
+    expect(boardBRes.ok(), `GET board (B) -> ${boardBRes.status()}`).toBeTruthy();
+    const boardB = (await boardBRes.json()) as {
+      unassignedAppointments: Array<{ jobId: string }>;
+      technicianLanes: Array<{ appointments: Array<{ jobId: string }> }>;
+    };
+    const boardBJobIds = new Set([
+      ...boardB.unassignedAppointments.map((a) => a.jobId),
+      ...boardB.technicianLanes.flatMap((l) => l.appointments.map((a) => a.jobId)),
+    ]);
+    expect(
+      boardBJobIds.has(jobB1.id),
+      'B\'s 23:00 America/Los_Angeles-local job must be on B\'s OWN today, per B\'s own timezone config',
+    ).toBe(true);
 
     // ── Browser reachability: owner A's real /dispatch page ─────────────────
     await installClerkStub(page, { signedIn: true, sub: ownerA.sub, token: ownerA.jwt });
@@ -268,14 +343,24 @@ test.describe('dispatch board (4.1) — real Postgres', () => {
       fullPage: true,
     });
 
-    // ── Browser reachability: owner B, SAME run, isolated browser context ──
+    // ── Browser reachability: owner B, SAME run, isolated browser context.
+    //    The board defaults to the BROWSER's local "today" (DispatchBoard.tsx
+    //    computes selectedDate from `new Date()` using LOCAL date parts, not
+    //    the tenant timezone) — jump the date picker straight to B's
+    //    LA-local today so this doesn't depend on what the browser's own
+    //    clock/timezone happens to read at run time. ─────────────────────────
     const bContext = await context.browser()!.newContext();
     const bPage = await bContext.newPage();
     await installClerkStub(bPage, { signedIn: true, sub: ownerB.sub, token: ownerB.jwt });
     await blockExternalHosts(bPage, baseURL!);
     await bPage.goto('/dispatch');
     await expect(bPage.getByTestId('dispatch-board')).toBeVisible({ timeout: 15_000 });
+    await bPage.getByTestId('date-nav-picker').fill(laTodayStr);
     await expect(bPage.getByTestId('appointment-card')).toHaveCount(1, { timeout: 15_000 });
+    await bPage.screenshot({
+      path: 'docs/audit/lane-reports/owner-surfaces-r5/4.1-dispatch-board-owner-b-t3.png',
+      fullPage: true,
+    });
     await bContext.close();
 
     pollDbSnapshot(
