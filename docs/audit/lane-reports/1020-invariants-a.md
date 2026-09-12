@@ -821,14 +821,38 @@ more findings, all this lane's rows, all fixed and pushed:
 - All three: RED/GREEN-verified against real Postgres, `tsc` clean, no new
   gaps introduced.
 
+**Fourth round (`3809785`):** Codex's re-review on `63f9ac9` raised two
+more findings — one this lane's row (fixed), one cross-lane PRD prose
+(flagged, not fixed, same reasoning as the I3/I12′ finding above):
+
+- **I2 (P2, fixed):** the T1 test only ever read tenant B's OWN proposal
+  (`proposalB`) — it never attempted a cross-tenant read or approval
+  lookup against tenant A's proposal under tenant B's scope, so a
+  regression that dropped the `tenant_id` predicate from
+  `PgProposalRepository.findById` or `approveProposal`'s lookup would
+  have left the test green. Added
+  `proposalRepo.findById(tenantB.tenantId, proposalA.id)` → asserts
+  `null`, plus an `approveProposal` attempt against `proposalA.id` under
+  tenant B's scope → asserts `NotFoundError`. RED/GREEN-verified against
+  real Postgres.
+- **PRD overview reconciliation (P2, not this lane's to fix):** the
+  overview paragraph above the invariant table (`docs/PRD-v5-as-built.md`
+  lines 578-580) still says only five invariants clear the bar and lists
+  I4/I10/I12/I17/I9 as remaining at rung 3 — stale relative to the table
+  Fable's own stamp commit (`c434dcf`) just updated below it. Same
+  reasoning as the I3/I12′ finding: this prose spans all ten #1020 rows
+  across both lanes, and rewriting a rung/count summary is explicitly
+  Fable's call at G7, not this lane's. Answered on the thread, left
+  unresolved, flagged here for Fable/the orchestrator.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus three follow-up commits (`cfe12f1`,
-  `b033257`, `fdb5257`) fixing the six Codex findings above across three
-  review rounds.
+  this report committed, plus four follow-up commits (`cfe12f1`,
+  `b033257`, `fdb5257`, `3809785`) fixing the seven Codex findings above
+  across four review rounds.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
