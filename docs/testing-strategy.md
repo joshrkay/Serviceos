@@ -176,6 +176,75 @@ Use the mock provider adapter for all AI gateway tests:
 - Tests verify routing, logging, caching, and failover behavior
 - No real LLM calls in CI — all provider tests use mocks
 
+### Real-Postgres Playwright locally (wayfinder #1025)
+
+The `e2e/journeys/*.hermetic.spec.ts` journeys normally run against the API's
+in-memory repositories. To run one against a real Postgres instance instead
+(closer to production, and the only way to exercise Postgres-backed
+onboarding-gate/derived-status behavior), run these from the repo root with
+[colima](https://github.com/abiosoft/colima) providing Docker and no more
+than ~3 minutes total:
+
+```bash
+# 1. Point Docker at colima (not needed if colima is your only Docker context).
+export DOCKER_HOST=unix:///Users/<you>/.colima/default/docker.sock
+export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+
+# 2. Start a disposable Postgres testcontainer FIRST, before Playwright.
+#    Prints `export DATABASE_URL=postgres://test:test@localhost:<port>/serviceos_e2e_test`.
+TESTCONTAINERS_RYUK_DISABLED=true npx tsx e2e/fixtures/setup-test-db.ts
+
+# 3. Run a journey spec against it.
+DB_SSL=false DATABASE_URL=<url from step 2> \
+  VITE_CLERK_PUBLISHABLE_KEY=pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA== \
+  npx playwright test e2e/journeys/signup-to-first-estimate.hermetic.spec.ts \
+    --project=chromium --reporter=line
+
+# 4. Tear the container down when done.
+npm run e2e:db:teardown
+```
+
+Why each piece is load-bearing:
+
+- **`TESTCONTAINERS_RYUK_DISABLED=true`** — the CLI process (step 2) exits
+  after printing the URL; without this flag, Ryuk (testcontainers' reaper)
+  sees that process die and immediately kills the container out from under
+  the Playwright run that's about to use it.
+- **`DB_SSL=false`** — `packages/api/src/db/pool.ts` forces
+  `ssl: { rejectUnauthorized: false }` on any `DATABASE_URL` unless
+  `DB_SSL === 'false'`. The testcontainer speaks plain TCP, so without this
+  every query fails with "The server does not support SSL connections".
+- **Container FIRST, then Playwright** — Playwright starts the API/Vite
+  `webServer` processes *before* running `globalSetup`, and
+  `webServerEnv` captures `process.env.DATABASE_URL` at config load time. If
+  `DATABASE_URL` isn't already in the shell when `npx playwright test`
+  starts, the API boots with `InMemoryProposalRepository` regardless of what
+  `globalSetup` does afterward.
+- **The placeholder `VITE_CLERK_PUBLISHABLE_KEY`** — a hermetic journey's
+  `hasViteClerkKey()` guard just needs *some* value to not skip itself; it's
+  the same placeholder `playwright.config.ts` uses for the devauth project.
+
+Add `E2E_USE_TEST_DB=true` to step 3 to also exercise the `global-setup.ts`
+ephemeral-DB bootstrap (mode 1: it adopts the already-set `DATABASE_URL`,
+runs migrations idempotently, and seeds journey fixtures) — useful when
+testing that bootstrap path itself, but note it truncates all tables in
+`global-teardown.ts` at the end of the run, so omit it if you want to inspect
+rows in the container afterward (e.g. `docker exec <container> psql -U test
+-d serviceos_e2e_test -c 'select * from estimates'`).
+
+This is one of three distinct e2e runners, not two — don't conflate them:
+
+- **`chromium`/`chromium-devauth`** (no `DATABASE_URL`) — in-memory only,
+  runs on every PR, fastest.
+- **This recipe** — real Postgres, fully local and hermetic (no secrets, no
+  deployed environment), for rung-5 reachability specs that need
+  Postgres-derived behavior (e.g. `deriveOnboardingStatus`).
+- **`qa-matrix`** — also real Postgres, but *not* hermetic: its precheck
+  (`e2e/qa-matrix/precheck.spec.ts`) requires `E2E_BASE_URL`, `E2E_API_URL`,
+  `E2E_DB_URL_READONLY`/`READWRITE`, `E2E_CLERK_HMAC_SECRET`, and seeded
+  tenant A/B ids — i.e. a deployed Railway dev environment (see
+  `qa/README.md`), not a disposable local container.
+
 ---
 
 ## AI-Specific Testing
