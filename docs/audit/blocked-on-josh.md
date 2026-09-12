@@ -54,3 +54,17 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **What:** `TechnicianAssignmentNotifier` is now registered (PR #1029). Every assign/unassign/reassign texts the technician whenever a delivery provider is wired; the only switches are the global `SMS_ENABLED` kill switch and whether the tech has a mobile on file. Dispatch churn sends one text per hop.
 - **Josh's call:** add a per-tenant `notifyTechniciansBySms` (default on or off?) and/or a churn window? Push notifications are unaffected (per-user mutes apply).
 - **Until decided:** nothing to build; issue #1033 holds the analysis.
+
+### §8.12 memberships — what does "bills itself" minimally mean? (from #1023, issue #1058)
+- **What:** the recurring-agreements sweep renews and bills on real rows (proven, `membership-renewal-sweep.test.ts`), but every dues invoice it writes is `draft`, has no `due_date`, and is numbered `AGREEMENT-<epoch ms>` outside the tenant sequence — so dues are never collectable without a human, can never go overdue, and the dunning cadence proven on 8.9 cannot reach membership revenue. Three `it.fails` pin the desired behaviour.
+- **Josh's call:** does "recurring revenue is actually recurring" require (a) issuing the dues invoice, (b) a due date so the cadence chases it, (c) numbering off the tenant sequence — all three, or a different minimum? Also whether `auto_collect_dues` + `StripeDuesCollector` is the intended path (see credentials below).
+- **Until decided:** row 8.12 stays at 3 STORY NOT MET; #1058 holds the analysis with file:line.
+
+### Stripe test-mode key for `StripeDuesCollector` (from #1023) — Credentials
+- **What:** off-session dues collection (`StripeDuesCollector.collect`) needs a Stripe test-mode credential in CI to charge a saved card; without it only the orchestration around it can be tested and any injected collector is *mocked is not proven*. Same credential unblocks §8.5's off-session-charge half (see the #1022 entry above).
+- **Row waiting:** 8.12's "dues collect" clause; 8.5b/c.
+
+### Spanish E1 life-safety gap — who owns the fix? (from #1014 lane B, issue #1056)
+- **What:** "fuga de gas" classifies **E2**, not E1: the caller is bridged to the dispatcher, never told to evacuate, the call is not closed, and a booking drafted earlier in the call stays live (`emergency-tier.ts:213/265`, English-only `E1_HAZARD_PHRASES` at `:73`). Proven end to end at the real handler; pinned as a characterization test plus an `it.fails`.
+- **Josh's call:** name the owner for a life-safety change to `emergency-tier.ts` semantics (the fix shape is small — carry the detector's `language` into the E1 candidate, or add the Spanish hazard phrases — but it sits next to O-2 and needs trade standing, not a test lane).
+- **Until decided:** row 2.5 is graded on the English path with the Spanish gap named; #1056 holds the analysis.
