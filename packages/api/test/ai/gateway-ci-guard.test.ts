@@ -88,3 +88,401 @@ describe('P2-027 Gap 3 — AI gateway guard', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// §5 I15 SCOPE CAVEAT (#1021) — the guard above is OpenAI-specific
+//
+// The PRD's I15 row carries the caveat verbatim: *"Scope caveat:
+// OpenAI-specific — an `@anthropic-ai/sdk` import would pass it"*. The shell
+// guard's pattern list is `new OpenAI(`, `client.chat.completions.create`,
+// and `from 'openai'`. Every one of those is a string about ONE vendor, so
+// I15's law — "No module outside it may import a provider SDK" (D-005) —
+// held only for the vendor the repo happened to start with.
+//
+// This closes the caveat in the test lane rather than by editing the shell
+// script, so the guard stays a vitest structural test (#1021's brief) and the
+// vendor list lives next to the negative controls that prove it works.
+//
+// **The rule in one sentence:** no module outside `src/ai/gateway` and
+// `src/ai/providers` may import ANY LLM provider SDK, construct a provider
+// client, or reach a provider HTTP endpoint directly.
+// ───────────────────────────────────────────────────────────────────────────
+
+import { describe as describeSdk, it as itSdk, expect as expectSdk } from 'vitest';
+import {
+  listSourceFiles,
+  plantTree,
+  removeTree,
+  type SourceFile,
+} from '../support/structural-scan';
+
+const API_SRC_DIR = path.resolve(__dirname, '../../src');
+
+/**
+ * The directories that ARE the gateway — the only place a provider SDK may be
+ * imported (D-005). Mirrors the shell guard's GATEWAY_DIR / PROVIDERS_DIR.
+ */
+const GATEWAY_TREES = ['src/ai/gateway/', 'src/ai/providers/'] as const;
+
+/**
+ * Every LLM provider SDK package this repo could plausibly reach for. Exact
+ * module specifiers (or their `/` subpaths), so a relative `from '../ai/...'`
+ * is never mistaken for the Vercel `ai` package.
+ *
+ * Listed by vendor rather than pattern-matched, because "is this an LLM SDK"
+ * is a fact about the package, not about its name — and because a reviewer
+ * adding a vendor should have to add it here, in front of the negative
+ * control that proves the guard catches it.
+ */
+const PROVIDER_SDK_PACKAGES = [
+  'openai',
+  '@anthropic-ai/sdk',
+  '@anthropic-ai/bedrock-sdk',
+  '@anthropic-ai/vertex-sdk',
+  '@google/generative-ai',
+  '@google/genai',
+  '@google-cloud/vertexai',
+  '@aws-sdk/client-bedrock-runtime',
+  'cohere-ai',
+  '@mistralai/mistralai',
+  'groq-sdk',
+  'replicate',
+  'together-ai',
+  'ollama',
+  'ai',
+  '@ai-sdk/openai',
+  '@ai-sdk/anthropic',
+  '@ai-sdk/google',
+  '@ai-sdk/azure',
+  '@ai-sdk/amazon-bedrock',
+  '@ai-sdk/mistral',
+  '@ai-sdk/cohere',
+  '@azure/openai',
+  '@azure-rest/ai-inference',
+  '@huggingface/inference',
+  '@fireworks-ai/sdk',
+  'openai-edge',
+  'anthropic',
+  'portkey-ai',
+  'llamaindex',
+  'langchain',
+  '@langchain/core',
+  '@langchain/openai',
+  '@langchain/anthropic',
+] as const;
+
+/**
+ * Installed packages whose NAME looks provider-shaped but which are not LLM
+ * provider SDKs. Declared so the manifest audit below can tell "reviewed and
+ * fine" from "nobody has looked".
+ */
+const NOT_A_PROVIDER_SDK: ReadonlyArray<{ name: string; why: string }> = [
+  {
+    name: '@ai-service-os/shared',
+    why: "This monorepo's own shared package — matches on 'ai' only because it is the product's name.",
+  },
+];
+
+/** Direct client construction / call shapes, vendor by vendor. */
+const PROVIDER_CALL_SHAPES: ReadonlyArray<{ vendor: string; pattern: RegExp }> = [
+  { vendor: 'openai', pattern: /\bnew\s+OpenAI\s*\(/ },
+  { vendor: 'openai', pattern: /\.chat\.completions\.create\s*\(/ },
+  { vendor: 'anthropic', pattern: /\bnew\s+Anthropic(?:Bedrock|Vertex)?\s*\(/ },
+  { vendor: 'anthropic', pattern: /\.messages\.(?:create|stream)\s*\(/ },
+  { vendor: 'google', pattern: /\bnew\s+GoogleGenerativeAI\s*\(|\.generateContent\s*\(/ },
+  { vendor: 'cohere', pattern: /\bnew\s+CohereClient\s*\(/ },
+  { vendor: 'mistral', pattern: /\bnew\s+Mistral(?:Client)?\s*\(/ },
+  { vendor: 'groq', pattern: /\bnew\s+Groq\s*\(/ },
+];
+
+/** Provider HTTP endpoints — an SDK-free `fetch` bypasses every import guard. */
+const PROVIDER_ENDPOINTS = [
+  'api.openai.com',
+  'api.anthropic.com',
+  'generativelanguage.googleapis.com',
+  'api.cohere.ai',
+  'api.mistral.ai',
+  'api.groq.com',
+  'bedrock-runtime.',
+] as const;
+
+/**
+ * Speech paths on the same vendor hosts, which I15 does NOT govern.
+ *
+ * D-005 and I15 are about **LLM calls** — "cost, retries and the audit trail"
+ * of a completion. `POST api.openai.com/v1/audio/speech` (TTS) and
+ * `/v1/audio/transcriptions` (STT) are neither completions nor routed through
+ * `LLMGateway.complete`; they have their own provider abstractions
+ * (`ai/tts/tts-provider.ts`, `voice/transcription-providers.ts`). Excluding
+ * them by PATH rather than by file keeps the exclusion narrow: a chat
+ * completion on the very same host still fails, as the negative control below
+ * proves.
+ *
+ * Flagged in the lane report as a scope question for Fable: if the product
+ * wants speech spend on the same cost/audit rail as completions, that is a
+ * gateway change, not a guard change.
+ */
+const NON_LLM_VENDOR_PATHS = ['/v1/audio/', '/v1/speech', '/audio/transcriptions'] as const;
+
+interface ProviderBypass {
+  readonly at: string;
+  readonly kind: 'sdk-import' | 'client-call' | 'http-endpoint';
+  readonly detail: string;
+  readonly snippet: string;
+}
+
+function importSpecifiers(line: string): string[] {
+  const out: string[] = [];
+  for (const m of line.matchAll(/(?:from|require\s*\(|import\s*\()\s*['"]([^'"]+)['"]/g)) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
+function isProviderPackage(spec: string): boolean {
+  return PROVIDER_SDK_PACKAGES.some((p) => spec === p || spec.startsWith(`${p}/`));
+}
+
+function inGatewayTree(rel: string): boolean {
+  return GATEWAY_TREES.some((t) => rel.startsWith(t));
+}
+
+/**
+ * Every direct provider reach outside the gateway trees. Pure in its roots,
+ * so the negative controls can point it at a planted tree — the same property
+ * that makes the shell guard above provable.
+ */
+export function providerBypassesOutsideGateway(roots: readonly string[]): ProviderBypass[] {
+  const found: ProviderBypass[] = [];
+  for (const file of listSourceFiles(roots) as SourceFile[]) {
+    if (inGatewayTree(file.rel)) continue;
+    const code = file.code.split('\n');
+    const raw = file.text.split('\n');
+    for (let i = 0; i < code.length; i += 1) {
+      const at = `${file.rel}:${i + 1}`;
+      const snippet = (raw[i] ?? '').trim();
+      for (const spec of importSpecifiers(code[i])) {
+        if (isProviderPackage(spec)) {
+          found.push({ at, kind: 'sdk-import', detail: spec, snippet });
+        }
+      }
+      for (const shape of PROVIDER_CALL_SHAPES) {
+        if (shape.pattern.test(code[i])) {
+          found.push({ at, kind: 'client-call', detail: shape.vendor, snippet });
+        }
+      }
+      for (const endpoint of PROVIDER_ENDPOINTS) {
+        if (!code[i].includes(endpoint)) continue;
+        if (NON_LLM_VENDOR_PATHS.some((p) => code[i].includes(p))) continue;
+        found.push({ at, kind: 'http-endpoint', detail: endpoint, snippet });
+      }
+    }
+  }
+  return found;
+}
+
+describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just OpenAI', () => {
+  itSdk('the clean tree reaches no provider directly outside src/ai/gateway and src/ai/providers', () => {
+    expectSdk(
+      providerBypassesOutsideGateway([API_SRC_DIR]).map(
+        (b) => `${b.at}  [${b.kind}: ${b.detail}]  ${b.snippet}`,
+      ),
+      [
+        'A module outside the gateway reaches a provider directly.',
+        '',
+        'I15/D-005: all LLM calls route through one gateway so cost, retries and',
+        'the audit trail cannot be bypassed. Use LLMGateway.complete().',
+      ].join('\n'),
+    ).toEqual([]);
+  });
+
+  itSdk('the vendor list is not vacuous: the gateway trees DO import a provider SDK', () => {
+    // If this ever came back empty the guard would be measuring nothing —
+    // §12.4d, "directory is not proof".
+    const inside = (listSourceFiles([API_SRC_DIR]) as SourceFile[])
+      .filter((f) => inGatewayTree(f.rel))
+      .filter((f) => f.code.split('\n').some((l) => importSpecifiers(l).some(isProviderPackage)));
+    expectSdk(inside.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The list is checked against the MANIFEST, not just against itself.
+   *
+   * Reviewed on PR #1063 (round 3): "iterating over this same list in the
+   * negative control is circular and cannot reveal omissions". True — a list
+   * can only catch what someone remembered. This closes the circularity from
+   * the side that actually matters: a provider SDK cannot be imported unless
+   * it is installed, so every dependency in `package.json` must be either a
+   * KNOWN provider SDK (caught by the guard) or explicitly declared not to be
+   * one. Adding `@azure/openai` to `dependencies` then fails HERE, before any
+   * module imports it.
+   *
+   * It does not make the list complete in the abstract — nothing short of a
+   * curated registry would — but it makes it complete with respect to what
+   * this repo can actually reach, which is the property I15 needs.
+   */
+  itSdk('the vendor list is audited against package.json — an installed provider SDK cannot go undeclared', () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'),
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    const installed = [
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+    ];
+
+    // Anything whose name suggests a model provider must be classified.
+    const providerShaped = installed.filter((name) =>
+      /openai|anthropic|claude|gemini|vertex|bedrock|cohere|mistral|groq|llama|ollama|replicate|together|huggingface|azure|genai|langchain|ai-sdk|^ai$/i.test(
+        name,
+      ),
+    );
+    const unclassified = providerShaped.filter(
+      (name) =>
+        !PROVIDER_SDK_PACKAGES.some((p) => name === p || name.startsWith(`${p}/`)) &&
+        !NOT_A_PROVIDER_SDK.some((n) => n.name === name),
+    );
+    expectSdk(
+      unclassified,
+      [
+        'A provider-shaped dependency is installed and nobody has said what it is.',
+        '',
+        'If it is an LLM provider SDK, add it to PROVIDER_SDK_PACKAGES so the',
+        'guard rejects it outside the gateway. If it is not, add it to',
+        'NOT_A_PROVIDER_SDK with the reason.',
+      ].join('\n'),
+    ).toEqual([]);
+  });
+
+  itSdk('NEGATIVE CONTROL — a planted `@anthropic-ai/sdk` import fails (the exact caveat the PRD names)', () => {
+    const dir = plantTree('i15-anthropic', {
+      'planted-anthropic.ts': [
+        "import Anthropic from '@anthropic-ai/sdk';",
+        "const client = new Anthropic({ apiKey: 'x' });",
+        "export const run = () => client.messages.create({ model: 'claude', messages: [] } as never);",
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = providerBypassesOutsideGateway([dir]);
+      expectSdk(found.map((f) => f.kind)).toContain('sdk-import');
+      expectSdk(found.map((f) => f.detail)).toContain('@anthropic-ai/sdk');
+      expectSdk(found.map((f) => f.detail)).toContain('anthropic');
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  itSdk('NEGATIVE CONTROL — every listed vendor SDK is caught, not just the two the repo has heard of', () => {
+    for (const pkg of PROVIDER_SDK_PACKAGES) {
+      const dir = plantTree('i15-vendor', {
+        'planted.ts': [`import x from '${pkg}';`, 'export default x;', ''].join('\n'),
+      });
+      try {
+        const found = providerBypassesOutsideGateway([dir]);
+        expectSdk(found.map((f) => f.detail), pkg).toContain(pkg);
+      } finally {
+        removeTree(dir);
+      }
+    }
+  });
+
+  itSdk('NEGATIVE CONTROL — an SDK-free fetch to a provider endpoint fails too', () => {
+    const dir = plantTree('i15-fetch', {
+      'planted-fetch.ts': [
+        'export async function complete(prompt: string) {',
+        "  const res = await fetch('https://api.anthropic.com/v1/messages', {",
+        "    method: 'POST',",
+        '    body: JSON.stringify({ prompt }),',
+        '  });',
+        '  return res.json();',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = providerBypassesOutsideGateway([dir]);
+      expectSdk(found.map((f) => f.kind)).toContain('http-endpoint');
+      expectSdk(found.map((f) => f.detail)).toContain('api.anthropic.com');
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  itSdk('NEGATIVE CONTROL (inverse) — a relative import of the repo\'s own ai/ tree is NOT mistaken for the `ai` package', () => {
+    const dir = plantTree('i15-relative', {
+      'consumer.ts': [
+        "import { LLMGateway } from '../ai/gateway';",
+        "import { buildContext } from './ai/orchestration/context-builder';",
+        'export const g = LLMGateway;',
+        'export const b = buildContext;',
+        '',
+      ].join('\n'),
+    });
+    try {
+      expectSdk(providerBypassesOutsideGateway([dir])).toEqual([]);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  itSdk('the speech exclusion is narrow: a chat completion on the SAME host still fails', () => {
+    const dir = plantTree('i15-same-host', {
+      'speech.ts': [
+        "export const tts = () => fetch('https://api.openai.com/v1/audio/speech');",
+        '',
+      ].join('\n'),
+      'completion.ts': [
+        "export const chat = () => fetch('https://api.openai.com/v1/chat/completions');",
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = providerBypassesOutsideGateway([dir]);
+      expectSdk(found).toHaveLength(1);
+      expectSdk(found[0].at).toMatch(/completion\.ts:1$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  itSdk('the three speech call sites this exclusion covers are still exactly those three', () => {
+    // Named so the exclusion cannot quietly grow: a fourth vendor-host fetch
+    // that happens to sit under /v1/audio/ still shows up in review here.
+    const speechSites = (listSourceFiles([API_SRC_DIR]) as SourceFile[])
+      .filter((f) => !inGatewayTree(f.rel))
+      .flatMap((f) =>
+        f.code
+          .split('\n')
+          .map((l, i) => ({ l, at: `${f.rel}:${i + 1}` }))
+          .filter(
+            (x) =>
+              PROVIDER_ENDPOINTS.some((e) => x.l.includes(e)) &&
+              NON_LLM_VENDOR_PATHS.some((p) => x.l.includes(p)),
+          ),
+      )
+      .map((x) => x.at);
+    expectSdk(speechSites.sort()).toEqual([
+      'src/ai/tts/tts-provider.ts:94',
+      'src/voice/transcription-providers.ts:166',
+      'src/voice/voice-service.ts:263',
+    ]);
+  });
+
+  itSdk('NEGATIVE CONTROL (inverse) — a provider SDK named only in a doc comment is NOT reported', () => {
+    const dir = plantTree('i15-comment-only', {
+      'commented.ts': [
+        '/**',
+        " * Do not `import Anthropic from '@anthropic-ai/sdk'` here — every call",
+        ' * goes through LLMGateway.complete() (D-005).',
+        ' */',
+        'export const ok = true;',
+        '',
+      ].join('\n'),
+    });
+    try {
+      expectSdk(providerBypassesOutsideGateway([dir])).toEqual([]);
+    } finally {
+      removeTree(dir);
+    }
+  });
+});

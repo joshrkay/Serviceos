@@ -231,28 +231,16 @@ describe('Postgres integration — negotiation guardrail REFUSE branch (REJECT_W
 
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
-  });
 
-  afterAll(async () => {
-    await closeSharedTestDb();
-  });
-
-  function makeEvaluateDiscount(customerId: string) {
-    const quoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
-    return (tenantId: string, _phoneE164: string, askText: string) =>
-      evaluateNegotiationDiscount({
-        tenantId,
-        customerId,
-        askText,
-        settingsRepo,
-        quoteResolver,
-      });
-  }
-
-  it('refuses a discount below the tenant floor: hands off to the owner with a counter price, never quotes the ask, and audits the routing', async () => {
-    // $100.00 quote, $60.00 absolute floor — a $50 discount ask lands at
-    // $50.00, BELOW the floor, so evaluateDiscountAsk (untouched, pure) must
-    // return REJECT_WITH_COUNTER at the $60.00 floor.
+    // Codex finding (PR #1043): this used to be seeded inside the first
+    // `it` below, so running this file with `-t` filtered to ONLY the T1
+    // case (which never seeds it itself) skipped that test and left tenant
+    // A's policy unconfigured — `evaluateNegotiationDiscount` then took the
+    // unconfigured-policy fallback path instead of the real $60.00-floor
+    // REJECT_WITH_COUNTER path, so T1 silently stopped proving what it
+    // claims to under `-t`. Seeded once here instead, so every test in this
+    // describe block — run together OR filtered individually — sees the
+    // same real tenant A policy row.
     await settingsRepo.create({
       id: crypto.randomUUID(),
       tenantId: tenantA.tenantId,
@@ -272,7 +260,29 @@ describe('Postgres integration — negotiation guardrail REFUSE branch (REJECT_W
       discountFloorCents: 6000,
       discountNeverBelowCatalog: false,
     });
+  });
 
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  function makeEvaluateDiscount(customerId: string) {
+    const quoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
+    return (tenantId: string, _phoneE164: string, askText: string) =>
+      evaluateNegotiationDiscount({
+        tenantId,
+        customerId,
+        askText,
+        settingsRepo,
+        quoteResolver,
+      });
+  }
+
+  it('refuses a discount below the tenant floor: hands off to the owner with a counter price, never quotes the ask, and audits the routing', async () => {
+    // $100.00 quote, $60.00 absolute floor (seeded once in beforeAll, shared
+    // by every test in this describe block) — a $50 discount ask lands at
+    // $50.00, BELOW the floor, so evaluateDiscountAsk (untouched, pure) must
+    // return REJECT_WITH_COUNTER at the $60.00 floor.
     const { customerId } = await seedSentEstimate(
       pool,
       tenantA,
