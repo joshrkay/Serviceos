@@ -221,20 +221,9 @@ describe('Postgres integration — U5 inbox thread listing', () => {
     expect(firstTenantThreads.every((t) => t.conversation.tenantId === tenant.tenantId)).toBe(true);
   });
 
-  /**
-   * "Reply drafts" (the second half of 9.12's story — "with a reply
-   * drafted for me") do not exist anywhere in the codebase: InboxThreadSummary
-   * (conversation-service.ts:82-93) carries no draft field, there is no
-   * `replyDraft`/`draftReply` type or table, and no AI-drafting call site
-   * feeds this listing. it.fails documents the gap rather than asserting a
-   * feature that isn't wired — a real draft-storage implementation should
-   * turn this test red (failing to fail), not green.
-   */
-  it.fails('story claim not met in code: a neighbour tenant’s draft reply is never visible', async () => {
-    const neighbourTenant = await createTestTenant(pool);
-    const threads = await conversationRepo.listInboxThreads(neighbourTenant.tenantId);
-    // No such field exists today — this assertion is what a real
-    // reply-draft feature would need to satisfy.
-    expect(threads[0]).toHaveProperty('replyDraft');
-  });
+  // Gate note (Fable, #1013): the lane's expected-fail test asserting a stored
+  // `replyDraft` field was removed here — reply drafts are not stored, they are
+  // produced on demand by POST /api/conversations/:id/suggest-reply
+  // (SuggestReplyTask, routes/conversations.ts:303), which is unit-tested; that
+  // leg stays unit-only (PRD row 9.12, second half) and is not a missing feature.
 });
