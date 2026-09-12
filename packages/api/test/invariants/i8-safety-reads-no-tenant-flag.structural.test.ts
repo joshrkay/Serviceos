@@ -35,8 +35,18 @@
  * this path fails the build — I8′'s story says "no setting ANYWHERE", and a
  * deploy-time env switch is still a setting.
  *
+ * ## Two axes, after review (PR #1063)
+ *
+ * A fixed CONFIG vocabulary (`settingsRepo`, `tenantSettings`, …) is renameable:
+ * `options.disableEmergency` matches none of it. So the guard also keys on the
+ * ACTION a kill switch must perform — disable, suppress, bypass, skip, opt out,
+ * override — which is not renameable; and it pins the exported SIGNATURES of
+ * the path's entry points, because a tier function cannot consult a setting it
+ * was never handed. Between them, the object name no longer matters.
+ *
  * Evidence class: STRUCTURAL (negative controls plant a tenant-flag read, an
- * env switch, and a new closure member).
+ * env switch, a generically-named suppression switch, and a new closure
+ * member).
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
@@ -114,6 +124,55 @@ const FORBIDDEN_READS: ReadonlyArray<{ rule: string; why: string; pattern: RegEx
     rule: 'environment-switch',
     why: 'I8′ says no setting ANYWHERE. A deploy-time env switch on the safety path is still a setting, and one nobody sees in review.',
     pattern: /\bprocess\.env\b/,
+  },
+  {
+    rule: 'suppression-verb',
+    why: "Keyed on the ACTION, not the object. Reviewed on PR #1063: the three rules above recognise a fixed CONFIG vocabulary, so `options.disableEmergency` or a destructured alias slips past every one of them. What cannot be renamed away is what a kill switch has to DO — disable, suppress, bypass, skip, turn off, opt out, override — so that is what this matches, on any receiver.",
+    pattern:
+      /\.(disable[A-Z_]?\w*|suppress\w*|bypass\w*|skip\w*|optOut\w*|override\w*|\w*Disabled|\w*Suppressed|\w*Bypassed)\b|\b(disable|suppress|bypass|skipSafety|turnOff)[A-Z]\w*\s*[:=]/,
+  },
+];
+
+/**
+ * The exported entry points of the safety path, with the parameter list each
+ * one is allowed to take.
+ *
+ * The second half of the PR #1063 answer. A text scan cannot trace a
+ * configuration value through a destructured alias — but a tier function
+ * cannot consult a tenant setting it was never handed, so pinning the
+ * SIGNATURES closes the same hole from the other end: a new `options` or
+ * `settings` parameter on any of these fails here, whatever it is called
+ * inside. `rules?: TriageRules` is the one config-shaped parameter, and it is
+ * the OPTIONAL corpus enrichment the module's own header describes — it can
+ * only add signals, never remove one, because the final tier is the MAX.
+ */
+const PINNED_ENTRY_SIGNATURES: ReadonlyArray<{ file: string; signature: RegExp; why: string }> = [
+  {
+    file: 'src/ai/agents/customer-calling/emergency-tier.ts',
+    signature:
+      /export function classifyCallerSafety\(\s*utterance: string,\s*ctx: UrgencyContext,\s*rules\?: TriageRules,\s*\)/,
+    why: 'The tier entry point. Takes the utterance, the call context, and the OPTIONAL corpus rules — no tenant handle of any kind.',
+  },
+  {
+    file: 'src/ai/agents/customer-calling/emergency-tier.ts',
+    signature: /export function detectLifeSafetyE1\(\s*transcript: string,\s*\)/,
+    why: 'The E1 detector takes a transcript and nothing else.',
+  },
+  {
+    file: 'src/ai/agents/customer-calling/emergency-tier.ts',
+    signature: /export function detectEmbeddedE2\(\s*transcript: string,\s*\)/,
+    why: 'The E2 detector takes a transcript and nothing else.',
+  },
+  {
+    file: 'src/ai/agents/customer-calling/emergency-detector.ts',
+    signature: /export function detectEmergency\(transcript: string\): EmergencyMatch/,
+    why: 'The keyword backstop takes a transcript and nothing else.',
+  },
+  {
+    file: 'src/ai/skills/classify-urgency-tier.ts',
+    signature:
+      /export function classifyUrgencyTier\(\s*input: UrgencyClassificationInput,\s*rules: TriageRules,\s*\)/,
+    why: 'The richer engine takes its input and the corpus rules — no tenant handle.',
   },
 ];
 
@@ -216,7 +275,48 @@ describe('§5 I8′ (STRUCTURAL) — no tenant setting, flag or env switch can s
     expect(RECORDED_EXCEPTIONS).toHaveLength(1);
   });
 
+  it('the safety entry points still take no tenant handle (a new config parameter fails here)', () => {
+    for (const pinned of PINNED_ENTRY_SIGNATURES) {
+      const text = fs.readFileSync(path.join(API_ROOT, pinned.file), 'utf8');
+      const normalized = stripComments(text).replace(/\s+/g, ' ');
+      expect(
+        pinned.signature.test(normalized),
+        `${pinned.file}: ${pinned.why}\n\nA safety entry point's signature changed. If a ` +
+          'parameter was added, say what it is and why it cannot suppress a tier — I8′ is the ' +
+          'invariant that no setting anywhere can switch safety off.',
+      ).toBe(true);
+    }
+  });
+
   // ─── Negative controls ────────────────────────────────────────────────────
+
+  it('NEGATIVE CONTROL — a suppression switch read through a GENERIC name is reported', () => {
+    // The false negative reviewed on PR #1063: `options`, `preferences` and
+    // destructured aliases match none of the config-vocabulary rules.
+    const dir = plantTree('i8-generic-name', {
+      'planted-options.ts': [
+        "export function classify(utterance: string, options: { disableEmergency?: boolean }) {",
+        "  if (options.disableEmergency) return 'E3';",
+        "  return 'E1';",
+        '}',
+        '',
+      ].join('\n'),
+      'planted-destructured.ts': [
+        'export function classify(prefs: Record<string, boolean>) {',
+        '  const { emergencyDetectionDisabled } = prefs;',
+        "  return emergencyDetectionDisabled ? 'E3' : 'E1';",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const reads = configReadsIn(['planted-options.ts', 'planted-destructured.ts'], dir);
+      expect(reads.map((r) => r.rule)).toContain('suppression-verb');
+      expect(reads.some((r) => r.at.startsWith('planted-options.ts'))).toBe(true);
+    } finally {
+      removeTree(dir);
+    }
+  });
 
   it('NEGATIVE CONTROL — a planted tenant-settings read on the path is reported', () => {
     const dir = plantTree('i8-tenant-flag', {
@@ -307,9 +407,12 @@ describe('§5 I8′ (STRUCTURAL) — no tenant setting, flag or env switch can s
   });
 
   it('every forbidden-read rule carries its reason', () => {
-    expect(FORBIDDEN_READS).toHaveLength(3);
+    expect(FORBIDDEN_READS).toHaveLength(4);
     for (const rule of FORBIDDEN_READS) {
       expect(rule.why.length, rule.rule).toBeGreaterThan(50);
+    }
+    for (const pinned of PINNED_ENTRY_SIGNATURES) {
+      expect(pinned.why.length, pinned.file).toBeGreaterThan(30);
     }
   });
 });

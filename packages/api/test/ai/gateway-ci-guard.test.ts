@@ -153,11 +153,35 @@ const PROVIDER_SDK_PACKAGES = [
   '@ai-sdk/openai',
   '@ai-sdk/anthropic',
   '@ai-sdk/google',
+  '@ai-sdk/azure',
+  '@ai-sdk/amazon-bedrock',
+  '@ai-sdk/mistral',
+  '@ai-sdk/cohere',
+  '@azure/openai',
+  '@azure-rest/ai-inference',
+  '@huggingface/inference',
+  '@fireworks-ai/sdk',
+  'openai-edge',
+  'anthropic',
+  'portkey-ai',
+  'llamaindex',
   'langchain',
   '@langchain/core',
   '@langchain/openai',
   '@langchain/anthropic',
 ] as const;
+
+/**
+ * Installed packages whose NAME looks provider-shaped but which are not LLM
+ * provider SDKs. Declared so the manifest audit below can tell "reviewed and
+ * fine" from "nobody has looked".
+ */
+const NOT_A_PROVIDER_SDK: ReadonlyArray<{ name: string; why: string }> = [
+  {
+    name: '@ai-service-os/shared',
+    why: "This monorepo's own shared package — matches on 'ai' only because it is the product's name.",
+  },
+];
 
 /** Direct client construction / call shapes, vendor by vendor. */
 const PROVIDER_CALL_SHAPES: ReadonlyArray<{ vendor: string; pattern: RegExp }> = [
@@ -279,6 +303,54 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
       .filter((f) => inGatewayTree(f.rel))
       .filter((f) => f.code.split('\n').some((l) => importSpecifiers(l).some(isProviderPackage)));
     expectSdk(inside.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The list is checked against the MANIFEST, not just against itself.
+   *
+   * Reviewed on PR #1063 (round 3): "iterating over this same list in the
+   * negative control is circular and cannot reveal omissions". True — a list
+   * can only catch what someone remembered. This closes the circularity from
+   * the side that actually matters: a provider SDK cannot be imported unless
+   * it is installed, so every dependency in `package.json` must be either a
+   * KNOWN provider SDK (caught by the guard) or explicitly declared not to be
+   * one. Adding `@azure/openai` to `dependencies` then fails HERE, before any
+   * module imports it.
+   *
+   * It does not make the list complete in the abstract — nothing short of a
+   * curated registry would — but it makes it complete with respect to what
+   * this repo can actually reach, which is the property I15 needs.
+   */
+  itSdk('the vendor list is audited against package.json — an installed provider SDK cannot go undeclared', () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'),
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    const installed = [
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+    ];
+
+    // Anything whose name suggests a model provider must be classified.
+    const providerShaped = installed.filter((name) =>
+      /openai|anthropic|claude|gemini|vertex|bedrock|cohere|mistral|groq|llama|ollama|replicate|together|huggingface|azure|genai|langchain|ai-sdk|^ai$/i.test(
+        name,
+      ),
+    );
+    const unclassified = providerShaped.filter(
+      (name) =>
+        !PROVIDER_SDK_PACKAGES.some((p) => name === p || name.startsWith(`${p}/`)) &&
+        !NOT_A_PROVIDER_SDK.some((n) => n.name === name),
+    );
+    expectSdk(
+      unclassified,
+      [
+        'A provider-shaped dependency is installed and nobody has said what it is.',
+        '',
+        'If it is an LLM provider SDK, add it to PROVIDER_SDK_PACKAGES so the',
+        'guard rejects it outside the gateway. If it is not, add it to',
+        'NOT_A_PROVIDER_SDK with the reason.',
+      ].join('\n'),
+    ).toEqual([]);
   });
 
   itSdk('NEGATIVE CONTROL — a planted `@anthropic-ai/sdk` import fails (the exact caveat the PRD names)', () => {
