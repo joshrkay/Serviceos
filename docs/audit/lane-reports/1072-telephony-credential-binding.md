@@ -584,9 +584,53 @@ storing the tenant alongside the cached TwiML and comparing it with the verified
 credential — a new capability rather than a fix for a break, so it is NOT in this PR. It is
 the one item in this family left open.
 
+### The guard for the CLASS, not the instance
+
+Five findings, all from review, all the same shape, is a pattern about how the fixes were
+made rather than about any one route: each closed the instance in front of it, and a
+behavioural test can only ever prove that today's handlers refuse today's forgeries. The
+invariant here is about the handler somebody adds next month.
+
+So it is pinned structurally, in this repo's existing idiom
+(`test/invariants/*.structural.test.ts` on `test/support/structural-scan.ts`):
+`i16-telephony-acting-tenant-guarded.structural.test.ts`. For every
+`router.get`/`router.post` handler in `routes/telephony.ts`,
+`telephony/recording-webhook.ts` and `telephony/voicemail-status-route.ts`: if the body
+binds a tenant from a session (`session.tenantId`, `findByCallSid`, `store.get`) or from a
+payload-alias resolver (`resolveTenantId`, `resolveTenantIdFallback`), the body must also
+call `sessionBelongsToAnotherTenant` or `actingTenantMismatchesCredential`. Handler bodies
+are split by brace matching with quote/template state tracked, so a check in a NEIGHBOURING
+handler — or in a helper below the last one — cannot satisfy the rule for this one. A
+seventh assertion covers the media-stream upgrade, which is not a router handler but owes
+the same property.
+
+`resolveInboundTenantId` is the one exception and is named rather than pattern-matched
+away: it resolves the tenant from the dialled number, which is the field the credential was
+bound to, so the agreement is structural. `/voice` and the fresh branch of
+`/voice/gather-fallback` use it.
+
+Negative controls are the evidence, not the green run. Three planted trees (a session-bound
+handler with no check; a fallback-bound handler with no check; a compliant handler beside a
+non-compliant one, proving per-handler granularity) and two planted non-violations (a
+handler touching no tenant; the named exception). Then the real one — the guard was pointed
+at `src` with the `/gather` check deleted:
+
+```
+AssertionError: a telephony handler resolves a tenant from a session or payload alias and
+never checks it against the credential that verified the request
++   "src/routes/telephony.ts:623  post '/gather' binds a caller-supplied tenant without
+     sessionBelongsToAnotherTenant/actingTenantMismatchesCredential"
+ Tests  1 failed | 7 passed (8)
+```
+
+restored byte-identically afterwards, and green: 8/8. This is the only thing on the branch
+that would have caught findings 2, 3 and 5 before review did.
+
+
 Full sweep on the fixed head: telephony + routes + invariants + app + webhooks + voice —
-**287 files, 3249 passed** (4 expected fail, all lane B's own pins); ten telephony
-integration files **95 passed** (1 expected fail); the new integration file **18 passed**;
+**287 files, 3249 passed** (4 expected fail, all lane B's own pins) plus I16's 8; ten
+telephony integration files **95 passed** (1 expected fail); the new integration file
+**18 passed**;
 e2e **6 passed (30.7s)**; `tsc --project tsconfig.build.json --noEmit` clean; eslint on the
 changed source files byte-identical to main's baseline.
 
