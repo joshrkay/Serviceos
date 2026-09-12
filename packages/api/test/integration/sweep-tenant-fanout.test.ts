@@ -944,6 +944,49 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       expect(visited).toEqual(expect.arrayContaining(trio));
     });
 
+    // The worker wraps renewal and billing in SEPARATE try/catch blocks
+    // (recurring-agreements-worker.ts:60 and :79). The seam above injects
+    // failures only through `findDue`, so it exercises the billing catch and
+    // says nothing about the renewal one — deleting that catch would leave it
+    // green (review finding, PR #1053). This drives the renewal phase
+    // directly and pins the promise its own comment makes at :58: "a renewal
+    // failure must not block this tenant's run sweep".
+    it("a renewal failure does not block that tenant's OWN billing phase, nor the rest of the sweep", async () => {
+      const ours = await seedTrio(pool);
+      const billed: string[] = [];
+      let doomed: string | null = null;
+
+      await runRecurringAgreementsSweep({
+        agreementRepo: {
+          findRenewable: async (tenantId: string) => {
+            // Whoever the enumerator reaches first, as elsewhere in this file.
+            if (ours.includes(tenantId) && (doomed === null || doomed === tenantId)) {
+              doomed = tenantId;
+              throw new Error(`synthetic renewal failure for tenant ${tenantId}`);
+            }
+            return [];
+          },
+          findDue: async (tenantId: string) => {
+            billed.push(tenantId);
+            return [];
+          },
+        } as never,
+        runRepo: {} as never,
+        jobsService: {} as never,
+        invoicesService: {} as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      // The tenant whose RENEWAL threw still reaches billing — the separate
+      // catch is what buys this, and nothing else in the suite covers it.
+      expect(billed).toContain(doomed);
+      // And every other tenant is billed too, so the loop did not abort.
+      expect(billed).toEqual(expect.arrayContaining(ours));
+    });
+
     it('keeps going when one tenant throws', async () => {
       const ours = await seedTrio(pool);
       const { visited, doomed } = await run(ours);
