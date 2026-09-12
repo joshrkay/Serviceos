@@ -1,0 +1,65 @@
+Last real-Postgres snapshot polled during the GREEN run of
+e2e/journeys/public-estimate-approve-sign.spec.ts, captured via a 1.5s-interval
+`docker exec <pg container> psql` poller (the E2E teardown truncates every
+table at the end of the run). Tenant 862adc74 = "Acme HVAC 7.6" (tenant A
+under test); tenant 0221a6c7 = "Bexar Plumbing 7.6" (tenant B, T2 isolation);
+tenants 1863129a / c396a189 are the always-on hermetic journey's own seeded
+fixtures (unrelated to this spec, confirming they were undisturbed).
+
+=== 2026-09-12T19:59:26Z ===
+  tenant  |            event_type             |   entity_type   | count
+----------+-----------------------------------+-----------------+-------
+ 0221a6c7 | customer.created                  | customer        |     1
+ 862adc74 | customer.created                  | customer        |     2
+ 862adc74 | estimate.converted                | estimate        |     1
+ 0221a6c7 | estimate.created                  | estimate        |     1
+ 862adc74 | estimate.created                  | estimate        |     2
+ 862adc74 | estimate.revised                  | estimate        |     1
+ 862adc74 | invoice.created                   | invoice         |     1
+ 0221a6c7 | job.created                       | job             |     1
+ 862adc74 | job.created                       | job             |     2
+ 0221a6c7 | job.money_state_changed           | job             |     1
+ 862adc74 | job.money_state_changed           | job             |     3
+ 0221a6c7 | location.created                  | location        |     1
+ 862adc74 | location.created                  | location        |     2
+ 0221a6c7 | notification.lifecycle_email.sent | tenant          |     1
+ 862adc74 | notification.lifecycle_email.sent | tenant          |     1
+ 862adc74 | public_estimate.approved          | estimate        |     1
+ 0221a6c7 | tenant.identity_set               | tenant_settings |     1
+ 862adc74 | tenant.identity_set               | tenant_settings |     1
+ 0221a6c7 | tenant.signup.bootstrap.completed | tenant          |     1
+ 862adc74 | tenant.signup.bootstrap.completed | tenant          |     1
+(20 rows)
+
+  tenant  |  estimate_number   |  status  | version |   accepted_by_name    |      sig_prefix
+----------+--------------------+----------+---------+-----------------------+----------------------
+ 1863129a | qa-journey-A-est-1 | draft    |       1 |                       |
+ 1863129a | qa-journey-A-est-2 | draft    |       1 |                       |
+ c396a189 | qa-journey-B-est-1 | draft    |       1 |                       |
+ c396a189 | qa-journey-B-est-2 | draft    |       1 |                       |
+ 862adc74 | EST-0001           | accepted |       1 | Pat Playwright Signer | data:image/png;base6
+ 862adc74 | EST-0002           | sent     |       2 |                       |
+ 0221a6c7 | EST-0001           | sent     |       1 |                       |
+(7 rows)
+
+  tenant  | invoice_number | status | stripe_payment_link_url
+----------+----------------+--------+-------------------------
+ 862adc74 | INV-0001       | draft  |
+(1 row)
+
+Notes:
+- EST-0001 (tenant 862adc74, "Acme HVAC 7.6") is the tiered estimate: accepted,
+  version 1 (never revised — the stale-revision guard's own precondition,
+  "never-revised estimates don't need the token", holds), acceptedByName
+  persisted, signature persisted as a real base64 PNG data URL (not fixture
+  data).
+- EST-0002 (same tenant) is the stale-revision-guard target: version bumped to
+  2 by the owner's revise while the customer's page was open with the OLD
+  version in React state; status stayed 'sent' — the public approve was
+  refused (409) and never applied.
+- EST-0001 (tenant 0221a6c7, "Bexar Plumbing 7.6") stayed 'sent' and completely
+  untouched by tenant A's approval — its own independent estimate number
+  sequence (both tenants' first estimate is "EST-0001") is itself proof the
+  numbering and the row are tenant-scoped, not shared.
+- INV-0001 is the invoice created by POST /api/estimates/:id/convert-to-invoice
+  off the accepted EST-0001 — `estimate.converted` fired exactly once.
