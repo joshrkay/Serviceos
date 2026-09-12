@@ -19,7 +19,7 @@ vi.mock('../../src/analytics/posthog', () => ({
 import { handleVapiCallEvent } from '../../src/integrations/vapi/webhook';
 import { computeVapiHmac } from '../../src/integrations/vapi/signature';
 import { PgWebhookEventRepository } from '../../src/webhooks/pg-webhook-event';
-import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 const SECRET = 'vapi_whsec_integration';
 
@@ -38,17 +38,19 @@ function endedBody(callId: string, from: string): string {
   return JSON.stringify({ message: { type: 'end-of-call-report', call: { id: callId }, customer: { number: from } } });
 }
 
-function deps(pool: Pool, webhookRepo: PgWebhookEventRepository) {
-  return { pool, auditRepo: new InMemoryAuditRepository(), webhookRepo, secret: SECRET };
+function deps(pool: Pool, webhookRepo: PgWebhookEventRepository, auditRepo: PgAuditRepository) {
+  return { pool, auditRepo, webhookRepo, secret: SECRET };
 }
 
 describe('Postgres integration — Vapi inbound-call webhook', () => {
   let pool: Pool;
   let webhookRepo: PgWebhookEventRepository;
+  let auditRepo: PgAuditRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     webhookRepo = new PgWebhookEventRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
   });
   afterAll(async () => {
     await closeSharedTestDb();
@@ -59,7 +61,7 @@ describe('Postgres integration — Vapi inbound-call webhook', () => {
     const tenantId = await seed(pool);
     const callId = `call_real_${Date.now()}`;
     const body = endedBody(callId, '+15125557777');
-    const res = await handleVapiCallEvent(deps(pool, webhookRepo), {
+    const res = await handleVapiCallEvent(deps(pool, webhookRepo, auditRepo), {
       tenantId,
       rawBody: body,
       signatureHeader: computeVapiHmac(body, SECRET),
@@ -80,12 +82,29 @@ describe('Postgres integration — Vapi inbound-call webhook', () => {
     expect(recordFunnelEventMock).toHaveBeenCalledWith(
       expect.objectContaining({ event: 'first_real_call_received' }),
     );
+
+    // Activation is AUDITED against real Postgres (voice/activation.ts
+    // stamps entityType='tenant_settings', entityId=tenantId).
+    const auditRows = await auditRepo.findByEntity(tenantId, 'tenant_settings', tenantId);
+    const activated = auditRows.filter((r) => r.eventType === 'tenant.activated');
+    expect(activated).toHaveLength(1);
+    expect(activated[0].metadata?.milestone).toBe('first_real_call_received');
+
+    // T1 — a second, never-activated tenant sees none of this tenant's
+    // activation audit trail. Querying tenant B's OWN entity id would pass
+    // vacuously (it would never match tenant A's row regardless of tenant
+    // filtering) — query tenant A's entity id, scoped under tenant B, so a
+    // findByEntity regression that dropped the tenant_id filter would be
+    // caught here.
+    const tenantB = await seed(pool);
+    const bAudit = await auditRepo.findByEntity(tenantB, 'tenant_settings', tenantId);
+    expect(bAudit.filter((r) => r.eventType === 'tenant.activated')).toHaveLength(0);
   });
 
   it('does NOT activate on the owner verified caller (the test call)', async () => {
     const tenantId = await seed(pool, { ownerPhone: '+15125550000' });
     const body = endedBody(`call_test_${Date.now()}`, '+15125550000');
-    const res = await handleVapiCallEvent(deps(pool, webhookRepo), {
+    const res = await handleVapiCallEvent(deps(pool, webhookRepo, auditRepo), {
       tenantId,
       rawBody: body,
       signatureHeader: computeVapiHmac(body, SECRET),
@@ -103,8 +122,8 @@ describe('Postgres integration — Vapi inbound-call webhook', () => {
     const callId = `call_idem_${Date.now()}`;
     const body = endedBody(callId, '+15125557777');
     const sig = computeVapiHmac(body, SECRET);
-    await handleVapiCallEvent(deps(pool, webhookRepo), { tenantId, rawBody: body, signatureHeader: sig });
-    const replay = await handleVapiCallEvent(deps(pool, webhookRepo), { tenantId, rawBody: body, signatureHeader: sig });
+    await handleVapiCallEvent(deps(pool, webhookRepo, auditRepo), { tenantId, rawBody: body, signatureHeader: sig });
+    const replay = await handleVapiCallEvent(deps(pool, webhookRepo, auditRepo), { tenantId, rawBody: body, signatureHeader: sig });
     expect((replay.body as { duplicate: boolean }).duplicate).toBe(true);
     const sessions = await pool.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM voice_sessions WHERE tenant_id = $1 AND external_id = $2`,
@@ -116,7 +135,7 @@ describe('Postgres integration — Vapi inbound-call webhook', () => {
   it('rejects an invalid signature with 403', async () => {
     const tenantId = await seed(pool);
     const body = endedBody(`call_badsig_${Date.now()}`, '+15125557777');
-    const res = await handleVapiCallEvent(deps(pool, webhookRepo), {
+    const res = await handleVapiCallEvent(deps(pool, webhookRepo, auditRepo), {
       tenantId,
       rawBody: body,
       signatureHeader: 'deadbeef',

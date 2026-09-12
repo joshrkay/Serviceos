@@ -1,0 +1,5 @@
+              tenant_id               | entity_type |              entity_id               | kind  | category | source | archived_at 
+--------------------------------------+-------------+--------------------------------------+-------+----------+--------+-------------
+ 2c1cb377-301b-44c2-af2a-56c8fb6ea5f8 | job         | 371cf3da-ce44-4fec-a2b3-67c0c91042ef | photo | before   | app    | 
+(1 row)
+
