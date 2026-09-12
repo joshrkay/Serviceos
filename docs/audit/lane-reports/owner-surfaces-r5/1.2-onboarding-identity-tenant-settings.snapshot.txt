@@ -1,6 +1,6 @@
               tenant_id               |        business_name        | hourly_rate_cents | service_area_radius |    timezone    
 --------------------------------------+-----------------------------+-------------------+---------------------+----------------
- 8a07eea1-837c-4be7-b348-0a9345069312 | Onboarding Browser E2E HVAC |             15000 |                  42 | UTC
- fe32b0d9-3e68-4f4d-bfe4-b340313c4bd2 | Tenant B Untouched HVAC     |              9900 |                  99 | America/Denver
+ 5c27b9d0-e07a-4d6d-8650-a52a9bc26195 | Onboarding Browser E2E HVAC |             15000 |                  42 | UTC
+ 624cac57-cc16-4033-a565-fe7b44cfff99 | Tenant B Untouched HVAC     |              9900 |                  99 | America/Denver
 (2 rows)
 

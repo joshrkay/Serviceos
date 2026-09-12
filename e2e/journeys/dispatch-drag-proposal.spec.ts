@@ -263,6 +263,7 @@ async function dragEarlyCardAndConfirm(
   page: import('@playwright/test').Page,
   baseURL: string,
   fixture: TenantDragFixture,
+  beforeDragScreenshotPath?: string,
 ): Promise<{ id: string; status: string; proposalType: string }> {
   await installClerkStub(page, { signedIn: true, sub: fixture.ownerSub, token: fixture.ownerJwt });
   await page.addInitScript(
@@ -285,6 +286,13 @@ async function dragEarlyCardAndConfirm(
   const cards = lane.getByTestId('appointment-card');
   await expect(cards).toHaveCount(2, { timeout: 15_000 });
 
+  // Screenshot AFTER the board has actually loaded the two cards — taking
+  // it any earlier (e.g. before this navigation) would capture a blank
+  // initial document, making the "before" audit evidence meaningless.
+  if (beforeDragScreenshotPath) {
+    await page.screenshot({ path: beforeDragScreenshotPath, fullPage: true });
+  }
+
   const sourceCard = cards.first(); // earliest (09:00) — sorted by scheduledStart
   const lastGap = lane.getByTestId('technician-lane-gap').last();
   await sourceCard.dragTo(lastGap);
@@ -301,18 +309,27 @@ async function dragEarlyCardAndConfirm(
   return (await proposalRes.json()) as { id: string; status: string; proposalType: string };
 }
 
-function pollDbSnapshot(label: string, sql: string): void {
+/**
+ * Reads the FULL appointments row (every column) as a single delimited
+ * string, for byte-for-byte before/after equality — not just the two
+ * fields (scheduledStart, status) the API happens to expose. Also writes
+ * the pretty-printed form to the report's snapshot file, so the report
+ * evidence and the assertion come from the same read.
+ */
+function snapshotFullAppointmentRow(label: string, appointmentId: string): string {
   const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) return;
-  try {
-    const out = execFileSync('psql', [databaseUrl, '-c', sql], { encoding: 'utf8' });
-    writeFileSync(`docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`, out);
-  } catch (err) {
-    writeFileSync(
-      `docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`,
-      `psql poll failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  if (!databaseUrl) return '';
+  const prettyOut = execFileSync(
+    'psql',
+    [databaseUrl, '-c', `SELECT * FROM appointments WHERE id = '${appointmentId}';`],
+    { encoding: 'utf8' },
+  );
+  writeFileSync(`docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`, prettyOut);
+  return execFileSync(
+    'psql',
+    [databaseUrl, '-t', '-A', '-F', '|', '-c', `SELECT * FROM appointments WHERE id = '${appointmentId}';`],
+    { encoding: 'utf8' },
+  ).trim();
 }
 
 test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
@@ -337,28 +354,25 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
 
     // ── Tenant A: owner + technician + two appointments ─────────────────────
     const fixtureA = await seedOwnerTechAndTwoAppointments(page, 'a');
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-a-before',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureA.earlyAppt.id}';`,
-    );
+    const rowABefore = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-a-before', fixtureA.earlyAppt.id);
 
     // ── Tenant B, SAME run: its OWN owner + technician + two appointments —
     //    not a passive bystander, it performs its own drag below. ───────────
     const bContext = await context.browser()!.newContext();
     const bPage = await bContext.newPage();
     const fixtureB = await seedOwnerTechAndTwoAppointments(bPage, 'b');
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-b-before',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureB.earlyAppt.id}';`,
-    );
+    const rowBBefore = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-b-before', fixtureB.earlyAppt.id);
 
     // ── Browser reachability: EACH tenant drags its own card, isolated
-    //    browser contexts, in the same run. ─────────────────────────────────
-    await page.screenshot({
-      path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-before-drag.png',
-      fullPage: true,
-    });
-    const proposalA = await dragEarlyCardAndConfirm(page, baseURL!, fixtureA);
+    //    browser contexts, in the same run. The "before" screenshot is taken
+    //    INSIDE dragEarlyCardAndConfirm once the board has actually loaded
+    //    the two cards — not here, before /dispatch has even been visited. ──
+    const proposalA = await dragEarlyCardAndConfirm(
+      page,
+      baseURL!,
+      fixtureA,
+      'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-before-drag.png',
+    );
     expect(proposalA.status, 'A\'s drag-created proposal must land in draft').toBe('draft');
     expect(proposalA.proposalType).toBe('reschedule_appointment');
     await page.screenshot({
@@ -376,15 +390,20 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     await bContext.close();
 
     // ── T2 — each tenant's appointment row is unchanged regardless of the
-    //      OTHER tenant's concurrent drag. ──────────────────────────────────
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-a-after',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureA.earlyAppt.id}';`,
+    //      OTHER tenant's concurrent drag. Compare the FULL row (every
+    //      column via `SELECT *`), not just the two fields the board API
+    //      happens to expose — a regression touching scheduled_end,
+    //      timezone, hold_pending_approval, etc. would otherwise stay
+    //      undetected. ─────────────────────────────────────────────────────
+    const rowAAfter = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-a-after', fixtureA.earlyAppt.id);
+    const rowBAfter = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-b-after', fixtureB.earlyAppt.id);
+    expect(rowAAfter, 'A\'s appointment row must be BYTE-FOR-BYTE unchanged (every column) after the drag').toBe(
+      rowABefore,
     );
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-b-after',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureB.earlyAppt.id}';`,
+    expect(rowBAfter, 'B\'s appointment row must be BYTE-FOR-BYTE unchanged (every column) after the drag').toBe(
+      rowBBefore,
     );
+
     for (const fixture of [fixtureA, fixtureB]) {
       const boardAfterRes = await page.request.get(
         `${API_URL}/api/dispatch/board?date=${fixture.todayStr}&timezone=Etc/UTC`,

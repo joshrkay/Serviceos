@@ -262,11 +262,16 @@ test.describe('onboarding identity (1.2) — real Postgres', () => {
     expect(settingsBBody.serviceAreaRadius).toBe(99);
 
     // ── Browser reachability: reload and confirm the onboarding gate has
-    //    moved past the identity step (the form is gone / a next step
-    //    renders) — a full-page reload re-derives status from Postgres,
-    //    not client-side state. ──────────────────────────────────────────────
+    //    moved past the identity step onto a CONCRETE next step (not just
+    //    "the identity form is gone", which a loading spinner or an error
+    //    screen would also satisfy) — a full-page reload re-derives status
+    //    from Postgres, not client-side state. `OnboardingShell` derives the
+    //    active step from `/api/onboarding/status`'s polled `currentStep`;
+    //    after identity that's `pack`, rendering `PackStep`'s "Pick your
+    //    trade" heading. ─────────────────────────────────────────────────────
     await page.reload();
     await expect(page.getByLabel('Business name')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Pick your trade' })).toBeVisible({ timeout: 15_000 });
     await page.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/1.2-onboarding-identity-after-reload.png',
       fullPage: true,
