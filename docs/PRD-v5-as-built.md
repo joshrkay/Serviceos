@@ -2494,11 +2494,39 @@ foreign key*), `llm_cache`, `provider_health`, `estimate_provenance`,
 > where none of these table names appear — routes name the repository, not the
 > table. Same mis-scoping as the digest falsifier (§12.4d).*
 
-And three concepts are **modeled twice**: `job_photos` alongside `attachments`
-(the newer migration explicitly keeps both for back-compatibility),
-`daily_digests` alongside `digest_entries`, and the vertical pack registry —
-whose DB `CHECK` still permits only HVAC and plumbing while the code registry
-carries four verticals.
+And two concepts are **modeled twice**: `job_photos` alongside `attachments`
+(the newer migration explicitly keeps both for back-compatibility), and
+`daily_digests` alongside `digest_entries`.
+
+> **A third entry here was wrong and has been removed** *(corrected 2026-09-12,
+> Codex review)*. It read: *"the vertical pack registry — whose DB `CHECK` still
+> permits only HVAC and plumbing while the code registry carries four
+> verticals."* Migration `032_create_vertical_packs` does declare
+> `CHECK (type IN ('hvac', 'plumbing'))`, but migration
+> `089_drop_vertical_packs_type_check` **drops it** (`db/schema.ts:2424-2431`),
+> precisely so canonical pack ids like `electrical-v1` can persist.
+>
+> **In a replay-in-full migration model, no single migration is the schema** —
+> the schema is the fold over all 277 of them, in order (§9). Reading a
+> `CREATE TABLE` and stopping reads an intermediate state as the final one, and
+> nothing about the source makes that visible: migration 032 looks exactly as
+> authoritative on line 823 as migration 089 does on line 2424. The check that
+> would have caught it is one line — `grep -n "vertical_packs" db/schema.ts` and
+> read **every** hit, not the first.
+>
+> Migration 089's own comment records why it exists: the stale `CHECK` had been
+> making `seedCanonicalVerticalPacks` fail **silently in production**, *"errors
+> swallowed by `.catch()`."* Both halves are now fixed — the constraint is
+> dropped, and each `.catch()` writes the failure to stderr
+> (`shared/canonical-vertical-packs.ts:50-65`). What remains is milder and worth
+> one line rather than a backlog entry: those writes go to stderr rather than
+> the structured logger, and `app.ts:1232` calls the function without `await`,
+> so a seed failure is visible in boot output and nowhere else.
+>
+> *(That sentence originally read "the constraint is gone; the swallowing is
+> not" — written without opening the file, in the same edit that recorded the
+> rule about not stopping at the first hit. Caught before publishing, by
+> applying it.)*
 
 One is a live correctness gap rather than tidiness: **`jobs.money_state` is a
 plain `TEXT` column with no `CHECK` constraint**, and its shared contract
@@ -2752,7 +2780,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how fifteen of these were got wrong
+### 12.4d A note on method — how sixteen of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -3059,6 +3087,34 @@ set is now an allowlist rather than a denylist, because the failure directions
 are asymmetric: a wrongly-retried job costs a log line, a wrongly-stamped one
 costs a customer message that no later run will send, so anything unrecognised
 must default to retry.
+
+**The sixteenth names a shape this document had not caught before, and it is
+specific to how this repo stores schema.** §12.4b listed the vertical-pack
+registry as schema debt because migration `032_create_vertical_packs` declares
+`CHECK (type IN ('hvac', 'plumbing'))`. Migration
+`089_drop_vertical_packs_type_check` drops it, 1,600 lines later in the same
+file.
+
+**In a replay-in-full migration model, no single migration is the schema.**
+§9 already says the schema is *"277 migrations replayed in full on every
+boot"* — so the schema is the fold over all of them, and any one of them is an
+intermediate state. Nothing in the source distinguishes the two: migration 032
+looks exactly as authoritative on line 823 as 089 does on line 2424, and a
+reader who finds the first hit has no signal that a later one reverses it. This
+is the same failure as *directory location is not evidence* and *a grep proving
+one writer is unwired does not prove no writer exists* — **a true observation
+about one location, read as a fact about the system** — but the migration file
+is its most dangerous host, because the convention that makes it safe for
+Postgres (idempotent, replayed, append-only) is exactly what makes single-hit
+reading unsafe for a human. The check is one line: `grep -n "<table>"
+db/schema.ts`, and read **every** hit.
+
+The correction to that entry then reproduced the error inside itself — a claim
+that the swallowed-`.catch()` the migration's comment blames was still present,
+written without opening the file. It is not; the catches write to stderr. Caught
+before publishing only by running the rule the same paragraph had just stated,
+which is the strongest argument in this section for **mechanising** these checks
+rather than adding another one to the list.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
