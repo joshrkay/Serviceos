@@ -561,8 +561,9 @@ customer, and the refusal is structural rather than policy. So each invariant is
 stated three ways below — as a law, as the story a persona would tell, and as a
 criterion a command can refute.
 
-**Eleven of eighteen clear the real-Postgres or structural-guard bar. Five carry
-a universal quantifier nothing proves. One has no enforcement at all.**
+**Eleven of eighteen clear the real-Postgres or structural-guard bar. Six
+sub-clauses carry a universal quantifier nothing proves. One has no enforcement
+at all.**
 
 | # | The law, and the story behind it | Acceptance criterion | Rung | Confirm |
 |---|---|---|---|---|
@@ -593,10 +594,13 @@ a universal quantifier nothing proves. One has no enforcement at all.**
 | **I18** | **No feature ships that adds admin work to the owner's day** — the litmus test, and the reason seven planned v1 phases were cut (D-011). · *As M, this is the entire reason I bought this* | **Given** any owner-role action required on a normal day, **then** it is reachable by SMS, one-tap or voice — or is in a reviewed exemption list | **0** 🚨 | **No enforcement of any kind, and no test.** The product's founding promise is the only invariant with nothing behind it — see §5.0c |
 | **C5** | *(not an invariant — founding commitment #5, listed here because it reads like one)* **A second classifier reviews every booking and quote.** · *As M, I want a second pair of eyes before a quote reaches a customer* | **Given** any booking/quote reaching an owner-facing dispatch — **any** origin, **any** status — **then** exactly one supervisor review exists first | **2** 🚨🚨 | **NOT KEPT — see §12.4e.** The gate has **2 call sites against 93 proposal-creation sites**; one is conditional on `ready_for_review` so **low-confidence quotes are skipped precisely because the agent was unsure**; default mode is `shadow` where nothing ever holds; and `pricing_anomaly` is not a harm check, so **it cannot hold even in `enforce`**. **Raised as O-9** |
 
-### 5.0a The five invariants whose universal quantifier is unproven
+### 5.0a The six sub-clauses whose universal quantifier is unproven
 
-I1′, I3′, I5′, I8′, I9′ and I13′ share one shape: **the instance is proven and
-the universal is not.** "The AI never writes" is proven for the paths someone
+I1′, I3′, I5′, I8′, I9′ and I13′ — **six**, which is what this list has always
+enumerated — share one shape: **the instance is proven and the universal is
+not.** *(The heading and the §5 summary both said "five" until 2026-09-12,
+against their own six-item list and against §11.0b's scorecard, which said six.
+Caught in review.)* "The AI never writes" is proven for the paths someone
 thought to test; nothing stops the next path. That is the difference between a
 tested behaviour and an enforced invariant, and it matters when someone adds the
 next code path.
@@ -1785,7 +1789,10 @@ shipped referencing nonexistent columns because its connection pool was mocked.
 
 **The standard is met unevenly, and that is now measured rather than assumed.**
 An audit on 2026-09-11 derived every §8 rung from the suite instead of from the
-source. Eleven of eighteen invariants clear the real-Postgres bar; so do the
+source. Eleven of eighteen invariants clear the real-Postgres **or
+structural-guard** bar — I15 and I16 are structural, not Postgres-executed, so
+the shorter phrasing used here previously overstated their evidence class. So do
+the
 strongest capability rows — RLS isolation, DB-level double-booking exclusion,
 payment concurrency, refund idempotency and the correction loop. But five rows
 rested on files in `test/integration/` that never open a pool, and eleven more
