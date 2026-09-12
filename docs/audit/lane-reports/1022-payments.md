@@ -341,7 +341,7 @@ platform-admin, no env var) is a **separate browser lane** — nothing in this f
 
 ## Row 8.13 — the arithmetic is exactly right · G1: 3 (unit fuzz)
 
-**File (new):** `test/integration/invoice-server-total-persisted.test.ts`
+**File (new):** `test/integration/invoice-arithmetic-crosses-db.test.ts`
 **Seam driven:** the production `createInvoice` (`src/invoices/invoice.ts:311`, which normalizes every line at
 `:322` via `normalizeLineItemTotals`) through `PgInvoiceRepository.create` (`src/invoices/pg-invoice.ts:22`, line
 items at `:546`), with the persisted columns read back by RAW SQL — not the mapped object.
@@ -368,9 +368,9 @@ a wrong neighbour total):
 **GREEN:**
 
 ```
- ✓ invoice-server-total-persisted.test.ts > … > the client's line total is discarded: the fractional-quantity cent lands server-side 15ms
- ✓ invoice-server-total-persisted.test.ts > … > 1000 randomized documents: every persisted money column is an integer, non-negative, and the engine's own number 3343ms
- ✓ invoice-server-total-persisted.test.ts > … > a neighbour tenant's identical payload persists its own totals, invisible to this tenant 11ms
+ ✓ invoice-arithmetic-crosses-db.test.ts > … > the client's line total is discarded: the fractional-quantity cent lands server-side 15ms
+ ✓ invoice-arithmetic-crosses-db.test.ts > … > 1000 randomized documents: every persisted money column is an integer, non-negative, and the engine's own number 3343ms
+ ✓ invoice-arithmetic-crosses-db.test.ts > … > a neighbour tenant's identical payload persists its own totals, invisible to this tenant 11ms
  Test Files  1 passed (1) · Tests  3 passed (3)
 ```
 
@@ -416,7 +416,7 @@ All eight files green against that container (29 tests):
 ######## payment-refunds                  Tests  5 passed (5)
 ######## invoice-void-payment-link        Tests  3 passed (3)
 ######## invoice-webhook-paid             Tests  4 passed (4)
-######## invoice-server-total-persisted   Tests  3 passed (3)
+######## invoice-arithmetic-crosses-db   Tests  3 passed (3)
 ######## ach-webhook                      Tests  4 passed (4)
 ```
 
@@ -653,7 +653,7 @@ touched file (full output in the run log):
 313:          metadata: { tenant_id: otherTenant.tenantId, invoice_id: mineInvoiceId },
 358:      (await invoiceRepo.findById(otherTenant.tenantId, theirInvoiceId))?.amountPaidCents,
 
-### test/integration/invoice-server-total-persisted.test.ts
+### test/integration/invoice-arithmetic-crosses-db.test.ts
 73:  let otherTenant: { tenantId: string; userId: string };
 166:    otherTenantJobId = await seedJobChain(otherTenant, 'ARITH-NEIGHBOUR');
 333:    expect(await invoiceRepo.findById(otherTenant.tenantId, mine.id)).toBeNull();
