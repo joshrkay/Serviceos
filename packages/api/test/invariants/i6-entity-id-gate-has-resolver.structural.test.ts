@@ -270,20 +270,34 @@ export function unliftableEntityIdGates(
  *
  * Reported on #1021 for Fable and the product owner; not fixed here.
  */
-const KNOWN_UNLIFTABLE: ReadonlyArray<{ key: string; where: string; note: string }> = [
+const KNOWN_UNLIFTABLE: ReadonlyArray<{
+  key: string;
+  /** Where the gate is DEFINED — the citation for the report. */
+  where: string;
+  /**
+   * The exact `where` string `unliftableEntityIdGates` produces for this gap
+   * today — the set of emitting sites, frozen. A new contract emitting the
+   * same key changes this string and fails the guard.
+   */
+  emittedAt: string;
+  note: string;
+}> = [
   {
     key: 'reviewId',
     where: 'packages/shared/src/contracts/review-response-proposal.ts:73 (review_response_proposal)',
+    emittedAt: 'contract(s): review_response_proposal',
     note: 'The review being answered is picked from the reputation queue by the drafting task (ai/tasks/review-response-task.ts:182), never named by the operator. Emitted as a gate on the voice leg by proposals/voice-payload.ts:504 if it is ever absent, and no resolver or card affordance can supply it.',
   },
   {
     key: 'entityId',
     where: 'packages/api/src/proposals/contracts/adopt-entity-alias.ts:11 (adopt_entity_alias)',
+    emittedAt: 'contract(s): adopt_entity_alias',
     note: 'The entity the alias is being adopted for — already resolved by the time the alias proposal is drafted. Owner-only to approve (proposals/actions.ts:227).',
   },
   {
     key: 'groundedProposalId',
     where: 'packages/api/src/proposals/contracts/adopt-entity-alias.ts:13 (adopt_entity_alias)',
+    emittedAt: 'contract(s): adopt_entity_alias',
     note: 'The proposal whose resolution grounded the alias — a system id by construction.',
   },
 ];
@@ -318,8 +332,15 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
 
   it('no NEW entity-id gate appears without a lifter (the three recorded gaps are frozen)', () => {
     const unliftable = unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC]);
+    // Compared on the full EMITTING SITE, not just the key. Reviewed on
+    // PR #1063: filtering on `key` alone meant a NEW contract that emits an
+    // already-recorded key — a second `reviewId` gate on another proposal
+    // type — was waved through as "recorded" while it expanded the set of
+    // unreachable capabilities. The `where` string carries the emitting
+    // contract types (or the file:line for a hand-written literal), so
+    // freezing it makes a new emitter fail.
     const unrecorded = unliftable.filter(
-      (u) => !KNOWN_UNLIFTABLE.some((k) => k.key === u.key),
+      (u) => !KNOWN_UNLIFTABLE.some((k) => k.key === u.key && k.emittedAt === u.where),
     );
     expect(
       unrecorded.map((u) => `${u.key}  (${u.where})`),
@@ -337,11 +358,33 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
     ).toEqual([]);
   });
 
-  it('the recorded gaps are still exactly where the report says they are', () => {
-    const found = unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC]).map((u) => u.key);
+  it('the recorded gaps are still exactly where the report says they are — key AND emitting site', () => {
+    const found = unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC]);
     for (const known of KNOWN_UNLIFTABLE) {
-      expect(found, `${known.key} — ${known.note}`).toContain(known.key);
+      const match = found.find((u) => u.key === known.key);
+      expect(match, `${known.key} — ${known.note}`).toBeDefined();
+      // The emitting site is frozen too: a SECOND contract emitting this same
+      // key would widen `where` and fail here rather than pass as "recorded".
+      expect(match!.where, `${known.key} emitting site drifted`).toBe(known.emittedAt);
     }
+  });
+
+  it('NEGATIVE CONTROL — a SECOND contract emitting an already-recorded key still fails the guard', () => {
+    // The false negative reviewed on PR #1063: `reviewId` is recorded, so a
+    // new proposal type gating on it must not be filtered out as known.
+    const planted = {
+      ...PROPOSAL_TYPE_SCHEMAS,
+      plant_review_escalation: z.object({ reviewId: z.string().uuid() }),
+    };
+    const unliftable = unliftableEntityIdGates(planted, [API_SRC]);
+    const reviewIdRow = unliftable.find((u) => u.key === 'reviewId');
+    expect(reviewIdRow).toBeDefined();
+    expect(reviewIdRow!.where).toContain('plant_review_escalation');
+    // …and the freeze rejects it, because the emitting-site string changed.
+    const unrecorded = unliftable.filter(
+      (u) => !KNOWN_UNLIFTABLE.some((k) => k.key === u.key && k.emittedAt === u.where),
+    );
+    expect(unrecorded.map((u) => u.key)).toContain('reviewId');
   });
 
   /**

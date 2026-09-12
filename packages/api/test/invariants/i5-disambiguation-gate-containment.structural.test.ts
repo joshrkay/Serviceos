@@ -89,9 +89,29 @@ const SHORT_LABELS = pendingWith([
   { id: 'cus-4', name: 'Okonkwo', hint: '77 Lark Ave' },
 ]);
 
+/**
+ * A candidate set at the product's own cap (`MAX_CANDIDATES = 5`,
+ * pending-proposal-resolver.ts:40).
+ *
+ * Reviewed on PR #1063 and load-bearing for C0: `parseOrdinalIndex` only
+ * returns an index when `index < candidateCount`, so on a two-candidate
+ * fixture the matcher can never place anything past "second" — and a
+ * generated ordinal space alone would still never exercise "third", "fourth"
+ * or "fifth". Five candidates is the real ceiling the product can produce, so
+ * this is the widest the guard can honestly reach.
+ */
+const FIVE_CANDIDATES = pendingWith([
+  { id: 'cus-5', name: 'Alvarez', hint: '12 Oak Ln' },
+  { id: 'cus-6', name: 'Petrov', hint: '34 Birch Way' },
+  { id: 'cus-7', name: 'Nakamura', hint: '56 Cedar Rd' },
+  { id: 'cus-8', name: 'Okafor', hint: '78 Spruce Dr' },
+  { id: 'cus-9', name: 'Lindqvist', hint: '90 Aspen Ct' },
+]);
+
 const FIXTURES: ReadonlyArray<{ name: string; pending: PendingEntityAmbiguity }> = [
   { name: 'two Johnsons', pending: TWO_JOHNSONS },
   { name: 'short labels', pending: SHORT_LABELS },
+  { name: 'five candidates', pending: FIVE_CANDIDATES },
 ];
 
 // ─── The corpus ─────────────────────────────────────────────────────────────
@@ -152,6 +172,35 @@ const CORPUS: ReadonlyArray<{ text: string; kind: 'answer' | 'request' }> = [
   { text: 'what is on the schedule for tomorrow', kind: 'request' },
   { text: 'cancel the 3pm and text the customer to let them know', kind: 'request' },
 ];
+
+/**
+ * The ordinal SPACE both components could plausibly understand — generated
+ * from the vocabulary axes rather than hand-listed, and deliberately reaching
+ * past what either side accepts today (through tenth, both languages, both
+ * digit and word forms, every wrapper).
+ *
+ * This is what makes C0 a real guard rather than a corpus sample: the day
+ * `parseOrdinalIndex` learns "fourth", the form is already in the space, the
+ * matcher places it, the gate rejects it, and C0 goes red — without anyone
+ * remembering to add a test case.
+ */
+const ORDINAL_SPACE: readonly string[] = (() => {
+  const bases = [
+    'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+    'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '10',
+    'option 1', 'option 2', 'option 3', 'option 4', 'option 5',
+    'primer', 'primero', 'segundo', 'tercero', 'cuarto', 'quinto',
+  ];
+  const out = new Set<string>();
+  for (const base of bases) {
+    out.add(base);
+    out.add(`the ${base}`);
+    out.add(`${base} one`);
+    out.add(`the ${base} one`);
+  }
+  return [...out];
+})();
 
 // ─── Classification of a permitted divergence ───────────────────────────────
 
@@ -266,15 +315,18 @@ describe('§5 I5′ (STRUCTURAL) — the gate/matcher RELATIONSHIP, since "one s
     // `ORDINAL_ANSWER_RE` (gate) and `parseOrdinalIndex` (matcher) are two
     // copies of the same vocabulary in two files, joined by a comment that
     // says "Kept in step with parseOrdinalIndex". This makes it mechanical.
-    const ordinals = CORPUS.filter((c) => c.kind === 'answer').map((c) => c.text);
+    //
+    // The space is GENERATED, not taken from `CORPUS`. Reviewed on PR #1063:
+    // sourcing it from the hand-written corpus meant a future change teaching
+    // `parseOrdinalIndex` a new form — "fourth", "cuarto", "option 4" — would
+    // never enter the loop, and the guard would stay green through exactly the
+    // drift it claims to make mechanical. `ORDINAL_SPACE` covers well past
+    // what either side understands today, so a new form the matcher learns is
+    // already under test before anyone writes it.
     const broken: string[] = [];
     for (const fixture of FIXTURES) {
-      for (const text of ordinals) {
-        const result = matchDisambiguationFollowUp(text, fixture.pending);
-        if (result.status !== 'resolved') continue;
-        // An ordinal resolution is one that lands positionally: it resolves
-        // for a fixture where the text is not a name/id/hint of any candidate.
-        if (!isOrdinalShaped(text)) continue;
+      for (const text of ORDINAL_SPACE) {
+        if (matchDisambiguationFollowUp(text, fixture.pending).status !== 'resolved') continue;
         if (!isDisambiguationAnswer(text, fixture.pending)) {
           broken.push(`${fixture.name}: ${JSON.stringify(text)}`);
         }
@@ -285,6 +337,26 @@ describe('§5 I5′ (STRUCTURAL) — the gate/matcher RELATIONSHIP, since "one s
       'An ordinal form the shared matcher places is rejected by the chat gate — the two ' +
         'ordinal vocabularies have drifted. Update ORDINAL_ANSWER_RE to match parseOrdinalIndex.',
     ).toEqual([]);
+  });
+
+  it('C0 is not vacuous: the generated space really does reach the matcher, and reaches past today\'s vocabulary', () => {
+    const placed = ORDINAL_SPACE.filter(
+      (t) => matchDisambiguationFollowUp(t, FIVE_CANDIDATES).status === 'resolved',
+    );
+    // The five-candidate fixture is what lets ordinals past "second" reach the
+    // matcher at all (`index < candidateCount`); on a two-candidate set the
+    // generated space would be silently capped.
+    expect(
+      ORDINAL_SPACE.filter((t) => matchDisambiguationFollowUp(t, TWO_JOHNSONS).status === 'resolved')
+        .length,
+    ).toBeLessThan(placed.length);
+    // Today's shared vocabulary stops at third; the space goes to tenth, so
+    // the forms a future `parseOrdinalIndex` could learn are already covered.
+    expect(placed.length).toBeGreaterThan(10);
+    expect(ORDINAL_SPACE).toContain('the fourth one');
+    expect(ORDINAL_SPACE).toContain('cuarto');
+    expect(ORDINAL_SPACE).toContain('option 4');
+    expect(ORDINAL_SPACE.length).toBeGreaterThan(100);
   });
 
   it('C1 — containment on the answer domain: every ANSWER the matcher places, the gate accepts', () => {

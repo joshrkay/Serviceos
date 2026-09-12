@@ -78,8 +78,21 @@ const CALLER_TEXT =
 /** The two structured caller channels (clause A's domain). */
 const STRUCTURED_CALLER_CHANNEL = /\b(recentMessages|retrievedChunks)\b/;
 
+/**
+ * Does this module actually CALL a sanctioned renderer?
+ *
+ * A call expression, never a bare mention. Reviewed on PR #1063: matching the
+ * name anywhere in the file let an `import { buildRecentMessagesPromptSections }`
+ * line alone count as proof of fencing, so a module could import the renderer,
+ * never use it, hand-roll `recentMessages` into a prompt, and the guard would
+ * report nothing — a false negative on exactly the drift clause A exists to
+ * catch. An import statement has no `(` after the identifier; a call does.
+ * `NEGATIVE CONTROL (A) — imported but hand-rolled` pins it.
+ */
 function usesSanctionedRenderer(file: SourceFile): boolean {
-  return SANCTIONED_RENDERERS.some((r) => file.code.includes(r));
+  return SANCTIONED_RENDERERS.some((r) =>
+    new RegExp(String.raw`\b${r}\s*\(`).test(file.code),
+  );
 }
 
 function isFenceModule(rel: string): boolean {
@@ -374,6 +387,29 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
     });
     try {
       expect(unfencedStructuredChannelConsumers([dir])).toEqual([]);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL (A) — a module that IMPORTS a renderer but still hand-rolls the thread is reported', () => {
+    // The false negative reviewed on PR #1063: an unused import is not a fence.
+    const dir = plantTree('i13-imported-unused', {
+      'imported-but-hand-rolled.ts': [
+        "import { buildRecentMessagesPromptSections } from '../ai/orchestration/context-builder';",
+        '',
+        'export function buildPrompt(context: { recentMessages: Array<{ role: string; content: string }> }) {',
+        '  // The import sits there unused while the thread is interpolated by hand.',
+        "  const thread = context.recentMessages.map((m) => `${m.role}: ${m.content}`).join('\\n');",
+        "  return { messages: [{ role: 'system', content: `Thread:\\n${thread}` }] };",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = unfencedStructuredChannelConsumers([dir]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatch(/imported-but-hand-rolled\.ts$/);
     } finally {
       removeTree(dir);
     }

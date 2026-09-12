@@ -859,6 +859,55 @@ Ranked by what a defect would cost, not by how hard it is to fix. **None are fix
 
 ---
 
+## Review round 1 (PR #1063, `xhawk-ai[bot]`) — three false negatives, all confirmed and fixed
+
+All three findings were verified against the code before acting; all three were real holes in the
+guards themselves — the guard passing while the drift it claims to freeze goes by. Fixed on this
+branch, each with a control that pins the hole shut.
+
+**1. I5′ C0 took its ordinal universe from the hand-written `CORPUS`** (`…i5-…test.ts:269`). A future
+change teaching `parseOrdinalIndex` "fourth" without updating `ORDINAL_ANSWER_RE` never entered the
+loop. Confirmed. The bot's suggestion — export a shared vocabulary both sides consume — is a `src`
+change and out of scope for a test-only lane, so the space is **generated** instead: 4 wrapper forms ×
+41 bases (through *tenth*, both languages, digit and word forms) = 160 candidates, reaching well past
+what either side understands today.
+
+That alone was still insufficient, and the second half is the part worth recording: `parseOrdinalIndex`
+only returns an index when `index < candidateCount`, so on the two existing two-candidate fixtures the
+matcher **cannot place anything past "second"** — a generated space would have been silently capped.
+A five-candidate fixture was added at the product's own ceiling (`MAX_CANDIDATES = 5`,
+`pending-proposal-resolver.ts:40`).
+
+Proved by planting the exact drift into production code — one line teaching `parseOrdinalIndex`
+`fourth|4|four|option 4|cuarto` and leaving the gate alone, then reverting:
+
+```
+ FAIL  … > C0 — the two ordinal vocabularies are in step: every ordinal the matcher places, the gate accepts
+AssertionError: An ordinal form the shared matcher places is rejected by the chat gate — the two
+ordinal vocabularies have drifted. Update ORDINAL_ANSWER_RE to match parseOrdinalIndex.
+
++ [ "five candidates: \"fourth\"", "five candidates: \"the fourth\"", "five candidates: \"fourth one\"",
++   "five candidates: \"the fourth one\"", "five candidates: \"four\"",   … 12 in total ]
+```
+
+Before the fix this planted drift was **silent**.
+
+**2. I6's frozen baseline was keyed on the gate name alone** (`…i6-…test.ts:322`), so a *new* contract
+emitting an already-recorded key — a second `reviewId` gate on another proposal type — was filtered out
+as "recorded" and passed CI while expanding the set of unreachable capabilities. Confirmed. The
+baseline now freezes `{ key, emittedAt }`, where `emittedAt` is the exact emitting-site string the
+guard produces (`contract(s): review_response_proposal`), and a new control plants
+`plant_review_escalation` gating on `reviewId` and asserts the freeze still rejects it.
+
+**3. I13′ treated any occurrence of a renderer's name as proof of fencing**
+(`…i13-…test.ts:82`), so an unused `import { buildRecentMessagesPromptSections }` counted while the
+module hand-rolled `recentMessages` into a prompt. Confirmed. `usesSanctionedRenderer` now requires a
+**call expression** (`\bname\s*\(` — an import has no `(` after the identifier), and a new control
+plants exactly the imported-but-hand-rolled module the bot described.
+
+Suite after the round: **`98 passed | 4 expected fail`** (was 95 | 4); `tsconfig.build.json` clean;
+`packages/api/src` still byte-identical to `origin/main`.
+
 ## Not done / judgment calls
 
 - **I18 — not attempted on this lane, and there is a brief conflict to resolve.** The ticket comment of
