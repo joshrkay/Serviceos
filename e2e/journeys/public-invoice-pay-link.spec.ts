@@ -296,9 +296,10 @@ test.describe('pay from a link (8.4) — real Postgres', () => {
     expect(invoiceAfterLink.stripePaymentLinkUrl).toBe(link1.url);
     expect(invoiceAfterLink.amountDueCents).toBe(50_000);
     // The id of the SPECIFIC link that was minted and persisted — read back
-    // from the invoice row, not re-derived. Threaded into the settlement
-    // webhook below so that event is tied to this exact issued link, not an
-    // independently-fabricated one (review finding on PR #1087).
+    // from the invoice row, not re-derived. This proves the mint call
+    // returned and persisted a real id. It does NOT prove settlement is
+    // tied to that id — see the correction in the comment above the
+    // webhook body below (Codex re-review, PR #1087).
     const issuedLinkId = invoiceAfterLink.stripePaymentLinkId;
     expect(issuedLinkId).toBeTruthy();
 
@@ -342,11 +343,24 @@ test.describe('pay from a link (8.4) — real Postgres', () => {
     //    Stripe object would carry). So this event's `metadata` cannot be
     //    read off the issued link the way it could with a live key; it is
     //    asserted from the same tenantId/invoiceId this test itself minted
-    //    the link for. What CAN be tied to the real, persisted link — and
-    //    is, below — is its id: `payment_link` carries the exact
-    //    `stripePaymentLinkId` this invoice's row was just read back with,
-    //    not an independently-fabricated one, so a webhook naming the wrong
-    //    link (or a link that was never actually issued) would fail here.
+    //    the link for.
+    //
+    //    Correction (Codex re-review, PR #1087): an earlier version of this
+    //    comment claimed that threading `stripePaymentLinkId` into
+    //    `payment_link` below "ties" settlement to the exact minted link,
+    //    so a webhook naming the wrong link would fail. That was wrong.
+    //    Verified against packages/api/src/webhooks/routes.ts's
+    //    checkout.session.completed branch: it reads only `metadata`,
+    //    `payment_status`, `amount_total` and `payment_intent` off the
+    //    session object — it never reads `payment_link`. The field below
+    //    is inert in production; this test would still pass today if
+    //    `issuedLinkId` were replaced with an arbitrary string. It's left
+    //    in only as documentation of intent, not as a working seam.
+    //    Actually closing this gap needs production code that validates
+    //    the incoming session's link (or its metadata) against the
+    //    invoice's persisted `stripePaymentLinkId` — a product-code
+    //    change, out of scope for this test-only, no-product-code-change
+    //    lane. This traceability gap is OPEN, not partially closed.
     //    The mint call's own metadata correctness
     //    (invoice-payment-link.ts's `metadata: {tenant_id, invoice_id}`) is
     //    unverified by any test in this repo against a real Stripe
