@@ -30,7 +30,10 @@ import { Router, Request, Response } from 'express';
 import express from 'express';
 import type { Pool } from 'pg';
 import { TwilioGatherAdapter, xmlEscape } from '../telephony/twilio-adapter';
-import { requireTwilioSignature } from '../telephony/twilio-signature';
+import {
+  requireTwilioSignature,
+  type TwilioAuthTokenGetter,
+} from '../telephony/twilio-signature';
 import {
   createRecordingRouter,
   type RecordingHandlerOptions,
@@ -70,12 +73,14 @@ const logger = createLogger({
 export interface TelephonyRouterDeps {
   adapter: TwilioGatherAdapter;
   /**
-   * Returns the Twilio account auth token for signature verification.
-   * Receives the AccountSid from Twilio's webhook body so per-tenant
-   * subaccount tokens can be looked up. Legacy single-account callers
+   * Resolves the credential an inbound webhook's signature is verified
+   * against. #1072: it receives the DIALLED NUMBER as well as the AccountSid,
+   * because the credential that may sign for a number is the one belonging to
+   * the tenant that owns it — and it may answer `refuse`, which the middleware
+   * turns into a 403 before any handler runs. Legacy single-account callers
    * may ignore the argument and return the master `TWILIO_AUTH_TOKEN`.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   /**
    * Optional explicit base URL Twilio called. When unset, the middleware
    * uses `PUBLIC_API_URL` from env, then falls back to req.protocol+host.

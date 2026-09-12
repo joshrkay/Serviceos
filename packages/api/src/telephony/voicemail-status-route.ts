@@ -53,7 +53,10 @@ import { createLead } from '../leads/lead-service';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
-import { requireTwilioSignature } from './twilio-signature';
+import {
+  requireTwilioSignature,
+  type TwilioAuthTokenGetter,
+} from './twilio-signature';
 import {
   fetchRecordingBytes,
   uploadToS3,
@@ -148,11 +151,13 @@ export interface VoicemailStatusRouterDeps {
   leadRepo?: LeadRepository;
   auditRepo?: AuditRepository;
   /**
-   * Twilio auth-token lookup for signature verification. Required — this is a
+   * Twilio credential lookup for signature verification. Required — this is a
    * public, unauthenticated Twilio callback, so the X-Twilio-Signature is the
-   * only thing proving the request actually came from Twilio.
+   * only thing proving the request actually came from Twilio. #1072: the
+   * resolver is handed the callback's dialled number so the signature is
+   * checked against the credential of the tenant that owns it.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   publicBaseUrl?: string;
   /**
    * U9 — replay guard for the lead leg. When wired, the first delivery of

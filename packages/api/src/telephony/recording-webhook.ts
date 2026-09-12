@@ -32,7 +32,10 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
 import type { Pool } from 'pg';
-import { requireTwilioSignature } from './twilio-signature';
+import {
+  requireTwilioSignature,
+  type TwilioAuthTokenGetter,
+} from './twilio-signature';
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
@@ -56,11 +59,12 @@ export interface RecordingWebhookDeps {
   twilioAccountSid?: string;
   twilioAuthToken?: string;
   /**
-   * Auth token getter used by the signature middleware. Receives the
-   * AccountSid from the Twilio webhook body so per-tenant subaccount
-   * tokens can be looked up; legacy callers may ignore it.
+   * Credential resolver used by the signature middleware. #1072: it receives
+   * the callback's `Called`/`To` as well as the AccountSid, so a callback
+   * naming a number is verified with the credential of the tenant that owns
+   * that number; legacy callers may ignore the argument.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   /** Optional public base URL used to reconstruct the signed URL. */
   publicBaseUrl?: string;
   /**

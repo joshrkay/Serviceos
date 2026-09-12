@@ -369,6 +369,7 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
+import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
@@ -3741,51 +3742,46 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   });
   const realtimeHealthCircuit = new RealtimeHealthCircuit();
 
-  // Per-tenant Twilio token + tenant-id resolvers, keyed off
-  // tenant_integrations. Falls back to the legacy single-account env
-  // vars when no row matches — preserves the in-production single-tenant
-  // flow while unblocking inbound calls on provisioned subaccounts.
-  // Reads the table outside withTenantTransaction (FORCE RLS) using a
-  // dedicated transaction with set_config('app.current_tenant_id', ...).
-  // Both helpers issue cross-tenant lookups against tenant_integrations
-  // (we don't know the tenant yet — that's what we're looking up).
-  // Migration 074 added a permissive read policy gated on
-  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
-  // transaction; SET LOCAL drops on COMMIT and the connection returns
-  // to the pool clean.
+  // Per-tenant Twilio credential + tenant-id resolvers, keyed off
+  // tenant_integrations. Both issue cross-tenant lookups (an inbound webhook
+  // arrives with no tenant context — finding the tenant is the point), which
+  // migration 074's permissive read policy gates on app.system_lookup = 'true',
+  // set LOCAL inside a short transaction so it drops on COMMIT and the
+  // connection returns to the pool clean.
+  //
+  // #1072 — the credential resolver is keyed on the DIALLED NUMBER, not on the
+  // payload's AccountSid: the token that may sign for a number is the one
+  // belonging to the tenant that owns it. See
+  // telephony/twilio-webhook-credential.ts for the full resolution order and
+  // the refusal cases.
+  const resolveTwilioWebhookCredential = createTwilioWebhookCredentialResolver(
+    pool ? { pool } : {},
+  );
+
+  /**
+   * Plain `AccountSid → token` view of the same resolver, for the two callers
+   * that are NOT inbound-webhook verification and must not be bound to a
+   * dialled number:
+   *   - the outbound REST client (`createTwilioCallRedirector`), which needs a
+   *     token to CALL Twilio with, not one to check a signature against;
+   *   - the outbound call-bridge callbacks, whose `To` is the CUSTOMER's
+   *     number, so binding on it would refuse a legitimate callback the moment
+   *     a tenant dials a number another tenant happens to own.
+   * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
+   * when we hold one, deployment token otherwise.
+   */
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
-    const encKey = process.env.TENANT_ENCRYPTION_KEY;
-    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
-    try {
-      const { decrypt } = await import('./integrations/crypto');
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ auth_token_primary_enc: string | null }>(
-          `SELECT auth_token_primary_enc FROM tenant_integrations
-           WHERE provider = 'twilio' AND subaccount_sid = $1
-           LIMIT 1`,
-          [accountSid],
-        );
-        await client.query('COMMIT');
-        const enc = result.rows[0]?.auth_token_primary_enc;
-        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
-      } catch (err) {
-        // Roll back before release: the outer catch swallows the error to a
-        // fallback, so without this the connection would silently return to
-        // the pool with the transaction (and system_lookup GUC) still open.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_AUTH_TOKEN;
+    const decision = await resolveTwilioWebhookCredential(
+      accountSid ? { accountSid } : {},
+    );
+    if (typeof decision === 'object') {
+      return decision.outcome === 'verify'
+        ? decision.authToken
+        : process.env.TWILIO_AUTH_TOKEN;
     }
+    return decision ?? process.env.TWILIO_AUTH_TOKEN;
   };
 
   const resolveTenantIdByPhoneNumber = async (
@@ -3807,7 +3803,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
       } catch (err) {
-        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        // Same dirty-connection guard as the credential resolver's lookups.
         await client.query('ROLLBACK').catch(() => {});
         throw err;
       } finally {
@@ -3829,7 +3825,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
-      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
@@ -4017,7 +4013,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   app.use(
     '/api/telephony',
     requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      resolveTwilioWebhookCredential,
       { publicBaseUrl: () => process.env.PUBLIC_API_URL },
     ),
     whisperRouter({ whisperCache: sharedWhisperCache }),
@@ -4431,7 +4427,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             handlePendingDialogueSilence: (session, tenantId) =>
               twilioAdapter.handlePendingDialogueSilence(session, tenantId),
             // Resolve the account bound by the verified inbound webhook.
-            authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+            authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
             // Section 7 (CRITICAL): wire the gather adapter's shared Map so
             // Dial TwiML built inside handleEscalateWithContext is visible to
