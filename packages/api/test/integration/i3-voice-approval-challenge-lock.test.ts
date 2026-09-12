@@ -489,13 +489,22 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
    * with the counter back at zero, even though three failures for this tenant
    * are sitting in `audit_events`.
    *
-   * Written as `it.fails`: the assertion below states the DESIRED behaviour
-   * (the lock is re-derived from the real store). It fails today. Product code
-   * is deliberately untouched — closing this is a product decision that sits
-   * with O-4/O-6 on #1000.
+   * This is an ORDINARY test that PINS the broken behaviour, not an
+   * `it.fails`. `it.fails` passes when ANY assertion in the body throws, so it
+   * would have swallowed a real I3 regression in the setup below — a failure
+   * to reach the challenge, to lock on the third attempt, or to persist the
+   * lockout row would all have read as "expected failure" and gone green.
+   * (Verified: breaking the `lockout.outcome` assertion below still reported
+   * `1 expected fail`.) Every setup assertion here is therefore live, and the
+   * gap itself is pinned as the CURRENT value: the day the lock is re-derived
+   * from the real store, the last two assertions flip and this test goes red,
+   * which is the alarm we want.
+   *
+   * Product code is deliberately untouched — closing this is a product
+   * decision, tracked as #1051 and sitting next to O-4/O-6 on #1000.
    */
-  it.fails(
-    'PRODUCT GAP — the lock does not survive a session rebuilt from the real store: a restarted session re-prompts the challenge although three failures are already in audit_events',
+  it(
+    'PRODUCT GAP (#1051) — the lock does not survive a session rebuilt from the real store: a restarted session re-prompts the challenge although three failures are already in audit_events',
     async () => {
       const { deps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550105');
       const proposal = await seedPending(proposalRepo, tenantA.tenantId, {
@@ -542,9 +551,13 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
         reference: 'the Holloway payment',
       });
 
-      // DESIRED: still locked. ACTUAL today: 'readback' — the challenge is
-      // re-prompted and the attacker gets three fresh tries.
-      expect(rebuilt.outcome).toBe('challenge_lockout');
+      // DESIRED: 'challenge_lockout' — the lock re-derived from the real
+      // store. ACTUAL today: 'readback' — the challenge is re-prompted and an
+      // attacker gets three fresh tries. Pinned both ways so the assertion
+      // cannot quietly pass for the wrong reason and so closing #1051 turns
+      // this red.
+      expect(rebuilt.outcome).toBe('readback');
+      expect(rebuilt.outcome).not.toBe('challenge_lockout');
     },
   );
 });

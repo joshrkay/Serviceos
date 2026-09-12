@@ -20,7 +20,7 @@ O-4 (static PIN) and O-6 (transport) — untouched here, and not answered.
 
 | | |
 |---|---|
-| Added | `packages/api/test/integration/i3-voice-approval-challenge-lock.test.ts` (5 tests: 4 passing + 1 deliberate `it.fails`) |
+| Added | `packages/api/test/integration/i3-voice-approval-challenge-lock.test.ts` (5 tests, all passing — the fifth pins the durability gap as its current value; see finding 3 below) |
 | Changed | none |
 
 ### Seams driven (file:line)
@@ -146,10 +146,13 @@ landing on a second Railway replica, or an API restart — arrives with
 zero, even though the three failures and the lockout are already sitting in
 `audit_events` (the dump below shows them).
 
-Recorded as a deliberate `it.fails` in the same file (the assertion states the
-desired behaviour — the lock is re-derived from the real store — and fails
-today). **Product code deliberately untouched**: this is a product decision and
-it sits next to O-4/O-6 on #1000, which is Josh's, not this lane's.
+Recorded as an ordinary test in the same file that **pins the broken behaviour**
+(`expect(rebuilt.outcome).toBe('readback')`), so every setup assertion around it
+stays live and the test goes red the day the lock is re-derived from the real
+store. It was first written as `it.fails`; that masked setup regressions — see
+finding 3 below. **Product code deliberately untouched**: this is a product
+decision, tracked as **#1051** and sitting next to O-4/O-6 on #1000, which is
+Josh's, not this lane's.
 
 ---
 
@@ -339,7 +342,7 @@ docker run -d --rm -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
 EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/serviceos_test \
 RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
   --reporter=verbose test/integration/i3-voice-approval-challenge-lock.test.ts
-# → Tests  4 passed | 1 expected fail (5)
+# → Tests  4 passed | 1 expected fail (5)   [before finding 3; now 5 passed (5)]
 
 EXTERNAL_TEST_DB_URL=… (same) … test/integration/i12-prime-tier2-audit-best-effort.test.ts
 # → Tests  3 passed (3)
@@ -467,10 +470,10 @@ git status --porcelain
 
 ---
 
-## Review findings addressed (PR #1050, `xhawk-ai`)
+## Review findings addressed (PR #1050 — `xhawk-ai`, `chatgpt-codex-connector`)
 
-Two Medium/Testing findings, both correct, both false-negatives in this lane's
-own tests. Verified, fixed RED-first, and pushed:
+Three findings across two review bots, all correct, all false-negatives in this
+lane's own tests. Verified, fixed RED-first, and pushed:
 
 1. **I12′ tenant isolation was not exercised under the same wiring**
    (`i12-prime-tier2-audit-best-effort.test.ts:231`). Tenant B ran through a
@@ -492,8 +495,28 @@ own tests. Verified, fixed RED-first, and pushed:
    with the full metadata dump showing no PIN in either form. GREEN: 4 passed
    + 1 expected fail.
 
-Neither fix changes what either row claims; both make the existing claims
+3. **The I3 `it.fails` block masked setup regressions**
+   (`i3-voice-approval-challenge-lock.test.ts:497`, Codex P2). `it.fails`
+   passes when **any** assertion in the body throws, so a real I3 regression in
+   the setup — failing to reach the challenge, failing to lock on the third
+   attempt, failing to persist the lockout row — would have read as "expected
+   failure" and gone green without the durability assertion ever running.
+
+   Verified concretely rather than taken on faith. Breaking the setup's
+   `expect(lockout.outcome).toBe('challenge_lockout')` inside the `it.fails`
+   body: `Tests  4 passed | 1 expected fail (5)` — still green, so the finding
+   is real. The block is now an ordinary `it(...)` that pins the gap as its
+   current value (`expect(rebuilt.outcome).toBe('readback')` plus
+   `.not.toBe('challenge_lockout')`), so every setup assertion is live and the
+   test flips red the day #1051 is closed. Re-breaking the same setup assertion
+   after the change: `AssertionError: expected 'challenge_lockout' to be
+   'THIS_SETUP_ASSERTION_IS_DELIBERATELY_…'`, `Tests 1 failed | 4 passed (5)` —
+   the hole is closed. GREEN with the assertion restored: `Tests 5 passed (5)`.
+
+Neither fix changes what either row claims; all three make the existing claims
 actually falsifiable. `tsc --project tsconfig.build.json --noEmit` still clean.
+The I3 file now reports `5 passed (5)` rather than `4 passed | 1 expected fail
+(5)` — the same five tests, with no expected-failure mechanism left.
 
 ---
 
@@ -520,8 +543,8 @@ actually falsifiable. `tsc --project tsconfig.build.json --noEmit` still clean.
    static secret is the right design.
 5. **The durability gap is reported, not fixed.** See I3 above. Writing the
    lockout to a durable store is a product change (a new column or a Redis
-   session store) and this is a test-only lane. The `it.fails` will start
-   failing-as-a-failure the day someone fixes it, which is the point.
+   session store) and this is a test-only lane. The pinning test goes red the
+   day someone fixes it (#1051), which is the point.
 6. **`voice-approval-gather.test.ts` was read but not extended.** The ticket
    lists it as a proving file for I3; it covers the Twilio Gather transport, and
    its lock-relevant behaviour is the same `startVoiceApproval` /
