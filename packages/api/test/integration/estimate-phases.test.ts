@@ -345,6 +345,12 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
 
       const events = await auditRepo.findByEntity(tenant.tenantId, 'estimate', view.id);
       expect(events.map((e) => e.eventType)).toContain('public_estimate.approved');
+
+      // T1 — cross-tenant isolation: another tenant's scoped repo call
+      // cannot read this accepted estimate, and sees none of its audit trail.
+      expect(await estimateRepo.findById(otherTenant.tenantId, view.id)).toBeNull();
+      const otherEvents = await auditRepo.findByEntity(otherTenant.tenantId, 'estimate', view.id);
+      expect(otherEvents).toHaveLength(0);
     });
 
     it('after_approval — accepting writes the deposit onto the job and the view is payable', async () => {
@@ -526,6 +532,13 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
 
       const events = await auditRepo.findByEntity(tenant.tenantId, 'estimate', view.id);
       expect(events.map((e) => e.eventType)).toContain('public_estimate.approved');
+
+      // T1 — cross-tenant isolation: the accepted row (signature columns
+      // included) cannot be read under a second tenant id, and its audit
+      // trail is invisible there too.
+      expect(await estimateRepo.findById(otherTenant.tenantId, view.id)).toBeNull();
+      const otherEvents = await auditRepo.findByEntity(otherTenant.tenantId, 'estimate', view.id);
+      expect(otherEvents).toHaveLength(0);
     });
   });
 
@@ -555,8 +568,25 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
       });
 
       await expect(service.approve({ token, acceptedByName: 'Needs To Pay First' }))
-        .rejects.toThrow(/deposit/i);
+        .rejects.toThrow(ConflictError);
       expect((await estimateRepo.findByViewToken!(token))!.status).toBe('sent');
+
+      // T1 + T3 — a second, differently-configured tenant (no deposit rule
+      // at all — otherTenant never had settingsRepo.update() called on it)
+      // approves its OWN estimate in the very same test and is NOT refused
+      // or capped by tenant A's before_approval/fixed-20000 rule above.
+      const otherJobId = await newJob(undefined, {
+        tenantId: otherTenant.tenantId, userId: otherTenant.userId, customerId: otherCustomerId,
+      });
+      const otherToken = `otherbeforeapproval-${crypto.randomUUID()}`;
+      await seedEstimate(
+        otherJobId,
+        [buildLineItem(crypto.randomUUID(), 'Repair', 1, 100000, 0, true)],
+        { status: 'sent', viewToken: otherToken, sentAt: new Date() },
+        { tenantId: otherTenant.tenantId, userId: otherTenant.userId },
+      );
+      const otherView = await service.approve({ token: otherToken, acceptedByName: 'No Rule Here' });
+      expect(otherView.status).toBe('accepted');
 
       // Simulate the deposit having been paid (the Stripe checkout round trip
       // is PR 3b/3c — out of scope for this row) by writing the paid amount
