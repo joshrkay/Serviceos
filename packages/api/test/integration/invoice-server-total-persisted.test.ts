@@ -21,6 +21,7 @@ import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createInvoice } from '../../src/invoices/invoice';
 import { calculateLineItemTotal, LineItem } from '../../src/shared/billing-engine';
 
@@ -75,6 +76,7 @@ async function seedJob(pool: Pool, tenantId: string, userId: string): Promise<st
     postalCode: '78701',
     country: 'USA',
     isPrimary: true,
+    addressType: 'service',
     isArchived: false,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -99,10 +101,12 @@ async function seedJob(pool: Pool, tenantId: string, userId: string): Promise<st
 describe('I9 — createInvoice persists the server total, discarding the client\'s, at real Postgres', () => {
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
+  let auditRepo: PgAuditRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     invoiceRepo = new PgInvoiceRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
   });
 
   afterAll(async () => {
@@ -125,6 +129,7 @@ describe('I9 — createInvoice persists the server total, discarding the client\
         createdBy: tenant.userId,
       },
       invoiceRepo,
+      auditRepo,
     );
 
     // The returned object already carries the server value...
@@ -156,6 +161,16 @@ describe('I9 — createInvoice persists the server total, discarding the client\
     const reread = await new PgInvoiceRepository(pool).findById(tenant.tenantId, invoice.id);
     expect(reread!.lineItems[0].totalCents).toBe(SERVER_TOTAL_CENTS);
     expect(reread!.totals.totalCents).toBe(SERVER_TOTAL_CENTS);
+
+    // The audit leg: createInvoice's own invoice.created event is real, on
+    // this same invoice, read back through PgAuditRepository — a real DB
+    // write alone is not the whole invariant without it (§8.0 evidence
+    // ladder).
+    const auditRows = await auditRepo.findByEntity(tenant.tenantId, 'invoice', invoice.id);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].eventType).toBe('invoice.created');
+    expect(auditRows[0].entityType).toBe('invoice');
+    expect(auditRows[0].entityId).toBe(invoice.id);
   });
 
   it('T1 — a second tenant\'s correctly-totaled invoice is unaffected by the first tenant\'s client-total discard', async () => {
@@ -173,6 +188,7 @@ describe('I9 — createInvoice persists the server total, discarding the client\
         createdBy: tenantA.userId,
       },
       invoiceRepo,
+      auditRepo,
     );
     // Tenant B sends an ALREADY-correct total for a whole-quantity line —
     // no divergence to fix, so its total should be untouched by whatever
@@ -186,6 +202,7 @@ describe('I9 — createInvoice persists the server total, discarding the client\
         createdBy: tenantB.userId,
       },
       invoiceRepo,
+      auditRepo,
     );
 
     expect(invoiceA.totals.totalCents).toBe(SERVER_TOTAL_CENTS);
@@ -200,5 +217,12 @@ describe('I9 — createInvoice persists the server total, discarding the client\
     const rowB = await pool.query(`SELECT total_cents FROM invoices WHERE id = $1`, [invoiceB.id]);
     expect(rowA.rows[0].total_cents).toBe(SERVER_TOTAL_CENTS);
     expect(rowB.rows[0].total_cents).toBe(10_000);
+
+    // Each tenant's own invoice.created audit row exists, and neither
+    // tenant's audit query can see the other's.
+    expect(await auditRepo.findByEntity(tenantA.tenantId, 'invoice', invoiceA.id)).toHaveLength(1);
+    expect(await auditRepo.findByEntity(tenantB.tenantId, 'invoice', invoiceB.id)).toHaveLength(1);
+    expect(await auditRepo.findByEntity(tenantB.tenantId, 'invoice', invoiceA.id)).toHaveLength(0);
+    expect(await auditRepo.findByEntity(tenantA.tenantId, 'invoice', invoiceB.id)).toHaveLength(0);
   });
 });

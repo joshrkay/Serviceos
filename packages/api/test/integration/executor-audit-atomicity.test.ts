@@ -337,14 +337,22 @@ describe('ProposalExecutor — WS11 audit-event atomicity', () => {
     // Tenant A's execution rolls back (audit-insert failure, per the test
     // above) WHILE tenant B's own execution on the SAME executor family
     // succeeds — proving the rollback is scoped to tenant A's transaction,
-    // never tenant-wide.
-    await expect(
+    // never tenant-wide. Dispatched via Promise.allSettled (not sequential
+    // awaits) so both executions' transactions are genuinely in flight on
+    // the shared pool at the same time, rather than A fully finishing
+    // (commit or rollback) before B's even starts.
+    const [aOutcome, bOutcome] = await Promise.allSettled([
       failingExecutor.execute(proposalA, { tenantId: tenantA.tenantId, executedBy: tenantA.userId }),
-    ).rejects.toThrow(/null value|not-null|row-level security/i);
-    const { proposal: afterB } = await happyExecutor.execute(proposalB, {
-      tenantId: tenantB.tenantId,
-      executedBy: tenantB.userId,
-    });
+      happyExecutor.execute(proposalB, { tenantId: tenantB.tenantId, executedBy: tenantB.userId }),
+    ]);
+
+    expect(aOutcome.status).toBe('rejected');
+    if (aOutcome.status === 'rejected') {
+      expect((aOutcome.reason as Error).message).toMatch(/null value|not-null|row-level security/i);
+    }
+    expect(bOutcome.status).toBe('fulfilled');
+    const afterB =
+      bOutcome.status === 'fulfilled' ? bOutcome.value.proposal : (undefined as never);
 
     // Tenant B is completely unaffected by tenant A's rollback.
     expect(afterB.status).toBe('executed');
