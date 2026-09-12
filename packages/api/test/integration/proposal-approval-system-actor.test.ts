@@ -30,20 +30,23 @@ import { approveProposal } from '../../src/proposals/actions';
 import { createProposal, Proposal, ProposalStatus } from '../../src/proposals/proposal';
 import { ForbiddenError, NotFoundError } from '../../src/shared/errors';
 
-// Every member of ProposalStatus — a system actor must be refused from ALL
-// of them, not just the reachable ones, because the D-019 guard in
-// transitionProposal fires before the state-machine legality check.
-const ALL_STATUSES: ProposalStatus[] = [
-  'draft',
-  'ready_for_review',
-  'approved',
-  'executing',
-  'rejected',
-  'expired',
-  'executed',
-  'execution_failed',
-  'undone',
-];
+// Every member of ProposalStatus, exhaustive by construction: if the union
+// gains a member without a corresponding key here, this object literal
+// fails to compile. A system actor must be refused from ALL of them, not
+// just the reachable ones, because the D-019 guard in transitionProposal
+// fires before the state-machine legality check.
+const ALL_STATUSES_MAP: Record<ProposalStatus, true> = {
+  draft: true,
+  ready_for_review: true,
+  approved: true,
+  executing: true,
+  rejected: true,
+  expired: true,
+  executed: true,
+  execution_failed: true,
+  undone: true,
+};
+const ALL_STATUSES: ProposalStatus[] = Object.keys(ALL_STATUSES_MAP) as ProposalStatus[];
 
 async function seedProposal(
   proposalRepo: PgProposalRepository,
@@ -71,6 +74,24 @@ describe('I2 — system: actor approval is refused at the real Postgres lifecycl
     pool = await getSharedTestDb();
     proposalRepo = new PgProposalRepository(pool);
     auditRepo = new PgAuditRepository(pool);
+  });
+
+  it('ALL_STATUSES is exhaustive: every ProposalStatus member', () => {
+    // 9-member ProposalStatus union.
+    expect(ALL_STATUSES).toHaveLength(9);
+    expect(ALL_STATUSES).toEqual(
+      expect.arrayContaining([
+        'draft',
+        'ready_for_review',
+        'approved',
+        'executing',
+        'rejected',
+        'expired',
+        'executed',
+        'execution_failed',
+        'undone',
+      ]),
+    );
   });
 
   it.each(ALL_STATUSES)(
