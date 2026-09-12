@@ -24,7 +24,7 @@ PR #1027) on this ticket, which replaces the printed rung column.
 | **8.10** late fees | audit read-back (exactly once); second tenant + foreign-proposal refusal; **cap clamped on the persisted invoice row**, re-sweep and re-execution add nothing | D | T1 | `late-fee-idempotency.test.ts` |
 | **8.11** milestones | Σ milestones === schedule total with the remainder cent on the last, on persisted rows; `schedule-completion.ts` row shape; `milestoneBillingEnabled` control; idempotent re-entry | D | T1 | `milestone-billing.test.ts` (new) |
 | **8.2** exact tier billed | the invoice bills exactly the accepted selection; declined tiers absent as ROWS; down-tier case; audit | D | T1 | `tier-billed-exactly.test.ts` (new) |
-| **8.12** memberships | what the sweep really does (renew / bill / member pricing) **plus three `it.fails` for clauses the story promises and the code does not do**; fan-out entry added | D | T1 (+T4 fan-out) | `membership-renewal-sweep.test.ts` (new), `sweep-tenant-fanout.test.ts` |
+| **8.12** memberships | what the sweep really does (renew / bill / member pricing / **auto-collect**) **plus three gap-pinning tests for the default-path clauses the story promises and the code does not do**; fan-out entry added | D | T1 (+T4 fan-out) | `membership-renewal-sweep.test.ts` (new), `sweep-tenant-fanout.test.ts` |
 | **8.1**, **8.3** | grading only — no code or test changed | D (pre-existing) | T1 both | — |
 
 ---
@@ -453,7 +453,7 @@ the gap itself is shown failing rather than asserted in prose:
  ✓ the tenant invoice sequence is NOT advanced by a membership cycle (the numbering gap, asserted positively) 57ms
 
  Test Files  1 passed (1)
-      Tests  6 passed | 3 expected fail (9)
+      Tests  12 passed (12)
 ```
 
 ### What the code DOES do (proven on real rows)
@@ -513,9 +513,14 @@ at the `stripeFetch` seam (the collector, the invoice ops, `issueInvoice`,
 
 ### What it does NOT do — the story-not-met findings, scoped to the default path
 
-Each is an `it.fails` in the file (green today, and it flips loudly the moment
-the gap is closed). **This lane does not decide what memberships minimally are;
-that is a story-not-met decision for the orchestrator's decision list.**
+Each is an ordinary test in the file asserting the CURRENT (wrong) value, so it
+goes RED the moment the gap is closed — the signal to update the row. They were
+first written as `it.fails`; two reviewers independently showed that `it.fails`
+passes on ANY throw, so a setup regression (no run generated → a TypeError on
+`run.generatedInvoiceId`) would read as "expected fail" and the gap would
+silently stop being tested. Each now opens with setup assertions so a broken
+seed is unmistakable. **This lane does not decide what memberships minimally
+are; that is a story-not-met decision for the orchestrator's decision list.**
 
 These hold for the DEFAULT path — `autoCollectDues` defaults to false in
 `createAgreement` (`agreement-service.ts:206`), so this is what a membership
@@ -644,7 +649,7 @@ $ cd packages/api && EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/s
   test/integration/membership-renewal-sweep.test.ts test/integration/sweep-tenant-fanout.test.ts
 
  Test Files  6 passed (6)
-      Tests  45 passed | 3 expected fail (48)
+      Tests  51 passed (51)
    Duration  7.50s
 ```
 
@@ -888,25 +893,34 @@ and none totals 82500 (the whole sheet).
  fa23a847 | 3d8b0bad  | 2026-09-12    | generated | 2e2ba200
 (8 rows)
 
-=== the dues invoices the sweep wrote ===
-  tenant  |            invoice_number             | status | total_cents | amount_due_cents | due_date
-----------+---------------------------------------+--------+-------------+------------------+----------
- 0ace9546 | AGREEMENT-1789237920846               | draft  |       19900 |            19900 |
- 14e7ab05 | AGREEMENT-1789237920938               | draft  |       19900 |            19900 |
- 67d44a6e | AGREEMENT-1789237920872               | draft  |        4900 |             4900 |
- 68e0b167 | AGREEMENT-1789237921043               | draft  |       19900 |            19900 |
- b5b494ba | AGREEMENT-1789237920706               | draft  |       19900 |            19900 |
- bdbd85b6 | AGREEMENT-1789237920995               | draft  |       19900 |            19900 |
- bdbdebb3 | AGREEMENT-1789237921089               | draft  |       19900 |            19900 |
- fa23a847 | AGREEMENT-c31f51a3-…                  | draft  |        9900 |             9900 |
-(8 rows)
+=== the dues invoices the sweep wrote (BOTH paths) ===
+  tenant  |            invoice_number             | status | total | paid  |  due  | has_due_date
+----------+---------------------------------------+--------+-------+-------+-------+--------------
+ 26bc45f3 | AGREEMENT-1789239749318               | draft  | 19900 |     0 | 19900 | f
+ 43f6bd6d | AGREEMENT-1789239749671               | draft  | 19900 |     0 | 19900 | f
+ 530b498f | AGREEMENT-1789239749177               | draft  | 19900 |     0 | 19900 | f
+ 54c2f791 | AGREEMENT-1789239749772               | draft  | 19900 |     0 | 19900 | f
+ 83515550 | AGREEMENT-1789239749872               | draft  | 19900 |     0 | 19900 | f
+ d2773538 | AGREEMENT-1789239749344               | draft  |  4900 |     0 |  4900 | f
+ d8c34481 | AGREEMENT-6ec063d1-…                  | draft  |  9900 |     0 |  9900 | f
+ e782c1d9 | AGREEMENT-1789239749725               | draft  | 19900 |     0 | 19900 | f
+ fe3d5403 | AGREEMENT-1789239749819               | draft  | 19900 |     0 | 19900 | f
+ 79ac0a1b | AGREEMENT-1789239749544               | open   | 19900 |     0 | 19900 | t   ← auto-collect, DECLINED
+ fba47f2f | AGREEMENT-1789239749412               | paid   | 19900 | 19900 |     0 | t   ← auto-collect, collected
+(11 rows)
 ```
 
-That last table **is** the 8.12 finding, in rows: every dues invoice the sweep
-produced is `draft`, has a NULL `due_date`, and carries a synthetic
-`AGREEMENT-` number. (The one `AGREEMENT-<uuid>` row is the fan-out entry's own
-port, which uses a uuid instead of `Date.now()` so a same-millisecond fan-out
-across tenants cannot flake the suite; production uses `Date.now()`.)
+That last table **is** the corrected 8.12 finding, in rows, and it shows both
+paths at once. The nine `draft` rows with no due date are the DEFAULT path —
+that gap is real. The two rows at the bottom are the auto-collect branch: one
+`paid` in full, one left `open` **with a due date** after a 402 decline, which
+is exactly the invoice the collections cadence can then chase. An earlier
+revision of this report claimed every dues invoice looks like the top nine;
+that was wrong, and this dump is what disproves it. The synthetic
+`AGREEMENT-` numbering is the one property common to all eleven. (The single
+`AGREEMENT-<uuid>` row is the fan-out entry's own port, which uses a uuid
+instead of `Date.now()` so a same-millisecond fan-out across tenants cannot
+flake the suite; production uses `Date.now()`.)
 
 ---
 
@@ -937,8 +951,11 @@ $ git status --porcelain
 - **The 8.12 decision is not taken.** What memberships minimally are — whether
   "bills itself" requires issuing the dues invoice, giving it a due date, and
   routing it into the collections cadence — is a story-not-met decision. This
-  lane wrote the finding with `file:line` and executable `it.fails`, and leaves
-  the decision for the orchestrator's decision list.
+  lane wrote the finding with `file:line` and executable gap-pinning tests, and
+  leaves the decision for the orchestrator's decision list. The review round
+  narrowed it usefully: the configured auto-collect path already issues with a
+  due date, so the open question is whether that is *the* intended path (and the
+  default should flip) or whether the default path must stand on its own.
 - **Dues auto-collection is now proven up to the Stripe HTTP boundary — my
   first call here was wrong.** I originally wrote that this could not be tested
   at all without a live Stripe credential, "because any collector I could inject
@@ -1002,7 +1019,7 @@ assertion in the T1 test — `rawAgreement(tenantB, agreementA)` must be
    → expected { ends_on: '2027-09-11', …(3) } to be undefined
  Tests  1 failed | 8 passed (9)
 ---
- Tests  6 passed | 3 expected fail (9)
+ Tests  12 passed (12)
 ```
 
 The same bare-`SET LOCAL` pattern in `dunning-cadence.test.ts`'s raw duplicate
