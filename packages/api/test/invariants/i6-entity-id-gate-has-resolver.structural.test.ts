@@ -84,19 +84,68 @@ export function gateKeysEmittableByContracts(
   schemas: Record<string, z.ZodSchema>,
 ): Map<string, string[]> {
   const byKey = new Map<string, string[]>();
+
+  const record = (head: string, proposalType: string): void => {
+    if (head.length === 0) return;
+    const seen = byKey.get(head) ?? [];
+    if (!seen.includes(proposalType)) seen.push(proposalType);
+    byKey.set(head, seen);
+  };
+
   for (const [proposalType, schema] of Object.entries(schemas)) {
-    const result = schema.safeParse({});
-    if (result.success) continue;
-    for (const issue of result.error.issues) {
-      const head = String(issue.path[0] ?? '');
-      if (head.length === 0) continue;
-      const seen = byKey.get(head) ?? [];
-      if (!seen.includes(proposalType)) seen.push(proposalType);
-      byKey.set(head, seen);
+    // Probe 1 — the EMPTY payload. Every required field reports an issue.
+    const empty = schema.safeParse({});
+    if (!empty.success) {
+      for (const issue of empty.error.issues) record(String(issue.path[0] ?? ''), proposalType);
+    }
+
+    // Probe 2 — a payload carrying a MALFORMED value for every id-shaped key
+    // the inventory has ever seen. Reviewed on PR #1063 (round 5): an
+    // OPTIONAL uuid field (`widgetId: z.string().uuid().optional()`) parses
+    // `{}` cleanly, so probe 1 never sees it — but the model supplying a
+    // malformed value produces a field-level issue that `contractGapFields`
+    // turns into an operator-facing gate. Probing with a bad value is what
+    // makes an optional-but-validated field visible.
+    const probe: Record<string, unknown> = {};
+    for (const key of CANDIDATE_ID_KEYS) probe[key] = NOT_A_UUID;
+    const malformed = schema.safeParse(probe);
+    if (!malformed.success) {
+      for (const issue of malformed.error.issues) record(String(issue.path[0] ?? ''), proposalType);
     }
   }
   return byKey;
 }
+
+/**
+ * Id-shaped keys to probe with a malformed value.
+ *
+ * Every `*Id` key already known to the system — the resolver table, the
+ * documented exceptions, the recorded gaps — plus the keys any contract
+ * declares. A contract that introduces a brand-new optional id key is still
+ * invisible to probe 2 until the key is known, which is the residual limit
+ * recorded in the lane report; the literal and fallback sweeps are what cover
+ * that case.
+ */
+const CANDIDATE_ID_KEYS: readonly string[] = [
+  ...Object.keys(GATED_REFERENCE_SOURCES),
+  'locationId',
+  'reviewId',
+  'entityId',
+  'groundedProposalId',
+  'linkedJobId',
+  'paymentId',
+  'refundId',
+  'creditId',
+  'materialId',
+  'expenseId',
+  'agreementId',
+  'templateId',
+  'packId',
+  'userId',
+  'crewMemberId',
+  'conversationId',
+  'sessionId',
+];
 
 // ─── Source 2: sweep the hand-written literal emitters ──────────────────────
 
@@ -115,18 +164,99 @@ export function literalGateKeyEmitters(
   for (const file of listSourceFiles(roots)) {
     const lines = file.code.split('\n');
     for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (!line.includes('issingFields')) continue;
-      for (const arr of line.matchAll(/\[([^[\]]*)\]/g)) {
+      if (!lines[i].includes('issingFields')) continue;
+
+      // A WINDOW, not a line. Reviewed on PR #1063 (round 3): a gate written
+      // as `const missingFields = [\n  'routeId',\n]` puts the identifier on
+      // one line and the literal on the next, so a line-at-a-time scan saw
+      // neither the array nor the key — exactly the hand-written case this
+      // secondary sweep exists to cover. Offsets are tracked so each key is
+      // still reported on the line it actually sits on.
+      const slice = lines.slice(i, i + LITERAL_WINDOW_LINES);
+      const starts: number[] = [];
+      let cursor = 0;
+      const window = slice
+        .map((line, n) => {
+          const collapsed = line.replace(/\s+/g, ' ').trim();
+          starts[n] = cursor;
+          cursor += collapsed.length + 1;
+          return collapsed;
+        })
+        .join(' ');
+
+      const lineFor = (index: number): number => {
+        let offset = 0;
+        for (let n = starts.length - 1; n >= 0; n -= 1) {
+          if (index >= starts[n]) {
+            offset = n;
+            break;
+          }
+        }
+        return i + offset + 1;
+      };
+
+      for (const arr of window.matchAll(/\[([^[\]]*)\]/g)) {
+        const arrStart = (arr.index ?? 0) + 1;
         for (const lit of arr[1].matchAll(/['"`]([^'"`]+)['"`]/g)) {
-          out.push({ key: lit[1], at: `${file.rel}:${i + 1}` });
+          out.push({ key: lit[1], at: `${file.rel}:${lineFor(arrStart + (lit.index ?? 0))}` });
         }
       }
-      for (const push of line.matchAll(/\.push\(\s*['"]([^'"]+)['"]\s*\)/g)) {
-        out.push({ key: push[1], at: `${file.rel}:${i + 1}` });
+      for (const push of window.matchAll(/\.push\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+        out.push({ key: push[1], at: `${file.rel}:${lineFor(push.index ?? 0)}` });
       }
-      for (const push of line.matchAll(/\.push\(\s*`([^`]*)`\s*\)/g)) {
-        out.push({ key: push[1].replace(/\$\{[^}]*\}/g, ''), at: `${file.rel}:${i + 1}` });
+      for (const push of window.matchAll(/\.push\(\s*`([^`]*)`\s*\)/g)) {
+        out.push({
+          key: push[1].replace(/\$\{[^}]*\}/g, ''),
+          at: `${file.rel}:${lineFor(push.index ?? 0)}`,
+        });
+      }
+    }
+  }
+  // The window overlaps, so the same key/line pair is reached from several
+  // starting lines; dedupe on the resolved citation.
+  const seen = new Set<string>();
+  return out.filter((e) => {
+    const key = `${e.key}@${e.at}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Lines folded into each literal-sweep window (a wrapped array literal). */
+const LITERAL_WINDOW_LINES = 5;
+
+// ─── Source 3: the root-refinement FALLBACK keys ────────────────────────────
+
+/**
+ * Gate keys supplied as the `fallback` argument to `contractGapFields`, and
+ * returned by `namedContractGap`.
+ *
+ * Reviewed on PR #1063 (round 4): the contract derivation drops Zod issues
+ * with an EMPTY path — object-level `.refine()` failures — but production maps
+ * exactly those through `contractGapFields(errors, fallback)`, where the
+ * caller's fallback string BECOMES the `missingFields` key. A new
+ * `widgetId`-or-reference refine paired with `contractGapFields(errors,
+ * 'widgetId')` would emit an entity-id gate at runtime that neither the
+ * derivation nor the literal sweep could see.
+ *
+ * These are the third source, scanned from the call sites so a new fallback
+ * has to pass the same lifter check as any other gate key.
+ */
+export function fallbackGateKeys(roots: readonly string[]): Array<{ key: string; at: string }> {
+  const out: Array<{ key: string; at: string }> = [];
+  for (const file of listSourceFiles(roots)) {
+    const lines = file.code.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      for (const m of lines[i].matchAll(/contractGapFields\([^,]*,\s*'([^']+)'\s*\)/g)) {
+        out.push({ key: m[1], at: `${file.rel}:${i + 1}` });
+      }
+      // `namedContractGap`'s per-type returns are the same mechanism written
+      // as a switch: `return <cond> ? ['customerId'] : []`.
+      if (/return[^;]*\?\s*\[/.test(lines[i]) || /^\s*return\s*\[/.test(lines[i])) {
+        for (const m of lines[i].matchAll(/\[\s*'([a-zA-Z][A-Za-z0-9_]*)'\s*\]/g)) {
+          out.push({ key: m[1], at: `${file.rel}:${i + 1}` });
+        }
       }
     }
   }
@@ -246,7 +376,7 @@ export function unliftableEntityIdGates(
     out.push({ key, where: `contract(s): ${types.join(', ')}` });
   }
 
-  for (const emitter of literalGateKeyEmitters(roots)) {
+  for (const emitter of [...literalGateKeyEmitters(roots), ...fallbackGateKeys(roots)]) {
     const key = emitter.key;
     if (!/^[A-Za-z][A-Za-z0-9]*Id$/.test(key) && !isPathShapedGate(key)) continue;
     if (classify(key) !== 'unliftable') continue;
@@ -287,6 +417,12 @@ const KNOWN_UNLIFTABLE: ReadonlyArray<{
     where: 'packages/shared/src/contracts/review-response-proposal.ts:73 (review_response_proposal)',
     emittedAt: 'contract(s): review_response_proposal',
     note: 'The review being answered is picked from the reputation queue by the drafting task (ai/tasks/review-response-task.ts:182), never named by the operator. Emitted as a gate on the voice leg by proposals/voice-payload.ts:504 if it is ever absent, and no resolver or card affordance can supply it.',
+  },
+  {
+    key: 'linkedJobId',
+    where: 'packages/api/src/proposals/contracts.ts:276 (create_appointment)',
+    emittedAt: 'contract(s): create_appointment',
+    note: "`linkedJobId: z.string().uuid().optional()` — the chained-booking job reference. A malformed value emits `linkedJobId` as a gate via `fieldPathsFrom`, and GATED_REFERENCE_SOURCES has `jobId` but not `linkedJobId`, so the resolver cannot lift it. Found in review round 5 by probing declared fields with an INVALID value: an optional field parses `{}` cleanly, so the empty-payload probe never saw it. Likely the cheapest of the four to close — `linkedJobId` pairs with the same `jobReference` free text `jobId` already resolves from.",
   },
   {
     key: 'entityId',
@@ -395,7 +531,7 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
    * back for re-grading.
    */
   it.fails(
-    'I6 as written — every entity-id gate has a lifter (KNOWN GAP: reviewId, entityId, groundedProposalId)',
+    'I6 as written — every entity-id gate has a lifter (KNOWN GAP: reviewId, entityId, groundedProposalId, linkedJobId)',
     () => {
       expect(unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC])).toEqual([]);
     },
@@ -470,6 +606,30 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
       const unliftable = unliftableEntityIdGates({}, [dir]);
       expect(unliftable.map((u) => u.key)).toEqual(['warrantyClaimId']);
       expect(unliftable[0].where).toMatch(/planted-task\.ts:3$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL — a gate written as a WRAPPED array literal is reported', () => {
+    // The false negative reviewed on PR #1063 (round 3): the identifier and
+    // the key sit on different lines, so a line-at-a-time scan saw neither.
+    const dir = plantTree('i6-wrapped-array', {
+      'planted-wrapped.ts': [
+        'export function draft() {',
+        '  const missingFields = [',
+        "    'warrantyClaimId',",
+        '  ];',
+        '  return { missingFields };',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const unliftable = unliftableEntityIdGates({}, [dir]);
+      expect(unliftable.map((u) => u.key)).toEqual(['warrantyClaimId']);
+      // Reported on line 3 — where the key actually sits, not the window head.
+      expect(unliftable[0].where).toMatch(/planted-wrapped\.ts:3$/);
     } finally {
       removeTree(dir);
     }

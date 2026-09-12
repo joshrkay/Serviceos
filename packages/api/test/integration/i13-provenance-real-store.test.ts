@@ -64,6 +64,25 @@ function neverCalledGateway(): LLMGateway {
   } as unknown as LLMGateway;
 }
 
+/**
+ * `finalizeTerminatedSession` fires its DB write via a fire-and-forget
+ * `void persistSessionEnded(...)` (create-voice-turn-processor.ts) — it is
+ * not awaitable from the outside. Poll until the row shows up rather than
+ * asserting immediately after the synchronous call returns.
+ */
+async function waitForSessionEnded(
+  repo: PgVoiceSessionRepository,
+  tenantId: string,
+  sessionId: string,
+): Promise<NonNullable<Awaited<ReturnType<PgVoiceSessionRepository['findById']>>>> {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const row = await repo.findById(tenantId, sessionId);
+    if (row?.endedAt) return row;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`voice session ${sessionId} was not persisted by finalizeTerminatedSession in time`);
+}
+
 describe('I13 — a transcript persisted with injected content survives the real-store round trip fenced', () => {
   let pool: Pool;
   let auditRepo: PgAuditRepository;
@@ -100,9 +119,12 @@ describe('I13 — a transcript persisted with injected content survives the real
     // writes the injection audit row to Postgres.
     await processor.executeSideEffects(session, sideEffects, tenant.tenantId);
 
-    // Persist the session end exactly as create-voice-turn-processor.ts's
-    // persistSessionEnded does: contentProvenance derived from the FSM's
-    // REAL injectionFlagged context, never asserted directly.
+    // Seed the initial row (as a real call would at session start), then
+    // terminate through the exposed production seam
+    // (`VoiceTurnProcessor.finalizeTerminatedSession` →
+    // `persistSessionEnded`) instead of replicating its contentProvenance
+    // logic in the test — a regression that broke that production spread
+    // would then fail THIS test, not just leave it green.
     const writeRepo = new PgVoiceSessionRepository(pool);
     await writeRepo.create({
       id: session.id,
@@ -111,22 +133,13 @@ describe('I13 — a transcript persisted with injected content survives the real
       callSid: session.callSid,
       state: fromState,
     });
-    await writeRepo.markEnded(tenant.tenantId, session.id, {
-      endedAt: new Date(),
-      endedReason: 'caller_hangup',
-      outcome: 'completed',
-      state: session.machine.currentState,
-      channel: 'voice_inbound',
-      transcript: [...session.transcript],
-      ...(session.machine.currentContext.injectionFlagged
-        ? { contentProvenance: 'untrusted' as const }
-        : {}),
-    });
+    processor.finalizeTerminatedSession(session, sideEffects, 'i13_test_hangup');
 
     // "Hours later": brand-new repository instances — no shared in-memory
     // state with the writes above — read everything back.
     const readRepo = new PgVoiceSessionRepository(pool);
     const readAuditRepo = new PgAuditRepository(pool);
+    await waitForSessionEnded(readRepo, tenant.tenantId, session.id);
 
     const injectionRows = (
       await readAuditRepo.findByEntity(tenant.tenantId, 'voice_session', session.id)
@@ -194,17 +207,9 @@ describe('I13 — a transcript persisted with injected content survives the real
       callSid: sessionA.callSid,
       state: fromStateA,
     });
-    await writeRepo.markEnded(tenantA.tenantId, sessionA.id, {
-      endedAt: new Date(),
-      endedReason: 'caller_hangup',
-      outcome: 'completed',
-      state: sessionA.machine.currentState,
-      channel: 'voice_inbound',
-      transcript: [...sessionA.transcript],
-      ...(sessionA.machine.currentContext.injectionFlagged
-        ? { contentProvenance: 'untrusted' as const }
-        : {}),
-    });
+    // Terminate through the exposed production seam, same as the main test.
+    processor.finalizeTerminatedSession(sessionA, sideEffectsA, 'i13_test_hangup');
+    await waitForSessionEnded(writeRepo, tenantA.tenantId, sessionA.id);
 
     // Tenant B: an ordinary call, no injection attempt.
     const sessionBId = crypto.randomUUID();

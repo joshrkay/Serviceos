@@ -75,7 +75,44 @@ const PROMPT_ASSEMBLY = /role:\s*['"](?:system|user)['"]|systemPrompt|messages\s
 const CALLER_TEXT =
   /\b(transcript|transcriptText|callerLines|callerTurns|customerLines|callerUtterance|callerMessage|customerMessage|inboundMessage|voicemail|callerText|messageThread)\b/;
 
-/** The two structured caller channels (clause A's domain). */
+/**
+ * The two structured caller channels, each paired with the renderer that is
+ * the only sanctioned way to put it in a prompt.
+ *
+ * Reviewed on PR #1063: a single file-wide "does this module mention any
+ * renderer" predicate meant a module that legitimately calls ONE renderer and
+ * separately hand-rolls the OTHER channel counted as fenced, reopening the
+ * injection path the clause exists to close. The channel and its renderer are
+ * now checked as a pair.
+ */
+const STRUCTURED_CHANNELS: ReadonlyArray<{
+  channel: string;
+  renderer: string;
+  /**
+   * Hand-rolling: a map/forEach/reduce/join applied DIRECTLY to the channel.
+   *
+   * Deliberately adjacent, not a window. Round 5's first attempt allowed up to
+   * 200 characters between the channel name and the call, which matched a
+   * `.join(...)` on the RENDERER'S OWN RESULT a couple of lines below the
+   * legitimate `buildRecentMessagesPromptSections(context.recentMessages)` —
+   * a false positive on correct code. Only `recentMessages.map(` and its
+   * siblings count.
+   */
+  handRolled: RegExp;
+}> = [
+  {
+    channel: 'recentMessages',
+    renderer: 'buildRecentMessagesPromptSections',
+    handRolled: /\brecentMessages\s*(?:\?\.)?\s*\.\s*(?:map|forEach|reduce|join)\s*\(/,
+  },
+  {
+    channel: 'retrievedChunks',
+    renderer: 'buildRetrievedChunksPromptSection',
+    handRolled: /\bretrievedChunks\s*(?:\?\.)?\s*\.\s*(?:map|forEach|reduce|join)\s*\(/,
+  },
+];
+
+/** Any mention of a structured caller channel (used for the coarse sweep). */
 const STRUCTURED_CALLER_CHANNEL = /\b(recentMessages|retrievedChunks)\b/;
 
 /**
@@ -89,10 +126,12 @@ const STRUCTURED_CALLER_CHANNEL = /\b(recentMessages|retrievedChunks)\b/;
  * catch. An import statement has no `(` after the identifier; a call does.
  * `NEGATIVE CONTROL (A) — imported but hand-rolled` pins it.
  */
+function callsRenderer(file: SourceFile, renderer: string): boolean {
+  return new RegExp(String.raw`\b${renderer}\s*\(`).test(file.code);
+}
+
 function usesSanctionedRenderer(file: SourceFile): boolean {
-  return SANCTIONED_RENDERERS.some((r) =>
-    new RegExp(String.raw`\b${r}\s*\(`).test(file.code),
-  );
+  return SANCTIONED_RENDERERS.some((r) => callsRenderer(file, r));
 }
 
 function isFenceModule(rel: string): boolean {
@@ -106,15 +145,61 @@ function isFenceModule(rel: string): boolean {
  * NOT go through a sanctioned renderer. Pure in its roots.
  */
 export function unfencedStructuredChannelConsumers(roots: readonly string[]): string[] {
-  return listSourceFiles(roots)
-    .filter((f) => !isFenceModule(f.rel))
-    .filter((f) => STRUCTURED_CALLER_CHANNEL.test(f.code))
-    .filter((f) => PROMPT_ASSEMBLY.test(f.code))
-    .filter((f) => !usesSanctionedRenderer(f))
-    .map((f) => f.rel);
+  const out: string[] = [];
+  for (const file of listSourceFiles(roots)) {
+    if (isFenceModule(file.rel)) continue;
+    if (!PROMPT_ASSEMBLY.test(file.code)) continue;
+    if (!STRUCTURED_CALLER_CHANNEL.test(file.code)) continue;
+
+    // PER CHANNEL, not per file. A module is only fenced for the channel it
+    // actually hands to that channel's renderer (or to the raw fence helper);
+    // calling one renderer earns it nothing for the other channel.
+    const unfenced = STRUCTURED_CHANNELS.some((c) => {
+      if (!new RegExp(String.raw`\b${c.channel}\b`).test(file.code)) return false;
+      // HAND-ROLLING IS CHECKED FIRST, and a renderer call no longer grants
+      // the module immunity for that channel. Reviewed on PR #1063 (round 5):
+      // returning early on the renderer call meant a module that legitimately
+      // renders `recentMessages` for one prompt and ALSO does
+      // `recentMessages.map(...)` for a second prompt was accepted — the
+      // file-wide bypass, surviving inside the per-channel fix.
+      //
+      // A module that does both is the ambiguous case, and ambiguity here
+      // belongs in front of a human: it is reported, and the way to clear it
+      // is to route the second use through the renderer too.
+      if (!c.handRolled.test(file.code)) return false;
+      return true;
+    });
+    if (unfenced) out.push(file.rel);
+  }
+  return out;
 }
 
 // ─── Clause B ───────────────────────────────────────────────────────────────
+
+/**
+ * Every module that actually SENDS a prompt to the gateway.
+ *
+ * Reviewed on PR #1063 (round 3): clause B's domain is "names a caller-text
+ * identifier", and extracting the transcription prompt into
+ * `buildCorrection(raw)` would match `PROMPT_ASSEMBLY` but not `CALLER_TEXT` —
+ * so the helper would never need classification. The critique is right, and
+ * the real fix (tracing provenance through a rename) needs dataflow a text
+ * scan does not have.
+ *
+ * What IS reachable is the chokepoint. Every prompt reaches a model through
+ * `gateway.complete(...)`, and that call cannot be renamed away — it is the
+ * gateway's own API, pinned by I15. So the set of gateway-calling modules is
+ * pinned instead: extracting a prompt builder cannot move the `complete` call
+ * out of a classified module, and introducing a NEW sender fails here
+ * regardless of what its local identifiers are called.
+ */
+export function gatewayCallingModules(roots: readonly string[]): string[] {
+  return listSourceFiles(roots)
+    .filter((f) => /\.complete\s*\(/.test(f.code))
+    .filter((f) => /gateway|llm/i.test(f.code))
+    .map((f) => f.rel)
+    .sort();
+}
 
 export function promptBuildersNamingCallerText(roots: readonly string[]): string[] {
   return listSourceFiles(roots)
@@ -123,6 +208,16 @@ export function promptBuildersNamingCallerText(roots: readonly string[]): string
     .filter((f) => PROMPT_ASSEMBLY.test(f.code))
     .map((f) => f.rel);
 }
+
+/**
+ * How many modules send a prompt to the gateway today.
+ *
+ * A budget assertion, in the shape §5.0c(b) recommends for I18: cheap,
+ * mechanical, and a PR that changes it is self-documenting in review. It is
+ * what closes the round-3 rename hole — a new prompt sender cannot appear
+ * without a human looking at where its text comes from.
+ */
+const PINNED_GATEWAY_SENDER_COUNT = 48;
 
 type Classification =
   | 'fenced'
@@ -327,6 +422,18 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
     ).toEqual([]);
   });
 
+  it('B — the set of modules that SEND a prompt is pinned (a rename cannot move the send)', () => {
+    const senders = gatewayCallingModules([SRC]);
+    // Not vacuous, and bounded: if this count moves, a module started or
+    // stopped talking to the gateway and its caller-text provenance needs a
+    // look — whatever its local identifiers happen to be called.
+    expect(senders.length).toBeGreaterThan(20);
+    expect(senders).toContain('src/workers/transcription.ts');
+    expect(senders).toContain('src/ai/skills/summarize-session.ts');
+    expect(senders).toContain('src/ai/tasks/suggest-reply-task.ts');
+    expect(PINNED_GATEWAY_SENDER_COUNT).toBe(senders.length);
+  });
+
   it('B — the recorded violation is still exactly where the report says it is', () => {
     const found = promptBuildersNamingCallerText([SRC]);
     for (const entry of CLASSIFIED.filter((c) => c.as === 'violation')) {
@@ -374,6 +481,34 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
     }
   });
 
+  it('NEGATIVE CONTROL (A) — a renderer call does NOT excuse a second raw use of the SAME channel', () => {
+    // The round-5 finding: one legitimate render plus one raw interpolation of
+    // the same channel. The renderer call used to grant file-wide immunity.
+    const dir = plantTree('i13-same-channel-twice', {
+      'renders-and-hand-rolls.ts': [
+        "import { buildRecentMessagesPromptSections } from '../ai/orchestration/context-builder';",
+        '',
+        'export function summaryPrompt(ctx: { recentMessages: Array<{ role: string; content: string }> }) {',
+        '  const { trustedLines, untrustedBlock } = buildRecentMessagesPromptSections(ctx.recentMessages);',
+        "  return { messages: [{ role: 'user', content: [...trustedLines, untrustedBlock].join('\\n') }] };",
+        '}',
+        '',
+        'export function secondPrompt(ctx: { recentMessages: Array<{ role: string; content: string }> }) {',
+        "  const raw = ctx.recentMessages.map((m) => m.content).join('\\n');",
+        "  return { messages: [{ role: 'system', content: raw }] };",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = unfencedStructuredChannelConsumers([dir]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatch(/renders-and-hand-rolls\.ts$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
   it('NEGATIVE CONTROL (A, inverse) — the same consumer PASSES once it uses the renderer', () => {
     const dir = plantTree('i13-plant-a-fixed', {
       'fixed-consumer.ts': [
@@ -410,6 +545,50 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
       const found = unfencedStructuredChannelConsumers([dir]);
       expect(found).toHaveLength(1);
       expect(found[0]).toMatch(/imported-but-hand-rolled\.ts$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL (A) — calling ONE renderer does not fence the OTHER channel', () => {
+    // The false negative reviewed on PR #1063: a module that legitimately
+    // renders retrievedChunks and separately hand-rolls the message thread.
+    const dir = plantTree('i13-one-of-two', {
+      'half-fenced.ts': [
+        "import { buildRetrievedChunksPromptSection } from '../ai/orchestration/context-builder';",
+        '',
+        'export function buildPrompt(context: {',
+        '  recentMessages: Array<{ role: string; content: string }>;',
+        '  retrievedChunks: Array<{ sourceType: string; content: string }>;',
+        '}) {',
+        '  const notes = buildRetrievedChunksPromptSection(context.retrievedChunks);',
+        "  const thread = context.recentMessages.map((m) => `${m.role}: ${m.content}`).join('\\n');",
+        "  return { messages: [{ role: 'system', content: `${notes}\\n${thread}` }] };",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = unfencedStructuredChannelConsumers([dir]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatch(/half-fenced\.ts$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL (A, inverse) — a module that merely NAMES a channel without reading it is not reported', () => {
+    const dir = plantTree('i13-names-only', {
+      'plumbing.ts': [
+        'export interface Ctx {',
+        '  recentMessages: Array<{ role: string; content: string }>;',
+        '}',
+        "export function forward(ctx: Ctx) { return { messages: [{ role: 'user', content: 'x' }], ctx }; }",
+        '',
+      ].join('\n'),
+    });
+    try {
+      expect(unfencedStructuredChannelConsumers([dir])).toEqual([]);
     } finally {
       removeTree(dir);
     }

@@ -55,25 +55,6 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **Josh's call:** add a per-tenant `notifyTechniciansBySms` (default on or off?) and/or a churn window? Push notifications are unaffected (per-user mutes apply).
 - **Until decided:** nothing to build; issue #1033 holds the analysis.
 
-### 3.8 customer confirmation — what happens when no delivery provider is configured? (from the dormant-rows lane, issue #1077)
-- **What:** the confirmation path IS wired (`TransactionalCommsService` as `schedulingNotifier`, `app.ts:1910`) and proven at real Postgres — but there are **four distinct boots on which an approved booking produces no dispatch row, no audit event and no owner-visible signal**, and they are NOT the same failure. Corrected in review (PR #1076): an earlier version of this entry said the launch flags cause the no-op fallback. They do not — `TELEPHONY_ENABLED`/`EMAIL_ENABLED` never reach `createMessageDeliveryProvider`.
-  1. **mode `'none'`** — no Twilio and no SendGrid credentials at all: `messageDelivery` is null, the handler falls back to `NoopSchedulingConfirmationNotifier` (`handlers.ts:381`). *This is the only one that involves the no-op.*
-  2. **both launch flags off, credentials present** — the factory returns a NON-NULL provider (the flags are invisible to it); `GatedMessageDelivery` then suppresses every send at runtime and `sendCustomerMessage` swallows it per channel. Live notifier, no rows.
-  3. **`autoSendAppointmentReminders = false`** — owner-reachable from settings; one flag governs both reminders and booking confirmations.
-  4. **one credential leg only** — SMS creds and no SendGrid boots a non-null provider whose email leg throws at send time, so a customer reachable only by email gets nothing (proven at real Postgres, tenant `Deadleg`).
-  A second, never-constructed implementation (`AppointmentConfirmationNotifier`) duplicates the live one and carries the same (3) early return.
-- **Josh's call:** record a failed dispatch row / emit an audit event / refuse to execute / accept and document — **and note a fix aimed only at (1) leaves (2), (3) and (4) untouched**; plus delete or promote the dead class.
-- **Until decided:** row 3.8 is graded on the wired path (4, T1) with the condition named in its cell; #1077 holds the analysis.
-
-### 4.7 lateness from truck location — wire or retire? (from the dormant-rows lane, issue #1079)
-- **What:** `computeDispatchLateness` is complete and unit-tested but has no runtime caller; pings are ingested and the board has a ready `lateness` seam the route never supplies. One adapter wires it; one deletion retires it.
-- **Josh's call:** wire (and decide where the owner sees it, that `autoNotifyCustomer` never fires without approval, and the per-query cost) or retire (delete the evaluator, its tests, the field and the hook; mark 4.7 not-built).
-- **Until decided:** row 4.7 stays at 2 (dormant, pinned); #1079 holds the analysis.
-
-### 9.5 service-credit cap at execute time (from the dormant-rows lane, issue #1080) — money
-- **What:** the cap holds at draft (credit omitted, proven) but `executeServiceCredit` never re-reads the rolling sum, so a delayed approval can execute past $100 (proven: $140). The source header claims an at-execute cap that does not exist.
-- **Josh's call:** refuse-and-surface at execute (recommended), or accept the window and document it.
-- **Until decided:** row 9.5 is at 4 on its criterion; #1080 holds the analysis.
 ### §8.12 memberships — what does "bills itself" minimally mean? (from #1023, issue #1058)
 - **What:** the recurring-agreements sweep renews and bills on real rows (proven, `membership-renewal-sweep.test.ts`). **Corrected on review (PR #1053) — an earlier version of this entry said *every* dues invoice is an undunnable draft, which is wrong.** On the CONFIGURED path (`autoCollectDues` + a saved default card + a Stripe key) `app.ts:5760-5766` issues the invoice with a 30-day due date *before* charging, so a decline leaves an open, dunnable invoice — proven at real Postgres, and the real overdue sweep then chases it. The gap is the **DEFAULT** path (`autoCollectDues` defaults to false in `createAgreement`) and the **no-saved-card** case (`no_card` returns before issuance, `dues-collector.ts:85`): there the invoice is `draft` with no `due_date`, so dues are not collectable without a human and the 8.9 cadence cannot reach them. Numbering as `AGREEMENT-<epoch ms>` outside the tenant sequence holds on both paths. The gaps are pinned by ordinary tests asserting the current wrong value.
 - **Josh's call:** does "recurring revenue is actually recurring" require (a) issuing the dues invoice, (b) a due date so the cadence chases it, (c) numbering off the tenant sequence — all three, or a different minimum? The correction above sharpens this into a concrete choice: the configured path already does (a) and (b), so is the answer *"auto-collect IS the intended path, and the default should flip / onboarding must drive owners to it"*, or *"the default path must stand on its own and issue dues regardless"*? The severity turns on how many real memberships sit on the default path or have no saved card — which only you can see.
@@ -175,3 +156,22 @@ named, not answered — see this file's own rule at the top.
   research #1004), or does some other proof satisfy 5 for a phone-surface
   row? **Until decided:** 2.7's rung is Fable's call per the ticket's
   resolution comment; this lane does not claim 5.
+### 3.8 customer confirmation — what happens when no delivery provider is configured? (from the dormant-rows lane, issue #1077)
+- **What:** the confirmation path IS wired (`TransactionalCommsService` as `schedulingNotifier`, `app.ts:1910`) and proven at real Postgres — but there are **four distinct boots on which an approved booking produces no dispatch row, no audit event and no owner-visible signal**, and they are NOT the same failure. Corrected in review (PR #1076): an earlier version of this entry said the launch flags cause the no-op fallback. They do not — `TELEPHONY_ENABLED`/`EMAIL_ENABLED` never reach `createMessageDeliveryProvider`.
+  1. **mode `'none'`** — no Twilio and no SendGrid credentials at all: `messageDelivery` is null, the handler falls back to `NoopSchedulingConfirmationNotifier` (`handlers.ts:381`). *This is the only one that involves the no-op.*
+  2. **both launch flags off, credentials present** — the factory returns a NON-NULL provider (the flags are invisible to it); `GatedMessageDelivery` then suppresses every send at runtime and `sendCustomerMessage` swallows it per channel. Live notifier, no rows.
+  3. **`autoSendAppointmentReminders = false`** — owner-reachable from settings; one flag governs both reminders and booking confirmations.
+  4. **one credential leg only** — SMS creds and no SendGrid boots a non-null provider whose email leg throws at send time, so a customer reachable only by email gets nothing (proven at real Postgres, tenant `Deadleg`).
+  A second, never-constructed implementation (`AppointmentConfirmationNotifier`) duplicates the live one and carries the same (3) early return.
+- **Josh's call:** record a failed dispatch row / emit an audit event / refuse to execute / accept and document — **and note a fix aimed only at (1) leaves (2), (3) and (4) untouched**; plus delete or promote the dead class.
+- **Until decided:** row 3.8 is graded on the wired path (4, T1) with the condition named in its cell; #1077 holds the analysis.
+
+### 4.7 lateness from truck location — wire or retire? (from the dormant-rows lane, issue #1079)
+- **What:** `computeDispatchLateness` is complete and unit-tested but has no runtime caller; pings are ingested and the board has a ready `lateness` seam the route never supplies. One adapter wires it; one deletion retires it.
+- **Josh's call:** wire (and decide where the owner sees it, that `autoNotifyCustomer` never fires without approval, and the per-query cost) or retire (delete the evaluator, its tests, the field and the hook; mark 4.7 not-built).
+- **Until decided:** row 4.7 stays at 2 (dormant, pinned); #1079 holds the analysis.
+
+### 9.5 service-credit cap at execute time (from the dormant-rows lane, issue #1080) — money
+- **What:** the cap holds at draft (credit omitted, proven) but `executeServiceCredit` never re-reads the rolling sum, so a delayed approval can execute past $100 (proven: $140). The source header claims an at-execute cap that does not exist.
+- **Josh's call:** refuse-and-surface at execute (recommended), or accept the window and document it.
+- **Until decided:** row 9.5 is at 4 on its criterion; #1080 holds the analysis.
