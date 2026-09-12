@@ -339,7 +339,13 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
   async function boardItems(seeded: SeededTenant): Promise<Array<Record<string, unknown>>> {
     const res = await request(productionBoardApp(seeded))
       .get('/api/dispatch/board')
-      .query({ date: seeded.dateStr });
+      // `dateStr` is a Phoenix-local calendar date, so the route must use the
+      // same boundary. Omitting `timezone` makes `getDispatchBoardData` fall
+      // back to UTC (routes.ts:146), and for the ~7 hours a day where the
+      // Phoenix and UTC dates differ the seeded appointment falls outside the
+      // queried window — the assertions would then fail on a wall clock rather
+      // than on anything to do with lateness wiring.
+      .query({ date: seeded.dateStr, timezone: 'America/Phoenix' });
     expect(res.status).toBe(200);
     const body = res.body as {
       unassignedAppointments?: Array<Record<string, unknown>>;
