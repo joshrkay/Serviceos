@@ -105,6 +105,44 @@ function centsToDollarInput(cents: number | null): string {
   return String(cents / 100);
 }
 
+/**
+ * #1011 — the two per-tenant capabilities an owner may switch (rows 2.6, 2.7).
+ * Deliberately a closed list mirroring the API's `z.enum` allowlist: the write
+ * route refuses anything else, so an extra entry here would render a switch
+ * that can only ever 400.
+ */
+const OWNER_CAPABILITIES = [
+  {
+    key: 'dropped_call_recovery',
+    label: 'Text back callers who hang up',
+    description:
+      'If someone calls and hangs up before they reach anyone, send them a text so the lead is not lost.',
+  },
+  {
+    key: 'voice_vulnerability_triage',
+    label: 'Extra care for callers in distress',
+    description:
+      'Watch each call for signs a caller is distressed or at risk, and hand the call to a person sooner.',
+  },
+] as const;
+
+type OwnerCapabilityKey = (typeof OWNER_CAPABILITIES)[number]['key'];
+
+/** Mirrors the API response: the resolved value, who decided it, and whether it is ours to change. */
+interface CapabilityState {
+  enabled: boolean;
+  source: 'tenant' | 'platform' | 'default';
+  /**
+   * The server's own answer to "would a PUT be refused?" — true only for a
+   * platform row that is explicitly OFF. Do NOT re-derive this from `source`:
+   * a platform row that is ON is a RAMP, not a freeze, and the owner may still
+   * turn the capability off. `source === 'platform'` was the first predicate
+   * here and it disabled the switch on a ramped-ON capability while claiming it
+   * was turned off platform-wide.
+   */
+  platformFrozen?: boolean;
+}
+
 export function SettingsPage() {
   const navigate = useNavigate();
   const { signOut } = useClerk();
@@ -164,6 +202,10 @@ export function SettingsPage() {
   // no signal that the user's real preferences never loaded).
   const [settingsLoadError, setSettingsLoadError] = useState(false);
   const [settingsReloadNonce, setSettingsReloadNonce] = useState(0);
+  // #1011 — per-tenant capabilities (rows 2.6 / 2.7). `null` means the API said
+  // they are unconfigured (503, the in-memory boot) — the block is then hidden
+  // entirely rather than rendering switches that cannot persist.
+  const [capabilities, setCapabilities] = useState<Record<string, CapabilityState> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -278,6 +320,21 @@ export function SettingsPage() {
         setSpanishMode(lang.defaultLanguage === 'es');
       } catch {
         /* language settings missing — default to English */
+      }
+    })();
+    // #1011 — capabilities load independently: a 503 (no database wired) must
+    // leave the rest of Settings fully usable.
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings/capabilities');
+        if (cancelled) return;
+        if (!res.ok) {
+          setCapabilities(null);
+          return;
+        }
+        setCapabilities((await res.json()) as Record<string, CapabilityState>);
+      } catch {
+        if (!cancelled) setCapabilities(null);
       }
     })();
     (async () => {
@@ -435,6 +492,55 @@ export function SettingsPage() {
       toast.error('Could not save preference');
       setCloseCapCents(previous);
       setCloseCapInput(centsToDollarInput(previous));
+    }
+  }
+
+  /**
+   * #1011 — flip one per-tenant capability. Same shape as `persistToggle`:
+   * optimistic, reverted with a toast on failure. A platform-frozen capability
+   * is never sent — the server answers 409 and the switch is disabled, so this
+   * is belt-and-braces against a click landing on a stale render.
+   */
+  async function toggleCapability(key: OwnerCapabilityKey, value: boolean) {
+    const previous = capabilities?.[key];
+    if (!previous || previous.platformFrozen === true) return;
+
+    setCapabilities((prev) =>
+      prev
+        ? { ...prev, [key]: { enabled: value, source: 'tenant', platformFrozen: false } }
+        : prev,
+    );
+    try {
+      const res = await apiFetch(`/api/settings/capabilities/${key}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: value }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings/capabilities/${key} ${res.status}`);
+      // Trust the server's RESOLVED state over the optimistic one: the write is
+      // an override and the value that matters is what the gate will read.
+      const resolved = (await res.json()) as {
+        enabled?: boolean;
+        source?: CapabilityState['source'];
+        platformFrozen?: boolean;
+      };
+      if (typeof resolved.enabled === 'boolean') {
+        setCapabilities((prev) =>
+          prev
+            ? {
+                ...prev,
+                [key]: {
+                  enabled: resolved.enabled!,
+                  source: resolved.source ?? 'tenant',
+                  platformFrozen: resolved.platformFrozen ?? false,
+                },
+              }
+            : prev,
+        );
+      }
+    } catch {
+      toast.error('Could not save preference');
+      setCapabilities((prev) => (prev ? { ...prev, [key]: previous } : prev));
     }
   }
   const [qbOpen, setQbOpen] = useState(false);
@@ -1189,6 +1295,55 @@ export function SettingsPage() {
             </div>
           </div>
         </div>
+
+        {/* #1011 — per-tenant capabilities (rows 2.6 / 2.7). Hidden entirely
+            when the API reports them unconfigured: a switch that cannot
+            persist is worse than no switch. */}
+        {capabilities && (
+          <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 mb-5">
+            <div className="px-4 py-3">
+              <p className="text-xs text-slate-400">Capabilities</p>
+            </div>
+            {OWNER_CAPABILITIES.map(({ key, label, description }) => {
+              const state = capabilities[key] ?? {
+                enabled: false,
+                source: 'default' as const,
+                platformFrozen: false,
+              };
+              // The SERVER's answer, not a re-derivation: a platform row that
+              // is ON is a ramp the owner may still switch off.
+              const frozen = state.platformFrozen === true;
+              return (
+                <div key={key} className="flex items-start justify-between gap-3 px-4 py-3.5">
+                  <div>
+                    <p className="text-sm text-slate-800">{label}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {description}
+                      {frozen && ' Currently turned off platform-wide, so this cannot be changed here.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={state.enabled}
+                    aria-label={label}
+                    disabled={frozen}
+                    onClick={() => void toggleCapability(key, !state.enabled)}
+                    className={`relative shrink-0 mt-0.5 inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                      state.enabled ? 'bg-blue-600' : 'bg-slate-200'
+                    } ${frozen ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span
+                      className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${
+                        state.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Reviews section */}
         <div className="mb-4">
