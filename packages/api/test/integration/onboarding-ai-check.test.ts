@@ -42,6 +42,10 @@ describe('onboarding AI self-check', () => {
   let app: express.Express;
   let queue: InMemoryQueue;
   let auditRepo: PgAuditRepository;
+  // Two-tenant auth shim — the middleware below reads `activeTenant` at
+  // request time so the T1 check can request /api/onboarding/status AS
+  // tenant B through the real route, not just query Postgres directly.
+  let activeTenant: { tenantId: string; userId: string };
   let currentTenant: { tenantId: string; userId: string };
 
   beforeAll(async () => {
@@ -55,9 +59,9 @@ describe('onboarding AI self-check', () => {
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
       (req as AuthenticatedRequest).auth = {
-        userId: currentTenant.userId,
+        userId: activeTenant.userId,
         sessionId: 'sess-test',
-        tenantId: currentTenant.tenantId,
+        tenantId: activeTenant.tenantId,
         role: 'owner',
       };
       next();
@@ -67,6 +71,7 @@ describe('onboarding AI self-check', () => {
 
   beforeEach(async () => {
     currentTenant = await createTestTenant(pool);
+    activeTenant = currentTenant;
   });
 
   afterAll(async () => {
@@ -99,13 +104,18 @@ describe('onboarding AI self-check', () => {
     expect(verified[0].metadata?.model).toBeTruthy();
 
     // T1 — a second tenant's status and audit trail are unaffected by this
-    // tenant's passing verification.
+    // tenant's passing verification. Request the REAL route as tenant B
+    // (not a superuser-pool query filtered to B's own tenant_id, which
+    // would only prove B has no row of its own — not that A's row/status
+    // is invisible to B) so a status-read-path RLS regression would
+    // actually fail this assertion.
     const tenantB = await createTestTenant(pool);
-    const bRow = await pool.query(
-      `SELECT ai_verification_status FROM tenant_settings WHERE tenant_id = $1`,
-      [tenantB.tenantId],
-    );
-    expect(bRow.rows).toHaveLength(0);
+    activeTenant = tenantB;
+    const statusB = await request(app).get('/api/onboarding/status');
+    activeTenant = currentTenant;
+    const aiStepB = statusB.body.steps.find((s: { id: string }) => s.id === 'ai_check');
+    expect(aiStepB.status).not.toBe('done');
+
     // Query tenant A's entity id, scoped under tenant B — tenant B's OWN
     // entity id would never match tenant A's row regardless of whether
     // tenant filtering works, so it wouldn't actually prove isolation.
