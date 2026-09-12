@@ -68,3 +68,20 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **What:** "fuga de gas" classifies **E2**, not E1: the caller is bridged to the dispatcher, never told to evacuate, the call is not closed, and a booking drafted earlier in the call stays live (`emergency-tier.ts:213/265`, English-only `E1_HAZARD_PHRASES` at `:73`). Proven end to end at the real handler; pinned as a characterization test plus an `it.fails`.
 - **Josh's call:** name the owner for a life-safety change to `emergency-tier.ts` semantics (the fix shape is small — carry the detector's `language` into the E1 candidate, or add the Spanish hazard phrases — but it sits next to O-2 and needs trade standing, not a test lane).
 - **Until decided:** row 2.5 is graded on the English path with the Spanish gap named; #1056 holds the analysis.
+
+### §8.5 payments — three blockers surfaced by the #1022 lane (branch `cloud/payments-8-8`, 2026-09-12)
+- **Saving a card on file writes no audit event** (engineering gap that needs a money-code change, so no lane on
+  this map may close it): `packages/api/src/webhooks/routes.ts:1074-1139` stores the PaymentMethod (ids, brand,
+  last4, expiry, default flag, Connect account) and records it with `logger.info` only. No
+  `entityType: 'payment_method'` event exists anywhere in `src`. **Row waiting:** §8.5's stored-card half — its
+  move is *the audit read-back*, and there is nothing to read; it stays where the #1009 entry audit put it
+  (4−, T1, no audit) until someone lands the emission in a money-class branch. Full evidence:
+  `docs/audit/lane-reports/1022-payments.md` (row 8.5b).
+- **Stripe test-mode credentials** (none in the cloud sandbox; the repo's only record/replay layer,
+  `CassetteLLMGateway` in `src/ai/voice-quality/cassette-gateway.ts`, records LLM exchanges — nothing records
+  Stripe HTTP): `chargeOffSession`
+  (`src/payments/stripe-saved-card.ts:184`) is proven only against a hand-written `StripeFetch` stub. **Row
+  waiting:** §8.5's off-session-charge half — a mocked client is not proof, so it stays at 3.
+- **Card-present hardware + Terminal credentials:** `src/payments/stripe-terminal.ts` is likewise stubbed-fetch
+  only (`test/payments/stripe-terminal.test.ts`). Per #1022 no Terminal proof was built; shares #1018's 5.5
+  finding. **Row waiting:** §8.5's card-present half — stays at 3.
