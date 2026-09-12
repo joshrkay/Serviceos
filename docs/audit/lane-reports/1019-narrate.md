@@ -437,6 +437,13 @@ project as it stands — a real reachability proof for 6.1a/6.1b would need a NE
 (not sweep) checking the recorder control renders on a representative sample of
 authenticated routes, which is out of this lane's TEST-ONLY-row scope and not written here.
 
+**Scope correction (chatgpt-codex-connector, PR #1048, on the PRD's 6.1b stamp, not on this
+report):** the PRD's `#1019` note for 6.1b originally said the 6 `useVoiceSession.test.ts`
+cases included "error paths." They do not — all 6 supply only SUCCESSFUL HTTP/SSE
+responses (no rejected start/send request, no auth rejection, no broken stream). This
+report never made that claim (see the accurate per-case list above); the PRD text has been
+corrected to match.
+
 ---
 
 ## Evidence run (artifact-before-sign-off)
