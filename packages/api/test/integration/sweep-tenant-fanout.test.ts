@@ -469,7 +469,21 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
   // full-suite run the shared container holds other files' completed jobs, so
   // these fixtures are dated far in the past to sort first and stay inside the
   // limit deterministically.
-  const FIXTURE_COMPLETED_AT = new Date('2020-01-01T00:00:00.000Z');
+  const FIXTURE_EPOCH = Date.parse('2020-01-01T00:00:00.000Z');
+  // ...and each fixture gets its OWN timestamp, one second apart, so the sweep
+  // processes them in the order they were seeded.
+  //
+  // They previously shared one instant. `ORDER BY completed_at ASC` leaves ties
+  // in unspecified order, so the failure-isolation tests below — which seed the
+  // doomed tenant first and assert the survivor is still processed — only
+  // detected a regression when the doomed row happened to come back first. A
+  // handler that swallowed the error and BROKE out of the loop would have
+  // passed roughly half the time, which is not a test, it is a coin flip.
+  // Caught in review on this PR (Codex P2); mutation-proof in the commit
+  // message. Seeding order is now sweep order, so "doomed first" is a fact
+  // rather than a hope.
+  let fixtureSeq = 0;
+  const nextCompletedAt = (): Date => new Date(FIXTURE_EPOCH + fixtureSeq++ * 1000);
   const seededJobIds: string[] = [];
 
   afterAll(async () => {
@@ -518,7 +532,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
        VALUES ($1,$2,$3,$4,$5,$6,'completed','normal',$7,$8, NOW(), NOW())`,
       [
         jobId, tenantId, customerId, locationId,
-        `J-${jobId.slice(0, 8)}`, 'Fan-out job', userId, FIXTURE_COMPLETED_AT,
+        `J-${jobId.slice(0, 8)}`, 'Fan-out job', userId, nextCompletedAt(),
       ],
     );
     seededJobIds.push(jobId);

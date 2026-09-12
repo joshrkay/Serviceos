@@ -1223,8 +1223,19 @@ an engineering-only view:
 
 Narrow to one case with `-t "<test title>"`. Paths under **D:** and **U:** are
 relative to `packages/api/test/`. The integration lane requires a running Docker
-daemon; **without one it does not fail, it skips** — which is its own trap, and
-the reason `S:` falsifiers appear wherever a claim is load-bearing.
+daemon **or** `EXTERNAL_TEST_DB_URL`; with neither, **it fails — it does not
+skip.** `test/integration/global-setup.ts` awaits `new
+PostgreSqlContainer(…).start()` with no catch and no skip path, so Vitest exits
+non-zero before collecting a single test.
+
+*An earlier draft of this line said the opposite — that the lane silently skips
+— and that error is worth keeping visible, because believing it is the trap.* A
+reader who has been told the lane skips without Docker will read a hard
+globalSetup failure as the documented harmless case and move on, when what
+actually happened is that **the confirmation never ran at all**. Neither a green
+nor a red from this lane means anything until you know the daemon was up. That
+is the reason `S:` falsifiers appear wherever a claim is load-bearing: a shell
+command that needs no container cannot fail this way.
 
 Rows marked ✅ *executed* were run during this audit rather than inspected —
 §8.1, §8.5 and §8.6 were produced by running the Docker-gated suite (12 files,
@@ -1242,7 +1253,7 @@ Rows marked ✅ *executed* were run during this audit rather than inspected —
 | 8.6 | Let me fix it by talking | J9 | 9 | 4 | No spoken-address entity — nobody can say "the house on Elm" |
 | 8.7 | Draft the quote from what was said | J4, J10 | 12 | 4− | 7 of 12 overstated; the stale-revision guard has never met a real DB |
 | 8.8 | Bill it and chase the money | J5, J6 | 13 | 4 | Dunning cadence idempotency is unproven — duplicate collections texts |
-| 8.9 | Tell me what happened, and what you got wrong | J7, J8 | 12 | 4 | **The digest cannot be turned on by anyone** |
+| 8.9 | Tell me what happened, and what you got wrong | J7, J8 | 12 | 4 | **No shipped surface turns the digest on** (the API does — §12.4) |
 | §5 | Never exceed your authority | J8, J10 | 26 | 4 | The second classifier reaches 2 of 93 origins |
 
 **123 stories. Zero at rung 6.** Nothing in this product has been observed
@@ -1861,16 +1872,26 @@ prose, and prose drifts. Three defences:
 3. **A status change is never one edit.** This document states the same fact in
    four to six places — §0, the §5/§8 row, §11.0c, §11.0e, §12, and often a
    D-NNN entry in `docs/decisions.md`. Every single status correction on this
-   PR has had to be applied more than once, and **three were caught only
-   because a reviewer found the copy I missed**: D-032's consequences after its
-   first clause was fixed, §11.0c's backlog after §11.0e's was, and the T0
-   verdict after the grades that retired it were published. So when a status
+   PR has had to be applied more than once, and **four were caught only because
+   a reviewer found the copy I missed**: D-032's consequences after its first
+   clause was fixed, §11.0c's backlog after §11.0e's was, the T0 verdict after
+   the grades that retired it were published, and the §8 epic table after the
+   digest's reachability was corrected in four other places. So when a status
    changes, the edit is not done until this returns nothing unexpected:
 
    ```bash
-   # every place the old status could still be asserted
-   grep -rn "<the old claim, and its paraphrases>" docs/
+   # grep the SUBJECT, not the wording — the claim is restated, not quoted
+   grep -rn "digest" docs/            # not "digestEnabled"
+   grep -rn "sweep" docs/             # not "seven sweeps"
    ```
+
+   **Grep the subject, not the token.** The rule above is stated this way
+   because its first outing failed: the digest claim was corrected in four
+   places by grepping `digestEnabled\|digest_enabled`, and the fifth copy —
+   *"the digest cannot be turned on by anyone"*, in the §8 epic table —
+   contained neither string. A restatement in plain English is invisible to a
+   grep for the identifier, and a summary table is exactly where a claim gets
+   restated in plain English.
 
    Fixing the line a reviewer pointed at is the *start* of the fix. **An
    incomplete correction is worse than none: it leaves two statements that
