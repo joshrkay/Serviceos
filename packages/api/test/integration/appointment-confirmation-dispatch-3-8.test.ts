@@ -50,7 +50,10 @@ import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
-import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import {
+  InMemoryDeliveryProvider,
+  type MessageDeliveryProvider,
+} from '../../src/notifications/delivery-provider';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
@@ -95,7 +98,10 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
   let tenantA: SeededTenant;
   let tenantB: SeededTenant;
 
-  async function seedTenant(label: string): Promise<SeededTenant> {
+  async function seedTenant(
+    label: string,
+    contact: { phone?: boolean; email?: boolean } = { phone: true, email: true },
+  ): Promise<SeededTenant> {
     const tenant = await createTestTenant(pool);
     const customerId = crypto.randomUUID();
     const phone = `+1602555${Math.floor(1000 + Math.random() * 8999)}`;
@@ -106,8 +112,8 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
       firstName: label,
       lastName: 'Customer',
       displayName: `${label} Customer`,
-      primaryPhone: phone,
-      email,
+      ...(contact.phone === false ? {} : { primaryPhone: phone }),
+      ...(contact.email === false ? {} : { email }),
       preferredChannel: 'sms',
       // The GatedMessageDelivery consent gate IS in play (see gatedDelivery()
       // below — the tests wrap the provider exactly as app.ts:1328 does, in the
@@ -215,9 +221,11 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
   async function confirmationRows(
     tenantId: string,
     appointmentId?: string,
-  ): Promise<Array<{ id: string; channel: string; recipient: string; entity_id: string }>> {
+  ): Promise<
+    Array<{ id: string; channel: string; recipient: string; entity_id: string; provider: string }>
+  > {
     const { rows } = await pool.query(
-      `SELECT id, channel, recipient, entity_id
+      `SELECT id, channel, recipient, entity_id, provider
          FROM message_dispatches
         WHERE tenant_id = $1
           AND entity_type = 'appointment_confirmation'
@@ -241,9 +249,9 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
    * `shared/config.ts:210-217` resolves to in prod/staging — so these rows are
    * proven against the gate production actually runs, not a permissive one.
    */
-  function gatedDelivery(): GatedMessageDelivery {
+  function gatedDelivery(base: MessageDeliveryProvider = new InMemoryDeliveryProvider()): GatedMessageDelivery {
     return new GatedMessageDelivery({
-      base: new InMemoryDeliveryProvider(),
+      base,
       dnc: new PgDncRepository(pool),
       auditRepo,
       enforcement: 'block',
@@ -261,12 +269,14 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     });
   }
 
-  function liveTransactionalComms(): TransactionalCommsService {
+  function liveTransactionalComms(
+    base: MessageDeliveryProvider = new InMemoryDeliveryProvider(),
+  ): TransactionalCommsService {
     // The construction app.ts:1771 performs whenever `messageDelivery` is
     // non-null. `invoiceRepo` is only reached by the overdue-reminder path,
     // which this row never touches, so it is stubbed rather than wired.
     return new TransactionalCommsService({
-      delivery: gatedDelivery(),
+      delivery: gatedDelivery(base),
       appointmentRepo,
       jobRepo,
       customerRepo,
@@ -459,6 +469,62 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     // promoting it would not close this path either.
     const quietAgain = await executeApprovedCreateAppointment(quiet, dormantNotifier());
     expect(await confirmationRows(quiet.tenant.tenantId, quietAgain)).toHaveLength(0);
+  });
+
+  it('CURRENT: a configured provider is still not sufficient — a customer with only ONE contact method gets only that channel`s confirmation', async () => {
+    // `sendCustomerMessage` skips a channel whose recipient is missing, so the
+    // row's criterion depends on the CUSTOMER too, not just the tenant and the
+    // boot. Both of these are ordinary production shapes.
+    const emailOnly = await seedTenant('Mailonly', { phone: false });
+    const emailAppt = await executeApprovedCreateAppointment(emailOnly, liveTransactionalComms());
+    const emailRows = await confirmationRows(emailOnly.tenant.tenantId, emailAppt);
+    expect(emailRows.map((r) => r.channel)).toEqual(['email']);
+    expect(emailRows[0].recipient).toBe(emailOnly.email);
+
+    const phoneOnly = await seedTenant('Phoneonly', { email: false });
+    const phoneAppt = await executeApprovedCreateAppointment(phoneOnly, liveTransactionalComms());
+    const phoneRows = await confirmationRows(phoneOnly.tenant.tenantId, phoneAppt);
+    expect(phoneRows.map((r) => r.channel)).toEqual(['sms']);
+    expect(phoneRows[0].recipient).toBe(phoneOnly.phone);
+  });
+
+  it('CURRENT: with only ONE credential leg configured, the working channel still confirms and the unconfigured one writes nothing — and a customer reachable only on the dead leg gets no confirmation at all', async () => {
+    // `createMessageDeliveryProvider` keeps the SMS and email credential legs
+    // INDEPENDENT (delivery-provider-factory.ts:212-240), so prod/staging with
+    // Twilio credentials and no SendGrid gets a NON-NULL provider whose email
+    // leg throws at send time. `sendCustomerMessage` swallows that per channel.
+    // Modelled here by a base whose sendEmail throws, which is what
+    // TwilioDeliveryProvider does on an unconfigured leg.
+    const smsOnlyProvider: MessageDeliveryProvider = {
+      sendSms: async () => ({
+        providerMessageId: 'sms-leg-1',
+        provider: 'twilio',
+        channel: 'sms' as const,
+      }),
+      sendEmail: async () => {
+        throw new Error('email channel is not configured');
+      },
+    };
+
+    // A customer with both contact methods still gets the SMS confirmation.
+    const both = await executeApprovedCreateAppointment(
+      tenantA,
+      liveTransactionalComms(smsOnlyProvider),
+    );
+    const bothRows = await confirmationRows(tenantA.tenant.tenantId, both);
+    expect(bothRows.map((r) => r.channel)).toEqual(['sms']);
+    // The provider recorded on the row is the real one the send returned, not
+    // a placeholder — so the row reflects an actual dispatch attempt.
+    expect(bothRows[0].provider).toBeTruthy();
+
+    // A customer reachable ONLY by email, on that same boot, gets nothing —
+    // approved booking, non-null provider, reminders enabled, and no row.
+    const emailOnly = await seedTenant('Deadleg', { phone: false });
+    const stranded = await executeApprovedCreateAppointment(
+      emailOnly,
+      liveTransactionalComms(smsOnlyProvider),
+    );
+    expect(await confirmationRows(emailOnly.tenant.tenantId, stranded)).toHaveLength(0);
   });
 
   it.fails(
