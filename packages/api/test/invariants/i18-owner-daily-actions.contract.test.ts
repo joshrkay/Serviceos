@@ -74,7 +74,7 @@
  *  2. Arm (2) is source-declared, not executed: `asyncRoute` hides the handler
  *     inside a wrapper, and the handler cannot be safely probed (it reaches a
  *     repository and throws for unrelated reasons). It is weaker evidence, and
- *     `filesWithInHandlerOwnerChecks` fails the build when a NEW file starts
+ *     `inHandlerOwnerChecks` fails the build when a NEW check starts
  *     gating this way so the weakness cannot spread unnoticed.
  *  3. A channel claim is checked for EXISTENCE and for UNIQUENESS across rows,
  *     not for performing that row's specific action — proving voice intent X
@@ -85,6 +85,7 @@
  *     not close.
  */
 import { promises as fs } from 'fs';
+import os from 'os';
 import path from 'path';
 import express from 'express';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -276,8 +277,9 @@ export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
  *   - the file must still contain an unconditional owner comparison (it cannot
  *     be left behind after the check moves into a middleware guard).
  *
- * And `inHandlerOwnerCheckFiles` below fails the build when any NEW file starts
- * gating on owner this way, so a future one cannot slip in unnoticed.
+ * And `inHandlerOwnerChecks` below fails the build when any NEW check of this
+ * shape appears — per occurrence, so one cannot hide behind a neighbour in a
+ * file already listed.
  *
  * This is weaker evidence than the executed-guard arm and is labelled as such.
  * (Codex, #1073: `PATCH /api/entity-aliases/:id/deactivate` is owner-only —
@@ -293,8 +295,14 @@ const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{ route: string; source: string }> 
 ];
 
 /**
- * Every file with an UNCONDITIONAL `req.auth.role` owner comparison — the shape
- * that makes a whole route owner-only.
+ * Every `req.auth.role` owner comparison in the tree, one entry PER OCCURRENCE
+ * — an unconditional one is the shape that makes a whole route owner-only.
+ *
+ * Per occurrence rather than per file because a file-level list cannot see a
+ * SECOND check added to a file already on it: the list would be unchanged, the
+ * wrapper would stay invisible to the walker, and the new owner-only route
+ * would need neither an inventory row nor a budget change. (Codex, #1073 —
+ * found against the first, file-level version of this scan.)
  *
  * A conditional one (`targetId !== actor.id && req.auth!.role !== 'owner'`, as
  * in `routes/users.ts`) does NOT make a route owner-only: a technician reaches
@@ -302,8 +310,8 @@ const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{ route: string; source: string }> 
  * it correctly stays out of the inventory. The distinction is the `&&`, so the
  * scan records every hit and the assertion below classifies them.
  */
-async function filesWithInHandlerOwnerChecks(): Promise<string[]> {
-  const srcRoot = path.resolve(__dirname, '../../src');
+async function inHandlerOwnerChecks(rootOverride?: string): Promise<string[]> {
+  const srcRoot = rootOverride ?? path.resolve(__dirname, '../../src');
   const pattern = /req\.auth!?\??\.role\s*[!=]==\s*'owner'/;
   const found: string[] = [];
 
@@ -315,9 +323,18 @@ async function filesWithInHandlerOwnerChecks(): Promise<string[]> {
         continue;
       }
       if (!entry.name.endsWith('.ts')) continue;
+      const relative = path.relative(
+        rootOverride ?? path.resolve(__dirname, '../../../..'),
+        full,
+      );
       const text = await fs.readFile(full, 'utf8');
-      if (pattern.test(text)) {
-        found.push(path.relative(path.resolve(__dirname, '../../../..'), full));
+      // Per OCCURRENCE, not per file: a second check added to a file already
+      // on this list must move the expectation too, or it would hide behind
+      // its neighbour. The matched line is carried so the assertion shows
+      // WHICH check appeared, and so conditional and unconditional forms are
+      // distinguishable on sight.
+      for (const line of text.split('\n')) {
+        if (pattern.test(line)) found.push(`${relative} :: ${line.trim()}`);
       }
     }
   };
@@ -594,13 +611,16 @@ describe('I18: owner daily actions ↔ code contract', () => {
     // decide whether its check is unconditional (the route is owner-only → it
     // belongs in the inventory and in IN_HANDLER_OWNER_ROUTES) or conditional
     // (self-service with an owner escalation → not owner-only, annotate here).
-    expect(await filesWithInHandlerOwnerChecks()).toEqual([
-      // Unconditional — owner-only. Declared in IN_HANDLER_OWNER_ROUTES.
-      'packages/api/src/routes/entity-aliases.ts',
-      // Conditional (`targetId !== actor.id && … !== 'owner'`): a technician
-      // reaches these for their OWN record, so they are self-service with an
-      // owner escalation, not owner-only actions. Deliberately not inventory.
-      'packages/api/src/routes/users.ts',
+    expect(await inHandlerOwnerChecks()).toEqual([
+      // UNCONDITIONAL — the whole route is owner-only. Declared in
+      // IN_HANDLER_OWNER_ROUTES and carried in the inventory.
+      "packages/api/src/routes/entity-aliases.ts :: if (req.auth!.role !== 'owner') {",
+      // CONDITIONAL (`targetId !== actor.id && …`): a technician reaches these
+      // for their OWN record, so they are self-service with an owner
+      // escalation, not owner-only actions. Deliberately not inventory. Both
+      // occurrences are listed — a third would have to be classified here.
+      "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
+      "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
     ]);
   });
 
@@ -818,6 +838,32 @@ describe('I18: owner daily actions ↔ code contract', () => {
           { ...row('POST /b', 'none'), smsReachable: false },
         ]),
       ).toHaveLength(0);
+    });
+
+    it('sees a SECOND in-handler check in a file it already lists', async () => {
+      // The file-level version of this scan returned one entry per file, so a
+      // second unconditional check added to an already-listed file changed
+      // nothing and its route stayed invisible. Per-occurrence must see both.
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'i18-inhandler-'));
+      await fs.writeFile(
+        path.join(dir, 'two-checks.ts'),
+        [
+          "router.patch('/a', asyncRoute(async (req, res) => {",
+          "  if (req.auth!.role !== 'owner') throw new ForbiddenError('a');",
+          '}));',
+          "router.patch('/b', asyncRoute(async (req, res) => {",
+          "  if (req.auth!.role !== 'owner') throw new ForbiddenError('b');",
+          '}));',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const occurrences = await inHandlerOwnerChecks(dir);
+      // Two, not one: the count is what a file-level scan threw away.
+      expect(occurrences).toHaveLength(2);
+      expect(new Set(occurrences.map((o) => o.split(' :: ')[0]))).toEqual(
+        new Set(['two-checks.ts']),
+      );
     });
 
     it('rejects a reached_via claim no channel actually reaches', () => {

@@ -754,3 +754,85 @@ in the test header naming what is still open instead of implying nothing is. The
 headline I18 budgets never moved through any of it —
 `ownerRequiredDailyWebActions` is still **1** — but the number is now
 considerably harder to be wrong by accident.
+
+---
+
+## 14. Review round 5 (Codex, PR #1073)
+
+### 14.1 The in-handler scan was file-level, so a second check could hide
+
+**Finding (P2, correct).** `filesWithInHandlerOwnerChecks` returned one entry per
+*file*. A second unconditional owner check added to `entity-aliases.ts` or
+`users.ts` — both already on the list — would leave the list unchanged, stay
+invisible to the walker, and need neither an inventory row nor a budget change.
+The scan added in §11 closed the "new file" case and left the "second check in
+a known file" case open.
+
+Fixed by scanning **per occurrence**, carrying the matched line so the assertion
+shows *which* check appeared and so conditional and unconditional forms are
+distinguishable on sight. The expectation is now three entries: one
+unconditional (`entity-aliases.ts`) and two conditional (`users.ts`, both
+`targetId !== actor.id && …`).
+
+Proven rather than asserted: the scan takes an optional root, and a new negative
+control points it at a temp fixture containing **two** checks in one file. RED
+against the file-level behaviour, then GREEN:
+
+```
+ FAIL  … > sees a SECOND in-handler check in a file it already lists
+AssertionError: expected [ …(2) ] to have a length of 1 but got 2
+```
+
+### 14.2 The PRD row carried stale counts
+
+**Finding (P2, correct).** The §5 I18 row still reported 53 routes, 45
+`occasional`, and a 17/17 run — the state at the Fable gate, before the review
+hardening changed them to 54 / 46 / 24. Anyone treating that row as the audit
+source got stale numbers.
+
+Updated, and this one I did edit despite it being the Fable stamp: **my own
+commits are what invalidated it**, and leaving numbers in the audit source that
+the same PR disproves is worse than the deference. The **rung is untouched** —
+it still reads `4 ↑ STRUCTURAL`, stated by Fable — and what changed is counts,
+the negative-control list, the verification line, and the two ceilings. Fable
+should confirm the row still reads as intended.
+
+The same edit fixed the contradiction flagged earlier in this PR: the evidence
+column opened with the rung-0 text (*"No enforcement of any kind, and no test …
+the only invariant with nothing behind it"*) immediately after the column
+declared rung 4, because the gate appended to the cell rather than replacing its
+lead. That history is now stated as history ("Was rung 0 … until 2026-09-12")
+instead of as present tense.
+
+```
+ Test Files  1 passed (1) · Tests 24 passed (24)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 327 tests passed
+```
+
+### 14.3 CI: `test` is being cancelled externally, and it is not this PR
+
+Recorded because it blocks the PR and is not something this branch can fix.
+
+On the current head, four of five required jobs pass (`playwright`,
+`mobile-typecheck`, `corpus-integrity`, `voice-quality-cassette-drift`). The
+`test` job has now been cancelled on every attempt — at ~85s, ~33s and ~4min on
+three separate runs. The job log for the last one shows the suite **passing**
+right up to the kill:
+
+```
+ ✓ test/voice/voice-smoke.synthetic.test.ts (3 tests) 97ms
+##[error]The operation was canceled.
+```
+
+No failure, no OOM, and the `test` job declares no `timeout-minutes` (the
+default is 360). The last cancellation happened at 20:01:32 with **no push
+since 19:55**, so the supersede explanation in §12's note covers the earlier
+ones but not this. The pattern — short jobs complete, the one long job is killed
+partway at varying elapsed times, nothing red in the logs — together with Cursor
+Bugbot independently reporting *"usage limit reached"* on this account three
+times in the same window, points at a **GitHub Actions usage/spend limit** as
+the most likely cause. That is an account-level setting, not a code problem, and
+not something this branch can resolve; re-running has been spent and the
+evidence says it will not help. Surfaced for the owner rather than retried
+again.
