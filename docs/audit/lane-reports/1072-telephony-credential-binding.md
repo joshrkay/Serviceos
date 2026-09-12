@@ -233,7 +233,9 @@ ordinary passing tests now:
 - *"a tenant-owned signature does NOT authorise a call to another tenant's DID"* — 403, no
   `voice_sessions` row, tenant B's emergency audit trail unmoved.
 - *"the same binding holds on /gather"* — a forged mid-call callback naming a LIVE session
-  under B is refused 403.
+  under B is refused 403. (That covers an attacker naming the VICTIM's DID; the case where
+  the attacker names its OWN DID and the victim's `sid` is the review finding in §9a, fixed
+  separately.)
 
 Run as its header documents, against a real API process + real Postgres:
 
@@ -412,6 +414,78 @@ actually on per-tenant credentials rather than silently riding the fallback.
    merged tree (6 passed, 32.6s).
 6. **No rung is claimed.** This is a security fix with its own proof; #1014's grading is not
    this branch's to move.
+
+---
+
+## 9a. Correction — the binding had a second half, found by review
+
+Everything above §9 describes binding the credential to the **dialled number**. Review on
+PR #1082 (xhawk-ai) caught that this is necessary and **not sufficient** on the
+session-scoped callbacks, and it was right on both findings. Recording it here because §5
+of this report claimed `/gather` was bound, and that claim was only true for the leg the
+`(d1)` test covers — an attacker naming the *victim's* DID.
+
+**HIGH — owning a number is not owning a call.** `/gather`, `/dial-result` and
+`/callback-message` are named by a `?sid=` the caller supplies, while the signature only
+proves the caller owns the number in `To`. `_handleGatherLocked` (`twilio-adapter.ts:2155`)
+does `store.get(opts.sessionId)` and never compares the session's tenant to the `tenantId`
+the route passed it. So an attacker signing with its **own** DID and **own** token cleared
+the credential binding and then drove the victim's live session: its utterance appended to
+the victim's transcript, the victim's FSM advanced, and the TwiML the victim's caller hears
+chosen by the attacker. `sid` is a random UUID, so the attack needs the session id — but an
+unguessable identifier is not authorization, which is this issue's whole premise.
+
+Fixed by making the authority the tenant whose credential **actually verified** the
+request: `requireTwilioSignature` records it on the request under a `Symbol` (so nothing a
+body parser writes can spoof it — `twilio-signature.ts`, `getVerifiedTwilioTenantId`), and
+`sessionBelongsToAnotherTenant` (`routes/telephony.ts`) refuses 403 when the named session
+belongs to anyone else. The payload-resolved tenant is the fallback **only** where no
+tenant credential answered — single-account deployments, where no tenant holds the token
+and there is therefore no tenant-attacker. `/voice/gather-fallback` is included: it hands
+back the session's own id in the `<Gather>` action URL, so letting a foreign tenant reach
+it would give away the `?sid=` the other routes are keyed on. An unknown session is
+deliberately **not** a 403 — the routes keep their "your session has ended" handling, and
+refusing there would turn an ordinary expiry into a hard failure and leak which ids exist.
+
+**MEDIUM — a silent downgrade on the subaccount path.**
+`if (row?.auth_token_primary_enc && encKey)` gated the whole branch on the key, so a
+missing `TENANT_ENCRYPTION_KEY` fell through to the deployment token: a tenant credential
+quietly replaced by the master one, inconsistent with the owning-tenant path six lines
+above it. Now fails closed with `tenant_encryption_key_missing`.
+
+RED before green, as with everything else here. Against the already-credential-bound code:
+
+```
+ × (f1) /gather — the attacker's OWN DID and token cannot drive the VICTIM's live session 73ms
+ × (f2) /dial-result — the same session-scoped hijack is refused 94ms
+   AssertionError: expected 200 to be 403        ← the hijack was accepted
+ Tests  2 failed | 11 passed (13)
+
+ × fails closed on the subaccount path too when the key to decrypt its credential is missing
+   AssertionError: expected { outcome: 'verify', …(2) } to match object { outcome: 'misconfigured', …(1) }
+```
+
+After:
+
+```
+ ✓ (f1) … 1567ms   ✓ (f2) … 1557ms   ✓ (f3) a tenant driving its OWN session is untouched 73ms
+ Tests  13 passed (13)
+```
+
+A note on process, since it cost a cycle: the first cut of the session guard looked the
+session up through `deps.adapter.getDeps().store`, which threw in
+`gather-fallback-route.test.ts` — that file mounts a hand-rolled adapter fake with no
+`getDeps`, and the throw inside an async handler hung the request until supertest timed out
+at 30s. Caught by running the full unit sweep before pushing, not by CI. The guard now
+takes the session each route already holds, and `sessionStoreFor` reads the router's own
+declared `voiceSessionStore` dep first. A guard must never be the thing that throws inside
+a webhook handler.
+
+Full sweep on the fixed head: telephony + invariants + telephony-tenant-lookup **642
+passed** (4 expected fail); app + webhooks + voice **1476 passed**; the nine telephony
+integration files **84 passed** (1 expected fail); the new integration file **13 passed**;
+e2e **6 passed (32.2s)**; `tsc --project tsconfig.build.json --noEmit` clean; eslint on the
+three changed source files unchanged from main's baseline.
 
 ---
 
