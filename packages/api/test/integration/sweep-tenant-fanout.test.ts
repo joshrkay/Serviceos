@@ -34,11 +34,15 @@ import { runDailyDigestSweep } from '../../src/workers/daily-digest-worker';
 import { runWeeklyFeedbackSweep } from '../../src/workers/weekly-feedback-worker';
 import { runHoldReaperSweep } from '../../src/workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from '../../src/workers/estimate-reminder-worker';
+import { runEstimateExpirySweep } from '../../src/workers/estimate-expiry-worker';
 import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
+import { PgLocationRepository } from '../../src/locations/pg-location';
+import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
@@ -655,6 +659,110 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       expect(doomed).not.toBeNull();
       expect(ours).toContain(doomed);
       expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+  });
+
+  // §8.7 G1 (ticket #1012) — the estimate-expiry sweep (row 7.1/Phase 1 in
+  // estimate-phases.test.ts) is not one of the sweeps this file otherwise
+  // covers; its own test only ever proved a single hand-picked tenant. This
+  // block mirrors 'estimate-reminder sweep' immediately above: real
+  // enumerator reach + failure isolation, on the SAME `findByTenant` seam.
+  describe('estimate-expiry sweep', () => {
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
+      const result = await runEstimateExpirySweep({
+        estimateRepo: { findByTenant: fn } as never,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      return { visited, failed: result.failed, doomed: doomed() };
+    };
+
+    it('reaches every tenant through the real enumerator', async () => {
+      const trio = await seedTrio(pool);
+      const { visited } = await run(null);
+      expect(visited).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws', async () => {
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
+      expect(failed).toBeGreaterThanOrEqual(1);
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+
+    // §8.7 review (ticket #1012) named this gap: the two tests above stub
+    // estimateRepo.findByTenant to prove ONLY that every tenant is visited —
+    // "untouched" was never checked. This one runs the REAL PgEstimateRepository
+    // (and real PgAuditRepository) so "untouched" means a concrete row: a
+    // second tenant with an estimate that ISN'T past valid_until keeps its
+    // 'sent' status and gets no estimate.expired audit row, in the SAME
+    // sweep pass that expires its neighbour through the real enumerator.
+    it('leaves a second tenant with nothing to expire untouched while its neighbour is expired in the same pass', async () => {
+      const estimateRepo = new PgEstimateRepository(pool);
+      const expiryAuditRepo = new PgAuditRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const jobRepo = new PgJobRepository(pool);
+      const customerRepo = new PgCustomerRepository(pool);
+
+      const seedSentEstimate = async (validUntil: Date) => {
+        const { tenantId, userId } = await createTestTenant(pool);
+        const customerId = uuidv4();
+        await customerRepo.create({
+          id: customerId, tenantId, firstName: 'Fan', lastName: 'Out', displayName: 'Fan Out',
+          preferredChannel: 'phone', smsConsent: false, isArchived: false,
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const locationId = uuidv4();
+        await locationRepo.create({
+          id: locationId, tenantId, customerId, street1: '1 Main St', city: 'Austin', state: 'TX',
+          postalCode: '78701', country: 'USA', addressType: 'service', isPrimary: true, isArchived: false,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+        const jobId = uuidv4();
+        await jobRepo.create({
+          id: jobId, tenantId, customerId, locationId, jobNumber: `J-${jobId.slice(0, 8)}`,
+          summary: 'Fan-out expiry job', status: 'scheduled', priority: 'normal',
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const lineItems = [buildLineItem(uuidv4(), 'Labor', 1, 5000, 0, true)];
+        const totals = calculateDocumentTotals(lineItems, 0, 0);
+        const est = await estimateRepo.create({
+          id: uuidv4(), tenantId, jobId, estimateNumber: `EST-${uuidv4().slice(0, 8)}`,
+          status: 'sent', lineItems, totals, validUntil, version: 1,
+          createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+        });
+        return { tenantId, estimateId: est.id };
+      };
+
+      // Past valid_until — this one IS a candidate and must expire.
+      const expiring = await seedSentEstimate(new Date(Date.now() - 86_400_000));
+      // Future valid_until — a second tenant that looks like a candidate
+      // (status 'sent') but has nothing due to expire yet.
+      const untouched = await seedSentEstimate(new Date(Date.now() + 86_400_000));
+
+      const result = await runEstimateExpirySweep({
+        estimateRepo,
+        auditRepo: expiryAuditRepo,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+      });
+      expect(result.expired).toBeGreaterThanOrEqual(1);
+
+      expect((await estimateRepo.findById(expiring.tenantId, expiring.estimateId))!.status).toBe('expired');
+      const expiringEvents = await expiryAuditRepo.findByEntity(expiring.tenantId, 'estimate', expiring.estimateId);
+      expect(expiringEvents.map((e) => e.eventType)).toContain('estimate.expired');
+
+      // T1 — the second/untouched tenant's estimate keeps its status and has
+      // NO estimate.expired audit row, in the same pass that expired its
+      // neighbour above.
+      expect((await estimateRepo.findById(untouched.tenantId, untouched.estimateId))!.status).toBe('sent');
+      const untouchedEvents = await expiryAuditRepo.findByEntity(untouched.tenantId, 'estimate', untouched.estimateId);
+      expect(untouchedEvents.map((e) => e.eventType)).not.toContain('estimate.expired');
     });
   });
 
