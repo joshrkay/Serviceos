@@ -44,6 +44,11 @@ import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type { WeeklyFeedbackSnapshot } from '../../src/digest/weekly-feedback';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import {
+  resolveTenantOwnerEmail,
+  isWeeklyFeedbackEnabledForTenant,
+  resolveTenantBusinessName,
+} from '../../src/digest/weekly-feedback-config';
 import { PgDailyDigestRepository } from '../../src/digest/pg-daily-digest';
 import type { DigestComputeDeps } from '../../src/digest/digest-service';
 import type { SettingsRepository } from '../../src/settings/settings';
@@ -248,11 +253,37 @@ function snapshotWithWork(weekStartIso: string, weekEndIso: string): WeeklyFeedb
 describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
   let pool: Pool;
   let auditRepo: PgAuditRepository;
+  let settingsRepo: PgSettingsRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     auditRepo = new PgAuditRepository(pool);
+    settingsRepo = new PgSettingsRepository(pool);
   });
+
+  /**
+   * A tenant with its OWN stored recipient, business name and opt-out flag.
+   *
+   * `createTestTenant` gives every tenant the same `owner_email`
+   * ('test@example.com'), so seeding distinct values is what makes the
+   * per-tenant assertions below falsifiable: a resolver that ignored the
+   * tenant id it was handed would serve one address to all three.
+   */
+  async function seedWeeklyTenant(opts: {
+    label: string;
+    businessName: string;
+    enabled: boolean;
+  }): Promise<{ tenantId: string; email: string }> {
+    const { tenantId } = await createTestTenant(pool);
+    const email = `${opts.label}-${tenantId.slice(0, 8)}@example.com`;
+    await pool.query('UPDATE tenants SET owner_email = $2 WHERE id = $1', [tenantId, email]);
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, weekly_feedback_enabled)
+       VALUES ($1, $2, $3, 'America/Chicago', $4)`,
+      [uuidv4(), tenantId, opts.businessName, opts.enabled],
+    );
+    return { tenantId, email };
+  }
 
   /**
    * Builds a sweep run scoped to the tenants this test seeded. Tenants belonging
@@ -260,18 +291,37 @@ describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
    * opt-out gate — which is exactly how a stranger tenant behaves in production.
    */
   async function runWeekly(opts: {
-    enabled: string[];
-    emailOf: Map<string, string>;
+    /** Tenants THIS test seeded. Strangers are gated out (see below). */
+    ours: string[];
     /** Throw for the FIRST of these the sweep reaches — see the digest seam. */
     failFirstOf?: string[];
-  }): Promise<{ sentTo: string[]; failed: number; doomed: string | null }> {
-    const sentTo: string[] = [];
+  }): Promise<{
+    sent: { to: string; text: string }[];
+    sentTo: string[];
+    failed: number;
+    doomed: string | null;
+  }> {
+    const sent: { to: string; text: string }[] = [];
     let doomed: string | null = null;
     const result = await runWeeklyFeedbackSweep({
       auditRepo,
       listTenantIds: () => listAllTenantIds(pool),
-      isFeedbackEnabled: async (tenantId) => opts.enabled.includes(tenantId),
-      resolveOwnerEmail: async (tenantId) => opts.emailOf.get(tenantId) ?? null,
+      // The PRODUCTION resolvers, reading the rows seeded above — the same
+      // three functions app.ts hands this sweep. Substituting them here (as
+      // every other test of this worker does) would leave a regression that
+      // stopped scoping by tenant id invisible: caught in review on this PR
+      // (Codex P2).
+      //
+      // The `ours` guard is scoping, not substitution. The shared container
+      // holds every other integration file's tenants, and weekly feedback is
+      // opt-OUT, so strangers would otherwise all be served. For OUR tenants
+      // — including the opted-out one — the real gate decides.
+      isFeedbackEnabled: async (tenantId) =>
+        opts.ours.includes(tenantId)
+          ? isWeeklyFeedbackEnabledForTenant(settingsRepo, tenantId)
+          : false,
+      resolveOwnerEmail: (tenantId) => resolveTenantOwnerEmail(pool, tenantId),
+      resolveBusinessName: (tenantId) => resolveTenantBusinessName(settingsRepo, tenantId),
       buildSnapshot: async (tenantId, weekStart, weekEnd) => {
         if (opts.failFirstOf?.includes(tenantId) && (doomed === null || doomed === tenantId)) {
           doomed = tenantId;
@@ -280,42 +330,54 @@ describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
         return snapshotWithWork(weekStart.toISOString(), weekEnd.toISOString());
       },
       sendEmail: async (args) => {
-        sentTo.push(args.to);
+        sent.push({ to: args.to, text: args.text });
         return undefined;
       },
       logger,
     });
-    return { sentTo, failed: result.failed, doomed };
+    return { sent, sentTo: sent.map((e) => e.to), failed: result.failed, doomed };
   }
 
-  it('serves each enabled tenant at its OWN address and skips the opted-out one', async () => {
-    const a = (await createTestTenant(pool)).tenantId;
-    const b = (await createTestTenant(pool)).tenantId;
-    const optedOut = (await createTestTenant(pool)).tenantId;
-    const emailOf = new Map([
-      [a, `a-${a.slice(0, 8)}@example.com`],
-      [b, `b-${b.slice(0, 8)}@example.com`],
-      [optedOut, `c-${optedOut.slice(0, 8)}@example.com`],
-    ]);
+  it('serves each enabled tenant at its OWN stored address, greeting and opt-out', async () => {
+    const a = await seedWeeklyTenant({ label: 'a', businessName: 'Alpha Plumbing', enabled: true });
+    const b = await seedWeeklyTenant({ label: 'b', businessName: 'Beta HVAC', enabled: true });
+    const optedOut = await seedWeeklyTenant({
+      label: 'c',
+      businessName: 'Gamma Electric',
+      enabled: false,
+    });
+    const ours = [a.tenantId, b.tenantId, optedOut.tenantId];
 
-    const { sentTo } = await runWeekly({ enabled: [a, b], emailOf });
+    const { sent, sentTo } = await runWeekly({ ours });
 
-    // T3: two tenants, two different recipients, one pass — no mixing.
-    expect(sentTo).toContain(emailOf.get(a));
-    expect(sentTo).toContain(emailOf.get(b));
-    expect(sentTo).not.toContain(emailOf.get(optedOut));
+    // T3: two tenants, two different recipients, one pass — no mixing. The
+    // addresses come from each tenant's own row via the production resolver.
+    expect(sentTo).toContain(a.email);
+    expect(sentTo).toContain(b.email);
+    // The opt-out is the tenant's own stored flag, read by the production gate.
+    expect(sentTo).not.toContain(optedOut.email);
+
+    // …and the per-tenant configuration reaches the body, not just the
+    // envelope: each owner is greeted with their OWN business name. This is
+    // the I10 shape — both queries correct, the configuration assumed shared.
+    const toA = sent.find((e) => e.to === a.email);
+    const toB = sent.find((e) => e.to === b.email);
+    expect(toA?.text).toContain('Alpha Plumbing');
+    expect(toA?.text).not.toContain('Beta HVAC');
+    expect(toB?.text).toContain('Beta HVAC');
+    expect(toB?.text).not.toContain('Alpha Plumbing');
   });
 
   it('keeps going when one tenant throws — the other tenants are still served', async () => {
-    const ours = [
-      (await createTestTenant(pool)).tenantId,
-      (await createTestTenant(pool)).tenantId,
+    const seeded = [
+      await seedWeeklyTenant({ label: 't0', businessName: 'Zero Co', enabled: true }),
+      await seedWeeklyTenant({ label: 't1', businessName: 'One Co', enabled: true }),
     ];
-    const emailOf = new Map(ours.map((t, i) => [t, `t${i}-${t.slice(0, 8)}@example.com`]));
+    const ours = seeded.map((t) => t.tenantId);
+    const emailOf = new Map(seeded.map((t) => [t.tenantId, t.email]));
 
     const { sentTo, failed, doomed } = await runWeekly({
-      enabled: ours,
-      emailOf,
+      ours,
       failFirstOf: ours,
     });
 
@@ -478,8 +540,8 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       const result = await runGoogleReviewsSweep({
         pollStateRepo: { getPollState: fn } as never,
         credentialResolver: { getCredential: async () => null } as never,
-        proposalRepo: {} as never,
-        buildProposalDeps: {} as never,
+        // No `proposalEmission`: this sweep is driven for tenant REACH, and
+        // the worker ingests without emitting proposals when it is absent.
         reviewRepo: {} as never,
         listTenantIds: () => listAllTenantIds(pool),
         logger,

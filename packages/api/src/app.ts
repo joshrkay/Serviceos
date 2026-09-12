@@ -254,6 +254,11 @@ import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
 import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
 import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
 import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
+import {
+  resolveTenantOwnerEmail,
+  isWeeklyFeedbackEnabledForTenant,
+  resolveTenantBusinessName,
+} from './digest/weekly-feedback-config';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { runReviewRequestSweep } from './workers/review-request-worker';
@@ -6206,21 +6211,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // WS22 — "same mistake twice" weekly rate (repeatCorrections).
             buildSnapshot: (tenantId, weekStart, weekEnd) =>
               buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
-            resolveOwnerEmail: async (tenantId) => {
-              const r = await weeklyFeedbackPool.query(
-                'SELECT owner_email FROM tenants WHERE id = $1',
-                [tenantId],
-              );
-              return (r.rows[0]?.owner_email as string | undefined) ?? null;
-            },
-            isFeedbackEnabled: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.weeklyFeedbackEnabled !== false;
-            },
-            resolveBusinessName: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.businessName ?? null;
-            },
+            // Extracted to digest/weekly-feedback-config.ts so the per-tenant
+            // scoping is exercised by the sweep fan-out integration test
+            // against real rows, rather than substituted by it (D-032).
+            resolveOwnerEmail: (tenantId) =>
+              resolveTenantOwnerEmail(weeklyFeedbackPool, tenantId),
+            isFeedbackEnabled: (tenantId) =>
+              isWeeklyFeedbackEnabledForTenant(settingsRepo, tenantId),
+            resolveBusinessName: (tenantId) =>
+              resolveTenantBusinessName(settingsRepo, tenantId),
             sendEmail: (args) =>
               weeklyFeedbackDelivery.sendEmail({
                 to: args.to,

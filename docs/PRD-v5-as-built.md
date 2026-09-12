@@ -57,8 +57,9 @@ the whole point of this edition:**
 
 - The grade is **required of any new or revised requirement** — that is the
   standard from here.
-- It is **measured in aggregate** for the existing suite (§11.0e): **140 of 216
-  real-DB files (65%) provision ≥2 tenants.** *(An earlier edition said "52%
+- It is **measured in aggregate** for the existing suite (§11.0e), by a lexical
+  scan whose figures are bounds and are labelled as such: **at least 145 of 216
+  real-DB files (67%) provision ≥2 tenants.** *(An earlier edition said "52%
   carry a genuine multi-tenant proof." That figure is withdrawn — §11.0e
   explains why it could not be re-derived.)*
 - It is **published per row only where it was actually earned** — today the
@@ -1546,7 +1547,7 @@ understanding than put words in a customer's mouth.
 | **9.4** | **As M**, I want new Google reviews found and a response drafted for my approval, so I reply within a day without watching for them | **Given** a connected tenant, **when** a sweep runs, **then** new reviews persist, the cursor advances, a re-sweep persists nothing new, a 429 stamps backoff, and reviews are RLS-invisible cross-tenant — with a PII-redacted draft response awaiting approval | **4 / 3** ↑ | **D:** `google-reviews-worker.test.ts`. *Classification and drafting are unit-only* |
 | **9.5** | **As M**, I want to make a bad experience right without over-giving, so goodwill doesn't become a leak | **Given** $80 already issued in 12 months and a $50 tier proposed, **when** the cap applies, **then** the credit is **omitted, not zeroed** — because proposing "$0 credit" is worse than proposing none | 3 | 🚨 The existing test calls itself a *smoke test that stubs `pool.connect()`* |
 | **9.6** | **As M**, I want one text at the end of the day telling me what happened, so I never open a dashboard | **Given** a tenant at its local digest time, **when** the sweep runs, **then** a digest sends once — not duplicated, not re-sent — carrying **"what I wasn't sure about"** and **"what I learned today"** | **4 — no client control** 🚨 | The write **and both named sections** are proven at real Postgres. 🚨 **`digest_enabled` defaults false and *nothing in web or mobile writes it*.** `PUT /api/settings` does accept `digestEnabled` behind `settings:update`, so this is reachable by API — but Mike cannot turn the product's central promise on from any shipped surface |
-| **9.7** | **As S**, I want a weekly summary I can read Saturday morning, including how often it repeated a mistake, so I can see whether it's learning | **Given** a week of corrections, **when** summarised, **then** total / repeats / rate come from the real corrections table, and the field is **omitted at zero**; the send ledger is idempotent and a failed send leaves **no** row so the week retries | **4** ↑ | **D:** `weekly-feedback-builder.test.ts`, `hfcr-weekly-send-worker.test.ts` |
+| **9.7** | **As S**, I want a weekly summary I can read Saturday morning, including how often it repeated a mistake, so I can see whether it's learning | **Given** a week of corrections, **when** summarised, **then** total / repeats / rate come from the real corrections table, and the field is **omitted at zero**; the send ledger is idempotent and a failed send leaves **no** row so the week retries | **4** ↑ | **D:** `weekly-feedback-builder.test.ts`, `hfcr-weekly-send-worker.test.ts`, `sweep-tenant-fanout.test.ts` (per-tenant recipient / greeting / opt-out, through the production resolvers) |
 | **9.8** | **As M**, I want a correction I make once to stick, so I never fix the same thing twice | **Given** a labor-rate correction, **when** executed, **then** the config changes so the **next same-day draft reflects it**, it appears in the day's applied lessons, and `correction_lesson.applied` is written | 5 | **D:** `correction-loop.test.ts` |
 | **9.9** | **As M**, I want to undo a lesson it learned wrong, so teaching it is not a one-way door | **Given** an applied lesson, **when** undone, **then** the prior value is restored **exactly**, `correction_lesson.reverted` is emitted **exactly once**, a second undo is a no-op, and it drops from the day | 5 | **D:** `correction-loop.test.ts` — *asserts both audit ends with `PgAuditRepository`; the best-evidenced row in the lifecycle sections* |
 | **9.10** | **As M**, I want a mistake I've corrected three times to become a permanent fix I approve, so the system stops needing me for it | **Given** a third same-target correction, **when** it lands, **then** a meta-proposal is minted that, once approved, updates the real catalog **through the production registry and executor** | 4 | **D:** `correction-repetition-meta-proposal.test.ts` |
@@ -1997,14 +1998,26 @@ The tenant grade (§8.0) is a new bar, so it is stated here with what the suite
 actually meets rather than as an aspiration — and, since this branch itself adds
 two integration files, **both before and after**, from one published script:
 
+**These are lexical counts, and the labels say so.** Every row below counts
+*occurrences of a string in a file*. That is a bound on the behaviour it stands
+for, never a measurement of it — see the correction beneath the table, where
+both bounds were caught being read as measurements.
+
 ```bash
 # run from packages/api/test/integration/
 POOL='getSharedTestDb|TEST_DB_URL|new Pool\(|withTestDb|testDb'
 files=$(ls *.test.ts | wc -l)
 pool=$(grep -lE "$POOL" *.test.ts | wc -l)
-multi=$(for f in *.test.ts; do [ "$(grep -c 'createTestTenant(' "$f")" -ge 2 ] && echo "$f"; done | wc -l)
-audit=$(grep -l 'PgAuditRepository' *.test.ts | wc -l)
-printf 'files=%s pool=%s no-pool=%s multi-tenant=%s audit=%s\n' "$files" "$pool" "$((files-pool))" "$multi" "$audit"
+# ≥2 LITERAL createTestTenant( call sites. A lower bound on multi-tenant files:
+# a file that seeds two tenants through one helper counts as zero.
+multi_lit=$(for f in *.test.ts; do [ "$(grep -c 'createTestTenant(' "$f")" -ge 2 ] && echo "$f"; done | wc -l)
+# Widened to conventionally-named seeding helpers. Still lexical, still a bound.
+multi=$(for f in *.test.ts; do [ "$(grep -cE 'createTestTenant\(|seed[A-Za-z]*Tenant\(' "$f")" -ge 2 ] && echo "$f"; done | wc -l)
+# Files that IMPORT PgAuditRepository. NOT files that assert a persisted audit
+# row — an upper bound, and a loose one.
+audit_import=$(grep -l 'PgAuditRepository' *.test.ts | wc -l)
+printf 'files=%s pool=%s no-pool=%s multi(lit)=%s multi(helpers)=%s audit-import=%s\n' \
+  "$files" "$pool" "$((files-pool))" "$multi_lit" "$multi" "$audit_import"
 ```
 
 | Measure | Before (merge-base) | After (this branch) |
@@ -2012,8 +2025,9 @@ printf 'files=%s pool=%s no-pool=%s multi-tenant=%s audit=%s\n' "$files" "$pool"
 | Integration files | 217 | **219** |
 | …that open a real pool | 214 | **216** |
 | …that never open a pool | 3 | 3 |
-| Provision **≥2 tenants** | 138 (64%) | **140 (65%)** |
-| Assert audit through `PgAuditRepository` | 68 | **69** |
+| ≥2 **literal** `createTestTenant(` sites | 138 (64%) | **140 (65%)** |
+| …widened to `seed*Tenant(` helpers | 143 (66%) | **145 (67%)** |
+| **Import** `PgAuditRepository` | 68 | **69** |
 
 > ⚠️ **Two figures from the first edition of this table are withdrawn, and one
 > is corrected.** That edition reported *"140 provision ≥2 tenants, 120 carry a
@@ -2035,8 +2049,36 @@ printf 'files=%s pool=%s no-pool=%s multi-tenant=%s audit=%s\n' "$files" "$pool"
 > two files this branch adds. Re-running it turned a stale number into a
 > reproducible one and found an unreproducible pair underneath.
 
-**A third of the Docker-gated suite never provisions a second tenant** — 76 of
-216 real-DB files. That is not a claim that those capabilities leak: most are
+> ⚠️ **Third edition: the surviving figures were reproducible and still
+> mislabelled.** Caught in review (Codex P2) one round later. Both defects are
+> demonstrated by a file this document already cites:
+>
+> - **False negative.** `Provision ≥2 tenants` counted ≥2 *literal*
+>   `createTestTenant(` call sites. `chat-entity-resolution.test.ts` seeds
+>   `mine` and `theirs` through a single `seedTenant()` helper — one literal
+>   call site — and was therefore excluded from a count of multi-tenant files
+>   *despite being one of the genuinely cross-tenant tests in the suite.* The
+>   widened row above recovers five such files (138→143, 140→145) and is still
+>   only a bound.
+> - **False positive, and this branch is the culprit.** `Assert audit through
+>   PgAuditRepository` counted files that **import** it.
+>   `sweep-tenant-fanout.test.ts` — added by this PR — imports it, constructs
+>   one, hands it to the sweeps, and **asserts nothing about any persisted
+>   audit row.** It incremented 68→69 on no evidence at all.
+>
+> **The obvious refinement is also wrong, which is why none is published.**
+> Narrowing the audit row to files that import `PgAuditRepository` *and* mention
+> `findByEntity|audit_events|eventType` gives 49→50 — and it counts
+> `sweep-tenant-fanout.test.ts` too, because line 510 stubs
+> `{ findByEntity: async () => [] }`. A grep for an assertion is satisfied by a
+> stub that asserts nothing. A real measure has to run the suite and observe
+> which files touch `audit_events`; until something does, the import count
+> stands with the label it has earned.
+
+**At most a third of the Docker-gated suite never provisions a second tenant**
+— at most 71 of 216 real-DB files, on the widened count; the true figure is
+lower, because even the widened count is a string match and cannot see an
+unconventionally-named helper. That is not a claim that those capabilities leak: most are
 tenant-scoped by RLS, itself the best-evidenced invariant in the product (I11).
 It is a claim about *proof* — for those files, tenant correctness rests on the
 boundary being right in general rather than on this capability having been
@@ -2045,8 +2087,10 @@ watched with a neighbour present.
 *This paragraph previously read "about half … for ~48% of the suite," resting on
 the withdrawn 52% figure above. **Provisioning two tenants is a weaker bar than
 the one that figure claimed to measure**, so the honest restatement is also a
-smaller number: 35% never provision a second tenant, where the withdrawn
-measure asserted 48% lack a genuine multi-tenant proof. The stricter count is
+smaller number: **at most 33%** never provision a second tenant, where the
+withdrawn measure asserted 48% lack a genuine multi-tenant proof. (The first
+restatement said a flat 35%, off the literal-call-site count, before that count
+was found to be a lower bound rather than a measure.) The stricter count is
 probably the more useful one and is exactly what nobody can now re-derive —
 which is the argument for writing the scan before quoting the number, not
 after.*
@@ -2185,7 +2229,7 @@ the difference matters:
 | Sweep | Shape | What is proven |
 |---|---|---|
 | Daily digest (9.6) | enumerator | **T3 + T4** — two tenants due simultaneously on different timezones *and* different digest times, a third opted out, and a throw isolated |
-| Weekly feedback (9.7) | enumerator | **T3 + T4** — each enabled tenant emailed at **its own address**, the opted-out one skipped, and a throw isolated |
+| Weekly feedback (9.7) | enumerator | **T3 + T4** — each enabled tenant emailed at **its own stored address** and greeted with **its own business name**, the tenant whose own `weekly_feedback_enabled` is false skipped, and a throw isolated. All three read through the **production** resolvers (`digest/weekly-feedback-config.ts`), not test substitutes |
 | Hold reaper (3.5) | enumerator | **T4** — every tenant reached through the real selector; a throw isolated |
 | Estimate nudge (7.10) | enumerator | **T4** — same |
 | HFCR weekly send | enumerator | **T4** — same |
@@ -2635,7 +2679,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how ten of these were got wrong
+### 12.4d A note on method — how twelve of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2840,6 +2884,40 @@ prose.** Every entry above is a check a machine could run: does a cited file
 exist (published, §12.4d), does a cited test open a pool, does a claim appear
 twice with opposite verdicts. The first is now one line of shell. The third is
 the one that would have caught the most, and it is still unwritten.
+
+**The eleventh and twelfth were both raised against the harness this PR added
+to fix the others**, which is the most useful thing in this section: the
+instrument built to stop overclaiming was itself overclaiming, in the two ways
+an instrument can.
+
+- **It proved the loop and substituted the configuration.** The weekly-feedback
+  fan-out test handed the sweep the real enumerator — the whole point of the
+  file — and then handed it `isFeedbackEnabled` and `resolveOwnerEmail` as a
+  hand-built array and map, while every seeded tenant carried the *identical*
+  `owner_email` that `createTestTenant` writes. So it proved the worker forwards
+  each tenant id, and proved nothing about the resolvers production actually
+  runs, which were inlined closures in `app.ts` with no test of any kind. This
+  is §11.0e's own finding one layer down: the tenant *selector* had been
+  extracted and tested (`tenants/list-tenant-ids.ts`) while the tenant
+  *configuration* was still inline. Fixed the same way — extracted to
+  `digest/weekly-feedback-config.ts`, wired at the one call site, and exercised
+  against three tenants with distinct stored emails, business names and opt-out
+  flags. Each of the three assertions was mutation-tested: an owner-email
+  resolver that drops its `WHERE id = $1`, an opt-out gate that ignores the
+  stored flag, and a business-name resolver that reads a fixed tenant each kill
+  the test.
+- **It counted itself as evidence it had not produced.** §11.0e's audit figure
+  counts files that *import* `PgAuditRepository`; this file imports one,
+  constructs one, passes it to the sweeps and asserts nothing about any
+  persisted audit row — incrementing the published count 68→69 on nothing. The
+  same table's multi-tenant figure erred the other way, excluding a genuinely
+  cross-tenant file because its two tenants come from one helper call site. Both
+  rows are now labelled as the string counts they are, and the refinement that
+  looks obvious — also grep for an audit assertion — is shown in §11.0e to count
+  this very file, because its stub object contains the word `findByEntity`.
+
+**A harness is not exempt from the standard it enforces.** Both of these passed
+review twice before someone read what the assertions could not fail on.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading

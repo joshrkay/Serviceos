@@ -992,8 +992,9 @@ underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
 means "a Docker-gated test proved the write and its audit event" — in a universe containing exactly
 one tenant. Rivet is multi-tenant and its isolation boundary is the database, not application code
 (I11), so a proof that never met a second tenant says nothing about the world the product ships
-into. Measured over `packages/api/test/integration/` on 2026-09-12: 214 of 217 files open a real
-pool and **138 (64%) provision ≥2 tenants** — 140 (65%) after this branch adds two.
+into. Measured over `packages/api/test/integration/` on 2026-09-12 by the published lexical scan
+(PRD §11.0e): 214 of 217 files open a real pool and **at least 143 (66%) provision ≥2 tenants**
+— at least 145 (67%) after this branch adds two.
 
 *Corrected 2026-09-12.* This paragraph originally read *"140 (65%) provision ≥2 tenants, 120 (56%)
 carry a cross-tenant assertion, and 113 (52%) have both — about half the Docker-gated suite has
@@ -1002,6 +1003,14 @@ five figures exactly; **≥2 tenants was 138 at the merge-base**, and the cross-
 figures **could not be reproduced at all** — no command for them was ever published. They are
 withdrawn rather than restated, and the "about half" conclusion goes with them: it rested on the
 113/52% figure, not on anything this decision can still re-derive.
+
+*Corrected again, same day.* The surviving figure was reproducible and still mislabelled. "Provision
+≥2 tenants" counted files with ≥2 **literal** `createTestTenant(` call sites, so a file seeding two
+tenants through one helper counted as zero — `chat-entity-resolution.test.ts`, a genuinely
+cross-tenant test, was excluded. Widening to conventionally-named helpers recovers five files
+(138→143, 140→145), and that is still a **lower bound**, not a measurement: every figure in this
+paragraph counts strings in files. Caught in review (Codex P2). The companion audit figure, which
+D-032 does not cite, was mislabelled in the other direction — see §11.0e.
 
 The sharpest instance: seven integration files inject the tenant enumerator and **six pass exactly
 one tenant id**. Production supplies `SELECT id FROM tenants` at ten inlined call sites in
