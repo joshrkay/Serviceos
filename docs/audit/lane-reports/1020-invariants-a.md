@@ -845,14 +845,37 @@ more findings — one this lane's row (fixed), one cross-lane PRD prose
   Fable's call at G7, not this lane's. Answered on the thread, left
   unresolved, flagged here for Fable/the orchestrator.
 
+**Fifth round (`0b2ae16`):** Codex's re-review on `154efec` raised one
+more finding on this lane's row (fixed):
+
+- **I8 (P2, fixed):** `LIVE_STATES` skipped `entity_confirm` between
+  `entity_resolution` and `intent_confirm` — the `it.each` matrix never
+  exercised complaint escalation from that phase. Re-reading the
+  complaint global guard in `transitions.ts` showed its only no-op
+  condition is `state === 'escalating' || state === 'terminated'`,
+  meaning `idle` and `degraded` were ALSO wrongly excluded, not just
+  `entity_confirm`. Replaced the manual 8-state array with one derived
+  from an exhaustive `Record<CallingAgentState, true>` literal (a
+  compile error if the union gains a member without a corresponding key)
+  filtered to exclude only `escalating`/`terminated`, plus an
+  exhaustiveness assertion test (`toHaveLength(11)` + explicit membership
+  checks for `idle`/`entity_confirm`/`degraded`). RED: temporarily
+  re-excluded `idle`/`entity_confirm`/`degraded` to reproduce the
+  pre-fix bug — the new assertion failed as expected (`expected length
+  11, got 8`). GREEN after restoring the correct filter: all 11 live
+  states now each produce their own `agent.calling.<state>.complaint_guardrail`
+  audit row, verified against real Postgres. Full 8-file touched-file
+  suite re-run together afterward: 39/39 passing, no regressions. `tsc
+  --noEmit -p tsconfig.json` clean for this file.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus four follow-up commits (`cfe12f1`,
-  `b033257`, `fdb5257`, `3809785`) fixing the seven Codex findings above
-  across four review rounds.
+  this report committed, plus five follow-up commits (`cfe12f1`,
+  `b033257`, `fdb5257`, `3809785`, `0b2ae16`) fixing the eight Codex
+  findings above across five review rounds.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
