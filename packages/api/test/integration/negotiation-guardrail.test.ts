@@ -1,48 +1,136 @@
 /**
- * #1014 row 2.11 — refuse to quote a firm price / haggle, at real Postgres.
+ * Negotiation guardrail — real-Postgres proofs for both decision branches.
  *
- * Correction on this ticket's own text: it cites a sibling
- * `test/integration/negotiation-guardrail.test.ts` proof for the ALLOW
- * branch "from PR #1035" — no such file exists anywhere in this repo's
- * history on `origin/main` (checked: no integration or unit test anywhere
- * exercises `evaluateNegotiationDiscount`/`evaluateDiscountAsk` against real
- * data). This file is therefore new, not an addition to an existing proof,
- * and covers the REFUSE branch (`REJECT_WITH_COUNTER`) the row asks for —
- * see the PR body's "not done / judgment calls" for the ALLOW-branch gap
- * this leaves.
+ * - **ALLOW branch (row 7.12, §8.7 G1 audit / #1012)**: an in-policy discount
+ *   ask persists a capture-class, confidence-capped owner-callback proposal
+ *   AND its `negotiation.discount_evaluated` audit event, via the voice-task
+ *   surface (`NegotiationGuardrailTaskHandler`, `ai/tasks/negotiation-task.ts`).
+ *   Landed on `main` via PR #1035.
+ * - **REFUSE branch (row 2.11, #1014)**: a below-floor discount ask never
+ *   quotes the customer's price — it hands off to the owner with a
+ *   REJECT_WITH_COUNTER recommendation and its `negotiation_guardrail
+ *   .sms_routed` audit event, via the inbound-SMS surface
+ *   (`createInboundNegotiationHandler`, `sms/negotiation/inbound-negotiation
+ *   -handler.ts`). Drives the real chain — no literal `DiscountDecision`
+ *   handed in: real `PgSettingsRepository` (the tenant's discount floor) →
+ *   real `DefaultCurrentQuoteResolver` (`PgJobRepository` +
+ *   `PgEstimateRepository`, a real 'sent' catalog-grounded estimate) → real
+ *   `parseDiscountTarget` → real `evaluateDiscountAsk` (the pure
+ *   money-correctness core — untouched) → `createInboundNegotiationHandler`
+ *   (real `PgProposalRepository` + `PgAuditRepository`).
  *
- * Drives the REAL chain — no literal `DiscountDecision` handed in:
- *   real `PgSettingsRepository` (the tenant's discount floor) →
- *   real `DefaultCurrentQuoteResolver` (`PgJobRepository` + `PgEstimateRepository`,
- *   a real 'sent' catalog-grounded estimate) →
- *   real `parseDiscountTarget` (the customer's literal words) →
- *   real `evaluateDiscountAsk` (the pure money-correctness core — untouched) →
- *   `createInboundNegotiationHandler` (real `PgProposalRepository` +
- *   `PgAuditRepository`).
- *
- * Asserts: the AI never quotes the discounted price or commits to a number,
- * a `callback` proposal (capture-class, 'draft') hands the ask to the owner
- * with the REJECT_WITH_COUNTER framing (floor + counter price), and the
- * `negotiation_guardrail.sms_routed` audit event is read back through
- * PgAuditRepository — plus T1 (a second tenant's floor never governs the
- * first tenant's counter price).
+ * Both surfaces call the same underlying `evaluateNegotiationDiscount` /
+ * `evaluateDiscountAsk` decision engine and the shared
+ * `buildNegotiationCallbackContent` owner-callback builder, so together
+ * these two describe blocks cover ALLOW and REFUSE without duplicating
+ * either — see PR #1043's body for the "not done" note this once left
+ * (written before PR #1035, which added the ALLOW-branch block below,
+ * landed on `main`).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { NegotiationGuardrailTaskHandler } from '../../src/ai/tasks/negotiation-task';
+import { ensureTenantSettings } from '../../src/settings/settings';
+import type { CurrentQuoteResolver } from '../../src/conversations/negotiation/current-quote-resolver';
+import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import { createInboundNegotiationHandler } from '../../src/sms/negotiation/inbound-negotiation-handler';
 import { evaluateNegotiationDiscount } from '../../src/proposals/guardrails/negotiation-guardrail';
 import { DefaultCurrentQuoteResolver } from '../../src/conversations/negotiation/current-quote-resolver';
-import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
-import { PgProposalRepository } from '../../src/proposals/pg-proposal';
-import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import type { InboundSmsContext } from '../../src/sms/inbound-dispatch';
 
+describe('Postgres integration — negotiation guardrail owner-callback persistence (7.12)', () => {
+  let pool: Pool;
+  let settingsRepo: PgSettingsRepository;
+  let proposalRepo: PgProposalRepository;
+  let auditRepo: PgAuditRepository;
+  let tenant: { tenantId: string; userId: string };
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    settingsRepo = new PgSettingsRepository(pool);
+    proposalRepo = new PgProposalRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    tenant = await createTestTenant(pool);
+    // createTestTenant only inserts tenants/users — tenant_settings.update()
+    // is a bare UPDATE (no upsert; see PgSettingsRepository.update), so a
+    // fresh tenant needs its settings row created first, exactly as the real
+    // bootstrap flow (auth/clerk.ts) and the estimate/invoice number
+    // safety-net (getNextEstimateNumber/getNextInvoiceNumber) both do via
+    // this same idempotent helper.
+    await ensureTenantSettings(tenant.tenantId, settingsRepo);
+    await settingsRepo.update(tenant.tenantId, {
+      discountMaxBps: 1000, // 10% cap
+      discountFloorCents: 15000,
+      discountNeverBelowCatalog: true,
+    });
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('an in-policy discount ask persists a capture-class, confidence-capped callback proposal AND its audit event', async () => {
+    const quoteResolver: CurrentQuoteResolver = {
+      resolve: async () => ({ estimateId: 'est-1', quotedCents: 25000, catalogGrounded: true }),
+    };
+    const handler = new NegotiationGuardrailTaskHandler(undefined, {
+      settingsRepo,
+      quoteResolver,
+      auditRepo,
+    });
+
+    const context: TaskContext = {
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      message: 'can you do $230?',
+      existingEntities: { customerId: 'c-1' },
+    };
+    const { proposal, taskType } = await handler.handle(context);
+    expect(taskType).toBe('callback');
+    // Capture-class: no sourceTrustTier, and the confidence cap below forces
+    // 'draft' regardless — the AI never auto-applies a discount.
+    expect(proposal.status).toBe('draft');
+    const meta = proposal.payload._meta as { overallConfidence: string };
+    expect(meta.overallConfidence).toBe('low');
+    expect(proposal.payload.approvedDiscountBps).toBe(800); // $250 → $230 = 8% (< 10% cap)
+
+    // Persist through the REAL repo — the row, not just the in-memory object
+    // handle() returns. A new file that never opens a pool would not count.
+    const persisted = await proposalRepo.create(proposal);
+    const reloaded = await proposalRepo.findById(tenant.tenantId, persisted.id);
+    expect(reloaded).not.toBeNull();
+    expect(reloaded!.status).toBe('draft');
+    expect(reloaded!.proposalType).toBe('callback');
+
+    // The discount evaluation's audit event landed for real. No
+    // recordingId/conversationId was supplied, so auditDecision's entityId
+    // falls back to the tenantId (see NegotiationGuardrailTaskHandler.auditDecision).
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'proposal', tenant.tenantId);
+    expect(events.map((e) => e.eventType)).toContain('negotiation.discount_evaluated');
+
+    // T1 — cross-tenant isolation: a second, wholly separate tenant cannot
+    // read the persisted callback proposal, and sees none of its audit trail.
+    const otherTenant = await createTestTenant(pool);
+    expect(await proposalRepo.findById(otherTenant.tenantId, persisted.id)).toBeNull();
+    const otherEvents = await auditRepo.findByEntity(otherTenant.tenantId, 'proposal', tenant.tenantId);
+    expect(otherEvents).toHaveLength(0);
+  });
+});
+
+/**
+ * #1014 row 2.11 — refuse to quote a firm price / haggle, at real Postgres.
+ * See the file-level docstring above: this is the REFUSE-branch counterpart
+ * to the ALLOW-branch block above (row 7.12, PR #1035).
+ */
 async function seedSentEstimate(
   pool: Pool,
   tenant: TestTenant,
