@@ -120,6 +120,7 @@ import {
 } from '../tasks/create-customer-task';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import { recordVoiceError } from '../../analytics/posthog';
+import { buildAccountContextPromptSection } from '../agents/customer-calling/b2b-account-context';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -4382,6 +4383,14 @@ export function createVoiceTurnProcessor(
         tenantId,
         session.customerId,
       );
+      // 2.12 — B2B/property-manager account context, assembled once by the
+      // twilio adapter at caller identification (twilio-adapter.ts:953) and
+      // stashed on the session. Resolved into its prompt-ready string here,
+      // same treatment as vertical/plan above — absent for a residential or
+      // unmatched caller, so that session's prompt stays byte-identical.
+      const b2bAccountPromptSection = session.b2bAccountContext
+        ? buildAccountContextPromptSection(session.b2bAccountContext)
+        : undefined;
       // #886/#887 — surface-conditional taxonomy: derived from session
       // identity (owner line / trusted channel / D-026 phone actor). Hoisted
       // so the off-surface audit below records the same profile the guard
@@ -4395,6 +4404,7 @@ export function createVoiceTurnProcessor(
             verticalPromptSection,
             planPromptSection,
             classifierProfile,
+            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
             // RV-071 — the owner-approval prompt section is appended ONLY
             // on a recognized owner line (caller-ID match; see
             // approver-identity.ts), keeping every other call's

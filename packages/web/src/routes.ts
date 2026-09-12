@@ -279,6 +279,11 @@ export const router = createBrowserRouter([
       { path: 'digest/:date',   lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
       { path: 'reports/revenue-by-source', lazy: async () => ({ Component: (await import('./components/reports/RevenueBySourcePage')).RevenueBySourcePage }) },
       { path: 'technician/day', lazy: async () => ({ Component: (await import('./components/technician/TechnicianDayPage')).TechnicianDayPage }) },
+      // 1.11 — invited teammate's landing page (inviteTeamMember redirects
+      // here after Clerk's invitation sign-up completes). Auth-wrapped: a
+      // signed-out visit falls through to ProtectedRoute's existing
+      // unauthenticated handling (redirect to /login with a return path).
+      { path: 'accept-invitation', lazy: async () => ({ Component: (await import('./components/auth/AcceptInvitationPage')).AcceptInvitationPage }) },
       { path: 'design',         lazy: async () => ({ Component: (await import('./pages/design/Showcase')).Showcase }) },
     ],
     }],
