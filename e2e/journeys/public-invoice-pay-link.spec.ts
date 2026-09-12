@@ -34,9 +34,14 @@ const CLERK_WEBHOOK_SECRET =
 // Must match the STRIPE_WEBHOOK_SECRET passed to `npx playwright test` on the
 // command line (see docs/audit/lane-reports/public-surfaces-r5.md) — the API
 // webServer process reads it from `process.env` at Playwright config load
-// time, same mechanism as DATABASE_URL.
-const STRIPE_WEBHOOK_SECRET =
-  process.env.STRIPE_WEBHOOK_SECRET ?? 'whsec_e2e_public_pay_link_test_secret';
+// time, same mechanism as DATABASE_URL. Deliberately NO in-spec fallback:
+// unlike CLERK_WEBHOOK_SECRET (whose default is ALSO baked into
+// playwright.config.ts's apiWebServerEnv, so test and server always agree),
+// a fallback here would only apply inside this test worker — the webServer
+// would still boot with STRIPE_WEBHOOK_SECRET unset, and the signed webhook
+// would 401 against a secret the API was never configured with. The `canRun`
+// gate below skips instead of false-failing when the var is missing.
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -234,11 +239,13 @@ test.describe('pay from a link (8.4) — real Postgres', () => {
   const canRun =
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
-    process.env.E2E_USE_TEST_DB === 'true';
+    process.env.E2E_USE_TEST_DB === 'true' &&
+    !!STRIPE_WEBHOOK_SECRET;
   test.skip(
     !canRun,
     'Requires the local webServer pair against a real Postgres: leave E2E_BASE_URL unset, ' +
-      'set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok), STRIPE_WEBHOOK_SECRET, and ' +
+      'set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok), STRIPE_WEBHOOK_SECRET (must be set before ' +
+      '`npx playwright test` starts — the API webServer reads it at config-load time), and ' +
       'E2E_USE_TEST_DB=true with DATABASE_URL pointing at the test container.',
   );
   test.use({ viewport: { width: 390, height: 844 } });
@@ -334,7 +341,9 @@ test.describe('pay from a link (8.4) — real Postgres', () => {
     const webhookRes = await request.post(`${API_URL}/webhooks/stripe`, {
       headers: {
         'content-type': 'application/json',
-        'stripe-signature': stripeSignature(webhookBody, STRIPE_WEBHOOK_SECRET),
+        // Non-null: `canRun` (gated above via test.skip) requires this env
+        // var to be set before this test body ever executes.
+        'stripe-signature': stripeSignature(webhookBody, STRIPE_WEBHOOK_SECRET!),
       },
       data: webhookBody,
     });
