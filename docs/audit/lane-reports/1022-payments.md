@@ -59,6 +59,34 @@ BUILD_TSC_EXIT:0
 - hygiene: the fixture chains were lifted into per-file helpers so both tenants are seeded identically, and the
   now-unused module-level `customerId` in the reversal suite was deleted.
 
+**Follow-up after review (xhawk-ai on PR #1055, Medium/Testing — a correct finding on my own tests):** the first
+version of the two neighbour cases reused the suite-level invoice and depended on an earlier test's credit, so
+they failed when run alone or shuffled. Reproduced before fixing:
+
+```
+$ … --reporter=verbose test/integration/payment-concurrent-credit.test.ts -t "neighbour"
+ FAIL … a neighbour tenant's concurrent payment never counts toward this tenant's balance
+AssertionError: expected 5000 to be 30000 // Object.is equality
+$ … --reporter=verbose test/integration/payment-duplicate-race.test.ts -t "neighbour tenant"
+ FAIL … the SAME provider reference in a neighbour tenant credits only that tenant
+ - 1  + 0            (the count of rows for `pi_dup_race_1` under this tenant)
+```
+
+Both now seed their own invoices — and, in the duplicate-race case, their own first credit for a freshly generated
+shared reference — inside the test. Green filtered AND whole:
+
+```
+ ✓ payment-concurrent-credit.test.ts > … > a neighbour tenant's concurrent payment never counts toward this tenant's balance 56ms
+      Tests  1 passed | 1 skipped (2)
+ ✓ payment-duplicate-race.test.ts > … > the SAME provider reference in a neighbour tenant credits only that tenant 63ms
+      Tests  1 passed | 3 skipped (4)
+ … full files: Tests 2 passed (2) · Tests 4 passed (4)
+```
+
+Every other test added by this lane was checked the same way (`-t` filtered, one at a time) and was already
+self-contained: the reversal (d) case, the refunds RLS case, the webhook neighbour case, the void-link neighbour
+case and the arithmetic neighbour case all pass alone.
+
 **RED** (`payment-concurrent-credit`, deliberate: audit count 3 instead of 2; neighbour's 22000 claimed to leak in):
 
 ```

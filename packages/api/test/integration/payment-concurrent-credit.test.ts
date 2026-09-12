@@ -39,7 +39,6 @@ describe('Postgres integration — concurrent distinct payments both credit the 
   let tenant: { tenantId: string; userId: string };
   let otherTenant: { tenantId: string; userId: string };
   let invoiceId: string;
-  let otherTenantInvoiceId: string;
 
   /**
    * Seed one tenant's full fixture chain (customer → location → job → open
@@ -132,7 +131,6 @@ describe('Postgres integration — concurrent distinct payments both credit the 
     otherTenant = await createTestTenant(pool);
 
     invoiceId = await seedOpenInvoice(tenant, 'RACE-1', 30000);
-    otherTenantInvoiceId = await seedOpenInvoice(otherTenant, 'RACE-NEIGHBOUR', 30000);
   });
 
   afterAll(async () => {
@@ -200,22 +198,33 @@ describe('Postgres integration — concurrent distinct payments both credit the 
   });
 
   it("a neighbour tenant's concurrent payment never counts toward this tenant's balance", async () => {
+    // Self-contained: both invoices are seeded HERE, so this test asserts the
+    // same isolation whether the file runs whole, shuffled, or filtered down to
+    // this one case. (Reusing the suite invoice made it depend on the previous
+    // test's 25000 — xhawk-ai review on PR #1055.)
+    const mineInvoiceId = await seedOpenInvoice(tenant, `RACE-2-${crypto.randomUUID().slice(0, 8)}`, 30000);
+    const theirInvoiceId = await seedOpenInvoice(
+      otherTenant,
+      `RACE-NEIGHBOUR-${crypto.randomUUID().slice(0, 8)}`,
+      30000,
+    );
+
     // Both tenants pay their OWN invoice at the same moment. Same code path,
     // same pool, same instant — only tenant_id differs.
     const mine = {
       tenantId: tenant.tenantId,
-      invoiceId,
+      invoiceId: mineInvoiceId,
       amountCents: 5000,
       method: 'cash' as const,
-      providerReference: 'manual-cash-mine',
+      providerReference: `manual-cash-mine-${crypto.randomUUID().slice(0, 8)}`,
       processedBy: 'owner',
     };
     const theirs = {
       tenantId: otherTenant.tenantId,
-      invoiceId: otherTenantInvoiceId,
+      invoiceId: theirInvoiceId,
       amountCents: 22000,
       method: 'bank_transfer' as const,
-      providerReference: 'pi_ach_neighbour',
+      providerReference: `pi_ach_neighbour_${crypto.randomUUID().slice(0, 8)}`,
       processedBy: 'stripe_webhook',
     };
 
@@ -224,46 +233,47 @@ describe('Postgres integration — concurrent distinct payments both credit the 
       recordPayment(theirs, invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
     ]);
 
-    // This tenant's invoice moved by ITS payment only (25000 + 5000); the
-    // neighbour's 22000 is nowhere in it.
-    const mineReloaded = await invoiceRepo.findById(tenant.tenantId, invoiceId);
-    expect(mineReloaded!.amountPaidCents).toBe(30000);
-    expect(mineReloaded!.amountDueCents).toBe(0);
-    expect(mineReloaded!.status).toBe('paid');
+    // This tenant's invoice moved by ITS payment only; the neighbour's 22000 is
+    // nowhere in it.
+    const mineReloaded = await invoiceRepo.findById(tenant.tenantId, mineInvoiceId);
+    expect(mineReloaded!.amountPaidCents).toBe(5000);
+    expect(mineReloaded!.amountDueCents).toBe(25000);
+    expect(mineReloaded!.status).toBe('partially_paid');
 
     // The neighbour's invoice moved by ITS payment only.
-    const theirsReloaded = await invoiceRepo.findById(otherTenant.tenantId, otherTenantInvoiceId);
+    const theirsReloaded = await invoiceRepo.findById(otherTenant.tenantId, theirInvoiceId);
     expect(theirsReloaded!.amountPaidCents).toBe(22000);
     expect(theirsReloaded!.amountDueCents).toBe(8000);
 
-    // Ledgers stay disjoint: three rows here (10000 + 15000 + 5000), one there.
+    // Ledgers stay disjoint: one row each, carrying only its own tenant's money.
     const mineRows = await pool.query<{ n: number; total: string }>(
       `SELECT count(*)::int AS n, COALESCE(sum(amount_cents), 0)::text AS total
          FROM payments WHERE tenant_id = $1 AND invoice_id = $2`,
-      [tenant.tenantId, invoiceId],
+      [tenant.tenantId, mineInvoiceId],
     );
-    expect(mineRows.rows[0].n).toBe(3);
-    expect(Number(mineRows.rows[0].total)).toBe(30000);
+    expect(mineRows.rows[0].n).toBe(1);
+    expect(Number(mineRows.rows[0].total)).toBe(5000);
+    const theirRows = await pool.query<{ n: number; total: string }>(
+      `SELECT count(*)::int AS n, COALESCE(sum(amount_cents), 0)::text AS total
+         FROM payments WHERE tenant_id = $1 AND invoice_id = $2`,
+      [otherTenant.tenantId, theirInvoiceId],
+    );
+    expect(theirRows.rows[0].n).toBe(1);
+    expect(Number(theirRows.rows[0].total)).toBe(22000);
 
     // Audit trails stay disjoint too — the neighbour's credit is not on this
     // tenant's invoice timeline, and this tenant cannot read the neighbour's.
-    const mineEvents = await auditRepo.findByEntity(tenant.tenantId, 'invoice', invoiceId);
-    expect(
-      mineEvents
-        .filter((e) => e.eventType === 'payment.recorded')
-        .map((e) => e.metadata!.amountCents),
-    ).not.toContain(22000);
-    const crossRead = await auditRepo.findByEntity(
-      tenant.tenantId,
-      'invoice',
-      otherTenantInvoiceId,
-    );
-    expect(crossRead).toEqual([]);
+    const mineEvents = await auditRepo.findByEntity(tenant.tenantId, 'invoice', mineInvoiceId);
+    const mineRecorded = mineEvents.filter((e) => e.eventType === 'payment.recorded');
+    expect(mineRecorded).toHaveLength(1);
+    expect(mineRecorded.map((e) => e.metadata!.amountCents)).not.toContain(22000);
+    expect(await auditRepo.findByEntity(tenant.tenantId, 'invoice', theirInvoiceId)).toEqual([]);
     const theirEvents = await auditRepo.findByEntity(
       otherTenant.tenantId,
       'invoice',
-      otherTenantInvoiceId,
+      theirInvoiceId,
     );
     expect(theirEvents.filter((e) => e.eventType === 'payment.recorded')).toHaveLength(1);
+    expect(await auditRepo.findByEntity(otherTenant.tenantId, 'invoice', mineInvoiceId)).toEqual([]);
   });
 });

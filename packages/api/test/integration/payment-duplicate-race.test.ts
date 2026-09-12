@@ -41,7 +41,6 @@ describe('Postgres integration — duplicate Stripe payment is rejected + handle
   let tenant: { tenantId: string; userId: string };
   let otherTenant: { tenantId: string; userId: string };
   let invoiceId: string;
-  let otherTenantInvoiceId: string;
 
   /**
    * Seed one tenant's fixture chain (customer → location → job → open invoice).
@@ -133,7 +132,6 @@ describe('Postgres integration — duplicate Stripe payment is rejected + handle
     otherTenant = await createTestTenant(pool);
 
     invoiceId = await seedOpenInvoice(tenant, 'DUP-1', 20000);
-    otherTenantInvoiceId = await seedOpenInvoice(otherTenant, 'DUP-NEIGHBOUR', 20000);
   });
 
   afterAll(async () => {
@@ -221,13 +219,44 @@ describe('Postgres integration — duplicate Stripe payment is rejected + handle
     // reference_number): two tenants can legitimately hold the same Stripe
     // reference (distinct Connect accounts), and neither the insert dedup nor
     // the credit may cross the tenant line.
-    const sharedRef = 'pi_dup_race_1'; // already recorded against THIS tenant
-    const mineBefore = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    //
+    // Self-contained: both invoices AND this tenant's first credit for the
+    // shared reference happen here, so the test holds whether the file runs
+    // whole, shuffled, or filtered to this one case (xhawk-ai review on #1055).
+    const sharedRef = `pi_shared_ref_${crypto.randomUUID().slice(0, 8)}`;
+    const mineInvoiceId = await seedOpenInvoice(
+      tenant,
+      `DUP-2-${crypto.randomUUID().slice(0, 8)}`,
+      20000,
+    );
+    const theirInvoiceId = await seedOpenInvoice(
+      otherTenant,
+      `DUP-NEIGHBOUR-${crypto.randomUUID().slice(0, 8)}`,
+      20000,
+    );
+
+    await recordPayment(
+      {
+        tenantId: tenant.tenantId,
+        invoiceId: mineInvoiceId,
+        amountCents: 10000,
+        method: 'credit_card',
+        providerReference: sharedRef,
+        processedBy: 'stripe_webhook',
+      },
+      invoiceRepo,
+      paymentRepo,
+      undefined,
+      undefined,
+      auditRepo,
+    );
+    const mineBefore = await invoiceRepo.findById(tenant.tenantId, mineInvoiceId);
+    expect(mineBefore!.amountPaidCents).toBe(10000);
 
     const neighbour = await recordPayment(
       {
         tenantId: otherTenant.tenantId,
-        invoiceId: otherTenantInvoiceId,
+        invoiceId: theirInvoiceId,
         amountCents: 7000,
         method: 'credit_card',
         providerReference: sharedRef,
@@ -243,29 +272,36 @@ describe('Postgres integration — duplicate Stripe payment is rejected + handle
     // The neighbour's insert was NOT swallowed as a duplicate of this tenant's
     // row, and it credited the neighbour's own invoice.
     expect(neighbour.payment.tenantId).toBe(otherTenant.tenantId);
-    const theirs = await invoiceRepo.findById(otherTenant.tenantId, otherTenantInvoiceId);
+    const theirs = await invoiceRepo.findById(otherTenant.tenantId, theirInvoiceId);
     expect(theirs!.amountPaidCents).toBe(7000);
     expect(theirs!.amountDueCents).toBe(13000);
 
-    // This tenant's balance did not move, and its ledger still holds exactly
-    // one row for that reference.
-    const mineAfter = await invoiceRepo.findById(tenant.tenantId, invoiceId);
-    expect(mineAfter!.amountPaidCents).toBe(mineBefore!.amountPaidCents);
-    const { rows } = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM payments WHERE tenant_id = $1 AND reference_number = $2`,
-      [tenant.tenantId, sharedRef],
-    );
-    expect(rows[0].n).toBe(1);
+    // This tenant's balance did not move, and each tenant holds exactly one row
+    // for that reference.
+    const mineAfter = await invoiceRepo.findById(tenant.tenantId, mineInvoiceId);
+    expect(mineAfter!.amountPaidCents).toBe(10000);
+    const countFor = async (tenantId: string) =>
+      (
+        await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM payments WHERE tenant_id = $1 AND reference_number = $2`,
+          [tenantId, sharedRef],
+        )
+      ).rows[0].n;
+    expect(await countFor(tenant.tenantId)).toBe(1);
+    expect(await countFor(otherTenant.tenantId)).toBe(1);
 
-    // …and the neighbour's credit is on the NEIGHBOUR's audit trail only.
+    // …and each credit is on its own tenant's audit trail only.
     const theirEvents = await auditRepo.findByEntity(
       otherTenant.tenantId,
       'invoice',
-      otherTenantInvoiceId,
+      theirInvoiceId,
     );
     expect(theirEvents.filter((e) => e.eventType === 'payment.recorded')).toHaveLength(1);
+    expect(await auditRepo.findByEntity(tenant.tenantId, 'invoice', theirInvoiceId)).toEqual([]);
     expect(
-      await auditRepo.findByEntity(tenant.tenantId, 'invoice', otherTenantInvoiceId),
-    ).toEqual([]);
+      (await auditRepo.findByEntity(tenant.tenantId, 'invoice', mineInvoiceId)).filter(
+        (e) => e.eventType === 'payment.recorded',
+      ),
+    ).toHaveLength(1);
   });
 });
