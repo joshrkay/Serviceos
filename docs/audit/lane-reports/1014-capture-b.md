@@ -252,6 +252,46 @@ Fixing it means changing `emergency-tier.ts` **semantics**, which the lane B sco
 1. A passing **characterization** test records exactly what happens today — tier absent, not terminated, dispatcher copy, booking still live.
 2. An **`it.fails`** test states the DESIRED behaviour in full (the English assertions, in Spanish). It reports as `1 expected fail`, keeps CI honest, and **starts failing loudly the day someone fixes the product** — which is the signal to delete it, promote its assertions into the English test, and re-grade row 2.5.
 
+### Why this was invisible — the Spanish corpus encodes the E2 behaviour as correct
+
+Worth knowing before anyone fixes it, because the fix will break a currently
+green test.
+
+This PR's own CI run posted **Voice Quality Report: PASS, 73/73 (100%)**, with
+bucket `11-spanish` at **4/4, threshold 90%**. That bucket contains the exact
+scenario — and it passes because it asserts the behaviour that exists rather
+than the behaviour §8.2's acceptance criterion requires.
+
+`src/ai/voice-quality/corpus/scripts/11-spanish/es-emergency-escalation.json`
+carries the same utterance this lane used:
+
+```json
+{
+  "caller": "¡Hay una fuga de gas en mi casa, se siente el olor a gas muy fuerte!",
+  "expected": {
+    "escalates": true,
+    "spokenAnswerMatches": "Si alguien está en peligro inmediato, cuelgue y llame al 911."
+  }
+}
+```
+
+`escalates: true` is the **E2** disposition. The quoted line is
+`EMERGENCY_SAFETY_LINE` in Spanish — the generic dispatcher-path 911 line — not
+the E1 evacuation script ("leave the building … without using light switches").
+Its golden (`corpus/golden/es-emergency-escalation.json`) is `[]`. Even the
+script's own id and the bucket's doc comment say *escalation*
+(`11-spanish.test.ts:18` — *"fuga de gas" escalates with the Spanish 911 safety
+line*).
+
+So the corpus does not miss the case; it **records the E2 outcome as the
+expected one**. That is why a life-safety gap sat behind a 100% Spanish score.
+
+**Consequence for #1056:** fixing the product will turn this cassette RED — E1
+terminates rather than escalates, and speaks a different script. The corpus
+script, its golden, and the bucket's doc comment have to be updated in the same
+change. A fix that only touches `emergency-tier.ts` will look like a
+regression.
+
 **Recommended routing:** a life-safety fix ticket with a named owner, plus an entry on `docs/audit/blocked-on-josh.md` (#1000) if the owner is not immediate. I did not add either — that is the orchestrator's call, and the row note is the honest place for it until then.
 
 ---
