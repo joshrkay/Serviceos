@@ -140,6 +140,26 @@ describe('router', () => {
     expect(detailIdx, 'invoices/:id must be registered').toBeGreaterThanOrEqual(0);
     expect(newIdx).toBeLessThan(detailIdx);
   });
+
+  // 1.11 — inviteTeamMember (users/invite-team-member.ts) redirects an
+  // accepted invitee to `${appBaseUrl}/accept-invitation?invitation_id=…`;
+  // without this route the invitee's browser 404s instead of reaching the
+  // app. Registered INSIDE ProtectedRoute (not as a public fullscreen flow
+  // like /onboarding) so a signed-out visit falls through to ProtectedRoute's
+  // existing unauthenticated handling (redirect to /login with a return
+  // path) rather than needing its own auth check.
+  it('registers accept-invitation inside the authed Shell (ProtectedRoute gates signed-out visitors)', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const route = allRoutes.find((r) => r.path === 'accept-invitation');
+    expect(route, 'expected an accept-invitation route').toBeDefined();
+    expect(typeof (route as { lazy?: unknown }).lazy, 'accept-invitation should be lazy').toBe('function');
+    expect(isEager(route!), 'accept-invitation should not be eagerly imported').toBe(false);
+
+    const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
+    const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
+    const isShellChild = shellRoute!.children?.some((r) => r.path === 'accept-invitation');
+    expect(isShellChild, 'accept-invitation must be a Shell child (auth-wrapped)').toBe(true);
+  });
 });
 
 /**

@@ -78,6 +78,10 @@ import { OwnerNotificationService } from './notifications/owner-notification-ser
 import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import {
+  TechnicianAssignmentNotifier,
+  setTechnicianAssignmentNotifier,
+} from './appointments/assignment-notifications';
 import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
 import {
   createMeRouter,
@@ -5313,14 +5317,52 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // producer seams (inbound call/SMS, appointment reminder/cancellation,
   // payment, lead, escalation). Each type targets the permission its descriptor
   // declares (owner+dispatcher, never a technician device).
-  setOwnerNotifications(
-    new OwnerNotificationService({
-      deviceTokenRepo,
-      provider: expoPushProvider,
-      resolveUserIds: userIdsWithPermissionResolver(userRepo),
-      // U10 — honor per-user category opt-outs before sending.
-      resolveMutedUserIds: (tenantId, type) =>
-        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  const ownerNotificationService = new OwnerNotificationService({
+    deviceTokenRepo,
+    provider: expoPushProvider,
+    resolveUserIds: userIdsWithPermissionResolver(userRepo),
+    // U10 — honor per-user category opt-outs before sending.
+    resolveMutedUserIds: (tenantId, type) =>
+      notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  });
+  setOwnerNotifications(ownerNotificationService);
+  // 4.11 — register the technician-assignment notifier (the doc-comment on
+  // TechnicianAssignmentNotifier already claimed this happened; it never
+  // did, so every assign/reassign silently no-op'd in production). Reuses
+  // ownerNotificationService as the `notifier` — it already implements
+  // notifyUser() and its NOTIFICATION_DESCRIPTORS registry already carries
+  // appointment_assigned / appointment_unassigned copy, built for exactly
+  // this user-targeted (not permission-broadcast) path. All deps this needs
+  // (appointment/job/customer/user/location repos) exist unconditionally in
+  // both Pg- and in-memory-backed boots, so — unlike messageDelivery below —
+  // registration itself is never gated.
+  setTechnicianAssignmentNotifier(
+    new TechnicianAssignmentNotifier({
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      userRepo,
+      locationRepo,
+      notifier: ownerNotificationService,
+      // Staff SMS is the raw, ungated `recipientClass: 'owner'` path (bypasses
+      // the customer DNC/consent gate — mirrors the emergency owner-cell
+      // paging call sites) — only available when a real delivery provider is
+      // wired (messageDelivery is null in dev/test without credentials), in
+      // which case the notifier's own doc-contract applies: no SMS sender ⇒
+      // in-app push only.
+      ...(messageDelivery
+        ? {
+            smsSender: (args: { to: string; body: string; tenantId: string; idempotencyKey?: string }) =>
+              messageDelivery!.sendSms({
+                to: args.to,
+                body: args.body,
+                tenantId: args.tenantId,
+                idempotencyKey: args.idempotencyKey,
+                recipientClass: 'owner',
+              }),
+          }
+        : {}),
+      logger: requestLogger,
     }),
   );
   // Render the real customer name in payment/cancellation pushes (best-effort;

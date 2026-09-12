@@ -292,6 +292,12 @@ export class OwnerNotificationService {
     if (!userId) return;
     const built = NOTIFICATION_DESCRIPTORS[type].build(ctx);
     try {
+      // U10 — a user-targeted send must respect the target's own mute for
+      // this type, exactly like the permission-broadcast path does.
+      if (this.deps.resolveMutedUserIds) {
+        const muted = await this.deps.resolveMutedUserIds(tenantId, type);
+        if (muted.has(userId)) return;
+      }
       const tokens = await this.deps.deviceTokenRepo.listByTenant(tenantId);
       const recipients = tokens.filter((t) => t.userId === userId);
       await this.send(tenantId, recipients, built);
