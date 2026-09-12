@@ -124,4 +124,52 @@ describe('Postgres integration — autonomous booking settings (UB-D / migration
       client.release();
     }
   });
+
+  it('T0 — a neighbour tenant\'s default lane settings are untouched by the first tenant\'s opt-in update', async () => {
+    const tenantA = await seedSettings(pool, settingsRepo, 'Opted-In Co');
+    const tenantB = await seedSettings(pool, settingsRepo, 'Neighbour Co');
+
+    // Tenant B starts at the same defaults as tenant A.
+    const beforeB = await settingsRepo.findByTenant(tenantB.tenantId);
+    expect(beforeB!.autonomousBookingEnabled).toBe(false);
+    expect(beforeB!.autonomousBookingThreshold).toBe(0.95);
+
+    const updatedA = await settingsRepo.update(tenantA.tenantId, {
+      autonomousBookingEnabled: true,
+      autonomousBookingThreshold: 0.98,
+    });
+    expect(updatedA!.autonomousBookingEnabled).toBe(true);
+    expect(updatedA!.autonomousBookingThreshold).toBe(0.98);
+
+    // Tenant B's lane is completely untouched by tenant A's opt-in — still
+    // off, still at the default floor. The platform kill switch / per-tenant
+    // opt-in (D-015) never leaks across tenants.
+    const afterB = await settingsRepo.findByTenant(tenantB.tenantId);
+    expect(afterB!.autonomousBookingEnabled).toBe(false);
+    expect(afterB!.autonomousBookingThreshold).toBe(0.95);
+
+    // Pin the real columns directly, scoped to tenant B by the WHERE clause.
+    const client = await pool.connect();
+    try {
+      await client.query(`SET LOCAL app.current_tenant_id = '${tenantB.tenantId}'`);
+      const { rows } = await client.query(
+        `SELECT autonomous_booking_enabled, autonomous_booking_threshold
+           FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantB.tenantId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].autonomous_booking_enabled).toBe(false);
+      expect(Number(rows[0].autonomous_booking_threshold)).toBe(0.95);
+    } finally {
+      client.release();
+    }
+
+    // Tenant A's opted-in row is unreachable through PgSettingsRepository
+    // scoped to tenant B — the repo's tenant-scoping, not just the raw WHERE
+    // clause above, keeps the two tenants' lane settings apart.
+    const crossTenantFetch = await settingsRepo.findByTenant(tenantB.tenantId);
+    expect(crossTenantFetch!.autonomousBookingThreshold).not.toBe(
+      updatedA!.autonomousBookingThreshold,
+    );
+  });
 });

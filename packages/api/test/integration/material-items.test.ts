@@ -10,7 +10,7 @@
  * testcontainer's default connection is a superuser and superusers bypass
  * RLS unconditionally.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
 import {
@@ -22,6 +22,22 @@ import {
 } from './shared';
 import { PgMaterialItemRepository } from '../../src/materials/pg-material-item';
 import { ValidationError } from '../../src/shared/errors';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-execution';
+import { missingFieldsFor, Proposal } from '../../src/proposals/proposal';
+import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
+import { approveProposal } from '../../src/proposals/actions';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import {
+  createExecutionHandlerRegistry,
+  ExecutionContext,
+} from '../../src/proposals/execution/handlers';
+import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
+import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { QueueMessage } from '../../src/queues/queue';
+import type { Logger } from '../../src/logging/logger';
 
 /**
  * Insert the customer -> location -> job FK chain under tenant RLS context.
@@ -532,6 +548,154 @@ describe('Postgres integration — material items', () => {
       // Untouched — still pending under its real tenant.
       const stillPending = await repo.listPending(other.tenantId);
       expect(stillPending.map((i) => i.id)).toContain(theirs.id);
+    });
+  });
+
+  // #1019 row 6.9 (G1 4−) — material-items.test.ts wrote at real Postgres
+  // (T1) but never proved the `material.requested` audit event Task 9's
+  // AddMaterialExecutionHandler emits. This drives the REAL voice-drafted
+  // payload ("three-quarter copper, twenty feet") through the task
+  // handler -> approval gate -> production execution registry, the same
+  // shape as add-note-voice-execution.test.ts, then reads the audit event
+  // back through `PgAuditRepository.findByEntity` — proving BOTH the
+  // number (quantity, a real integer column) and the unit ("feet", carried
+  // in the free-text description — material_items has no separate unit
+  // column) survive the full round trip, not just the description string
+  // alone.
+  /** Replays scripted JSON classifier replies in call order; repeats the last one. */
+  function scriptedGateway(responses: unknown[]): LLMGateway {
+    let i = 0;
+    return {
+      complete: vi.fn(async () => ({
+        content: JSON.stringify(responses[Math.min(i++, responses.length - 1)]),
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 10, output: 10, total: 20 },
+        latencyMs: 1,
+      } satisfies LLMResponse)),
+    } as unknown as LLMGateway;
+  }
+
+  function silentLogger(): Logger {
+    const noop = (..._args: unknown[]) => {};
+    const base = {
+      debug: noop,
+      info: noop,
+      warn: noop,
+      error: noop,
+      child: () => base,
+    } as unknown as Logger;
+    return base;
+  }
+
+  function msg<T>(payload: T): QueueMessage<T> {
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 10)}`,
+      type: 'voice_action_router',
+      payload,
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: `idem-${Math.random().toString(36).slice(2, 10)}`,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  describe('add_material end-to-end: task -> approve -> execute -> material_items + audit (#1019 6.9)', () => {
+    it('persists quantity and the spoken unit, and emits a readable material.requested audit event', async () => {
+      const t = await createTestTenant(pool);
+      const auditRepo = new PgAuditRepository(pool);
+      const proposalRepo = new PgProposalRepository(pool);
+      const registry = createExecutionHandlerRegistry({ materialItemRepo: repo, auditRepo });
+      const guard = new IdempotencyGuard(new PgProposalExecutionRepository(pool), proposalRepo);
+      const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
+
+      // 1) Draft via the REAL voice-action-router, from a SCRIPTED classifier
+      // reply carrying the extractedEntities a spoken "three-quarter copper,
+      // twenty feet" would produce — not the task handler called directly
+      // with hand-fed existingEntities (review follow-up, chatgpt-codex-
+      // connector on PR #1048: a hand-fed TaskContext cannot catch a
+      // classifier/router regression that drops "feet" or mis-parses
+      // "twenty", since AddMaterialTaskHandler only COPIES
+      // materialDescription/materialQuantity and never parses `message`
+      // itself). Routing through the worker proves the classifier's
+      // extractedEntities survive `entitiesForProposal` and land on the
+      // drafted payload unchanged.
+      const gateway = scriptedGateway([
+        {
+          intentType: 'add_material',
+          confidence: 0.95,
+          extractedEntities: {
+            materialDescription: '3/4" copper pipe, sold by the foot',
+            materialQuantity: 20,
+          },
+        },
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+      await worker.handle(
+        msg({
+          tenantId: t.tenantId,
+          userId: t.userId,
+          transcript: 'three-quarter copper, twenty feet',
+        }),
+        silentLogger(),
+      );
+
+      const draftedList = await proposalRepo.findByTenant(t.tenantId);
+      expect(draftedList).toHaveLength(1);
+      const drafted = draftedList[0]!;
+      expect(drafted.proposalType).toBe('add_material');
+      expect(missingFieldsFor(drafted)).toEqual([]);
+      const payload = drafted.payload as Record<string, unknown>;
+      expect(payload.quantity).toBe(20);
+      expect(payload.description).toContain('foot');
+      expect(payload.description).toContain('3/4');
+
+      // 2) Real approval gate.
+      const approved: Proposal = await approveProposal(
+        proposalRepo,
+        t.tenantId,
+        drafted.id,
+        t.userId,
+        'owner',
+        auditRepo,
+        'ui',
+      );
+      expect(approved.status).toBe('approved');
+
+      // 3) Execute past the undo window via the production registry.
+      const backdated: Proposal = {
+        ...approved,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      };
+      const context: ExecutionContext = { tenantId: t.tenantId, executedBy: t.userId };
+      const { result } = await executor.execute(backdated, context);
+      expect(result.success).toBe(true);
+      const itemId = result.resultEntityId as string;
+
+      // 4) The number: quantity persisted as a real integer column on the
+      // material_items row (not folded into text, not dropped).
+      const { rows } = await pool.query(
+        `SELECT quantity, description FROM material_items WHERE id = $1`,
+        [itemId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].quantity).toBe(20);
+      expect(typeof rows[0].quantity).toBe('number');
+      // The unit: "feet" survives on the row — there is no separate unit
+      // column, so it must ride along in description.
+      expect(rows[0].description).toContain('foot');
+      expect(rows[0].description).toContain('3/4');
+
+      // 5) The audit-event read-back G1 flagged as missing: read through
+      // PgAuditRepository.findByEntity, not a raw SELECT, since the read
+      // path is exactly what a real caller (the activity feed) uses.
+      const events = await auditRepo.findByEntity(t.tenantId, 'material_item', itemId);
+      expect(events).toHaveLength(1);
+      expect(events[0].eventType).toBe('material.requested');
+      expect(events[0].actorId).toBe(t.userId);
+      // The audit metadata also carries the number, independently of the
+      // material_items row itself.
+      expect(events[0].metadata?.quantity).toBe(20);
     });
   });
 
