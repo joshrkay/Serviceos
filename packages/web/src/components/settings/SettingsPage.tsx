@@ -80,6 +80,31 @@ interface SettingsSection {
   items: SettingsRow[];
 }
 
+/**
+ * #1011 — Quick-settings switches that persist through `PUT /api/settings`.
+ * Keyed by the local state name, valued by the API field, so the persist
+ * helper builds `{ [field]: value }` from one table instead of a ternary that
+ * has to grow a branch per toggle.
+ */
+const SETTINGS_TOGGLE_FIELDS = {
+  aiAuto: 'autoApplyInternalUpdates',
+  reminders: 'autoSendAppointmentReminders',
+  // 9.6 — the daily digest switch (added by #1010), folded into the same table.
+  digestEnabled: 'digestEnabled',
+  thankYouSms: 'sendThankYouSms',
+  reviewRequest: 'sendReviewRequest',
+  weeklyFeedback: 'weeklyFeedbackEnabled',
+  autonomousClose: 'autonomousCloseEnabled',
+} as const;
+
+type SettingsToggleField = keyof typeof SETTINGS_TOGGLE_FIELDS;
+
+/** Integer cents → the dollars string the cap input edits. null renders empty. */
+function centsToDollarInput(cents: number | null): string {
+  if (cents === null) return '';
+  return String(cents / 100);
+}
+
 export function SettingsPage() {
   const navigate = useNavigate();
   const { signOut } = useClerk();
@@ -104,6 +129,20 @@ export function SettingsPage() {
   const [batchInvoiceEnabled, setBatchInvoiceEnabledState] = useState(false);
   const [milestoneBillingEnabled, setMilestoneBillingEnabledState] = useState(false);
   const [spanishMode, setSpanishMode] = useState(false);
+  // #1011 — five settings that `updateSettingsSchema` used to STRIP, so a
+  // PUT returned 200 and changed nothing. They had no control on any surface;
+  // these are it. Initial values mirror the column defaults so the switch is
+  // not lying about live state during the first paint (send_thank_you_sms and
+  // send_review_request are NOT NULL DEFAULT TRUE; weekly_feedback_enabled is
+  // opt-OUT; autonomous_close_enabled defaults FALSE).
+  const [thankYouSms, setThankYouSms] = useState(true);
+  const [reviewRequest, setReviewRequest] = useState(true);
+  const [weeklyFeedback, setWeeklyFeedback] = useState(true);
+  const [autonomousClose, setAutonomousClose] = useState(false);
+  // The cap is money: held as integer CENTS (the repo invariant) and edited as
+  // a dollars string so a half-typed value never round-trips through a float.
+  const [closeCapCents, setCloseCapCents] = useState<number | null>(null);
+  const [closeCapInput, setCloseCapInput] = useState('');
   const [businessName, setBusinessName] = useState<string | null>(null);
   // #874 — live service-area data for the RESOURCES row (null until the
   // settings document loads; the subtitle must never show made-up data).
@@ -149,6 +188,11 @@ export function SettingsPage() {
           serviceAreaText?: string | null;
           serviceAreaRadius?: number | null;
           serviceAreaZips?: string[] | null;
+          sendThankYouSms?: boolean;
+          sendReviewRequest?: boolean;
+          weeklyFeedbackEnabled?: boolean;
+          autonomousCloseEnabled?: boolean;
+          autonomousCloseMaxCents?: number | null;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
@@ -170,6 +214,22 @@ export function SettingsPage() {
         }
         if (typeof data.milestoneBillingEnabled === 'boolean') {
           setMilestoneBillingEnabledState(data.milestoneBillingEnabled);
+        }
+        // #1011 — hydrate the five owner toggles.
+        if (typeof data.sendThankYouSms === 'boolean') setThankYouSms(data.sendThankYouSms);
+        if (typeof data.sendReviewRequest === 'boolean') setReviewRequest(data.sendReviewRequest);
+        if (typeof data.weeklyFeedbackEnabled === 'boolean') {
+          setWeeklyFeedback(data.weeklyFeedbackEnabled);
+        }
+        if (typeof data.autonomousCloseEnabled === 'boolean') {
+          setAutonomousClose(data.autonomousCloseEnabled);
+        }
+        if (typeof data.autonomousCloseMaxCents === 'number') {
+          setCloseCapCents(data.autonomousCloseMaxCents);
+          setCloseCapInput(centsToDollarInput(data.autonomousCloseMaxCents));
+        } else if (data.autonomousCloseMaxCents === null) {
+          setCloseCapCents(null);
+          setCloseCapInput('');
         }
         if (typeof data.businessName === 'string' && data.businessName.trim()) {
           setBusinessName(data.businessName.trim());
@@ -243,10 +303,7 @@ export function SettingsPage() {
     }
   }
 
-  async function persistToggle(
-    field: 'aiAuto' | 'reminders' | 'spanishMode' | 'digestEnabled',
-    value: boolean,
-  ) {
+  async function persistToggle(field: SettingsToggleField | 'spanishMode', value: boolean) {
     if (field === 'spanishMode') {
       try {
         await updateLanguageSettings({ defaultLanguage: value ? 'es' : 'en' });
@@ -256,12 +313,7 @@ export function SettingsPage() {
       }
       return;
     }
-    const body =
-      field === 'aiAuto'
-        ? { autoApplyInternalUpdates: value }
-        : field === 'reminders'
-          ? { autoSendAppointmentReminders: value }
-          : { digestEnabled: value };
+    const body = { [SETTINGS_TOGGLE_FIELDS[field]]: value };
     try {
       const res = await apiFetch('/api/settings', {
         method: 'PUT',
@@ -272,27 +324,39 @@ export function SettingsPage() {
     } catch {
       toast.error('Could not save preference');
       // revert on failure
-      if (field === 'aiAuto') setAiAuto(!value);
-      else if (field === 'reminders') setReminders(!value);
-      else setDigestEnabledState(!value);
+      TOGGLE_SETTERS[field](!value);
     }
   }
 
+  // One setter per toggle so a failed PUT reverts the switch the operator
+  // actually flipped (a switch that stays ON after a failed save is the
+  // silent-200 defect #1011 exists to remove, moved into the client).
+  const TOGGLE_SETTERS: Record<SettingsToggleField, (v: boolean) => void> = {
+    aiAuto: setAiAuto,
+    reminders: setReminders,
+    digestEnabled: setDigestEnabledState,
+    thankYouSms: setThankYouSms,
+    reviewRequest: setReviewRequest,
+    weeklyFeedback: setWeeklyFeedback,
+    autonomousClose: setAutonomousClose,
+  };
+
+  function toggleSetting(field: SettingsToggleField, value: boolean) {
+    TOGGLE_SETTERS[field](value);
+    void persistToggle(field, value);
+  }
   function toggleAiAuto(value: boolean) {
-    setAiAuto(value);
-    void persistToggle('aiAuto', value);
+    toggleSetting('aiAuto', value);
   }
   function toggleReminders(value: boolean) {
-    setReminders(value);
-    void persistToggle('reminders', value);
+    toggleSetting('reminders', value);
   }
   function toggleSpanishMode(value: boolean) {
     setSpanishMode(value);
     void persistToggle('spanishMode', value);
   }
   function toggleDigestEnabled(value: boolean) {
-    setDigestEnabledState(value);
-    void persistToggle('digestEnabled', value);
+    toggleSetting('digestEnabled', value);
   }
 
   /**
@@ -300,6 +364,10 @@ export function SettingsPage() {
    * Each writes `{ [field]: value }` through the same PUT /api/settings
    * every other quick-toggle uses; `setLocal` flips the optimistic UI state
    * and reverts it on failure, mirroring persistToggle's contract.
+   *
+   * Kept distinct from `persistToggle` on purpose: these four live in the
+   * Payments & billing section and pass their own setter, rather than being
+   * keyed off the SETTINGS_TOGGLE_FIELDS table the Quick-settings switches use.
    */
   async function persistBillingToggle(
     field: 'autoInvoiceOnCompletion' | 'billLaborFromTimeEntries' | 'batchInvoiceEnabled' | 'milestoneBillingEnabled',
@@ -330,6 +398,44 @@ export function SettingsPage() {
   }
   function toggleMilestoneBillingEnabled() {
     void persistBillingToggle('milestoneBillingEnabled', !milestoneBillingEnabled, setMilestoneBillingEnabledState);
+  }
+
+  /**
+   * #1011 — commit the close cap. Empty clears it (explicit `null`, which the
+   * API maps to a SQL NULL); anything else persists integer CENTS. Sent on its
+   * OWN — the server refuses a payload that enables the lane and nulls the cap
+   * in the same request, and this field never carries the enabled bit.
+   */
+  async function commitCloseCap() {
+    const raw = closeCapInput.trim();
+    let next: number | null;
+    if (raw === '') {
+      next = null;
+    } else {
+      const dollars = Number(raw);
+      if (!Number.isFinite(dollars) || dollars < 0) {
+        toast.error('Enter a dollar amount, or leave it empty for no cap');
+        setCloseCapInput(centsToDollarInput(closeCapCents));
+        return;
+      }
+      next = Math.round(dollars * 100);
+    }
+    if (next === closeCapCents) return;
+    const previous = closeCapCents;
+    setCloseCapCents(next);
+    setCloseCapInput(centsToDollarInput(next));
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autonomousCloseMaxCents: next }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      setCloseCapCents(previous);
+      setCloseCapInput(centsToDollarInput(previous));
+    }
   }
   const [qbOpen, setQbOpen] = useState(false);
   const [qbIntegration, setQbIntegration] = useState<AccountingIntegrationSummary | null>(null);
@@ -1012,6 +1118,38 @@ export function SettingsPage() {
               description: 'One text at the end of the day summarizing what happened',
               value: digestEnabled, onChange: toggleDigestEnabled,
             },
+            // #1011 — the post-job customer SMS pair. Both columns ship ON, and
+            // until now a tenant who asked to stop texting their customers got
+            // a 200 and kept texting them.
+            {
+              label: 'Thank-you text after every job',
+              description: 'Text the customer a thank-you about 2 hours after the job is marked done',
+              value: thankYouSms, onChange: (v: boolean) => toggleSetting('thankYouSms', v),
+            },
+            {
+              label: 'Review request after every job',
+              description: 'Ask the customer for a public review a day after the job is marked done',
+              value: reviewRequest, onChange: (v: boolean) => toggleSetting('reviewRequest', v),
+            },
+            {
+              label: 'Weekly summary email',
+              description: 'A weekly recap of your ratings and customer feedback, emailed to you',
+              value: weeklyFeedback, onChange: (v: boolean) => toggleSetting('weeklyFeedback', v),
+            },
+            // #1011 / D-019 — this column is NOT an autonomous-close switch any
+            // more. D-019 revoked system approval outright; all it decides today
+            // is whether a phone-confirmed quote is staged as ONE owner-approval
+            // chain (booking + estimate together) or as a separate estimate+send
+            // chain with the hold released. The copy must therefore describe the
+            // approval shape and must never imply anything happens unattended.
+            // TODO(#1011 §E.4): final label + column rename are Josh's product
+            // call — `autonomous_close_enabled` is now a misnomer for what it does.
+            {
+              label: 'One approval for phone-quoted work',
+              description:
+                'When a caller agrees to a quote on the phone, hold the slot and send you a single approval covering the booking and the estimate. Nothing is scheduled or sent until you approve it.',
+              value: autonomousClose, onChange: (v: boolean) => toggleSetting('autonomousClose', v),
+            },
           ].map(({ label, description, value, onChange }) => (
             <div key={label} className="flex items-start justify-between gap-3 px-4 py-3.5">
               <div>
@@ -1026,6 +1164,30 @@ export function SettingsPage() {
               </button>
             </div>
           ))}
+          {/* #1011 — the spend bound on the row above. Money is integer cents
+              on the wire; this field edits dollars. Empty means no cap. */}
+          <div className="flex items-start justify-between gap-3 px-4 py-3.5">
+            <label htmlFor="autonomous-close-cap" className="block">
+              <span className="text-sm text-slate-800">Largest quote that can use that single approval</span>
+              <span className="block text-xs text-slate-400 mt-0.5">
+                Quotes above this still reach you — just as separate approvals. Leave empty for no limit.
+              </span>
+            </label>
+            <div className="flex shrink-0 items-center gap-1">
+              <span className="text-sm text-slate-400">$</span>
+              <input
+                id="autonomous-close-cap"
+                data-testid="autonomous-close-cap"
+                type="text"
+                inputMode="decimal"
+                value={closeCapInput}
+                onChange={(e) => setCloseCapInput(e.target.value)}
+                onBlur={() => void commitCloseCap()}
+                placeholder="No limit"
+                className="w-28 min-h-11 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+              />
+            </div>
+          </div>
         </div>
 
         {/* Reviews section */}

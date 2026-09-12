@@ -2761,6 +2761,52 @@ should be editable after provisioning is a product question, not an omission.
 > map entirely and has its own endpoint, so always check for a dedicated route
 > before calling a key unreachable.
 
+**#1011 2026-09-12:** five of the thirteen are now in the schema, so the
+falsifier's answer has moved and the paragraph above is history rather than
+current state. Re-run from `packages/api/`:
+
+```bash
+comm -23 \
+  <(awk '/const fieldMap: Record<string, string> = \{/,/^ *\};/' src/settings/pg-settings.ts \
+      | sed -n "s/^ *\([a-zA-Z][a-zA-Z0-9]*\): '.*/\1/p" | sort -u) \
+  <(awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' src/shared/contracts.ts \
+      | sed -n 's/^  \([a-zA-Z][a-zA-Z0-9]*\):.*/\1/p' | sort -u)
+```
+
+→ **13 lines BEFORE** (`aiModel`, `autonomousCloseEnabled`,
+`autonomousCloseMaxCents`, `e1ReviewedScript`, `laborRateCentsPerHour`,
+`nextEstimateNumber`, `nextInvoiceNumber`, `sendReviewRequest`,
+`sendThankYouSms`, `speedToLeadEnabled`, `speedToLeadTemplate`, `updatedAt`,
+`weeklyFeedbackEnabled`) → **8 lines AFTER** (`aiModel`, `e1ReviewedScript`,
+`laborRateCentsPerHour`, `nextEstimateNumber`, `nextInvoiceNumber`,
+`speedToLeadEnabled`, `speedToLeadTemplate`, `updatedAt`).
+
+The companion falsifier is unchanged and must stay unchanged —
+`awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' src/shared/contracts.ts | grep -c 'strict()'`
+→ **1**, still the nested `autoApproveThreshold` object. Blanket strict mode was
+not the remediation and was not applied.
+
+What the remaining eight are, and why each stayed out:
+
+| Key | Why it is still absent from the generic PUT |
+|---|---|
+| `e1ReviewedScript` | It is the literal script spoken to a caller in a life-safety E1 emergency (`telephony/twilio-adapter.ts:1631-1632`). Owner-settable through the generic PUT would mean life-safety copy rewritten with no review, no version history, no cool-down, and no audit beyond `changedKeys`. If it is ever owner-editable it needs the D-023 brand-voice shape plus an attestation — **Josh's call**, filed in `docs/audit/blocked-on-josh.md` |
+| `speedToLeadEnabled`, `speedToLeadTemplate` | **Reclassified.** This section filed them under *"no write path at all,"* implying the schema was the gap. It is not: **speed-to-lead has zero production callers.** `git grep -rn "sendSpeedToLeadResponse\|shouldSendSpeedToLead" -- packages/api/src packages/api/test` returns the module's own definitions plus its unit test, and nothing imports `leads/speed-to-lead`. Adding the keys would hand an owner a switch that turns on nothing — the §12.4d failure mode in product form. It belongs in the *unlit-able* table above, not here |
+| `laborRateCentsPerHour`, `nextEstimateNumber`, `nextInvoiceNumber` | Dedicated writers, as the table below already says. Unchanged |
+| `aiModel` | Still the open product question. Unchanged |
+| `updatedAt` | Bookkeeping, not a setting. Unchanged |
+
+The five that were added — `sendThankYouSms`, `sendReviewRequest`,
+`weeklyFeedbackEnabled`, `autonomousCloseEnabled`, `autonomousCloseMaxCents` —
+carry route-boundary validation matching their siblings, a cross-field refine
+rejecting the one payload that enables the close lane while clearing its spend
+bound, an integration test reading the raw `tenant_settings` columns back at
+real Postgres with its audit row through `PgAuditRepository` (T1 + T3), and
+owner controls in `SettingsPage.tsx`. `autonomousCloseEnabled`'s control is
+labelled for what D-019 left it doing — deciding whether a phone-confirmed
+quote is staged as one owner-approval chain — not for the autonomous close
+D-019 revoked.
+
 **Two smaller items with outsized effect**, both one-line fixes:
 
 - **Team invitations 404.** The invite flow redirects to
