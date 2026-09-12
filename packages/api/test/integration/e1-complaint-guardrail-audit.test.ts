@@ -78,6 +78,7 @@ describe('I8 — E1 + complaint escalation write their audit event through the r
     return createVoiceTurnProcessor({
       store: new VoiceSessionStore({ startInterval: false }),
       gateway: neverCalledGateway(),
+      businessName: 'I8 Test Business',
       auditRepo,
       proposalRepo: new InMemoryProposalRepository(),
       voiceSessionRepo: new InMemoryVoiceSessionRepository(),
@@ -104,7 +105,9 @@ describe('I8 — E1 + complaint escalation write their audit event through the r
       type: 'emergency_detected',
       keyword: safety.keyword,
       utterance,
-      tier: safety.tier,
+      // Runtime-asserted above (`expect(safety.tier).toBe('E1')`) — TS can't
+      // narrow SafetyTier ('E1'|'E2'|'E3') to the event's 'E1'|'E2' from that.
+      tier: safety.tier as 'E1' | 'E2',
       responseScript: safety.responseScript ?? undefined,
     };
     const result = transition(fromState, event, session.machine.currentContext);

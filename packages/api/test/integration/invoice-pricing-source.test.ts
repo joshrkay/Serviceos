@@ -359,6 +359,7 @@ describe('Postgres integration — invoice_line_items.pricing_source (migration 
       postalCode: '78701',
       country: 'USA',
       isPrimary: true,
+      addressType: 'service',
       isArchived: false,
       createdAt: new Date(),
       updatedAt: new Date(),
