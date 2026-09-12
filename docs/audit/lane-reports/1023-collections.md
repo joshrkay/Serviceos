@@ -477,25 +477,63 @@ the gap itself is shown failing rather than asserted in prose:
   (19900 and 4900), only the auto-renew one renewed, and no cross-tenant reach
   into agreements, runs or invoices.
 
-### What it does NOT do — the story-not-met findings
+### The AUTO-COLLECT branch — dues that DO collect themselves
+
+**Correction (review finding on PR #1053, Codex P2).** An earlier revision of
+this report stated the draft/no-due-date gap below as universal. It is not.
+When a membership has `autoCollectDues: true`, the tenant has a saved default
+card, and `STRIPE_SECRET_KEY` is configured, `app.ts:5760-5766` issues the
+draft with a **30-day** term *before* charging:
+
+```ts
+ensureIssuedAmountDue: async (tenantId, invoiceId) => {
+  let inv = await invoiceRepo.findById(tenantId, invoiceId);
+  if (inv && inv.status === 'draft') {
+    inv = (await issueInvoice(tenantId, invoiceId, 30, invoiceRepo)) ?? inv;
+  }
+  return inv?.amountDueCents ?? 0;
+}
+```
+
+That branch is now proven on real rows, with only the Stripe HTTP call injected
+at the `stripeFetch` seam (the collector, the invoice ops, `issueInvoice`,
+`recordPayment` and every repository are production code):
+
+- **card succeeds** → the invoice is `paid`, carries a due date,
+  `amount_paid_cents = 19900`, `amount_due_cents = 0`, and
+  `service_agreement.dues_collected` is audited;
+- **card declined** → the invoice is left **`open` WITH a due date** and
+  `amount_due_cents = 19900`, `service_agreement.auto_collect_failed` is
+  audited — and the collections cadence really does reach it: running the real
+  overdue sweep 10 days past that due date records `3:sms` against it. This is
+  the whole point of issuing before charging, and it works;
+- **no saved card** → `no_card` returns *before* issuance
+  (`dues-collector.ts:85`), so the default path's gap reappears for a member
+  who never completed card setup: `draft`, no due date.
+
+### What it does NOT do — the story-not-met findings, scoped to the default path
 
 Each is an `it.fails` in the file (green today, and it flips loudly the moment
 the gap is closed). **This lane does not decide what memberships minimally are;
 that is a story-not-met decision for the orchestrator's decision list.**
 
+These hold for the DEFAULT path — `autoCollectDues` defaults to false in
+`createAgreement` (`agreement-service.ts:206`), so this is what a membership
+gets unless the owner opts in — and for an opted-in member with no saved card.
+They do **not** hold for a fully-configured auto-collect membership.
+
 1. **The dues invoice is never issued.** `runDueAgreements`
    (`agreement-service.ts:402`) calls `createDraftInvoice`, and `createInvoice`
-   (`src/invoices/invoice.ts:336`) hardcodes `status: 'draft'`. Nothing in the
-   sweep issues or sends it. "Recurring revenue is actually recurring" therefore
-   requires a human to open each cycle's draft — unless `auto_collect_dues` and
-   a `StripeDuesCollector` are wired **and** the member has a saved card.
+   (`src/invoices/invoice.ts:336`) hardcodes `status: 'draft'`. On this path
+   nothing in the sweep issues or sends it, so "recurring revenue is actually
+   recurring" requires a human to open each cycle's draft.
 2. **The dues invoice has no due date.** The production port
    (`src/app.ts:5689-5710`) passes no `dueDate`. The overdue sweep's prefilter
    is `status IN ('open','partially_paid') AND due_date <= now`
-   (`overdue-invoice-worker.ts:163-172`), so a dues invoice can never be
-   selected: an unpaid membership is never chased, however long it goes unpaid.
-   Findings 1 and 2 compound — the collections cadence proven in row 8.9 cannot
-   reach membership revenue at all.
+   (`overdue-invoice-worker.ts:163-172`), so such a dues invoice can never be
+   selected: an unpaid membership on the default path is never chased, however
+   long it goes unpaid. Findings 1 and 2 compound — for the default path, the
+   collections cadence proven in row 8.9 cannot reach membership revenue.
 3. **The dues invoice is numbered `AGREEMENT-<epoch ms>`** (`src/app.ts:5693`)
    rather than through `createInvoiceWithNextNumber`. Proven positively: the
    invoice number starts with `AGREEMENT-` and the tenant's
@@ -901,14 +939,23 @@ $ git status --porcelain
   routing it into the collections cadence — is a story-not-met decision. This
   lane wrote the finding with `file:line` and executable `it.fails`, and leaves
   the decision for the orchestrator's decision list.
-- **Dues auto-collection (`StripeDuesCollector`) is not proven.** It needs a
-  live Stripe test-mode credential to charge off-session; any collector I could
-  inject here would be a mock, which is not proof. Recommend appending to
-  `docs/audit/blocked-on-josh.md` (#1000): *"§8.12 membership dues
-  auto-collection — needs a Stripe test-mode key in CI to drive
-  `StripeDuesCollector.collect` end to end; without it only the orchestration
-  around it can be tested, and a fake collector would be `mocked is not
-  proven`."* I did not edit that file — it belongs to #1000's owner.
+- **Dues auto-collection is now proven up to the Stripe HTTP boundary — my
+  first call here was wrong.** I originally wrote that this could not be tested
+  at all without a live Stripe credential, "because any collector I could inject
+  would be a mock". That conflated two different seams. Injecting a fake
+  `DuesCollector` would indeed be *mocked is not proven* — but `stripeFetch`
+  (`StripeDuesCollectorDeps.stripeFetch`) replaces only the HTTPS call to
+  api.stripe.com, exactly as the deposit-checkout path already does, leaving the
+  real collector, the real invoice ops, real `issueInvoice` / `recordPayment`
+  and real repositories in the path. That is now done, and it is what caught the
+  overstated finding above. What genuinely still needs a Stripe test-mode key is
+  narrower: that Stripe's own API accepts the PaymentIntent parameters we send
+  (`chargeOffSession`'s request shape) and that decline codes come back in the
+  shape we parse. Suggested `blocked-on-josh.md` (#1000) wording, corrected:
+  *"§8.12 dues auto-collection — the orchestration is proven at real Postgres
+  with `stripeFetch` injected; a Stripe test-mode key in CI would additionally
+  pin the PaymentIntent request shape and decline-code parsing against the real
+  API."* I did not edit that file — it belongs to #1000's owner.
 - **Member pricing is proven at the resolver, not at the application site.**
   `getCustomerMemberDiscountBps` is proven against real rows here. The place the
   discount is actually applied to a document is `src/routes/invoices.ts:175` and
@@ -984,18 +1031,29 @@ correctness rested on that scheduling accident. Fixed on that basis.
 ## Money defects found and NOT fixed
 
 All three are in the membership path and all are outside this lane's TEST-ONLY
-limit. Each has an executable `it.fails` in
+limit. Each has an executable test in
 `test/integration/membership-renewal-sweep.test.ts`.
 
-1. **Membership dues are never collectable without a human.** The dues invoice is
-   written `draft` (`src/invoices/invoice.ts:336` via
-   `src/agreements/agreement-service.ts:402`) and never issued or sent.
-2. **Membership dues can never go overdue.** No `dueDate` is set
+**Scope correction (PR #1053 review).** Findings 1 and 2 were first written as
+universal. They are not: they hold on the **default** path
+(`autoCollectDues: false`, which is what `createAgreement` produces unless the
+owner opts in) and for an opted-in member with **no saved card**. A
+fully-configured auto-collect membership issues the dues invoice with a 30-day
+due date before charging, and a decline leaves it open and dunnable — proven in
+the auto-collect block of that file. Finding 3 holds on both paths.
+
+1. **Membership dues are not collectable without a human on the default path.**
+   The dues invoice is written `draft` (`src/invoices/invoice.ts:336` via
+   `src/agreements/agreement-service.ts:402`) and, absent auto-collect with a
+   saved card, is never issued or sent.
+2. **Those dues invoices can never go overdue.** No `dueDate` is set
    (`src/app.ts:5689-5710`), so the overdue sweep's prefilter
-   (`src/workers/overdue-invoice-worker.ts:163-172`) can never select it. The
-   whole collections cadence proven in row 8.9 is unreachable for membership
-   revenue.
+   (`src/workers/overdue-invoice-worker.ts:163-172`) can never select them — the
+   cadence proven in row 8.9 is unreachable for default-path membership revenue.
+   The severity question this raises is how many real memberships sit on the
+   default path, which is an owner question, not a lane one.
 3. **Membership dues invoices are outside the tenant's invoice sequence**
    (`src/app.ts:5693`, `AGREEMENT-${Date.now()}`), leaving a hole in the tenant's
    books and a latent `idx_invoices_number` collision for two agreements billed
-   in the same millisecond.
+   in the same millisecond. This one holds on **both** paths — the auto-collect
+   branch issues the same synthetic number.

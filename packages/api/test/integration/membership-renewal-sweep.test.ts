@@ -23,13 +23,25 @@
  *     `service_agreement_runs` row, advances `next_run_at`, and audits
  *     `service_agreement.run.generated`; a second sweep the same day skips
  *     rather than double-billing;
- *   - member pricing resolves from real agreement rows (effective term only).
+ *   - member pricing resolves from real agreement rows (effective term only);
+ *   - AUTO-COLLECT (`autoCollectDues: true` + a saved card + a Stripe key):
+ *     the dues invoice IS issued with a 30-day due date before the charge
+ *     (`app.ts:5760-5766`), the payment is recorded on success, and a DECLINE
+ *     leaves an open, dunnable invoice that the collections cadence really
+ *     does chase. Proven end to end with only the Stripe HTTP call injected.
  *
- * NOT MET (see the `it.fails` blocks and the lane report):
+ * NOT MET — and scoped to the DEFAULT path, which is what `createAgreement`
+ * produces unless the owner opts in (`autoCollectDues` defaults to false), and
+ * also to an opted-in member who never saved a card (`no_card` returns before
+ * issuance, dues-collector.ts:85):
  *   - the dues invoice is left as a DRAFT with no due date, so it is invisible
  *     to the collections cadence — nothing chases it, and nothing sends it;
  *   - it is numbered `AGREEMENT-<epoch ms>` instead of off the tenant's
- *     invoice sequence.
+ *     invoice sequence (this one holds on BOTH paths).
+ *
+ * An earlier revision of this file stated the draft/no-due-date gap as
+ * universal. It is not — caught by a review finding on PR #1053 (Codex P2),
+ * and the auto-collect block below is the correction.
  *
  * Runs only under the integration harness (globalSetup starts the Postgres
  * testcontainer and sets TEST_DB_URL).
@@ -46,8 +58,21 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgPaymentRepository } from '../../src/invoices/pg-payment';
+import { PgCustomerPaymentMethodRepository } from '../../src/payments/pg-customer-payment-method';
+import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import {
+  PgDunningConfigRepository,
+  PgDunningEventRepository,
+} from '../../src/invoices/pg-dunning-config';
+import { defaultDunningConfig } from '../../src/invoices/dunning-config';
+import { runOverdueInvoiceSweep } from '../../src/workers/overdue-invoice-worker';
+import { StripeDuesCollector, DuesInvoiceOps } from '../../src/agreements/dues-collector';
+import type { StripeFetch } from '../../src/payments/stripe-payment-intent';
 import { createJob } from '../../src/jobs/job';
-import { createInvoice } from '../../src/invoices/invoice';
+import { createInvoice, issueInvoice } from '../../src/invoices/invoice';
+import { recordPayment } from '../../src/invoices/payment';
 import { createAgreement } from '../../src/agreements/agreement-service';
 import { getCustomerMemberDiscountBps } from '../../src/agreements/member-pricing';
 import { runRecurringAgreementsSweep } from '../../src/workers/recurring-agreements-worker';
@@ -78,6 +103,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
   let locationRepo: PgLocationRepository;
   let settingsRepo: PgSettingsRepository;
   let auditRepo: PgAuditRepository;
+  let paymentRepo: PgPaymentRepository;
 
   /**
    * The production ports (app.ts:5658-5713), verbatim in shape: a real job via
@@ -263,6 +289,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
     locationRepo = new PgLocationRepository(pool);
     settingsRepo = new PgSettingsRepository(pool);
     auditRepo = new PgAuditRepository(pool);
+    paymentRepo = new PgPaymentRepository(pool);
   });
 
   afterAll(async () => {
@@ -434,13 +461,207 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
   });
 
   /**
-   * The story-not-met half. These use `it.fails`: each body asserts what "bills
-   * itself" would require, and PASSES because the assertion fails today — so
-   * the gap is recorded executably and flips loudly the moment it is closed.
+   * The AUTO-COLLECT branch — the other half of "bills itself".
+   *
+   * Everything here is production code and real rows except the Stripe HTTP
+   * call itself, which is injected at the `stripeFetch` seam
+   * (`StripeDuesCollectorDeps.stripeFetch`, the same seam the deposit-checkout
+   * path uses). The collector, the invoice ops, `issueInvoice`, `recordPayment`
+   * and every repository are the real ones; only api.stripe.com is replaced,
+   * because it is unreachable in CI (that is the blocked-on-#1000 item).
+   *
+   * Added after a review finding on PR #1053 (Codex P2): the story-not-met
+   * tests below cover ONLY the default `autoCollectDues: false` path, and
+   * stating their conclusion as universal was wrong. On this branch the dues
+   * invoice IS issued with a 30-day term before the charge
+   * (`app.ts:5760-5766`), so a decline leaves an open, dunnable invoice.
+   */
+  describe('the auto-collect branch — dues that DO collect themselves', () => {
+    /** The production `duesInvoiceOps` (app.ts:5759-5788), real repos throughout. */
+    function productionDuesInvoiceOps(): DuesInvoiceOps {
+      return {
+        ensureIssuedAmountDue: async (tenantId, invoiceId) => {
+          let inv = await invoiceRepo.findById(tenantId, invoiceId);
+          if (inv && inv.status === 'draft') {
+            inv = (await issueInvoice(tenantId, invoiceId, 30, invoiceRepo)) ?? inv;
+          }
+          return inv?.amountDueCents ?? 0;
+        },
+        recordPayment: async ({ tenantId, invoiceId, amountCents, providerReference, createdBy }) => {
+          await recordPayment(
+            {
+              tenantId,
+              invoiceId,
+              amountCents,
+              method: 'credit_card',
+              providerReference,
+              processedBy: createdBy,
+              note: 'Membership dues (auto-collected)',
+            },
+            invoiceRepo,
+            paymentRepo,
+            undefined,
+            undefined,
+            auditRepo,
+          );
+        },
+      };
+    }
+
+    /** Only the Stripe HTTP boundary is stubbed. */
+    function stripeFetchReturning(body: Record<string, unknown>): StripeFetch {
+      return (async () =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as StripeFetch;
+    }
+
+    async function seedAutoCollectMembership(stripeFetch: StripeFetch) {
+      const t = await seedTenant();
+      const membership = await seedMembership(t, {
+        nextRunAt: new Date(Date.now() - 3600_000),
+        autoCollectDues: true,
+      });
+      await new PgCustomerPaymentMethodRepository(pool).create({
+        id: uuidv4(),
+        tenantId: t.tenantId,
+        customerId: t.customerId,
+        stripeCustomerId: `cus_${uuidv4().slice(0, 8)}`,
+        stripePaymentMethodId: `pm_${uuidv4().slice(0, 8)}`,
+        brand: 'visa',
+        last4: '4242',
+        isDefault: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const duesCollector = new StripeDuesCollector({
+        customerPaymentMethodRepo: new PgCustomerPaymentMethodRepository(pool),
+        stripeConfig: { apiKey: 'sk_test_not_a_real_key' },
+        invoiceOps: productionDuesInvoiceOps(),
+        stripeFetch,
+      });
+      await runRecurringAgreementsSweep({
+        agreementRepo,
+        runRepo,
+        jobsService,
+        invoicesService,
+        listTenantIds: async () => [t.tenantId],
+        auditRepo,
+        duesCollector,
+        logger,
+      });
+      const run = (await runRepo.findByAgreement(t.tenantId, membership.id))[0];
+      return { t, membership, run };
+    }
+
+    it('issues the dues invoice with a due date and records the payment when the card succeeds', async () => {
+      const { t, membership, run } = await seedAutoCollectMembership(
+        stripeFetchReturning({ id: 'pi_dues_ok', status: 'succeeded' }),
+      );
+
+      const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
+      // Issued before the charge — NOT left a draft.
+      expect(invoice!.status).toBe('paid');
+      expect(invoice!.dueDate).toBeDefined();
+      expect(invoice!.amountPaidCents).toBe(19_900);
+      expect(invoice!.amountDueCents).toBe(0);
+
+      const audits = await auditRepo.findByEntity(t.tenantId, 'service_agreement', membership.id);
+      expect(audits.map((a) => a.eventType)).toContain('service_agreement.dues_collected');
+    });
+
+    it('leaves a DECLINED dues invoice open WITH a due date, so the collections cadence can chase it', async () => {
+      const { t, membership, run } = await seedAutoCollectMembership(
+        stripeFetchReturning({
+          error: { code: 'card_declined', decline_code: 'insufficient_funds', payment_intent: { id: 'pi_dues_declined', status: 'requires_payment_method' } },
+        }),
+      );
+
+      const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
+      // This is the point of issuing first: a decline is dunnable, not hidden.
+      expect(invoice!.status).toBe('open');
+      expect(invoice!.dueDate).toBeDefined();
+      expect(invoice!.amountDueCents).toBe(19_900);
+
+      const audits = await auditRepo.findByEntity(t.tenantId, 'service_agreement', membership.id);
+      expect(audits.map((a) => a.eventType)).toContain('service_agreement.auto_collect_failed');
+
+      // And the collections cadence really can select it now — the overdue
+      // sweep's own prefilter, run against this invoice 40 days on.
+      const asOf = new Date(invoice!.dueDate!.getTime() + 10 * 86_400_000);
+      const dunningEventRepo = new PgDunningEventRepository(pool);
+      const dunningConfigRepo = new PgDunningConfigRepository(pool);
+      await dunningConfigRepo.upsert({
+        ...defaultDunningConfig(t.tenantId),
+        reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+      });
+      await runOverdueInvoiceSweep({
+        jobRepo,
+        estimateRepo: new PgEstimateRepository(pool),
+        invoiceRepo,
+        auditRepo,
+        proposalRepo: new PgProposalRepository(pool),
+        dunningEventRepo,
+        dunningConfigRepo,
+        listTenantIds: async () => [t.tenantId],
+        now: () => asOf,
+        logger,
+      });
+      expect(
+        (await dunningEventRepo.findByInvoice(t.tenantId, invoice!.id)).map((e) => e.stepKey),
+      ).toEqual(['3:sms']);
+    });
+
+    it('leaves the invoice an undunnable draft when auto-collect is on but no card is saved', async () => {
+      // The collector returns `no_card` BEFORE ensureIssuedAmountDue
+      // (dues-collector.ts:85), so the issuance never happens — the default
+      // path's gap reappears for a member who never completed card setup.
+      const t = await seedTenant();
+      const membership = await seedMembership(t, {
+        nextRunAt: new Date(Date.now() - 3600_000),
+        autoCollectDues: true,
+      });
+      const duesCollector = new StripeDuesCollector({
+        customerPaymentMethodRepo: new PgCustomerPaymentMethodRepository(pool),
+        stripeConfig: { apiKey: 'sk_test_not_a_real_key' },
+        invoiceOps: productionDuesInvoiceOps(),
+        stripeFetch: stripeFetchReturning({ id: 'pi_unused', status: 'succeeded' }),
+      });
+      await runRecurringAgreementsSweep({
+        agreementRepo,
+        runRepo,
+        jobsService,
+        invoicesService,
+        listTenantIds: async () => [t.tenantId],
+        auditRepo,
+        duesCollector,
+        logger,
+      });
+
+      const run = (await runRepo.findByAgreement(t.tenantId, membership.id))[0];
+      const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
+      expect(invoice!.status).toBe('draft');
+      expect(invoice!.dueDate).toBeUndefined();
+      const audits = await auditRepo.findByEntity(t.tenantId, 'service_agreement', membership.id);
+      expect(audits.map((a) => a.eventType)).toContain('service_agreement.auto_collect_skipped');
+    });
+  });
+
+  /**
+   * The story-not-met half — scoped to the DEFAULT path.
+   *
+   * These use `it.fails`: each body asserts what "bills itself" would require,
+   * and PASSES because the assertion fails today. IMPORTANT (review finding on
+   * PR #1053): this is the `autoCollectDues: false` default, which is what a
+   * membership created through `createAgreement` gets unless the owner opts in.
+   * The auto-collect branch above DOES issue with a due date — do not read
+   * these three as universal.
+   *
    * Do not "fix" one by weakening it; close the gap in the worker (an owner
    * decision — parked on #1023 for the orchestrator, not taken by this lane).
    */
-  describe('story-not-met: what "bills itself" does not yet do', () => {
+  describe('story-not-met: what "bills itself" does not do on the DEFAULT (no auto-collect) path', () => {
     it.fails(
       'the dues invoice is ISSUED so the customer can pay it — today it is left a draft',
       async () => {
