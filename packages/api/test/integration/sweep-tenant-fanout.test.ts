@@ -37,6 +37,9 @@ import { runEstimateReminderSweep } from '../../src/workers/estimate-reminder-wo
 import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
+import { PgJobRepository } from '../../src/jobs/pg-job';
+import { PgCustomerRepository } from '../../src/customers/pg-customer';
+import { PgDncRepository } from '../../src/compliance/dnc';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type { WeeklyFeedbackSnapshot } from '../../src/digest/weekly-feedback';
@@ -484,8 +487,9 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
   });
 
   /** A tenant with settings and one long-completed job, eligible for both sweeps. */
-  async function seedEligibleTenant(): Promise<{ tenantId: string; jobId: string }> {
+  async function seedEligibleTenant(): Promise<{ tenantId: string; jobId: string; phone: string }> {
     const { tenantId, userId } = await createTestTenant(pool);
+    const phone = `+1555${tenantId.replace(/-/g, '').slice(0, 7)}`;
     await pool.query(
       `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone)
        VALUES ($1,$2,$3,$4)`,
@@ -498,7 +502,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         customerId, tenantId, 'Mary', 'Johnson', 'Mary Johnson',
-        `+1555${tenantId.replace(/-/g, '').slice(0, 7)}`, 'sms', true, false, userId,
+        phone, 'sms', true, false, userId,
       ],
     );
     const locationId = uuidv4();
@@ -518,56 +522,88 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       ],
     );
     seededJobIds.push(jobId);
-    return { tenantId, jobId };
+    return { tenantId, jobId, phone };
   }
 
   describe('thank-you-SMS sweep', () => {
+    /**
+     * REAL job/customer/DNC repositories, against the rows seeded above.
+     *
+     * An earlier version of this block stubbed them — and the stubs were wrong
+     * in two ways (`jobRepo` had no `findById`; the DNC stub exposed
+     * `isSuppressed` where the interface requires `isOnDnc`), so every job threw
+     * before reaching the dispatcher. The tests still went green: the first
+     * asserted only the settings visits and never used its `dispatched` array,
+     * and the second read those incidental stub failures as proof of failure
+     * isolation. Caught in review on this PR. The lesson is the same one §11.0e
+     * is about — a fan-out test that never reaches the thing it claims to fan
+     * out to is not evidence — so the repositories are now real and the
+     * DISPATCHED tenants are asserted, not merely the visited ones.
+     */
     const run = async (tenantsOfInterest: string[], failFor: string | null) => {
       const visited: string[] = [];
       const dispatched: string[] = [];
+      const realSettings = new PgSettingsRepository(pool);
       const result = await runThankYouSmsSweep({
         pool,
         settingsRepo: {
           findByTenant: async (tenantId: string) => {
-            // Only record the tenants this test seeded; the shared container
-            // carries other files' eligible jobs and they are not our business.
-            if (tenantsOfInterest.includes(tenantId)) visited.push(tenantId);
+            // Record once per tenant: sendOneThankYou re-reads settings for
+            // language, so this seam is hit more than once per tenant.
+            if (tenantsOfInterest.includes(tenantId) && !visited.includes(tenantId)) {
+              visited.push(tenantId);
+            }
             if (tenantId === failFor) throw new Error(`synthetic failure for ${tenantId}`);
-            return { businessName: 'Fan-out Plumbing', sendThankYouSms: true } as never;
+            const row = await realSettings.findByTenant(tenantId);
+            return { ...(row ?? {}), sendThankYouSms: true } as never;
           },
         } as never,
-        jobRepo: {} as never,
-        customerRepo: { findById: async () => null } as never,
-        dncRepo: { isSuppressed: async () => false } as never,
+        jobRepo: new PgJobRepository(pool),
+        customerRepo: new PgCustomerRepository(pool),
+        dncRepo: new PgDncRepository(pool),
         dispatcher: {
-          dispatch: async (args: { tenantId?: string }) => {
-            if (args.tenantId) dispatched.push(args.tenantId);
-            return undefined;
+          // NOTE: thank-you-sms-worker.ts:260 calls send({ to, body }) and
+          // passes NO tenantId — unlike its sibling caller feedback-send.ts:69,
+          // which passes both tenantId and consent. So a dispatch can only be
+          // attributed to a tenant by its recipient number here. See the note
+          // below the describe block.
+          send: async (input: { to: string }) => {
+            dispatched.push(input.to);
           },
         } as never,
         logger,
       });
-      return { visited, dispatched, failed: result.failed, tenants: result.tenants };
+      return { visited, dispatched, failed: result.failed, tenants: result.tenants, sent: result.sent };
     };
 
-    it('groups a multi-tenant result set and reaches each tenant under its own settings', async () => {
+    it('groups a multi-tenant result set and SENDS for each tenant under its own settings', async () => {
       const a = await seedEligibleTenant();
       const b = await seedEligibleTenant();
 
-      const { visited, tenants } = await run([a.tenantId, b.tenantId], null);
+      const { visited, dispatched, tenants } = await run([a.tenantId, b.tenantId], null);
 
       expect(tenants).toBeGreaterThanOrEqual(2);
       expect(visited).toEqual(expect.arrayContaining([a.tenantId, b.tenantId]));
+      // The assertion the earlier version was missing: each tenant's customer
+      // was actually SENT to, not merely visited.
+      expect(dispatched).toEqual(expect.arrayContaining([a.phone, b.phone]));
     });
 
-    it('keeps going when one tenant throws', async () => {
+    it('keeps going when one tenant throws — the other tenant is still SENT', async () => {
       const doomed = await seedEligibleTenant();
       const survivor = await seedEligibleTenant();
 
-      const { visited, failed } = await run([doomed.tenantId, survivor.tenantId], doomed.tenantId);
+      const { dispatched, failed } = await run(
+        [doomed.tenantId, survivor.tenantId],
+        doomed.tenantId,
+      );
 
       expect(failed).toBeGreaterThanOrEqual(1);
-      expect(visited).toEqual(expect.arrayContaining([doomed.tenantId, survivor.tenantId]));
+      // Scoped to our own tenants: the doomed one never dispatches, the
+      // survivor does. A blanket `failed >= 1` would also pass if every tenant
+      // broke, which is exactly how the earlier version fooled itself.
+      expect(dispatched).not.toContain(doomed.phone);
+      expect(dispatched).toContain(survivor.phone);
     });
   });
 
