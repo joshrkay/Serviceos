@@ -852,8 +852,16 @@ Verified against code: `digest_enabled` defaults false with **no control in web 
 writes it; `brand_voice_configurator` is seeded explicitly `enabled: false`; dropped-call recovery
 is gated on a per-tenant flag for which **no write path exists** (`setTenantFlag` has zero callers
 and no route); and B2B account context is assembled onto the session and **read nowhere**. The
-distinguishing evidence for drift over staging is the digest: a capability with no switch cannot
-have been staged for a rollout. Remediation is a launch checklist, not an architecture change.
+distinguishing evidence for drift over staging is dropped-call recovery: a capability with no
+switch cannot have been staged for a rollout. Remediation is a launch checklist, not an
+architecture change.
+
+*— corrected 2026-09-12. This sentence originally named **the digest** as the distinguishing
+evidence, and the premise was wrong: the digest does have a switch (`PUT /api/settings` accepts
+`digestEnabled`), just no UI. An API-only switch is exactly what a staged rollout would look like,
+so the digest was the **weakest** of the four as evidence for drift, not the strongest. The
+conclusion survives on dropped-call recovery and B2B context, which genuinely have no write path
+and no reader respectively — but it survives on those, not on the one this sentence cited.*
 
 **Rationale:** This log's own history is the argument. D-025 found that a posture everyone cited
 ("approval is never voice-reachable") had never actually been decided, was attributed to an
@@ -917,8 +925,11 @@ underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
    command behind it is a prediction and is to be read as one.
 4. **Reachability is part of the score, and "dark by default" is not its weakest form.** Four
    capabilities are *unlit-able*: no product surface can enable them at all
-   (`setTenantFlag` and `setTechnicianAssignmentNotifier` have zero production callers;
-   `digest_enabled` has no route or UI writer). Those cap at 4 regardless of test quality.
+   (`setTenantFlag` and `setTechnicianAssignmentNotifier` have zero production callers).
+   Those cap at 4 regardless of test quality. *— corrected 2026-09-12: **three**, not four.
+   `digest_enabled` was listed here and does not belong: `PUT /api/settings` accepts
+   `digestEnabled` and `PgSettingsRepository` maps it, so the digest has a write path and is
+   missing only a client control. See PRD §12.4.*
 
 **Consequences.**
 - §8 of the PRD now carries verified rungs and a per-row reason. §5 distinguishes invariants that

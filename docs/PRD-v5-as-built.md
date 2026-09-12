@@ -2332,11 +2332,32 @@ so a `PUT` carrying one returns **200 with the key silently discarded**. That is
 worse than the rejection this document claimed, because the caller is told the
 write succeeded.
 
-**Three** settings exist in the repository interface *and* its write column map
-but not in that schema, making them settable only by direct SQL:
-`speedToLeadEnabled`, `autonomousCloseEnabled`, `weeklyFeedbackEnabled`. The
-last means a tenant cannot turn *off* a recurring email the product sends them
-— and receives a success response for trying.
+**Twelve** settings are in `PgSettingsRepository`'s write column map but not in
+that schema. Earlier drafts of this paragraph said four, then three, and both
+were hand-written lists — which is why this one is **computed**, and the command
+that computes it is published below rather than its output being retyped.
+
+**Nine have no write path at all** (direct SQL only):
+
+| Setting | What a tenant cannot do |
+|---|---|
+| `sendThankYouSms` | **Stop the post-job thank-you SMS.** Live gate (`thank-you-sms-worker.ts:186`), column default `TRUE` |
+| `sendReviewRequest` | **Stop the post-job review request.** Live gate in SQL (`review-request-worker.ts:74`), column default `TRUE` |
+| `weeklyFeedbackEnabled` | Turn off a recurring email the product sends them |
+| `speedToLeadEnabled`, `speedToLeadTemplate` | Configure or disable speed-to-lead |
+| `autonomousCloseEnabled`, `autonomousCloseMaxCents` | Set or bound the autonomous-close lane (D-018) |
+| `laborRateCentsPerHour` | Set the labor rate their own reports divide by (`reports.ts` reads it; nothing writes it) |
+| `e1ReviewedScript` | Clear the E1 script-review flag |
+
+**Three more are written once at onboarding and never again** — `aiModel`,
+`nextEstimateNumber`, `nextInvoiceNumber`, all set to fixed bootstrap values by
+`activate-pack-with-seed.ts`. Reachable at provisioning, unreachable afterwards.
+(`updatedAt` is bookkeeping, not a setting.)
+
+The first two rows are the ones that matter most and neither earlier draft
+named them: **both post-job customer-facing SMS toggles default ON and cannot
+be switched off through any API.** A tenant who asks to stop texting their
+customers after every job gets a 200 and keeps texting them.
 
 *An earlier draft listed a fourth, `brandVoiceLocked`, and was wrong about it.*
 It appears in `pg-settings.ts` only as a **read projection** (row → object); it
@@ -2367,13 +2388,31 @@ semantics deliberately: `voice_approval_pin_hash` is omitted **on purpose** so a
 raw hash can never be injected through the generic settings `PUT`, and the
 schema says exactly that in its own comment. Going strict would convert that
 designed-silent drop into a 400 and newly reject every client that sends an
-extra key. The narrow fix is to add the **three** missing keys, with the same
-route-boundary validation their siblings already get — and to leave
-`brandVoiceLocked` on its dedicated workflow.
+extra key. The narrow fix is to add the **nine** unreachable keys to the schema
+with the same route-boundary validation their siblings already get, starting
+with `sendThankYouSms` and `sendReviewRequest` — and to leave `brandVoiceLocked`
+on its dedicated workflow. The three onboarding-only keys are a separate
+question (whether `aiModel` and the two numbering counters should be editable at
+all is a product decision, not an omission).
 
 > **S:** `awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' packages/api/src/shared/contracts.ts | grep -c 'strict()'`
 > → **1**, and that one is the nested `autoApproveThreshold` object, not the
 > settings schema itself.
+>
+> **S:** the stripped set, computed rather than listed — run from `packages/api/`:
+> ```bash
+> comm -23 \
+>   <(awk '/const fieldMap: Record<string, string> = \{/,/^ *\};/' src/settings/pg-settings.ts \
+>       | sed -n "s/^ *\([a-zA-Z][a-zA-Z0-9]*\): '.*/\1/p" | sort -u) \
+>   <(awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' src/shared/contracts.ts \
+>       | sed -n 's/^  \([a-zA-Z][a-zA-Z0-9]*\):.*/\1/p' | sort -u)
+> ```
+> → **13 lines** (the twelve above plus `updatedAt`). If this returns a
+> different set, the table above is stale — which is the point of publishing the
+> command instead of the list. Note it answers *"absent from the generic
+> schema,"* **not** *"unreachable"*: `brandVoiceLocked` is absent from the write
+> map entirely and has its own endpoint, so always check for a dedicated route
+> before calling a key unreachable.
 
 **Two smaller items with outsized effect**, both one-line fixes:
 
