@@ -60,6 +60,7 @@ import { createJob } from '../../src/jobs/job';
 import { transitionJobStatus } from '../../src/jobs/job-lifecycle';
 import { createEstimate } from '../../src/estimates/estimate';
 import { buildLineItem } from '../../src/shared/billing-engine';
+import { lookupJobs } from '../../src/ai/skills/lookup-jobs';
 
 describe('Postgres integration — voice update_job → approve → execute → persist + audit', () => {
   let pool: Pool;
@@ -792,5 +793,124 @@ describe('Postgres integration — B7.7 drafting leg: spoken "Mark the Garcia jo
     expect((borrowed.payload as Record<string, unknown>).jobId).toBeUndefined();
     expect(missingFieldsFor(borrowed)).toEqual(['jobId']);
     expect(borrowed.sourceContext ?? {}).not.toHaveProperty('verifiedIds');
+  });
+});
+
+/**
+ * #1019 6.4 (G1 4, T1) — "As M, I want to ask where a job stands and get an
+ * answer, not a proposal, so a question doesn't create work." This suite's
+ * two describes above prove the WRITE leg (`update_job`) end to end; this
+ * one proves the companion READ leg never touches the proposals pipeline at
+ * all, against the SAME real Postgres. `lookup_jobs` (ai/skills/lookup-jobs.ts,
+ * "Read-only, bypasses the proposals pipeline") has no proposalRepo in its
+ * dependency bag by construction — this pins that architectural claim with a
+ * real negative assertion on the `proposals` table (before AND after), not
+ * just an absence of a dependency parameter. T1 kept, not raised — this is a
+ * grep+negative-assertion pass, not a reachability upgrade.
+ */
+describe('Postgres integration — voice lookup_jobs ("where does it stand?") writes no proposal, no mutation (#1019 6.4)', () => {
+  let pool: Pool;
+  let jobRepo: PgJobRepository;
+  let tenant: { tenantId: string; userId: string };
+  let customerId: string;
+  let jobId: string;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    jobRepo = new PgJobRepository(pool);
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+    tenant = await createTestTenant(pool);
+
+    customerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: customerId,
+      tenantId: tenant.tenantId,
+      firstName: 'Garcia',
+      lastName: 'Household',
+      displayName: 'Garcia Household',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const locationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locationId,
+      tenantId: tenant.tenantId,
+      customerId,
+      street1: '4 Garcia Way',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const job = await createJob(
+      {
+        tenantId: tenant.tenantId,
+        customerId,
+        locationId,
+        summary: 'Furnace inspection',
+        priority: 'normal',
+        createdBy: tenant.userId,
+      },
+      jobRepo,
+    );
+    jobId = job.id;
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('answers "where does the Garcia job stand?" with no proposal row and no mutation to the job', async () => {
+    const proposalsBefore = await pool.query(
+      `SELECT count(*) FROM proposals WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(Number(proposalsBefore.rows[0].count)).toBe(0);
+
+    const jobBefore = await pool.query(
+      `SELECT status, updated_at FROM jobs WHERE id = $1`,
+      [jobId],
+    );
+
+    const result = await lookupJobs(
+      { tenantId: tenant.tenantId, customerId },
+      { jobRepo },
+    );
+
+    // An answer, not a proposal: the caller gets the status back directly.
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.data.jobs.map((j) => j.jobId)).toContain(jobId);
+      expect(result.data.jobs.find((j) => j.jobId === jobId)?.status).toBe('new');
+    }
+
+    // NO proposal row: the negative assertion this row was missing.
+    const proposalsAfter = await pool.query(
+      `SELECT count(*) FROM proposals WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(Number(proposalsAfter.rows[0].count)).toBe(0);
+    expect(Number(proposalsAfter.rows[0].count)).toBe(Number(proposalsBefore.rows[0].count));
+
+    // NO mutation: the job row itself is byte-for-byte unchanged.
+    const jobAfter = await pool.query(
+      `SELECT status, updated_at FROM jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(jobAfter.rows[0].status).toBe(jobBefore.rows[0].status);
+    expect(new Date(jobAfter.rows[0].updated_at).toISOString()).toBe(
+      new Date(jobBefore.rows[0].updated_at).toISOString(),
+    );
   });
 });
