@@ -77,6 +77,26 @@ export type TwilioAuthTokenGetter = (
   | undefined
   | TwilioCredentialDecision;
 
+/**
+ * Where the middleware records the tenant whose credential actually verified a
+ * request. A Symbol rather than a plain property so it cannot collide with —
+ * or be spoofed through — anything a body parser puts on the request.
+ */
+const VERIFIED_TENANT = Symbol('twilioVerifiedTenantId');
+
+/**
+ * The tenant whose own Twilio credential verified this request, when a
+ * tenant-owned credential did. Undefined when the deployment-wide fallback
+ * token verified it (single-account deployments and unowned numbers), where no
+ * tenant is implied and callers must fall back to their own tenant resolution.
+ *
+ * #1072 — session-scoped callbacks need this: a valid signature proves the
+ * caller owns SOME number, never that it owns the call a `?sid=` names.
+ */
+export function getVerifiedTwilioTenantId(req: Request): string | undefined {
+  return (req as Request & { [VERIFIED_TENANT]?: string })[VERIFIED_TENANT];
+}
+
 /** First defined string among a Twilio payload's dialled-number aliases. */
 function readDialedNumber(req: Request): string | undefined {
   const body = (req.body && typeof req.body === 'object'
@@ -230,6 +250,14 @@ export function requireTwilioSignature(
       });
       res.status(403).end();
       return;
+    }
+
+    // #1072 — hand the verified tenant to the routes. A session-scoped
+    // callback compares its `?sid=` session against THIS, not against a tenant
+    // re-derived from the payload: the payload only says which number the
+    // caller dialled, and owning a number is not owning a call.
+    if (credentialTenantId) {
+      (req as Request & { [VERIFIED_TENANT]?: string })[VERIFIED_TENANT] = credentialTenantId;
     }
 
     // #1072 — which credential actually answered for this request. The

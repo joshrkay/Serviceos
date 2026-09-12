@@ -220,6 +220,25 @@ describe('createTwilioWebhookCredentialResolver (#1072)', () => {
     });
   });
 
+  it('fails closed on the subaccount path too when the key to decrypt its credential is missing', async () => {
+    // Found by review on PR #1082: this branch used to require BOTH a stored
+    // credential and a key, so a missing key fell through to the deployment
+    // token — silently downgrading a tenant credential to the master one,
+    // which is the shape of failure #1072 exists to remove.
+    const { pool } = stubPool(ROWS);
+    const resolve = createTwilioWebhookCredentialResolver({
+      pool,
+      env: () => ({ ...baseEnv(), TENANT_ENCRYPTION_KEY: undefined }) as NodeJS.ProcessEnv,
+    });
+
+    const decision = await resolve({ accountSid: A_SUBACCOUNT });
+
+    expect(decision).toMatchObject({
+      outcome: 'misconfigured',
+      reason: 'tenant_encryption_key_missing',
+    });
+  });
+
   it('scopes every lookup with the system_lookup GUC and always releases the client', async () => {
     const { pool, statements, released } = stubPool(ROWS);
     const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });

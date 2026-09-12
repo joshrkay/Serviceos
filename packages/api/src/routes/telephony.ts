@@ -32,6 +32,7 @@ import type { Pool } from 'pg';
 import { TwilioGatherAdapter, xmlEscape } from '../telephony/twilio-adapter';
 import {
   requireTwilioSignature,
+  getVerifiedTwilioTenantId,
   type TwilioAuthTokenGetter,
 } from '../telephony/twilio-signature';
 import {
@@ -545,6 +546,20 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const callSid = body.CallSid ?? '';
     const session = callSid ? deps.voiceSessionStore?.findByCallSid(callSid) : undefined;
 
+    // #1072 — this route hands back the session's own id in the <Gather>
+    // action URL, so letting a foreign tenant reach it would give away the
+    // `?sid=` the session-scoped routes are keyed on. No tenant is resolved on
+    // this branch, so the verifying credential's tenant is the only authority
+    // available; passing the session's own tenant as the fallback makes the
+    // check a no-op under the deployment token, where no tenant is implied.
+    if (sessionBelongsToAnotherTenant(req, session, session?.tenantId ?? '')) {
+      logger.warn('telephony/gather-fallback: session belongs to another tenant — refusing', {
+        callSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (session) {
       const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
       const action = `${base}/api/telephony/gather?sid=${encodeURIComponent(session.id)}`;
@@ -651,6 +666,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
+    // #1072 — the signature proves the caller owns a number, not this call.
+    if (sessionBelongsToAnotherTenant(req, sessionStoreFor(deps)?.get(sessionId), tenantId)) {
+      logger.warn('telephony/gather: session belongs to another tenant — refusing', {
+        sessionId,
+        callSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     try {
       const twiml = await deps.adapter.handleGather({
         sessionId,
@@ -736,6 +761,17 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const adapter = deps.adapter;
     const adapterDeps = adapter.getDeps();
     const session = adapterDeps.store.get(sessionId);
+
+    // #1072 — the signature proves the caller owns a number, not this call.
+    if (sessionBelongsToAnotherTenant(req, session, tenantId)) {
+      logger.warn('telephony/dial-result: session belongs to another tenant — refusing', {
+        sessionId,
+        callSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (!session) {
       logger.warn('telephony/dial-result: unknown session', { sessionId, callSid });
       // Hangup gracefully — Twilio's leg is going away anyway.
@@ -942,6 +978,15 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     if (!tenantId || !isValidTenantId(tenantId)) {
       logger.error('telephony/callback-message: no/invalid tenant resolved', { sessionId });
       res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
+      return;
+    }
+
+    // #1072 — the signature proves the caller owns a number, not this call.
+    if (sessionBelongsToAnotherTenant(req, sessionStoreFor(deps)?.get(sessionId), tenantId)) {
+      logger.warn('telephony/callback-message: session belongs to another tenant — refusing', {
+        sessionId,
+      });
+      res.status(403).end();
       return;
     }
 
@@ -1213,6 +1258,52 @@ function technicalDifficultiesTwiml(): string {
     `<Hangup/>` +
     `</Response>`
   );
+}
+
+/**
+ * #1072 (second half, found by review on PR #1082) — the session-scoped
+ * callbacks are named by a `?sid=` (or a CallSid) the caller supplies, while
+ * the signature only proves the caller owns the number in `To`. Owning a
+ * number is not owning a call: without this check a tenant could sign a
+ * `/gather` with its OWN DID and token, name another tenant's live session,
+ * and drive that call — appending to its transcript, advancing its FSM, and
+ * choosing the TwiML the victim's caller hears.
+ *
+ * The authority is the tenant whose credential actually VERIFIED the request
+ * when one did; only when the deployment-wide fallback token answered (no
+ * tenant implied — single-account deployments, where no tenant holds the
+ * token) does it fall back to the tenant the route resolved from the payload.
+ *
+ * A session that does not exist is NOT a violation: the routes have their own
+ * "your session has ended" handling for a reaped or unknown id, and answering
+ * 403 there would turn an ordinary expiry into a hard failure — and would leak
+ * which session ids exist.
+ */
+function sessionBelongsToAnotherTenant(
+  req: Request,
+  session: { tenantId: string } | undefined,
+  resolvedTenantId: string,
+): boolean {
+  if (!session) return false;
+  const authority = getVerifiedTwilioTenantId(req) ?? resolvedTenantId;
+  return session.tenantId !== authority;
+}
+
+/**
+ * The session store to check a `?sid=` against. `voiceSessionStore` is the
+ * router's own declared dep and is what app.ts wires (the SAME instance the
+ * adapter holds — there is one shared store per process); the adapter's own
+ * store is the fallback for callers that pre-date that dep. `getDeps` is
+ * accessed defensively because tests mount hand-rolled adapter fakes that do
+ * not implement it, and a guard must never be the thing that throws inside a
+ * webhook handler.
+ */
+function sessionStoreFor(
+  deps: TelephonyRouterDeps,
+): { get(id: string): { tenantId: string } | undefined } | undefined {
+  if (deps.voiceSessionStore) return deps.voiceSessionStore;
+  const getDeps = (deps.adapter as Partial<TwilioGatherAdapter>).getDeps;
+  return typeof getDeps === 'function' ? deps.adapter.getDeps().store : undefined;
 }
 
 /**

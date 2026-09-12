@@ -440,6 +440,110 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     expect(await victimCounts(tenantB.tenantId)).toEqual(before);
   });
 
+  /**
+   * (f) — the second half of the binding, found by review on PR #1082.
+   *
+   * Binding the credential to the DIALLED NUMBER proves the caller owns SOME
+   * number; on the session-scoped callbacks (`?sid=`) it does NOT prove the
+   * caller owns THE CALL. An attacker signing with its OWN DID and its OWN
+   * token clears the credential check and then names the victim's live session
+   * id, driving the victim's in-flight call: the utterance lands in their
+   * transcript, their FSM advances, and the TwiML the victim's caller hears is
+   * the attacker's to shape.
+   *
+   * `sid` is a random UUID, so this needs the session id rather than being
+   * trivially reachable — but an unguessable identifier is not authorization,
+   * which is the whole premise of #1072.
+   */
+  it('(f1) /gather — the attacker\'s OWN DID and token cannot drive the VICTIM\'s live session', async () => {
+    const callSid = `CA-1072-hijack-${crypto.randomUUID().slice(0, 8)}`;
+    const voice = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: B_SUBACCOUNT, From: CALLER, To: B_DID },
+      B_TOKEN,
+    );
+    expect(voice.status).toBe(200);
+    const victimSid = sessionIdFromTwiml(voice.text);
+    expect(victimSid, `no ?sid= in TwiML: ${voice.text}`).toBeDefined();
+
+    const before = await victimCounts(tenantB.tenantId);
+
+    // Every credential here is one tenant A legitimately owns — its own DID in
+    // `To`, its own AccountSid, its own token. The only hostile field is `sid`.
+    const forged = await signedPost(
+      `/api/telephony/gather?sid=${victimSid}`,
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        From: CALLER,
+        To: A_DID,
+        SpeechResult: 'I smell gas in my kitchen and it is getting stronger',
+        Confidence: '0.95',
+      },
+      A_TOKEN,
+    );
+
+    expect(forged.status).toBe(403);
+    await settle();
+    expect(await victimCounts(tenantB.tenantId)).toEqual(before);
+  });
+
+  it('(f2) /dial-result — the same session-scoped hijack is refused', async () => {
+    const callSid = `CA-1072-hijack-dial-${crypto.randomUUID().slice(0, 8)}`;
+    const voice = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: B_SUBACCOUNT, From: CALLER, To: B_DID },
+      B_TOKEN,
+    );
+    expect(voice.status).toBe(200);
+    const victimSid = sessionIdFromTwiml(voice.text);
+
+    const before = await victimCounts(tenantB.tenantId);
+
+    const forged = await signedPost(
+      `/api/telephony/dial-result?sid=${victimSid}`,
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        From: CALLER,
+        To: A_DID,
+        DialCallStatus: 'no-answer',
+      },
+      A_TOKEN,
+    );
+
+    expect(forged.status).toBe(403);
+    await settle();
+    expect(await victimCounts(tenantB.tenantId)).toEqual(before);
+  });
+
+  it('(f3) a tenant driving its OWN session through /gather is untouched by the session check', async () => {
+    const callSid = `CA-1072-own-session-${crypto.randomUUID().slice(0, 8)}`;
+    const voice = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: A_SUBACCOUNT, From: CALLER, To: A_DID },
+      A_TOKEN,
+    );
+    expect(voice.status).toBe(200);
+    const ownSid = sessionIdFromTwiml(voice.text);
+
+    const gather = await signedPost(
+      `/api/telephony/gather?sid=${ownSid}`,
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        From: CALLER,
+        To: A_DID,
+        SpeechResult: 'I smell gas in my kitchen and it is getting stronger',
+        Confidence: '0.95',
+      },
+      A_TOKEN,
+    );
+
+    expect(gather.status).toBe(200);
+    expect(gather.text).toContain('911');
+  });
+
   it('(e) a number with NO tenant integration row still verifies with the deployment fallback token', async () => {
     const callSid = `CA-1072-fallback-${crypto.randomUUID().slice(0, 8)}`;
     const res = await signedPost(

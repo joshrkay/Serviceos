@@ -253,7 +253,19 @@ export function createTwilioWebhookCredentialResolver(
         });
         return { outcome: 'misconfigured', reason: 'credential_lookup_failed' };
       }
-      if (row?.auth_token_primary_enc && encKey) {
+      if (row?.auth_token_primary_enc) {
+        // The key check is NOT part of this condition on purpose: gating the
+        // whole branch on `&& encKey` would fall through to the deployment
+        // token whenever the key is unset, silently downgrading a tenant's own
+        // credential to the master one — the shape of failure this module
+        // exists to remove. Mirror the owning-tenant path and fail closed.
+        if (!encKey) {
+          logger.error('telephony.tenant_credential_undecryptable', {
+            tenantId: row.tenant_id,
+            reason: 'TENANT_ENCRYPTION_KEY unset',
+          });
+          return { outcome: 'misconfigured', reason: 'tenant_encryption_key_missing' };
+        }
         try {
           const { decrypt } = await import('../integrations/crypto');
           return {
