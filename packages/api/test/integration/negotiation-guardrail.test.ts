@@ -95,5 +95,12 @@ describe('Postgres integration — negotiation guardrail owner-callback persiste
     // falls back to the tenantId (see NegotiationGuardrailTaskHandler.auditDecision).
     const events = await auditRepo.findByEntity(tenant.tenantId, 'proposal', tenant.tenantId);
     expect(events.map((e) => e.eventType)).toContain('negotiation.discount_evaluated');
+
+    // T1 — cross-tenant isolation: a second, wholly separate tenant cannot
+    // read the persisted callback proposal, and sees none of its audit trail.
+    const otherTenant = await createTestTenant(pool);
+    expect(await proposalRepo.findById(otherTenant.tenantId, persisted.id)).toBeNull();
+    const otherEvents = await auditRepo.findByEntity(otherTenant.tenantId, 'proposal', tenant.tenantId);
+    expect(otherEvents).toHaveLength(0);
   });
 });
