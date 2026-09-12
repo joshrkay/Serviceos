@@ -470,7 +470,7 @@ describe('runThankYouSmsSweep', () => {
    * `sendOneThankYou` and it fails with `missing_consent_context`.
    */
   describe('the production dispatch chain (gated delivery, block mode)', () => {
-    function gatedDispatcher(): {
+    function gatedDispatcher(env?: NodeJS.ProcessEnv): {
       dispatcher: FeedbackDispatcher;
       sentSms: SmsMessage[];
     } {
@@ -488,6 +488,8 @@ describe('runThankYouSmsSweep', () => {
         auditRepo,
         // The prod/staging default when TCPA_CONSENT_ENFORCEMENT is unset.
         enforcement: 'block',
+        // Kill-switch seam; defaults to process.env when absent.
+        ...(env ? { env } : {}),
       });
       return { dispatcher: new MessageDeliveryFeedbackDispatcher(gate), sentSms };
     }
@@ -549,6 +551,65 @@ describe('runThankYouSmsSweep', () => {
             ),
         ),
       ).toBe(true);
+    });
+
+    /**
+     * PR #994, Codex P1 (second) — raised against the fix for the first.
+     *
+     * The kill switch is thrown by the SAME `SmsSuppressedError` type, ahead of
+     * the owner bypass and of any consent evaluation, off an env var read per
+     * send. Catching every instance of that error as terminal meant a
+     * ten-minute `TELEPHONY_ENABLED=false` incident response permanently
+     * discarded every thank-you it touched.
+     */
+    it('the kill switch is RETRYABLE — not stamped, and sends once telephony is back', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const off = gatedDispatcher({ TELEPHONY_ENABLED: 'false' });
+
+      const during = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: off.dispatcher }),
+      );
+
+      expect(off.sentSms).toHaveLength(0);
+      // Transient, so it counts as a failure and NOT as a handled suppression.
+      expect(during.failed).toBe(1);
+      expect(during.suppressed).toBe(0);
+      // The absence of this stamp is the whole finding: with it, the job is
+      // never re-selected and the customer is never thanked.
+      const afterOutage = await jobRepo.findById(TENANT, job.id);
+      expect(afterOutage?.thankYouSmsSentAt).toBeFalsy();
+
+      // Telephony restored — the same job is still eligible and now sends.
+      const back = gatedDispatcher();
+      const after = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: back.dispatcher }),
+      );
+      expect(after.sent).toBe(1);
+      expect(back.sentSms).toHaveLength(1);
+    });
+
+    it('an unexpected missing_consent_context is retryable too, not silently consumed', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      // Only reachable via a wiring regression now that both fields are
+      // forwarded; it must surface rather than eat a customer message.
+      const broken: FeedbackDispatcher = {
+        send: async () => {
+          throw new SmsSuppressedError('missing_consent_context');
+        },
+      };
+
+      const result = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: broken }),
+      );
+
+      expect(result.failed).toBe(1);
+      expect(result.suppressed).toBe(0);
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toBeFalsy();
     });
   });
 });

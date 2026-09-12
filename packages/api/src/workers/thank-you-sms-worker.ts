@@ -41,7 +41,37 @@ import { CustomerRepository } from '../customers/customer';
 import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
-import { SmsSuppressedError } from '../notifications/gated-message-delivery';
+import {
+  SmsSuppressedError,
+  type SmsSuppressionReason,
+} from '../notifications/gated-message-delivery';
+
+/**
+ * Gate verdicts that are permanent for THIS customer: they reflect a consent
+ * state that cannot change without the customer acting, so the job is stamped
+ * and never re-selected — the same treatment as the `on_dnc` guard below.
+ *
+ * Everything else stays RETRYABLE, and the set is an allowlist so a reason
+ * added later defaults to retryable rather than to silent discard.
+ *
+ *  - `channel_disabled` is the operator kill switch (`TELEPHONY_ENABLED=false`).
+ *    It is thrown ahead of the owner bypass and of any consent evaluation, and
+ *    the env is read per send, so it is by construction temporary. Stamping it
+ *    would permanently discard every eligible thank-you processed during an
+ *    incident-response shutdown, and they would never send once telephony came
+ *    back.
+ *  - `missing_consent_context` can now only mean a wiring regression in this
+ *    worker (it forwards both fields below). That belongs in the failed counter
+ *    and the warn log, not in a stamp that silently consumes customer messages.
+ *
+ * Caught in review on PR #994 (Codex P1) — against the fix for the P1 one round
+ * earlier, which caught `SmsSuppressedError` wholesale.
+ */
+const PERMANENT_GATE_REASONS: ReadonlySet<SmsSuppressionReason> = new Set<SmsSuppressionReason>([
+  'no_consent',
+  'dnc',
+  'revoked',
+]);
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
@@ -278,7 +308,7 @@ async function sendOneThankYou(
       }),
     );
   } catch (err) {
-    if (err instanceof SmsSuppressedError) {
+    if (err instanceof SmsSuppressedError && PERMANENT_GATE_REASONS.has(err.reason)) {
       // Terminal, not transient. The gate consults the consent ledger, which
       // this worker does not read, so a cross-channel revocation can suppress a
       // send whose local consent + DNC checks both passed. That verdict will
@@ -287,6 +317,8 @@ async function sendOneThankYou(
       await markHandled(deps, tenantId, jobId, customer.id, `consent_gate:${err.reason}`);
       return 'suppressed';
     }
+    // Every other suppression — the kill switch above all — falls through to
+    // the per-job catch, which leaves the stamp null so the next sweep retries.
     throw err;
   }
   if (claimResult.outcome === 'duplicate') {

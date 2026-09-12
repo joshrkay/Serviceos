@@ -2364,9 +2364,30 @@ assertion that checked the payload asserted `{ to, body }` **exactly** — an
 exact-match on the defect. §12.4d files this as the sharpest instance of a
 mocked dependency capping a claim at the mock: the substitute could not fail,
 so the rung-4 row above described a capability that had never sent a message in
-production. Fixed by forwarding `tenantId` + `consent`, treating a gate
-suppression as terminal, and adding a unit test that composes the **real**
+production. Fixed by forwarding `tenantId` + `consent`, treating a **permanent
+consent verdict** as terminal, and adding unit tests that compose the **real**
 adapter over the **real** gate in `block` mode. Caught in review (Codex P1).
+
+**And the first fix for it was itself wrong, caught the same way one round
+later (Codex P1 again).** It caught `SmsSuppressedError` wholesale — but the
+gate throws that same type with reason `channel_disabled` for the operator kill
+switch (`TELEPHONY_ENABLED=false`), **ahead of the owner bypass and of any
+consent evaluation**, off an env var read per send. So a ten-minute
+incident-response shutdown would have stamped every thank-you it touched and
+discarded them permanently: they would never send once telephony came back.
+
+The reason set is now an **allowlist** — `no_consent`, `dnc`, `revoked` are
+terminal; everything else, including a `missing_consent_context` that could now
+only mean a wiring regression, stays retryable. An allowlist because the
+failure directions are not symmetric: a wrongly-retried job is a log line, a
+wrongly-stamped one is a customer who is never thanked, so a reason added later
+must default to retry.
+
+The general form is worth more than the fix: **one error type carried both a
+permanent verdict about a customer and a temporary statement about the
+operator's own infrastructure.** Any handler that branches on the type rather
+than the reason gets one of the two wrong, and which one it gets wrong is
+invisible until an incident.
 
 ### 12.3 Money — correctness defects
 
@@ -2731,7 +2752,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how fourteen of these were got wrong
+### 12.4d A note on method — how fifteen of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -3013,6 +3034,31 @@ The rule that generalises: **when a dependency is a policy gate, a mock of it is
 not a mock of a collaborator — it is a deletion of the policy.** The other
 substitutes in this suite (repos, clocks, providers) stand in for things that
 say *yes*. This one stood in for the thing whose job is to say *no*.
+
+**The fifteenth was raised against the fourteenth's fix, one round later**, and
+it is the second time on this PR that a correction created the next finding
+(§11.0d records the first). The fix caught `SmsSuppressedError` wholesale and
+stamped the job. But the gate throws that same type with reason
+`channel_disabled` for the operator kill switch — **before** the owner bypass
+and before any consent evaluation — so a temporary `TELEPHONY_ENABLED=false`
+would have permanently discarded every thank-you processed during the outage.
+
+The two findings are the same mistake at two altitudes, which is why they belong
+together:
+
+| | What was treated as equivalent | Consequence |
+|---|---|---|
+| Fourteenth | a mock of the gate ≡ the gate | the policy was deleted from three test files |
+| Fifteenth | the error *type* ≡ the error *reason* | a permanent customer verdict and a temporary operator action took the same branch |
+
+**A type is not a verdict.** `SmsSuppressedError` carries a machine-readable
+`reason` precisely because its instances mean different things, and its own
+doc-comment says so — *"so callers that report suppression can branch on it
+rather than string-matching."* The fix branched on the type anyway. The reason
+set is now an allowlist rather than a denylist, because the failure directions
+are asymmetric: a wrongly-retried job costs a log line, a wrongly-stamped one
+costs a customer message that no later run will send, so anything unrecognised
+must default to retry.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
