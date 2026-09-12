@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 
@@ -248,6 +248,38 @@ describe('SettingsPage Quick toggles persistence', () => {
         expect(body[field]).toBe(true);
       }
     });
+  });
+
+  it('8.11 — Milestone billing description promises no approval step (review fix)', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        autoInvoiceOnCompletion: false,
+        billLaborFromTimeEntries: false,
+        batchInvoiceEnabled: false,
+        milestoneBillingEnabled: false,
+      }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+
+    renderPage();
+    const toggle = await screen.findByRole('switch', { name: 'Milestone billing' });
+    const row = toggle.closest('div');
+    expect(row).toBeTruthy();
+    expect(
+      within(row as HTMLElement).getByText(
+        'Automatically draft a numbered invoice at each completed billing milestone. No approval step: the plan was approved when the schedule was created.',
+      ),
+    ).toBeInTheDocument();
+    // The sibling "Auto-draft invoice on completion" row genuinely routes
+    // through approval; Milestone billing must not borrow that phrasing.
+    expect(within(row as HTMLElement).queryByText(/for your approval/i)).not.toBeInTheDocument();
   });
 
   it('persists spanishMode via /api/settings/language when toggled', async () => {

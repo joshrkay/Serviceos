@@ -709,7 +709,7 @@ export function SettingsPage() {
           kind: 'toggle',
           icon: FileText,
           label: 'Milestone billing',
-          description: 'Draft an invoice for your approval at each completed billing milestone',
+          description: 'Automatically draft a numbered invoice at each completed billing milestone. No approval step: the plan was approved when the schedule was created.',
           checked: milestoneBillingEnabled,
           onToggle: toggleMilestoneBillingEnabled,
         },
