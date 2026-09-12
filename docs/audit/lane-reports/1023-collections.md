@@ -103,6 +103,14 @@ repositories — a tenant whose invoice is **not yet due** left with no ledger
 row, no reminder proposal and no `invoice.dunning_proposed` audit row in the
 same pass that chases its neighbour.
 
+The two seam tests carry the reach-across-the-whole-database claim on the real
+enumerator. The third test WRITES through real repositories, so it asserts
+`listAllTenantIds(pool)` contains both of its seeded tenants (the D-032 claim)
+and then drives the sweep with just those two ids — handing a writing sweep
+every tenant in the shared container would chase other integration files'
+invoices and make the suite order-dependent. Changed in response to a review
+finding on PR #1053; see **Review follow-ups** at the end.
+
 ```
  × overdue-invoice (dunning) sweep > reaches every tenant through the real enumerator 20ms
    → expected [ …(68) ] to deeply equal []          (RED)
@@ -500,7 +508,10 @@ that is a story-not-met decision for the orchestrator's decision list.**
 **Fan-out entry (T4)** — new `describe('recurring-agreements (membership) sweep')`
 in `sweep-tenant-fanout.test.ts`: real enumerator reach, failure isolation, and
 a tenant whose cycle is not due left unbilled in the same pass that bills its
-neighbour (run rows and `service_agreement.run.generated` both absent).
+neighbour (run rows and `service_agreement.run.generated` both absent). As in
+the dunning entry, the two seam tests carry the reach claim on the real
+enumerator and the writing test asserts the enumerator reaches its tenants, then
+confines the sweep to them.
 
 ```
  × recurring-agreements (membership) sweep > reaches every tenant through the real enumerator 19ms
@@ -911,6 +922,64 @@ $ git status --porcelain
 - **The recurring-agreements worker's missing `failed` counter** (see row 8.12)
   is worker code, not a test, and outside this lane's TEST-ONLY limit. Recorded,
   not fixed.
+
+## Review follow-ups (PR #1053)
+
+`xhawk-ai[bot]` raised two Medium testing findings. Both verified against real
+Postgres and both fixed on this branch.
+
+**1. `rawAgreement` was not tenant-scoped** (`membership-renewal-sweep.test.ts`).
+The helper ran a bare `SET LOCAL app.current_tenant_id` outside a transaction
+and had no `tenant_id` predicate. Verified directly:
+
+```
+PG NOTICE/WARNING: SET LOCAL can only be used in transaction blocks
+after bare SET LOCAL, GUC = ""
+inside BEGIN + set_config(local), GUC = "22222222-2222-2222-2222-222222222222"
+```
+
+Postgres discards the setting, and because the integration harness connects as
+a superuser (which bypasses RLS outright), the helper read by global id — a
+cross-tenant assertion written against it would have passed whichever tenant
+was asked for. No assertion in the file was *wrong* (every read is by a unique
+agreement id belonging to the tenant asked for), but the helper was not the
+evidence it appeared to be.
+
+Fixed: `BEGIN` + `set_config('app.current_tenant_id', $1, true)` + an explicit
+`tenant_id = $2` predicate + `COMMIT` (`ROLLBACK` on error). Pinned by a new
+assertion in the T1 test — `rawAgreement(tenantB, agreementA)` must be
+`undefined` — which was run RED against the old helper first:
+
+```
+ × T1 — two tenants are renewed and billed on their own memberships in one pass, with no cross-tenant reach 109ms
+   → expected { ends_on: '2027-09-11', …(3) } to be undefined
+ Tests  1 failed | 8 passed (9)
+---
+ Tests  6 passed | 3 expected fail (9)
+```
+
+The same bare-`SET LOCAL` pattern in `dunning-cadence.test.ts`'s raw duplicate
+INSERT got the same treatment. That test's evidence is unaffected either way —
+the `23505` comes from the unique index, and a superuser bypasses RLS — but the
+line implied a tenant scoping that was not happening.
+
+**2. The two writing fan-out tests swept every tenant in the shared container**
+(`sweep-tenant-fanout.test.ts`). Both now assert `listAllTenantIds(pool)`
+contains their seeded tenants — keeping the D-032 "production selector" claim —
+and then drive the sweep with only those ids. The seam tests above them still
+run the real enumerator across the whole database, so no reach claim is lost;
+what goes away is a writing sweep raising dunning rows and billing cycles on
+other integration files' tenants. I did not touch the pre-existing
+`estimate-expiry` untouched test, which has the same shape — not this lane's,
+and worth its own call.
+
+Note on the bot's stated failure mode ("if this fan-out test runs before a
+membership test asserts its first sweep generated exactly one run"): that
+specific ordering cannot bite, because vitest runs integration files
+sequentially and atomically (`maxWorkers: 1`), so a stranger tenant either does
+not exist yet or has already finished asserting. The *structural* hazard it
+points at is real, though — the tests wrote to rows they do not own, and their
+correctness rested on that scheduling accident. Fixed on that basis.
 
 ## Money defects found and NOT fixed
 

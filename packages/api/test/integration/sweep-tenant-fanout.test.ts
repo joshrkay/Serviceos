@@ -726,6 +726,18 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       // Another tenant, same cadence, invoice not due for another 10 days.
       const tenantB = await seedInvoice(new Date(asOf.getTime() + 10 * 86_400_000));
 
+      // The production selector really returns both of our tenants — that is
+      // the D-032 claim, and the two seam tests above prove reach across the
+      // whole database. The sweep itself is then driven with just our two ids:
+      // this one WRITES (ledger rows, proposals, audit) through real
+      // repositories, and handing it every tenant in the shared container
+      // would chase other integration files' invoices and make the suite
+      // order-dependent (review finding, PR #1053).
+      const allTenantIds = await listAllTenantIds(pool);
+      expect(allTenantIds).toEqual(
+        expect.arrayContaining([overdue.tenantId, tenantB.tenantId]),
+      );
+
       await runOverdueInvoiceSweep({
         jobRepo: dunningJobRepo,
         estimateRepo: dunningEstimateRepo,
@@ -734,7 +746,7 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
         proposalRepo,
         dunningEventRepo,
         dunningConfigRepo,
-        listTenantIds: () => listAllTenantIds(pool),
+        listTenantIds: async () => [overdue.tenantId, tenantB.tenantId],
         now: () => asOf,
         logger,
       });
@@ -871,12 +883,21 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       // Another tenant, same membership shape, not due for another 20 days.
       const tenantB = await seedMembership(new Date(Date.now() + 20 * 86_400_000));
 
+      // As in the dunning entry above: the production selector is asserted to
+      // reach both of our tenants (reach across the whole database is the two
+      // seam tests' job), then the WRITING sweep is confined to them, so it
+      // cannot bill other integration files' due agreements.
+      const allTenantIds = await listAllTenantIds(pool);
+      expect(allTenantIds).toEqual(
+        expect.arrayContaining([due.tenantId, tenantB.tenantId]),
+      );
+
       await runRecurringAgreementsSweep({
         agreementRepo,
         runRepo,
         jobsService,
         invoicesService,
-        listTenantIds: () => listAllTenantIds(pool),
+        listTenantIds: async () => [due.tenantId, tenantB.tenantId],
         auditRepo: memberAuditRepo,
         logger,
       });

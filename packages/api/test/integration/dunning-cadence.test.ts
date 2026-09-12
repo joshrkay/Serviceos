@@ -231,20 +231,31 @@ describe('Postgres integration — dunning cadence at the real UNIQUE index (§8
     // The second send attempt for the SAME cadence key. This is raw SQL: no
     // repository, no worker, no in-memory guard — if the row lands, a duplicate
     // reminder is possible in production. It must be the database that refuses.
+    //
+    // The tenant GUC is set with `set_config(..., true)` inside an explicit
+    // transaction: a bare `SET LOCAL` outside a transaction block is DISCARDED
+    // by Postgres with the warning "SET LOCAL can only be used in transaction
+    // blocks", which would leave the insert running with no tenant context at
+    // all (review finding, PR #1053).
     const client = await pool.connect();
     let code: string | undefined;
     let constraint: string | undefined;
     try {
-      await client.query(`SET LOCAL app.current_tenant_id = '${seeded.tenantId}'`);
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [
+        seeded.tenantId,
+      ]);
       await client.query(
         `INSERT INTO invoice_dunning_events
            (id, tenant_id, invoice_id, kind, step_key, channel, sent_at)
          VALUES ($1, $2, $3, 'reminder', '3:sms', 'sms', NOW())`,
         [uuidv4(), seeded.tenantId, seeded.invoiceId],
       );
+      await client.query('COMMIT');
     } catch (err) {
       code = (err as { code?: string }).code;
       constraint = (err as { constraint?: string }).constraint;
+      await client.query('ROLLBACK');
     } finally {
       client.release();
     }

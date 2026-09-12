@@ -217,17 +217,37 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       logger,
     });
 
-  /** Raw agreement row — the DATE columns as Postgres holds them. */
-  async function rawAgreement(tenantId: string, id: string): Promise<Record<string, unknown>> {
+  /**
+   * Raw agreement row — the DATE columns as Postgres holds them, read under
+   * the requested tenant.
+   *
+   * The tenant GUC is set with `set_config(..., true)` inside an explicit
+   * transaction, NOT a bare `SET LOCAL`: outside a transaction block Postgres
+   * warns "SET LOCAL can only be used in transaction blocks" and DISCARDS the
+   * setting, so the RLS predicate would see an empty tenant. The `tenant_id`
+   * predicate is belt-and-braces on top of that, because the integration
+   * harness connects as a superuser, which bypasses RLS entirely — without it
+   * this helper reads by global id and a cross-tenant assertion written
+   * against it would pass no matter which tenant was asked for.
+   */
+  async function rawAgreement(
+    tenantId: string,
+    id: string,
+  ): Promise<Record<string, unknown> | undefined> {
     const client = await pool.connect();
     try {
-      await client.query(`SET LOCAL app.current_tenant_id = '${tenantId}'`);
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('app.current_tenant_id', $1, true)`, [tenantId]);
       const { rows } = await client.query(
         `SELECT ends_on::text AS ends_on, renewal_count, next_run_at, last_run_at
-           FROM service_agreements WHERE id = $1`,
-        [id],
+           FROM service_agreements WHERE id = $1 AND tenant_id = $2`,
+        [id, tenantId],
       );
+      await client.query('COMMIT');
       return rows[0];
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
     } finally {
       client.release();
     }
@@ -263,7 +283,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       const result = await sweep([t.tenantId]);
       expect(result.renewed).toBeGreaterThanOrEqual(1);
 
-      const row = await rawAgreement(t.tenantId, membership.id);
+      const row = (await rawAgreement(t.tenantId, membership.id))!;
       // Rolled forward a whole 12-month term, into the future.
       expect(String(row.ends_on) > ymd(0)).toBe(true);
       expect(String(row.ends_on)).toBe(
@@ -301,7 +321,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
 
       await sweep([t.tenantId]);
 
-      const row = await rawAgreement(t.tenantId, membership.id);
+      const row = (await rawAgreement(t.tenantId, membership.id))!;
       expect(String(row.ends_on) > ymd(0)).toBe(true);
       expect(Number(row.renewal_count)).toBe(3);
     });
@@ -328,7 +348,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       expect(invoice!.jobId).toBe(runs[0].generatedJobId);
 
       // The pointer moved forward, so the next sweep is not due again today.
-      const row = await rawAgreement(t.tenantId, membership.id);
+      const row = (await rawAgreement(t.tenantId, membership.id))!;
       expect(new Date(row.next_run_at as string).getTime()).toBeGreaterThan(Date.now());
       expect(row.last_run_at).not.toBeNull();
 
@@ -392,8 +412,8 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
         (await invoiceRepo.findById(tenantB.tenantId, bRuns[0].generatedInvoiceId!))!.totals.totalCents,
       ).toBe(4_900);
       // Only tenant A's membership was renewable; tenant B's has no term.
-      expect(Number((await rawAgreement(tenantA.tenantId, a.id)).renewal_count)).toBe(1);
-      expect(Number((await rawAgreement(tenantB.tenantId, b.id)).renewal_count)).toBe(0);
+      expect(Number((await rawAgreement(tenantA.tenantId, a.id))!.renewal_count)).toBe(1);
+      expect(Number((await rawAgreement(tenantB.tenantId, b.id))!.renewal_count)).toBe(0);
 
       // Cross-tenant: neither tenant's scoped repo can read the other's rows.
       expect(await agreementRepo.findById(tenantB.tenantId, a.id)).toBeNull();
@@ -401,6 +421,15 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       expect(
         await invoiceRepo.findById(tenantB.tenantId, aRuns[0].generatedInvoiceId!),
       ).toBeNull();
+
+      // …and the raw helper this file reads DATE columns with is itself
+      // tenant-scoped, so a cross-tenant assertion written against it cannot
+      // pass by reading the row globally. (Review finding, PR #1053: the
+      // helper used a bare `SET LOCAL` outside a transaction — Postgres warns
+      // "SET LOCAL can only be used in transaction blocks" and discards the
+      // GUC — and had no tenant_id predicate, so it read by global id on the
+      // privileged test connection.)
+      expect(await rawAgreement(tenantB.tenantId, a.id)).toBeUndefined();
     });
   });
 
