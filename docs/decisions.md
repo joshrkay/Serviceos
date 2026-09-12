@@ -850,8 +850,9 @@ the instrument that got its own two worst findings fixed, and v5 scores against 
 3. **Four founding commitments shipped dark, and that was drift rather than staged rollout.**
 Verified against code: `digest_enabled` defaults false with **no control in web or mobile** that
 writes it; `brand_voice_configurator` is seeded explicitly `enabled: false`; dropped-call recovery
-is gated on a per-tenant flag for which **no write path exists** (`setTenantFlag` has zero callers
-and no route); and B2B account context is assembled onto the session and **read nowhere**. The
+is gated on a per-tenant flag whose dedicated writer is unwired (`setTenantFlag` has zero callers
+and no route — though *corrected 2026-09-12:* a platform admin can still scope the platform flag by
+`tenantIds`, so the capability is admin-API-only rather than unreachable; see PRD §12.4); and B2B account context is assembled onto the session and **read nowhere**. The
 distinguishing evidence for drift over staging is dropped-call recovery: a capability with no
 switch cannot have been staged for a rollout. Remediation is a launch checklist, not an
 architecture change.
@@ -923,13 +924,19 @@ underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
 3. **Every rung carries a command.** Acceptance criteria, evidence classes and confirming commands
    live inline in `docs/PRD-v5-as-built.md` §5 and §8, one falsifiable sentence per row. A rung published without a
    command behind it is a prediction and is to be read as one.
-4. **Reachability is part of the score, and "dark by default" is not its weakest form.** Four
-   capabilities are *unlit-able*: no product surface can enable them at all
-   (`setTenantFlag` and `setTechnicianAssignmentNotifier` have zero production callers).
-   Those cap at 4 regardless of test quality. *— corrected 2026-09-12: **three**, not four.
-   `digest_enabled` was listed here and does not belong: `PUT /api/settings` accepts
-   `digestEnabled` and `PgSettingsRepository` maps it, so the digest has a write path and is
-   missing only a client control. See PRD §12.4.*
+4. **Reachability is part of the score, and "dark by default" is not its weakest form.** **One**
+   capability is *unlit-able*: no surface can enable it at all
+   (`setTechnicianAssignmentNotifier` has zero production callers).
+   It caps at 4 regardless of test quality.
+
+   *— corrected 2026-09-12, twice. This said **four**, then **three**, and the answer is **one**.
+   Removed, in order: `digest_enabled` (→ `PUT /api/settings` accepts `digestEnabled` and
+   `PgSettingsRepository` maps it — missing a client control, not a write path); then dropped-call
+   recovery and voice vulnerability triage (→ a platform admin can scope their flag by `tenantIds`
+   via `PUT /api/admin/feature-flags/:name`, which `PgTenantFeatureFlagRepository._resolve`
+   honours — missing an owner-facing control, not a write path). Three of the four "unlit-able"
+   claims were the same mistake: **a grep proving one specific writer is unwired, read as proving
+   no writer exists.** See PRD §12.4.*
 
 **Consequences.**
 - §8 of the PRD now carries verified rungs and a per-row reason. §5 distinguishes invariants that

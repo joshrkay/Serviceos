@@ -1276,7 +1276,7 @@ The rungs are not interchangeable, and the work each one needs is different:
 | **2 — unguarded invariant** | Write the structural test (I1′, I5′, I6, I8′) |
 | **3** | Write the Docker-gated test. **The code is probably fine** |
 | **4−** | Swap `InMemoryAuditRepository` → `PgAuditRepository`. *One import closes four §8.7 rows* |
-| **4 — unlit-able** | Ship a write path. Not a feature — a route and a toggle (2.7) |
+| **4 — admin-API only** | The write path exists (platform flag + `tenantIds`); ship an owner-facing control (2.7, 2.6) |
 | **4 — no client control** | The write path exists; ship the toggle only (9.6) |
 | **5** | Nothing. Get a tenant on it and earn rung 6 |
 
@@ -1349,8 +1349,8 @@ the session.
 | **2.3** | **As M**, I want a known customer recognised by their number and a stranger turned into a lead, so nothing falls on the floor | **Given** an inbound number, **when** it matches a stored customer in E.164, **then** they are identified — **and** a non-NANP caller sharing the last 10 digits is **not** matched | 4 | **D:** `identify-caller.test.ts`. *The voice unknown→lead leg is untested at real DB; only the SMS caller is* |
 | **2.4** | **As M**, I want a stranger on the phone to be unable to reach owner-only capability, so my phone line isn't an admin console | **Given** a caller-surface session, **when** the classifier returns an off-profile intent, **then** it becomes `unknown` and is **audited**, never silently dropped | **3** 🚨 | Fixture-proven only. **S:** `grep -rln "intent_off_surface" packages/api/test/integration/` → **empty** |
 | **2.5** | **As J**, I want a gas leak recognised before any AI thinks about it, so a life-safety call never waits on a model | **Given** any transcript chunk in English **or** Spanish, **when** a tier-1 phrase appears, **then** E1 is returned **with no rules loaded**, the safety script speaks first, pending bookings are revoked, and it **never books** | **3** 🚨 | **Unit only.** The nearest integration test covers the downstream handler with an in-memory audit repo. *Also: the E1 script is still a self-declared placeholder* |
-| **2.6** | **As J**, I want an elderly caller on oxygen in 104°F heat to reach me personally, so vulnerability isn't handled by a queue | **Given** age + weather + critical urgency, **when** triage runs, **then** my cell is patched with a 60s dial and a non-PII preface; if I don't answer, a high-priority booking plus an owner SMS — **never a normal booking** | 3 | **U:** `vulnerability-triage-hook.test.ts`. *Its flag has no production write path either* |
-| **2.7** | **As M**, I want a caller who hangs up mid-booking to get a text back, so a dropped call isn't a lost job | **Given** a call ending in `dropped`/`failed` with a usable number, **when** 60s elapse, **then** exactly one recovery SMS sends, stamped and audited, re-evaluated at send time | **4 — unlit-able** 🚨 | Pipeline **proven at real Postgres including the flag-on transition**. But `setTenantFlag` has **zero production callers** — *Mike cannot turn this on* |
+| **2.6** | **As J**, I want an elderly caller on oxygen in 104°F heat to reach me personally, so vulnerability isn't handled by a queue | **Given** age + weather + critical urgency, **when** triage runs, **then** my cell is patched with a 60s dial and a non-PII preface; if I don't answer, a high-priority booking plus an owner SMS — **never a normal booking** | 3 | **U:** `vulnerability-triage-hook.test.ts`. *Its dedicated flag writer (`setTenantFlag`) is unwired, but a platform admin can scope the platform flag by `tenantIds` — admin-API-only, not unreachable (§12.4)* |
+| **2.7** | **As M**, I want a caller who hangs up mid-booking to get a text back, so a dropped call isn't a lost job | **Given** a call ending in `dropped`/`failed` with a usable number, **when** 60s elapse, **then** exactly one recovery SMS sends, stamped and audited, re-evaluated at send time | **4 — admin-API only** 🚨 | Pipeline **proven at real Postgres including the flag-on transition**. `setTenantFlag` has **zero production callers**, but the capability is still ramp-able: a platform admin can scope the platform flag with `tenantIds` (§12.4). *Mike cannot turn it on; someone with platform-admin can turn it on for Mike* |
 | **2.8** | **As J**, I want a customer's photo of a leaking heater to become a draft quote, so I can price it from the truck | **Given** an MMS from an unknown number, **when** ingest runs, **then** a `draft_estimate` proposal persists with `tenant_id` and an audit row — and an **ambiguous sender yields a clarification, never a draft** | **4** ↑ | **D:** `mms-to-quote.int.test.ts` |
 | **2.9** | **As M**, I want customers to book themselves on my website without a login, so I stop playing phone tag | **Given** the public page, **when** a customer picks a real open slot, **then** a held appointment is written pending my approval | **3** 🚨 | Route mounted, `/book` ships — **but the only test is in-memory supertest** |
 | **2.10** | **As M**, I want an unclaimed text to become a thread I can answer, so SMS isn't a black hole | **Given** concurrent inbound texts from one unmatched number, **when** captured, **then** they collapse to a single open thread with no cross-tenant bleed | 4 | **D:** `inbound-sms-capture.test.ts` |
@@ -1568,7 +1568,7 @@ question they answer is not "is it built" but **"is it still true."**
 | 5 | **A second classifier reviews every booking and quote** | **NOT-KEPT** | See A.7. The gate has **two call sites**, both in one file; one is conditional on `ready_for_review`, so **low-confidence quotes are excluded**; the default mode is `shadow`, where `hold` is always false; and `pricing_anomaly` is **not** in `CUSTOMER_HARM_CHECKS`, so a pricing anomaly on a quote **can never hold in any mode**. | **S:** `grep -rn "getSupervisorReviewGate()" packages/api/src` → **2 call sites** |
 | 6 | Emergency intent overrides automation | **KEPT-AND-PROVEN** | An E1/E2 utterance with a vulnerability signal, on a tenant configured with nothing but an owner phone, dials the owner's cell within the same turn; if unanswered for 60 s it produces a high-priority booking plus an owner SMS, never a normal booking. The tier classifier works with **no rules loaded**. Open item: `E1_SCRIPT_REVIEW_REQUIRED` is still `true`. | **U:** `emergency-tier.test.ts` `triage-decision.test.ts` `voice/triage/` `emergency-immediate-dial.test.ts` `gather-vulnerability-triage.test.ts` |
 | 7 | Never discounts or promises scope changes | **KEPT-AND-PROVEN** | On an unconfigured tenant every price-pressure utterance produces a capture-class, low-confidence owner callback carrying a recommendation — never a committed price — **and no registered proposal type can express an AI-applied discount.** That second clause is a type-level impossibility proof, not a behaviour sample. **The strongest of the fourteen.** | **U:** `negotiation-invariant.test.ts` `discount-evaluator.test.ts` `settings/discount-policy.test.ts` |
-| 8 | Dropped calls trigger SMS recovery | **KEPT-BUT-DARK** | A normally-provisioned tenant receives a recovery SMS 60 s after a dropped inbound call. The pipeline is proven at real Postgres **including the flag-on transition** — but `setTenantFlag` has **zero production callers**, no route writes `tenant_feature_flags`, and no web UI references the admin endpoint. Rows are scheduled, then expire unsent. | **S:** `grep -rn "setTenantFlag" packages/api/src packages/web/src` → **definition only** |
+| 8 | Dropped calls trigger SMS recovery | **KEPT-BUT-DARK** | A normally-provisioned tenant receives a recovery SMS 60 s after a dropped inbound call. The pipeline is proven at real Postgres **including the flag-on transition**. `setTenantFlag` has **zero production callers** and no route writes `tenant_feature_flags` — but a platform admin *can* scope the platform flag to chosen tenants (§12.4), so this is admin-API-only rather than unreachable. For a normally-provisioned tenant with nobody intervening, rows are scheduled and expire unsent. | **S:** `grep -rn "setTenantFlag" packages/api/src packages/web/src` → **definition only** — which is true and, on its own, does **not** establish that the capability cannot be ramped |
 | 9 | B2B account recognition is first-class | **KEPT-BUT-DARK** | Two identical calls — one from a `property_manager`, one residential — produce **observably different** outcomes. The context is assembled onto the session and **read nowhere** — `session.b2bAccountContext` is written once at `twilio-adapter.ts:953` with no consumer, **`buildAccountContextPromptSection` has zero production callers**, and nothing routes on `ctx.priority`. Recognition is implemented and tested; *routed differently* is not implemented. *(An earlier draft credited "one supervisor check" here. The supervisor's `resolveAccountType` reloads `customer.accountType` from the customer row, not from this call context — a separate path that is unaffected by whether the call recognised a portfolio account.)* | **S:** `grep -rn "buildAccountContextPromptSection" packages/api/src` → **definition only** |
 | 10 | Vertical packs genuinely differ | **KEPT-BUT-UNPROVEN** | For every pair of shipped packs, the `sttKeywords`, terminology key sets, `repairTemplates` and SKU sets are pairwise non-identical. **They genuinely differ** — 12 vs 12 fully disjoint STT keywords, disjoint terminology, plumbing-only `minor_issue` objection, different rates *and* different SKUs. **But only pricing has a cross-pack test.** A refactor collapsing `sttKeywords` to a shared list would keep the suite green. | **U:** `test/verticals/` `test/packs/seed-pack-defaults.test.ts` |
 | 11 | Google review monitoring with draft-response approval | **KEPT-AND-PROVEN** | A new review on a connected tenant produces a draft `review_response_proposal` with PII redacted **on input and output**, approvable from the inbox, never duplicated on re-sweep. Reachable — no feature flag; the OAuth connect flow has a shipped settings UI. | **U:** `workers/google-reviews.test.ts` `test/reputation/` · **W:** `InboxPage.reviewResponse.test.tsx` · **E:** `e2e/review-response-approval-mobile.spec.ts` |
@@ -2423,10 +2423,26 @@ ever be enabled. That is wrong, and the distinction is operationally important:
   `DATABASE_URL` is present; it fails closed only without a database. A row in
   `platform_admins` plus `PUT /api/admin/feature-flags/:name` works today. There
   is no UI for it, but there is a path.
-- **Per-tenant overrides CANNOT be set at all.** `setTenantFlag` has **zero
-  callers and no route**. So any capability gated per-tenant — dropped-call
-  recovery, vulnerability triage — is all-or-nothing at the platform level, with
-  no ramp mechanism. That is the real structural gap.
+- **`setTenantFlag` has zero callers and no route** — true, and that is where an
+  earlier draft stopped. **The conclusion drawn from it was wrong.**
+
+  Per-tenant ramping *is* reachable, through a different mechanism:
+  `PUT /api/admin/feature-flags/:name` persists a `tenantIds` array
+  (`routes/feature-flags.ts:99`), and `PgTenantFeatureFlagRepository._resolve`
+  falls back to the platform flag **evaluated for the current tenant** — its own
+  comment says it "honours environments and tenantIds scoping, not just the raw
+  enabled bit." `isFeatureEnabled` enforces it: a non-empty `tenantIds` returns
+  false for any tenant not in the list (`flags/feature-flags.ts:58`).
+
+  Both capabilities resolve through that path — dropped-call recovery via
+  `dropped-call-worker.ts:148` and vulnerability triage via
+  `vulnerability-triage-hook.ts:113`, both calling `isEnabledForTenant`.
+
+  So the gap is **an admin-API-only control**, not "all-or-nothing" and not a
+  missing ramp. A platform admin can enable either capability for a chosen set
+  of tenants today; nobody else can, and no UI exposes it. *Caught in review
+  (Codex P2) — the unwritten `setTenantFlag` was real, and reading "therefore no
+  ramp exists" off it was an inference, not a measurement.*
 
 **Settings unreachable even by API — and the failure is silent.**
 `updateSettingsSchema` is a plain `z.object(…).superRefine(…)`. It is **not**
@@ -2541,25 +2557,34 @@ should be editable after provisioning is a product question, not an omission.
   it through `instance?.notifyChange(...)` — so the optional chain makes a
   permanent no-op completely silent.
 
-#### "Dark by default" understates two of these — they are unlit-able
+#### "Dark by default" understates one of these — it is unlit-able
 
-A default-off flag implies someone can turn it on. For two of the items above,
-and one module not previously listed, **no product surface can**:
+A default-off flag implies someone can turn it on. For **one** module, not
+previously listed, **no surface can** — not even an admin API:
 
 | Capability | The blocker |
 |---|---|
-| Dropped-call SMS recovery | `setTenantFlag` has **zero production callers**. No route writes `tenant_feature_flags`; no web UI references the platform-admin endpoint. The only writer is SQL by hand |
-| Voice vulnerability triage | Same flag mechanism, same absence |
 | Technician assignment notification | `setTechnicianAssignmentNotifier` has **zero callers**. The accessor is `await instance?.notifyChange(change)`, so every production assignment fires a silent no-op — while the module's own doc-comment says *"app.ts registers one notifier"* and *"Called once in app.ts."* |
 
-Each of these is fully built, and **one** — dropped-call recovery — is proven at
-real Postgres; 2.6 is rung 3 (unit-only) and 4.11 is rung 2. *(An earlier draft
-said "three cases" while the table held four rows, one of which was rung 2 — the
-count was wrong before the digest was removed from it.)* What they need is a
-write path, not a feature.
+It is rung 2 — built, never called — and what it needs is one wiring line, not a
+feature.
 
-**The end-of-day digest was listed here and does not belong.** Its blocker is a
-different and cheaper one: `PUT /api/settings` already accepts `digestEnabled`,
+**This table began with four rows and has lost three of them to review**, which
+is the more useful finding:
+
+| Was listed as unlit-able | Actually |
+|---|---|
+| End-of-day digest | `PUT /api/settings` accepts `digestEnabled` — missing a **client control** |
+| Dropped-call SMS recovery | platform-admin can scope the flag by `tenantIds` — missing an **owner-facing control** |
+| Voice vulnerability triage | same mechanism, same correction |
+
+Three of four "no surface can enable this" claims were wrong, each for the same
+reason: **a grep proving one specific writer is unwired was read as proving no
+writer exists.** `setTenantFlag` really does have zero callers; that fact is
+true and the conclusion drawn from it was not. Only the technician-assignment
+notifier survives, and it survives because nothing anywhere calls it.
+
+On the digest specifically, the falsifier deserves its own note: `PUT /api/settings` already accepts `digestEnabled`,
 `digestTime` and `digestChannel` behind `settings:update`, and
 `PgSettingsRepository` maps all three to their columns — so an owner with the
 permission can switch the digest on through the API today. What is missing is a
@@ -2569,8 +2594,11 @@ does return nothing — but only because the key lives in `src/shared/contracts.
 which the route imports. It was scoped where it could not see the thing it was
 meant to test (§12.4d).
 
-Together with the digest's missing toggle these are roughly a day of work, and
-they light four of the capabilities the strategy documents cite most.
+All four are roughly a day of work between them — one wiring line, two
+owner-facing controls, one client toggle — and they light four of the
+capabilities the strategy documents cite most. **Three of the four need a
+control, not a write path**, which is a materially cheaper backlog than this
+section claimed for most of its life.
 
 The last row is also the clearest instance of §12.4d's first rule: **a
 doc-comment claiming a module is wired is a claim, not a wiring.**
@@ -2585,7 +2613,7 @@ one a customer would notice first:
 | Story | Rung | Why it still fails |
 |---|---|---|
 | **9.6** End-of-day digest | 4 | `PUT /api/settings` accepts `digestEnabled` today; **no web or mobile control sends it**. The product's central promise ships off, with no switch an owner can reach |
-| **2.7** Dropped-call recovery | 4 | `setTenantFlag` has zero production callers |
+| **2.7** Dropped-call recovery | 4 | Enable-able by a platform admin via `PUT /api/admin/feature-flags/:name` with `tenantIds`; **no owner-facing surface exposes it** |
 | **1.11** Team invites | 4 | The invite row is written perfectly and the email 404s — `/accept-invitation` has no route |
 | **4.11** Technician assignment notice | 2 | Silent no-op on every assignment; doc-comment says otherwise |
 | **2.12** B2B recognition | 2 | Recognised, assembled, and **never routed on** — no reader anywhere |
