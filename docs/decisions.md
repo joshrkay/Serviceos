@@ -847,22 +847,40 @@ engineering archive — v5 does not replace it. Part E's **rung ladder is retain
 (0 Absent … 6 Live, where rung 4 requires a real-database proof including the audit event): it is
 the instrument that got its own two worst findings fixed, and v5 scores against it.
 
-3. **Four founding commitments shipped dark, and that was drift rather than staged rollout.**
-Verified against code: `digest_enabled` defaults false with **no control in web or mobile** that
-writes it; `brand_voice_configurator` is seeded explicitly `enabled: false`; dropped-call recovery
-is gated on a per-tenant flag whose dedicated writer is unwired (`setTenantFlag` has zero callers
-and no route — though *corrected 2026-09-12:* a platform admin can still scope the platform flag by
-`tenantIds`, so the capability is admin-API-only rather than unreachable; see PRD §12.4); and B2B account context is assembled onto the session and **read nowhere**. The
-distinguishing evidence for drift over staging is dropped-call recovery: a capability with no
-switch cannot have been staged for a rollout. Remediation is a launch checklist, not an
-architecture change.
+3. **Four founding commitments shipped dark**, and for one of them that is drift rather than
+staged rollout. Verified against code, and *dark* means the same thing for all four — on a
+normally-provisioned tenant, with nobody intervening, the capability does not run:
 
-*— corrected 2026-09-12. This sentence originally named **the digest** as the distinguishing
-evidence, and the premise was wrong: the digest does have a switch (`PUT /api/settings` accepts
-`digestEnabled`), just no UI. An API-only switch is exactly what a staged rollout would look like,
-so the digest was the **weakest** of the four as evidence for drift, not the strongest. The
-conclusion survives on dropped-call recovery and B2B context, which genuinely have no write path
-and no reader respectively — but it survives on those, not on the one this sentence cited.*
+   - **The digest** (`digest_enabled`) defaults false. `PUT /api/settings` accepts
+     `digestEnabled`, but **no control in web or mobile writes it**.
+   - **The brand-voice configurator** (`brand_voice_configurator`) is seeded explicitly
+     `enabled: false`, and the settings UI is gated on it (`SettingsPage.tsx:1150`).
+   - **Dropped-call recovery** is gated per tenant. Its dedicated writer is unwired —
+     `setTenantFlag` has zero callers and no route — but a platform admin can scope the
+     platform flag by `tenantIds` (`PUT /api/admin/feature-flags/:name`), which
+     `PgTenantFeatureFlagRepository._resolve` evaluates for the calling tenant. Admin-API-only,
+     not unreachable. See PRD §12.4.
+   - **B2B account context** is assembled onto the session and **read nowhere**:
+     `session.b2bAccountContext` is written once and has no consumer.
+
+   **The drift-over-staging reading now rests on B2B context alone.** The other three each have
+a working write path, and a flag with a ramp path is what a staged rollout and an abandoned one
+look like *alike* — the brand-voice configurator (flag + per-tenant ramp + a UI already built
+behind it) is if anything better explained as staging than as drift. B2B context is the one that
+cannot be read either way: there is no flag, because there is nothing to ramp *to*. The capability
+was never finished, so no stage of a rollout describes its current state. Remediation is a launch
+checklist rather than an architecture change for all four regardless — that part of the ruling
+does not depend on which reading is right.
+
+*— corrected twice, both on 2026-09-12, and the second correction is the instructive one. This
+clause originally named **the digest** as the distinguishing evidence, on the premise that it had
+no switch; it has one (`PUT /api/settings`), just no UI. The first correction moved the argument
+to **dropped-call recovery** on the same premise, and that premise was wrong for the same reason:
+a platform admin can ramp it by `tenantIds`. The test itself was the defect. "A capability with no
+switch cannot have been staged" cannot distinguish drift from staging for anything that **has** a
+flag, which is three of the four — it only ever identified the capability that has no flag at all.
+Stated that way the conclusion is narrower and stops moving. (Both corrections: Codex review on
+PR #994.)*
 
 **Rationale:** This log's own history is the argument. D-025 found that a posture everyone cited
 ("approval is never voice-reachable") had never actually been decided, was attributed to an

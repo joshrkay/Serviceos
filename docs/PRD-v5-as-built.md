@@ -1190,9 +1190,11 @@ The two come apart in **both** directions, and neither direction is visible in
 an engineering-only view:
 
 - **Rung 4 and the story still fails.** 9.6 (the end-of-day digest) and 2.7
-  (dropped-call recovery) are proven at real Postgres and **Mike cannot turn
-  either on**. 4.11 is worse: Carlos is never notified of an assignment, and the
-  module's own doc-comment claims otherwise.
+  (dropped-call recovery) are proven at real Postgres and **no control Mike can
+  reach turns either on** — the digest's switch is tenant-API-only with no UI,
+  dropped-call recovery's is platform-admin-only (§12.4). Both have a switch;
+  neither has one *Mike* has. 4.11 is worse: Carlos is never notified of an
+  assignment, and the module's own doc-comment claims otherwise.
 - **Rung 3 and the story is probably fine.** 2.5 (emergency detection) has a
   thorough bilingual corpus and an upward-only bias. It is very likely correct.
   We simply cannot *confirm* it survives a real database — and for a life-safety
@@ -1882,11 +1884,13 @@ prose, and prose drifts. Three defences:
 3. **A status change is never one edit.** This document states the same fact in
    four to six places — §0, the §5/§8 row, §11.0c, §11.0e, §12, and often a
    D-NNN entry in `docs/decisions.md`. Every single status correction on this
-   PR has had to be applied more than once, and **four were caught only because
+   PR has had to be applied more than once, and **five were caught only because
    a reviewer found the copy I missed**: D-032's consequences after its first
    clause was fixed, §11.0c's backlog after §11.0e's was, the T0 verdict after
-   the grades that retired it were published, and the §8 epic table after the
-   digest's reachability was corrected in four other places. So when a status
+   the grades that retired it were published, the §8 epic table after the
+   digest's reachability was corrected in four other places, and D-030's
+   *"a capability with no switch cannot have been staged"* after the clause it
+   rests on was corrected **two lines above it, in the same paragraph.** So when a status
    changes, the edit is not done until this returns nothing unexpected:
 
    ```bash
@@ -1902,6 +1906,15 @@ prose, and prose drifts. Three defences:
    contained neither string. A restatement in plain English is invisible to a
    grep for the identifier, and a summary table is exactly where a claim gets
    restated in plain English.
+
+   **Re-read the paragraph, not the line.** The fifth case above is the one no
+   grep would have caught: the sentence that contradicted the fix sat two lines
+   below it, and the edit that introduced the contradiction *was the correction
+   itself.* A fix dropped in as a parenthetical leaves every sentence
+   downstream of it still asserting the premise it just withdrew. A correction
+   is therefore not applied to a line, it is applied to the argument: read
+   forward to the end of the claim and ask what else was resting on what you
+   just changed.
 
    Fixing the line a reviewer pointed at is the *start* of the fix. **An
    incomplete correction is worse than none: it leaves two statements that
@@ -2405,7 +2418,7 @@ that the strategy documents treat as differentiators:
 |---|---|---|
 | #2 Digest is the dashboard | `digest_enabled` defaults false | Accepted by `PUT /api/settings` — **but no control in web or mobile writes it**, and the `/digest` page is a registered route with no nav entry |
 | #12 Brand voice configurable | `brand_voice_configurator` seeded explicitly `enabled: false` | Deliberate dark-launch (the comment says so). Platform-admin API only |
-| #8 Dropped call → SMS recovery | per-tenant `dropped_call_recovery` flag | **No per-tenant flag write path exists** (below) |
+| #8 Dropped call → SMS recovery | per-tenant `dropped_call_recovery` flag | **Platform-admin API only** — the dedicated per-tenant writer (`setTenantFlag`) is unwired, but an admin can ramp it by `tenantIds` (below) |
 | #9 B2B recognition first-class | context assembled, `session.b2bAccountContext` written once, **read nowhere** | Missing wiring, not missing capability |
 
 **The revenue cluster.** Four money-mechanics capabilities, each fully
@@ -2622,7 +2635,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how nine of these were got wrong
+### 12.4d A note on method — how ten of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2786,11 +2799,41 @@ What makes it the specimen is the distribution:
 | D-030 in `docs/decisions.md` | the founding-commitments table |
 
 **Two and two, and the correct version was already there before this edition.**
-That is the shape of seven of the seventeen findings raised against this
-document: one claim, two files, opposite verdicts, the truth already present
-somewhere. §11.0d's third defence asks a human to grep the subject on every
-status change — and a human forgetting is precisely what it cannot prevent, as
-this row proves after two review passes over the same section.
+That is the shape of **ten** of the findings raised on this PR — one claim,
+two or more places, opposite verdicts, the truth usually already present
+somewhere in the repo — and it is the most common single defect in this
+reconstruction. §11.0d's third defence asks a human to grep the subject on
+every status change, and a human forgetting is precisely what it cannot
+prevent, as this row proves after two review passes over the same section.
+
+**The tenth is the one that beat every defence, including the ones written to
+stop it.** D-030 argued that the four dark commitments were drift rather than a
+staged rollout, on the evidence that one of them *had no switch at all*. That
+argument has now been wrong three times, in the same way, about a different
+capability each time:
+
+| Edition | Cited as the capability with no switch | Why it was wrong |
+|---|---|---|
+| Original | The digest | `PUT /api/settings` accepts `digestEnabled` |
+| Corrected 2026-09-12 (1st) | Dropped-call recovery | A platform admin can ramp it by `tenantIds` |
+| Corrected 2026-09-12 (2nd) | — | **The test cannot work**: three of the four *have* flags |
+
+The second correction is the instructive one, for two reasons. First, the
+contradiction it fixed was **two lines below the clause the first correction
+edited, inside the same paragraph** — no grep was needed or would have helped,
+because the correction itself created it: a parenthetical was inserted and the
+sentences resting on the withdrawn premise were left standing. That failure
+mode is now §11.0d's *"re-read the paragraph, not the line."*
+
+Second, and more useful: the defect was never in any one citation, it was in
+the **test**. "A capability with no switch cannot have been staged for a
+rollout" cannot distinguish drift from staging for anything that has a flag,
+and three of the four do. It only ever identified the one capability with no
+flag at all — B2B account context, which has none because there is nothing to
+ramp *to*. Two editions of this document searched for a better example instead
+of noticing that the question was unanswerable as posed. **A claim that has to
+change its evidence twice is usually not short of evidence; it is the wrong
+claim.**
 
 **So the honest conclusion of this section is that it should not exist as
 prose.** Every entry above is a check a machine could run: does a cited file
