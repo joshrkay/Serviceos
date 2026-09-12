@@ -101,6 +101,13 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
   /**
    * The ONLY stub in this file: Stripe's REST API. Records every call so the
    * 409 leg can prove the gate closes BEFORE Stripe is ever dialled.
+   *
+   * FAILS CLOSED (xhawk-ai review, PR #1097): it matches method AND exact URL
+   * for the four calls named in the file header, and throws on anything else.
+   * An earlier cut fell through to a successful PaymentIntent for every
+   * unmatched URL, which would have masked a fifth Stripe call or a wrong
+   * endpoint while the report claimed the boundary was exactly those four —
+   * the stub would have been quietly widening the very claim it backs.
    */
   const stripeFetch: StripeFetch = async (url, init) => {
     stripeCalls.push({
@@ -108,7 +115,9 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       headers: init.headers as Record<string, string>,
       body: String(init.body ?? ''),
     });
-    if (url.includes('/v1/accounts/')) {
+    const method = (init.method ?? '').toUpperCase();
+
+    if (method === 'GET' && /^https:\/\/api\.stripe\.com\/v1\/accounts\/[^/?]+$/.test(url)) {
       return {
         ok: true,
         status: 200,
@@ -126,7 +135,7 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         }),
       };
     }
-    if (url.includes('/v1/terminal/locations')) {
+    if (method === 'POST' && url === 'https://api.stripe.com/v1/terminal/locations') {
       return {
         ok: true,
         status: 200,
@@ -134,7 +143,7 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         json: async () => ({ id: CREATED_LOCATION_ID }),
       };
     }
-    if (url.includes('/v1/terminal/connection_tokens')) {
+    if (method === 'POST' && url === 'https://api.stripe.com/v1/terminal/connection_tokens') {
       return {
         ok: true,
         status: 200,
@@ -142,21 +151,29 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         json: async () => ({ secret: 'pst_doorstep_secret' }),
       };
     }
-    // POST /v1/payment_intents — the card_present intent.
-    const params = new URLSearchParams(String(init.body ?? ''));
-    const id = `pi_term_${randomUUID().replace(/-/g, '').slice(0, 18)}`;
-    return {
-      ok: true,
-      status: 200,
-      text: async () => '',
-      json: async () => ({
-        id,
-        client_secret: `${id}_secret_test`,
-        amount: Number(params.get('amount')),
-        currency: params.get('currency'),
-        payment_method_types: ['card_present'],
-      }),
-    };
+    if (method === 'POST' && url === 'https://api.stripe.com/v1/payment_intents') {
+      const params = new URLSearchParams(String(init.body ?? ''));
+      const id = `pi_term_${randomUUID().replace(/-/g, '').slice(0, 18)}`;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          id,
+          client_secret: `${id}_secret_test`,
+          amount: Number(params.get('amount')),
+          currency: params.get('currency'),
+          payment_method_types: ['card_present'],
+        }),
+      };
+    }
+
+    throw new Error(
+      `Unstubbed Stripe call: ${method} ${url}. The stub boundary in this file is ` +
+        'exactly four calls (see the header); a fifth means the route changed and ' +
+        'the boundary claim in docs/audit/lane-reports/execute-8-5-terminal.md ' +
+        'must be re-stated, not silently widened.',
+    );
   };
 
   async function seedOpenInvoice(t: TestTenant): Promise<string> {
@@ -675,6 +692,15 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     const cross = await postSignedStripe(
       terminalSucceededEvent(crossEventId, paymentIntentId, noConnect.tenantId, invoiceId),
     );
+    // 500 is TODAY'S behaviour, pinned as an observation, not endorsed: the
+    // handler throws 'Invoice not found', so the delivery is not ACKed and
+    // Stripe retries an event that can never succeed. The same shape is
+    // already pinned for the online path at invoice-webhook-paid.test.ts:320.
+    // Raised by xhawk-ai on PR #1097, and it has a point — a 200-with-skipped
+    // would be kinder to the retry queue — but changing it is a money-surface
+    // webhook change this test-only lane is barred from making, so the row's
+    // real invariant is asserted independently of the status code below:
+    // whatever the response, NOTHING is credited to either tenant.
     expect(cross.status).toBe(500);
 
     const untouched = await invoiceRepo.findById(connected.tenantId, invoiceId);

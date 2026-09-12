@@ -29,6 +29,8 @@ The **only** thing stubbed is Stripe's own REST API, at the `StripeFetch` seam t
 
 Everything else is real: real Postgres (testcontainer or a kept plain container), the real terminal router with its real `requireAuth`/`requireTenant`/`requirePermission` chain, the real `StripeConnectService` reading and writing the real `tenants.stripe_connect_*` / `stripe_terminal_location_id` columns, real `PgInvoiceRepository` / `PgPaymentRepository` / `PgAuditRepository` / `PgWebhookRepository`, and the **real signed `createWebhookRouter` settlement path** (HMAC per `invoice-webhook-paid.test.ts`). No DB is mocked. The webhook is not stubbed. **On the 409 leg the Stripe stub is asserted to have received zero calls** — the gate closes before the network.
 
+**The stub fails closed** (xhawk-ai review on PR #1097, finding accepted). It matches method **and** exact URL for those four calls and throws on anything else. The first cut fell through to a successful PaymentIntent for every *unmatched* URL, so a fifth Stripe call or a wrong endpoint would have been silently absorbed while this report claimed the boundary was exactly four — the stub would have been quietly widening the claim it exists to back. Negative control in §2.7.
+
 ---
 
 ## 2. Commands and raw output
@@ -118,6 +120,24 @@ cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integrat
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit   # exit 0
 cd packages/api && npx tsc --noEmit | grep stripe-terminal-doorstep # no output
 ```
+
+### 2.7 RED — negative control on the fail-closed stub (post-review)
+
+With the stub's `POST /v1/payment_intents` matcher pointed at a deliberately wrong URL, the route's real call goes unmatched, the stub throws instead of fabricating an intent, and the route 500s:
+
+```
+ × … > connected tenant: card_present intent → signed webhook settles the invoice at real Postgres 29ms
+   → expected 500 to be 200 // Object.is equality
+ × … > an UNSIGNED delivery of the same terminal capture credits nothing 22ms
+   → expected 500 to be 200 // Object.is equality
+ × … > T1 cross-tenant on settlement: a terminal intent naming another tenant credits nothing 22ms
+   → expected 500 to be 200 // Object.is equality
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 4 passed (7)
+```
+
+Control reverted; re-run GREEN — `stripe-terminal-doorstep` + `invoice-webhook-paid` **2 files · 11 passed**, unit lane **16 files · 132 passed**, `tsc --project tsconfig.build.json --noEmit` exit 0.
 
 ---
 
