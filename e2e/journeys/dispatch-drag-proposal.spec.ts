@@ -280,6 +280,12 @@ async function dragEarlyCardAndConfirm(
   await blockExternalHosts(page, baseURL);
   await page.goto('/dispatch');
   await expect(page.getByTestId('dispatch-board')).toBeVisible({ timeout: 15_000 });
+  // Codex review (dispatch-board.spec.ts finding, same assumption here):
+  // DispatchBoard.tsx defaults `selectedDate` from the browser's LOCAL date
+  // parts, while `fixture.todayStr` is the UTC calendar date the jobs were
+  // seeded against — those only coincide on a UTC-clocked runner. Pin the
+  // board to the fixture's date explicitly rather than relying on that.
+  await page.getByTestId('date-nav-picker').fill(fixture.todayStr);
 
   const lane = page.locator(`[data-testid="technician-lane"][data-technician-id="${fixture.techId}"]`);
   await expect(lane).toBeVisible({ timeout: 15_000 });
@@ -383,17 +389,21 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     expect(proposalA.payload.appointmentId, 'A\'s proposal payload must target the dragged appointment').toBe(
       fixtureA.earlyAppt.id,
     );
+    // Codex review round 4: `not.toBe` + duration-preserved would still pass
+    // for ANY other one-hour slot (e.g. 10:00-11:00), not just the ACTUAL
+    // final gap the drag targeted. The lane holds two 60-min appointments
+    // (09:00 and 13:00-14:00 UTC); dragging the 09:00 card to the lane's
+    // LAST gap packs it immediately after the 13:00-14:00 appointment ends
+    // (DispatchBoard.tsx's `computeProposedSlot`, insertIndex >= lane
+    // length -> `pack(lastEnd)`) — assert that EXACT destination.
+    const aExpectedFinalGapStart = `${fixtureA.todayStr}T14:00:00.000Z`;
+    const aExpectedFinalGapEnd = `${fixtureA.todayStr}T15:00:00.000Z`;
     expect(
       proposalA.payload.newScheduledStart,
-      'A\'s proposal must propose a genuinely different start time (the final gap), not a no-op',
-    ).not.toBe(fixtureA.earlyAppt.scheduledStart);
-    const aOriginalDurationMs =
-      new Date(fixtureA.earlyAppt.scheduledEnd).getTime() - new Date(fixtureA.earlyAppt.scheduledStart).getTime();
-    const aProposedDurationMs =
-      new Date(proposalA.payload.newScheduledEnd as string).getTime() -
-      new Date(proposalA.payload.newScheduledStart as string).getTime();
-    expect(aProposedDurationMs, 'A\'s proposed slot must preserve the original appointment duration').toBe(
-      aOriginalDurationMs,
+      'A\'s proposal must target the ACTUAL final gap (right after the 13:00-14:00 appointment), not just any other time',
+    ).toBe(aExpectedFinalGapStart);
+    expect(proposalA.payload.newScheduledEnd, 'A\'s proposed end must preserve the dragged appointment\'s duration').toBe(
+      aExpectedFinalGapEnd,
     );
     await page.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-after-drag.png',
@@ -406,17 +416,14 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     expect(proposalB.payload.appointmentId, 'B\'s proposal payload must target the dragged appointment').toBe(
       fixtureB.earlyAppt.id,
     );
+    const bExpectedFinalGapStart = `${fixtureB.todayStr}T14:00:00.000Z`;
+    const bExpectedFinalGapEnd = `${fixtureB.todayStr}T15:00:00.000Z`;
     expect(
       proposalB.payload.newScheduledStart,
-      'B\'s proposal must propose a genuinely different start time (the final gap), not a no-op',
-    ).not.toBe(fixtureB.earlyAppt.scheduledStart);
-    const bOriginalDurationMs =
-      new Date(fixtureB.earlyAppt.scheduledEnd).getTime() - new Date(fixtureB.earlyAppt.scheduledStart).getTime();
-    const bProposedDurationMs =
-      new Date(proposalB.payload.newScheduledEnd as string).getTime() -
-      new Date(proposalB.payload.newScheduledStart as string).getTime();
-    expect(bProposedDurationMs, 'B\'s proposed slot must preserve the original appointment duration').toBe(
-      bOriginalDurationMs,
+      'B\'s proposal must target the ACTUAL final gap (right after the 13:00-14:00 appointment), not just any other time',
+    ).toBe(bExpectedFinalGapStart);
+    expect(proposalB.payload.newScheduledEnd, 'B\'s proposed end must preserve the dragged appointment\'s duration').toBe(
+      bExpectedFinalGapEnd,
     );
     await bPage.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-tenant-b-after-drag.png',

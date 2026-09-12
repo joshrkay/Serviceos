@@ -282,8 +282,8 @@ test.describe('dispatch board (4.1) — real Postgres', () => {
     );
     expect(boardARes.ok(), `GET board (A) -> ${boardARes.status()}`).toBeTruthy();
     const boardA = (await boardARes.json()) as {
-      unassignedAppointments: Array<{ jobId: string }>;
-      technicianLanes: Array<{ appointments: Array<{ jobId: string }> }>;
+      unassignedAppointments: Array<{ id: string; jobId: string }>;
+      technicianLanes: Array<{ appointments: Array<{ id: string; jobId: string }> }>;
     };
     const boardAJobIds = new Set([
       ...boardA.unassignedAppointments.map((a) => a.jobId),
@@ -325,10 +325,30 @@ test.describe('dispatch board (4.1) — real Postgres', () => {
     await page.goto('/dispatch');
     await expect(page.getByTestId('dispatch-board')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('dispatch-board-loading')).toHaveCount(0, { timeout: 15_000 });
+    // Codex review: DispatchBoard.tsx defaults `selectedDate` from the
+    // BROWSER's local date parts (`new Date()`), while `todayStr` above is
+    // computed from the UTC calendar date. Those only coincide by luck of
+    // the runner's system timezone (CI happens to run UTC) — pin the board
+    // to `todayStr` explicitly, exactly like the T3 leg does for owner B
+    // below, rather than relying on that coincidence.
+    await page.getByTestId('date-nav-picker').fill(todayStr);
 
     const cardsA = page.getByTestId('appointment-card');
     await expect(cardsA).toHaveCount(2, { timeout: 15_000 });
-    await expect(page.locator(`[data-appointment-id]`).filter({ hasText: '' })).toBeTruthy();
+    // Codex review: `toHaveCount(2)` plus a `toBeTruthy()` on a Locator
+    // object (always truthy, match or no match) doesn't prove the browser
+    // rendered THESE two appointments rather than duplicates or the wrong
+    // records. Assert the actual seeded appointment ids are present.
+    const boardAAppointments = [
+      ...boardA.unassignedAppointments,
+      ...boardA.technicianLanes.flatMap((l) => l.appointments),
+    ];
+    const apptA1 = boardAAppointments.find((a) => a.jobId === jobA1.id)!;
+    const apptA2 = boardAAppointments.find((a) => a.jobId === jobA2.id)!;
+    expect(apptA1, 'job A1\'s appointment must be resolvable from the board API response').toBeTruthy();
+    expect(apptA2, 'job A2\'s appointment must be resolvable from the board API response').toBeTruthy();
+    await expect(page.locator(`[data-appointment-id="${apptA1.id}"]`), 'job A1\'s card must render').toBeVisible();
+    await expect(page.locator(`[data-appointment-id="${apptA2.id}"]`), 'job A2\'s card must render').toBeVisible();
 
     // Screenshot BEFORE reload.
     await page.screenshot({
@@ -337,6 +357,9 @@ test.describe('dispatch board (4.1) — real Postgres', () => {
     });
     await page.reload();
     await expect(page.getByTestId('dispatch-board')).toBeVisible({ timeout: 15_000 });
+    // A full reload remounts the board, which re-defaults to the browser's
+    // local date — re-pin to `todayStr` for the same reason as above.
+    await page.getByTestId('date-nav-picker').fill(todayStr);
     await expect(cardsA).toHaveCount(2, { timeout: 15_000 });
     await page.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.1-dispatch-board-owner-a-after-reload.png',
