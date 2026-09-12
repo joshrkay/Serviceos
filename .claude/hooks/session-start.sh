@@ -37,23 +37,51 @@ cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # ~5s for a warm `npm install` (measured in this image); that is the price of
 # a reproducible tree and a clean `git status`.
 #
-# Consequence worth keeping: with `npm ci` as the default path, a dirty
-# package-lock.json now MEANS something. Do not reflexively revert it.
+# Consequence worth keeping: this hook never writes package-lock.json on any
+# path (see the fallback below), so a dirty lockfile always means a human
+# changed it deliberately. Do not reflexively revert it.
 install_dependencies() {
   echo "[session-start] Installing workspace dependencies (npm ci)…"
   if npm ci; then
     return 0
   fi
 
-  # `npm ci` fails hard when package.json and package-lock.json disagree. That
-  # is a real signal, not a flake — but it must not leave the session without
-  # node_modules, and `set -e` would otherwise abort before Docker starts.
-  echo "[session-start] WARNING: npm ci failed — package-lock.json is likely out of sync"
+  # `npm ci` fails for two different reasons and the hook cannot tell them
+  # apart: package.json and package-lock.json genuinely disagree, OR the
+  # registry was unreachable. That matters, because the fallback below is the
+  # very `npm install` this file exists to avoid.
+  #
+  # In the out-of-sync case its lockfile changes would be meaningful. In the
+  # registry case — where a warm npm cache can still let it succeed — its only
+  # change is the `libc` stripping described above, i.e. the corruption. An
+  # earlier version of this hook told the reader the change was REAL and should
+  # be committed, which is right for the first case and actively wrong for the
+  # second (Codex P2, PR #994).
+  #
+  # So: run the fallback for its node_modules, then put the lockfile back. A
+  # bootstrap hook's job is to make the session usable, not to update
+  # dependencies — any lockfile edit it produces is a side effect nobody asked
+  # for. The invariant holds on every path: THIS HOOK NEVER REWRITES
+  # package-lock.json, so a dirty lockfile always means a human did it.
+  echo "[session-start] WARNING: npm ci failed — either package-lock.json is out of sync"
   echo "[session-start]          with package.json, or the registry is unreachable."
   echo "[session-start]          Falling back to npm install so the session is usable."
-  echo "[session-start]          If package-lock.json is modified after this, the change"
-  echo "[session-start]          is REAL: review and commit it deliberately, do not revert."
+
+  local snapshot
+  snapshot="$(mktemp)"
+  cp package-lock.json "$snapshot" 2>/dev/null || true
+
   npm install || echo "[session-start] WARNING: npm install also failed — dependencies are incomplete."
+
+  if [ -s "$snapshot" ] && ! cmp -s package-lock.json "$snapshot"; then
+    cp "$snapshot" package-lock.json
+    echo "[session-start]          NOTE: the fallback modified package-lock.json and the change"
+    echo "[session-start]          was REVERTED — it cannot be distinguished from the libc"
+    echo "[session-start]          stripping this hook exists to prevent. If package.json really"
+    echo "[session-start]          did change, regenerate the lockfile deliberately (npm install)"
+    echo "[session-start]          and review the diff before committing."
+  fi
+  rm -f "$snapshot"
 }
 
 install_dependencies

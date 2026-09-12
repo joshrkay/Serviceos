@@ -68,15 +68,40 @@ install_dependencies() {
   if npm ci; then
     return 0
   fi
-  # npm ci fails hard when package.json and package-lock.json disagree.
-  # That is a real signal — but it must not leave the session without
-  # node_modules, and `set -e` would otherwise abort before Docker starts.
+  # npm ci fails for two reasons the hook cannot tell apart: a genuine
+  # package.json/lockfile mismatch, OR an unreachable registry. Run the
+  # fallback for its node_modules, then put the lockfile back.
   echo "[session-start] WARNING: npm ci failed — …falling back to npm install…"
+  local snapshot; snapshot="$(mktemp)"
+  cp package-lock.json "$snapshot" 2>/dev/null || true
   npm install || echo "[session-start] WARNING: npm install also failed…"
+  if [ -s "$snapshot" ] && ! cmp -s package-lock.json "$snapshot"; then
+    cp "$snapshot" package-lock.json   # …and say so, loudly
+  fi
+  rm -f "$snapshot"
 }
 ```
 
-The `set -euo pipefail` at the top of the hook is why the fallback matters: a
+### The fallback needed a second pass
+
+The first version of this fix ran a bare `npm install` in the fallback and told
+the reader *"if package-lock.json is modified after this, the change is REAL:
+review and commit it deliberately."* **That is right for one of the two failure
+causes and actively wrong for the other**, and the hook cannot distinguish them:
+
+- **package.json really diverged** → the fallback's lockfile change is meaningful.
+- **registry unreachable** → a warm npm cache can still let `npm install`
+  succeed, and its only change is the `libc` stripping. The warning would then
+  be telling someone to commit the exact musl regression this fix exists to
+  prevent.
+
+Caught in review on PR #994. The fallback now snapshots the lockfile, runs
+`npm install` for its `node_modules`, and restores the file if it changed —
+saying loudly that it did so and that a genuine mismatch has to be regenerated
+deliberately. **The invariant now holds on every path: the hook never writes
+`package-lock.json`, so a dirty lockfile always means a human did it.**
+
+The `set -euo pipefail` at the top of the hook is why a fallback exists at all: a
 bare `npm ci` that fails would kill the hook at step 1, so the Docker daemon
 would never start and the integration testcontainer images would never be
 pre-pulled. The symptom would present as *"integration tests are broken"*, far
