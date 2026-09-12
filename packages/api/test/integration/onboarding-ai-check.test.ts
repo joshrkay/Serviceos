@@ -9,7 +9,6 @@ import { PgPackActivationRepository } from '../../src/settings/pg-pack-activatio
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createVerifyAiWorker, VERIFY_AI_JOB_TYPE } from '../../src/workers/verify-ai';
 import { createMockLLMGateway } from '../../src/ai/gateway';
-import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryQueue, QueueMessage } from '../../src/queues/queue';
 import { createLogger } from '../../src/logging/logger';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway';
@@ -42,22 +41,27 @@ describe('onboarding AI self-check', () => {
   let pool: Pool;
   let app: express.Express;
   let queue: InMemoryQueue;
+  let auditRepo: PgAuditRepository;
+  // Two-tenant auth shim — the middleware below reads `activeTenant` at
+  // request time so the T1 check can request /api/onboarding/status AS
+  // tenant B through the real route, not just query Postgres directly.
+  let activeTenant: { tenantId: string; userId: string };
   let currentTenant: { tenantId: string; userId: string };
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     const settingsRepo = new PgSettingsRepository(pool);
     const packActivationRepo = new PgPackActivationRepository(pool);
-    const auditRepo = new PgAuditRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     queue = new InMemoryQueue();
 
     app = express();
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
       (req as AuthenticatedRequest).auth = {
-        userId: currentTenant.userId,
+        userId: activeTenant.userId,
         sessionId: 'sess-test',
-        tenantId: currentTenant.tenantId,
+        tenantId: activeTenant.tenantId,
         role: 'owner',
       };
       next();
@@ -67,6 +71,7 @@ describe('onboarding AI self-check', () => {
 
   beforeEach(async () => {
     currentTenant = await createTestTenant(pool);
+    activeTenant = currentTenant;
   });
 
   afterAll(async () => {
@@ -76,7 +81,7 @@ describe('onboarding AI self-check', () => {
   it('passing verification → ai_check step done and DB status passed', async () => {
     await seedSettings(pool, currentTenant.tenantId, 'gpt-4o-mini');
     const { gateway } = createMockLLMGateway('pong');
-    const worker = createVerifyAiWorker({ pool, gateway, auditRepo: new InMemoryAuditRepository() });
+    const worker = createVerifyAiWorker({ pool, gateway, auditRepo });
 
     await worker.handle(message(currentTenant.tenantId), logger);
 
@@ -90,6 +95,32 @@ describe('onboarding AI self-check', () => {
     );
     expect(row.rows[0].ai_verification_status).toBe('passed');
     expect(row.rows[0].ai_verified_at).not.toBeNull();
+
+    // 1.8 (§8.1) — the write is AUDITED against real Postgres, not the
+    // mocked repo G1 flagged ("audit leg is InMemoryAuditRepository ×3").
+    const auditRows = await auditRepo.findByEntity(currentTenant.tenantId, 'tenant_settings', currentTenant.tenantId);
+    const verified = auditRows.filter((r) => r.eventType === 'tenant.ai_verified');
+    expect(verified).toHaveLength(1);
+    expect(verified[0].metadata?.model).toBeTruthy();
+
+    // T1 — a second tenant's status and audit trail are unaffected by this
+    // tenant's passing verification. Request the REAL route as tenant B
+    // (not a superuser-pool query filtered to B's own tenant_id, which
+    // would only prove B has no row of its own — not that A's row/status
+    // is invisible to B) so a status-read-path RLS regression would
+    // actually fail this assertion.
+    const tenantB = await createTestTenant(pool);
+    activeTenant = tenantB;
+    const statusB = await request(app).get('/api/onboarding/status');
+    activeTenant = currentTenant;
+    const aiStepB = statusB.body.steps.find((s: { id: string }) => s.id === 'ai_check');
+    expect(aiStepB.status).not.toBe('done');
+
+    // Query tenant A's entity id, scoped under tenant B — tenant B's OWN
+    // entity id would never match tenant A's row regardless of whether
+    // tenant filtering works, so it wouldn't actually prove isolation.
+    const bAudit = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_settings', currentTenant.tenantId);
+    expect(bAudit.filter((r) => r.eventType === 'tenant.ai_verified')).toHaveLength(0);
   });
 
   it('failing verification → ai_check step error with ai_verification_failed blocker', async () => {
@@ -99,7 +130,7 @@ describe('onboarding AI self-check', () => {
         throw new Error('provider down');
       },
     } as unknown as LLMGateway;
-    const worker = createVerifyAiWorker({ pool, gateway: throwingGateway, auditRepo: new InMemoryAuditRepository() });
+    const worker = createVerifyAiWorker({ pool, gateway: throwingGateway, auditRepo });
 
     await expect(worker.handle(message(currentTenant.tenantId), logger)).rejects.toThrow();
 
@@ -107,6 +138,11 @@ describe('onboarding AI self-check', () => {
     const aiStep = status.body.steps.find((s: { id: string }) => s.id === 'ai_check');
     expect(aiStep.status).toBe('error');
     expect(aiStep.blockers).toEqual(['ai_verification_failed']);
+
+    const auditRows = await auditRepo.findByEntity(currentTenant.tenantId, 'tenant_settings', currentTenant.tenantId);
+    const failed = auditRows.filter((r) => r.eventType === 'tenant.ai_verification_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].metadata?.error).toContain('provider down');
   });
 
   it('retry route resets status to pending and enqueues a verify_ai job', async () => {
@@ -128,5 +164,11 @@ describe('onboarding AI self-check', () => {
     );
     expect(row.rows[0].ai_verification_status).toBe('pending');
     expect(row.rows[0].ai_verification_error).toBeNull();
+
+    // The retry itself is AUDITED — read it back, not just inferred from
+    // the enqueue + status-reset side effects above.
+    const auditRows = await auditRepo.findByEntity(currentTenant.tenantId, 'tenant_settings', currentTenant.tenantId);
+    const retried = auditRows.filter((r) => r.eventType === 'tenant.ai_verification_retry');
+    expect(retried).toHaveLength(1);
   });
 });

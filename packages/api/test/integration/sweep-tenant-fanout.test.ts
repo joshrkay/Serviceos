@@ -47,6 +47,13 @@ import { PgDncRepository } from '../../src/compliance/dnc';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import { runDroppedCallRecoverySweep } from '../../src/workers/dropped-call-worker';
 import { PgDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
+import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
+import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
+import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
+import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+import { createAppointment } from '../../src/appointments/appointment';
+import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
+import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type { WeeklyFeedbackSnapshot } from '../../src/digest/weekly-feedback';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
@@ -481,6 +488,148 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
       expect(doomed).not.toBeNull();
       expect(ours).toContain(doomed);
       expect(visited).toEqual(expect.arrayContaining(ours));
+    });
+  });
+
+  /**
+   * appointment-reminder sweep — unlike hold-reaper/estimate-reminder above,
+   * this worker sends a customer-facing message and so needs a real
+   * job/customer/appointment behind each tenant it claims to reach (a bare
+   * `findByDateRange: fn` stub proves the enumerator loop but not that the
+   * right tenant actually got reminded, or that an unrelated tenant did not).
+   * §1015 3.9 — its integration test previously stubbed
+   * `listTenantIds: async () => [tenant.tenantId]` (single tenant, no
+   * fan-out claim at all).
+   */
+  describe('appointment-reminder sweep', () => {
+    let appointmentRepo: PgAppointmentRepository;
+    let jobRepo: PgJobRepository;
+    let customerRepo: PgCustomerRepository;
+    let settingsRepo: PgSettingsRepository;
+    let dispatchRepo: PgDispatchRepository;
+    let transactionalComms: TransactionalCommsService;
+    const NOW = new Date('2026-06-01T12:00:00Z');
+    const DUE_START = new Date(NOW.getTime() + 24 * 60 * 60 * 1000);
+    const NOT_DUE_START = new Date(NOW.getTime() + 5 * 24 * 60 * 60 * 1000);
+
+    beforeAll(() => {
+      appointmentRepo = new PgAppointmentRepository(pool);
+      jobRepo = new PgJobRepository(pool);
+      customerRepo = new PgCustomerRepository(pool);
+      settingsRepo = new PgSettingsRepository(pool);
+      dispatchRepo = new PgDispatchRepository(pool);
+      transactionalComms = new TransactionalCommsService({
+        delivery: new InMemoryDeliveryProvider(),
+        dispatchRepo,
+        dncRepo: new PgDncRepository(pool),
+        appointmentRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        invoiceRepo: new PgInvoiceRepository(pool),
+        pool,
+        logger,
+      });
+    });
+
+    /** A tenant with a real job/customer/appointment — the reminder window decides whether it is "due". */
+    async function seedReminderTenant(start: Date): Promise<{ tenantId: string; apptId: string }> {
+      const { tenantId, userId } = await createTestTenant(pool);
+      await pool.query(
+        `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone)
+         VALUES ($1, $2, $3, $4)`,
+        [uuidv4(), tenantId, 'Fan-out Reminders Co', 'America/Chicago'],
+      );
+      const customerId = uuidv4();
+      await customerRepo.create({
+        id: customerId,
+        tenantId,
+        firstName: 'Robin',
+        lastName: 'Diaz',
+        displayName: 'Robin Diaz',
+        primaryPhone: `+1555${tenantId.replace(/-/g, '').slice(0, 7)}`,
+        preferredChannel: 'sms',
+        smsConsent: true,
+        isArchived: false,
+        createdBy: userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const locationId = uuidv4();
+      await pool.query(
+        `INSERT INTO service_locations (id, tenant_id, customer_id, street1, city, state, postal_code, country)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [locationId, tenantId, customerId, '1 Main St', 'Austin', 'TX', '78701', 'US'],
+      );
+      const jobId = uuidv4();
+      await jobRepo.create({
+        id: jobId,
+        tenantId,
+        customerId,
+        locationId,
+        jobNumber: `JOB-${jobId.slice(0, 8)}`,
+        summary: 'Fan-out reminder job',
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const appt = await createAppointment(
+        {
+          tenantId,
+          jobId,
+          scheduledStart: start,
+          scheduledEnd: new Date(start.getTime() + 60 * 60 * 1000),
+          timezone: 'America/Chicago',
+          createdBy: userId,
+        },
+        appointmentRepo,
+      );
+      return { tenantId, apptId: appt.id };
+    }
+
+    it('runs on the REAL enumerator, reminds only the tenant with a reminder due, and survives one tenant throwing', async () => {
+      const due = await seedReminderTenant(DUE_START);
+      const nothingDue = await seedReminderTenant(NOT_DUE_START);
+      const throwing = await seedReminderTenant(DUE_START);
+
+      const realIds = await listAllTenantIds(pool);
+      expect(realIds).toEqual(
+        expect.arrayContaining([due.tenantId, nothingDue.tenantId, throwing.tenantId]),
+      );
+
+      // The read seam throws for exactly one tenant; every other tenant is
+      // still served by the REAL repository, not a stand-in.
+      const wrappedAppointmentRepo = {
+        findByDateRange: async (tenantId: string, start: Date, end: Date) => {
+          if (tenantId === throwing.tenantId) {
+            throw new Error(`synthetic failure for tenant ${tenantId}`);
+          }
+          return appointmentRepo.findByDateRange(tenantId, start, end);
+        },
+      };
+
+      const result = await runAppointmentReminderSweep({
+        appointmentRepo: wrappedAppointmentRepo as never,
+        transactionalComms,
+        listTenantIds: () => listAllTenantIds(pool),
+        logger,
+        now: () => NOW,
+      });
+
+      expect(result.failed).toBeGreaterThanOrEqual(1);
+
+      // T4 (nothing due): a tenant with no appointment inside the reminder
+      // window is untouched — no dispatch row at all.
+      expect(await dispatchRepo.findByEntity(nothingDue.tenantId, 'appointment_reminder', nothingDue.apptId)).toEqual([]);
+
+      // T4 (fan-out survives a failure): the throwing tenant's own read blew
+      // up, so it was never reminded either — but that must not have stopped
+      // the due tenant from being reached in the SAME pass.
+      expect(await dispatchRepo.findByEntity(throwing.tenantId, 'appointment_reminder', throwing.apptId)).toEqual([]);
+      const dueDispatch = await dispatchRepo.findByEntity(due.tenantId, 'appointment_reminder', due.apptId);
+      expect(dueDispatch.length).toBeGreaterThan(0);
     });
   });
 
