@@ -56,6 +56,15 @@ import { createLogger } from '../../src/logging/logger';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
+/** What the thank-you sweep hands its dispatcher — the whole input, so the
+ *  per-tenant scope can be asserted rather than inferred from the recipient. */
+interface ThankYouDispatch {
+  to: string;
+  body: string;
+  tenantId?: string;
+  consent?: { smsConsent: boolean; customerId?: string };
+}
+
 /**
  * 2026-06-11T23:05Z is simultaneously 18:05 in Chicago (CDT, UTC-5) and 16:05
  * in Phoenix (MST, UTC-7, no DST). Two tenants in different zones with
@@ -623,7 +632,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
   });
 
   /** A tenant with settings and one long-completed job, eligible for both sweeps. */
-  async function seedEligibleTenant(): Promise<{ tenantId: string; jobId: string; phone: string }> {
+  async function seedEligibleTenant(): Promise<{ tenantId: string; jobId: string; phone: string; customerId: string }> {
     const { tenantId, userId } = await createTestTenant(pool);
     const phone = `+1555${tenantId.replace(/-/g, '').slice(0, 7)}`;
     await pool.query(
@@ -658,7 +667,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       ],
     );
     seededJobIds.push(jobId);
-    return { tenantId, jobId, phone };
+    return { tenantId, jobId, phone, customerId };
   }
 
   describe('thank-you-SMS sweep', () => {
@@ -678,7 +687,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
      */
     const run = async (tenantsOfInterest: string[], failFor: string | null) => {
       const visited: string[] = [];
-      const dispatched: string[] = [];
+      const dispatched: ThankYouDispatch[] = [];
       const realSettings = new PgSettingsRepository(pool);
       const result = await runThankYouSmsSweep({
         pool,
@@ -698,13 +707,14 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
         customerRepo: new PgCustomerRepository(pool),
         dncRepo: new PgDncRepository(pool),
         dispatcher: {
-          // NOTE: thank-you-sms-worker.ts:260 calls send({ to, body }) and
-          // passes NO tenantId — unlike its sibling caller feedback-send.ts:69,
-          // which passes both tenantId and consent. So a dispatch can only be
-          // attributed to a tenant by its recipient number here. See the note
-          // below the describe block.
-          send: async (input: { to: string }) => {
-            dispatched.push(input.to);
+          // Capture the WHOLE input, not just the recipient. Recording `to`
+          // alone would pass even if every message carried the first tenant's
+          // `tenantId` — under which the production consent-ledger and DNC
+          // lookups would run in the wrong scope, silently. Caught in review on
+          // PR #994 (Codex P2), against the round that made the worker forward
+          // these fields in the first place.
+          send: async (input: ThankYouDispatch) => {
+            dispatched.push(input);
           },
         } as never,
         logger,
@@ -722,7 +732,23 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       expect(visited).toEqual(expect.arrayContaining([a.tenantId, b.tenantId]));
       // The assertion the earlier version was missing: each tenant's customer
       // was actually SENT to, not merely visited.
-      expect(dispatched).toEqual(expect.arrayContaining([a.phone, b.phone]));
+      expect(dispatched.map((d) => d.to)).toEqual(
+        expect.arrayContaining([a.phone, b.phone]),
+      );
+
+      // …and each message carries ITS OWN tenant's scope. Without this, a
+      // worker that forwarded one tenant's id for every send would pass every
+      // assertion above: the recipient numbers would still be right, while the
+      // gate's per-tenant DNC and consent-ledger lookups ran against the wrong
+      // tenant. Recipient identity is not tenant identity.
+      expect(dispatched.find((d) => d.to === a.phone)).toMatchObject({
+        tenantId: a.tenantId,
+        consent: { smsConsent: true, customerId: a.customerId },
+      });
+      expect(dispatched.find((d) => d.to === b.phone)).toMatchObject({
+        tenantId: b.tenantId,
+        consent: { smsConsent: true, customerId: b.customerId },
+      });
     });
 
     it('keeps going when one tenant throws — the other tenant is still SENT', async () => {
@@ -738,8 +764,13 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       // Scoped to our own tenants: the doomed one never dispatches, the
       // survivor does. A blanket `failed >= 1` would also pass if every tenant
       // broke, which is exactly how the earlier version fooled itself.
-      expect(dispatched).not.toContain(doomed.phone);
-      expect(dispatched).toContain(survivor.phone);
+      expect(dispatched.map((d) => d.to)).not.toContain(doomed.phone);
+      expect(dispatched.map((d) => d.to)).toContain(survivor.phone);
+      // The survivor's send is still correctly scoped after another tenant threw.
+      expect(dispatched.find((d) => d.to === survivor.phone)).toMatchObject({
+        tenantId: survivor.tenantId,
+        consent: { smsConsent: true, customerId: survivor.customerId },
+      });
     });
   });
 

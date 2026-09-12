@@ -2418,7 +2418,15 @@ lines in proportion to their share of the subtotal before computing the tax base
 Every one of these represents engineering already paid for.
 
 - **A complete urgency-tier classifier** with its own rules file and unit tests —
-  **zero production callers.**
+  **wired, and structurally unreachable.** `classifyUrgencyTier` *is* imported and
+  called in production, by `classifyCallerSafety`
+  (`emergency-tier.ts:224`) — but only `if (rules)`, and the one live call site
+  passes none: `twilio-adapter.ts:1620` calls `classifyCallerSafety(speechResult, {})`
+  with two arguments. So the engine, its amplifiers and `triage-rules.json` are
+  never consulted on a real call. **The gap is a missing argument, not a missing
+  caller** — which makes it cheaper to close than the rest of this list and a
+  mistake to delete. *(Corrected 2026-09-12; this bullet said "zero production
+  callers", which a grep for the symbol disproves on its second hit.)*
 - **A lateness computation** with geofence, dwell, and a confidence breakdown —
   complete, unit-tested, **no worker or route invokes it.**
 - **The single-shot onboarding orchestrator** — a separate, earlier extraction
@@ -2804,7 +2812,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how seventeen of these were got wrong
+### 12.4d A note on method — how nineteen of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -3149,8 +3157,40 @@ Tests: `test/ai/orchestration/triggers.test.ts` exercises four exports across
 ten cases. The same overreach sat in the next bullet, for the guardrail
 expiration module.
 
-**Applying the rule to the rest of the document found three more**, none of them
-raised in review: story 4.11 and §12.4c both said `setTechnicianAssignmentNotifier`
+**The eighteenth broke the rule above by obeying it.** One round after that
+scope rule was published, §12.4's first bullet was found to say the urgency-tier
+classifier has *"zero production callers."* It has one: `classifyCallerSafety`
+imports and calls `classifyUrgencyTier` at `emergency-tier.ts:224`. A
+`packages/api/src`-scoped grep — exactly the right scope — returns that hit
+second. **The scope was never the problem; the reading was.** A rule that
+compares paths cannot help someone who stopped at the first line of output, and
+it is worth saying plainly that the rule published in the previous entry would
+not have caught the very next finding.
+
+What the bullet should have said is a category the dormant list did not have.
+`classifyUrgencyTier` runs only `if (rules)`, and the one live call site passes
+none — `twilio-adapter.ts:1620` calls `classifyCallerSafety(speechResult, {})`.
+So it is **wired and structurally unreachable**: the gap is a missing argument,
+not a missing caller, which makes it cheaper to close than anything else in the
+list and a mistake to delete. That is the same shape as §12.4e's supervisor gate
+— *not dark, structurally incomplete* — and the list had only two buckets
+(wired / unwired) when the interesting cases live in a third.
+
+**The nineteenth is the third finding against the fan-out harness itself**, and
+the most specific: the thank-you-SMS block recorded only `input.to`, so it would
+have passed had every message been dispatched under the **first** tenant's id,
+with the production consent-ledger and DNC lookups running in the wrong scope on
+a real call. **Recipient identity is not tenant identity.** The test now captures
+the whole dispatch input and asserts each message's `tenantId` and
+`consent.customerId` against the tenant that owns the recipient; a mutation that
+forwards one tenant's id for every send fails both cases.
+
+Three findings against the instrument built to catch overclaiming is worth
+stating as its own result: **a harness earns its authority the same way a
+capability does — by evidence, round after round — and it started with none.**
+
+**Applying the scope rule to the rest of the document found three more**, none of
+them raised in review: story 4.11 and §12.4c both said `setTechnicianAssignmentNotifier`
 has *"zero callers"* (it has an `assignment-notifications.test.ts`), and §12.4's
 own flag analysis said `setTenantFlag` has *"zero callers"* — **four** test files
 call it, three of them Docker-gated. All now read *production* callers. That the
