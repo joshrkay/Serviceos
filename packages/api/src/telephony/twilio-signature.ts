@@ -129,6 +129,14 @@ export function sessionBelongsToAnotherTenant(
   return session.tenantId !== authority;
 }
 
+/** First defined, non-empty string among a set of candidates. */
+function firstString(candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
 /** First defined string among a Twilio payload's dialled-number aliases. */
 function readDialedNumber(req: Request): string | undefined {
   const body = (req.body && typeof req.body === 'object'
@@ -138,11 +146,27 @@ function readDialedNumber(req: Request): string | undefined {
   // query param the voicemail callback URL mints for itself when Twilio's
   // recordingStatusCallback body carries neither.
   const query = req.query as Record<string, unknown>;
-  const candidates = [body.To, body.Called, query.To, query.Called];
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-  }
-  return undefined;
+  return firstString([body.To, body.Called, query.To, query.Called]);
+}
+
+/**
+ * The `AccountSid` the request claims. Read from the query as well as the
+ * body: Twilio POSTs the standard call params as a form body but sends them as
+ * QUERY parameters on a GET (the whisper TwiML fetch is a GET), and reading the
+ * body alone meant every such request resolved to the deployment token
+ * regardless of which subaccount actually signed it — so on a per-tenant
+ * subaccount deployment the signature could never match. Found while fixing
+ * the whisper leg on PR #1082.
+ *
+ * This value is caller-controlled on either surface; it is never trusted on
+ * its own — it is checked against the owning tenant's `subaccount_sid`.
+ */
+function readAccountSid(req: Request): string | undefined {
+  const body = (req.body && typeof req.body === 'object'
+    ? (req.body as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const query = req.query as Record<string, unknown>;
+  return firstString([body.AccountSid, query.AccountSid]);
 }
 
 /**
@@ -205,9 +229,7 @@ export function requireTwilioSignature(
   options: { publicBaseUrl?: string | (() => string | undefined) } = {},
 ): (req: Request, res: Response, next: NextFunction) => Promise<void> {
   return async (req: Request, res: Response, next: NextFunction) => {
-    const accountSid = (req.body && typeof req.body === 'object'
-      ? (req.body as Record<string, unknown>).AccountSid
-      : undefined) as string | undefined;
+    const accountSid = readAccountSid(req);
     const to = readDialedNumber(req);
 
     const resolved = await Promise.resolve(

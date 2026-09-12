@@ -3821,6 +3821,37 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the env-var seam in dev (with a loud WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
+  // GETs (no Clerk session) are accepted, and BEFORE the telephony router
+  // below because that router's signature middleware runs for EVERY
+  // /api/telephony/* request, matched route or not: mounting whisper after it
+  // would subject this route to the router's dialled-number binding no matter
+  // what credential view were passed here.
+  //
+  // #1072 — whisper deliberately keeps the AccountSid-only view. This is the
+  // OUTBOUND dispatcher leg of an escalation, so its `To` is the DISPATCHER's
+  // number, not the tenant's inbound DID (and Twilio sends the standard call
+  // params as QUERY parameters on a GET, so the binding would see it). If that
+  // dispatcher number is also some other tenant's DID — two businesses under
+  // one owner, a sister branch, an answering service that is itself a tenant —
+  // binding on `To` picks THAT tenant, finds the originating subaccount
+  // foreign, and refuses, killing the whisper on an escalation; an error on
+  // this URL risks dropping the call entirely (see whisper-route.ts's header).
+  // Found by Codex review on PR #1082. The signature check still gates the
+  // route — whisper TwiML carries PII (caller name, phone, intent).
+  //
+  // The middleware is scoped to the whisper path rather than the router mount
+  // so a POST to /voice does not pay a second, weaker signature check on its
+  // way past.
+  app.use(
+    '/api/telephony/whisper',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+  );
+  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
@@ -4003,20 +4034,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       callMeBackRepo,
       businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
-  );
-
-  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
-  // signed GETs (no Clerk session) are accepted. Path is under
-  // /api/telephony so it's co-located with the main telephony webhook.
-  // Twilio signature verification is enforced to prevent unauthenticated
-  // access to whisper TwiML (which contains PII: caller name, phone, intent).
-  app.use(
-    '/api/telephony',
-    requireTwilioSignature(
-      resolveTwilioWebhookCredential,
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
-    whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
   // Owner→customer click-to-call. The authed POST /api/calls is wired only when

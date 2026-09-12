@@ -632,6 +632,53 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     expect(await victimCounts(tenantB.tenantId)).toEqual(before);
   });
 
+  /**
+   * (g) — whisper must NOT be bound to the dialled number, found by Codex
+   * review on PR #1082.
+   *
+   * `GET /api/telephony/whisper/:escalationId` is the OUTBOUND dispatcher leg
+   * of an escalation: Twilio dials the dispatcher and fetches this TwiML to
+   * play in their ear. Its `To` is therefore the DISPATCHER's number, not the
+   * tenant's inbound DID — and Twilio sends the standard call params as QUERY
+   * parameters on a GET, so the binding sees it.
+   *
+   * If that dispatcher number happens to be another tenant's DID (two
+   * businesses under one owner, a sister branch, an answering service that is
+   * itself a tenant), the binding picks THAT tenant, finds the originating
+   * subaccount foreign, and refuses — killing the whisper on an escalation.
+   * The route's own header says an error here risks dropping the call
+   * ("NEVER 404 — that would drop the call"), and escalation is the safety
+   * path, so this must resolve by AccountSid as it did before #1072.
+   *
+   * Note the mount order this pins: the telephony router's signature
+   * middleware runs for ANY `/api/telephony/*` request, matched route or not,
+   * so exempting whisper at its own mount alone would not have worked — the
+   * main router refuses first.
+   */
+  it('(g1) whisper — a dispatcher leg whose To belongs to another tenant is NOT refused', async () => {
+    const escalationId = crypto.randomUUID();
+    const path =
+      `/api/telephony/whisper/${escalationId}` +
+      `?AccountSid=${encodeURIComponent(A_SUBACCOUNT)}` +
+      `&To=${encodeURIComponent(B_DID)}` +
+      `&From=${encodeURIComponent(A_DID)}` +
+      `&CallSid=${encodeURIComponent(`CA-1072-whisper-${crypto.randomUUID().slice(0, 8)}`)}`;
+
+    // Twilio signs a GET over the full URL (query string included) with no
+    // params object — the same way it will in production.
+    const signature = twilio.getExpectedTwilioSignature(
+      A_TOKEN,
+      `${PUBLIC_API_URL}${path}`,
+      {},
+    );
+    const res = await request(app).get(path).set('X-Twilio-Signature', signature);
+
+    // 200 with empty TwiML (the escalation id is not in this process's cache)
+    // is the correct answer; a 403 means tenant A's own escalation was killed
+    // because the number it dialled happens to belong to tenant B.
+    expect(res.status).toBe(200);
+  });
+
   it('(e) a number with NO tenant integration row still verifies with the deployment fallback token', async () => {
     const callSid = `CA-1072-fallback-${crypto.randomUUID().slice(0, 8)}`;
     const res = await signedPost(

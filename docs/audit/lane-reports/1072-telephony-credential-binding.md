@@ -527,14 +527,51 @@ takes the session each route already holds, and `sessionStoreFor` reads the rout
 declared `voiceSessionStore` dep first. A guard must never be the thing that throws inside
 a webhook handler.
 
-Full sweep on the fixed head: telephony + invariants + telephony-tenant-lookup + app +
-webhooks + voice — **193 files, 2118 passed** (4 expected fail, all lane B's own pins); ten
-telephony integration files **92 passed** (1 expected fail); the new integration file
-**15 passed**; e2e **6 passed (32.2s)**; `tsc --project tsconfig.build.json --noEmit`
-clean; eslint on all five changed source files byte-identical to main's baseline
-(6 / 2 / 2 / 0 / 0 pre-existing errors, none added).
+**And one the binding BROKE, found by Codex review — `/api/telephony/whisper`.** Not a
+hole: a regression I introduced. Whisper is the OUTBOUND dispatcher leg of an escalation,
+so its `To` is the dispatcher's number, not the tenant's inbound DID — and Twilio sends the
+standard call params as QUERY parameters on a GET, so the binding saw it. If that
+dispatcher number is also another tenant's DID (two businesses under one owner, a sister
+branch, an answering service that is itself a tenant), the binding picked THAT tenant,
+found the originating subaccount foreign, and refused — killing the whisper on an
+escalation, on a route whose own header says an error risks dropping the call. `(g1)` was
+RED at 403.
 
-**Three findings in this family now, all from review, none found by my own tests.** The
+Two things had to change, and the first is the one that matters for anyone touching this
+file again: **the telephony router's signature middleware runs for EVERY
+`/api/telephony/*` request, matched route or not** (verified with a probe, not assumed), so
+exempting whisper at its own mount would have changed nothing — the router refuses first.
+The whisper mount therefore moves ABOVE the telephony router, with its middleware scoped to
+`/api/telephony/whisper` so a POST to `/voice` does not pay a second, weaker check on the
+way past. It keeps the AccountSid-only credential view, which is exactly what it had before
+#1072.
+
+The second change fell out of the first: `requireTwilioSignature` read `AccountSid` from
+the **body only**, so every GET resolved to the deployment token no matter which subaccount
+signed it — meaning whisper could never have verified on a per-tenant-subaccount deployment,
+before this PR or after. `readAccountSid` now reads body then query, mirroring
+`readDialedNumber`. The value is caller-controlled on either surface and is never trusted
+on its own; it is checked against the owning tenant's `subaccount_sid`.
+
+`test/app/route-manifest.test.ts`'s committed snapshot pins mount order, so it moved with
+the remount — the diff is exactly the three whisper lines relocating above the telephony
+router, and nothing else.
+
+**Whisper's `escalationId` is still an unguessable-id-as-authorization**, the last one on
+this surface: the cache is keyed by it and holds no tenant, so any tenant with a valid
+signature could fetch another tenant's whisper text if it knew the id. Closing that means
+storing the tenant alongside the cached TwiML and comparing it with the verified
+credential — a new capability rather than a fix for a break, so it is NOT in this PR. It is
+the one item in this family left open.
+
+Full sweep on the fixed head: telephony + routes + invariants + app + webhooks + voice —
+**287 files, 3249 passed** (4 expected fail, all lane B's own pins); ten telephony
+integration files **93 passed** (1 expected fail); the new integration file **16 passed**;
+e2e **6 passed (33.2s)**; `tsc --project tsconfig.build.json --noEmit` clean; eslint on the
+changed source files byte-identical to main's baseline.
+
+**Four findings in this family now, all from review, none found by my own tests** — three
+holes the binding missed and one working path the binding broke. The
 lesson is in the shape rather than any one route: I bound the credential to the dialled
 number and treated that as the binding, when the routes take their target from a SECOND
 caller-supplied identifier — a `?sid=`, a `CallSid` — and act as whoever owns it. Every
