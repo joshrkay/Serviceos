@@ -17,14 +17,15 @@ This is evidence for that decision, not the decision.
 
 | Row | File (new) | What the audit said | What the code says | Evidence class | Tenant grade |
 |---|---|---|---|---|---|
-| 3.8 | `appointment-confirmation-dispatch-3-8.test.ts` | "only live instantiation is a no-op notifier" | **Half true.** The dormant class is real; the confirmation path is *not* dead — a second implementation is wired and writes the row | PROVEN-REAL-DB | T1 |
+| 3.8 | `appointment-confirmation-dispatch-3-8.test.ts` | "only live instantiation is a no-op notifier" | **Half true.** The dormant class is real; the confirmation path is *not* dead — a second implementation is wired and writes the row. But it skips silently on **two** conditions, one owner-reachable | PROVEN-REAL-DB | T1 + T3 |
 | 3.11 | `proposal-expiry-sweep-3-11.test.ts` | "two TTL regimes"; guardrail has zero callers | **Confirmed.** 48 h worker is the only live regime; guardrail is dead code | PROVEN-REAL-DB + STRUCTURAL (negative control) | T2 |
 | 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + REAL-DB-WRITE-ONLY for ingestion | T1 |
 | 9.5 | `service-credit-cap-9-5.test.ts` | the only test stubs `pool.connect()` | **Confirmed.** Replaced with a real-Postgres proof; the cap holds at draft and **fails at execute** | PROVEN-REAL-DB | T1 |
 
-Counts below are from the first evidence run (25 tests). One ordinary test was
-added to row 9.5 in review round 1, so the current total is **22 passed | 4
-expected fail (26)**; the SQL dumps are unchanged in shape.
+Counts below are from the first evidence run (25 tests). Two ordinary tests were
+added in review — one to row 9.5 (round 1) and one to row 3.8 (round 2) — so the
+current total is **23 passed | 4 expected fail (27)**; the SQL dumps are unchanged
+in shape apart from the extra 3.8 tenants.
 
 Command for every file (from `packages/api/`):
 
@@ -129,12 +130,58 @@ Everything runs through the production execution registry
       Tests  5 passed | 1 expected fail (6)
 ```
 
+### Review round 2 — the wired path was narrower than claimed (Codex, two P2s)
+
+Both findings correct, and together they narrow this row's positive claim. Fixed
+on the same head.
+
+**(a) The gate was missing.** `app.ts:1328-1335` wraps the selected provider in
+`GatedMessageDelivery` before `TransactionalCommsService` ever sees it; the tests
+passed the raw `InMemoryDeliveryProvider`, so every send succeeded
+unconditionally. That is not the production path — consent, DNC and the
+`TELEPHONY_ENABLED`/`EMAIL_ENABLED` kill switches all live in that wrapper. Both
+helpers now wrap it with the same five deps (`base`, `PgDncRepository`,
+`auditRepo`, `enforcement`, `PgConsentEventRepository`), in
+**`enforcement: 'block'`** — the strictest mode, the one `shared/config.ts:210-217`
+resolves to in prod/staging. The rows still pass, so the claim now holds against
+the gate production actually runs.
+
+**(b) A configured provider is NOT sufficient — and this one is owner-reachable.**
+`sendAppointmentNotice` returns early when the tenant has
+`autoSendAppointmentReminders === false` (`transactional-comms-service.ts:355`),
+and the dormant class carries the identical early return
+(`appointment-confirmation-notifier.ts:42`). Every test here used tenants with no
+settings row, so this path was invisible. Now pinned as a **T3** case — two
+tenants, configured differently, in the same run:
+
+- the tenant with the flag off gets **no** confirmation row, provider wired and all
+- its differently-configured neighbour, same run, same notifier, **does**
+- and the dormant class agrees, so promoting it would not close this path either
+
+That RED came for free: the first version asserted the flag through
+`settingsRepo.create`, which does not list `auto_send_appointment_reminders`
+among its INSERT columns (`pg-settings.ts:274-280`), so the row landed at the
+column's `TRUE` default — `expected true to be false`. The flag only moves
+through `update` (`pg-settings.ts:369`), which is also how an owner toggles it.
+
+**This changes the shape of the row's gap.** There are **two** silent skips, not
+one: delivery mode `'none'` (a deploy-time condition) and
+`autoSendAppointmentReminders = false` (a setting the owner can flip). The second
+is arguably worse, because an owner who turns off *reminders* almost certainly
+does not intend to turn off *booking confirmations* — one flag governs both, and
+nothing tells them. **The PRD cell stamped at `5f93a9d` says the row "holds only
+where a delivery provider is configured", which is now known incomplete.** That
+cell is Fable's and carries the rung, so this lane has not edited it — raised on
+the PR for Fable to amend, and it belongs in issue #1077.
+
 ### Evidence class / tenant grade
 
 **PROVEN-REAL-DB** — the dispatch write and the `appointment.created` audit event are
-both proven against real Postgres. **T1** — a second tenant exists and its write is
-invisible to the first. (The "tenant A's row set is byte-identical after tenant B
-writes" assertion is T2-shaped but narrow; graded T1 conservatively.)
+both proven against real Postgres, now through `GatedMessageDelivery` in `'block'`
+mode as production wires it. **T1**, and **T3** after review round 2 — two tenants
+with different `autoSendAppointmentReminders` settings each get their own correct
+result in the same run. (The "tenant A's row set is byte-identical after tenant B
+writes" assertion is T2-shaped but narrow; not claimed.)
 
 ### Judgment calls
 

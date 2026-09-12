@@ -51,6 +51,9 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { PgDncRepository } from '../../src/compliance/dnc';
+import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
 import { AppointmentConfirmationNotifier } from '../../src/notifications/appointment-confirmation-notifier';
 import type { SchedulingConfirmationNotifier } from '../../src/proposals/execution/scheduling-notifications';
@@ -106,10 +109,11 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
       primaryPhone: phone,
       email,
       preferredChannel: 'sms',
-      // The GatedMessageDelivery consent gate is NOT in play here (the tests
-      // wire the raw provider, exactly as app.ts does before wrapping), but
-      // the stored flag is forwarded by sendCustomerMessage, so set it true so
-      // a later wrapping change cannot silently turn these into suppressions.
+      // The GatedMessageDelivery consent gate IS in play (see gatedDelivery()
+      // below — the tests wrap the provider exactly as app.ts:1328 does, in the
+      // strictest 'block' mode), and it reads this stored flag. A consenting
+      // customer is the case these rows are about; the gate's own suppression
+      // behaviour is proven in customer-message-delivery.test.ts.
       smsConsent: true,
       isArchived: false,
       createdBy: tenant.userId,
@@ -224,12 +228,35 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     return rows;
   }
 
+  /**
+   * The delivery object app.ts actually hands to `TransactionalCommsService`:
+   * the selected provider wrapped in `GatedMessageDelivery` (app.ts:1328-1335),
+   * with the same five deps — the Pg DNC lookup, the audit repo, the
+   * `TCPA_CONSENT_ENFORCEMENT` mode, and the Pg consent ledger. Passing the raw
+   * provider would make every send unconditionally succeed, which is not what
+   * the production path does: consent, DNC and the kill switches all sit in
+   * this wrapper.
+   *
+   * `enforcement: 'block'` is deliberately the STRICTEST mode — what
+   * `shared/config.ts:210-217` resolves to in prod/staging — so these rows are
+   * proven against the gate production actually runs, not a permissive one.
+   */
+  function gatedDelivery(): GatedMessageDelivery {
+    return new GatedMessageDelivery({
+      base: new InMemoryDeliveryProvider(),
+      dnc: new PgDncRepository(pool),
+      auditRepo,
+      enforcement: 'block',
+      consentLedger: new PgConsentEventRepository(pool),
+    });
+  }
+
   function liveTransactionalComms(): TransactionalCommsService {
     // The construction app.ts:1771 performs whenever `messageDelivery` is
     // non-null. `invoiceRepo` is only reached by the overdue-reminder path,
     // which this row never touches, so it is stubbed rather than wired.
     return new TransactionalCommsService({
-      delivery: new InMemoryDeliveryProvider(),
+      delivery: gatedDelivery(),
       appointmentRepo,
       jobRepo,
       customerRepo,
@@ -248,7 +275,7 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     // `AppointmentConfirmationNotifierDeps` declares
     // (src/notifications/appointment-confirmation-notifier.ts:12).
     return new AppointmentConfirmationNotifier({
-      delivery: new InMemoryDeliveryProvider(),
+      delivery: gatedDelivery(),
       appointmentRepo,
       jobRepo,
       customerRepo,
@@ -366,6 +393,64 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
    * the dead notifier?) — see the drafted issue in the lane report. This test
    * only pins that the criterion does not hold today on that wiring.
    */
+  it('CURRENT (T3): a delivery provider is NOT sufficient — a tenant with autoSendAppointmentReminders=false gets no confirmation row, while a differently-configured neighbour in the same run does', async () => {
+    // The second silent-skip path, and unlike delivery mode 'none' this one is
+    // reachable by the owner from settings. Both live notifier implementations
+    // return early on it: transactional-comms-service.ts:355 and the dormant
+    // appointment-confirmation-notifier.ts:42.
+    const quiet = await seedTenant('Quiet');
+    await settingsRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: quiet.tenant.tenantId,
+      businessName: 'Quiet Heating',
+      timezone: 'America/Phoenix',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      laborRateCentsPerHour: 11500,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // The flag goes through `update`, not `create`: PgSettingsRepository.create
+    // does not list auto_send_appointment_reminders among its INSERT columns
+    // (pg-settings.ts:274-280), so the row lands at the column's TRUE default
+    // and only the update path (pg-settings.ts:369) can turn it off — which is
+    // also how an owner toggles it.
+    await settingsRepo.update(quiet.tenant.tenantId, {
+      autoSendAppointmentReminders: false,
+    });
+    expect(
+      (await settingsRepo.findByTenant(quiet.tenant.tenantId))?.autoSendAppointmentReminders,
+    ).toBe(false);
+
+    const quietAppointment = await executeApprovedCreateAppointment(
+      quiet,
+      liveTransactionalComms(),
+    );
+    expect(await confirmationRows(quiet.tenant.tenantId, quietAppointment)).toHaveLength(0);
+
+    // T3 — the neighbour tenant, differently configured (no settings row, so
+    // the flag is unset rather than false), books in the SAME run through the
+    // SAME notifier and DOES get its confirmation.
+    const loudAppointment = await executeApprovedCreateAppointment(
+      tenantB,
+      liveTransactionalComms(),
+    );
+    expect(
+      (await settingsRepo.findByTenant(tenantB.tenant.tenantId))?.autoSendAppointmentReminders,
+    ).toBeUndefined();
+    expect(
+      (await confirmationRows(tenantB.tenant.tenantId, loudAppointment)).map((r) => r.channel),
+    ).toEqual(['email', 'sms']);
+
+    // The dormant class agrees — it carries the same early return, so
+    // promoting it would not close this path either.
+    const quietAgain = await executeApprovedCreateAppointment(quiet, dormantNotifier());
+    expect(await confirmationRows(quiet.tenant.tenantId, quietAgain)).toHaveLength(0);
+  });
+
   it.fails(
     'DESIRED (row 3.8): an approved create_appointment writes an appointment_confirmation dispatch row even when app.ts resolves NO delivery provider, so a booked customer is never silently left unconfirmed',
     async () => {
