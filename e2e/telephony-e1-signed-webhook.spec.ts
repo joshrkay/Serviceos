@@ -1,13 +1,10 @@
 /**
- * PROVENANCE (#1072): this spec was written by #1014 lane B and lives on
- * `cloud/capture-8-2-b`, which is NOT merged to main — so the copy here is
- * that file with its security pin flipped, which is what #1072 asked for. Lane
- * B pinned the cross-tenant hole two ways: the then-current behaviour as a
- * passing characterization, and the required refusal as a Playwright
- * `test.fail()` that would break the run the day the refusal landed. The
- * refusal has landed, so both are ordinary passing tests at the bottom of this
- * file. If `cloud/capture-8-2-b` merges first, take ITS copy of the other four
- * tests and re-apply the bottom two from here.
+ * #1072: lane B pinned the cross-tenant auth hole below two ways — the
+ * then-current behaviour as a passing characterization, and the required
+ * refusal as a Playwright `test.fail()` that breaks the run the day the
+ * refusal lands. It landed (the credential is now bound to the tenant that
+ * owns the dialled number), so both are ordinary passing tests at the bottom
+ * of this file.
  *
  * #1014 row 2.5, phone-surface leg (lane B) — hermetic reachability on the
  * phone surface, per the definition research ticket #1004 recorded verbatim

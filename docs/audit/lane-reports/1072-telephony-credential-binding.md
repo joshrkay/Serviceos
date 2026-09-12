@@ -222,19 +222,18 @@ shape are pinned by the integration file, per CLAUDE.md.
 
 ## 5. The e2e pin, flipped
 
-`e2e/telephony-e1-signed-webhook.spec.ts` is lane B's spec and lives on
-`cloud/capture-8-2-b`, which is **not merged to main**, so this branch carries that file
-with its security pin flipped — the two pinned tests (the passing characterization of the
-hole and the Playwright `test.fail()` for the required refusal) are ordinary passing tests
-now:
+`e2e/telephony-e1-signed-webhook.spec.ts` is lane B's spec. When this branch was cut it
+lived only on `cloud/capture-8-2-b`, so the file was vendored here with its pin flipped;
+lane B then landed on main (PR #1069) while this PR was open, and the add/add conflict was
+resolved by keeping main's copy of the spec and re-applying the flipped pair on top —
+exactly the sequencing the vendored header called for. The two pinned tests (the passing
+characterization of the hole and the Playwright `test.fail()` for the required refusal) are
+ordinary passing tests now:
 
 - *"a tenant-owned signature does NOT authorise a call to another tenant's DID"* — 403, no
   `voice_sessions` row, tenant B's emergency audit trail unmoved.
 - *"the same binding holds on /gather"* — a forged mid-call callback naming a LIVE session
   under B is refused 403.
-
-The file header says what to do if `cloud/capture-8-2-b` merges first (take its copy of the
-other four tests, re-apply these two).
 
 Run as its header documents, against a real API process + real Postgres:
 
@@ -407,7 +406,41 @@ actually on per-tenant credentials rather than silently riding the fallback.
    router's middleware, so it could not be excluded without weakening it). Its `To` is the
    dispatcher's number, which owns no integration row, so it resolves through the
    AccountSid path exactly as before.
-5. **The e2e spec is vendored, not cherry-picked**, because lane B's branch is not on main.
-   If both land, take `cloud/capture-8-2-b`'s copy of the other four tests.
+5. **The e2e spec was vendored, then reconciled.** Lane B's branch landed on main (#1069)
+   while this PR was open; the add/add conflict was resolved in favour of main's copy of
+   the spec with the flipped security pair re-applied, and the whole spec re-run on the
+   merged tree (6 passed, 32.6s).
 6. **No rung is claimed.** This is a security fix with its own proof; #1014's grading is not
    this branch's to move.
+
+---
+
+## 10. Post-merge revalidation (main moved under this PR)
+
+`origin/main` advanced from `137dc55` to `a961d93` while this PR was open — it now carries
+lane B's `cloud/capture-8-2-b` (#1069), which made `e2e/telephony-e1-signed-webhook.spec.ts`
+an add/add conflict. Resolved as §5 describes. Everything re-run on the merged head:
+
+```
+$ npx tsc --project tsconfig.build.json --noEmit
+(clean)
+
+$ npx vitest run test/invariants test/telephony test/routes/telephony-tenant-lookup.test.ts
+ Test Files  46 passed (46)
+      Tests  641 passed | 4 expected fail (645)
+
+$ RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
+    test/integration/{telephony-tenant-credential-binding,phone-lookups-shared-dispatch,\
+    e1-life-safety-handler,stranger-owner-capability,durable-telephony-timers,\
+    identify-caller,provision-twilio-vapi,rls-tenant-isolation,dropped-call-worker}.test.ts
+ Test Files  9 passed (9)
+      Tests  81 passed | 1 expected fail (82)
+
+$ npx playwright test --project=chromium e2e/telephony-e1-signed-webhook.spec.ts
+  6 passed (32.6s)
+```
+
+The expected-fails are lane B's own remaining pins (the Spanish E1 gap and its siblings),
+not this change's. Main also brought `test/invariants/*.structural.test.ts` and the
+`e1-life-safety-handler` / `stranger-owner-capability` integration files the original brief
+named — all now runnable, all green above.
