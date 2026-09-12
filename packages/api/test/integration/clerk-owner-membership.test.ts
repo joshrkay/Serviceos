@@ -13,11 +13,14 @@ import request from 'supertest';
 import * as crypto from 'crypto';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Pool } from 'pg';
-import { getSharedTestDb, closeSharedTestDb } from './shared';
+import { getSharedTestDb, closeSharedTestDb, createTestTenant } from './shared';
 import { createWebhookRouter } from '../../src/webhooks/routes';
 import { PgTenantRepository } from '../../src/auth/pg-tenant';
 import { InMemoryWebhookRepository } from '../../src/webhooks/webhook-handler';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
+import { PgUserRepository } from '../../src/users/pg-user';
+import { createUsersRouter } from '../../src/routes/users';
 import type { AppConfig } from '../../src/shared/config';
 
 const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ='; // base64("test-secret")
@@ -223,5 +226,127 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
       clerkUserId,
     ]);
     expect(rows.rows[0].n).toBe(0);
+  });
+});
+
+/**
+ * Postgres integration — team invitations (Tier 4 PR 3) against real
+ * Postgres: the local invitation row survives a Clerk outage, the last
+ * owner can never be demoted, and invitations are tenant-isolated.
+ * (§8.1/§8.9 row 1.11.)
+ */
+describe('Postgres integration — team invitations + last-owner guard', () => {
+  let pool: Pool;
+  let usersApp: express.Express;
+  let tenantA: { tenantId: string; userId: string };
+  let tenantB: { tenantId: string; userId: string };
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    tenantA = await createTestTenant(pool);
+    tenantB = await createTestTenant(pool);
+
+    const userRepo = new PgUserRepository(pool);
+    const pendingInvitationRepo = new PgPendingInvitationRepository(pool);
+    const auditRepo = new PgAuditRepository(pool);
+
+    usersApp = express();
+    usersApp.use(express.json());
+    usersApp.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
+      // Test harness picks the acting tenant via a header rather than a
+      // real Clerk JWT — both tenants A and B are live simultaneously in
+      // this suite, unlike the single-currentTenant pattern elsewhere.
+      const asTenant = req.headers['x-test-tenant'] === 'B' ? tenantB : tenantA;
+      (req as import('../../src/auth/clerk').AuthenticatedRequest).auth = {
+        userId: asTenant.userId,
+        sessionId: 'sess-test',
+        tenantId: asTenant.tenantId,
+        role: 'owner',
+      };
+      next();
+    });
+    usersApp.use(
+      '/api/users',
+      createUsersRouter(
+        userRepo,
+        {
+          pendingInvitationRepo,
+          // Clerk IS configured (clerkSecretKey set) but the outbound call
+          // always rejects — simulates a Clerk-down invite, per row 1.11's
+          // "when Clerk is down" clause. Only this network call is stubbed;
+          // the local invitation write below is the real production path.
+          clerkSecretKey: 'sk_test_down',
+          clerkFetch: (async () => {
+            throw new Error('Clerk API unreachable (simulated outage)');
+          }) as unknown as typeof fetch,
+        },
+        auditRepo,
+      ),
+    );
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('writes the local invitation row even when Clerk is down, and audits it', async () => {
+    const auditRepo = new PgAuditRepository(pool);
+    const email = `invitee-${crypto.randomUUID()}@example.com`;
+
+    const res = await request(usersApp)
+      .post('/api/users/invitations')
+      .send({ email, role: 'technician' });
+
+    expect(res.status).toBe(201);
+
+    const row = await pool.query(
+      `SELECT tenant_id, email, role, accepted_at FROM pending_invitations WHERE id = $1`,
+      [res.body.id],
+    );
+    expect(row.rowCount).toBe(1);
+    expect(row.rows[0].tenant_id).toBe(tenantA.tenantId);
+    expect(row.rows[0].email).toBe(email.toLowerCase());
+    expect(row.rows[0].accepted_at).toBeNull();
+
+    const auditEvents = await auditRepo.findByEntity(
+      tenantA.tenantId,
+      'pending_invitation',
+      res.body.id,
+    );
+    expect(auditEvents.some((e) => e.eventType === 'user.invited')).toBe(true);
+  });
+
+  it('the last owner cannot be demoted (real PgUserRepository guard)', async () => {
+    // tenantA.userId is its ONLY owner (createTestTenant seeds exactly one).
+    const res = await request(usersApp)
+      .patch(`/api/users/${tenantA.userId}`)
+      .send({ role: 'dispatcher' });
+    expect(res.status).toBe(400);
+
+    const row = await pool.query(`SELECT role FROM users WHERE id = $1`, [tenantA.userId]);
+    expect(row.rows[0].role).toBe('owner');
+  });
+
+  it("tenant B's invitation never appears under tenant A", async () => {
+    const email = `otherco-${crypto.randomUUID()}@example.com`;
+    const invited = await request(usersApp)
+      .post('/api/users/invitations')
+      .set('x-test-tenant', 'B')
+      .send({ email, role: 'technician' });
+    expect(invited.status).toBe(201);
+
+    const seenFromA = await request(usersApp).get('/api/users/invitations');
+    expect(seenFromA.status).toBe(200);
+    expect(
+      (seenFromA.body.data as Array<{ email: string }>).some((inv) => inv.email === email),
+    ).toBe(false);
+
+    // Direct repository check — the tenant-scoped WHERE, not just the
+    // route's response shape, is what isolates the row.
+    const pendingInvitationRepo = new PgPendingInvitationRepository(pool);
+    const fromA = await pendingInvitationRepo.findByTenant(tenantA.tenantId);
+    expect(fromA.some((inv) => inv.email === email.toLowerCase())).toBe(false);
+    const fromB = await pendingInvitationRepo.findByTenant(tenantB.tenantId);
+    expect(fromB.some((inv) => inv.email === email.toLowerCase())).toBe(true);
   });
 });
