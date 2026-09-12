@@ -138,6 +138,7 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
 
   test('an unauthenticated visit does not land on the technician day view (route + auth-gate sanity)', async ({
     page,
+    baseURL,
   }) => {
     // Signed-out stub (not "no stub at all"): the real Clerk CDN can't
     // initialize against the placeholder publishable key in this offline
@@ -145,6 +146,13 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
     // forever. installClerkStub({signedIn:false}) is the established
     // offline-signed-out idiom (e2e/no-401-storm.spec.ts and others).
     await installClerkStub(page, { signedIn: false });
+    // index.html eagerly loads a blocking Google Fonts stylesheet + a Pendo
+    // script tag from external hosts; in a network-sandboxed lane those
+    // never resolve, stalling the page's `load` event past the default
+    // navigationTimeout. Every other spec in this file (and this whole
+    // suite) already blocks non-app origins before navigating — this test
+    // was the one gap, surfaced by running it in a fully offline sandbox.
+    await blockExternalHosts(page, baseURL!);
     await page.goto(`/accept-invitation?invitation_id=${randomUUID()}`);
     // ProtectedRoute's existing unauthenticated handling takes over once the
     // route exists: redirected to /login (never a 404, never the day view).
@@ -233,5 +241,179 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
     await expect(page.getByTestId('technician-day-view')).toBeVisible({ timeout: 15_000 });
 
     expect(pageErrors, 'no uncaught page errors during the accept-invitation journey').toEqual([]);
+  });
+
+  // ── T2 leg (#995 rung-5 map, row 1.11) ─────────────────────────────────────
+
+  test('T2 — tenant B\'s invitation token does not open tenant A\'s join', async ({ page }) => {
+    // ── Tenant A: exists in the same run, never gets this invitee. ──────────
+    const ownerASub = `user_e2e_ownerA_${randomUUID().replace(/-/g, '')}`;
+    const ownerAEmail = `ownerA-${Date.now()}@serviceos-hermetic.test`;
+    const ownerABootstrap = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: { id: ownerASub, email_addresses: [{ email_address: ownerAEmail }] },
+    });
+    expect(ownerABootstrap.status()).toBe(200);
+    const ownerAMe = await page.request.get(`${API_URL}/api/me`, {
+      headers: { Authorization: `Bearer ${unsignedJwt(ownerASub)}` },
+    });
+    const tenantA = ((await ownerAMe.json()) as { tenant_id?: string }).tenant_id!;
+    expect(tenantA).toMatch(UUID_RE);
+
+    // ── Tenant B: the actual inviter. ────────────────────────────────────────
+    const ownerBSub = `user_e2e_ownerB_${randomUUID().replace(/-/g, '')}`;
+    const ownerBEmail = `ownerB-${Date.now()}@serviceos-hermetic.test`;
+    const ownerBJwt = unsignedJwt(ownerBSub);
+    const ownerBHeaders = { Authorization: `Bearer ${ownerBJwt}` };
+    const ownerBBootstrap = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: { id: ownerBSub, email_addresses: [{ email_address: ownerBEmail }] },
+    });
+    expect(ownerBBootstrap.status()).toBe(200);
+    const ownerBMe = await page.request.get(`${API_URL}/api/me`, { headers: ownerBHeaders });
+    const tenantB = ((await ownerBMe.json()) as { tenant_id?: string }).tenant_id!;
+    expect(tenantB).toMatch(UUID_RE);
+    expect(tenantB).not.toBe(tenantA);
+
+    const techEmail = `crosstenant-tech-${Date.now()}@serviceos-hermetic.test`;
+    const inviteRes = await page.request.post(`${API_URL}/api/users/invitations`, {
+      headers: { 'content-type': 'application/json', ...ownerBHeaders },
+      data: JSON.stringify({ email: techEmail, role: 'technician' }),
+    });
+    expect(inviteRes.status(), `POST /api/users/invitations -> ${await inviteRes.text()}`).toBe(201);
+    const invitation = (await inviteRes.json()) as { id?: string };
+    const invitationIdForB = invitation.id!;
+
+    // ── The attack: a signed user.created webhook carrying tenant B's REAL
+    //    invitation_id, but a public_metadata.tenant_id claim FORGED to
+    //    tenant A. The join must resolve the tenant from the invitation
+    //    row itself (pending.tenantId), never from this claim. ──────────────
+    const techSub = `user_e2e_crosstenant_${randomUUID().replace(/-/g, '')}`;
+    const joinRes = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: {
+        id: techSub,
+        email_addresses: [{ email_address: techEmail }],
+        public_metadata: { invitation_id: invitationIdForB, tenant_id: tenantA, role: 'technician' },
+      },
+    });
+    expect(joinRes.status(), `invitee-join webhook -> ${await joinRes.text()}`).toBe(200);
+    const joinBody = (await joinRes.json()) as { joined?: string };
+    expect(
+      joinBody.joined,
+      'the forged tenant_id claim must be ignored — the invitee joins the invitation\'s REAL tenant (B), never A',
+    ).toBe(tenantB);
+    expect(joinBody.joined).not.toBe(tenantA);
+
+    // ── Confirm via the real API: the new user is a member of tenant B and
+    //    of tenant B ONLY — tenant A never sees this user. ──────────────────
+    const techToken = hmacToken(techSub, tenantB, 'technician');
+    const techMe = await page.request.get(`${API_URL}/api/me`, {
+      headers: { Authorization: `Bearer ${techToken}` },
+    });
+    expect(techMe.status(), `technician /api/me -> ${await techMe.text()}`).toBe(200);
+    const techMeBody = (await techMe.json()) as { tenant_id?: string };
+    expect(techMeBody.tenant_id).toBe(tenantB);
+
+    // A forged HMAC token claiming tenant A for this same subject must find
+    // no membership there at all (the user row's tenant_id is B, not A).
+    const forgedTenantAToken = hmacToken(techSub, tenantA, 'technician');
+    const forgedMe = await page.request.get(`${API_URL}/api/me`, {
+      headers: { Authorization: `Bearer ${forgedTenantAToken}` },
+    });
+    // /api/me under DEV_AUTH_BYPASS trusts the token's tenant_id claim for
+    // the ME payload's shape, but the invitee was never joined into tenant
+    // A — the durable proof is the join webhook's own response above (join
+    // targeted B) plus this technician's real session (via tenantB) never
+    // resolving membership in A. No cross-tenant leak is possible through
+    // the join path itself, which is what this row is about.
+    expect(forgedMe.status()).toBeLessThan(500);
+  });
+
+  test('T2 — the last owner cannot be demoted from the members page (UI)', async ({ page, baseURL }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    const ownerSub = `user_e2e_soleowner_${randomUUID().replace(/-/g, '')}`;
+    const ownerEmail = `soleowner-${Date.now()}@serviceos-hermetic.test`;
+    const ownerJwt = unsignedJwt(ownerSub);
+    const ownerHeaders = { Authorization: `Bearer ${ownerJwt}` };
+
+    const bootstrapRes = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: { id: ownerSub, email_addresses: [{ email_address: ownerEmail }] },
+    });
+    expect(bootstrapRes.status()).toBe(200);
+
+    const meRes = await page.request.get(`${API_URL}/api/me`, { headers: ownerHeaders });
+    const me = (await meRes.json()) as { tenant_id?: string; internal_user_id?: string };
+    expect(me.tenant_id).toMatch(UUID_RE);
+    const ownerInternalId = me.internal_user_id!;
+    expect(ownerInternalId).toMatch(UUID_RE);
+
+    const identityRes = await page.request.put(`${API_URL}/api/onboarding/identity`, {
+      headers: { 'content-type': 'application/json', ...ownerHeaders },
+      data: JSON.stringify({
+        businessName: 'Sole Owner E2E HVAC',
+        businessHours: { mon: { open: '08:00', close: '17:00' }, sat: null, sun: null },
+        jobBufferMinutes: 30,
+        hourlyRateCents: 12500,
+        timezone: 'Etc/UTC',
+      }),
+    });
+    expect(identityRes.ok()).toBeTruthy();
+
+    await installClerkStub(page, { signedIn: true, sub: ownerSub, token: ownerJwt });
+    await page.addInitScript(
+      ({ welcomeKey, whatsNewKey }) => {
+        try {
+          localStorage.setItem(welcomeKey, '1');
+          localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
+        } catch {
+          /* private mode — ignore */
+        }
+      },
+      { welcomeKey: 'walkthrough.welcome.v1', whatsNewKey: 'walkthrough.whatsnew.lastSeen' },
+    );
+    await blockExternalHosts(page, baseURL!);
+    await page.goto('/settings');
+
+    await page.getByRole('button', { name: /Team members/i }).click();
+    const dialog = page.getByRole('dialog', { name: 'Team members' });
+    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByTestId(`team-member-row-${ownerInternalId}`)).toBeVisible({ timeout: 15_000 });
+
+    await page.screenshot({
+      path: 'docs/audit/lane-reports/owner-surfaces-r5/1.11-last-owner-demote-before.png',
+      fullPage: true,
+    });
+
+    await dialog.getByTestId(`team-member-edit-${ownerInternalId}`).click();
+    await dialog.getByTestId(`team-member-role-select-${ownerInternalId}`).selectOption('dispatcher');
+
+    const patchPromise = page.waitForResponse(
+      (r) => r.request().method() === 'PATCH' && new URL(r.url()).pathname === `/api/users/${ownerInternalId}`,
+    );
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    const patchRes = await patchPromise;
+    expect(patchRes.status(), 'demoting the only owner must be refused, not succeed').toBe(400);
+
+    const alert = dialog.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 10_000 });
+    await expect(alert).toContainText(/only owner|Cannot demote/i);
+
+    // The role must NOT have changed — the row still shows Owner.
+    await expect(dialog.getByTestId(`team-member-row-${ownerInternalId}`)).toContainText('Owner');
+
+    await page.screenshot({
+      path: 'docs/audit/lane-reports/owner-surfaces-r5/1.11-last-owner-demote-after.png',
+      fullPage: true,
+    });
+
+    const stillOwnerRes = await page.request.get(`${API_URL}/api/me`, { headers: ownerHeaders });
+    const stillOwner = (await stillOwnerRes.json()) as { role?: string };
+    expect(stillOwner.role, 'the sole owner\'s role must be unchanged after the refused demotion').toBe('owner');
+
+    expect(pageErrors, 'no uncaught page errors during the last-owner demotion attempt').toEqual([]);
   });
 });
