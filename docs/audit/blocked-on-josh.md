@@ -40,7 +40,7 @@ waiting* names the §5/§8 rows and the rung they cannot reach until the answer 
 
 | Question | Ticket | Rows |
 |---|---|---|
-| Rung-0 rows: build, fix the lie, or park? (recommendations: 4.10 out of scope per §12.7; 4.9 make the empty skill list explicit and audited; 6.8 park unless wanted; I18 §5.0c (a)+(b)) | #1001 | 4.9, 4.10, 6.8, I18 |
+| Rung-0 rows: build, fix the lie, or park? — **answered 2026-09-12:** 4.10 **out of scope** (§12.7); 4.9 **fix the lie** (empty skill list → explicit audited outcome, regrade at 2, #1017); 6.8 **parked** (no `place` entity on this map, #1019); I18 **§5.0c (a)+(b)** on #1021 (target rung 4), (c) out | #1001 (closed) | 4.9, 4.10, 6.8, I18 |
 | Rung 6: which two real tenants — or is 5 the ceiling? | #999 (waits on #998) | every row's target rung |
 
 ## Open in §14 but blocking no row on this map
