@@ -29,7 +29,7 @@
  *
  * ## Finding: the universal does NOT hold today
  *
- * FOUR second implementations exist, listed in the inventory below. Two of
+ * NINE second implementations exist, listed in the inventory below. Two of
  * them are the same member-discount subtotal written twice —
  * `routes/invoices.ts:178` over every line, `routes/estimates.ts:239` over the
  * default selection only — so the repo already carries two disagreeing
@@ -41,6 +41,12 @@
  * CLAUDE.md's first core pattern ("all money: integer cents") forbids outright
  * and which the engine's own `normalizeLineItemTotals` doc comment describes
  * as the P0-2 bug it was written to close.
+ *
+ * Two MORE unrounded copies sit on the SPOKEN quote readback
+ * (`ai/voice-turn/quote-readback.ts:82`, `create-voice-turn-processor.ts:432`),
+ * so the total the owner hears is recomputed rather than read from the engine
+ * and need not equal the persisted one. Both surfaced in review round 4: the
+ * sweep matched only `quantity * unitPrice`, and multiplication commutes.
  *
  * The engine's math is NOT touched here (§5 lane rule: never touch
  * discount/tax math). The violations are recorded and reported.
@@ -77,8 +83,9 @@ const TOTALS_MATH_SHAPES: ReadonlyArray<{ rule: string; why: string; pattern: Re
   },
   {
     rule: 'line-item-total-math',
-    why: '`quantity × unitPrice` is `calculateLineItemTotal`, which rounds per line. A copy that forgets the rounding produces non-integer cents — the P0-2 client/server divergence.',
-    pattern: /\b(quantity|qty)[\w.?]*\s*\*\s*[\w.?]*\b(unitPriceCents|unitPrice)\b/,
+    why: '`quantity × unitPrice` is `calculateLineItemTotal`, which rounds per line. A copy that forgets the rounding produces non-integer cents — the P0-2 client/server divergence. Multiplication COMMUTES, so both orders count: reviewed on PR #1063 (round 4), matching only `quantity * unitPrice` hid five existing implementations written the other way round, two of them unrounded.',
+    pattern:
+      /\b(quantity|qty)[\w.?]*\s*\*\s*[\w.?)]*\b(unitPriceCents|unitPrice)\b|\b(unitPriceCents|unitPrice)\b[\w.?)\s]*\*\s*[\w.?(]*\b(quantity|qty)\b/,
   },
   {
     rule: 'percent-of-money',
@@ -216,6 +223,31 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: "`Math.round(quantity * unitPriceCents)` in the execution line-item normalizer duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap.",
   },
   {
+    at: 'src/ai/voice-turn/quote-readback.ts:82',
+    as: 'violation',
+    why: "`(li.unitPrice ?? 0) * qty` — a line total with NO rounding, feeding the SPOKEN quote readback. Same defect class as calculateEstimateTotal, on the surface the customer hears: a fractional quantity makes the spoken total a non-integer number of cents that need not equal the persisted total. Found in review round 4; the sweep matched only `quantity * unitPrice`, and multiplication commutes.",
+  },
+  {
+    at: 'src/ai/voice-turn/create-voice-turn-processor.ts:432',
+    as: 'violation',
+    why: "`sum + li.unitPrice * qty` — an unrounded SUBTOTAL over readback lines. The spoken quote total is recomputed here rather than read from the engine, so it can diverge from the proposal's own total. I3′-adjacent: a readback should derive from the payload, not recalculate it.",
+  },
+  {
+    at: 'src/proposals/resolve-line.ts:237',
+    as: 'violation',
+    why: '`Math.round(chosen.unitPriceCents * qty)` duplicates `calculateLineItemTotal`. Rounded, so numerically right today — a second definition tomorrow.',
+  },
+  {
+    at: 'src/ai/resolution/catalog-resolver.ts:623',
+    as: 'violation',
+    why: '`Math.round(item.unitPriceCents * qty)` duplicates `calculateLineItemTotal`, inside the catalog resolver that CLAUDE.md makes the grounding authority for AI-drafted prices.',
+  },
+  {
+    at: 'src/ai/tasks/invoice-task.ts:305',
+    as: 'violation',
+    why: '`Math.round(unitPriceCents * qty)` duplicates `calculateLineItemTotal` on the invoice drafting path.',
+  },
+  {
     at: 'src/routes/estimates.ts:239',
     as: 'violation',
     why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
@@ -273,7 +305,7 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
    * fails, and the row is forced back for re-grading.
    */
   it.fails(
-    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 4 sites)',
+    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 9 sites)',
     () => {
       const violations = totalsMathOutsideEngine([SRC]).filter(
         (h) => classificationOf(h.at) === 'violation',

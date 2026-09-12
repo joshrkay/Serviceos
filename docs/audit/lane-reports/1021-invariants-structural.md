@@ -21,7 +21,7 @@ config added; no money/pricing/RLS/auth/migration change; `ai/supervisor/review-
 | **I5′** | STRUCTURAL (relationship, not identity) | ✅ narrowed gate · widened matcher · wide-open gate | I5′ **false as written** — corrected wording proposed below | `test/invariants/i5-disambiguation-gate-containment.structural.test.ts` |
 | **I6** | STRUCTURAL | ✅ planted contract gate · planted `missingFields` literal | **3 gates** with no lifter | `test/invariants/i6-entity-id-gate-has-resolver.structural.test.ts` |
 | **I8′** | STRUCTURAL | ✅ tenant flag · env switch · feature flag · generic-name switch · new closure member | none | `test/invariants/i8-safety-reads-no-tenant-flag.structural.test.ts` |
-| **I9′** | STRUCTURAL | ✅ four planted shapes · planted wrapped reducer | **4 second implementations** | `test/invariants/i9-one-totals-engine.structural.test.ts` |
+| **I9′** | STRUCTURAL | ✅ four planted shapes · planted wrapped reducer | **9 second implementations** | `test/invariants/i9-one-totals-engine.structural.test.ts` |
 | **I13′** | STRUCTURAL | ✅ hand-rolled consumer · imported-but-unused renderer · one-of-two channels | **1 unfenced prompt** | `test/invariants/i13-operator-prompt-fencing.structural.test.ts` |
 | **I15** | STRUCTURAL, caveat closed | ✅ planted `@anthropic-ai/sdk` + 22 vendors + raw fetch | none (scope call recorded) | `test/ai/gateway-ci-guard.test.ts` |
 | **I7** | STRUCTURAL | ✅ planted `apply_ai_discount` | none | `test/proposals/guardrails/negotiation-invariant.test.ts` |
@@ -565,7 +565,7 @@ the build whichever it turns out to be — which is what stops the exception lis
 `jobs/job-profit.ts:145`, `verticals/context-assembly.ts:296`, `digest/digest-service.ts:961`.
 **Harness:** `ai/voice-quality/inapp-50/world.ts:554`.
 
-### 🚨 GENUINE VIOLATION — I9′ does not hold (4 second implementations)
+### 🚨 GENUINE VIOLATION — I9′ does not hold (9 second implementations)
 
 | file:line | What | Why it matters |
 |---|---|---|
@@ -833,6 +833,10 @@ $ npx vitest run --reporter=verbose test/proposals/guardrails/negotiation-invari
 
 Ranked by what a defect would cost, not by how hard it is to fix. **None are fixed on this branch.**
 
+0. **I9′ — the spoken quote total is recomputed, unrounded, in two places**
+   (`ai/voice-turn/quote-readback.ts:82`, `create-voice-turn-processor.ts:432`). The figure the owner
+   hears does not come from the engine and can be a non-integer number of cents. Surfaced by review
+   round 4.
 0. **I9′ — two member-discount subtotals that already disagree** (`routes/invoices.ts:178` over every
    line, `routes/estimates.ts:239` over the default selection only). Not a drift *risk* — drift that
    has already happened, in money, on one feature. Surfaced by review round 2.
@@ -1024,6 +1028,61 @@ classified module, and a new sender fails regardless of its local identifiers.
 
 Suite after the round: **`111 passed | 4 expected fail`** (round 2: 105 | 4; round 1: 98 | 4; initial:
 95 | 4). `tsconfig.build.json` clean; `packages/api/src` still byte-identical to `origin/main`.
+
+## Review round 4 (PR #1063, Codex) — five more, and I9′ more than doubles
+
+**1. 🚨 I9′ matched only one order of a commutative operation, hiding five more sites.** The
+`line-item-total-math` pattern required `quantity * unitPrice`; five existing implementations are
+written `unitPrice * quantity`. Multiplication commutes, so the guard was measuring source spelling,
+not arithmetic. **I9′ goes from 4 sites to 9**, and two of the new ones are the serious kind:
+
+| file:line | Why it matters |
+|---|---|
+| `ai/voice-turn/quote-readback.ts:82` | `(li.unitPrice ?? 0) * qty` — **no rounding**, feeding the SPOKEN quote readback |
+| `ai/voice-turn/create-voice-turn-processor.ts:432` | `sum + li.unitPrice * qty` — an **unrounded subtotal** for the spoken total |
+| `proposals/resolve-line.ts:237` | `Math.round(chosen.unitPriceCents * qty)` — duplicates `calculateLineItemTotal` |
+| `ai/resolution/catalog-resolver.ts:623` | same, inside the resolver CLAUDE.md makes the price-grounding authority |
+| `ai/tasks/invoice-task.ts:305` | same, on the invoice drafting path |
+
+The first two mean **the total the owner hears is recomputed rather than read from the engine**, and
+unrounded — so a fractional quantity makes the spoken figure a non-integer number of cents that need
+not equal the persisted total. That is I9′ and I3′-adjacent at once: a readback should derive from the
+payload, not recalculate it.
+
+**2. I1′'s write-verb allowlist missed every repository-specific mutation.** `updateStatus` (nine call
+sites under `src/ai`), `markEnded`, `activate`, `markFinalApproved`, `stampOutcomeByCallSid`,
+`setSummary` — none were write verbs by the old list. **The list is now inverted**: a repository call
+is a candidate write *unless* its name starts with a read verb (`find`/`get`/`list`/`has`/`is`/…), so
+the default is "this needs classifying" and a future `archiveGroup(...)` is caught by construction.
+Five newly-surfaced calls were reviewed and classified AI-plane (voice-session lifecycle, revision
+approval flag, eval-run telemetry, call-outcome stamp); none is an operational entity, so the I1′
+count stays at 6.
+
+**3. I6 dropped root-refinement gates.** Zod issues with an EMPTY path were discarded, but production
+maps exactly those through `contractGapFields(errors, fallback)` where the **fallback argument becomes
+the gate key**. A `widgetId`-or-reference refine paired with `contractGapFields(errors, 'widgetId')`
+would emit an entity-id gate at runtime invisible to both existing sources. Added as a third source,
+scanned from the call sites, with a control.
+
+**4. I7's "exhaustive" check filtered to money-class first** — so it was blind to exactly the case it
+described, a new `apply_concession` mistakenly registered as capture-class; and its negative control
+manipulated a local array rather than running the real predicate. Both fair. **Every registered
+proposal type now carries a reviewed capability classification** (52 of them), and the control runs the
+real predicate over a planted registry, including the assertion that the name-fragment tripwire alone
+would *not* have caught it.
+
+**5. I13′'s gateway-sender pin does not close the delegation hole, and I am not going to claim it
+does.** Codex is right: a classified sender can call `gateway.complete(buildCorrection(transcript))`
+while a new helper module defines `buildCorrection(raw)` with neither a gateway call nor a recognised
+caller-text identifier. Round 3's fix narrowed the hole; it did not close it. Closing it needs
+provenance tracing across delegated builders — dataflow, not a text scan. **Recorded as a known limit
+rather than patched a fourth time**, because three successive partial fixes to the same class of hole
+is the signal that the approach, not the pattern, is what is wrong.
+
+Suite after the round: **`111 passed | 4 expected fail`**. `tsconfig.build.json` clean;
+`packages/api/src` still byte-identical to `origin/main`.
+
+**Revised counts: I1′ 6, I9′ 9.**
 
 ## Not done / judgment calls
 

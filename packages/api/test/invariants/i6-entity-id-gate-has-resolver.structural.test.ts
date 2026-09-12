@@ -177,6 +177,43 @@ export function literalGateKeyEmitters(
 /** Lines folded into each literal-sweep window (a wrapped array literal). */
 const LITERAL_WINDOW_LINES = 5;
 
+// ─── Source 3: the root-refinement FALLBACK keys ────────────────────────────
+
+/**
+ * Gate keys supplied as the `fallback` argument to `contractGapFields`, and
+ * returned by `namedContractGap`.
+ *
+ * Reviewed on PR #1063 (round 4): the contract derivation drops Zod issues
+ * with an EMPTY path — object-level `.refine()` failures — but production maps
+ * exactly those through `contractGapFields(errors, fallback)`, where the
+ * caller's fallback string BECOMES the `missingFields` key. A new
+ * `widgetId`-or-reference refine paired with `contractGapFields(errors,
+ * 'widgetId')` would emit an entity-id gate at runtime that neither the
+ * derivation nor the literal sweep could see.
+ *
+ * These are the third source, scanned from the call sites so a new fallback
+ * has to pass the same lifter check as any other gate key.
+ */
+export function fallbackGateKeys(roots: readonly string[]): Array<{ key: string; at: string }> {
+  const out: Array<{ key: string; at: string }> = [];
+  for (const file of listSourceFiles(roots)) {
+    const lines = file.code.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      for (const m of lines[i].matchAll(/contractGapFields\([^,]*,\s*'([^']+)'\s*\)/g)) {
+        out.push({ key: m[1], at: `${file.rel}:${i + 1}` });
+      }
+      // `namedContractGap`'s per-type returns are the same mechanism written
+      // as a switch: `return <cond> ? ['customerId'] : []`.
+      if (/return[^;]*\?\s*\[/.test(lines[i]) || /^\s*return\s*\[/.test(lines[i])) {
+        for (const m of lines[i].matchAll(/\[\s*'([a-zA-Z][A-Za-z0-9_]*)'\s*\]/g)) {
+          out.push({ key: m[1], at: `${file.rel}:${i + 1}` });
+        }
+      }
+    }
+  }
+  return out;
+}
+
 // ─── Classification ─────────────────────────────────────────────────────────
 
 /**
@@ -290,7 +327,7 @@ export function unliftableEntityIdGates(
     out.push({ key, where: `contract(s): ${types.join(', ')}` });
   }
 
-  for (const emitter of literalGateKeyEmitters(roots)) {
+  for (const emitter of [...literalGateKeyEmitters(roots), ...fallbackGateKeys(roots)]) {
     const key = emitter.key;
     if (!/^[A-Za-z][A-Za-z0-9]*Id$/.test(key) && !isPathShapedGate(key)) continue;
     if (classify(key) !== 'unliftable') continue;

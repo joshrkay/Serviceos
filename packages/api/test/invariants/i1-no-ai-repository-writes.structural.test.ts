@@ -53,7 +53,43 @@ import {
 
 const AI_ROOT = path.resolve(__dirname, '../../src/ai');
 
-/** Repository method names that mutate persisted state. */
+/**
+ * Method-name prefixes that are unambiguously READS.
+ *
+ * Reviewed on PR #1063 (round 4): a fixed allowlist of write verbs left every
+ * repository-specific mutation outside the inventory — `updateStatus` (nine
+ * call sites under `src/ai`), `markEnded`, `activate`, `markFinalApproved`,
+ * `stampOutcomeByCallSid`, `setSummary`. Adding one of those would have kept
+ * I1′ green without being classified.
+ *
+ * So the list is INVERTED. A repository call is a candidate write unless its
+ * name starts with a read verb, which makes the default "this needs
+ * classifying" rather than "this is fine". A new `archiveGroup(...)` is
+ * therefore caught by construction, not by someone remembering to add the
+ * verb.
+ */
+const READ_METHOD_PREFIXES = [
+  'find',
+  'get',
+  'list',
+  'has',
+  'is',
+  'count',
+  'search',
+  'query',
+  'exists',
+  'load',
+  'fetch',
+  'read',
+  'resolve',
+  'stream',
+] as const;
+
+function isReadMethod(method: string): boolean {
+  return READ_METHOD_PREFIXES.some((p) => method.startsWith(p));
+}
+
+/** Method names that mutate persisted state — kept for documentation. */
 const WRITE_METHODS = [
   'create',
   'update',
@@ -85,7 +121,7 @@ const WRITE_METHODS = [
  * cannot infer what `repository` writes, so a human has to say.
  */
 const WRITE_CALL_RE = new RegExp(
-  String.raw`\b((?:[A-Za-z_][A-Za-z0-9_]*)?[Rr]epo(?:sitory)?)\.(${WRITE_METHODS.join('|')})\s*\(`,
+  String.raw`\b((?:[A-Za-z_][A-Za-z0-9_]*)?[Rr]epo(?:sitory)?)\.([a-z][A-Za-z0-9_]*)\s*\(`,
 );
 
 /** A receiver whose name says nothing about what it writes. */
@@ -119,6 +155,7 @@ export function findRepositoryWrites(roots: readonly string[]): RepoWrite[] {
     for (let i = 0; i < codeLines.length; i += 1) {
       const m = codeLines[i].match(WRITE_CALL_RE);
       if (!m) continue;
+      if (isReadMethod(m[2])) continue;
       writes.push({
         at: `${file.rel}:${i + 1}`,
         file: file.rel,
@@ -169,6 +206,18 @@ const AI_PLANE_REPOS: ReadonlyArray<{ receiver: string; why: string }> = [
     why: 'Onboarding-conversation session state — AI conversation plane, no customer-visible record.',
   },
   {
+    receiver: 'voiceSessionRepo',
+    why: 'Voice SESSION lifecycle state (`markEnded`) — the AI conversation plane. The call session is not a customer-facing operational record; its outcome rides the proposal rail.',
+  },
+  {
+    receiver: 'retrievalEvalRunRepo',
+    why: 'Retrieval evaluation run telemetry (`recordRun`) — offline eval plane, same class as aiRunRepo.',
+  },
+  {
+    receiver: 'voiceRepo',
+    why: 'Stamps the call OUTCOME on the voice-call record (`stampOutcomeByCallSid`) — telephony session bookkeeping, not an operational entity.',
+  },
+  {
     receiver: 'smsEventRepo',
     why: 'RV-225 — records a voice edit request in the proposal approval-rail event store so it blocks approval exactly like an SMS EDIT. Approval-rail bookkeeping on the proposal, not an operational entity.',
   },
@@ -200,6 +249,11 @@ const GENERIC_RECEIVER_SITES: ReadonlyArray<{
     file: 'ai/evaluation/dataset-hooks.ts',
     as: 'ai-plane',
     why: 'Eval dataset rows for the offline evaluation harness — AI-plane telemetry.',
+  },
+  {
+    file: 'ai/evaluation/invoice-revision.ts',
+    as: 'ai-plane',
+    why: 'Marks a revision SNAPSHOT final-approved (`markFinalApproved`) in the revision store; it never writes the invoice. Surfaced in round 4 once the verb list was inverted.',
   },
   {
     file: 'ai/evaluation/invoice-approval.ts',
