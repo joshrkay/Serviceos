@@ -76,8 +76,18 @@ install_dependencies() {
   local snapshot had_lockfile=0
   snapshot="$(mktemp)"
   if [ -f package-lock.json ]; then
+    # If the snapshot cannot be taken there is no way to honour the invariant,
+    # so don't run the fallback at all rather than run it and hope. A failed
+    # bootstrap is recoverable; a silently rewritten lockfile is the thing this
+    # whole function exists to prevent.
+    if ! cp package-lock.json "$snapshot"; then
+      echo "[session-start] WARNING: could not snapshot package-lock.json, so the npm install"
+      echo "[session-start]          fallback was SKIPPED — it could not be undone if it"
+      echo "[session-start]          rewrote the lockfile. node_modules may be incomplete."
+      rm -f "$snapshot"
+      return 0
+    fi
     had_lockfile=1
-    cp package-lock.json "$snapshot"
   fi
 
   # The restore runs from a trap, not just inline after npm. Remote startup can
@@ -87,7 +97,12 @@ install_dependencies() {
   # dynamic, so this sees $snapshot and $had_lockfile from the caller.
   _restore_lockfile() {
     if [ "$had_lockfile" -eq 1 ]; then
-      if [ -s "$snapshot" ] && ! cmp -s package-lock.json "$snapshot"; then
+      # No `-s` test on the snapshot: `had_lockfile` already proves the file
+      # existed and was copied. Testing for non-empty here silently exempted a
+      # zero-byte lockfile — it exists, so it is snapshotted and restorable,
+      # but the guard skipped the restore and let the fallback's regenerated
+      # file stand (Codex P2, #994 — fourth hole found in this invariant).
+      if ! cmp -s package-lock.json "$snapshot"; then
         cp "$snapshot" package-lock.json
         echo "[session-start]          NOTE: the fallback modified package-lock.json and the change"
         echo "[session-start]          was REVERTED — it cannot be distinguished from the libc"
