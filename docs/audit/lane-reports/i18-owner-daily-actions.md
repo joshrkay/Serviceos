@@ -109,10 +109,15 @@ no mocked registry, no grep result standing in for a wiring.
 
 ### 3.1 Owner-only routes — executed guards, not source text
 
-`createApp()` is booted hermetically (no Postgres, no Clerk instance, no AI
-key — the identical boot `test/app/route-manifest.test.ts` uses) and its real
-Express layer stack is walked. Express 4 makes `app.router` throw, so `_router`
-is the only way in — the same note `src/app-route-manifest.ts` carries.
+`createApp()` is booted with **a pool but no live database** — no Clerk
+instance, no AI key, and a `DATABASE_URL` that is never connected to. `pg.Pool`
+constructs lazily, so no socket opens, and this test only walks the router
+stack, so no query is ever issued. The pool has to EXIST because `app.ts` guards
+~20 mounts behind `if (pool)` / `if (<pool-backed repo>)` — see §11.1, which is
+why this differs from `test/app/route-manifest.test.ts`, whose boot deletes
+`DATABASE_URL` and therefore never sees those routers. Express 4 makes
+`app.router` throw, so `_router` is the only way in — the same note
+`src/app-route-manifest.ts` carries.
 
 For every route the guards Express would actually run are collected — the
 router-level `use` middleware registered **ahead** of it (matching Express's own
@@ -378,7 +383,7 @@ Those pre-existing errors are untouched by this lane.
 
 ## 6. Judgment calls
 
-Every one of the 53 rows carries a one-line `why` in the doc. The calls worth
+Every one of the 54 rows carries a one-line `why` in the doc. The calls worth
 naming here are the ones a reviewer might land differently:
 
 1. **`POST /api/attachments/:id/visibility` → `daily`.** The most debatable
@@ -952,6 +957,63 @@ the *enumeration* rather than the assertions. 16.3 is a different and more
 embarrassing kind — the report describing the work incorrectly. An audit
 artifact that misstates its own result is exactly the rot this lane exists to
 prevent, and it was caught by review rather than by me.
+
+```
+ Test Files  1 passed (1) · Tests 25 passed (25)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 328 tests passed
+```
+
+---
+
+## 17. Review round 8 — two more stale claims, and the root cause of them
+
+Both findings correct, both the same class as §16.3: **the documentation lagging
+the code it documents.**
+
+### 17.1 The PRD row advertised 24/24
+
+Round 5 corrected the row to 24/24; round 7 added the route-binding negative
+control and made it 25. The row was not re-touched, so the authoritative audit
+source again carried a stale verification line. Now **25/25**.
+
+### 17.2 The report still described a boot it no longer uses
+
+§3.1 said *"booted hermetically (no Postgres … the identical boot
+`test/app/route-manifest.test.ts` uses)"*. That stopped being true in §11.1,
+which added a `DATABASE_URL` precisely so pool-gated routers mount — and
+`route-manifest.test.ts` deletes `DATABASE_URL`, so the two boots are now
+deliberately different. Calling them identical did not just go stale: it
+obscured the completeness fix that §11.1 exists to record. §3.1 now describes a
+pool-backed boot that issues no query, and says why it differs.
+
+### 17.3 The root cause, and what I did about it beyond the two reports
+
+Three rounds running (16.3, 17.1, 17.2) the finding has been *my prose
+describing my code incorrectly*, always the same way: I update the section I am
+editing and leave the earlier section that says the same thing differently.
+Fixing only what review flags would guarantee a fourth.
+
+So this round I swept all three documents for every stale claim rather than the
+two reported, and found one more nobody had flagged:
+
+| Location | Was | Now |
+|---|---|---|
+| PRD §5 I18 row | `24/24` | `25/25` |
+| Report §3.1 | "booted hermetically… identical boot" | pool-backed, no query, and why it differs |
+| Report §6 | "Every one of the **53** rows" | 54 — *not flagged by review* |
+
+Deliberately left as-is, because they are history rather than staleness: the
+per-round `18/18`, `20/20`, `23/23` lines, the raw RED output quoting
+`expected 53 to be greater than 400`, the §11.3 before/after table, and §1's
+note that the counts started at 53 / 45.
+
+**The durable lesson.** The inventory doc cannot rot — a contract test pins it,
+including its budget block. The *report* and the *PRD row* have no such pin, and
+that asymmetry is exactly where all three of these findings landed. Numbers
+worth auditing should live in the machine-checked artifact, with prose pointing
+at it rather than restating it. That is the fourth follow-up this lane has
+surfaced: the §5 row could cite the budget block instead of copying it.
 
 ```
  Test Files  1 passed (1) · Tests 25 passed (25)
