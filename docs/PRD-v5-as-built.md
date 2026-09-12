@@ -1250,13 +1250,13 @@ Rows marked ✅ *executed* were run during this audit rather than inspected —
 | 8.3 | Book the job without me | J2 | 12 | 4 | The customer never provably gets a confirmation |
 | 8.4 | Run the day | J1, J10 | 11 | 3 | The drag→proposal guarantee is untested at the DB |
 | 8.5 | Capture the work in the field | J5 | 5 | 4 | Field screens aren't pinned to the glove/daylight contract |
-| 8.6 | Let me fix it by talking | J9 | 9 | 4 | No spoken-address entity — nobody can say "the house on Elm" |
+| 8.6 | Let me fix it by talking | J9 | 10 | 4 | No spoken-address entity — nobody can say "the house on Elm" |
 | 8.7 | Draft the quote from what was said | J4, J10 | 12 | 4− | 7 of 12 overstated; the stale-revision guard has never met a real DB |
 | 8.8 | Bill it and chase the money | J5, J6 | 13 | 4 | Dunning cadence idempotency is unproven — duplicate collections texts |
 | 8.9 | Tell me what happened, and what you got wrong | J7, J8 | 12 | 4 | **No shipped surface turns the digest on** (the API does — §12.4) |
 | §5 | Never exceed your authority | J8, J10 | 26 | 4 | The second classifier reaches 2 of 93 origins |
 
-**123 stories. Zero at rung 6.** Nothing in this product has been observed
+**124 stories. Zero at rung 6.** Nothing in this product has been observed
 serving a real tenant.
 
 #### What each rung shape actually costs to close
@@ -1428,7 +1428,8 @@ actual interface thesis — *voice directs, SMS approves* (D-030).
 
 | # | User story | Acceptance criterion | Rung | Confirm |
 |---|---|---|---|---|
-| **6.1** | **As M**, I want to talk to it from any screen without hunting for a button, so speaking is always the fastest path | **Given** any authenticated screen, **when** I press to talk, **then** a session opens with an SSE event stream | 5 | **W:** `useVoiceRecorder.test.ts` |
+| **6.1a** | **As M**, I want to talk to it from any screen without hunting for a button, so speaking is always the fastest path | **Given** any authenticated screen, **when** I press to talk, **then** the recording **uploads and is transcribed** — `POST /api/voice/recordings`, polled to completion. *Not* an SSE stream | **3** ↓ | **W:** `VoiceBar.hint.test.tsx` — proves the idle affordance renders on both variants and *"tapping the hint starts listening"*. `Shell.tsx:480,605` mounts it desktop + mobile, so "any screen" holds. 🚨 **Nothing tests the browser→upload→poll→transcript round trip** |
+| **6.1b** | **As M**, I want a live voice session when I'm working with the assistant, so I see it responding as I speak | **Given** the assistant screen, **when** a session starts, **then** an SSE event stream carries the turns | **2** ↓↓↓ | 🚨 **CODE-ONLY — zero tests.** `useVoiceSession.ts` and `VoiceSessionPanel.tsx` have none; `streamAuth.test.ts` names `useVoiceSession` only in a doc-comment. **S:** `grep -rln "useVoiceSession\|VoiceSessionPanel" packages/web/src --include=*.test.tsx --include=*.test.ts` → only `streamAuth.test.ts`, which imports neither |
 | **6.2** | **As M**, I want what I say to become a typed, validated proposal, so a mumble can't become a malformed invoice | **Given** a spoken sentence, **when** classified, **then** a Zod-validated proposal of the mapped type is drafted with vertical context | 5 | **U:** `operator-voice-golden-path.test.ts` · **D:** `voice-inbound-appointment.test.ts` |
 | **6.3** | **As M**, I want to say "the Henderson job" and have it find the right one, so I don't have to know IDs | **Given** a free-text reference across nine entity kinds, **when** resolved, **then** a real row is found — or an ambiguity carrying **both** candidates | 4 | **D:** `entity-resolution.test.ts`, `chat-entity-resolution.test.ts` |
 | **6.4** | **As M**, I want to ask where a job stands and get an answer, not a proposal, so a question doesn't create work | **Given** a status question, **when** dispatched, **then** a spoken answer and **no proposal minted** | 5 | **D:** `update-job-execution.test.ts` |
@@ -2514,7 +2515,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how seven of these were got wrong
+### 12.4d A note on method — how eight of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2617,6 +2618,49 @@ audit trail. **A document that grades its own claims owes a higher standard to
 the sentences that tell someone what to change than to the ones that tell them
 what is true.** The remediations in §12 have had no falsifier of any kind
 attached to them; the rungs at least have commands.
+
+**The eighth is the worst one in this document, and it was the highest rung it
+claimed.** Story 6.1 asserted that pressing the global control on any screen
+opens *"a session with an SSE event stream,"* graded **5**, confirmed by
+`useVoiceRecorder.test.ts`.
+
+Three things were wrong at once. The global control (`VoiceBar`, mounted by
+`Shell`) **uploads and polls** — `POST /api/voice/recordings`, then
+`GET /api/voice/recordings/:id` until done; there is no `EventSource` in it. The
+SSE path is real but lives in `useVoiceSession`, imported by exactly one
+component, `VoiceSessionPanel`, on the assistant screen. And **the cited test
+file does not exist** — there is `useVoiceRecorder.ts` (the hook, untested) and
+`VoiceRecorder.test.tsx` (a different file, presentational callbacks only).
+
+The row is now split: 6.1a at **3** for the upload path, 6.1b at **2** for the
+SSE session, which has **no test at all**. Rung 5 became 3 and 2.
+
+A wrong rung is ordinary. **A rung whose confirming command cannot be run is a
+different failure**, because this document's entire proposition is that every
+number has a runnable command beneath it — §11.0d's first defence, stated twice
+more in §0 and D-031. A citation nobody executed is indistinguishable from an
+invented one, and it sat on the highest rung claimed anywhere here. The cheapest
+possible guard would have caught it:
+
+```bash
+# every W:/U:/D: file cited in §5 and §8 exists
+grep -oE '`[a-zA-Z0-9./-]+\.test\.tsx?`' docs/PRD-v5-as-built.md | tr -d '`' | sort -u |
+  while read -r f; do find packages -name "$(basename "$f")" -print -quit | grep -q . || echo "MISSING: $f"; done
+```
+
+That is the falsifier-runner §11.0d keeps calling future work, in its smallest
+useful form — and it would have failed this PR before review did.
+
+**Run against this edition it prints exactly two lines, both expected:**
+
+| Line | Why it is not a defect |
+|---|---|
+| `test/ai/supervisor/review-coverage.test.ts` | Cited only as work to do — §11.0c item 1 and §12.4e's *"the missing proof is one test."* Never in a `Confirm` column |
+| `useVoiceRecorder.test.ts` | Named in this section as the citation that didn't exist. No row cites it any more |
+
+**A third line is a real defect.** 114 distinct test files are cited across §5
+and §8; 112 of them exist and 2 are deliberate. That is the baseline this
+command is worth running against.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
