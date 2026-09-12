@@ -14,7 +14,7 @@ A prior lane announcement on this ticket (Codex, local worktree `lane/close-8-9`
 |---|---|---|---|---|
 | 9.2 | `review-request-sweep.test.ts` (extended) | PROVEN-REAL-DB | T4 (cited, sweep-tenant-fanout.test.ts) | `RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts --reporter=verbose <file>` |
 | 9.3 | `feedback-review-gating.test.ts` (new) | PROVEN-REAL-DB + honest `it.fails` | T1 | same |
-| 9.12 | `conversation-inbox.test.ts` (extended) | PROVEN-REAL-DB + honest `it.fails` | T1 (was vacuous) | same |
+| 9.12 | `conversation-inbox.test.ts` (extended) | PROVEN-REAL-DB (listing isolation only) | T1 (was vacuous) | same |
 | 9.4 | `google-reviews-matching.test.ts` (new) | PROVEN-REAL-DB | T1 | same |
 | 9.1 / 9.8 / 9.9 / 9.10 | grading only — see below | n/a | see below | grep, no test run |
 
@@ -47,7 +47,9 @@ All commands run from `packages/api/`. Docker-gated via `vitest.integration.conf
       Tests  3 passed (3)
 ```
 
-Evidence class: **PROVEN-REAL-DB**. T4 for this sweep is cited, not re-proven: `test/integration/sweep-tenant-fanout.test.ts` → "cross-tenant query sweep fan-out (T4)" → "review-request sweep" (lines 1034-1072) drives `runReviewRequestSweep` against a multi-tenant result set and asserts per-tenant enqueue + failure isolation.
+Evidence class: **PROVEN-REAL-DB** for the audit write on the SUPPRESSED path specifically. T4 for this sweep is cited, not re-proven: `test/integration/sweep-tenant-fanout.test.ts` → "cross-tenant query sweep fan-out (T4)" → "review-request sweep" (lines 1034-1072) drives `runReviewRequestSweep` against a multi-tenant result set and asserts per-tenant enqueue + failure isolation.
+
+**Scope limit (flagged in review, Codex — accurate):** the audit row this test reads back is `sms.suppressed`, written only when the gate REFUSES a send (no consent, here). The codebase has no audit event anywhere for a *successful* customer send through this path — `GatedMessageDelivery.audit()` is only called from its two suppression branches (`gated-message-delivery.ts:246-253`). So this test proves the suppression is audited; it does not prove the successful enqueue/delivery is, because nothing in the product code audits that today. Adding one would be a product-code change, out of this TEST-ONLY lane's scope. Whether that gap caps this row below rung 4 is Fable's call, not this lane's.
 
 Tenant-grade grep (this file):
 ```
@@ -103,9 +105,9 @@ Tenant-grade grep (this file):
 
 ---
 
-## Row 9.12 — unified inbox with reply drafts (4/3 → 4)
+## Row 9.12 — unified inbox with reply drafts (4/3, listing isolation only)
 
-**File:** `test/integration/conversation-inbox.test.ts` (extended; existing describe block, one `it` replaced + one `it.fails` added).
+**File:** `test/integration/conversation-inbox.test.ts` (extended; existing describe block, one `it` replaced).
 
 **G1 gap:** the file's only T1 test, `does not surface another tenant's threads`, called `listInboxThreads` on a freshly-created SECOND tenant with NOTHING seeded for it, then asserted `.every(...)` over the (necessarily empty) result — vacuously true regardless of whether cross-tenant filtering works. It could not have caught a leak.
 
@@ -116,21 +118,20 @@ Tenant-grade grep (this file):
  × ... T1: a neighbour tenant's unanswered thread never appears in another tenant's inbox listing 24ms
    → expected [ …(3) ] to include 'fba73ccc-b465-4134-aa01-5877a57ce8db'
  Test Files  1 failed (1)
-      Tests  1 failed | 1 passed | 1 expected fail (3)
+      Tests  1 failed | 1 passed (2)
 ```
 
 **GREEN:**
 ```
  ✓ lists customer + unmatched comms threads with the customer name joined, newest-inbound first
  ✓ T1: a neighbour tenant's unanswered thread never appears in another tenant's inbox listing
- ✓ story claim not met in code: a neighbour tenant's draft reply is never visible (expected fail)
  Test Files  1 passed (1)
-      Tests  2 passed | 1 expected fail (3)
+      Tests  2 passed (2)
 ```
 
-Evidence class: **PROVEN-REAL-DB** for the listing isolation (now a real T1, not vacuous); honest `it.fails` for the unproven half.
+Evidence class: **PROVEN-REAL-DB** for the listing isolation (now a real T1, not vacuous). This row's other half — "with a reply drafted for me" — is untouched by this lane's testing, corrected below.
 
-**Not done / judgment call:** "reply drafts" (the second half of the story — "with a reply drafted for me") do not exist anywhere in the codebase. `InboxThreadSummary` (`conversation-service.ts:82-93`) carries no draft field; there is no `replyDraft`/`draftReply` type, table, or AI-drafting call site feeding this listing (grepped for all four spellings across `packages/api/src` — zero hits). The `it.fails` added here documents that rather than faking a feature; it should go red (fail to fail) the moment a real draft-storage implementation lands.
+**Correction (Fable gate, commit f4da6f9, superseding this lane's original text):** this lane originally added an `it.fails` here claiming "reply drafts" don't exist anywhere in the codebase — that was wrong. `POST /api/conversations/:id/suggest-reply` (`SuggestReplyTask`, `routes/conversations.ts:303`) drafts a reply on demand and is unit-tested; drafts are simply produced on request rather than stored on the thread row, so the `it.fails` recorded a gap that wasn't one (and would have failed for the wrong reason — `threads[0]` undefined on an empty tenant — even before that). Fable's gate commit removed it. The accurate state of this row's second half: the on-demand suggest-reply endpoint is unit-tested only; this lane did not add real-Postgres coverage for it (its own audit/persistence leg, if any, is untouched by this PR).
 
 Tenant-grade grep (this file):
 ```
@@ -171,7 +172,7 @@ Tenant-grade grep (this file):
       Tests  5 passed (5)
 ```
 
-Evidence class: **PROVEN-REAL-DB**.
+Evidence class: **PROVEN-REAL-DB** for the customer-matching step specifically (the one DB-touching piece of this pipeline — see file header). The draft composers are faked here (constant strings) and no `ProposalRepository` write is exercised — this file does not prove a persisted, audit-readable `review_response_proposal`, only that the real match feeds the pipeline correctly. Noted in review (Codex) as a caution against reading this as full-pipeline persistence proof; agreed, and scoped that way in this report from the start.
 
 **Not done:** rung 5 needs a connected Google Business Profile — a live OAuth integration against real upstream reviews. Out of scope for this repo's hermetic test harness; not faked. (Matches #1013's own note: "OAuth parked.")
 
@@ -247,6 +248,13 @@ $ EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/serviceos_test RLS_R
       Tests  13 passed | 2 expected fail (15)
 ```
 
+**Post-gate correction:** the Fable gate (commit f4da6f9) removed `conversation-inbox.test.ts`'s `it.fails` (see Row 9.12 above — it recorded a gap that wasn't one) after this evidence run was captured. Re-run against the same combined set on the current head (`e5bae06`) is:
+```
+ Test Files  4 passed (4)
+      Tests  13 passed | 1 expected fail (14)
+```
+(the one remaining expected fail is 9.3's owner-notification sentinel). Row dumps below are from the original run and are still valid for the rows they cover (9.2/9.3 audit rows and 9.4/9.12 data rows are unaffected by the removed test).
+
 **Audit rows written by these tests, real tenant ids visible:**
 ```
 $ docker exec evidence-pg psql -U test -d serviceos_test -P pager=off -c \
@@ -307,8 +315,8 @@ Container stopped and removed after capture (`docker stop evidence-pg`); no test
 
 ## Not done / judgment calls (recap)
 
-- **9.3** — "routed to me privately" has no active owner-notification code path; documented via `it.fails`, not faked. A future implementer: this test should go red the moment it's built.
-- **9.12** — "reply drafted for me" has no field, type, or storage anywhere in the codebase; documented via `it.fails`, not faked.
-- **9.4** — rung 5 needs a connected Google Business Profile (live OAuth); out of scope for this harness.
+- **9.3** — "routed to me privately" has no active owner-notification code path; documented via `it.fails`, not faked. A future implementer: this test should go red the moment it's built. **Scope limit flagged in review (Codex, valid):** the audit row this test reads back is the consent gate's `sms.suppressed` event on the SUPPRESSED path (no consent) — the codebase has no audit event at all for a *successful* customer send on this path, so this proves the suppression is audited, not that a successful enqueue/delivery is. Whether that's enough for a rung move is Fable's call, not this lane's — flagging it rather than resolving it.
+- **9.12** — corrected above: reply drafts exist as an on-demand endpoint (`suggest-reply`), not a stored field; this lane proves only the listing-isolation half.
+- **9.4** — rung 5 needs a connected Google Business Profile (live OAuth); out of scope for this harness. **Scope limit flagged in review (Codex, valid):** the classify→match→draft test fakes both draft composers (constant strings) and never invokes a real `ProposalRepository` write — it proves the real-DB CUSTOMER MATCH, not a persisted, audit-readable `review_response_proposal`. The report and PR body already scoped this claim to "the one DB-touching step" (the customer loader); Codex's finding is a caution against reading that as full pipeline persistence proof. Again, the rung call is Fable's.
 - **9.1/9.8/9.9/9.10** — grading only, per scope; the two literal-grep false negatives (9.1, 9.10-adjacent naming) are called out above rather than silently reported as "0 matches = no coverage."
 - Did not touch 9.5 (money, Opus), 9.6 (browser lane), 9.7 (#1011 PR-3), 9.11 (not assigned) per the brief's scope fence.
