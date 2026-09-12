@@ -23,6 +23,8 @@ import {
 } from '../../src/shared/billing-engine';
 import { applyInvoiceEdits, InvoiceEditAction } from '../../src/invoices/invoice-editor';
 import { applyEstimateEdits, EstimateEditAction } from '../../src/estimates/estimate-editor';
+import { createInvoice } from '../../src/invoices/invoice';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 describe('Postgres integration — invoice_line_items.pricing_source (migration 255)', () => {
   let pool: Pool;
@@ -379,24 +381,21 @@ describe('Postgres integration — invoice_line_items.pricing_source (migration 
       updatedAt: new Date(),
     });
 
-    const neighbourLines: LineItem[] = [
-      lineWithSource(crypto.randomUUID(), 'Neighbour catalog part', 7_700, 0, 'catalog'),
-    ];
-    const neighbourTotals = calculateDocumentTotals(neighbourLines, 0, 0);
-    const neighbourInvoice = await invoiceRepo.create({
-      id: crypto.randomUUID(),
-      tenantId: neighbour.tenantId,
-      jobId: neighbourJobId,
-      invoiceNumber: 'INV-PS-NEIGHBOUR-1',
-      status: 'draft',
-      lineItems: neighbourLines,
-      totals: neighbourTotals,
-      amountPaidCents: 0,
-      amountDueCents: neighbourTotals.totalCents,
-      createdBy: neighbour.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    // Through the real audited production path (createInvoice), not a bare
+    // repo.create() — a real DB write without its audit event doesn't clear
+    // the PRD's own §8.0 evidence bar (PROVEN-REAL-DB requires both).
+    const neighbourAuditRepo = new PgAuditRepository(pool);
+    const neighbourInvoice = await createInvoice(
+      {
+        tenantId: neighbour.tenantId,
+        jobId: neighbourJobId,
+        invoiceNumber: 'INV-PS-NEIGHBOUR-1',
+        lineItems: [lineWithSource(crypto.randomUUID(), 'Neighbour catalog part', 7_700, 0, 'catalog')],
+        createdBy: neighbour.userId,
+      },
+      invoiceRepo,
+      neighbourAuditRepo,
+    );
 
     // Cross-tenant fetch fails: the original tenant can never read the
     // neighbour's invoice by id.
@@ -419,6 +418,20 @@ describe('Postgres integration — invoice_line_items.pricing_source (migration 
       [neighbourInvoice.id, tenant.tenantId],
     );
     expect(leakCheck.rows).toHaveLength(0);
+
+    // The audit leg: createInvoice's own invoice.created event is real, on
+    // this invoice, scoped to the neighbour tenant, and invisible under the
+    // original tenant's audit query.
+    const neighbourAuditRows = await neighbourAuditRepo.findByEntity(
+      neighbour.tenantId,
+      'invoice',
+      neighbourInvoice.id,
+    );
+    expect(neighbourAuditRows).toHaveLength(1);
+    expect(neighbourAuditRows[0].eventType).toBe('invoice.created');
+    expect(
+      await neighbourAuditRepo.findByEntity(tenant.tenantId, 'invoice', neighbourInvoice.id),
+    ).toHaveLength(0);
   });
 });
 

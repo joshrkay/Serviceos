@@ -43,13 +43,21 @@ import {
  * The SMS transport is stubbed (an external send, not a DB leg); every
  * proposal row, settings row and audit row in this file is real Postgres.
  *
- * DURABILITY FINDING — see the final `it.fails` block: the lock lives ONLY on
- * the in-process voice session (`voice-session-store.ts:310` holds
+ * DURABILITY FINDING — see the final test (#1051): the lock lives ONLY on the
+ * in-process voice session (`voice-session-store.ts:310` holds
  * `voiceApprovalState` on an in-memory `Map`; `voice-session-store.ts:5-7`
  * documents "single-process, in-memory map"). Nothing about the lockout is
  * persisted, so a session rebuilt from the real store — a mid-call reconnect
  * onto a second Railway replica, or a process restart — re-prompts the
  * challenge with the counter back at zero.
+ *
+ * WHAT THIS FILE DOES NOT REACH: the session boundary itself. Every test here
+ * calls the task functions directly and hands them `sessionState` by hand, so
+ * the binding of a session to its tenant and to its `voiceApprovalState`
+ * (`voice-session-store.ts:310`, supplied at
+ * `create-voice-turn-processor.ts:3054`) is never exercised. Two consequences
+ * are called out at the tests they affect: the T1 lock-isolation claim, and
+ * the conditional alarm on the #1051 test.
  */
 
 const PIN_SECRET = 'i3-integration-pin-secret';
@@ -401,7 +409,24 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     );
   });
 
-  it('T1 — tenant B’s lock state never leaks into tenant A, and neither do its audit rows (and the reverse)', async () => {
+  /**
+   * SCOPE OF THIS T1 CLAIM — read before citing it as lock-state isolation.
+   *
+   * What is PROVEN here, at real Postgres: tenant B burning its three attempts
+   * neither approves anything of B's nor blocks A's own approval at this seam,
+   * and neither tenant can read the other's proposal or audit rows.
+   *
+   * What is NOT proven: that the session→tenant binding is itself sound. This
+   * test threads `stateB` to tenant B and nothing to tenant A *by hand*, so
+   * "B's lock never reaches A" is true by construction of the harness. The
+   * real association is made in `voice-session-store.ts:310` and supplied at
+   * `create-voice-turn-processor.ts:3054` (`sessionState:
+   * session.voiceApprovalState`); neither is exercised here, so a regression
+   * that attached B's `voiceApprovalState` to A's session would leave every
+   * assertion below green. Proving that needs the store + processor boundary,
+   * which is the adapter layer this lane deliberately does not enter.
+   */
+  it('T1 — tenant B’s lockout neither approves its own proposals nor blocks tenant A at this seam, and neither tenant reads the other’s rows', async () => {
     const aHarness = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550103');
     const bHarness = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550104');
     const refA = {
@@ -561,9 +586,22 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
    * lockout row would all have read as "expected failure" and gone green.
    * (Verified: breaking the `lockout.outcome` assertion below still reported
    * `1 expected fail`.) Every setup assertion here is therefore live, and the
-   * gap itself is pinned as the CURRENT value: the day the lock is re-derived
-   * from the real store, the last two assertions flip and this test goes red,
-   * which is the alarm we want.
+   * gap itself is pinned as the CURRENT value.
+   *
+   * THE ALARM IS CONDITIONAL, and the condition matters. This test calls
+   * `startVoiceApproval` directly with no `sessionState`, which is NOT a
+   * faithful rebuild of a production session: the real rebuild goes through
+   * `VoiceSessionStore` (`voice-session-store.ts:310`) and the voice-turn
+   * processor, which is what supplies `sessionState`
+   * (`create-voice-turn-processor.ts:3054`). So:
+   *   - if #1051 is closed INSIDE this task function, the last two assertions
+   *     flip and this test goes red, as intended;
+   *   - if #1051 is closed at the SESSION BOUNDARY — restoring
+   *     `voiceApprovalState` when the session is reconstructed, which is the
+   *     more likely shape — this test still sees `readback` and stays green.
+   * Whoever closes #1051 must therefore extend or replace this test at the
+   * store/processor boundary rather than trusting it to fail on its own. That
+   * note is on #1051.
    *
    * Product code is deliberately untouched — closing this is a product
    * decision, tracked as #1051 and sitting next to O-4/O-6 on #1000.

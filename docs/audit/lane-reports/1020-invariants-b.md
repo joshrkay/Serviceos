@@ -102,6 +102,21 @@ explicit isolation assertions in both directions: tenant B locks out while
 tenant A, in its own session, still reaches the challenge and approves, and
 neither tenant reads the other's proposal row or audit rows.
 
+**Scope limit on the lock-isolation half of this claim, stated rather than
+implied:** the tests thread `sessionState` to each tenant *by hand*, so "tenant
+B's lock never reaches tenant A" is true by construction of the harness. The
+real session→tenant→`voiceApprovalState` binding lives at
+`voice-session-store.ts:310` and is supplied at
+`create-voice-turn-processor.ts:3054`; neither is exercised here, so a
+regression attaching B's state to A's session would leave these tests green.
+What IS proven at real Postgres is narrower and still worth having: tenant B
+burning three attempts approves nothing of B's and does not block A's own
+approval at this seam, and neither tenant can read the other's proposal or
+audit rows. Proving the binding needs the store + processor boundary — the
+adapter layer this lane does not enter (see "not done" item 6). Found by
+`chatgpt-codex-connector` on PR #1050; the test name and the report text above
+are narrowed to match.
+
 Tenant **C** exists to pin the HMAC salt: its settings row holds tenant A's
 digest **copied verbatim** — the shape of a leaked hash replayed into another
 tenant — and tenant A's PIN still does not open tenant C's challenge, because
@@ -155,8 +170,20 @@ zero, even though the three failures and the lockout are already sitting in
 
 Recorded as an ordinary test in the same file that **pins the broken behaviour**
 (`expect(rebuilt.outcome).toBe('readback')`), so every setup assertion around it
-stays live and the test goes red the day the lock is re-derived from the real
-store. It was first written as `it.fails`; that masked setup regressions — see
+stays live.
+
+**The alarm that test provides is conditional, and the condition is worth
+stating plainly rather than leaving as an implied promise.** It calls
+`startVoiceApproval` directly with no `sessionState`, which is not a faithful
+rebuild of a production session — the real rebuild runs through
+`VoiceSessionStore` and the voice-turn processor, which is what supplies
+`sessionState` (`create-voice-turn-processor.ts:3054`). So it flips red if
+#1051 is closed *inside the task function*, and stays green if #1051 is closed
+*at the session boundary* — which is the more likely shape of the fix. Whoever
+closes #1051 must extend or replace this test at the store/processor boundary
+rather than trusting it to fail on its own; that note is on #1051. Found by
+`chatgpt-codex-connector` on PR #1050, and an earlier version of this report
+promised the unconditional alarm. It was first written as `it.fails`; that masked setup regressions — see
 finding 3 below. **Product code deliberately untouched**: this is a product
 decision, tracked as **#1051** and sitting next to O-4/O-6 on #1000, which is
 Josh's, not this lane's.
@@ -479,8 +506,10 @@ git status --porcelain
 
 ## Review findings addressed (PR #1050 — `xhawk-ai`, `chatgpt-codex-connector`)
 
-Four findings across two review bots, all correct, all false-negatives in this
-lane's own tests. Verified, fixed RED-first, and pushed:
+Six findings across two review bots, all correct. Four were false-negatives in
+this lane's own tests (1-4); two were claims that outran their evidence (5-6),
+corrected by narrowing the claim rather than by widening the lane. Verified,
+fixed RED-first where a fix was code, and pushed:
 
 1. **I12′ tenant isolation was not exercised under the same wiring**
    (`i12-prime-tier2-audit-best-effort.test.ts:231`). Tenant B ran through a
@@ -538,7 +567,29 @@ lane's own tests. Verified, fixed RED-first, and pushed:
    dialogue. GREEN: `Tests 6 passed (6)`. The A/B assertion stays, with its
    comment corrected to claim only what it proves.
 
-Neither fix changes what either row claims; all four make the existing claims
+5. **The T1 lock-isolation claim was true by construction**
+   (`i3-voice-approval-challenge-lock.test.ts:445`, Codex P2). The harness
+   threads `stateB` to tenant B and nothing to tenant A by hand, so the
+   session→state binding — the thing that would actually leak — is never
+   exercised. Corrected by narrowing: the test is renamed to what it proves
+   (B's lockout approves nothing of B's, does not block A at this seam, and
+   neither tenant reads the other's rows) and both the test and this report now
+   state that the binding at `voice-session-store.ts:310` /
+   `create-voice-turn-processor.ts:3054` is out of reach here. No test was
+   weakened; an overstatement was removed.
+
+6. **The #1051 alarm was conditional and sold as unconditional**
+   (`i3-voice-approval-challenge-lock.test.ts:617`, Codex P2). Verified in
+   source: the processor supplies `sessionState: session.voiceApprovalState`
+   at `create-voice-turn-processor.ts:3054`, so a fix that restores state at
+   the session boundary would leave this test returning `readback` and green —
+   contradicting the promise, made in this report and in a PR reply, that it
+   goes red when the gap closes. Corrected by stating the condition in the test
+   and here, and by putting a note on #1051 telling whoever closes it to extend
+   the test at the store/processor boundary.
+
+Findings 5 and 6 change no assertion; both remove a claim this lane could not
+support. Findings 1-4 change assertions and all four make the existing claims
 actually falsifiable. `tsc --project tsconfig.build.json --noEmit` still clean.
 The I3 file now reports `6 passed (6)` rather than `4 passed | 1 expected fail
 (5)`: no expected-failure mechanism left, plus the new salt test.

@@ -16,13 +16,13 @@ config added; no money/pricing/RLS/auth/migration change; `ai/supervisor/review-
 
 | Row | Evidence class after this lane | Negative control | Genuine violation found | Files |
 |---|---|---|---|---|
-| **I1′** | STRUCTURAL | ✅ planted `customerRepo.create` under `src/ai` | **5 call sites** | `test/invariants/i1-no-ai-repository-writes.structural.test.ts` |
+| **I1′** | STRUCTURAL | ✅ planted `customerRepo.create` · planted bare `repository.create` | **6 call sites** | `test/invariants/i1-no-ai-repository-writes.structural.test.ts` |
 | **I3′** | PROVEN-REAL-DB + STRUCTURAL, **T1** | ✅ utterance-echoing builder fails the same assertions | none | `test/integration/i3-readback-provenance.test.ts` |
 | **I5′** | STRUCTURAL (relationship, not identity) | ✅ narrowed gate · widened matcher · wide-open gate | I5′ **false as written** — corrected wording proposed below | `test/invariants/i5-disambiguation-gate-containment.structural.test.ts` |
 | **I6** | STRUCTURAL | ✅ planted contract gate · planted `missingFields` literal | **3 gates** with no lifter | `test/invariants/i6-entity-id-gate-has-resolver.structural.test.ts` |
-| **I8′** | STRUCTURAL | ✅ tenant flag · env switch · feature flag · new closure member | none | `test/invariants/i8-safety-reads-no-tenant-flag.structural.test.ts` |
-| **I9′** | STRUCTURAL | ✅ four planted shapes | **3 second implementations** | `test/invariants/i9-one-totals-engine.structural.test.ts` |
-| **I13′** | STRUCTURAL | ✅ planted hand-rolled consumer (both clauses) | **1 unfenced prompt** | `test/invariants/i13-operator-prompt-fencing.structural.test.ts` |
+| **I8′** | STRUCTURAL | ✅ tenant flag · env switch · feature flag · generic-name switch · new closure member | none | `test/invariants/i8-safety-reads-no-tenant-flag.structural.test.ts` |
+| **I9′** | STRUCTURAL | ✅ four planted shapes · planted wrapped reducer | **9 second implementations** | `test/invariants/i9-one-totals-engine.structural.test.ts` |
+| **I13′** | STRUCTURAL | ✅ hand-rolled consumer · imported-but-unused renderer · one-of-two channels | **1 unfenced prompt** | `test/invariants/i13-operator-prompt-fencing.structural.test.ts` |
 | **I15** | STRUCTURAL, caveat closed | ✅ planted `@anthropic-ai/sdk` + 22 vendors + raw fetch | none (scope call recorded) | `test/ai/gateway-ci-guard.test.ts` |
 | **I7** | STRUCTURAL | ✅ planted `apply_ai_discount` | none | `test/proposals/guardrails/negotiation-invariant.test.ts` |
 | **I16** | STRUCTURAL | ✅ planted hole · dropped family · new surface · unwired handler · renamed map key | none | `coverage-table.structural.test.ts`, `drafting-surface-parity.test.ts` |
@@ -38,8 +38,12 @@ $ cd packages/api && npx vitest run --reporter=verbose test/invariants \
     test/ai/voice-turn/coverage-table.structural.test.ts
 
  Test Files  10 passed (10)
-      Tests  95 passed | 4 expected fail (99)
+      Tests  105 passed | 4 expected fail (109)
 ```
+
+*(95 | 4 as first published; 98 | 4 after review round 1; 105 | 4 after round 2. The two review
+rounds are recorded in full below — they found seven false negatives in these guards and two more
+product violations.)*
 
 The four `expected fail` entries are deliberate: they are the honest `it.fails` statements of I1′, I6,
 I9′ and I13′ **as written**, so that the gaps below are recorded in CI rather than defined away. Each
@@ -109,7 +113,7 @@ Exempt by **path**: `ai/voice-quality/**` — the Layer-1 corpus + inapp-50 eval
 fixture world and is never on a caller-facing path. Exempted by path rather than receiver so an
 operational write cannot hide behind a harness-shaped name elsewhere.
 
-### 🚨 GENUINE VIOLATION — I1′ does not hold (5 call sites)
+### 🚨 GENUINE VIOLATION — I1′ does not hold (6 call sites)
 
 | file:line | Call | Note |
 |---|---|---|
@@ -117,9 +121,10 @@ operational write cannot hide behind a harness-shaped name elsewhere.
 | `packages/api/src/ai/skills/find-or-create-lead.ts:122` | `leadRepo.create` | Same shape for the lead entity |
 | `packages/api/src/ai/skills/patch-owner-through.ts:238` | `callMeBackRepo.create` | Creates an owner call-back task row directly from an AI skill |
 | `packages/api/src/ai/voice-turn/create-voice-turn-processor.ts:2474` | `callMeBackRepo.create` | Same entity from the voice-turn processor |
-| `packages/api/src/ai/voice-turn/create-voice-turn-processor.ts:2639` | `appointmentRepo.update` | **The strongest of the five** — the E1 revoke path sets `status: 'canceled'` on a held appointment with no proposal: a state-changing write to a scheduled entity |
+| `packages/api/src/ai/voice-turn/create-voice-turn-processor.ts:2639` | `appointmentRepo.update` | **The strongest of the six** — the E1 revoke path sets `status: 'canceled'` on a held appointment with no proposal: a state-changing write to a scheduled entity |
+| `packages/api/src/ai/tasks/estimate-template.ts:97` | `repository.create` | Mints a tenant **estimate template** (priced, catalog-adjacent) from an AI task module with no proposal. Found in review round 2 — the bare `repository` receiver was invisible to the first edition of the guard |
 
-These are frozen as a baseline (a sixth breaks the build) **and** asserted by an honest `it.fails` of
+These are frozen as a baseline (a seventh breaks the build) **and** asserted by an honest `it.fails` of
 I1′ as written. Not fixed — test-only lane.
 
 ### RED (planted)
@@ -560,13 +565,14 @@ the build whichever it turns out to be — which is what stops the exception lis
 `jobs/job-profit.ts:145`, `verticals/context-assembly.ts:296`, `digest/digest-service.ts:961`.
 **Harness:** `ai/voice-quality/inapp-50/world.ts:554`.
 
-### 🚨 GENUINE VIOLATION — I9′ does not hold (3 second implementations)
+### 🚨 GENUINE VIOLATION — I9′ does not hold (9 second implementations)
 
 | file:line | What | Why it matters |
 |---|---|---|
 | `packages/api/src/proposals/estimate-editor.ts:33` | `calculateEstimateTotal` — `sum + item.quantity * item.unitPrice`, **no per-line rounding** | **Demonstrably divergent, not merely duplicative.** On `0.5 × 29¢` it returns `14.5` where the engine returns `15` — a **non-integer cents value**, which CLAUDE.md's first core pattern forbids outright and which is precisely the P0-2 divergence `normalizeLineItemTotals` was written to close. It also has **zero callers in `src`** (only its own unit test), so the cheapest fix is deletion — which CLAUDE.md's hygiene rule already requires of an unused export |
 | `packages/api/src/proposals/execution/handlers.ts:838` | `Math.round(quantity * unitPriceCents)` | Duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap |
-| `packages/api/src/routes/invoices.ts:178` | `parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0)` to feed the member-discount `applyBps` | It reaches for the engine's `applyBps` and then defines `subtotal` itself. If the engine's subtotal ever stops meaning "every line" — optional and tier lines are **already** selectable via `resolveSelectedLineItems` — the member discount silently uses a different base than the invoice does |
+| `packages/api/src/routes/invoices.ts:178` | `parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0)` to feed the member-discount `applyBps` | It reaches for the engine's `applyBps` and then defines `subtotal` itself, over **every** line |
+| `packages/api/src/routes/estimates.ts:239` | The same member-discount subtotal, over `resolveSelectedLineItems(...)` | **The two already disagree.** Same feature, two definitions of the discount base — the estimate one sums only the default selection and says why in its own EE-1 comment (*"Summing every tier option here would over-discount a tiered estimate"*), the invoice one sums everything. Neither is in the engine. Found in review round 2 once the sweep read wrapped expressions |
 
 The engine's own math is untouched (lane rule: never touch discount/tax math). The divergence is proved
 with numbers by a test that measures the *second* implementation against the first, not by assertion.
@@ -827,6 +833,13 @@ $ npx vitest run --reporter=verbose test/proposals/guardrails/negotiation-invari
 
 Ranked by what a defect would cost, not by how hard it is to fix. **None are fixed on this branch.**
 
+0. **I9′ — the spoken quote total is recomputed, unrounded, in two places**
+   (`ai/voice-turn/quote-readback.ts:82`, `create-voice-turn-processor.ts:432`). The figure the owner
+   hears does not come from the engine and can be a non-integer number of cents. Surfaced by review
+   round 4.
+0. **I9′ — two member-discount subtotals that already disagree** (`routes/invoices.ts:178` over every
+   line, `routes/estimates.ts:239` over the default selection only). Not a drift *risk* — drift that
+   has already happened, in money, on one feature. Surfaced by review round 2.
 1. **I9′ — `proposals/estimate-editor.ts:31` returns non-integer cents.** A second totals engine that
    breaks CLAUDE.md's first core pattern, provably (`0.5 × 29¢ → 14.5`). **Zero callers in `src`** —
    the fix is deletion, which the hygiene rule already requires of an unused export. Cheapest, most
@@ -847,6 +860,9 @@ Ranked by what a defect would cost, not by how hard it is to fix. **None are fix
 
 ## PRD edits proposed (additive, §8/§12 — not made here)
 
+- **I7** — replace the criterion: two registered types (`apply_credit`, `record_refund`) already move
+  value toward the customer, so "no registered proposal type can even express an AI-applied discount"
+  is false. The invariant holds on the money-class approval rail instead. Wording above.
 - **I5′** — replace the acceptance criterion with the four-clause relationship above; keep the
   "FALSE AS WRITTEN" note but restate it as *the gate is deliberately asymmetric in both directions*,
   since the broad-⊇ reading is also wrong.
@@ -908,6 +924,217 @@ plants exactly the imported-but-hand-rolled module the bot described.
 Suite after the round: **`98 passed | 4 expected fail`** (was 95 | 4); `tsconfig.build.json` clean;
 `packages/api/src` still byte-identical to `origin/main`.
 
+## Review round 2 (PR #1063, Codex) — four more false negatives, two citing existing code
+
+All four verified before acting. Two named concrete call sites the guards were walking straight past;
+both were real, and one of them makes the I9′ finding materially worse than round 1 reported.
+
+**1. I1′ missed a bare `repository` receiver.** The pattern required at least one character before
+`Repo`, so `repository.create(...)` and `repo.save(...)` were invisible — seven such sites exist under
+`src/ai`. Six are AI-plane (revision snapshots, prompt versions, eval records) and are now classified
+by FILE, since a bare receiver carries no entity information to classify by name. **The seventh is a
+sixth I1′ violation:** `ai/tasks/estimate-template.ts:97` mints a tenant estimate template — priced,
+catalog-adjacent, operational — straight from an AI task module with no proposal. An unclassified
+bare-receiver write now fails the build rather than being guessed at in either direction.
+
+**2. 🚨 I9′ missed a wrapped expression — and the fourth site changes the finding.** Testing one line
+at a time could not see `.reduce(` and `+ li.totalCents` together once prettier wraps them, and
+`routes/estimates.ts:239` is exactly that shape. The sweep now reads a four-line whitespace-collapsed
+window and maps each match back to the line it *starts* on.
+
+What it found is the strongest evidence on this ticket for I9′:
+
+> **`routes/invoices.ts:178` and `routes/estimates.ts:239` are the same member-discount subtotal
+> written twice, and they already disagree.** The invoice one sums **every** line; the estimate one
+> sums only `resolveSelectedLineItems(...)` — the default selection — and its own EE-1 comment
+> explains why: *"Summing every tier option here would over-discount a tiered estimate."* One feature,
+> two definitions of the discount base, neither of them in the engine. Round 1 reported this as a
+> theoretical drift risk under I9′; it is not theoretical, it has already happened.
+
+**3. I13′'s fence check was file-wide.** A module calling one sanctioned renderer counted as fenced for
+*both* channels, so a consumer that legitimately renders `retrievedChunks` and separately hand-rolls
+`recentMessages` reopened the injection path. Clause A now pairs each channel with its own renderer and
+only treats a channel as fenced if that channel's renderer is called. It also no longer counts merely
+*naming* a channel as using it — hand-rolling means reading its element text out (`map`/`join`/…) —
+which removes the false positives the stricter rule would otherwise have created on plumbing modules.
+
+**4. I8′ recognised a fixed config vocabulary.** `options.disableEmergency` matched none of the three
+rules. Fixed on two axes, because the object name is the renameable part and the action is not:
+
+- a **suppression-verb** rule matching what a kill switch must *do* — `disable`, `suppress`, `bypass`,
+  `skip`, `optOut`, `override`, `*Disabled` — on any receiver; and
+- **pinned entry-point signatures** for the five exported functions on the path, because a tier
+  function cannot consult a setting it was never handed. A new `options`/`settings` parameter fails
+  there whatever it is called inside. (`rules?: TriageRules` is the one config-shaped parameter and is
+  the module's own optional corpus enrichment — it can only add signals, never remove one, since the
+  tier is the MAX.)
+
+Codex's own framing for 2 and 4 — *"scan complete expressions"*, *"trace configuration inputs rather
+than recognize a fixed vocabulary"* — is the right target. Full expression parsing and dataflow are
+beyond a text scan; the window and the two-axis rule are how close a test-only lane gets, and the
+residual limit is recorded under judgment calls below.
+
+Suite after the round: **`105 passed | 4 expected fail`** (round 1: 98 | 4; initial: 95 | 4);
+`tsconfig.build.json` clean; `packages/api/src` still byte-identical to `origin/main`.
+
+**Revised violation counts: I1′ 6 sites (was 5), I9′ 4 sites (was 3).**
+
+## Review round 3 (PR #1063, Codex) — four more, and a correction to I7's criterion
+
+**1. I6's literal sweep could not read a wrapped array.** `const missingFields = [\n 'routeId',\n]`
+puts the identifier on one line and the key on the next — the same shape as round 2's I9′ miss, in the
+sweep whose whole job is catching hand-written gates. Now a five-line window with offsets mapped back
+to the key's real line, plus a control.
+
+**2. 🚨 I7's criterion is wrong, and the registry proves it.** Codex's point was that
+`/discount|haggle|negotiat/` would miss `apply_concession` or `issue_credit`. Checking the registry
+gives the sharper version:
+
+> **`apply_credit` and `record_refund` are already registered and already AI-reachable**
+> (`voice-intent-map.ts:190`). A guard keyed on the words "discount / haggle / negotiate" was never
+> going to see them.
+
+I7's stated criterion — *"no registered proposal type can even express an AI-applied discount"* — is
+therefore **false as written**, in the same way I5′ was. What makes I7 actually hold is that both types
+are **money-class**, and `decideInitialStatus` never auto-approves money-class: the owner approves the
+concession by hand. `apply_credit`'s own comment says it plainly — *"it moves money (down, but money
+nonetheless), so money-class: never auto-approves."*
+
+The guard now enforces that instead: every concession-capable type is asserted money-class, and every
+money-class type must be reviewed by name, so a new `apply_concession` lands in the guard the moment it
+is registered whatever it is called. The vocabulary check stays as a cheap tripwire.
+
+> **Proposed I7 criterion replacement:** *Given no configured discount policy, then zero concession on
+> every ask — and every registered proposal type that can move value toward the customer is
+> money-class, so none of them can auto-approve at any trust tier.*
+> (Not "no such type exists": two do.)
+
+**3. I15's vendor list was a list someone remembered.** Codex: *"iterating over this same list in the
+negative control is circular and cannot reveal omissions"* — correct. The list is widened (Azure,
+Bedrock, HuggingFace, Fireworks, Portkey, the rest of `@ai-sdk/*`) and, more usefully, **audited
+against `package.json`**: a provider SDK cannot be imported unless it is installed, so every
+provider-shaped dependency must be either a known provider SDK or explicitly declared not to be one.
+Adding `@azure/openai` to `dependencies` now fails *before* any module imports it. That does not make
+the list complete in the abstract — only a curated registry would — but it makes it complete with
+respect to what this repo can reach, which is the property I15 needs.
+
+**4. I13′ clause B keys on identifier spelling.** Extracting the transcription prompt into
+`buildCorrection(raw)` would match `PROMPT_ASSEMBLY` but not `CALLER_TEXT`. Correct, and tracing
+provenance through a rename needs dataflow. What *is* reachable is the **chokepoint**: every prompt
+reaches a model through `gateway.complete(...)`, which cannot be renamed away — it is the gateway's own
+API, pinned by I15. The set of gateway-calling modules (48) is now pinned with a budget assertion, in
+the shape §5.0c(b) recommends for I18. Extracting a builder cannot move the `complete` call out of a
+classified module, and a new sender fails regardless of its local identifiers.
+
+Suite after the round: **`111 passed | 4 expected fail`** (round 2: 105 | 4; round 1: 98 | 4; initial:
+95 | 4). `tsconfig.build.json` clean; `packages/api/src` still byte-identical to `origin/main`.
+
+## Review round 4 (PR #1063, Codex) — five more, and I9′ more than doubles
+
+**1. 🚨 I9′ matched only one order of a commutative operation, hiding five more sites.** The
+`line-item-total-math` pattern required `quantity * unitPrice`; five existing implementations are
+written `unitPrice * quantity`. Multiplication commutes, so the guard was measuring source spelling,
+not arithmetic. **I9′ goes from 4 sites to 9**, and two of the new ones are the serious kind:
+
+| file:line | Why it matters |
+|---|---|
+| `ai/voice-turn/quote-readback.ts:82` | `(li.unitPrice ?? 0) * qty` — **no rounding**, feeding the SPOKEN quote readback |
+| `ai/voice-turn/create-voice-turn-processor.ts:432` | `sum + li.unitPrice * qty` — an **unrounded subtotal** for the spoken total |
+| `proposals/resolve-line.ts:237` | `Math.round(chosen.unitPriceCents * qty)` — duplicates `calculateLineItemTotal` |
+| `ai/resolution/catalog-resolver.ts:623` | same, inside the resolver CLAUDE.md makes the price-grounding authority |
+| `ai/tasks/invoice-task.ts:305` | same, on the invoice drafting path |
+
+The first two mean **the total the owner hears is recomputed rather than read from the engine**, and
+unrounded — so a fractional quantity makes the spoken figure a non-integer number of cents that need
+not equal the persisted total. That is I9′ and I3′-adjacent at once: a readback should derive from the
+payload, not recalculate it.
+
+**2. I1′'s write-verb allowlist missed every repository-specific mutation.** `updateStatus` (nine call
+sites under `src/ai`), `markEnded`, `activate`, `markFinalApproved`, `stampOutcomeByCallSid`,
+`setSummary` — none were write verbs by the old list. **The list is now inverted**: a repository call
+is a candidate write *unless* its name starts with a read verb (`find`/`get`/`list`/`has`/`is`/…), so
+the default is "this needs classifying" and a future `archiveGroup(...)` is caught by construction.
+Five newly-surfaced calls were reviewed and classified AI-plane (voice-session lifecycle, revision
+approval flag, eval-run telemetry, call-outcome stamp); none is an operational entity, so the I1′
+count stays at 6.
+
+**3. I6 dropped root-refinement gates.** Zod issues with an EMPTY path were discarded, but production
+maps exactly those through `contractGapFields(errors, fallback)` where the **fallback argument becomes
+the gate key**. A `widgetId`-or-reference refine paired with `contractGapFields(errors, 'widgetId')`
+would emit an entity-id gate at runtime invisible to both existing sources. Added as a third source,
+scanned from the call sites, with a control.
+
+**4. I7's "exhaustive" check filtered to money-class first** — so it was blind to exactly the case it
+described, a new `apply_concession` mistakenly registered as capture-class; and its negative control
+manipulated a local array rather than running the real predicate. Both fair. **Every registered
+proposal type now carries a reviewed capability classification** (52 of them), and the control runs the
+real predicate over a planted registry, including the assertion that the name-fragment tripwire alone
+would *not* have caught it.
+
+**5. I13′'s gateway-sender pin does not close the delegation hole, and I am not going to claim it
+does.** Codex is right: a classified sender can call `gateway.complete(buildCorrection(transcript))`
+while a new helper module defines `buildCorrection(raw)` with neither a gateway call nor a recognised
+caller-text identifier. Round 3's fix narrowed the hole; it did not close it. Closing it needs
+provenance tracing across delegated builders — dataflow, not a text scan. **Recorded as a known limit
+rather than patched a fourth time**, because three successive partial fixes to the same class of hole
+is the signal that the approach, not the pattern, is what is wrong.
+
+Suite after the round: **`111 passed | 4 expected fail`**. `tsconfig.build.json` clean;
+`packages/api/src` still byte-identical to `origin/main`.
+
+**Revised counts: I1′ 6, I9′ 9.**
+
+## Review round 5 — three more holes, one more product gap, and the ceiling
+
+**1. I6 never probed OPTIONAL uuid fields.** An empty payload parses cleanly for
+`widgetId: z.string().uuid().optional()`, so the derivation never saw it — but a malformed value
+produces a field-level issue that `contractGapFields` turns into a gate. Added a second probe that
+supplies an invalid uuid for every known id-shaped key.
+
+> 🚨 **It immediately found a FOURTH I6 gap:** `linkedJobId`
+> (`proposals/contracts.ts:276`, `create_appointment`). `GATED_REFERENCE_SOURCES` has `jobId` but not
+> `linkedJobId`, so a malformed chained-booking reference emits a gate the resolver cannot lift.
+> Probably the cheapest of the four to close — `linkedJobId` pairs with the same `jobReference` free
+> text `jobId` already resolves from.
+
+**2. I1′'s inverted list was still prefix-only.** `getOrCreateCustomer`, `loadAndClaim` start with a
+read verb and write anyway. A write verb ANYWHERE in the name (after the prefix is stripped) now
+overrides the prefix, and `resolve` was removed from the read list entirely — resolving is ambiguous
+(`resolveReference` reads, `resolveDispute` writes), and an ambiguous verb belongs on the side that
+gets looked at.
+
+**3. I13′ clause A granted file-wide immunity within a channel.** A module that legitimately renders
+`recentMessages` for one prompt and hand-rolls it for a second was accepted — the file-wide bypass
+surviving inside the per-channel fix. Hand-rolling is now checked first, and a renderer call no longer
+excuses a second raw use of the same channel.
+*(The first attempt at this over-corrected: a 200-character window matched a `.join()` on the
+renderer's own result, a false positive on correct code. Tightened to a call applied directly to the
+channel.)*
+
+**4. I5′'s corpus still cannot cover forms the matcher learns that are not ordinals** (`last`,
+`former`, an email hint). Not fixed. Deriving the accepted-form space needs the parser shared between
+gate and matcher — a `src` change, out of scope for a test-only lane.
+
+### The ceiling, stated plainly
+
+Five review rounds have found **nineteen** false negatives in these guards. Every one was a real hole,
+every fix was correct, and each round produced more — because these are regex approximations of a
+static-analysis problem, and a regex cannot be *sound*.
+
+That has a consequence worth writing down rather than leaving implied:
+
+> **These guards are detectors with known false-negative ceilings, not proofs of absence. Every
+> violation count in this report is a FLOOR.** I1′ ≥ 6, I6 ≥ 4, I9′ ≥ 9, I13′ ≥ 1. Each round's
+> number was reported in good faith and each was too low.
+
+What the guards *do* prove is one direction only: **a planted violation fails the build** — that is
+the negative control, and it holds for every row. They catch regressions of the shapes they know.
+They do not certify that the tree is clean, and no row here should be read as saying so.
+
+Genuinely closing I13′ and I5′ needs an AST/type-aware pass over the module graph — real work, worth
+doing, and a different piece of work from this lane. Recommended as its own ticket rather than a sixth
+round of patches.
+
 ## Not done / judgment calls
 
 - **I18 — not attempted on this lane, and there is a brief conflict to resolve.** The ticket comment of
@@ -929,7 +1156,15 @@ Suite after the round: **`98 passed | 4 expected fail`** (was 95 | 4); `tsconfig
 - **I13′ scope limit** — the clause-B sweep cannot follow a prompt string built in one module and sent
   by another (`app.ts` → `classifyTurnSentiment`). A data-flow pass would be needed; flagged, not
   attempted.
-- **I5′ corpus is hand-built** (43 utterances × 2 fixtures), not generated. A property-based generator
+- **Residual limits the two review rounds did not close.** I9′'s window is four lines, so an
+  expression wrapped wider than that is still invisible; a real fix is expression parsing, not a
+  scan. I8′'s suppression-verb rule keys on a verb vocabulary that is wider than a config vocabulary
+  but is still a vocabulary — only the pinned signatures are truly name-independent. I13′ treats a
+  call to the raw `buildUntrustedContentSection` as fencing any channel in that module, which is
+  right in the ordinary case and cannot distinguish a module that fences one payload and hand-rolls
+  another. Each is a text-scan ceiling, recorded rather than papered over.
+- **I5′ corpus is hand-built** (43 utterances × 3 fixtures), not generated for the non-ordinal cases;
+  the ordinal space IS generated after round 1. A property-based generator
   over candidate names would be stronger; the hand corpus was chosen because the three hijack shapes
   are specific enough that random names would mostly exercise the same branch.
 - **I6's uuid probe** classifies a key by parsing it against every contract. That is mechanical, but it

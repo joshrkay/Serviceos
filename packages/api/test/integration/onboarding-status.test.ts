@@ -90,4 +90,49 @@ describe('GET /api/onboarding/status', () => {
     expect(res.body.currentStep).toBeNull();
     expect(res.body.steps.every((s: { status: string }) => s.status === 'done')).toBe(true);
   });
+
+  // §8.1/§8.9 row 1.4 — GET /status is a pure READ (deriveOnboardingStatus
+  // over settingsRepo/packActivationRepo/pool; no auditRepo.create anywhere
+  // in the handler — confirmed by grep against src/routes/onboarding.ts), so
+  // there is no audit leg to read back here; the isolation guarantee this
+  // pins is that tenant B's onboarding configuration can never change the
+  // DERIVED STEP tenant A's status computes.
+  it("tenant A's derived status is unchanged by a neighbour tenant's configuration (T1)", async () => {
+    const tenantA = currentTenant;
+    const tenantB = await createTestTenant(pool);
+
+    // Tenant A stays fresh (no settings row) — current step should be
+    // 'identity' per the very first test in this file.
+    const beforeB = await request(app).get('/api/onboarding/status');
+    expect(beforeB.body.currentStep).toBe('identity');
+
+    // Fully complete tenant B's onboarding (mirrors the isComplete=true
+    // fixture above), driven under tenant B's own auth context.
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, business_hours, job_buffer_minutes, hourly_rate_cents, terminology_preferences, ai_model, ai_verification_status, timezone, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
+       VALUES (gen_random_uuid(), $1, 'Neighbour Co', $2::jsonb, 30, 12500, $3::jsonb, 'gpt-4o-mini', 'passed', 'America/New_York', 'EST', 'INV', 1, 1, 30)`,
+      [tenantB.tenantId, JSON.stringify({ mon: null }), JSON.stringify({ _activeVerticalPacks: ['hvac'] })],
+    );
+    await pool.query(
+      `INSERT INTO tenant_integrations (id, tenant_id, provider, status) VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness')`,
+      [tenantB.tenantId],
+    );
+    await pool.query(
+      `UPDATE tenants SET stripe_subscription_id='sub_test_b', subscription_status='trialing' WHERE id=$1`,
+      [tenantB.tenantId],
+    );
+    await pool.query(
+      `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at) VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() - interval '1 minute', now())`,
+      [tenantB.tenantId],
+    );
+
+    currentTenant = tenantB;
+    const asB = await request(app).get('/api/onboarding/status');
+    expect(asB.body.isComplete).toBe(true);
+    currentTenant = tenantA;
+
+    const afterB = await request(app).get('/api/onboarding/status');
+    expect(afterB.body.currentStep).toBe('identity');
+    expect(afterB.body.isComplete).toBe(false);
+  });
 });
