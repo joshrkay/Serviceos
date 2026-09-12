@@ -35,8 +35,11 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PublicEstimateService } from '../../src/estimates/public-estimate-service';
 import { convertEstimateToInvoice } from '../../src/invoices/convert-estimate';
-import { buildLineItem, calculateSelectedDocumentTotals } from '../../src/shared/billing-engine';
-import { LineItem } from '../../src/shared/contracts';
+import {
+  buildLineItem,
+  calculateSelectedDocumentTotals,
+  LineItem,
+} from '../../src/shared/billing-engine';
 import { createLogger } from '../../src/logging/logger';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
