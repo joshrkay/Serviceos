@@ -76,12 +76,27 @@ function srcFiles(dir: string, acc: string[] = []): string[] {
  * tail ('../ai/guardrails/expiration') and the same-directory spelling
  * ('./expiration' from inside ai/guardrails), so a relative importer cannot
  * hide from the scan.
+ *
+ * FOUR syntaxes, not two. An earlier version matched only `from` and
+ * `require(`, which meant a module wired by `await import('./x')` — a form
+ * `src/` really does use (`ai/gateway/tenant-quota.ts:303`,
+ * `void import('./redis-tenant-quota')`) — would be reported as having no
+ * importer. That is the precise false negative that would let a live TTL
+ * regime pass as dormant. Side-effect imports (`import './x'`, no `from`)
+ * were invisible for the same reason. The second control in the test below
+ * pins the dynamic case.
+ *
+ * Deliberately over-inclusive: `import('./x').SomeType` in a TYPE position
+ * matches too, even though it carries no runtime edge. That errs toward
+ * REPORTING an importer, which makes a dormancy claim FAIL loudly rather than
+ * pass wrongly — the safe direction for a guard whose whole job is to refuse
+ * to call live code dead.
  */
 function runtimeImportersOf(moduleSuffix: string): string[] {
   const srcRoot = resolve(__dirname, '../../src');
   const basename = moduleSuffix.split('/').pop() as string;
   const dirOfModule = resolve(srcRoot, moduleSuffix, '..');
-  const specifier = /(?:from|require\()\s*['"]([^'"]+)['"]/g;
+  const specifier = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)['"]([^'"]+)['"]/g;
   const hits: string[] = [];
 
   for (const file of srcFiles(srcRoot)) {
@@ -284,6 +299,15 @@ describe('Postgres integration — §8.3 row 3.11 stale schedule proposals expir
     const control = runtimeImportersOf('workers/proposal-expiry-worker');
     expect(control).toContain('app.ts');
     expect(control.length).toBeGreaterThan(0);
+
+    // SECOND control, for the DYNAMIC-import syntax specifically. A scanner
+    // that only understands `from` / `require(` would report a module wired by
+    // `await import('./x')` as dormant — the exact false negative that would
+    // let a live TTL regime hide. `ai/gateway/tenant-quota.ts:303` really does
+    // `void import('./redis-tenant-quota')`, so the scan must find it.
+    expect(runtimeImportersOf('ai/gateway/redis-tenant-quota')).toContain(
+      'ai/gateway/tenant-quota.ts',
+    );
 
     // The claim under test.
     expect(runtimeImportersOf('ai/guardrails/expiration')).toEqual([]);

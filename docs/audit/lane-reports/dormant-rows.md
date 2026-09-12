@@ -22,10 +22,15 @@ This is evidence for that decision, not the decision.
 | 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + PROVEN-REAL-DB for ingestion | T1 |
 | 9.5 | `service-credit-cap-9-5.test.ts` | the only test stubs `pool.connect()` | **Confirmed.** Replaced with a real-Postgres proof; the cap holds at draft and **fails at execute** | PROVEN-REAL-DB | T1 |
 
-Counts below are from the first evidence run (25 tests). Two ordinary tests were
-added in review — one to row 9.5 (round 1) and one to row 3.8 (round 2) — so the
-current total is **24 passed | 4 expected fail (28)**; the SQL dumps are unchanged
-in shape apart from the extra 3.8 tenants.
+**Current totals: 24 passed | 4 expected fail (28)** — 3.8 is 6+1, 3.11 is 5+1,
+4.7 is 6+1, 9.5 is 7+1. The Evidence section at the bottom was regenerated from a
+single run of this head and is the reproducible record.
+
+The per-row **RED / GREEN blocks below are historical** — each is the raw output
+captured at the moment that row's TDD cycle ran, kept because the rung ladder asks
+for red-before-green. Three review rounds have since added four ordinary tests, so
+those per-file counts are lower than the file's current count. They are a log, not
+a claim about the checked-in suite.
 
 Command for every file (from `packages/api/`):
 
@@ -781,138 +786,173 @@ silently greened on its own. Patch reverted; both green again.
 
 ## Evidence — plain container, all four files, then SQL
 
+**Regenerated after review round 5** (the earlier block showed a 26-test run and
+pre-route dumps, which no longer matched the checked-in files — Codex, P2). Every
+number and row below comes from one run of the current head against a fresh
+container.
+
 Container:
 
 ```
 docker run -d --rm -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=serviceos_test -p 127.0.0.1:0:5432 \
   pgvector/pgvector:pg16 -c max_connections=300
-→ ce9245cb313a…  port 32768
+→ port 32769
 ```
 
-Re-run of all four files against it:
+All four files against it:
 
 ```
 cd packages/api && RLS_RUNTIME_ROLE=true \
-  EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32768/serviceos_test \
-  npx vitest run --config vitest.integration.config.ts --reporter=verbose \
+  EXTERNAL_TEST_DB_URL=postgres://test:test@localhost:32769/serviceos_test \
+  npx vitest run --config vitest.integration.config.ts \
   test/integration/appointment-confirmation-dispatch-3-8.test.ts \
   test/integration/proposal-expiry-sweep-3-11.test.ts \
   test/integration/lateness-from-truck-location-4-7.test.ts \
   test/integration/service-credit-cap-9-5.test.ts
 
  Test Files  4 passed (4)
-      Tests  22 passed | 4 expected fail (26)
-   Duration  5.57s
+      Tests  24 passed | 4 expected fail (28)
+   Duration  5.94s
 ```
 
 ### `audit_events`, grouped by tenant and event
 
 ```
-              tenant_id               |        event_type        | entity_type | n
---------------------------------------+--------------------------+-------------+---
- 34a4bd46-aba9-4546-a7d1-ef8e2812857d | appointment.created      | appointment | 1
- 90623f3c-24ae-46d0-8e82-9ed88a6feb7e | appointment.created      | appointment | 1
- 92ad1d66-a532-4714-95f3-3df81605ded9 | appointment.created      | appointment | 1
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment.created      | appointment | 5
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | proposal.executed        | proposal    | 1
- 92ad1d66-a532-4714-95f3-3df81605ded9 | proposal.executed        | proposal    | 1
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | proposal.executed        | proposal    | 5
- fa90ad5f-d712-407e-9f70-63883e1aba7c | proposal.executed        | proposal    | 1
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | proposal.expired         | proposal    | 3
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | review_response.executed | proposal    | 1
- fa90ad5f-d712-407e-9f70-63883e1aba7c | review_response.executed | proposal    | 1
-(11 rows)
+              tenant_id               |             event_type             | entity_type | n
+--------------------------------------+------------------------------------+-------------+---
+ 6acc7e07-7941-4677-8662-debafc832e4a | appointment.created                | appointment | 1
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment.created                | appointment | 5
+ 7cb11a29-983e-4b46-8e38-79a2f8484db7 | appointment.created                | appointment | 2
+ 7d8f0b43-b2cb-4790-b4ae-173258b1a72b | appointment.created                | appointment | 1
+ ce7dea36-2a28-45c8-bf6b-f143900bc1dd | appointment.created                | appointment | 2
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | proposal.executed                  | proposal    | 1
+ 452b471a-290e-4485-b9da-d14237237121 | proposal.executed                  | proposal    | 1
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | proposal.executed                  | proposal    | 1
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | proposal.executed                  | proposal    | 5
+ 7cb11a29-983e-4b46-8e38-79a2f8484db7 | proposal.executed                  | proposal    | 2
+ ce7dea36-2a28-45c8-bf6b-f143900bc1dd | proposal.executed                  | proposal    | 2
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | proposal.expired                   | proposal    | 3
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | proposal.reproposed                | proposal    | 1
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | review_response.executed           | proposal    | 1
+ 452b471a-290e-4485-b9da-d14237237121 | review_response.executed           | proposal    | 1
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | review_response.executed           | proposal    | 1
+ 6acc7e07-7941-4677-8662-debafc832e4a | technician_location.batch_ingested | technician  | 1
+ 7d8f0b43-b2cb-4790-b4ae-173258b1a72b | technician_location.batch_ingested | technician  | 3
+(18 rows)
 ```
 
-Tenant map: `a90be2f5…`/`92ad1d66…` = row 3.8 Alpha/Bravo. `34a4bd46…`/`90623f3c…` =
-row 4.7 Alpha/Bravo. `ed629ea8…`/`cd8b513f…` = row 3.11 A/B. `52af7079…`/`d8df4575…`/
-`291b5199…` = row 9.5 Alpha/Bravo/Charlie; `fa90ad5f…` = row 9.5 "Delta", the
-`it.fails` tenant. Note the expiry audit rows land in **exactly one** tenant — the
-neighbour's fresh card was never touched.
+Tenant map — 3.8: `718ec867…` Alpha, `7cb11a29…` Bravo, `ce7dea36…` Quiet (the
+`autoSendAppointmentReminders = false` tenant). 3.11: `bc16aaf2…` A,
+`bd211398…` B. 4.7: `7d8f0b43…` Alpha, `6acc7e07…` Bravo. 9.5: `67e8da85…`
+Alpha, `82bd9117…` Bravo, `b994700b…` Charlie, `452b471a…` Echo,
+`116b71da…` Delta.
+
+Three rows read on their own:
+- `proposal.expired` and `proposal.reproposed` land in **exactly one** tenant —
+  the neighbour's fresh card was never touched, and the re-propose went through
+  the production action
+- `technician_location.batch_ingested` appears for **both** 4.7 tenants: the
+  audit leg this lane originally and wrongly reported as absent
+- Quiet (`ce7dea36…`) has two `appointment.created` and two `proposal.executed`
+  and **no dispatch rows at all** (below) — the owner-reachable silent skip
 
 ### `message_dispatches` (row 3.8)
 
 ```
               tenant_id               |       entity_type        | channel |         recipient          | provider  | status
 --------------------------------------+--------------------------+---------+----------------------------+-----------+--------
- 92ad1d66-a532-4714-95f3-3df81605ded9 | appointment_confirmation | email   | bravo-edc320f7@example.com | in-memory | sent
- 92ad1d66-a532-4714-95f3-3df81605ded9 | appointment_confirmation | sms     | +16025551851               | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | email   | alpha-5750da06@example.com | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | sms     | +16025554620               | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | email   | alpha-5750da06@example.com | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | sms     | +16025554620               | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | email   | alpha-5750da06@example.com | in-memory | sent
- a90be2f5-53e6-40fa-9cb7-8018e5ff35f9 | appointment_confirmation | sms     | +16025554620               | in-memory | sent
-(8 rows)
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment_confirmation | email   | alpha-e34b25b1@example.com | in-memory | sent
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment_confirmation | sms     | +16025555798               | in-memory | sent
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment_confirmation | email   | alpha-e34b25b1@example.com | in-memory | sent
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment_confirmation | sms     | +16025555798               | in-memory | sent
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment_confirmation | email   | alpha-e34b25b1@example.com | in-memory | sent
+ 718ec867-c50b-4810-8eb3-1f036ef479e1 | appointment_confirmation | sms     | +16025555798               | in-memory | sent
+ 7cb11a29-983e-4b46-8e38-79a2f8484db7 | appointment_confirmation | email   | bravo-df5369f9@example.com | in-memory | sent
+ 7cb11a29-983e-4b46-8e38-79a2f8484db7 | appointment_confirmation | sms     | +16025552647               | in-memory | sent
+ 7cb11a29-983e-4b46-8e38-79a2f8484db7 | appointment_confirmation | email   | bravo-df5369f9@example.com | in-memory | sent
+ 7cb11a29-983e-4b46-8e38-79a2f8484db7 | appointment_confirmation | sms     | +16025552647               | in-memory | sent
+(10 rows)
 ```
 
-Alpha ran **five** executions (`appointment.created` n=5, `proposal.executed` n=5):
-three with a notifier wired (live, dormant, audit test) and two with none (the
-`mode: 'none'` test and the `it.fails`). Three × two channels = the six rows above.
-The two no-provider executions contributed **nothing** — that is the row's gap, in the
-table.
+Written through `GatedMessageDelivery` in `enforcement: 'block'`, as production
+wires it. Alpha ran five executions and shows six rows (three × two channels):
+the two with no notifier — mode `'none'` and the `it.fails` — contributed
+nothing. **Quiet is absent from this table entirely**: two bookings executed, a
+provider wired, and not one confirmation row, because one settings flag governs
+both reminders and booking confirmations.
 
 ### `proposals` (row 3.11 + the 9.5 anchors)
 
 ```
               tenant_id               |      proposal_type       |      status      | past_ttl
 --------------------------------------+--------------------------+------------------+----------
- 291b5199-30e2-4d05-b27f-67ead1feeef7 | review_response_proposal | draft            |
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | review_response_proposal | draft            |
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | review_response_proposal | executed         |
- cd8b513f-5e42-405b-b53f-ad9ab5becbe9 | create_appointment       | ready_for_review | f
- d8df4575-6ec8-4157-9698-9c1548175cbc | review_response_proposal | draft            |
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | create_appointment       | expired          | t
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | create_appointment       | expired          | t
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | create_appointment       | ready_for_review | f
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | draft_estimate           | ready_for_review |
- ed629ea8-6d9a-4d65-b4d3-e8065dc7d4c2 | reschedule_appointment   | expired          | t
- fa90ad5f-d712-407e-9f70-63883e1aba7c | review_response_proposal | draft            |
- fa90ad5f-d712-407e-9f70-63883e1aba7c | review_response_proposal | executed         |
-(12 rows)
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | review_response_proposal | draft            |
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | review_response_proposal | executed         |
+ 452b471a-290e-4485-b9da-d14237237121 | review_response_proposal | draft            |
+ 452b471a-290e-4485-b9da-d14237237121 | review_response_proposal | executed         |
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | review_response_proposal | draft            |
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | review_response_proposal | executed         |
+ 82bd9117-385f-498f-87f0-e59bb06d480e | review_response_proposal | draft            |
+ b994700b-b375-47d2-b346-183808257869 | review_response_proposal | draft            |
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | create_appointment       | draft            | f
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | create_appointment       | expired          | t
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | create_appointment       | expired          | t
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | draft_estimate           | ready_for_review |
+ bc16aaf2-d0c9-4d7b-8391-1b3d7e5bbb38 | reschedule_appointment   | expired          | t
+ bd211398-6ee7-493f-ad94-c5e13b9c68b7 | create_appointment       | ready_for_review | f
+(14 rows)
 ```
 
-Every `past_ttl = t` row is `expired`; every `past_ttl = f` row is still
-`ready_for_review` — including the neighbour tenant's (`cd8b513f…`). The
-`draft_estimate` has a NULL `expires_at` and was never a candidate.
+Every `past_ttl = t` row is `expired`; every `past_ttl = f` row is still live,
+including the neighbour tenant's (`bd211398…`). The `draft` `create_appointment`
+on `bc16aaf2…` is the card `reproposeProposal` minted — a fresh 48 h window, and
+it survived the next sweep. The `draft_estimate` carries a NULL `expires_at` and
+was never a candidate.
 
 ### `service_credits` (row 9.5)
 
 ```
               tenant_id               |             customer_id              | amount_cents | issued_on  | in_window | has_review
 --------------------------------------+--------------------------------------+--------------+------------+-----------+------------
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | b334ab29-1ea8-4fb1-a64a-c28f5f87ac0c |         8000 | 2025-08-12 | f         | f
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | b334ab29-1ea8-4fb1-a64a-c28f5f87ac0c |         3000 | 2026-02-24 | t         | f
- 52af7079-a5fb-4a81-9ed2-6adb4fa77f94 | b334ab29-1ea8-4fb1-a64a-c28f5f87ac0c |         5000 | 2026-08-13 | t         | f
- d8df4575-6ec8-4157-9698-9c1548175cbc | dd368c7f-2c61-4bb6-9119-5b8ff8b31e91 |         8000 | 2026-08-13 | t         | f
- fa90ad5f-d712-407e-9f70-63883e1aba7c | 28a27709-d58b-4d84-af6b-e51a42672d8c |         4000 | 2026-09-02 | t         | f
- fa90ad5f-d712-407e-9f70-63883e1aba7c | 28a27709-d58b-4d84-af6b-e51a42672d8c |         5000 | 2026-09-11 | t         | f
- fa90ad5f-d712-407e-9f70-63883e1aba7c | 28a27709-d58b-4d84-af6b-e51a42672d8c |         5000 | 2026-09-12 | t         | t
-(7 rows)
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | 29277db9-e49a-4bad-81b6-001fbd7abd3c |         4000 | 2026-09-02 | t         | f
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | 29277db9-e49a-4bad-81b6-001fbd7abd3c |         5000 | 2026-09-11 | t         | f
+ 116b71da-239a-4cfb-9bd9-7f479bc8da97 | 29277db9-e49a-4bad-81b6-001fbd7abd3c |         5000 | 2026-09-12 | t         | t
+ 452b471a-290e-4485-b9da-d14237237121 | f537c837-a3a0-4946-9f4c-01466a5679bf |         4000 | 2026-09-02 | t         | f
+ 452b471a-290e-4485-b9da-d14237237121 | f537c837-a3a0-4946-9f4c-01466a5679bf |         5000 | 2026-09-11 | t         | f
+ 452b471a-290e-4485-b9da-d14237237121 | f537c837-a3a0-4946-9f4c-01466a5679bf |         5000 | 2026-09-12 | t         | t
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | 894c3469-0e05-48cd-8e7a-4e9ea3e995e8 |         8000 | 2025-08-12 | f         | f
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | 894c3469-0e05-48cd-8e7a-4e9ea3e995e8 |         3000 | 2026-02-24 | t         | f
+ 67e8da85-8fc1-4d0a-817d-513f76cca136 | 894c3469-0e05-48cd-8e7a-4e9ea3e995e8 |         5000 | 2026-08-13 | t         | f
+ 82bd9117-385f-498f-87f0-e59bb06d480e | d27d940c-bf70-4ea8-8a87-2e2d646123c1 |         8000 | 2026-08-13 | t         | f
+(10 rows)
 ```
 
-Tenant `52af7079…` (Alpha): $30 + $50 in window = **$80**, with the 2025-08-12 $80 out
-of window — and **no fourth row**, because the $50 tier was omitted rather than issued.
-Tenant `d8df4575…` (Bravo): its own $80, which did not count against Alpha. Tenant
-`fa90ad5f…` (Delta, the `it.fails`): $40 + $50 + $50 = **$140 in window against a $100
-cap**, the last row carrying a `review_id` — that is the over-cap credit written at
-execution time, visible in SQL.
+Alpha (`67e8da85…`): $30 + $50 in window = **$80**, with the 2025-08-12 $80 out
+of window — and **no fourth row**, because the $50 tier was omitted rather than
+issued. Bravo (`82bd9117…`): its own $80, uncounted against Alpha. Charlie
+(`b994700b…`) drew the full $50 at draft and has **no ledger row** — a proposal
+is not an issuance. Echo (`452b471a…`) and Delta (`116b71da…`) each hold
+$40 + $50 + $50 = **$140 in window against a $100 cap**, the last row carrying a
+`review_id`: the over-cap credit written at execution time, once as the ordinary
+guard test and once as the `it.fails`.
 
 ### `technician_location_pings` (row 4.7)
 
 ```
-              tenant_id               |            technician_id             | pings | acc | avg_lat  |  avg_lng
---------------------------------------+--------------------------------------+-------+-----+----------+------------
- 34a4bd46-aba9-4546-a7d1-ef8e2812857d | c7efe14d-16f5-4951-9c61-d99b0ceb7a5f |     6 |   8 | 33.44843 | -112.07398
- 90623f3c-24ae-46d0-8e82-9ed88a6feb7e | d8aa60ba-81f6-4cab-bf1c-792fa21fab80 |     4 |   8 | 33.44842 | -112.07399
+              tenant_id               |            technician_id             | pings | linked | stripped
+--------------------------------------+--------------------------------------+-------+--------+----------
+ 6acc7e07-7941-4677-8662-debafc832e4a | c3e539dd-7ee4-461f-beb1-778b46df3f92 |     4 |      4 |        0
+ 7d8f0b43-b2cb-4790-b4ae-173258b1a72b | 9f18395c-1c92-47fe-b5ba-ce20145f9c7c |     8 |      6 |        2
 (2 rows)
 ```
 
-Six dwell pings for tenant A parked on the service location, four for the neighbour —
-and, per the board assertion above, not one lateness state derived from any of them.
-
----
+All ingested through the production router. Tenant Alpha's 8 = the 6 dwell pings
+(still **linked**, so they survived the assignment gate), plus one that never
+named an appointment, plus the positive control naming an appointment this
+technician is not assigned to — **stripped to NULL by
+`sanitizeAppointmentIds`**, which is the gate visible in the table. And, per the
+board assertion above, not one lateness state derived from any of them.
 
 ## Falsifier greps (§8.0's "how to confirm a grade")
 
