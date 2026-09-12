@@ -84,19 +84,68 @@ export function gateKeysEmittableByContracts(
   schemas: Record<string, z.ZodSchema>,
 ): Map<string, string[]> {
   const byKey = new Map<string, string[]>();
+
+  const record = (head: string, proposalType: string): void => {
+    if (head.length === 0) return;
+    const seen = byKey.get(head) ?? [];
+    if (!seen.includes(proposalType)) seen.push(proposalType);
+    byKey.set(head, seen);
+  };
+
   for (const [proposalType, schema] of Object.entries(schemas)) {
-    const result = schema.safeParse({});
-    if (result.success) continue;
-    for (const issue of result.error.issues) {
-      const head = String(issue.path[0] ?? '');
-      if (head.length === 0) continue;
-      const seen = byKey.get(head) ?? [];
-      if (!seen.includes(proposalType)) seen.push(proposalType);
-      byKey.set(head, seen);
+    // Probe 1 — the EMPTY payload. Every required field reports an issue.
+    const empty = schema.safeParse({});
+    if (!empty.success) {
+      for (const issue of empty.error.issues) record(String(issue.path[0] ?? ''), proposalType);
+    }
+
+    // Probe 2 — a payload carrying a MALFORMED value for every id-shaped key
+    // the inventory has ever seen. Reviewed on PR #1063 (round 5): an
+    // OPTIONAL uuid field (`widgetId: z.string().uuid().optional()`) parses
+    // `{}` cleanly, so probe 1 never sees it — but the model supplying a
+    // malformed value produces a field-level issue that `contractGapFields`
+    // turns into an operator-facing gate. Probing with a bad value is what
+    // makes an optional-but-validated field visible.
+    const probe: Record<string, unknown> = {};
+    for (const key of CANDIDATE_ID_KEYS) probe[key] = NOT_A_UUID;
+    const malformed = schema.safeParse(probe);
+    if (!malformed.success) {
+      for (const issue of malformed.error.issues) record(String(issue.path[0] ?? ''), proposalType);
     }
   }
   return byKey;
 }
+
+/**
+ * Id-shaped keys to probe with a malformed value.
+ *
+ * Every `*Id` key already known to the system — the resolver table, the
+ * documented exceptions, the recorded gaps — plus the keys any contract
+ * declares. A contract that introduces a brand-new optional id key is still
+ * invisible to probe 2 until the key is known, which is the residual limit
+ * recorded in the lane report; the literal and fallback sweeps are what cover
+ * that case.
+ */
+const CANDIDATE_ID_KEYS: readonly string[] = [
+  ...Object.keys(GATED_REFERENCE_SOURCES),
+  'locationId',
+  'reviewId',
+  'entityId',
+  'groundedProposalId',
+  'linkedJobId',
+  'paymentId',
+  'refundId',
+  'creditId',
+  'materialId',
+  'expenseId',
+  'agreementId',
+  'templateId',
+  'packId',
+  'userId',
+  'crewMemberId',
+  'conversationId',
+  'sessionId',
+];
 
 // ─── Source 2: sweep the hand-written literal emitters ──────────────────────
 
@@ -370,6 +419,12 @@ const KNOWN_UNLIFTABLE: ReadonlyArray<{
     note: 'The review being answered is picked from the reputation queue by the drafting task (ai/tasks/review-response-task.ts:182), never named by the operator. Emitted as a gate on the voice leg by proposals/voice-payload.ts:504 if it is ever absent, and no resolver or card affordance can supply it.',
   },
   {
+    key: 'linkedJobId',
+    where: 'packages/api/src/proposals/contracts.ts:276 (create_appointment)',
+    emittedAt: 'contract(s): create_appointment',
+    note: "`linkedJobId: z.string().uuid().optional()` — the chained-booking job reference. A malformed value emits `linkedJobId` as a gate via `fieldPathsFrom`, and GATED_REFERENCE_SOURCES has `jobId` but not `linkedJobId`, so the resolver cannot lift it. Found in review round 5 by probing declared fields with an INVALID value: an optional field parses `{}` cleanly, so the empty-payload probe never saw it. Likely the cheapest of the four to close — `linkedJobId` pairs with the same `jobReference` free text `jobId` already resolves from.",
+  },
+  {
     key: 'entityId',
     where: 'packages/api/src/proposals/contracts/adopt-entity-alias.ts:11 (adopt_entity_alias)',
     emittedAt: 'contract(s): adopt_entity_alias',
@@ -476,7 +531,7 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
    * back for re-grading.
    */
   it.fails(
-    'I6 as written — every entity-id gate has a lifter (KNOWN GAP: reviewId, entityId, groundedProposalId)',
+    'I6 as written — every entity-id gate has a lifter (KNOWN GAP: reviewId, entityId, groundedProposalId, linkedJobId)',
     () => {
       expect(unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC])).toEqual([]);
     },

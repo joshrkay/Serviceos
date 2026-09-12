@@ -88,18 +88,27 @@ const CALLER_TEXT =
 const STRUCTURED_CHANNELS: ReadonlyArray<{
   channel: string;
   renderer: string;
-  /** Hand-rolling: reading the channel's element text out into a string. */
+  /**
+   * Hand-rolling: a map/forEach/reduce/join applied DIRECTLY to the channel.
+   *
+   * Deliberately adjacent, not a window. Round 5's first attempt allowed up to
+   * 200 characters between the channel name and the call, which matched a
+   * `.join(...)` on the RENDERER'S OWN RESULT a couple of lines below the
+   * legitimate `buildRecentMessagesPromptSections(context.recentMessages)` —
+   * a false positive on correct code. Only `recentMessages.map(` and its
+   * siblings count.
+   */
   handRolled: RegExp;
 }> = [
   {
     channel: 'recentMessages',
     renderer: 'buildRecentMessagesPromptSections',
-    handRolled: /recentMessages[\s\S]{0,200}?\.(?:map|forEach|reduce|join)\s*\(/,
+    handRolled: /\brecentMessages\s*(?:\?\.)?\s*\.\s*(?:map|forEach|reduce|join)\s*\(/,
   },
   {
     channel: 'retrievedChunks',
     renderer: 'buildRetrievedChunksPromptSection',
-    handRolled: /retrievedChunks[\s\S]{0,200}?\.(?:map|forEach|reduce|join)\s*\(/,
+    handRolled: /\bretrievedChunks\s*(?:\?\.)?\s*\.\s*(?:map|forEach|reduce|join)\s*\(/,
   },
 ];
 
@@ -147,11 +156,18 @@ export function unfencedStructuredChannelConsumers(roots: readonly string[]): st
     // calling one renderer earns it nothing for the other channel.
     const unfenced = STRUCTURED_CHANNELS.some((c) => {
       if (!new RegExp(String.raw`\b${c.channel}\b`).test(file.code)) return false;
-      if (callsRenderer(file, c.renderer)) return false;
-      if (callsRenderer(file, 'buildUntrustedContentSection')) return false;
-      // Naming the channel is not using it — only a module that reads its
-      // element text out into a string is hand-rolling.
-      return c.handRolled.test(file.code);
+      // HAND-ROLLING IS CHECKED FIRST, and a renderer call no longer grants
+      // the module immunity for that channel. Reviewed on PR #1063 (round 5):
+      // returning early on the renderer call meant a module that legitimately
+      // renders `recentMessages` for one prompt and ALSO does
+      // `recentMessages.map(...)` for a second prompt was accepted — the
+      // file-wide bypass, surviving inside the per-channel fix.
+      //
+      // A module that does both is the ambiguous case, and ambiguity here
+      // belongs in front of a human: it is reported, and the way to clear it
+      // is to route the second use through the renderer too.
+      if (!c.handRolled.test(file.code)) return false;
+      return true;
     });
     if (unfenced) out.push(file.rel);
   }
@@ -460,6 +476,34 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
       const found = unfencedStructuredChannelConsumers([dir]);
       expect(found).toHaveLength(1);
       expect(found[0]).toMatch(/planted-consumer\.ts$/);
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL (A) — a renderer call does NOT excuse a second raw use of the SAME channel', () => {
+    // The round-5 finding: one legitimate render plus one raw interpolation of
+    // the same channel. The renderer call used to grant file-wide immunity.
+    const dir = plantTree('i13-same-channel-twice', {
+      'renders-and-hand-rolls.ts': [
+        "import { buildRecentMessagesPromptSections } from '../ai/orchestration/context-builder';",
+        '',
+        'export function summaryPrompt(ctx: { recentMessages: Array<{ role: string; content: string }> }) {',
+        '  const { trustedLines, untrustedBlock } = buildRecentMessagesPromptSections(ctx.recentMessages);',
+        "  return { messages: [{ role: 'user', content: [...trustedLines, untrustedBlock].join('\\n') }] };",
+        '}',
+        '',
+        'export function secondPrompt(ctx: { recentMessages: Array<{ role: string; content: string }> }) {',
+        "  const raw = ctx.recentMessages.map((m) => m.content).join('\\n');",
+        "  return { messages: [{ role: 'system', content: raw }] };",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = unfencedStructuredChannelConsumers([dir]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatch(/renders-and-hand-rolls\.ts$/);
     } finally {
       removeTree(dir);
     }

@@ -81,12 +81,34 @@ const READ_METHOD_PREFIXES = [
   'load',
   'fetch',
   'read',
-  'resolve',
   'stream',
+  // `resolve` is deliberately NOT here. Reviewed on PR #1063 (round 5):
+  // resolving is ambiguous — `resolveReference` reads, `resolveDispute`
+  // writes — and an ambiguous verb belongs on the side that gets looked at.
 ] as const;
 
+/**
+ * Write verbs that can appear ANYWHERE in a method name, not just at the
+ * front.
+ *
+ * Reviewed on PR #1063 (round 5): a prefix test alone still lets a mutating
+ * method through if it happens to start with a read verb —
+ * `getOrCreateCustomer`, `resolveDispute`, `loadAndClaim`. The read prefix is
+ * a hint about the method's FIRST action, never a promise that it does not
+ * also write, so a write verb anywhere in the name overrides it.
+ */
+const WRITE_VERB_ANYWHERE =
+  /(create|update|insert|save|upsert|delete|remove|write|claim|assign|archive|mark|set|stamp|record|activate|deactivate|apply|revoke|cancel|close|resolve|attach|detach|add|push|clear|reset|sync|commit)/i;
+
 function isReadMethod(method: string): boolean {
-  return READ_METHOD_PREFIXES.some((p) => method.startsWith(p));
+  if (!READ_METHOD_PREFIXES.some((p) => method.startsWith(p))) return false;
+  // Strip the read prefix before looking for a write verb, so `getCustomer`
+  // is a read while `getOrCreateCustomer` is not.
+  const tail = method.replace(
+    new RegExp(`^(${READ_METHOD_PREFIXES.join('|')})`, 'i'),
+    '',
+  );
+  return !WRITE_VERB_ANYWHERE.test(tail);
 }
 
 /** Method names that mutate persisted state — kept for documentation. */
@@ -499,6 +521,39 @@ describe('§5 I1′ (STRUCTURAL) — no AI module may call an operational reposi
     ).toEqual([]);
     // Not vacuous: the relaxed receiver pattern really does reach these.
     expect(generic.length).toBeGreaterThan(0);
+  });
+
+  it('NEGATIVE CONTROL — a read-PREFIXED mutation is still treated as a write', () => {
+    // The false negative reviewed on PR #1063 (round 5): the read prefix
+    // describes the method's first action, not a promise that it never writes.
+    const dir = plantTree('i1-read-prefixed-write', {
+      'planted-get-or-create.ts': [
+        'export async function ensure(customerRepo: { getOrCreateCustomer: Function }) {',
+        "  return customerRepo.getOrCreateCustomer('t', 'x');",
+        '}',
+        '',
+      ].join('\n'),
+      'planted-resolve.ts': [
+        'export async function settle(disputeRepo: { resolveDispute: Function }) {',
+        "  return disputeRepo.resolveDispute('t', 'd');",
+        '}',
+        '',
+      ].join('\n'),
+      'planted-genuine-read.ts': [
+        'export async function look(customerRepo: { getCustomer: Function }) {',
+        "  return customerRepo.getCustomer('t', 'x');",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = operationalWrites([dir]).map((w) => w.method).sort();
+      expect(found).toEqual(['getOrCreateCustomer', 'resolveDispute']);
+      // …and a genuine read is still not reported.
+      expect(found).not.toContain('getCustomer');
+    } finally {
+      removeTree(dir);
+    }
   });
 
   it('NEGATIVE CONTROL — a bare `repository.create` in an unclassified file is reported', () => {

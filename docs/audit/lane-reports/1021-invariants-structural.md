@@ -1084,6 +1084,57 @@ Suite after the round: **`111 passed | 4 expected fail`**. `tsconfig.build.json`
 
 **Revised counts: I1′ 6, I9′ 9.**
 
+## Review round 5 — three more holes, one more product gap, and the ceiling
+
+**1. I6 never probed OPTIONAL uuid fields.** An empty payload parses cleanly for
+`widgetId: z.string().uuid().optional()`, so the derivation never saw it — but a malformed value
+produces a field-level issue that `contractGapFields` turns into a gate. Added a second probe that
+supplies an invalid uuid for every known id-shaped key.
+
+> 🚨 **It immediately found a FOURTH I6 gap:** `linkedJobId`
+> (`proposals/contracts.ts:276`, `create_appointment`). `GATED_REFERENCE_SOURCES` has `jobId` but not
+> `linkedJobId`, so a malformed chained-booking reference emits a gate the resolver cannot lift.
+> Probably the cheapest of the four to close — `linkedJobId` pairs with the same `jobReference` free
+> text `jobId` already resolves from.
+
+**2. I1′'s inverted list was still prefix-only.** `getOrCreateCustomer`, `loadAndClaim` start with a
+read verb and write anyway. A write verb ANYWHERE in the name (after the prefix is stripped) now
+overrides the prefix, and `resolve` was removed from the read list entirely — resolving is ambiguous
+(`resolveReference` reads, `resolveDispute` writes), and an ambiguous verb belongs on the side that
+gets looked at.
+
+**3. I13′ clause A granted file-wide immunity within a channel.** A module that legitimately renders
+`recentMessages` for one prompt and hand-rolls it for a second was accepted — the file-wide bypass
+surviving inside the per-channel fix. Hand-rolling is now checked first, and a renderer call no longer
+excuses a second raw use of the same channel.
+*(The first attempt at this over-corrected: a 200-character window matched a `.join()` on the
+renderer's own result, a false positive on correct code. Tightened to a call applied directly to the
+channel.)*
+
+**4. I5′'s corpus still cannot cover forms the matcher learns that are not ordinals** (`last`,
+`former`, an email hint). Not fixed. Deriving the accepted-form space needs the parser shared between
+gate and matcher — a `src` change, out of scope for a test-only lane.
+
+### The ceiling, stated plainly
+
+Five review rounds have found **nineteen** false negatives in these guards. Every one was a real hole,
+every fix was correct, and each round produced more — because these are regex approximations of a
+static-analysis problem, and a regex cannot be *sound*.
+
+That has a consequence worth writing down rather than leaving implied:
+
+> **These guards are detectors with known false-negative ceilings, not proofs of absence. Every
+> violation count in this report is a FLOOR.** I1′ ≥ 6, I6 ≥ 4, I9′ ≥ 9, I13′ ≥ 1. Each round's
+> number was reported in good faith and each was too low.
+
+What the guards *do* prove is one direction only: **a planted violation fails the build** — that is
+the negative control, and it holds for every row. They catch regressions of the shapes they know.
+They do not certify that the tree is clean, and no row here should be read as saying so.
+
+Genuinely closing I13′ and I5′ needs an AST/type-aware pass over the module graph — real work, worth
+doing, and a different piece of work from this lane. Recommended as its own ticket rather than a sixth
+round of patches.
+
 ## Not done / judgment calls
 
 - **I18 — not attempted on this lane, and there is a brief conflict to resolve.** The ticket comment of
