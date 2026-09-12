@@ -16,13 +16,13 @@ config added; no money/pricing/RLS/auth/migration change; `ai/supervisor/review-
 
 | Row | Evidence class after this lane | Negative control | Genuine violation found | Files |
 |---|---|---|---|---|
-| **I1′** | STRUCTURAL | ✅ planted `customerRepo.create` under `src/ai` | **5 call sites** | `test/invariants/i1-no-ai-repository-writes.structural.test.ts` |
+| **I1′** | STRUCTURAL | ✅ planted `customerRepo.create` · planted bare `repository.create` | **6 call sites** | `test/invariants/i1-no-ai-repository-writes.structural.test.ts` |
 | **I3′** | PROVEN-REAL-DB + STRUCTURAL, **T1** | ✅ utterance-echoing builder fails the same assertions | none | `test/integration/i3-readback-provenance.test.ts` |
 | **I5′** | STRUCTURAL (relationship, not identity) | ✅ narrowed gate · widened matcher · wide-open gate | I5′ **false as written** — corrected wording proposed below | `test/invariants/i5-disambiguation-gate-containment.structural.test.ts` |
 | **I6** | STRUCTURAL | ✅ planted contract gate · planted `missingFields` literal | **3 gates** with no lifter | `test/invariants/i6-entity-id-gate-has-resolver.structural.test.ts` |
-| **I8′** | STRUCTURAL | ✅ tenant flag · env switch · feature flag · new closure member | none | `test/invariants/i8-safety-reads-no-tenant-flag.structural.test.ts` |
-| **I9′** | STRUCTURAL | ✅ four planted shapes | **3 second implementations** | `test/invariants/i9-one-totals-engine.structural.test.ts` |
-| **I13′** | STRUCTURAL | ✅ planted hand-rolled consumer (both clauses) | **1 unfenced prompt** | `test/invariants/i13-operator-prompt-fencing.structural.test.ts` |
+| **I8′** | STRUCTURAL | ✅ tenant flag · env switch · feature flag · generic-name switch · new closure member | none | `test/invariants/i8-safety-reads-no-tenant-flag.structural.test.ts` |
+| **I9′** | STRUCTURAL | ✅ four planted shapes · planted wrapped reducer | **4 second implementations** | `test/invariants/i9-one-totals-engine.structural.test.ts` |
+| **I13′** | STRUCTURAL | ✅ hand-rolled consumer · imported-but-unused renderer · one-of-two channels | **1 unfenced prompt** | `test/invariants/i13-operator-prompt-fencing.structural.test.ts` |
 | **I15** | STRUCTURAL, caveat closed | ✅ planted `@anthropic-ai/sdk` + 22 vendors + raw fetch | none (scope call recorded) | `test/ai/gateway-ci-guard.test.ts` |
 | **I7** | STRUCTURAL | ✅ planted `apply_ai_discount` | none | `test/proposals/guardrails/negotiation-invariant.test.ts` |
 | **I16** | STRUCTURAL | ✅ planted hole · dropped family · new surface · unwired handler · renamed map key | none | `coverage-table.structural.test.ts`, `drafting-surface-parity.test.ts` |
@@ -38,8 +38,12 @@ $ cd packages/api && npx vitest run --reporter=verbose test/invariants \
     test/ai/voice-turn/coverage-table.structural.test.ts
 
  Test Files  10 passed (10)
-      Tests  95 passed | 4 expected fail (99)
+      Tests  105 passed | 4 expected fail (109)
 ```
+
+*(95 | 4 as first published; 98 | 4 after review round 1; 105 | 4 after round 2. The two review
+rounds are recorded in full below — they found seven false negatives in these guards and two more
+product violations.)*
 
 The four `expected fail` entries are deliberate: they are the honest `it.fails` statements of I1′, I6,
 I9′ and I13′ **as written**, so that the gaps below are recorded in CI rather than defined away. Each
@@ -109,7 +113,7 @@ Exempt by **path**: `ai/voice-quality/**` — the Layer-1 corpus + inapp-50 eval
 fixture world and is never on a caller-facing path. Exempted by path rather than receiver so an
 operational write cannot hide behind a harness-shaped name elsewhere.
 
-### 🚨 GENUINE VIOLATION — I1′ does not hold (5 call sites)
+### 🚨 GENUINE VIOLATION — I1′ does not hold (6 call sites)
 
 | file:line | Call | Note |
 |---|---|---|
@@ -117,9 +121,10 @@ operational write cannot hide behind a harness-shaped name elsewhere.
 | `packages/api/src/ai/skills/find-or-create-lead.ts:122` | `leadRepo.create` | Same shape for the lead entity |
 | `packages/api/src/ai/skills/patch-owner-through.ts:238` | `callMeBackRepo.create` | Creates an owner call-back task row directly from an AI skill |
 | `packages/api/src/ai/voice-turn/create-voice-turn-processor.ts:2474` | `callMeBackRepo.create` | Same entity from the voice-turn processor |
-| `packages/api/src/ai/voice-turn/create-voice-turn-processor.ts:2639` | `appointmentRepo.update` | **The strongest of the five** — the E1 revoke path sets `status: 'canceled'` on a held appointment with no proposal: a state-changing write to a scheduled entity |
+| `packages/api/src/ai/voice-turn/create-voice-turn-processor.ts:2639` | `appointmentRepo.update` | **The strongest of the six** — the E1 revoke path sets `status: 'canceled'` on a held appointment with no proposal: a state-changing write to a scheduled entity |
+| `packages/api/src/ai/tasks/estimate-template.ts:97` | `repository.create` | Mints a tenant **estimate template** (priced, catalog-adjacent) from an AI task module with no proposal. Found in review round 2 — the bare `repository` receiver was invisible to the first edition of the guard |
 
-These are frozen as a baseline (a sixth breaks the build) **and** asserted by an honest `it.fails` of
+These are frozen as a baseline (a seventh breaks the build) **and** asserted by an honest `it.fails` of
 I1′ as written. Not fixed — test-only lane.
 
 ### RED (planted)
@@ -560,13 +565,14 @@ the build whichever it turns out to be — which is what stops the exception lis
 `jobs/job-profit.ts:145`, `verticals/context-assembly.ts:296`, `digest/digest-service.ts:961`.
 **Harness:** `ai/voice-quality/inapp-50/world.ts:554`.
 
-### 🚨 GENUINE VIOLATION — I9′ does not hold (3 second implementations)
+### 🚨 GENUINE VIOLATION — I9′ does not hold (4 second implementations)
 
 | file:line | What | Why it matters |
 |---|---|---|
 | `packages/api/src/proposals/estimate-editor.ts:33` | `calculateEstimateTotal` — `sum + item.quantity * item.unitPrice`, **no per-line rounding** | **Demonstrably divergent, not merely duplicative.** On `0.5 × 29¢` it returns `14.5` where the engine returns `15` — a **non-integer cents value**, which CLAUDE.md's first core pattern forbids outright and which is precisely the P0-2 divergence `normalizeLineItemTotals` was written to close. It also has **zero callers in `src`** (only its own unit test), so the cheapest fix is deletion — which CLAUDE.md's hygiene rule already requires of an unused export |
 | `packages/api/src/proposals/execution/handlers.ts:838` | `Math.round(quantity * unitPriceCents)` | Duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap |
-| `packages/api/src/routes/invoices.ts:178` | `parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0)` to feed the member-discount `applyBps` | It reaches for the engine's `applyBps` and then defines `subtotal` itself. If the engine's subtotal ever stops meaning "every line" — optional and tier lines are **already** selectable via `resolveSelectedLineItems` — the member discount silently uses a different base than the invoice does |
+| `packages/api/src/routes/invoices.ts:178` | `parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0)` to feed the member-discount `applyBps` | It reaches for the engine's `applyBps` and then defines `subtotal` itself, over **every** line |
+| `packages/api/src/routes/estimates.ts:239` | The same member-discount subtotal, over `resolveSelectedLineItems(...)` | **The two already disagree.** Same feature, two definitions of the discount base — the estimate one sums only the default selection and says why in its own EE-1 comment (*"Summing every tier option here would over-discount a tiered estimate"*), the invoice one sums everything. Neither is in the engine. Found in review round 2 once the sweep read wrapped expressions |
 
 The engine's own math is untouched (lane rule: never touch discount/tax math). The divergence is proved
 with numbers by a test that measures the *second* implementation against the first, not by assertion.
@@ -827,6 +833,9 @@ $ npx vitest run --reporter=verbose test/proposals/guardrails/negotiation-invari
 
 Ranked by what a defect would cost, not by how hard it is to fix. **None are fixed on this branch.**
 
+0. **I9′ — two member-discount subtotals that already disagree** (`routes/invoices.ts:178` over every
+   line, `routes/estimates.ts:239` over the default selection only). Not a drift *risk* — drift that
+   has already happened, in money, on one feature. Surfaced by review round 2.
 1. **I9′ — `proposals/estimate-editor.ts:31` returns non-integer cents.** A second totals engine that
    breaks CLAUDE.md's first core pattern, provably (`0.5 × 29¢ → 14.5`). **Zero callers in `src`** —
    the fix is deletion, which the hygiene rule already requires of an unused export. Cheapest, most
