@@ -327,6 +327,98 @@ describe('Postgres integration — invoice_line_items.pricing_source (migration 
       ),
     ).rejects.toThrow();
   });
+
+  it('T0 — a neighbour tenant\'s catalog-priced invoice is isolated: cross-tenant fetch fails and pricing_source rows never cross tenants', async () => {
+    const neighbour = await createTestTenant(pool);
+    const jobRepo = new PgJobRepository(pool);
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+
+    const neighbourCustomerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: neighbourCustomerId,
+      tenantId: neighbour.tenantId,
+      firstName: 'Neighbour',
+      lastName: 'Customer',
+      displayName: 'Neighbour Customer',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: neighbour.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const neighbourLocationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: neighbourLocationId,
+      tenantId: neighbour.tenantId,
+      customerId: neighbourCustomerId,
+      street1: '9 Neighbour Ave',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const neighbourJobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: neighbourJobId,
+      tenantId: neighbour.tenantId,
+      customerId: neighbourCustomerId,
+      locationId: neighbourLocationId,
+      jobNumber: 'JOB-PS-NEIGHBOUR-001',
+      summary: 'Neighbour tenant pricing-source job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: neighbour.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const neighbourLines: LineItem[] = [
+      lineWithSource(crypto.randomUUID(), 'Neighbour catalog part', 7_700, 0, 'catalog'),
+    ];
+    const neighbourTotals = calculateDocumentTotals(neighbourLines, 0, 0);
+    const neighbourInvoice = await invoiceRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: neighbour.tenantId,
+      jobId: neighbourJobId,
+      invoiceNumber: 'INV-PS-NEIGHBOUR-1',
+      status: 'draft',
+      lineItems: neighbourLines,
+      totals: neighbourTotals,
+      amountPaidCents: 0,
+      amountDueCents: neighbourTotals.totalCents,
+      createdBy: neighbour.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Cross-tenant fetch fails: the original tenant can never read the
+    // neighbour's invoice by id.
+    expect(await invoiceRepo.findById(tenant.tenantId, neighbourInvoice.id)).toBeNull();
+
+    // The neighbour's own pricing_source rows are visible under its own
+    // tenant scope...
+    const neighbourRows = await pool.query(
+      `SELECT pricing_source FROM invoice_line_items
+       WHERE invoice_id = $1 AND tenant_id = $2`,
+      [neighbourInvoice.id, neighbour.tenantId],
+    );
+    expect(neighbourRows.rows.map((r) => r.pricing_source)).toEqual(['catalog']);
+
+    // ...but never leak into a query scoped to the original tenant, even
+    // when asked for the neighbour's own invoice id.
+    const leakCheck = await pool.query(
+      `SELECT pricing_source FROM invoice_line_items
+       WHERE invoice_id = $1 AND tenant_id = $2`,
+      [neighbourInvoice.id, tenant.tenantId],
+    );
+    expect(leakCheck.rows).toHaveLength(0);
+  });
 });
 
 /**
