@@ -49,3 +49,8 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 
 ---
 *Every blocker above was verified against `origin/main` at `2c2aa6d90` (PR #994 landed) or the research tickets named. When Josh answers, the answering session records the answer here, on the ticket, and in the row's Confirm cell — a status change is never one edit (PRD §11.0d).*
+
+### Per-assignment technician SMS — tenant control? (from #1010 review, issue #1033)
+- **What:** `TechnicianAssignmentNotifier` is now registered (PR #1029). Every assign/unassign/reassign texts the technician whenever a delivery provider is wired; the only switches are the global `SMS_ENABLED` kill switch and whether the tech has a mobile on file. Dispatch churn sends one text per hop.
+- **Josh's call:** add a per-tenant `notifyTechniciansBySms` (default on or off?) and/or a churn window? Push notifications are unaffected (per-user mutes apply).
+- **Until decided:** nothing to build; issue #1033 holds the analysis.
