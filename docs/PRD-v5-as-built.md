@@ -27,7 +27,7 @@ that the PRD and the system finally agree.
 **Method.** Twelve parallel read-only sweeps across 3,868 source files —
 282,247 LOC in `packages/api`, 111,568 in `packages/web`, plus mobile, shared,
 and a 1,403-file API test corpus — cross-read against the decision log
-(D-001–D-031), the strategy spine (`docs/strategy/day-in-the-life.md`), the
+(D-001–D-032), the strategy spine (`docs/strategy/day-in-the-life.md`), the
 go-to-market brief, and the 2026-09-06 full-verification run. Where
 documentation and code disagreed, **the code won and the disagreement is
 recorded in §12**.
@@ -45,6 +45,14 @@ using the ladder this repository itself invented in PRD v4 Part E:
 | **4− Written** | Real-Postgres **write** proven; the audit leg still uses an in-memory repository |
 | **5 Reachable** | Proven *and* reachable by a real user on the surface the requirement names |
 | **6 Live** | Observed working in production, with real tenants |
+
+**A rung alone is not the definition of done.** It answers *"is this proven?"* for
+one tenant. Rivet is a multi-tenant product whose isolation boundary is the
+database, so every requirement also carries a **tenant grade T0–T4** saying how
+many tenants the proof has actually met. The two compose: **the tenant grade caps
+the rung.** §8.0 defines both and the capping rules; §11.0e reports the measured
+baseline.
+
 
 **Every rung in §5 and §8 was re-derived from the test suite on 2026-09-11.**
 The first edition asserted them from reading the source, which is a prediction,
@@ -1097,6 +1105,57 @@ Rung **5** additionally requires **reachability**: a normally-provisioned tenant
 gets there with no SQL, no platform-admin action, no environment variable. Rung
 **6** requires live production traffic.
 
+#### The tenant grade — the second half of the definition of done
+
+An evidence class says *how* something was proven. It does not say **in what
+world**. A Docker-gated test that writes a row and its audit event proves the
+capability in a universe containing exactly one tenant — which is not the universe
+the product ships into.
+
+This matters more here than in most products, because **the isolation boundary is
+the database, not application code** (I11). Application-level correctness is
+therefore not evidence of tenant correctness: the query can be right and the
+*answer* still wrong once a neighbour exists.
+
+| Grade | What was proven | Typical shape of the proof |
+|---|---|---|
+| **T0 — Single** | One tenant existed. Nothing about neighbours is known | the default; not a claim |
+| **T1 — Isolated** | A second tenant exists and **cannot see or touch** the first's rows | *"invisible to another tenant"*, *"rejects cross-tenant access"*, a raw query under the unprivileged role |
+| **T2 — Non-interfering** | A second tenant's **data does not change the first's answer** — aggregates, availability, selection, counters | *"tenant A's appointment does not block tenant B's availability"* |
+| **T3 — Divergently configured** | Two tenants with **different settings** each get their own correct result **in the same run** | *"a tenant on both packs gets both Diagnostic Fees at their pack prices"*; the Phoenix timezone case |
+| **T4 — Really enumerated** | For anything that iterates tenants: the **production selector runs** (not a stubbed list), every eligible tenant is processed, and a failure on one **does not abort the rest** | a sweep test that seeds N tenants and asserts N outcomes |
+
+**T1 is isolation; T2 is non-interference; they are different failures.** A
+correctly tenant-scoped `WHERE` clause gives you T1 and tells you nothing about
+T2 — a sweep can be perfectly scoped and still pick the wrong rows, double-count,
+or starve a tenant. **T3 is where the Phoenix mis-booking lived**: both tenants'
+queries were fine; the *configuration* was assumed shared.
+
+**Capping rules — the tenant grade caps the rung:**
+
+| Rule | Why |
+|---|---|
+| Rung **4** requires **T1** | "The write and its audit event are proven" is not proof for a multi-tenant product if only one tenant has ever existed |
+| Rung **5** requires **T2**, and **T3** wherever the capability reads per-tenant configuration | Reachable *for one owner* is not reachable. If two differently-configured tenants would collide, the capability is not done |
+| Any capability that **iterates tenants** is capped at rung **4** until **T4** | A sweep proven against a stubbed one-element tenant list has not been proven at all — the stub replaces the exact thing under test |
+| Rung **6** requires **T4** plus live traffic from **≥2 real tenants** | One pilot tenant is a demo, not production |
+
+**How to confirm a grade.** Each is a shell falsifier over the test that carries
+the row's rung:
+
+```bash
+# T1/T2 — does the proving test even know a second tenant exists?
+grep -nE "tenantB|otherTenant|secondTenant|cross-tenant|another tenant" <test file>
+
+# T3 — are two tenants configured DIFFERENTLY and asserted separately?
+grep -nE "timezone|business_hours|labor_rate|threshold|pack|digest_enabled" <test file>
+
+# T4 — is the tenant enumerator stubbed to a hand-picked list?
+grep -nE "listTenantIds:\s*async\s*\(\)\s*=>\s*\[" <test file>
+#   a single-element literal here means the sweep is T0, whatever its rung says
+```
+
+
 **The honest reading of the scale:** below 4, the story is a belief. At 4 it is
 proven but may be unreachable. Only at **5** has the persona been served, and
 only at **6** have we watched them be served. **Rung 6 is empty.**
@@ -1758,6 +1817,11 @@ In the order they should be written:
 7. Void → link deactivation + intent cancellation at real Postgres.
 8. Uncatalogued line → confidence capped below the auto-approve floor, on disk.
 
+**A ninth, added 2026-09-12 and arguably first:** extract `listAllTenantIds(pool)`
+and write one shared sweep harness that runs every tenant-iterating worker through
+the **real** selector against 3 divergently-configured tenants. It is the only
+item on this list that earns a grade for seven rows at once — see §11.0e.
+
 ### 11.0d Keeping this document honest
 
 This document has the same failure mode as every document it replaces: it is
@@ -1841,6 +1905,97 @@ that workflow **hard-fails when its secrets are absent**, on the stated principl
 that *a skipped run is not a passing gate*.
 
 ---
+
+### 11.0e The tenant-grade baseline, measured
+
+The tenant grade (§8.0) is a new bar, so it is stated here with what the suite
+actually meets today rather than as an aspiration. Measured 2026-09-12 over
+`packages/api/test/integration/`:
+
+| Measure | Count | Share of real-DB files |
+|---|---|---|
+| Integration files | 217 | — |
+| …that open a real pool | 214 | — |
+| …that never open a pool | **3** | — |
+| Provision **≥2 tenants** | 140 | 65% |
+| Carry a **cross-tenant assertion** | 120 | 56% |
+| **Both** — a genuine multi-tenant proof (**T1 or better**) | **113** | **52%** |
+| Assert audit through `PgAuditRepository` | 68 | 32% |
+
+**About half the Docker-gated suite has never met a second tenant.** That is not
+a claim that those capabilities leak — most are tenant-scoped by RLS, which is
+itself the best-evidenced invariant in the product (I11). It is a claim about
+*proof*: for ~48% of the suite, tenant correctness rests on the boundary being
+right in general rather than on this capability having been watched with a
+neighbour present.
+
+#### The sharpest finding: sweeps stub the thing under test
+
+Seven integration files inject the tenant enumerator. **Six pass exactly one
+tenant id**; only `money-reconciliation.test.ts` passes two.
+
+```
+daily-digest-worker.test.ts                     listTenantIds: async () => [tenant.tenantId]
+appointment-reminder-owner-push.integration.ts  listTenantIds: async () => [tenant.tenantId]
+hold-reaper.test.ts                             listTenantIds: async () => [tenant.tenantId]
+hfcr-weekly-send-worker.test.ts                 listTenantIds: async () => [tenantA.tenantId]
+estimate-phases.test.ts                         listTenantIds: async () => [tenant.tenantId]
+google-reviews-worker.test.ts                   listTenantIds: async () => [tenantA.tenantId]
+money-reconciliation.test.ts                    listTenantIds: async () => [tenantA, tenantB]   ← the only one
+```
+
+In production `app.ts` supplies the real thing at **ten call sites**, each an
+inlined copy of the same literal:
+
+```js
+listTenantIds: async () => {
+  if (!pool) return [];
+  const r = await pool.query('SELECT id FROM tenants');
+  return r.rows.map((row) => row.id);
+},
+```
+
+**No test exercises that selector.** This is the same shape as the defect
+CLAUDE.md already records — *the entity resolver shipped with nonexistent column
+names because its `Pool` was mocked* — except here what is mocked away is
+multi-tenancy itself.
+
+`daily-digest-worker.test.ts` shows the trap concretely. It creates **one**
+tenant, stubs the enumerator to that id, and its *"skips a tenant whose
+`digest_enabled` is false"* test toggles the flag on **the same tenant** and
+re-runs. Nothing proves the sweep sends A's digest to A and B's to B, continues
+to B when A throws, or honours two different `digest_time` values in one pass.
+
+**Consequently, under §8.0's capping rules, every tenant-iterating sweep is
+capped at rung 4 until T4 is earned**, and the digest (9.6), thank-you SMS (9.1),
+review request (9.2), hold reaper (3.5), estimate nudge (7.10), Google review
+monitoring (9.4) and weekly summary (9.7) rows are **T0 sweeps** regardless of
+the rung printed beside them.
+
+#### The cheapest fix, and it is structural
+
+The ten inlined copies should be one exported, tested function —
+`listAllTenantIds(pool)` — used at every sweep site. That converts an untested
+duplicated literal into a single function a test can cover, and it is the
+precondition for any T4 proof: a sweep test cannot run the production selector
+while the production selector exists only as ten anonymous closures inside
+`app.ts`.
+
+Order of work:
+
+1. **Extract `listAllTenantIds(pool)`** and replace the ten copies. One commit,
+   no behaviour change.
+2. **One shared sweep harness test**: seed 3 tenants with divergent config, run
+   each sweep through the *real* enumerator, assert 3 correct outcomes and that a
+   thrown error on tenant 1 still processes 2 and 3. Earns T4 for every sweep at
+   once.
+3. **Grade the remaining rows.** §5 and §8 carry rungs; they do not yet carry
+   T-grades per row. The aggregate above is measured; the per-row grading is not
+   done, and should not be asserted until it is.
+
+> **Deliberately not claimed.** Per-row T-grades are absent from §5 and §8 on
+> purpose. Publishing a grade per row without running the falsifier for that row
+> would repeat the exact error this edition exists to correct — see §12.4d.
 
 ## 12. What is not built — the honest register
 
@@ -2291,7 +2446,7 @@ approval median latency (<10 min in business hours).
 
 ## 15. Decision history
 
-The thirty-one recorded decisions, in one table, because the *shape* of this
+The thirty-two recorded decisions, in one table, because the *shape* of this
 list is itself a product artifact: it shows a team that repeatedly chose the
 harder, safer option and wrote down why.
 
@@ -2328,6 +2483,7 @@ harder, safer option and wrote down why.
 | D-029 | A gate on an entity id must have a resolver behind it | Live — **but see §5.0a: I6 has no evidence and a test pins the opposite** |
 | D-030 | Voice directs, SMS approves; v5 is canonical | Live |
 | D-031 | A rung is derived from evidence, never from reading the source | Live, method |
+| D-032 | Definition of done is two-dimensional — evidence class **and** tenant grade | Live, method |
 
 Three entries are worth reading as a set. **D-018 → D-019 → D-025** is the
 product finding its own line: an autonomous capability was designed carefully,

@@ -939,3 +939,72 @@ underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
   eleven of eighteen invariants are genuinely strong.
 - *Delete the ladder and describe capabilities in prose.* Rejected: prose is what rotted in
   `docs/remaining-features.md`, which is why the ladder exists.
+
+---
+
+## D-032 — Definition of done is two-dimensional: an evidence class AND a tenant grade
+
+**Date:** 2026-09-12
+**Status:** Accepted
+**Amends:** D-031 (a rung is derived from evidence, never from reading the source).
+
+**Context.** D-031 fixed *how* a rung is earned but left the bar single-tenant. A rung-4 row
+means "a Docker-gated test proved the write and its audit event" — in a universe containing exactly
+one tenant. Rivet is multi-tenant and its isolation boundary is the database, not application code
+(I11), so a proof that never met a second tenant says nothing about the world the product ships
+into. Measured over `packages/api/test/integration/` on 2026-09-12: 214 of 217 files open a real
+pool, **140 (65%) provision ≥2 tenants, 120 (56%) carry a cross-tenant assertion, and 113 (52%)
+have both.** About half the Docker-gated suite has never seen a neighbour.
+
+The sharpest instance: seven integration files inject the tenant enumerator and **six pass exactly
+one tenant id**. Production supplies `SELECT id FROM tenants` at ten inlined call sites in
+`app.ts`, and **no test exercises it.** `daily-digest-worker.test.ts` creates one tenant, stubs the
+enumerator to that id, and proves "skips a tenant whose `digest_enabled` is false" by toggling the
+flag on *the same tenant*. The stub replaces precisely the thing under test — the same shape as the
+entity resolver shipping with nonexistent column names because its `Pool` was mocked.
+
+**Decision.**
+
+1. **Every requirement carries a tenant grade T0–T4 alongside its rung**, defined in
+   `docs/PRD-v5-as-built.md` §8.0:
+   - **T0 Single** — one tenant existed; nothing about neighbours is known.
+   - **T1 Isolated** — a second tenant cannot see or touch the first's rows.
+   - **T2 Non-interfering** — a second tenant's *data* does not change the first's answer.
+   - **T3 Divergently configured** — two tenants with *different* settings each get their own
+     correct result in the same run.
+   - **T4 Really enumerated** — the production tenant selector runs (not a stub), every eligible
+     tenant is processed, and a failure on one does not abort the rest.
+2. **The tenant grade caps the rung.** Rung 4 requires T1. Rung 5 requires T2, plus T3 wherever the
+   capability reads per-tenant configuration. **Any capability that iterates tenants is capped at
+   rung 4 until T4.** Rung 6 requires T4 plus live traffic from ≥2 real tenants.
+3. **T1 and T2 are different failures and are graded separately.** A correctly tenant-scoped
+   `WHERE` gives T1 and says nothing about T2: a sweep can be perfectly scoped and still pick the
+   wrong rows, double-count, or starve a tenant. **T3 is where the Phoenix mis-booking lived** —
+   both tenants' queries were fine; the configuration was assumed shared.
+4. **Each grade is confirmed by a shell falsifier**, not by judgement. The T4 falsifier is the
+   sharpest: a single-element literal in `listTenantIds: async () => [...]` means the sweep is T0
+   whatever rung is printed beside it.
+
+**Consequences.**
+- Seven sweep-backed rows — digest (9.6), thank-you SMS (9.1), review request (9.2), hold reaper
+  (3.5), estimate nudge (7.10), Google review monitoring (9.4), weekly summary (9.7) — are **T0 and
+  capped at rung 4** until the enumerator is real in their tests.
+- The precondition for any T4 proof is structural: the ten inlined copies of
+  `SELECT id FROM tenants` become one exported, tested `listAllTenantIds(pool)`. A sweep test cannot
+  run the production selector while that selector exists only as ten anonymous closures in `app.ts`.
+- One shared sweep harness — 3 divergently-configured tenants, real enumerator, assert 3 outcomes
+  and that a throw on tenant 1 still processes 2 and 3 — earns T4 for every sweep at once. It is now
+  the ninth and arguably first item in §11.0c.
+- **Per-row T-grades are deliberately not published yet.** The aggregate above is measured; the
+  per-row grading is not. Asserting a grade per row without running that row's falsifier would
+  repeat the error D-031 exists to correct.
+
+**Alternatives rejected:**
+- *Fold multi-tenancy into the existing rungs (e.g. "rung 4 now means two tenants").* Rejected: it
+  silently redefines ~100 published numbers and conflates two independent questions — how strong the
+  evidence is, and how many tenants it covered.
+- *Rely on RLS and skip per-capability tenant proof.* Rejected: RLS gives T1 by construction and
+  nothing else. T2, T3 and T4 are behavioural and RLS cannot supply them — the digest sweep is
+  perfectly RLS-scoped and still unproven across tenants.
+- *Grade every row now from the existing scan.* Rejected: the scan is a keyword heuristic. It is
+  sound as an aggregate and not sound per row, and a wrong grade is worse than an absent one.
