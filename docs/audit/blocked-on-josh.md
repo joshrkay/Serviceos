@@ -85,3 +85,74 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **Card-present hardware + Terminal credentials:** `src/payments/stripe-terminal.ts` is likewise stubbed-fetch
   only (`test/payments/stripe-terminal.test.ts`). Per #1022 no Terminal proof was built; shares #1018's 5.5
   finding. **Row waiting:** §8.5's card-present half — stays at 3.
+
+### #1011 §E parking lot (per-tenant flag write path + strict-schema settings, issue #995)
+
+Surfaced by the design pass (#1011, 2026-09-12) and this PR-3 lane. Each is
+named, not answered — see this file's own rule at the top.
+
+- **(E1) O-2, narrower question: may an owner ever EDIT the spoken E1
+  life-safety script, and behind what gate?** O-2 above asks who *signs off*
+  on the placeholder script; this is the separate write-path question the
+  design pass raised when it kept `e1ReviewedScript` out of the generic
+  settings PUT (decision #7, PR-2): if an owner is ever allowed to edit it,
+  the write needs its own reviewed/gated path (legal + trade sign-off,
+  per O-2), not a bare boolean/string field on `PUT /api/settings`. **Until
+  decided:** `e1ReviewedScript` stays unreachable from every settings
+  surface; rows 2.5/I8 are unaffected (they speak the placeholder either way).
+- **(E2) `aiModel` after provisioning — ever owner-editable, or fixed for the
+  tenant's lifetime?** PRD §12.4c (decision #8) leaves `aiModel` as a
+  dedicated-writer / not-user-settable field, untouched by this ticket's
+  scope. Open question: should an owner ever be able to switch which model
+  backs their tenant's AI after initial provisioning, and if so through what
+  surface (settings, support-assisted, platform-admin only)? **Until
+  decided:** no write path exists or is planned; `aiModel` stays
+  provisioning-time-only.
+- **(E3) Is owner consent sovereign over the platform ramp?** `_resolve` in
+  `pg-tenant-feature-flags.ts` returns a tenant override **before** the
+  platform fallback (verified, decision #1's evidence) — so a tenant that has
+  explicitly opted in or out always wins over a platform-level ramp or
+  kill-switch for that flag. Open question: should that hold unconditionally,
+  or should a platform-level safety kill-switch be able to override a
+  tenant's own consent in an emergency (e.g., a defect discovered in a
+  capability a tenant has already turned on)? **Until decided:** the current,
+  shipped precedent is tenant-override-wins, unconditionally, for both
+  `dropped_call_recovery` and `voice_vulnerability_triage`.
+- **(E4) The Settings label for `autonomousCloseEnabled` is a placeholder.**
+  The shipped copy — "One approval for phone-quoted work" — was written to
+  ship something legible, not as a considered product label; the design pass
+  flagged it may need a rename (and, separately, whether the underlying
+  column name should change to match). **Until decided:** the copy and
+  column stay as shipped; do not treat "One approval for phone-quoted work"
+  as a finalized product name in specs, docs, or comms.
+- **(E5) Speed-to-lead: wire it or retire it.** `sendSpeedToLeadResponse` is a
+  complete module (`leads/speed-to-lead.ts`) with zero production callers
+  outside its own unit test (decision #6, PR-2 design pass:
+  `git grep -l sendSpeedToLeadResponse` → 2 files). It is not a schema gap —
+  its keys were deliberately kept out of `updateSettingsSchema` — it is a
+  built-and-never-wired module, the exact shape CLAUDE.md's Code Hygiene
+  section asks to either wire or delete. **Josh's call:** wire it into a real
+  trigger site (which one?) or delete the module and its test. **Until
+  decided:** the module stays dormant; no row on this map claims it.
+- **(E6) Which Playwright runner counts for rung 5 — ratify.** Map research
+  #1004 and this ticket's design pass (§C) both settled on **chromium +
+  a local Postgres testcontainer** (docs/testing-strategy.md "Real-Postgres
+  Playwright locally") as the rung-5 reachability runner, explicitly NOT
+  `chromium-devauth` (in-memory repos, fails "mocked is not proven") and NOT
+  `qa-matrix` (needs a deployed environment, not hermetic). This PR-3 lane
+  used exactly that runner for `weekly-feedback-toggle.spec.ts` and
+  `capabilities-toggle.spec.ts`. **Josh's call:** formally ratify
+  chromium+testcontainer as the map's one rung-5 runner definition (issue
+  #995) so future lanes stop re-litigating it per ticket. **Until decided:**
+  treated as adopted-but-not-ratified; this lane followed it.
+- **(E7) Can 2.7 claim rung 5 without a live Twilio line?** Row 2.7
+  (dropped-call recovery) is a phone-surface capability. This lane proved the
+  owner-facing settings write path reaches real Postgres end-to-end
+  (`capabilities-toggle.spec.ts`), but the capability itself only fires from
+  a real dropped call on a live Twilio line — §8.2's lane, not this one. Open
+  question, same shape as 2.6's telephony gap: does an owner-facing write
+  path plus a hermetic Postgres proof cap at 4, with 5 reserved for a signed
+  Twilio-shaped webhook driving the real `/api/telephony/*` routes (per map
+  research #1004), or does some other proof satisfy 5 for a phone-surface
+  row? **Until decided:** 2.7's rung is Fable's call per the ticket's
+  resolution comment; this lane does not claim 5.

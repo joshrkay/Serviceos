@@ -59,6 +59,8 @@ import { createInvoice } from '../../src/invoices/invoice';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
+import { runDroppedCallRecoverySweep } from '../../src/workers/dropped-call-worker';
+import { PgDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
 import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
@@ -1369,6 +1371,110 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       expect(failed).toBeGreaterThanOrEqual(1);
       expect(enqueued).not.toContain(doomed.jobId);
       expect(enqueued).toContain(survivor.jobId);
+    });
+  });
+
+  /**
+   * C6 (#1011 PR-3) — the dropped-call recovery sweep has no fan-out entry in
+   * this file. Like thank-you-SMS and review-request immediately above,
+   * `dropped-call-worker.ts` takes no `listTenantIds` dependency:
+   * `PgDroppedCallRecoveryRepository.findDueTenantIds` (scheduler.ts) runs ONE
+   * cross-tenant `SELECT DISTINCT tenant_id` query, and the worker's send
+   * batch (Phase 2) is scoped to whatever that REAL query returns — so this
+   * belongs in the cross-tenant-query shape, not the enumerator-driven one.
+   * T4 for this sweep: the real repository sees every tenant with a due row in
+   * one pass, one tenant's synthetic send failure does not stop the rest, and
+   * a tenant with nothing scheduled is left untouched in the same pass.
+   */
+  describe('dropped-call recovery sweep', () => {
+    const DC_SCHEDULED_FOR = new Date('2020-02-02T00:00:00.000Z');
+    const DC_DUE_AT = new Date(DC_SCHEDULED_FOR.getTime() + 1000);
+
+    async function seedDueRecovery(): Promise<string> {
+      const { tenantId } = await createTestTenant(pool);
+      await pool.query(
+        `INSERT INTO dropped_call_recoveries (tenant_id, voice_session_id, caller_e164, scheduled_for)
+         VALUES ($1, $2, $3, $4)`,
+        [tenantId, uuidv4(), `+1555${tenantId.replace(/-/g, '').slice(0, 7)}`, DC_SCHEDULED_FOR],
+      );
+      return tenantId;
+    }
+
+    /**
+     * All three rows below share one `scheduled_for` (DC_SCHEDULED_FOR), and
+     * `findDueForTenants` orders only by `scheduled_for ASC` — Postgres is
+     * free to return them in any order among the tie. Pre-selecting which
+     * tenant "doomed" is (and asserting the OTHER two survive) would only
+     * catch a worker that aborts its whole batch on the first error when the
+     * doomed tenant happens to sort before both survivors; on the other
+     * orderings the test would pass whether or not the implementation
+     * aborted, since the abort would have nothing left to cut short. Instead,
+     * `doomed` is whichever tenant THIS run's `sendSms` seam reaches first —
+     * the same `recordingSeam`/`computeDepsFailingForFirstOf` idiom already
+     * used above for the digest and enumerator-driven sweeps — so "the
+     * failure preceded the surviving work" is true by construction, not by
+     * luck of the sort. Caught in PR review (xhawk-ai) on this PR.
+     */
+    const run = async (failFirstOf: string[] | null) => {
+      const repo = new PgDroppedCallRecoveryRepository(pool);
+      const auditRepo = new PgAuditRepository(pool);
+      const sent: string[] = [];
+      let doomed: string | null = null;
+      const result = await runDroppedCallRecoverySweep({
+        repo,
+        handlerDeps: {
+          audit: auditRepo,
+          logger,
+          rateLimit: { check: async () => true, record: async () => undefined },
+          resolvedSince: async () => null,
+          compose: async () => 'We got cut off — reply to pick back up.',
+          sendSms: async (input) => {
+            if (failFirstOf?.includes(input.tenantId) && (doomed === null || doomed === input.tenantId)) {
+              doomed = input.tenantId;
+              throw new Error(`synthetic failure for tenant ${input.tenantId}`);
+            }
+            sent.push(input.tenantId);
+            return `SM_${sent.length}`;
+          },
+        },
+        logger,
+        now: () => DC_DUE_AT,
+      });
+      return { sent, failed: result.failed, doomed: () => doomed };
+    };
+
+    it('reaches every tenant with a due row through the REAL cross-tenant selector', async () => {
+      const trio = [await seedDueRecovery(), await seedDueRecovery(), await seedDueRecovery()];
+
+      const { sent } = await run(null);
+
+      expect(sent).toEqual(expect.arrayContaining(trio));
+    });
+
+    it('keeps going when one tenant throws — the other tenants are still SENT', async () => {
+      const ours = [await seedDueRecovery(), await seedDueRecovery(), await seedDueRecovery()];
+
+      const { sent, failed, doomed } = await run(ours);
+
+      // Whichever of ours the sweep reached first is the one that threw, so
+      // every surviving assertion below describes work done AFTER a failure.
+      expect(failed).toBeGreaterThanOrEqual(1);
+      expect(doomed()).not.toBeNull();
+      expect(ours).toContain(doomed());
+      expect(sent).not.toContain(doomed());
+      for (const survivor of ours.filter((t) => t !== doomed())) {
+        expect(sent).toContain(survivor);
+      }
+    });
+
+    it('leaves a tenant with nothing scheduled untouched while its neighbour sends in the same pass', async () => {
+      const withWork = await seedDueRecovery();
+      const { tenantId: withoutWork } = await createTestTenant(pool);
+
+      const { sent } = await run(null);
+
+      expect(sent).toContain(withWork);
+      expect(sent).not.toContain(withoutWork);
     });
   });
 });
