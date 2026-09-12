@@ -8,7 +8,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { ensureTenantSettings } from '../../src/settings/settings';
-import { findBookableSlots } from '../../src/scheduling/booking-availability';
+import { findBookableSlots, schedulingConfigFromSettings } from '../../src/scheduling/booking-availability';
 
 /**
  * U7 — GET /api/dispatch/availability wraps `findBookableSlots`, which runs a
@@ -160,5 +160,53 @@ describe('Postgres integration — dispatch availability (findBookableSlots)', (
     // Tenant B has an empty calendar; the 10:00 slot that is blocked for tenant A
     // must be offered for tenant B. Proves the range query is tenant-scoped.
     expect(starts).toContain(`${day}T10:00:00.000Z`);
+  });
+
+  /**
+   * V17 — `booking-availability.test.ts` ("V17 (unit) — tenant business
+   * hours propagate into slot generation") already proves this against an
+   * in-memory appointment repo and a hand-built `weeklyHours` literal. §1015
+   * 3.2's own acceptance criterion is "offered times respect my ACTUAL
+   * working day" — the part that unit test can't reach is whether a REAL
+   * `tenant_settings.business_hours` column, read back through
+   * `schedulingConfigFromSettings` exactly as routes.ts does, still shapes
+   * the offered slots. Moved here where the code allows it (a pure date-math
+   * function like `isWithinBusinessHours` has no DB seam to move); the T2
+   * assertion above is unchanged.
+   */
+  it('V17 (unit-only half moved to real DB) — a tenant\'s OWN configured business hours and travel buffer, read from a real tenant_settings row, shape the offered slots', async () => {
+    const configuredTenant = await createTestTenant(pool);
+    await seedTenant(configuredTenant);
+    await settingsRepo.update(configuredTenant.tenantId, {
+      businessHours: { mon: { open: '10:00', close: '12:00' } },
+      jobBufferMinutes: 60,
+    });
+
+    const settings = await settingsRepo.findByTenant(configuredTenant.tenantId);
+    const config = schedulingConfigFromSettings(settings);
+    expect(config.weeklyHours).toEqual({ mon: { open: '10:00', close: '12:00' } });
+    expect(config.bufferMinutes).toBe(60);
+
+    const slots = await findBookableSlots(
+      { appointmentRepo, assignmentRepo },
+      {
+        tenantId: configuredTenant.tenantId,
+        fromDate: day, // 2099-06-15 is a Monday
+        toDate: day,
+        timezone,
+        durationMin: 60,
+        weeklyHours: config.weeklyHours,
+        bufferMinutes: config.bufferMinutes,
+        maxSlots: 20,
+      },
+    );
+
+    // The tenant's OWN 10:00-12:00 window — NOT the 08:00-17:00 default the
+    // sibling test above proves for tenant B (an unconfigured tenant).
+    expect(slots.length).toBeGreaterThan(0);
+    for (const s of slots) {
+      expect(s.start.toISOString() >= `${day}T10:00:00.000Z`).toBe(true);
+      expect(s.end.toISOString() <= `${day}T12:00:00.000Z`).toBe(true);
+    }
   });
 });
