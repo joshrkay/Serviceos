@@ -19,6 +19,7 @@ import { PgTenantRepository } from '../../src/auth/pg-tenant';
 import { InMemoryWebhookRepository } from '../../src/webhooks/webhook-handler';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
+import type { PendingInvitationRepository } from '../../src/users/pending-invitation';
 import { PgUserRepository } from '../../src/users/pg-user';
 import { createUsersRouter } from '../../src/routes/users';
 import type { AppConfig } from '../../src/shared/config';
@@ -273,12 +274,17 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
   let usersApp: express.Express;
   let tenantA: { tenantId: string; userId: string };
   let tenantB: { tenantId: string; userId: string };
-  // Populated by the clerkFetch stub below — lets tests assert not just
-  // that the local row survives a Clerk outage, but that it was ALREADY
-  // durably written at the moment the (failing) Clerk call fired, pinning
-  // inviteTeamMember's "local row first" ordering rather than merely its
-  // outcome (Codex review, PR #1074).
-  const clerkFetchCalls: Array<{ pendingRowExistedAtCallTime: boolean }> = [];
+  // Populated by the instrumented repo/stub below — proves the CODE ORDER
+  // inviteTeamMember actually runs in (local row awaited, THEN Clerk
+  // called), rather than the local row's visibility to a separate DB
+  // connection. Production wraps every /api request in a request-scoped
+  // transaction (`withTenantTransaction`, app.ts) that only commits on
+  // res.finish — i.e. AFTER this whole handler (Clerk call included) — so
+  // asserting the row was already durably COMMITTED at Clerk-call time
+  // would be false in production even though the code order is correct;
+  // asserting code order directly is what's actually true and portable
+  // (Codex review, PR #1074, round 3).
+  const inviteCallOrder: string[] = [];
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -286,7 +292,22 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
     tenantB = await createTestTenant(pool);
 
     const userRepo = new PgUserRepository(pool);
-    const pendingInvitationRepo = new PgPendingInvitationRepository(pool);
+    const realPendingInvitationRepo = new PgPendingInvitationRepository(pool);
+    // Delegates every method to the real Pg repo, instrumenting only
+    // `create` so GET /invitations (findByTenant) and the cross-tenant
+    // test below still exercise the genuine tenant-scoped queries.
+    const pendingInvitationRepo: PendingInvitationRepository = {
+      create: async (input) => {
+        const result = await realPendingInvitationRepo.create(input);
+        inviteCallOrder.push('local-row-created');
+        return result;
+      },
+      findByTenant: (...args) => realPendingInvitationRepo.findByTenant(...args),
+      findPendingByEmail: (...args) => realPendingInvitationRepo.findPendingByEmail(...args),
+      findById: (...args) => realPendingInvitationRepo.findById(...args),
+      markAccepted: (...args) => realPendingInvitationRepo.markAccepted(...args),
+      delete: (...args) => realPendingInvitationRepo.delete(...args),
+    };
     const auditRepo = new PgAuditRepository(pool);
 
     usersApp = express();
@@ -314,20 +335,9 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
           // always rejects — simulates a Clerk-down invite, per row 1.11's
           // "when Clerk is down" clause. Only this network call is stubbed;
           // the local invitation write below is the real production path.
-          // Before throwing, the stub itself queries Postgres for the
-          // pending_invitations row keyed by the invitation_id it was just
-          // handed — proving the row was ALREADY committed at the moment
-          // Clerk was called, not merely present afterward.
           clerkSecretKey: 'sk_test_down',
-          clerkFetch: (async (_url: string, init: { body?: string }) => {
-            const body = JSON.parse(init?.body ?? '{}') as {
-              public_metadata?: { invitation_id?: string };
-            };
-            const invitationId = body.public_metadata?.invitation_id;
-            const existing = invitationId
-              ? await pool.query('SELECT id FROM pending_invitations WHERE id = $1', [invitationId])
-              : { rowCount: 0 };
-            clerkFetchCalls.push({ pendingRowExistedAtCallTime: (existing.rowCount ?? 0) > 0 });
+          clerkFetch: (async () => {
+            inviteCallOrder.push('clerk-called');
             throw new Error('Clerk API unreachable (simulated outage)');
           }) as unknown as typeof fetch,
         },
@@ -343,7 +353,7 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
   it('writes the local invitation row even when Clerk is down, and audits it', async () => {
     const auditRepo = new PgAuditRepository(pool);
     const email = `invitee-${crypto.randomUUID()}@example.com`;
-    clerkFetchCalls.length = 0;
+    inviteCallOrder.length = 0;
 
     const res = await request(usersApp)
       .post('/api/users/invitations')
@@ -360,12 +370,15 @@ describe('Postgres integration — team invitations + last-owner guard', () => {
     expect(row.rows[0].email).toBe(email.toLowerCase());
     expect(row.rows[0].accepted_at).toBeNull();
 
-    // Pins ORDER, not just outcome: the stubbed Clerk call itself observed
-    // the pending_invitations row already committed at call time — proving
-    // inviteTeamMember writes the local row BEFORE calling Clerk, not just
-    // that the row happens to exist once the request has finished.
-    expect(clerkFetchCalls).toHaveLength(1);
-    expect(clerkFetchCalls[0].pendingRowExistedAtCallTime).toBe(true);
+    // Pins ORDER at the code level: inviteTeamMember awaits
+    // invitationRepo.create() BEFORE calling clerkFetch. This deliberately
+    // does NOT assert the row was already durably COMMITTED (visible to a
+    // separate connection) at Clerk-call time — production wraps /api
+    // requests in a request-scoped transaction that only commits on
+    // res.finish, i.e. after this whole handler including the Clerk call,
+    // so that claim would be false there even though the code order is
+    // correct.
+    expect(inviteCallOrder).toEqual(['local-row-created', 'clerk-called']);
 
     const auditEvents = await auditRepo.findByEntity(
       tenantA.tenantId,
