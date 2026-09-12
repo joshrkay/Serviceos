@@ -9,6 +9,7 @@ import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { resolveCanonicalUser, type UserRepository } from '../users/user';
 import { z } from 'zod';
 import {
   getSettings,
@@ -188,6 +189,15 @@ export interface PlatformFlagReader {
 export interface SettingsCapabilityDependencies {
   tenantFlags: TenantCapabilityFlagRepository;
   platformFlags: PlatformFlagReader;
+  /**
+   * Needed only to map the acting principal to a `users.id`. `req.auth.userId`
+   * is the CLERK SUBJECT (`payload.sub` — auth/clerk.ts:460), e.g.
+   * `user_2abc…`, or `dev_owner` under DEV_AUTH_BYPASS
+   * (auth/dev-auth-bypass.ts:207/239/246) — but
+   * `tenant_feature_flags.updated_by` is a UUID column (migration 159).
+   * Writing the subject straight in is a 500 at the database.
+   */
+  userRepo: Pick<UserRepository, 'findByTenant'>;
 }
 
 type CapabilitySource = 'tenant' | 'platform' | 'default';
@@ -672,11 +682,31 @@ export function createSettingsRouter(
           return;
         }
 
+        // `req.auth.userId` is the Clerk SUBJECT, and `updated_by` is a UUID
+        // column — passing the subject straight through is a 500 at the
+        // database (caught by the #1011 artifact gate, which drove the real
+        // route against real Postgres; the integration test had been feeding a
+        // UUID subject that production never produces).
+        //
+        // `resolveCanonicalUser` is the established dual-check
+        // (`clerkUserId === raw || id === raw`, users/user.ts) already used by
+        // the en-route voice and in-app surfaces, so a canonical id keeps
+        // working too.
+        //
+        // No users row for the subject degrades ATTRIBUTION, not the write:
+        // `updated_by` is nullable, and refusing an owner's toggle because we
+        // cannot name them would be a worse failure than an unattributed row.
+        const actor = await resolveCanonicalUser(
+          capabilityDeps.userRepo,
+          tenantId,
+          req.auth!.userId,
+        );
+
         await capabilityDeps.tenantFlags.setTenantFlag(
           tenantId,
           key.data,
           enabled,
-          req.auth!.userId,
+          actor?.id,
         );
 
         if (auditRepo) {

@@ -5444,7 +5444,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // omitted, and both routes answer 503 — the in-memory boot and every
       // app-booting test are unaffected.
       tenantFeatureFlags
-        ? { tenantFlags: tenantFeatureFlags, platformFlags: featureFlagRepo }
+        ? { tenantFlags: tenantFeatureFlags, platformFlags: featureFlagRepo, userRepo }
         : undefined,
     ),
   );

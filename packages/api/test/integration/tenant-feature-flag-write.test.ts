@@ -37,6 +37,7 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
+import { PgUserRepository } from '../../src/users/pg-user';
 import { ensureTenantSettings } from '../../src/settings/settings';
 import { DROPPED_CALL_RECOVERY_FLAG } from '../../src/workers/dropped-call-worker';
 import { VOICE_VULNERABILITY_TRIAGE_FLAG } from '../../src/ai/agents/customer-calling/vulnerability-triage-hook';
@@ -97,6 +98,7 @@ describe('#1011 — owner capability write reaches tenant_feature_flags (real Po
       createSettingsRouter(settingsRepo, undefined, auditRepo, {
         tenantFlags,
         platformFlags,
+        userRepo: new PgUserRepository(pool),
       }),
     );
   });
@@ -326,5 +328,111 @@ describe('#1011 — owner capability write reaches tenant_feature_flags (real Po
       rowCount = 'threw';
     }
     expect(rowCount === 'threw' || rowCount === 0).toBe(true);
+  });
+
+  // ── The real auth shape ──────────────────────────────────────────────────
+  //
+  // Everything above feeds `req.auth.userId` a UUID, because `createTestTenant`
+  // makes the users row's id and its clerk_user_id the same value. PRODUCTION
+  // DOES NOT: `req.auth.userId` is the Clerk SUBJECT (`payload.sub`,
+  // auth/clerk.ts:460) — `user_2abc…` in production, `dev_owner` under
+  // DEV_AUTH_BYPASS (auth/dev-auth-bypass.ts:207/239/246) — while
+  // `tenant_feature_flags.updated_by` is a UUID column (migration 159).
+  //
+  // So the tests above were passing on a fixture that cannot occur in
+  // production, and the route 500s the first time a real owner touches it.
+  // These cases pin the real shape.
+
+  /** Point the tenant's users row at a Clerk-shaped subject, as production has it. */
+  async function useClerkSubject(
+    tenant: { tenantId: string; userId: string },
+    subject: string,
+  ) {
+    await pool.query('UPDATE users SET clerk_user_id = $1 WHERE id = $2', [
+      subject,
+      tenant.userId,
+    ]);
+    current = { tenantId: tenant.tenantId, userId: subject };
+  }
+
+  it('accepts a Clerk-subject userId and stores the canonical users.id in updated_by', async () => {
+    const subject = 'user_2capturetestSubjectAbc123';
+    await useClerkSubject(tenantA, subject);
+
+    const res = await request(app)
+      .put(`/api/settings/capabilities/${DROPPED_CALL_RECOVERY_FLAG}`)
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    const row = await rawFlagRow(tenantA.tenantId, DROPPED_CALL_RECOVERY_FLAG);
+    expect(row).toBeDefined();
+    expect(row!.enabled).toBe(true);
+    // The UUID of the users row, NOT the Clerk subject.
+    expect(row!.updated_by).toBe(tenantA.userId);
+  });
+
+  it('accepts the DEV_AUTH_BYPASS subject (dev_owner) the same way', async () => {
+    await useClerkSubject(tenantA, 'dev_owner');
+
+    const res = await request(app)
+      .put(`/api/settings/capabilities/${VOICE_VULNERABILITY_TRIAGE_FLAG}`)
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    expect(
+      (await rawFlagRow(tenantA.tenantId, VOICE_VULNERABILITY_TRIAGE_FLAG))!.updated_by,
+    ).toBe(tenantA.userId);
+  });
+
+  it('still audits under the CLERK SUBJECT, which audit_events.actor_id is TEXT for', async () => {
+    const subject = 'user_2capturetestSubjectAbc123';
+    await useClerkSubject(tenantA, subject);
+
+    await request(app)
+      .put(`/api/settings/capabilities/${DROPPED_CALL_RECOVERY_FLAG}`)
+      .send({ enabled: true });
+
+    const events = await auditRepo.findRecentByTenant(tenantA.tenantId, { limit: 20 });
+    const event = events.find((e) => e.eventType === 'feature_flag.tenant_updated');
+    expect(event).toBeDefined();
+    // Deliberately NOT the users.id: the audit trail records who acted as the
+    // authenticated principal, and every other audit row on this tenant keys
+    // the same way.
+    expect(event!.actorId).toBe(subject);
+  });
+
+  it('writes NULL updated_by rather than failing when the subject has no users row', async () => {
+    // A subject with no matching users row must not cost the owner their
+    // toggle — the column is nullable, so the attribution degrades, not the write.
+    current = { tenantId: tenantA.tenantId, userId: 'user_2neverProvisioned' };
+
+    const res = await request(app)
+      .put(`/api/settings/capabilities/${DROPPED_CALL_RECOVERY_FLAG}`)
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    const row = await rawFlagRow(tenantA.tenantId, DROPPED_CALL_RECOVERY_FLAG);
+    expect(row).toBeDefined();
+    expect(row!.enabled).toBe(true);
+    expect(row!.updated_by).toBeNull();
+  });
+
+  it('resolves a subject to the RIGHT tenant user, not another tenant with the same subject', async () => {
+    const subject = 'user_2sharedAcrossTenants';
+    await pool.query('UPDATE users SET clerk_user_id = $1 WHERE id = $2', [
+      subject,
+      tenantB.userId,
+    ]);
+    await useClerkSubject(tenantA, subject);
+
+    await request(app)
+      .put(`/api/settings/capabilities/${DROPPED_CALL_RECOVERY_FLAG}`)
+      .send({ enabled: true });
+
+    // Tenant A's row must carry A's users.id, never B's.
+    expect((await rawFlagRow(tenantA.tenantId, DROPPED_CALL_RECOVERY_FLAG))!.updated_by).toBe(
+      tenantA.userId,
+    );
+    expect(await rawFlagRow(tenantB.tenantId, DROPPED_CALL_RECOVERY_FLAG)).toBeUndefined();
   });
 });

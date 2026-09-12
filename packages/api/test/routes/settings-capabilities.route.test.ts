@@ -22,6 +22,7 @@ import { createSettingsRouter } from '../../src/routes/settings';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { Role } from '../../src/auth/rbac';
 import { InMemorySettingsRepository, createSettings } from '../../src/settings/settings';
+import { InMemoryUserRepository } from '../../src/users/user';
 import {
   InMemoryFeatureFlagRepository,
   type FeatureFlagRepository,
@@ -30,7 +31,14 @@ import type { TenantCapabilityFlagRepository } from '../../src/routes/settings';
 
 const TENANT = 'tenant-caps-1011';
 const OTHER_TENANT = 'tenant-caps-other';
-const USER = 'user-caps-1011';
+/**
+ * The CLERK SUBJECT the route sees on `req.auth.userId` — deliberately NOT a
+ * UUID, because production never sends one (auth/clerk.ts:460 assigns
+ * `payload.sub`; DEV_AUTH_BYPASS sends `dev_owner`).
+ */
+const USER = 'user_2capsClerkSubject';
+/** The canonical `users.id` that subject resolves to, and the only thing that may reach a UUID column. */
+const USER_INTERNAL_ID = '11111111-1111-4111-8111-111111111111';
 
 /**
  * Route-level stand-in for `PgTenantFeatureFlagRepository`. Keyed by
@@ -102,6 +110,18 @@ async function buildApp(opts: { role?: Role; wired?: boolean } = {}): Promise<Bu
   const tenantFlags = new FakeTenantFlags(platformFlags);
   const events: Built['events'] = [];
 
+  // The users row the Clerk subject resolves to. `updated_by` is a UUID column,
+  // so the route must write THIS id, never the subject on `req.auth.userId`.
+  const userRepo = new InMemoryUserRepository();
+  await userRepo.create({
+    id: USER_INTERNAL_ID,
+    tenantId: TENANT,
+    email: 'owner@example.com',
+    role: 'owner',
+    clerkUserId: USER,
+    canFieldServe: false,
+  });
+
   app.use(
     '/api/settings',
     createSettingsRouter(
@@ -113,7 +133,7 @@ async function buildApp(opts: { role?: Role; wired?: boolean } = {}): Promise<Bu
           return e;
         },
       } as never,
-      wired ? { tenantFlags, platformFlags } : undefined,
+      wired ? { tenantFlags, platformFlags, userRepo } : undefined,
     ),
   );
 
@@ -138,9 +158,10 @@ describe('#1011 — PUT /api/settings/capabilities/:key', () => {
       enabled: true,
       source: 'tenant',
     });
+    // The canonical users.id, NOT the Clerk subject on req.auth.userId.
     expect(built.tenantFlags.rows.get(`${TENANT}:dropped_call_recovery`)).toEqual({
       enabled: true,
-      updatedBy: USER,
+      updatedBy: USER_INTERNAL_ID,
     });
   });
 
@@ -153,12 +174,14 @@ describe('#1011 — PUT /api/settings/capabilities/:key', () => {
     expect(res.body.enabled).toBe(true);
   });
 
-  it('pins updated_by to the acting user so the write has an actor', async () => {
+  it('pins updated_by to the acting user RESOLVED to users.id, not the Clerk subject', async () => {
     await request(built.app)
       .put('/api/settings/capabilities/dropped_call_recovery')
       .send({ enabled: true });
 
-    expect(built.tenantFlags.rows.get(`${TENANT}:dropped_call_recovery`)?.updatedBy).toBe(USER);
+    expect(built.tenantFlags.rows.get(`${TENANT}:dropped_call_recovery`)?.updatedBy).toBe(
+      USER_INTERNAL_ID,
+    );
   });
 
   it('emits a feature_flag.tenant_updated audit event scoped to the tenant', async () => {
@@ -176,6 +199,10 @@ describe('#1011 — PUT /api/settings/capabilities/:key', () => {
       value: { enabled: true },
     });
     expect(event!.entityId).toBe('dropped_call_recovery');
+    // The AUDIT actor stays the Clerk subject — `audit_events.actor_id` is TEXT
+    // and every other audit row on the tenant keys the same way. Only the UUID
+    // column gets the resolved users.id.
+    expect((event as unknown as { actorId: string }).actorId).toBe(USER);
   });
 
   // ── D2 — the allowlist IS the auth hop ───────────────────────────────────
