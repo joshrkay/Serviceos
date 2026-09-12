@@ -908,6 +908,61 @@ plants exactly the imported-but-hand-rolled module the bot described.
 Suite after the round: **`98 passed | 4 expected fail`** (was 95 | 4); `tsconfig.build.json` clean;
 `packages/api/src` still byte-identical to `origin/main`.
 
+## Review round 2 (PR #1063, Codex) — four more false negatives, two citing existing code
+
+All four verified before acting. Two named concrete call sites the guards were walking straight past;
+both were real, and one of them makes the I9′ finding materially worse than round 1 reported.
+
+**1. I1′ missed a bare `repository` receiver.** The pattern required at least one character before
+`Repo`, so `repository.create(...)` and `repo.save(...)` were invisible — seven such sites exist under
+`src/ai`. Six are AI-plane (revision snapshots, prompt versions, eval records) and are now classified
+by FILE, since a bare receiver carries no entity information to classify by name. **The seventh is a
+sixth I1′ violation:** `ai/tasks/estimate-template.ts:97` mints a tenant estimate template — priced,
+catalog-adjacent, operational — straight from an AI task module with no proposal. An unclassified
+bare-receiver write now fails the build rather than being guessed at in either direction.
+
+**2. 🚨 I9′ missed a wrapped expression — and the fourth site changes the finding.** Testing one line
+at a time could not see `.reduce(` and `+ li.totalCents` together once prettier wraps them, and
+`routes/estimates.ts:239` is exactly that shape. The sweep now reads a four-line whitespace-collapsed
+window and maps each match back to the line it *starts* on.
+
+What it found is the strongest evidence on this ticket for I9′:
+
+> **`routes/invoices.ts:178` and `routes/estimates.ts:239` are the same member-discount subtotal
+> written twice, and they already disagree.** The invoice one sums **every** line; the estimate one
+> sums only `resolveSelectedLineItems(...)` — the default selection — and its own EE-1 comment
+> explains why: *"Summing every tier option here would over-discount a tiered estimate."* One feature,
+> two definitions of the discount base, neither of them in the engine. Round 1 reported this as a
+> theoretical drift risk under I9′; it is not theoretical, it has already happened.
+
+**3. I13′'s fence check was file-wide.** A module calling one sanctioned renderer counted as fenced for
+*both* channels, so a consumer that legitimately renders `retrievedChunks` and separately hand-rolls
+`recentMessages` reopened the injection path. Clause A now pairs each channel with its own renderer and
+only treats a channel as fenced if that channel's renderer is called. It also no longer counts merely
+*naming* a channel as using it — hand-rolling means reading its element text out (`map`/`join`/…) —
+which removes the false positives the stricter rule would otherwise have created on plumbing modules.
+
+**4. I8′ recognised a fixed config vocabulary.** `options.disableEmergency` matched none of the three
+rules. Fixed on two axes, because the object name is the renameable part and the action is not:
+
+- a **suppression-verb** rule matching what a kill switch must *do* — `disable`, `suppress`, `bypass`,
+  `skip`, `optOut`, `override`, `*Disabled` — on any receiver; and
+- **pinned entry-point signatures** for the five exported functions on the path, because a tier
+  function cannot consult a setting it was never handed. A new `options`/`settings` parameter fails
+  there whatever it is called inside. (`rules?: TriageRules` is the one config-shaped parameter and is
+  the module's own optional corpus enrichment — it can only add signals, never remove one, since the
+  tier is the MAX.)
+
+Codex's own framing for 2 and 4 — *"scan complete expressions"*, *"trace configuration inputs rather
+than recognize a fixed vocabulary"* — is the right target. Full expression parsing and dataflow are
+beyond a text scan; the window and the two-axis rule are how close a test-only lane gets, and the
+residual limit is recorded under judgment calls below.
+
+Suite after the round: **`105 passed | 4 expected fail`** (round 1: 98 | 4; initial: 95 | 4);
+`tsconfig.build.json` clean; `packages/api/src` still byte-identical to `origin/main`.
+
+**Revised violation counts: I1′ 6 sites (was 5), I9′ 4 sites (was 3).**
+
 ## Not done / judgment calls
 
 - **I18 — not attempted on this lane, and there is a brief conflict to resolve.** The ticket comment of
@@ -929,7 +984,15 @@ Suite after the round: **`98 passed | 4 expected fail`** (was 95 | 4); `tsconfig
 - **I13′ scope limit** — the clause-B sweep cannot follow a prompt string built in one module and sent
   by another (`app.ts` → `classifyTurnSentiment`). A data-flow pass would be needed; flagged, not
   attempted.
-- **I5′ corpus is hand-built** (43 utterances × 2 fixtures), not generated. A property-based generator
+- **Residual limits the two review rounds did not close.** I9′'s window is four lines, so an
+  expression wrapped wider than that is still invisible; a real fix is expression parsing, not a
+  scan. I8′'s suppression-verb rule keys on a verb vocabulary that is wider than a config vocabulary
+  but is still a vocabulary — only the pinned signatures are truly name-independent. I13′ treats a
+  call to the raw `buildUntrustedContentSection` as fencing any channel in that module, which is
+  right in the ordinary case and cannot distinguish a module that fences one payload and hand-rolls
+  another. Each is a text-scan ceiling, recorded rather than papered over.
+- **I5′ corpus is hand-built** (43 utterances × 3 fixtures), not generated for the non-ordinal cases;
+  the ordinal space IS generated after round 1. A property-based generator
   over candidate names would be stronger; the hand corpus was chosen because the three hijack shapes
   are specific enough that random names would mostly exercise the same branch.
 - **I6's uuid probe** classifies a key by parsing it against every contract. That is mechanical, but it

@@ -29,9 +29,13 @@
  *
  * ## Finding: the universal does NOT hold today
  *
- * Three second implementations exist, listed in `KNOWN_VIOLATIONS`. One of
- * them is demonstrably divergent rather than merely duplicative, and the test
- * below proves it with numbers: `proposals/estimate-editor.ts:31`'s
+ * FOUR second implementations exist, listed in the inventory below. Two of
+ * them are the same member-discount subtotal written twice —
+ * `routes/invoices.ts:178` over every line, `routes/estimates.ts:239` over the
+ * default selection only — so the repo already carries two disagreeing
+ * definitions of one discount base. And one is demonstrably divergent rather
+ * than merely duplicative, as the test below proves with numbers:
+ * `proposals/estimate-editor.ts:31`'s
  * `calculateEstimateTotal` sums `quantity × unitPrice` with **no per-line
  * rounding**, so on a fractional quantity it returns a NON-INTEGER — which
  * CLAUDE.md's first core pattern ("all money: integer cents") forbids outright
@@ -100,28 +104,75 @@ export interface TotalsMathHit {
  * engine itself. Pure in its roots — the negative controls point it at
  * planted trees.
  */
+/**
+ * How many following lines are folded into the window each line is tested
+ * against.
+ *
+ * Reviewed on PR #1063: testing one `code[i]` at a time could not see
+ * `.reduce(` and `+ li.totalCents` together when a reducer is formatted across
+ * lines, and `src/routes/estimates.ts:239` already IS that shape — a fourth
+ * hand-rolled subtotal the first edition of this guard walked straight past.
+ * Four lines covers a prettier-wrapped `.reduce()` call without folding
+ * unrelated statements into one another.
+ */
+const WINDOW_LINES = 4;
+
 export function totalsMathOutsideEngine(roots: readonly string[]): TotalsMathHit[] {
   const hits: TotalsMathHit[] = [];
   for (const file of listSourceFiles(roots)) {
     if (file.rel === ENGINE_REL || file.rel.endsWith('shared/billing-engine.ts')) continue;
     const code = file.code.split('\n');
     const raw = file.text.split('\n');
+    const seen = new Set<string>();
+
     for (let i = 0; i < code.length; i += 1) {
+      // The window is joined with single spaces so a prettier-wrapped
+      // expression reads as the single expression it is. Offsets are tracked
+      // so a match can be mapped back to the line it actually starts on —
+      // otherwise a wrapped reducer would be reported against the first line
+      // of the window, three lines above the code in question.
+      const slice = code.slice(i, i + WINDOW_LINES);
+      const starts: number[] = [];
+      let cursor = 0;
+      const window = slice
+        .map((line, n) => {
+          const collapsed = line.replace(/\s+/g, ' ').trim();
+          starts[n] = cursor;
+          cursor += collapsed.length + 1; // + the joining space
+          return collapsed;
+        })
+        .join(' ');
+
       for (const shape of TOTALS_MATH_SHAPES) {
         // `percent-of-money` only counts in a money context; `/ 10000` is also
         // a perfectly ordinary audio/bitrate divisor.
-        if (shape.rule === 'percent-of-money' && !code[i].includes('Cents')) continue;
-        if (!shape.pattern.test(code[i])) continue;
+        if (shape.rule === 'percent-of-money' && !window.includes('Cents')) continue;
+        const match = new RegExp(shape.pattern.source, shape.pattern.flags).exec(window);
+        if (!match) continue;
+
+        // Which line of the window does the match begin on?
+        let offsetLine = 0;
+        for (let n = starts.length - 1; n >= 0; n -= 1) {
+          if (match.index >= starts[n]) {
+            offsetLine = n;
+            break;
+          }
+        }
+        const line = i + offsetLine + 1;
+        const key = `${shape.rule}:${line}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
         hits.push({
-          at: `${file.rel}:${i + 1}`,
+          at: `${file.rel}:${line}`,
           file: file.rel,
           rule: shape.rule,
-          snippet: (raw[i] ?? '').trim(),
+          snippet: (raw[line - 1] ?? '').trim(),
         });
       }
     }
   }
-  return hits;
+  return hits.sort((a, b) => a.at.localeCompare(b.at));
 }
 
 // ─── The frozen inventory ───────────────────────────────────────────────────
@@ -163,6 +214,11 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     at: 'src/proposals/execution/handlers.ts:838',
     as: 'violation',
     why: "`Math.round(quantity * unitPriceCents)` in the execution line-item normalizer duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap.",
+  },
+  {
+    at: 'src/routes/estimates.ts:239',
+    as: 'violation',
+    why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
   },
   {
     at: 'src/routes/invoices.ts:178',
@@ -217,7 +273,7 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
    * fails, and the row is forced back for re-grading.
    */
   it.fails(
-    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 3 sites)',
+    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 4 sites)',
     () => {
       const violations = totalsMathOutsideEngine([SRC]).filter(
         (h) => classificationOf(h.at) === 'violation',
@@ -274,6 +330,32 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
       const hits = totalsMathOutsideEngine([dir]);
       expect(hits.map((h) => h.rule)).toEqual(['line-item-subtotal']);
       expect(hits[0].snippet).toContain('reduce');
+    } finally {
+      removeTree(dir);
+    }
+  });
+
+  it('NEGATIVE CONTROL — a subtotal WRAPPED across lines is reported, on the line it starts on', () => {
+    // The false negative reviewed on PR #1063: a line-at-a-time scan cannot
+    // see `.reduce(` and `+ li.totalCents` together once prettier wraps them.
+    const dir = plantTree('i9-wrapped', {
+      'planted-wrapped.ts': [
+        'export function subtotal(lineItems: Array<{ totalCents: number }>) {',
+        '  const subtotalCents = resolveSelected(lineItems).reduce(',
+        '    (sum, li) => sum + li.totalCents,',
+        '    0,',
+        '  );',
+        '  return subtotalCents;',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const hits = totalsMathOutsideEngine([dir]);
+      expect(hits.map((h) => h.rule)).toEqual(['line-item-subtotal']);
+      // Anchored on line 2 — where the expression opens — not on the window head.
+      expect(hits[0].at).toMatch(/planted-wrapped\.ts:2$/);
+      expect(hits[0].snippet).toContain('.reduce(');
     } finally {
       removeTree(dir);
     }
