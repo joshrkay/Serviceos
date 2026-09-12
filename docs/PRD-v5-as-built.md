@@ -57,8 +57,10 @@ the whole point of this edition:**
 
 - The grade is **required of any new or revised requirement** — that is the
   standard from here.
-- It is **measured in aggregate** for the existing suite (§11.0e): 52% of
-  Docker-gated files carry a genuine multi-tenant proof.
+- It is **measured in aggregate** for the existing suite (§11.0e): **140 of 216
+  real-DB files (65%) provision ≥2 tenants.** *(An earlier edition said "52%
+  carry a genuine multi-tenant proof." That figure is withdrawn — §11.0e
+  explains why it could not be re-derived.)*
 - It is **published per row only where it was actually earned** — today the
   seven sweep-backed rows (covered by eight sweep workers), graded and
   mutation-tested in §11.0e.
@@ -1972,25 +1974,62 @@ that *a skipped run is not a passing gate*.
 ### 11.0e The tenant-grade baseline, measured
 
 The tenant grade (§8.0) is a new bar, so it is stated here with what the suite
-actually meets today rather than as an aspiration. Measured 2026-09-12 over
-`packages/api/test/integration/`:
+actually meets rather than as an aspiration — and, since this branch itself adds
+two integration files, **both before and after**, from one published script:
 
-| Measure | Count | Share of real-DB files |
+```bash
+# run from packages/api/test/integration/
+POOL='getSharedTestDb|TEST_DB_URL|new Pool\(|withTestDb|testDb'
+files=$(ls *.test.ts | wc -l)
+pool=$(grep -lE "$POOL" *.test.ts | wc -l)
+multi=$(for f in *.test.ts; do [ "$(grep -c 'createTestTenant(' "$f")" -ge 2 ] && echo "$f"; done | wc -l)
+audit=$(grep -l 'PgAuditRepository' *.test.ts | wc -l)
+printf 'files=%s pool=%s no-pool=%s multi-tenant=%s audit=%s\n' "$files" "$pool" "$((files-pool))" "$multi" "$audit"
+```
+
+| Measure | Before (merge-base) | After (this branch) |
 |---|---|---|
-| Integration files | 217 | — |
-| …that open a real pool | 214 | — |
-| …that never open a pool | **3** | — |
-| Provision **≥2 tenants** | 140 | 65% |
-| Carry a **cross-tenant assertion** | 120 | 56% |
-| **Both** — a genuine multi-tenant proof (**T1 or better**) | **113** | **52%** |
-| Assert audit through `PgAuditRepository` | 68 | 32% |
+| Integration files | 217 | **219** |
+| …that open a real pool | 214 | **216** |
+| …that never open a pool | 3 | 3 |
+| Provision **≥2 tenants** | 138 (64%) | **140 (65%)** |
+| Assert audit through `PgAuditRepository` | 68 | **69** |
 
-**About half the Docker-gated suite has never met a second tenant.** That is not
-a claim that those capabilities leak — most are tenant-scoped by RLS, which is
-itself the best-evidenced invariant in the product (I11). It is a claim about
-*proof*: for ~48% of the suite, tenant correctness rests on the boundary being
-right in general rather than on this capability having been watched with a
-neighbour present.
+> ⚠️ **Two figures from the first edition of this table are withdrawn, and one
+> is corrected.** That edition reported *"140 provision ≥2 tenants, 120 carry a
+> cross-tenant assertion, 113 (52%) both."* Re-measuring found:
+>
+> - **Four of five checkable figures reproduce exactly** (217, 214, 3, 68) — so
+>   the scan behind them was sound.
+> - **≥2 tenants was 138, not 140**, at the merge-base. 140 is the figure *after*
+>   this branch adds two multi-tenant files, so the original number appears to
+>   have been read off a working tree that already had them.
+> - **"Cross-tenant assertion" (120) and "both" (113 / 52%) cannot be
+>   reproduced**, because no command for them was ever published and the
+>   keyword heuristic behind them is not recoverable. They are withdrawn rather
+>   than restated: a figure this document cannot re-derive is exactly what
+>   §12.4d says not to publish, and **52% was cited in §0 and D-032 as if it
+>   were checkable.**
+>
+> Caught in review (Codex P2) as a staleness problem — the table predated the
+> two files this branch adds. Re-running it turned a stale number into a
+> reproducible one and found an unreproducible pair underneath.
+
+**A third of the Docker-gated suite never provisions a second tenant** — 76 of
+216 real-DB files. That is not a claim that those capabilities leak: most are
+tenant-scoped by RLS, itself the best-evidenced invariant in the product (I11).
+It is a claim about *proof* — for those files, tenant correctness rests on the
+boundary being right in general rather than on this capability having been
+watched with a neighbour present.
+
+*This paragraph previously read "about half … for ~48% of the suite," resting on
+the withdrawn 52% figure above. **Provisioning two tenants is a weaker bar than
+the one that figure claimed to measure**, so the honest restatement is also a
+smaller number: 35% never provision a second tenant, where the withdrawn
+measure asserted 48% lack a genuine multi-tenant proof. The stricter count is
+probably the more useful one and is exactly what nobody can now re-derive —
+which is the argument for writing the scan before quoting the number, not
+after.*
 
 #### The sharpest finding: sweeps stub the thing under test
 

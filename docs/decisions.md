@@ -964,8 +964,15 @@ means "a Docker-gated test proved the write and its audit event" — in a univer
 one tenant. Rivet is multi-tenant and its isolation boundary is the database, not application code
 (I11), so a proof that never met a second tenant says nothing about the world the product ships
 into. Measured over `packages/api/test/integration/` on 2026-09-12: 214 of 217 files open a real
-pool, **140 (65%) provision ≥2 tenants, 120 (56%) carry a cross-tenant assertion, and 113 (52%)
-have both.** About half the Docker-gated suite has never seen a neighbour.
+pool and **138 (64%) provision ≥2 tenants** — 140 (65%) after this branch adds two.
+
+*Corrected 2026-09-12.* This paragraph originally read *"140 (65%) provision ≥2 tenants, 120 (56%)
+carry a cross-tenant assertion, and 113 (52%) have both — about half the Docker-gated suite has
+never seen a neighbour."* Re-measuring with a now-published script (PRD §11.0e) reproduced four of
+five figures exactly; **≥2 tenants was 138 at the merge-base**, and the cross-tenant and "both"
+figures **could not be reproduced at all** — no command for them was ever published. They are
+withdrawn rather than restated, and the "about half" conclusion goes with them: it rested on the
+113/52% figure, not on anything this decision can still re-derive.
 
 The sharpest instance: seven integration files inject the tenant enumerator and **six pass exactly
 one tenant id**. Production supplies `SELECT id FROM tenants` at ten inlined call sites in
