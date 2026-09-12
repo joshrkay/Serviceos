@@ -1020,3 +1020,71 @@ surfaced: the §5 row could cite the budget block instead of copying it.
 npx tsc --project tsconfig.build.json --noEmit → clean
 neighbouring suites → 24 files, 328 tests passed
 ```
+
+---
+
+## 18. Review round 9 — two more evasions, and a bug my own control caught
+
+Both findings correct, and both back to substance rather than documentation.
+
+### 18.1 The scan matched only single-quoted literals
+
+`if (role !== "owner")` gates a route exactly as well as the single-quoted form,
+the repo enforces no quote style, and the scan saw neither it nor the guard
+walker. Now both quote styles are matched — in the comparison scan, in the
+hit-finder that binds a declared check to its route, and in the route-path
+parse.
+
+Negative control: a fixture whose gate is **both** destructured and
+double-quoted. RED at the old answer (`0`), GREEN at `1`.
+
+### 18.2 A declared route was one hard-coded path, not every mount
+
+`IN_HANDLER_OWNER_ROUTES` carried a full path. Mount `createEntityAliasesRouter`
+under a second prefix — a versioned or compatibility path — and both mounts
+enforce the same in-handler check, but only the hard-coded one entered
+`derived`: no inventory row for the second, no budget move, everything green.
+
+Now the declaration carries the router-relative path and a **mount-qualified
+suffix**, and every mounted route matching it is derived. The qualification
+matters and the first attempt got it wrong — see below.
+
+Negative control: a synthetic mount table with `/api/entity-aliases/…` and
+`/api/v2/entity-aliases/…` (both expected) plus
+`/api/standing-instructions/:id/deactivate` (a different router, guard-gated,
+must not be swept in). RED at one mount, GREEN at two.
+
+### 18.3 The first attempt over-matched, and the suite caught it
+
+Worth recording because it is the failure mode this whole contract is built
+against. Matching mounts on the router-relative path alone —
+`endsWith('/:id/deactivate')` — also matched
+`PATCH /api/standing-instructions/:id/deactivate`, a **different** router that
+is properly guard-gated and already in the derived set. The run went red on
+three assertions at once: the route budget (55 vs 54), the row/route equality,
+and the "now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES" guard. That
+last one is the check added in §14 doing exactly its job — catching a route
+being claimed by the weak arm when the strong arm already covers it.
+
+Qualifying the suffix with the router's own segment fixed it. The lesson is the
+same one §13 drew: the assertions were sound; the enumeration feeding them was
+wrong, and it was the cross-checks between arms that surfaced it rather than
+any single test.
+
+### 18.4 And a process note against myself
+
+Two of the three quote-style edits in this round silently did nothing — I
+applied them with string replacements and asserted on only some of them, so the
+two that no longer matched the file (reformatted by an earlier `prettier` pass)
+were no-ops I did not notice. The double-quote negative control failed in the
+wider suite run and pointed straight at it. Had I written the control less
+thoroughly — checking only that the comparison scan found the gate, not that the
+route binding also resolved it — the fix would have shipped half-applied and
+green. Assert on every mechanical edit; and a negative control is worth most
+when it exercises the whole path, not just the function named in the finding.
+
+```
+ Test Files  1 passed (1) · Tests 27 passed (27)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 330 tests passed
+```

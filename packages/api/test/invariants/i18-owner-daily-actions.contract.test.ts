@@ -288,12 +288,45 @@ export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
  * of this test missed it on both counts, being DB-gated at the mount AND
  * in-handler at the check.)
  */
-const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{ route: string; source: string }> = [
+const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{
+  method: string;
+  /** Router-RELATIVE path, as declared inside the router module. */
+  routerPath: string;
+  /**
+   * Mount-qualified suffix — the router's own segment plus `routerPath`. Used
+   * to find EVERY mount. `routerPath` alone would be too loose: another
+   * router's `PATCH /api/standing-instructions/:id/deactivate` ends with the
+   * same `/:id/deactivate` and is guard-gated, so it would be double-counted.
+   */
+  pathSuffix: string;
+  source: string;
+}> = [
   {
-    route: 'PATCH /api/entity-aliases/:id/deactivate',
+    method: 'PATCH',
+    routerPath: '/:id/deactivate',
+    pathSuffix: '/entity-aliases/:id/deactivate',
     source: 'packages/api/src/routes/entity-aliases.ts',
   },
 ];
+
+/**
+ * Every MOUNTED route a declared in-handler gate covers.
+ *
+ * Deliberately derived from the booted app rather than hard-coded as one full
+ * path: a router can be mounted more than once (a versioned or compatibility
+ * prefix), and every mount enforces the same in-handler check. Hard-coding one
+ * path would leave the second mount out of `derived`, so it would need no
+ * inventory row and move no budget — with everything green. (Codex, #1073.)
+ */
+function mountedInHandlerOwnerRoutes(mountedRoutes: Set<string>): string[] {
+  const found: string[] = [];
+  for (const { method, pathSuffix } of IN_HANDLER_OWNER_ROUTES) {
+    for (const route of mountedRoutes) {
+      if (route.startsWith(`${method} `) && route.endsWith(pathSuffix)) found.push(route);
+    }
+  }
+  return [...new Set(found)].sort();
+}
 
 /**
  * Every owner COMPARISON in the tree, one entry per occurrence, with
@@ -326,7 +359,9 @@ const IN_HANDLER_OWNER_ROUTES: ReadonlyArray<{ route: string; source: string }> 
  */
 async function ownerComparisons(rootOverride?: string): Promise<string[]> {
   const srcRoot = rootOverride ?? path.resolve(__dirname, '../../src');
-  const comparison = /[!=]==\s*'owner'|'owner'\s*[!=]==/;
+  // Both quote styles: the repo does not enforce one, and `role !== "owner"`
+  // gates a route exactly as well as `role !== 'owner'`. (Codex, #1073.)
+  const comparison = /[!=]==\s*['"]owner['"]|['"]owner['"]\s*[!=]==/;
   const viaMiddleware = /requireRole\(|requirePermission\(/;
   const found: string[] = [];
 
@@ -375,20 +410,21 @@ async function enclosingRouteOfOwnerCheck(
   // Unconditional only: a `&&` before the comparison makes it self-service.
   const hit = lines.findIndex(
     (line) =>
-      /req\.auth!?\??\.role\s*[!=]==\s*'owner'/.test(line) && !line.includes('&&'),
+      /(?:req\.auth!?\??\.)?role\s*[!=]==\s*['"]owner['"]/.test(line) &&
+      !line.includes('&&'),
   );
   if (hit < 0) return undefined;
 
   for (let i = hit; i >= 0; i -= 1) {
     const declaration =
-      /router\.(get|post|put|patch|delete)\(\s*$|router\.(get|post|put|patch|delete)\(\s*'([^']+)'/.exec(
+      /router\.(get|post|put|patch|delete)\(\s*$|router\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/.exec(
         lines[i],
       );
     if (!declaration) continue;
     const method = (declaration[1] ?? declaration[2]).toUpperCase();
     // `router.patch(` on its own line puts the path on the next one.
     const inline = declaration[3];
-    const path_ = inline ?? /'([^']+)'/.exec(lines[i + 1] ?? '')?.[1];
+    const path_ = inline ?? /['"]([^'"]+)['"]/.exec(lines[i + 1] ?? '')?.[1];
     return path_ ? { method, path: path_ } : undefined;
   }
   return undefined;
@@ -615,11 +651,11 @@ describe('I18: owner daily actions ↔ code contract', () => {
     // EXECUTING their guards, plus the declared in-handler ones the walker
     // cannot see. Both are checked against the doc; the second is additionally
     // checked for still being mounted and still containing its check.
+    mounted = allMountedRoutes(app);
     derived = [
       ...deriveOwnerOnlyRoutes(app),
-      ...IN_HANDLER_OWNER_ROUTES.map((r) => r.route),
+      ...mountedInHandlerOwnerRoutes(mounted),
     ].sort();
-    mounted = allMountedRoutes(app);
     inventory = await loadInventory();
   });
 
@@ -644,11 +680,16 @@ describe('I18: owner daily actions ↔ code contract', () => {
 
   it('keeps every declared in-handler owner route mounted and still gated', async () => {
     // The declaration cannot be fictional: the app must really mount it.
-    for (const { route } of IN_HANDLER_OWNER_ROUTES) {
+    for (const { method, pathSuffix } of IN_HANDLER_OWNER_ROUTES) {
+      const mounts = mountedInHandlerOwnerRoutes(mounted).filter(
+        (route) => route.startsWith(`${method} `) && route.endsWith(pathSuffix),
+      );
+      // At least one — a declaration for a route the app does not serve is
+      // stale. All of them enter `derived`, so a second mount cannot hide.
       expect(
-        mounted,
-        `${route} is declared in-handler owner-only but not mounted`,
-      ).toContain(route);
+        mounts.length,
+        `${method} …${pathSuffix} is declared in-handler owner-only but not mounted`,
+      ).toBeGreaterThan(0);
     }
     // …and it cannot be stale: the check must still gate THIS route. Asserting
     // only that the FILE still contains the comparison is not enough — moving
@@ -657,25 +698,27 @@ describe('I18: owner daily actions ↔ code contract', () => {
     // documenting a route that is no longer owner-gated while missing the one
     // that now is. (Codex, #1073.) So the check is located and bound to the
     // `router.<verb>('<path>', …)` it sits inside.
-    for (const { route, source } of IN_HANDLER_OWNER_ROUTES) {
+    for (const { method, routerPath, source } of IN_HANDLER_OWNER_ROUTES) {
+      const label = `${method} …${routerPath}`;
       const enclosing = await enclosingRouteOfOwnerCheck(source);
       expect(
         enclosing,
-        `${route}: no owner comparison found inside a route in ${source}`,
+        `${label}: no owner comparison found inside a route in ${source}`,
       ).not.toBeUndefined();
-      const [method, routePath] = route.split(' ');
       expect(
         enclosing!.method,
-        `${route}: the owner check now sits in a ${enclosing!.method} handler`,
+        `${label}: the owner check now sits in a ${enclosing!.method} handler`,
       ).toBe(method);
       expect(
-        routePath.endsWith(enclosing!.path),
-        `${route}: the owner check moved to '${enclosing!.path}' — update IN_HANDLER_OWNER_ROUTES and the inventory`,
-      ).toBe(true);
-      expect(
-        deriveOwnerOnlyRoutes(app),
-        `${route} is now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES`,
-      ).not.toContain(route);
+        enclosing!.path,
+        `${label}: the owner check moved to '${enclosing!.path}' — update IN_HANDLER_OWNER_ROUTES and the inventory`,
+      ).toBe(routerPath);
+      for (const route of mountedInHandlerOwnerRoutes(mounted)) {
+        expect(
+          deriveOwnerOnlyRoutes(app),
+          `${route} is now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES`,
+        ).not.toContain(route);
+      }
     }
   });
 
@@ -984,6 +1027,46 @@ describe('I18: owner daily actions ↔ code contract', () => {
 
       const enclosing = await enclosingRouteOfOwnerCheck(file);
       expect(enclosing).toEqual({ method: 'POST', path: '/:id/reactivate' });
+    });
+
+    it('sees a DOUBLE-QUOTED owner gate', async () => {
+      // The repo enforces no quote style, and `role !== "owner"` gates a route
+      // exactly as well as the single-quoted form. (Codex, #1073.)
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'i18-quotes-'));
+      await fs.writeFile(
+        path.join(dir, 'double.ts'),
+        [
+          'router.patch("/:id/deactivate", asyncRoute(async (req, res) => {',
+          '  const { role } = req.auth!;',
+          '  if (role !== "owner") throw new ForbiddenError("nope");',
+          '}));',
+        ].join('\n'),
+        'utf8',
+      );
+
+      expect(await ownerComparisons(dir)).toHaveLength(1);
+      expect(await enclosingRouteOfOwnerCheck(path.join(dir, 'double.ts'))).toEqual({
+        method: 'PATCH',
+        path: '/:id/deactivate',
+      });
+    });
+
+    it('covers EVERY mount of a declared in-handler route', () => {
+      // A router mounted twice (a versioned or compatibility prefix) enforces
+      // the same in-handler check on both paths. Taking one hard-coded full
+      // path would leave the second out of `derived` — no inventory row, no
+      // budget move, everything green. (Codex, #1073.)
+      const twoMounts = new Set([
+        'PATCH /api/entity-aliases/:id/deactivate',
+        'PATCH /api/v2/entity-aliases/:id/deactivate',
+        // Same router-relative path, a DIFFERENT router, and guard-gated — must
+        // not be swept in by a loose suffix match.
+        'PATCH /api/standing-instructions/:id/deactivate',
+      ]);
+      expect(mountedInHandlerOwnerRoutes(twoMounts)).toEqual([
+        'PATCH /api/entity-aliases/:id/deactivate',
+        'PATCH /api/v2/entity-aliases/:id/deactivate',
+      ]);
     });
 
     it('rejects a reached_via claim no channel actually reaches', () => {
