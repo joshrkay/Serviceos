@@ -91,9 +91,13 @@ describe('Postgres integration — Vapi inbound-call webhook', () => {
     expect(activated[0].metadata?.milestone).toBe('first_real_call_received');
 
     // T1 — a second, never-activated tenant sees none of this tenant's
-    // activation audit trail.
+    // activation audit trail. Querying tenant B's OWN entity id would pass
+    // vacuously (it would never match tenant A's row regardless of tenant
+    // filtering) — query tenant A's entity id, scoped under tenant B, so a
+    // findByEntity regression that dropped the tenant_id filter would be
+    // caught here.
     const tenantB = await seed(pool);
-    const bAudit = await auditRepo.findByEntity(tenantB, 'tenant_settings', tenantB);
+    const bAudit = await auditRepo.findByEntity(tenantB, 'tenant_settings', tenantId);
     expect(bAudit.filter((r) => r.eventType === 'tenant.activated')).toHaveLength(0);
   });
 

@@ -129,8 +129,12 @@ describe('GET /api/onboarding/status — the derived "look around before finishi
     const identityStepB = statusB.body.steps.find((s: { id: string }) => s.id === 'identity');
     expect(identityStepB.status).toBe('current');
 
-    // Tenant A's audit trail is invisible under tenant B's id.
-    const auditUnderB = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_settings', tenantB.tenantId);
+    // Tenant A's audit trail is invisible under tenant B's id. Querying
+    // tenant B's OWN entity id would never match tenant A's row regardless
+    // of whether tenant filtering works — query tenant A's entity id,
+    // scoped under tenant B, so a findByEntity regression that dropped the
+    // tenant_id filter would actually be caught here.
+    const auditUnderB = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_settings', currentTenant.tenantId);
     expect(auditUnderB.filter((r) => r.eventType === 'tenant.identity_set')).toHaveLength(0);
 
     // And tenant A's own status is unaffected by tenant B ever having looked.

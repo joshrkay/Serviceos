@@ -106,7 +106,10 @@ describe('onboarding AI self-check', () => {
       [tenantB.tenantId],
     );
     expect(bRow.rows).toHaveLength(0);
-    const bAudit = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_settings', tenantB.tenantId);
+    // Query tenant A's entity id, scoped under tenant B — tenant B's OWN
+    // entity id would never match tenant A's row regardless of whether
+    // tenant filtering works, so it wouldn't actually prove isolation.
+    const bAudit = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_settings', currentTenant.tenantId);
     expect(bAudit.filter((r) => r.eventType === 'tenant.ai_verified')).toHaveLength(0);
   });
 
