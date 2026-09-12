@@ -526,4 +526,93 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
     });
     expect(crossTenant.kind).toBe('not_found');
   });
+
+  /**
+   * #1014 row 2.1 — T2. Every negative above proves "tenant B cannot read
+   * tenant A's row" (T1). This proves the stronger claim: tenant B running
+   * its OWN complete inbound-call flow — its own DID, its own customer, its
+   * own booking — never so much as CHANGES tenant A's rows or availability,
+   * not merely that it can't be read from tenant A's context. Snapshotted
+   * before/after so the assertion is a real equality, not a fresh count.
+   */
+  it("T2: tenant B's own inbound call to its own DID books its own appointment without touching tenant A's rows or availability", async () => {
+    const tenantB = await createTestTenant(pool);
+    const DID_B = '+15125550200';
+    await insertTwilioIntegration(pool, tenantB.tenantId, DID_B);
+
+    // Tenant A's availability before tenant B's independent call.
+    const beforeA = await appointmentRepo.findByJob(tenant.tenantId, jobId);
+
+    // Routing resolves each DID to its own tenant — adding tenant B's
+    // integration row does not perturb tenant A's existing lookup.
+    const hitB = await phoneRepo.findByNumber(DID_B);
+    expect(hitB?.tenantId).toBe(tenantB.tenantId);
+    const hitA = await phoneRepo.findByNumber(TENANT_DID);
+    expect(hitA?.tenantId).toBe(tenant.tenantId);
+
+    const { customerId: bCustomerId, locationId: bLocationId } = await seedBookableCustomer(
+      tenantB.tenantId,
+      tenantB.userId,
+      'Tenant B Caller',
+    );
+    const bJobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: bJobId,
+      tenantId: tenantB.tenantId,
+      customerId: bCustomerId,
+      locationId: bLocationId,
+      jobNumber: 'JOB-B1',
+      summary: 'Tenant B job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: tenantB.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const start = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const input: CreateProposalInput = {
+      tenantId: tenantB.tenantId,
+      proposalType: 'create_appointment',
+      payload: {
+        jobId: bJobId,
+        scheduledStart: start.toISOString(),
+        scheduledEnd: end.toISOString(),
+        timezone: 'America/Chicago',
+        summary: 'Tenant B leaking faucet',
+      },
+      summary: 'Tenant B leaking faucet — appointment',
+      createdBy: tenantB.userId,
+    };
+    let bProposal: Proposal = createProposal(input);
+    bProposal = transitionProposal(bProposal, 'ready_for_review', tenantB.userId);
+    bProposal = transitionProposal(bProposal, 'approved', tenantB.userId);
+    bProposal = { ...bProposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+
+    const bProposalRepo = new InMemoryProposalRepository();
+    const bExecutionRepo = new InMemoryProposalExecutionRepository();
+    const bHandlers = createExecutionHandlerRegistry({ appointmentRepo, jobRepo, auditRepo });
+    const bExecutor = new ProposalExecutor(
+      bHandlers,
+      bProposalRepo,
+      new IdempotencyGuard(bExecutionRepo, bProposalRepo),
+      auditRepo,
+    );
+    await bProposalRepo.create(bProposal);
+    const { result: bResult } = await bExecutor.execute(bProposal, {
+      tenantId: tenantB.tenantId,
+      executedBy: tenantB.userId,
+    });
+    expect(bResult.success).toBe(true);
+
+    const bookedB = await appointmentRepo.findById(tenantB.tenantId, bResult.resultEntityId!);
+    expect(bookedB).not.toBeNull();
+
+    // Tenant A's availability for its own job is byte-for-byte unchanged —
+    // not merely "not visible from tenant A", but genuinely untouched.
+    const afterA = await appointmentRepo.findByJob(tenant.tenantId, jobId);
+    expect(afterA).toEqual(beforeA);
+    expect(await appointmentRepo.findById(tenant.tenantId, bookedB!.id)).toBeNull();
+  });
 });
