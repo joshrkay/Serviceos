@@ -26,12 +26,16 @@ after the #1021 lane left it unstarted.
 **Under this derivation the owner's normal day costs one forced web action,
 plus a six-action one-time activation.**
 
+*(Counts here are the FINAL ones, after the review hardening in §9–§16. They
+started at 53 routes / 45 `occasional`; §11 records why one more route was
+found. The headline budgets never moved.)*
+
 | Count | |
 |---|---|
-| Owner-only routes the booted app serves | **53** |
+| Owner-only routes the booted app serves | **54** |
 | …classified `daily` (the day's work forces it) | **2** |
 | …classified `onboarding` (forced once, before the tenant can operate) | **6** |
-| …classified `occasional` (administration no normal day forces) | **45** |
+| …classified `occasional` (administration no normal day forces) | **46** |
 | Reachable off the web (SMS keyword / one-tap / voice intent) | **4** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ unreachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ unreachable | **6** |
@@ -105,10 +109,15 @@ no mocked registry, no grep result standing in for a wiring.
 
 ### 3.1 Owner-only routes — executed guards, not source text
 
-`createApp()` is booted hermetically (no Postgres, no Clerk instance, no AI
-key — the identical boot `test/app/route-manifest.test.ts` uses) and its real
-Express layer stack is walked. Express 4 makes `app.router` throw, so `_router`
-is the only way in — the same note `src/app-route-manifest.ts` carries.
+`createApp()` is booted with **a pool but no live database** — no Clerk
+instance, no AI key, and a `DATABASE_URL` that is never connected to. `pg.Pool`
+constructs lazily, so no socket opens, and this test only walks the router
+stack, so no query is ever issued. The pool has to EXIST because `app.ts` guards
+~20 mounts behind `if (pool)` / `if (<pool-backed repo>)` — see §11.1, which is
+why this differs from `test/app/route-manifest.test.ts`, whose boot deletes
+`DATABASE_URL` and therefore never sees those routers. Express 4 makes
+`app.router` throw, so `_router` is the only way in — the same note
+`src/app-route-manifest.ts` carries.
 
 For every route the guards Express would actually run are collected — the
 router-level `use` middleware registered **ahead** of it (matching Express's own
@@ -374,7 +383,7 @@ Those pre-existing errors are untouched by this lane.
 
 ## 6. Judgment calls
 
-Every one of the 53 rows carries a one-line `why` in the doc. The calls worth
+Every one of the 54 rows carries a one-line `why` in the doc. The calls worth
 naming here are the ones a reviewer might land differently:
 
 1. **`POST /api/attachments/:id/visibility` → `daily`.** The most debatable
@@ -754,3 +763,328 @@ in the test header naming what is still open instead of implying nothing is. The
 headline I18 budgets never moved through any of it —
 `ownerRequiredDailyWebActions` is still **1** — but the number is now
 considerably harder to be wrong by accident.
+
+---
+
+## 14. Review round 5 (Codex, PR #1073)
+
+### 14.1 The in-handler scan was file-level, so a second check could hide
+
+**Finding (P2, correct).** `filesWithInHandlerOwnerChecks` returned one entry per
+*file*. A second unconditional owner check added to `entity-aliases.ts` or
+`users.ts` — both already on the list — would leave the list unchanged, stay
+invisible to the walker, and need neither an inventory row nor a budget change.
+The scan added in §11 closed the "new file" case and left the "second check in
+a known file" case open.
+
+Fixed by scanning **per occurrence**, carrying the matched line so the assertion
+shows *which* check appeared and so conditional and unconditional forms are
+distinguishable on sight. The expectation is now three entries: one
+unconditional (`entity-aliases.ts`) and two conditional (`users.ts`, both
+`targetId !== actor.id && …`).
+
+Proven rather than asserted: the scan takes an optional root, and a new negative
+control points it at a temp fixture containing **two** checks in one file. RED
+against the file-level behaviour, then GREEN:
+
+```
+ FAIL  … > sees a SECOND in-handler check in a file it already lists
+AssertionError: expected [ …(2) ] to have a length of 1 but got 2
+```
+
+### 14.2 The PRD row carried stale counts
+
+**Finding (P2, correct).** The §5 I18 row still reported 53 routes, 45
+`occasional`, and a 17/17 run — the state at the Fable gate, before the review
+hardening changed them to 54 / 46 / 24. Anyone treating that row as the audit
+source got stale numbers.
+
+Updated, and this one I did edit despite it being the Fable stamp: **my own
+commits are what invalidated it**, and leaving numbers in the audit source that
+the same PR disproves is worse than the deference. The **rung is untouched** —
+it still reads `4 ↑ STRUCTURAL`, stated by Fable — and what changed is counts,
+the negative-control list, the verification line, and the two ceilings. Fable
+should confirm the row still reads as intended.
+
+The same edit fixed the contradiction flagged earlier in this PR: the evidence
+column opened with the rung-0 text (*"No enforcement of any kind, and no test …
+the only invariant with nothing behind it"*) immediately after the column
+declared rung 4, because the gate appended to the cell rather than replacing its
+lead. That history is now stated as history ("Was rung 0 … until 2026-09-12")
+instead of as present tense.
+
+```
+ Test Files  1 passed (1) · Tests 24 passed (24)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 327 tests passed
+```
+
+### 14.3 CI: `test` is being cancelled externally, and it is not this PR
+
+Recorded because it blocks the PR and is not something this branch can fix.
+
+On the current head, four of five required jobs pass (`playwright`,
+`mobile-typecheck`, `corpus-integrity`, `voice-quality-cassette-drift`). The
+`test` job has now been cancelled on every attempt — at ~85s, ~33s and ~4min on
+three separate runs. The job log for the last one shows the suite **passing**
+right up to the kill:
+
+```
+ ✓ test/voice/voice-smoke.synthetic.test.ts (3 tests) 97ms
+##[error]The operation was canceled.
+```
+
+No failure, no OOM, and the `test` job declares no `timeout-minutes` (the
+default is 360). The last cancellation happened at 20:01:32 with **no push
+since 19:55**, so the supersede explanation in §12's note covers the earlier
+ones but not this. The pattern — short jobs complete, the one long job is killed
+partway at varying elapsed times, nothing red in the logs — together with Cursor
+Bugbot independently reporting *"usage limit reached"* on this account three
+times in the same window, points at a **GitHub Actions usage/spend limit** as
+the most likely cause. That is an account-level setting, not a code problem, and
+not something this branch can resolve; re-running has been spent and the
+evidence says it will not help. Surfaced for the owner rather than retried
+again.
+
+---
+
+## 15. Review round 6 — the scan matched one spelling (Codex, PR #1073)
+
+**Finding (P2, correct).** The per-occurrence scan from §14 still keyed on
+`req.auth.role` specifically. A handler that aliases or destructures first —
+
+```ts
+const { role } = req.auth!;
+if (role !== 'owner') throw new ForbiddenError(…);
+```
+
+— gates the whole route unconditionally, is invisible to `asyncRoute` and so to
+the executed-guard arm, and would not appear in the scan either. It could ship
+with no inventory row and no budget change.
+
+**Fixed by matching the COMPARISON, not the expression that feeds it.** The scan
+now finds every `… === 'owner'` / `… !== 'owner'` in `src`, excluding
+`requireRole(…)` / `requirePermission(…)` call lines — those are the
+discoverable middleware that arm (1) already settles by execution. How the role
+got into the variable no longer matters.
+
+That widens the net from 3 hits to **17**, and the expectation now classifies
+every one. Exactly **one** is a route gate (`entity-aliases.ts`); the other
+sixteen are labelled for what they are, so a future reader does not have to
+re-derive the judgment:
+
+| Kind | Count | Examples |
+|---|---|---|
+| The one owner-only route gate | 1 | `entity-aliases.ts` |
+| Conditional self-service (`targetId !== actor.id && …`) | 2 | `routes/users.ts` |
+| Domain rules about the TARGET user (last-owner protection, role changes) | 5 | `users/user.ts`, `routes/users.ts` |
+| Prompt-shaping flags, not authorization | 4 | `inapp-adapter.ts`, `routes/assistant.ts` |
+| Not a caller role at all (recipient class, `can_field_serve`, owner-or-dispatcher) | 5 | `gated-message-delivery.ts`, `routes/me.ts`, `routes/time-entries.ts` |
+
+The noise is the point: a new owner comparison of *any* kind now has to be
+looked at and labelled rather than landing silently.
+
+Negative control planting Codex's exact example — destructured **and** twice in
+one file, so it covers this round and §14's together. RED at the old behaviour's
+answer (`0`), then GREEN at `2`:
+
+```
+ FAIL  … > sees an ALIASED owner gate, and every occurrence of it
+AssertionError: expected [ …(2) ] to have a length of +0 but got 2
+```
+
+**Residual ceiling, stated in the code rather than implied.** A source scan
+cannot be exhaustive against every spelling: comparing against a constant
+(`ROLE_OWNER`) or computing the string would evade it. The durable fix is the
+*convention* — owner gating belongs in the discoverable middleware, where arm
+(1) sees it by execution and no scanning is needed at all. Changing that
+convention means editing `packages/api/src`, which is outside this
+docs-and-tests lane; it is the third follow-up this lane has surfaced without
+taking.
+
+```
+ Test Files  1 passed (1) · Tests 24 passed (24)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 327 tests passed
+```
+
+---
+
+## 16. Review round 7 (Codex, PR #1073) — three findings
+
+### 16.1 A declared check was bound to a FILE, not to its route
+
+**Finding (P2, correct), and the same granularity bug one level up.** §14 fixed
+the *scan* to be per-occurrence but left the *verification* file-level: it
+asserted only that `entity-aliases.ts` still contained the comparison. Move that
+unchanged check from `/deactivate` to a sibling handler in the same file and the
+file text is identical — so the contract keeps documenting `/deactivate`, which
+is no longer owner-gated, and misses the route that now is. Both stay mounted;
+nothing fails.
+
+Fixed by locating the comparison and walking back to the enclosing
+`router.<verb>('<path>', …)`, then asserting the declared method and path
+match. Negative control plants the check in the **second** of two handlers and
+asserts the binding says so; RED at the file-level answer, GREEN at the real
+one:
+
+```
+ FAIL  … > binds a declared owner check to the route it actually sits in
+AssertionError: expected { method: 'POST', …(1) } to deeply equal { method: 'PATCH', …(1) }
+-   "method": "PATCH",  "path": "/:id/deactivate"
++   "method": "POST",   "path": "/:id/reactivate"
+```
+
+### 16.2 Keyword claims were compared before canonicalization
+
+**Finding (P2, correct).** `channelReaches` lowercases a keyword token and the
+registry trims and lowercases on registration, so `keyword:Y` and `keyword:y`
+are one channel — but `duplicateChannelClaims` compared the raw strings and saw
+no duplicate. Two rows could hold the same SMS action with the uniqueness check
+and the web-action budget both green. Latent today (no row claims a keyword),
+real the moment one does. Claims are now canonicalized with the registry's own
+trim/lowercase rule before comparison.
+
+### 16.3 The report's own headline counts were stale
+
+**Finding (P2, correct).** §1's "honest number" table still read 53 / 45 while
+§11 recorded the 54 / 46 correction — the audit artifact contradicted itself,
+and §1 is what a reader sees first. Updated, with a line making explicit that
+§1 carries the FINAL counts and where the earlier ones went.
+
+Worth noting against my own §13: I wrote there that the findings all lived in
+the *enumeration* rather than the assertions. 16.3 is a different and more
+embarrassing kind — the report describing the work incorrectly. An audit
+artifact that misstates its own result is exactly the rot this lane exists to
+prevent, and it was caught by review rather than by me.
+
+```
+ Test Files  1 passed (1) · Tests 25 passed (25)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 328 tests passed
+```
+
+---
+
+## 17. Review round 8 — two more stale claims, and the root cause of them
+
+Both findings correct, both the same class as §16.3: **the documentation lagging
+the code it documents.**
+
+### 17.1 The PRD row advertised 24/24
+
+Round 5 corrected the row to 24/24; round 7 added the route-binding negative
+control and made it 25. The row was not re-touched, so the authoritative audit
+source again carried a stale verification line. Now **25/25**.
+
+### 17.2 The report still described a boot it no longer uses
+
+§3.1 said *"booted hermetically (no Postgres … the identical boot
+`test/app/route-manifest.test.ts` uses)"*. That stopped being true in §11.1,
+which added a `DATABASE_URL` precisely so pool-gated routers mount — and
+`route-manifest.test.ts` deletes `DATABASE_URL`, so the two boots are now
+deliberately different. Calling them identical did not just go stale: it
+obscured the completeness fix that §11.1 exists to record. §3.1 now describes a
+pool-backed boot that issues no query, and says why it differs.
+
+### 17.3 The root cause, and what I did about it beyond the two reports
+
+Three rounds running (16.3, 17.1, 17.2) the finding has been *my prose
+describing my code incorrectly*, always the same way: I update the section I am
+editing and leave the earlier section that says the same thing differently.
+Fixing only what review flags would guarantee a fourth.
+
+So this round I swept all three documents for every stale claim rather than the
+two reported, and found one more nobody had flagged:
+
+| Location | Was | Now |
+|---|---|---|
+| PRD §5 I18 row | `24/24` | `25/25` |
+| Report §3.1 | "booted hermetically… identical boot" | pool-backed, no query, and why it differs |
+| Report §6 | "Every one of the **53** rows" | 54 — *not flagged by review* |
+
+Deliberately left as-is, because they are history rather than staleness: the
+per-round `18/18`, `20/20`, `23/23` lines, the raw RED output quoting
+`expected 53 to be greater than 400`, the §11.3 before/after table, and §1's
+note that the counts started at 53 / 45.
+
+**The durable lesson.** The inventory doc cannot rot — a contract test pins it,
+including its budget block. The *report* and the *PRD row* have no such pin, and
+that asymmetry is exactly where all three of these findings landed. Numbers
+worth auditing should live in the machine-checked artifact, with prose pointing
+at it rather than restating it. That is the fourth follow-up this lane has
+surfaced: the §5 row could cite the budget block instead of copying it.
+
+```
+ Test Files  1 passed (1) · Tests 25 passed (25)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 328 tests passed
+```
+
+---
+
+## 18. Review round 9 — two more evasions, and a bug my own control caught
+
+Both findings correct, and both back to substance rather than documentation.
+
+### 18.1 The scan matched only single-quoted literals
+
+`if (role !== "owner")` gates a route exactly as well as the single-quoted form,
+the repo enforces no quote style, and the scan saw neither it nor the guard
+walker. Now both quote styles are matched — in the comparison scan, in the
+hit-finder that binds a declared check to its route, and in the route-path
+parse.
+
+Negative control: a fixture whose gate is **both** destructured and
+double-quoted. RED at the old answer (`0`), GREEN at `1`.
+
+### 18.2 A declared route was one hard-coded path, not every mount
+
+`IN_HANDLER_OWNER_ROUTES` carried a full path. Mount `createEntityAliasesRouter`
+under a second prefix — a versioned or compatibility path — and both mounts
+enforce the same in-handler check, but only the hard-coded one entered
+`derived`: no inventory row for the second, no budget move, everything green.
+
+Now the declaration carries the router-relative path and a **mount-qualified
+suffix**, and every mounted route matching it is derived. The qualification
+matters and the first attempt got it wrong — see below.
+
+Negative control: a synthetic mount table with `/api/entity-aliases/…` and
+`/api/v2/entity-aliases/…` (both expected) plus
+`/api/standing-instructions/:id/deactivate` (a different router, guard-gated,
+must not be swept in). RED at one mount, GREEN at two.
+
+### 18.3 The first attempt over-matched, and the suite caught it
+
+Worth recording because it is the failure mode this whole contract is built
+against. Matching mounts on the router-relative path alone —
+`endsWith('/:id/deactivate')` — also matched
+`PATCH /api/standing-instructions/:id/deactivate`, a **different** router that
+is properly guard-gated and already in the derived set. The run went red on
+three assertions at once: the route budget (55 vs 54), the row/route equality,
+and the "now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES" guard. That
+last one is the check added in §14 doing exactly its job — catching a route
+being claimed by the weak arm when the strong arm already covers it.
+
+Qualifying the suffix with the router's own segment fixed it. The lesson is the
+same one §13 drew: the assertions were sound; the enumeration feeding them was
+wrong, and it was the cross-checks between arms that surfaced it rather than
+any single test.
+
+### 18.4 And a process note against myself
+
+Two of the three quote-style edits in this round silently did nothing — I
+applied them with string replacements and asserted on only some of them, so the
+two that no longer matched the file (reformatted by an earlier `prettier` pass)
+were no-ops I did not notice. The double-quote negative control failed in the
+wider suite run and pointed straight at it. Had I written the control less
+thoroughly — checking only that the comparison scan found the gate, not that the
+route binding also resolved it — the fix would have shipped half-applied and
+green. Assert on every mechanical edit; and a negative control is worth most
+when it exercises the whole path, not just the function named in the finding.
+
+```
+ Test Files  1 passed (1) · Tests 27 passed (27)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 330 tests passed
+```
