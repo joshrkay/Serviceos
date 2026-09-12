@@ -232,6 +232,14 @@ testing that bootstrap path itself, but note it truncates all tables in
 rows in the container afterward (e.g. `docker exec <container> psql -U test
 -d serviceos_e2e_test -c 'select * from estimates'`).
 
+**Teardown footgun.** After a run with `E2E_USE_TEST_DB=true`, `global-setup.ts` rewrites
+`e2e/fixtures/.test-db-state.json` with `ownsContainer: false` (it *adopted* your
+`DATABASE_URL`), so `npm run e2e:db:teardown` **truncates the tables and leaves the
+container running**. Stop it yourself:
+`docker ps --filter ancestor=pgvector/pgvector:pg16 -q | xargs docker rm -f`.
+Run teardown *before* the Playwright run if you want the container stopped by the
+script, or just remove it by id.
+
 This is one of three distinct e2e runners, not two — don't conflate them:
 
 - **`chromium`/`chromium-devauth`** (no `DATABASE_URL`) — in-memory only,
