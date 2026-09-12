@@ -157,12 +157,32 @@ function guardAdmits(guard: express.RequestHandler, role: string): boolean {
 
 const NON_OWNER_ROLES = ['dispatcher', 'technician'] as const;
 
+/**
+ * Whether the CHAIN — not any one guard in it — is owner-only.
+ *
+ * Reaching the handler means passing every guard in order, so a role reaches
+ * the route iff it is admitted by all of them; it is refused iff at least one
+ * refuses it. Asking instead whether any SINGLE guard is owner-only misses a
+ * route composed of guards that are each individually permissive:
+ * `requireRole('owner','dispatcher')` then `requireRole('owner','technician')`
+ * admits only `owner`, yet neither guard alone refuses both non-owner roles.
+ * That route would drop out of the inventory silently and the doc and budget
+ * checks would never fire on it — the dangerous direction, since the whole
+ * point is to catch owner work nobody wrote down. Pinned by the composed
+ * negative control below. (Found in review of #1073 by xhawk-ai.)
+ *
+ * Caveat worth knowing if this ever stops matching reality: `guards` includes
+ * router-level `use` middleware registered ahead of the route without checking
+ * that the `use` mount path covers it. No router in the app attaches a role
+ * guard via `use` today (every one is per-route), so the set is exact; a
+ * path-scoped `router.use('/admin', requireRole('owner'))` would need the mount
+ * comparison added here before this stayed true.
+ */
 function isOwnerOnly(guards: express.RequestHandler[]): boolean {
-  return guards.some(
-    (guard) =>
-      guardAdmits(guard, 'owner') &&
-      NON_OWNER_ROLES.every((role) => !guardAdmits(guard, role)),
-  );
+  if (guards.length === 0) return false;
+  const chainAdmits = (role: string): boolean =>
+    guards.every((guard) => guardAdmits(guard, role));
+  return chainAdmits('owner') && NON_OWNER_ROLES.every((role) => !chainAdmits(role));
 }
 
 /**
@@ -556,6 +576,31 @@ describe('I18: owner daily actions ↔ code contract', () => {
       planted.use('/api/planted-surface', router);
 
       expect(deriveOwnerOnlyRoutes(planted)).toEqual([]);
+    });
+
+    /**
+     * Composed owner-only: NEITHER guard rejects both non-owner roles on its
+     * own, but the CHAIN does — dispatcher fails the second, technician fails
+     * the first, and only owner passes both. A route like this is owner-only at
+     * runtime, so it must be derived; missing it would drop an owner web action
+     * out of the inventory silently, and the doc and budget checks would never
+     * fire on it. (xhawk-ai review, #1073: the first implementation asked
+     * whether ANY SINGLE guard was owner-only, and missed exactly this.)
+     */
+    it('counts a route made owner-only by the chain, not by one guard', () => {
+      const planted = express();
+      const router = express.Router();
+      router.get(
+        '/composed',
+        requireRole('owner', 'dispatcher'),
+        requireRole('owner', 'technician'),
+        (_req, res) => res.json({}),
+      );
+      planted.use('/api/planted-surface', router);
+
+      expect(deriveOwnerOnlyRoutes(planted)).toEqual([
+        'GET /api/planted-surface/composed',
+      ]);
     });
 
     it('rejects a reached_via claim no channel actually reaches', () => {

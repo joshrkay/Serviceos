@@ -163,8 +163,9 @@ Command, unchanged across every run:
 cd packages/api && npx vitest run test/invariants/i18-owner-daily-actions.contract.test.ts
 ```
 
-Strict TDD: **every one of the 17 assertions was first written with a
-deliberately wrong expectation and run RED**, over three passes. Pass 2 exists
+Strict TDD: **every one of the 18 assertions was first written with a
+deliberately wrong expectation and run RED**, over three passes (17 at the
+time; the 18th, NC7, was added in review — §9). Pass 2 exists
 because 6 assertions happened to be written correctly the first time; pass 3
 exists because two `expect` calls in pass 2 short-circuited on their first
 sub-assertion, leaving the rest of those two tests un-RED.
@@ -322,6 +323,14 @@ booted — so the SMS probe is live, not vacuously negative.
    Duration  10.50s
 ```
 
+After the §9 review fix, on the same command:
+
+```
+ Test Files  1 passed (1)
+      Tests  18 passed (18)
+   Duration  11.57s
+```
+
 ### Neighbouring suites (no interference from the keyword-registry probe)
 
 ```
@@ -329,7 +338,7 @@ cd packages/api && npx vitest run test/invariants test/app/route-manifest.test.t
   test/sms test/proposals/sms test/ai/voice-action-catalog.contract.test.ts
 
  Test Files  24 passed (24)
-      Tests  320 passed (320)
+      Tests  320 passed (320)   (321 after NC7 — §9)
 ```
 
 ### Build verification
@@ -358,6 +367,7 @@ Those pre-existing errors are untouched by this lane.
 | NC4 | a `reached_via` claim no channel reaches | `voice_intent:definitely_not_an_intent`; `voice_intent:lookup_invoices` (real intent, lookup-only); `keyword:zzz-not-a-registered-keyword`; `one_tap:/public/proposals/not-mounted`; bare `none`; unknown prefix `telepathy:just-know` | every one resolves **false** |
 | NC5 | the positive side, so NC4 is not trivially true | `voice_intent:add_catalog_item`; `keyword:Y`; `one_tap:/public/proposals/one-tap-approve`; `one_tap:/public/proposals/one-tap-undo` | every one resolves **true**, against the live registry and live mount table |
 | NC6 | doc prose is not inventory | the doc's closing paragraph names `POST /api/settings/` and `GET /api/nonexistent` outside the machine-readable markers | the parser does not yield `GET /api/nonexistent` |
+| NC7 | **the chain is owner-only, not one guard** | `requireRole('owner','dispatcher')` then `requireRole('owner','technician')` — neither guard alone refuses both non-owner roles, but the chain admits only `owner` | the route **is** derived. Added after review; see §9 |
 | — | non-vacuity floor | — | `derived.length > 40`, and it contains one route owner-gated by each mechanism: `PUT /api/onboarding/identity` (`requireRole('owner')`) and `PUT /api/settings/` (`requirePermission('settings:update')`) |
 
 ---
@@ -450,3 +460,79 @@ No rung is stated in this report. O-1…O-9 and Q12 are not answered here.
   reachable rows are voice. If I18 is meant to hold on the *SMS* channel
   specifically — the invariant's own wording leads with SMS — that gap is
   visible now and was not before.
+
+---
+
+## 9. Review round 1 — a real defect in the derivation (xhawk-ai, PR #1073)
+
+**Finding (Medium, correct):** `isOwnerOnly` asked whether **any single guard**
+in the chain was owner-only, rather than whether **the chain** is. A route
+guarded by
+
+```ts
+requireRole('owner', 'dispatcher'), requireRole('owner', 'technician')
+```
+
+admits only `owner` at runtime — dispatcher fails the second guard, technician
+fails the first — yet neither guard *alone* refuses both non-owner roles, so the
+original predicate returned `false` and the route dropped out of the derived
+set.
+
+**Why it mattered more than its severity label.** The failure direction is a
+**false negative**: an owner-only route silently missing from the derived set
+needs no row in the inventory, so the divergence check never fires and the
+budget never moves. That is precisely the hole the invariant exists to close —
+undocumented owner work passing the build. A false *positive* would merely have
+demanded an extra doc row.
+
+**Verified before fixing, RED first.** The composed route was planted as a new
+negative control against the unmodified predicate:
+
+```
+ FAIL  … > negative controls > counts a route made owner-only by the chain, not by one guard
+AssertionError: expected [] to deeply equal [ 'GET /api/planted-surface/composed' ]
+- [ "GET /api/planted-surface/composed" ]
++ []
+```
+
+**Fix.** Reaching a handler means passing every guard in order, so a role
+reaches the route iff **all** guards admit it, and is refused iff **at least
+one** refuses it:
+
+```ts
+const chainAdmits = (role: string): boolean =>
+  guards.every((guard) => guardAdmits(guard, role));
+return chainAdmits('owner') && NON_OWNER_ROLES.every((role) => !chainAdmits(role));
+```
+
+**Result — no number in this report changed.** The real app's derived set is
+still **53**, and every budget still holds, because no route in the app today is
+owner-only by composition; the `toHaveLength(53)` assertion passing after the
+change is the proof. The fix is pure hardening against the next route that is.
+
+```
+ Test Files  1 passed (1) · Tests 18 passed (18)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 321 tests passed
+```
+
+**One caveat the fix surfaced and the code now records.** `guards` includes
+router-level `use` middleware registered ahead of a route *without* checking
+that the `use` mount path covers it. Under the old `some` semantics that was a
+false-positive risk; under `every` it would also be a false-negative risk. It is
+inert today — `grep -rn "\.use(.*requireRole\|\.use(.*requirePermission" src`
+returns nothing, every role guard in the app is attached per-route — so the
+guard set is exact. A path-scoped `router.use('/admin', requireRole('owner'))`
+would need the mount comparison added first; that is noted in `isOwnerOnly`'s
+comment rather than built speculatively.
+
+### CI note
+
+The first check run on this branch reported every required job as `cancelled`
+at 19:34:25–28Z, ~85s in, while all jobs were still `queued` — no test body
+ran. Neither `pr-checks.yml` nor `e2e.yml` declares a `concurrency` group, and
+the *newer* runs died while an older run for the superseded commit stayed
+queued, so it was not a supersede-cancel. Re-run once (the legitimate "died
+before any test body ran" case): `playwright`, `mobile-typecheck`,
+`corpus-integrity` and `voice-quality-cassette-drift` all went green, so the
+cancellation was transient rather than an account limit.
