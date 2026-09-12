@@ -54,3 +54,18 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **What:** `TechnicianAssignmentNotifier` is now registered (PR #1029). Every assign/unassign/reassign texts the technician whenever a delivery provider is wired; the only switches are the global `SMS_ENABLED` kill switch and whether the tech has a mobile on file. Dispatch churn sends one text per hop.
 - **Josh's call:** add a per-tenant `notifyTechniciansBySms` (default on or off?) and/or a churn window? Push notifications are unaffected (per-user mutes apply).
 - **Until decided:** nothing to build; issue #1033 holds the analysis.
+
+### 3.8 customer confirmation — what happens when no delivery provider is configured? (from the dormant-rows lane, issue #1077)
+- **What:** the confirmation path IS wired (`TransactionalCommsService` as `schedulingNotifier`, `app.ts:1910`) and proven at real Postgres — but when `createMessageDeliveryProvider` resolves mode `'none'` (no Twilio and no SendGrid credentials, which is production today with the EMAIL/TELEPHONY launch flags off) the handler falls back to a no-op and an approved booking produces no dispatch row, no audit event and no owner-visible signal. A second, never-constructed implementation (`AppointmentConfirmationNotifier`) duplicates the live one.
+- **Josh's call:** record a failed dispatch row / emit an audit event / refuse to execute / accept and document; and delete or promote the dead class.
+- **Until decided:** row 3.8 is graded on the wired path (4, T1) with the condition named in its cell; #1077 holds the analysis.
+
+### 4.7 lateness from truck location — wire or retire? (from the dormant-rows lane, issue #1079)
+- **What:** `computeDispatchLateness` is complete and unit-tested but has no runtime caller; pings are ingested and the board has a ready `lateness` seam the route never supplies. One adapter wires it; one deletion retires it.
+- **Josh's call:** wire (and decide where the owner sees it, that `autoNotifyCustomer` never fires without approval, and the per-query cost) or retire (delete the evaluator, its tests, the field and the hook; mark 4.7 not-built).
+- **Until decided:** row 4.7 stays at 2 (dormant, pinned); #1079 holds the analysis.
+
+### 9.5 service-credit cap at execute time (from the dormant-rows lane, issue #1080) — money
+- **What:** the cap holds at draft (credit omitted, proven) but `executeServiceCredit` never re-reads the rolling sum, so a delayed approval can execute past $100 (proven: $140). The source header claims an at-execute cap that does not exist.
+- **Josh's call:** refuse-and-surface at execute (recommended), or accept the window and document it.
+- **Until decided:** row 9.5 is at 4 on its criterion; #1080 holds the analysis.
