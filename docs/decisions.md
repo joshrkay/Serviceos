@@ -251,9 +251,17 @@ because nothing runs it.
   prior pass, and its presence kept inviting new "founding decision" tests to be written
   against it (see D9/A1/A2 history) instead of the real product.
 - Keep the CDK stack in case AWS is revisited — rejected: nothing in the current
-  architecture (Railway/Supabase/Clerk/Twilio) depends on it; reviving AWS deployment would
+  architecture (Railway/Postgres/Clerk/Twilio) depends on it; reviving AWS deployment would
   start from a fresh CDK design against the current schema, not from a two-generations-old
   prototype.
+
+> **[Verification correction, Phase 1 — 2026-08-30]** The current-architecture list
+> above previously read `Railway/Supabase/Clerk/Twilio`. Corrected to
+> `Railway/Postgres/Clerk/Twilio`: no Supabase client exists anywhere in the shipping
+> tree — `grep -rl supabase packages/*/src` and `grep '@supabase' packages/*/package.json`
+> both return zero matches. Supabase was the *original PRD baseline* (still correctly
+> recorded as a rejected alternative in D-001 at line 17), never a shipped dependency.
+> `[VERIFY-COMMS-008 corollary; packages/api/src/db/schema.ts:306]`
 
 ### D-017: One consent model — revoke-anywhere-suppress-everywhere, grants never cross channels
 **Date:** 2026-07-11

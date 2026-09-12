@@ -4,6 +4,23 @@
 
 ---
 
+> ## Status banner — acceptance criteria written against a removed stack
+>
+> **Added by the Phase 1 verification run, 2026-08-30.** Some stories in this catalog
+> carry **acceptance criteria written against code that no longer exists**. The
+> `/experiments` (AWS CDK, Next.js prototype, Python LangGraph prototype, standalone
+> Supabase schema) and `/rewrite` trees were removed in 2026-07 (see
+> `docs/decisions.md` D-016). Acceptance criteria referencing those trees are
+> **superseded by the shipping code in `/packages`** and cannot be satisfied as written.
+>
+> Per this repo's own rule ("**When this doc and v2 disagree, v2 wins**",
+> `docs/PRD.md` "About this document"), and per the Phase 1 contradictions analysis
+> §B.4, treat any such criterion as *superseded-by-code*: verify against
+> `/packages/**` or record the story as not-built. **The stories themselves are
+> deliberately left unrewritten** — this run corrects claims, it does not re-scope work.
+>
+> Nothing in this banner upgrades any story to "built".
+
 ## How to Use This Document
 
 This PRD is structured for **AI-agent-driven development** using Claude Code and Cowork. Every story includes:
