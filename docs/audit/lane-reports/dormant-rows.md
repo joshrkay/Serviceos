@@ -19,12 +19,12 @@ This is evidence for that decision, not the decision.
 |---|---|---|---|---|---|
 | 3.8 | `appointment-confirmation-dispatch-3-8.test.ts` | "only live instantiation is a no-op notifier" | **Half true.** The dormant class is real; the confirmation path is *not* dead — a second implementation is wired and writes the row. But it skips silently on **two** conditions, one owner-reachable | PROVEN-REAL-DB | T1 + T3 |
 | 3.11 | `proposal-expiry-sweep-3-11.test.ts` | "two TTL regimes"; guardrail has zero callers | **Confirmed.** 48 h worker is the only live regime; guardrail is dead code | PROVEN-REAL-DB + STRUCTURAL (negative control) | T2 |
-| 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + REAL-DB-WRITE-ONLY for ingestion | T1 |
+| 4.7 | `lateness-from-truck-location-4-7.test.ts` | evaluator's only importer is type-only | **Confirmed**, and sharper: the evaluator's sole value export has *no* reference anywhere in `src/` | STRUCTURAL (negative control) + PROVEN-REAL-DB for ingestion | T1 |
 | 9.5 | `service-credit-cap-9-5.test.ts` | the only test stubs `pool.connect()` | **Confirmed.** Replaced with a real-Postgres proof; the cap holds at draft and **fails at execute** | PROVEN-REAL-DB | T1 |
 
 Counts below are from the first evidence run (25 tests). Two ordinary tests were
 added in review — one to row 9.5 (round 1) and one to row 3.8 (round 2) — so the
-current total is **23 passed | 4 expected fail (27)**; the SQL dumps are unchanged
+current total is **24 passed | 4 expected fail (28)**; the SQL dumps are unchanged
 in shape apart from the extra 3.8 tenants.
 
 Command for every file (from `packages/api/`):
@@ -173,6 +173,17 @@ nothing tells them. **The PRD cell stamped at `5f93a9d` says the row "holds only
 where a delivery provider is configured", which is now known incomplete.** That
 cell is Fable's and carries the rung, so this lane has not edited it — raised on
 the PR for Fable to amend, and it belongs in issue #1077.
+
+### Review round 3 — the gate inherited ambient kill switches (Codex, P2)
+
+Correct, and a direct consequence of round 2's fix. `GatedMessageDeliveryDeps.env`
+defaults to `process.env` (`gated-message-delivery.ts:190`) and the switches are
+read per send (`isOutboundChannelEnabled`, line 112), so a shell or CI job
+exporting `TELEPHONY_ENABLED=false` or `EMAIL_ENABLED=false` would suppress the
+send and fail the POSITIVE assertions — the rows would look unwritten for a
+reason with nothing to do with this row. Both channels are now pinned on
+explicitly via an injected `env`. The kill switches' own behaviour stays where it
+already lives, `killswitch-production-config.test.ts`.
 
 ### Evidence class / tenant grade
 
@@ -388,9 +399,11 @@ confidence breakdown.
   technician *and* tenant B's appointment gets nothing, both ways
 - with those pings in the database, a board built the way the production route builds
   it carries `lateness === undefined` on **every** item
-- audit: `appointment.created` reads back via `findByEntity`; no lateness event has
-  ever been emitted; the pings themselves are **unaudited** (`findByEntity` for
-  `technician_location_ping` returns nothing); the neighbour tenant reads none of it
+- audit: ingestion through the **real router** emits
+  `technician_location.batch_ingested` against the `technician` entity, read back
+  via `findByEntity`; `appointment.created` reads back too; **no** lateness or
+  delay event has ever been emitted on either entity; the neighbour tenant reads
+  none of it
 
 ### RED (deliberately wrong: asserted the board *does* carry lateness)
 
@@ -419,9 +432,10 @@ confidence breakdown.
 ### Evidence class / tenant grade
 
 **STRUCTURAL** (guard test with a negative control) for the absent runtime edge —
-the claim the row turns on. The ingestion leg is **REAL-DB-WRITE-ONLY (4−)**: the write
-is proven at real Postgres and there is no audit leg to prove, because location pings
-emit no audit event. **T1** for both.
+the claim the row turns on. The ingestion leg is **PROVEN-REAL-DB** (corrected in
+review round 3, below): the write AND its `technician_location.batch_ingested`
+audit event are both proven at real Postgres, through the production router.
+**T1** for both.
 
 ### Review round 1 — order-dependent fixtures (xhawk-ai, medium)
 
@@ -460,6 +474,33 @@ have quietly stopped meaning anything at the exact moment the row was closed.
 The location now carries `SITE.lat`/`SITE.lng`, and `beforeAll` asserts they
 round-tripped, so the fixture is a geofence signal rather than a set of rows that
 resemble one.
+
+### Review round 3 — I asserted an absence that does not hold (Codex, P2). **Correction.**
+
+This one was my error, not a fragility. The test read
+`findByEntity(tenant, 'technician_location_ping', pings[0].id)`, got nothing, and
+concluded "the pings are unaudited". But **no such entity type exists**: the
+production route emits `technician_location.batch_ingested` against the
+`technician` entity (`emitLocationBatchAudit`,
+`routes/technician-location.ts:106`, with `auditRepo` supplied by `app.ts`). The
+test also bypassed the route entirely via `pingRepo.insertMany`, so it could not
+have seen the event even had it queried the right entity. An empty result from a
+query that can only ever return empty is not evidence of anything.
+
+That wrong claim propagated: into this report, and from it into the PRD cell for
+4.7 ("real Postgres, T1, **no audit event**"). Both are corrected here; the PRD
+cell is Fable's and is flagged on the PR rather than edited.
+
+The test now drives the **real router** (express + the same `auditRepo` app.ts
+passes), asserts a 201, and reads `technician_location.batch_ingested` back via
+`findByEntity` on the `technician` entity, with the neighbour tenant reading none
+of it. The absence that genuinely belongs to this row is stated separately and
+correctly: **no lateness or delay event on either the appointment or the
+technician**, because nothing evaluates the pings.
+
+**This upgrades the ingestion leg from REAL-DB-WRITE-ONLY (4−) to
+PROVEN-REAL-DB** — the write and its audit event are both proven. It does not
+move the row: 4.7 turns on the evaluation half, which is still absent.
 
 ### Judgment calls
 

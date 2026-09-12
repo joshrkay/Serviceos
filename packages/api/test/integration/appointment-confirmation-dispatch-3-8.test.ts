@@ -248,6 +248,16 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
       auditRepo,
       enforcement: 'block',
       consentLedger: new PgConsentEventRepository(pool),
+      // `GatedMessageDeliveryDeps.env` defaults to `process.env`
+      // (gated-message-delivery.ts:190), and the kill switches are read per
+      // send (`isOutboundChannelEnabled`, line 112). Left to default, a shell
+      // or CI job exporting TELEPHONY_ENABLED=false or EMAIL_ENABLED=false
+      // would suppress the send and fail the POSITIVE assertions below — the
+      // rows would look unwritten for a reason that has nothing to do with
+      // this row. Both channels are pinned on explicitly so these cases are
+      // about the confirmation path and nothing else. The kill switches'
+      // own behaviour is covered in killswitch-production-config.test.ts.
+      env: { ...process.env, TELEPHONY_ENABLED: 'true', EMAIL_ENABLED: 'true' },
     });
   }
 

@@ -11,7 +11,10 @@
  *    app.ts:5523) validates and persists pings through
  *    `PgTechnicianLocationPingRepository`
  *    (src/telemetry/pg-technician-location-ping.ts:22) into
- *    `technician_location_pings`.
+ *    `technician_location_pings`, AND emits
+ *    `technician_location.batch_ingested` against the `technician` entity
+ *    (`emitLocationBatchAudit`, routes/technician-location.ts:106). Both legs
+ *    are exercised through the real router below.
  *  - NOT WIRED: the EVALUATION half. `computeDispatchLateness`
  *    (src/dispatch/lateness.ts:278) is the module's ONLY value export and has
  *    no caller anywhere under `src/`. The single import of that module,
@@ -36,6 +39,8 @@
  *   test/integration/lateness-from-truck-location-4-7.test.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import express, { Request, Response, NextFunction } from 'express';
+import request from 'supertest';
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { Pool } from 'pg';
@@ -50,6 +55,8 @@ import { PgTechnicianLocationPingRepository } from '../../src/telemetry/pg-techn
 import { createTechnicianLocationPing } from '../../src/telemetry/technician-location-ping';
 import { createAppointment } from '../../src/appointments/appointment';
 import { getDispatchBoardData, BoardQueryDependencies } from '../../src/dispatch/board-query';
+import { createTechnicianLocationRouter } from '../../src/routes/technician-location';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 /** Service address the fixture pings sit on top of (Phoenix). */
 const SITE = { lat: 33.4484, lng: -112.074 };
@@ -328,7 +335,67 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     expect(items.every((item) => item.lateness === undefined)).toBe(true);
   });
 
-  it('CURRENT: the audit trail reads back for the appointment through PgAuditRepository.findByEntity, and a location update writes NO audit row of its own', async () => {
+  it('CURRENT: ingestion through the PRODUCTION route emits technician_location.batch_ingested, readable back via findByEntity on the technician entity', async () => {
+    // Through the real router (`createTechnicianLocationRouter`, mounted at
+    // app.ts:5523) with the same `auditRepo` app.ts supplies — NOT the bare
+    // repository. `emitLocationBatchAudit` (routes/technician-location.ts:106)
+    // writes `technician_location.batch_ingested` against the TECHNICIAN
+    // entity, so a bare `insertMany` plus a query on some other entity type
+    // would return empty and prove nothing about the production path.
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: tenantA.tenant.userId,
+        canonicalUserId: tenantA.technicianId,
+        sessionId: 'row-4-7-session',
+        tenantId: tenantA.tenant.tenantId,
+        role: 'technician',
+      };
+      next();
+    });
+    app.use(
+      '/api/technician-location',
+      createTechnicianLocationRouter({ repository: pingRepo, auditRepo }),
+    );
+
+    const res = await request(app)
+      .post('/api/technician-location')
+      .send({
+        technicianId: tenantA.technicianId,
+        pings: [
+          {
+            clientPingId: crypto.randomUUID(),
+            lat: SITE.lat,
+            lng: SITE.lng,
+            recordedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+            source: 'gps',
+          },
+        ],
+      });
+    expect(res.status).toBe(201);
+
+    const technicianEvents = await auditRepo.findByEntity(
+      tenantA.tenant.tenantId,
+      'technician',
+      tenantA.technicianId,
+    );
+    expect(technicianEvents.map((e) => e.eventType)).toContain(
+      'technician_location.batch_ingested',
+    );
+    expect(technicianEvents.every((e) => e.tenantId === tenantA.tenant.tenantId)).toBe(true);
+
+    // The neighbour tenant reads none of it.
+    expect(
+      await auditRepo.findByEntity(
+        tenantB.tenant.tenantId,
+        'technician',
+        tenantA.technicianId,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('CURRENT: the appointment audit trail reads back, and NO lateness event has ever been emitted for it', async () => {
     const events = await auditRepo.findByEntity(
       tenantA.tenant.tenantId,
       'appointment',
@@ -336,20 +403,18 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     );
     expect(events.map((e) => e.eventType)).toContain('appointment.created');
     expect(events.every((e) => e.tenantId === tenantA.tenant.tenantId)).toBe(true);
-    // No lateness event was ever emitted for this appointment.
-    expect(events.map((e) => e.eventType).filter((t) => t.includes('late'))).toEqual([]);
-
-    // The pings themselves are unaudited — nothing under this entity type.
-    const pings = await pingRepo.listByAppointment(
+    // The absence that actually belongs to this row: ingestion IS audited (see
+    // the test above), but nothing downstream ever evaluates those pings, so no
+    // lateness/delay event exists on the appointment or the technician.
+    expect(events.map((e) => e.eventType).filter((t) => /late|delay/.test(t))).toEqual([]);
+    const technicianEvents = await auditRepo.findByEntity(
       tenantA.tenant.tenantId,
-      tenantA.appointmentId,
+      'technician',
+      tenantA.technicianId,
     );
-    const pingEvents = await auditRepo.findByEntity(
-      tenantA.tenant.tenantId,
-      'technician_location_ping',
-      pings[0].id,
-    );
-    expect(pingEvents).toHaveLength(0);
+    expect(
+      technicianEvents.map((e) => e.eventType).filter((t) => /late|delay/.test(t)),
+    ).toEqual([]);
 
     // The neighbour tenant reads none of tenant A's appointment audit rows.
     const crossTenant = await auditRepo.findByEntity(
