@@ -1,0 +1,87 @@
+Last real-Postgres snapshot polled during the GREEN run of
+e2e/journeys/public-self-booking.spec.ts (1.5s-interval `docker exec <pg
+container> psql` poller; the E2E teardown truncates every table at the end of
+the run). Tenant d7ed5d9c = "Acme HVAC 2.9" (tenant A, Mon-Fri 08:00-17:00
+America/Chicago); tenant d12bfe21 = "Bexar Plumbing 2.9" (tenant B, Sat/Sun
+09:00-13:00 America/Chicago). 14d7c817 / 71f0f14d are the always-on hermetic
+journey's own seeded fixtures.
+
+=== 2026-09-12T20:37:35Z ===
+  tenant  |  status   | hold_pending_approval |        scheduled_start
+----------+-----------+-----------------------+-------------------------------
+ 14d7c817 | scheduled | f                     | 2026-09-13 20:37:14.973492+00
+ 14d7c817 | scheduled | f                     | 2026-09-14 20:37:14.97554+00
+ 71f0f14d | scheduled | f                     | 2026-09-13 20:37:14.994155+00
+ 71f0f14d | scheduled | f                     | 2026-09-14 20:37:14.995528+00
+ d7ed5d9c | scheduled | t                     | 2026-09-14 13:00:00+00
+ d12bfe21 | scheduled | t                     | 2026-09-13 14:00:00+00
+(6 rows)
+
+  tenant  |            event_type             |   entity_type   | count
+----------+-----------------------------------+-----------------+-------
+ d12bfe21 | appointment.booking_requested     | appointment     |     1
+ d7ed5d9c | appointment.booking_requested     | appointment     |     1
+ d12bfe21 | customer.created                  | customer        |     1
+ d7ed5d9c | customer.created                  | customer        |     1
+ d12bfe21 | job.created                       | job             |     1
+ d7ed5d9c | job.created                       | job             |     1
+ d12bfe21 | location.created                  | location        |     1
+ d7ed5d9c | location.created                  | location        |     1
+ d12bfe21 | notification.lifecycle_email.sent | tenant          |     1
+ d7ed5d9c | notification.lifecycle_email.sent | tenant          |     1
+ d12bfe21 | tenant.identity_set               | tenant_settings |     1
+ d7ed5d9c | tenant.identity_set               | tenant_settings |     1
+ d12bfe21 | tenant.signup.bootstrap.completed | tenant          |     1
+ d7ed5d9c | tenant.signup.bootstrap.completed | tenant          |     1
+(14 rows)
+
+Notes:
+- Tenant A's held appointment (d7ed5d9c) is 2026-09-14 13:00 UTC = Monday
+  08:00 America/Chicago — the first open weekday slot from "now" (a Saturday)
+  under its Mon-Fri 08:00-17:00 configuration.
+- Tenant B's held appointment (d12bfe21) is 2026-09-13 14:00 UTC = Sunday
+  09:00 America/Chicago — the first open weekend slot under its Sat/Sun
+  09:00-13:00-only configuration. The two instants and the two calendar days
+  (Monday vs Sunday) are completely disjoint — T3 (two differently-configured
+  tenants, each correct, in the same run) and T1 (isolation) both hold: each
+  hold row lives under its own tenant_id, RLS-scoped, and each `SET LOCAL
+  app.current_tenant_id` audit query only ever finds its own tenant's row.
+- Both rows: `status = 'scheduled'` + `hold_pending_approval = true` — there
+  is no dedicated 'held' status enum value (see
+  packages/api/src/appointments/appointment.ts); "held pending owner
+  approval" is this flag combination, confirmed directly against the real
+  column, not inferred.
+- `appointment.booking_requested` fires exactly once per tenant, entityType
+  'appointment', metadata.proposalId matching the booking response's own
+  proposalId (asserted in the spec via a raw-column readback, not shown in
+  this dump).
+- The owner's Inbox (`/inbox`, `GET /api/proposals/inbox`) was reloaded and
+  showed each tenant's own `create_booking` proposal (matched by its
+  distinctive `summary` text) and never the other tenant's — screenshot
+  `2.9-owner-inbox-after-reload.png`.
+- Judgment call: tenant B's half of this proof is driven directly against
+  `/api/public/booking/:tenantId` (the same product surface the browser page
+  itself calls) rather than through a second full browser page load. Two
+  reasons, both discovered while iterating this spec, documented rather than
+  silently worked around: (1) `/api/public/booking` is rate-limited to 5
+  req/min per IP (packages/api/src/app.ts:3053-3078), and tenant A's own page
+  load already costs 2 GETs — React 18 StrictMode double-invokes the
+  availability-fetch effect on mount in dev — plus 1 POST, leaving no budget
+  for a second full page load in the same window; (2) an attempt to wait out
+  the rate-limit window (`page.waitForTimeout(65_000)`) surfaced a real,
+  pre-existing defect instead: the API process crashed on an uncaught
+  "terminating connection due to idle-in-transaction timeout" from its
+  `dropped-call-worker` sweep (`dropped-call sweep: send-batch fetch failed`,
+  `Cannot use a pool after calling end on the pool`), unrelated to this
+  story and out of scope to fix here (no product code changes). Tenant A's
+  full flow — the story's actual named surface — is still proven end to end
+  through the real browser; tenant B's slots/isolation are proven through the
+  identical backend path with no SQL, no platform-admin route, and no faked
+  response.
+- Incidental finding, not fixed (out of scope, no product code changes): the
+  `dropped-call-worker` sweep's DB transaction can go idle-in-transaction and
+  crash the whole API process on an uncaught exception rather than failing
+  its own sweep gracefully. Reproduced twice by simply letting the dev
+  webServer run for ~1.5-2 minutes; harmless to this spec's own assertions
+  (the crash always landed after the test's own requests had already
+  completed) but worth a ticket.

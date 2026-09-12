@@ -97,9 +97,12 @@ grep -nE "tenantB|otherTenant|secondTenant|cross-tenant|another tenant|across te
 ## Row 1.11 — Team invitations: Clerk-down persistence, last-owner guard, isolation
 
 G1 (#1006): demoted to **3** — T0, no audit leg. Same file as 1.1.
-(Note: `/accept-invitation`'s own missing-route defect, tracked separately
-in the PRD's row narrative, is out of this lane's scope — no product code
-was touched here.)
+(Note: the PRD's row narrative originally flagged `/accept-invitation` as a
+missing web route, but that was already fixed by #1010 — confirmed against
+the current tree: `packages/web/src/routes.ts:286` registers the route,
+`AcceptInvitationPage` implements it, and `e2e/journeys/accept-invitation
+.spec.ts` exercises it. No 404 gap remains; no product code was touched in
+this lane regardless.)
 
 **File:** `packages/api/test/integration/clerk-owner-membership.test.ts`
 (second `describe` block, same file as row 1.1)
@@ -589,11 +592,13 @@ torn down as part of this report.
 
 ## Not done / judgment calls
 
-- **1.11 scope narrowing:** the PRD narrative for 1.11 also flags
-  `/accept-invitation` as a missing web route (a 404 on every invite email).
-  That is a product-code gap (`packages/web`), explicitly out of this
-  TEST-ONLY lane's scope (SCOPE says "Do NOT touch product code"). Not
-  addressed here; #1010 (referenced in the PRD row) is the tracked fix.
+- **1.11 scope correction (post-review):** the PRD narrative for 1.11
+  originally flagged `/accept-invitation` as a missing web route (a 404 on
+  every invite email). That was stale — #1010 already added it (route +
+  `AcceptInvitationPage` + a passing e2e spec), confirmed against the
+  current tree. This lane's earlier draft repeated the stale claim; it is
+  corrected here rather than silently fixed, per Codex review on PR #1074.
+  No product code was touched in this lane either way.
 - **1.4 has no audit leg by design**, not an oversight — see the row's
   section above for the grep basis (`GET /status` never calls
   `auditRepo.create`).

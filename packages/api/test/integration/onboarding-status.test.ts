@@ -105,6 +105,7 @@ describe('GET /api/onboarding/status', () => {
     // 'identity' per the very first test in this file.
     const beforeB = await request(app).get('/api/onboarding/status');
     expect(beforeB.body.currentStep).toBe('identity');
+    expect(beforeB.body.isComplete).toBe(false);
 
     // Fully complete tenant B's onboarding (mirrors the isComplete=true
     // fixture above), driven under tenant B's own auth context.
@@ -131,8 +132,12 @@ describe('GET /api/onboarding/status', () => {
     expect(asB.body.isComplete).toBe(true);
     currentTenant = tenantA;
 
+    // Compare the FULL response body (all 7 step statuses/metadata, not
+    // just currentStep+isComplete) — tenant A has no identity row so
+    // currentStep/isComplete alone would stay 'identity'/false even if a
+    // leak corrupted one of the OTHER six steps' derived facts (pack,
+    // phone, billing, ai_check, test call) (Codex review, PR #1074).
     const afterB = await request(app).get('/api/onboarding/status');
-    expect(afterB.body.currentStep).toBe('identity');
-    expect(afterB.body.isComplete).toBe(false);
+    expect(afterB.body).toEqual(beforeB.body);
   });
 });

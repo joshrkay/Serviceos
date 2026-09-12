@@ -156,10 +156,14 @@ named, not answered — see this file's own rule at the top.
   research #1004), or does some other proof satisfy 5 for a phone-surface
   row? **Until decided:** 2.7's rung is Fable's call per the ticket's
   resolution comment; this lane does not claim 5.
-
 ### 3.8 customer confirmation — what happens when no delivery provider is configured? (from the dormant-rows lane, issue #1077)
-- **What:** the confirmation path IS wired (`TransactionalCommsService` as `schedulingNotifier`, `app.ts:1910`) and proven at real Postgres — but when `createMessageDeliveryProvider` resolves mode `'none'` (no Twilio and no SendGrid credentials, which is production today with the EMAIL/TELEPHONY launch flags off) the handler falls back to a no-op and an approved booking produces no dispatch row, no audit event and no owner-visible signal. A second, never-constructed implementation (`AppointmentConfirmationNotifier`) duplicates the live one.
-- **Josh's call:** record a failed dispatch row / emit an audit event / refuse to execute / accept and document; and delete or promote the dead class.
+- **What:** the confirmation path IS wired (`TransactionalCommsService` as `schedulingNotifier`, `app.ts:1910`) and proven at real Postgres — but there are **four distinct boots on which an approved booking produces no dispatch row, no audit event and no owner-visible signal**, and they are NOT the same failure. Corrected in review (PR #1076): an earlier version of this entry said the launch flags cause the no-op fallback. They do not — `TELEPHONY_ENABLED`/`EMAIL_ENABLED` never reach `createMessageDeliveryProvider`.
+  1. **mode `'none'`** — no Twilio and no SendGrid credentials at all: `messageDelivery` is null, the handler falls back to `NoopSchedulingConfirmationNotifier` (`handlers.ts:381`). *This is the only one that involves the no-op.*
+  2. **both launch flags off, credentials present** — the factory returns a NON-NULL provider (the flags are invisible to it); `GatedMessageDelivery` then suppresses every send at runtime and `sendCustomerMessage` swallows it per channel. Live notifier, no rows.
+  3. **`autoSendAppointmentReminders = false`** — owner-reachable from settings; one flag governs both reminders and booking confirmations.
+  4. **one credential leg only** — SMS creds and no SendGrid boots a non-null provider whose email leg throws at send time, so a customer reachable only by email gets nothing (proven at real Postgres, tenant `Deadleg`).
+  A second, never-constructed implementation (`AppointmentConfirmationNotifier`) duplicates the live one and carries the same (3) early return.
+- **Josh's call:** record a failed dispatch row / emit an audit event / refuse to execute / accept and document — **and note a fix aimed only at (1) leaves (2), (3) and (4) untouched**; plus delete or promote the dead class.
 - **Until decided:** row 3.8 is graded on the wired path (4, T1) with the condition named in its cell; #1077 holds the analysis.
 
 ### 4.7 lateness from truck location — wire or retire? (from the dormant-rows lane, issue #1079)

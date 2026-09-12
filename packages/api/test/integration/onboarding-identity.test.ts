@@ -158,6 +158,15 @@ describe('PUT /api/onboarding/identity', () => {
       serviceAreaRadius: 40,
     });
 
+    // Full row snapshot (not just business_name + service_area_radius) —
+    // a regression that leaks tenant B's business_hours, job buffer,
+    // hourly rate, or timezone into tenant A's row while leaving those two
+    // columns alone would otherwise slip past this test (Codex review,
+    // PR #1074).
+    const rowABefore = (
+      await pool.query('SELECT * FROM tenant_settings WHERE tenant_id=$1', [tenantA.tenantId])
+    ).rows[0];
+
     // Act as tenant B and upsert its OWN identity, including a DIFFERENT
     // serviceAreaRadius and an explicit null — this must not touch tenant A.
     currentTenant = tenantB;
@@ -176,12 +185,12 @@ describe('PUT /api/onboarding/identity', () => {
       serviceAreaRadius: null,
     });
 
-    const rowA = await pool.query(
-      'SELECT business_name, service_area_radius FROM tenant_settings WHERE tenant_id=$1',
-      [tenantA.tenantId],
-    );
-    expect(rowA.rows[0].business_name).toBe('Tenant A Co');
-    expect(rowA.rows[0].service_area_radius).toBe(40);
+    const rowAAfter = (
+      await pool.query('SELECT * FROM tenant_settings WHERE tenant_id=$1', [tenantA.tenantId])
+    ).rows[0];
+    expect(rowAAfter).toEqual(rowABefore);
+    expect(rowAAfter.business_name).toBe('Tenant A Co');
+    expect(rowAAfter.service_area_radius).toBe(40);
 
     // Restore tenant A context for the remaining assertions.
     currentTenant = tenantA;
