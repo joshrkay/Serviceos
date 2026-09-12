@@ -54,6 +54,7 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgTechnicianLocationPingRepository } from '../../src/telemetry/pg-technician-location-ping';
 import { createTechnicianLocationPing } from '../../src/telemetry/technician-location-ping';
 import { createAppointment } from '../../src/appointments/appointment';
+import { assignTechnician } from '../../src/appointments/assignment';
 import { getDispatchBoardData, BoardQueryDependencies } from '../../src/dispatch/board-query';
 import { createTechnicianLocationRouter } from '../../src/routes/technician-location';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -165,6 +166,21 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
       updatedAt: new Date(),
     });
 
+    // A real technician user — `assignTechnician` refuses anything else
+    // ("Assigned user must have technician role"), and the router submits as
+    // this person. createTestTenant's own user is the owner.
+    const technicianId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role) VALUES ($1, $2, $3, $4, $5)`,
+      [
+        technicianId,
+        tenant.tenantId,
+        technicianId,
+        `tech-${technicianId.slice(0, 8)}@example.com`,
+        'technician',
+      ],
+    );
+
     // An appointment that STARTED 90 minutes ago and should have ended 30
     // minutes ago — the shape the evaluator would call late.
     const scheduledStart = new Date(Date.now() - 90 * 60 * 1000);
@@ -184,6 +200,22 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
       'system',
     );
 
+    // The technician must actually be ASSIGNED to this appointment, or the
+    // router's assignment gate strips the appointmentId off every ping below
+    // (routes/technician-location.ts:77) and the dwell fixture stops being
+    // about this visit at all.
+    await assignTechnician(
+      {
+        tenantId: tenant.tenantId,
+        appointmentId: appointment.id,
+        technicianId,
+        technicianRole: 'technician',
+        isPrimary: true,
+        assignedBy: tenant.userId,
+      },
+      assignmentRepo,
+    );
+
     const dateStr = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/Phoenix',
     }).format(scheduledStart);
@@ -192,29 +224,80 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
       tenant,
       customerId,
       appointmentId: appointment.id,
-      technicianId: tenant.userId,
+      technicianId,
       dateStr,
     };
   }
 
-  /** Dwell pings parked on the service location — the geofence/dwell signal. */
-  async function seedDwellPings(seeded: SeededTenant, count = 6): Promise<number> {
-    const pings = Array.from({ length: count }, (_, i) =>
-      createTechnicianLocationPing({
+  /**
+   * An express app wired the way `app.ts:5521-5533` wires the location router:
+   * the real repository, the assignment gate, and the audit repo. Auth is the
+   * technician submitting for themselves.
+   */
+  function productionLocationApp(seeded: SeededTenant) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: seeded.tenant.userId,
+        canonicalUserId: seeded.technicianId,
+        sessionId: 'row-4-7-session',
         tenantId: seeded.tenant.tenantId,
-        technicianId: seeded.technicianId,
-        clientPingId: crypto.randomUUID(),
-        appointmentId: seeded.appointmentId,
-        lat: SITE.lat + i * 0.00001,
-        lng: SITE.lng + i * 0.00001,
-        accuracyMeters: 8,
-        speedMps: 0,
-        recordedAt: new Date(Date.now() - (count - i) * 5 * 60 * 1000),
-        source: 'mobile',
+        role: 'technician',
+      };
+      next();
+    });
+    app.use(
+      '/api/technician-location',
+      createTechnicianLocationRouter({
+        repository: pingRepo,
+        // The gate app.ts supplies. Without it `sanitizeAppointmentIds`
+        // (routes/technician-location.ts:50) is a passthrough and the fixture
+        // would carry an appointmentId production would have stripped.
+        isAppointmentAssignedToTechnician: async (tenantId, appointmentId, technicianId) => {
+          const assignments = await assignmentRepo.findByAppointment(tenantId, appointmentId);
+          return assignments.some((a) => a.technicianId === technicianId);
+        },
+        auditRepo,
       }),
     );
-    const written = await pingRepo.insertMany(seeded.tenant.tenantId, pings);
-    return written.length;
+    return app;
+  }
+
+  /**
+   * Dwell pings parked on the service location — the geofence/dwell signal —
+   * ingested through the PRODUCTION router, not `insertMany`.
+   *
+   * Why it matters that these go through the route: `app.ts` supplies
+   * `isAppointmentAssignedToTechnician`, so a ping naming an appointment the
+   * submitting technician is NOT assigned to has its `appointmentId` stripped
+   * (routes/technician-location.ts:77). Inserting directly bypasses that, and
+   * the fixture would hold appointment-linked pings production could never
+   * produce — so an evaluator reading pings by appointment would find nothing
+   * real, and the desired-state test could stay red even once the row is
+   * correctly wired. The appointment is assigned to this technician in
+   * `beforeAll`, so the ids survive the gate.
+   */
+  async function seedDwellPings(seeded: SeededTenant, count = 6): Promise<number> {
+    const res = await request(productionLocationApp(seeded))
+      .post('/api/technician-location')
+      .send({
+        technicianId: seeded.technicianId,
+        pings: Array.from({ length: count }, (_, i) => ({
+          clientPingId: crypto.randomUUID(),
+          appointmentId: seeded.appointmentId,
+          lat: SITE.lat + i * 0.00001,
+          lng: SITE.lng + i * 0.00001,
+          accuracyMeters: 8,
+          speedMps: 0,
+          recordedAt: new Date(Date.now() - (count - i) * 5 * 60 * 1000).toISOString(),
+          source: 'mobile',
+        })),
+      });
+    expect(res.status).toBe(201);
+    return (
+      await pingRepo.listByAppointment(seeded.tenant.tenantId, seeded.appointmentId)
+    ).length;
   }
 
   /**
@@ -243,6 +326,14 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     // zero pings and fail before reaching the behaviour it claims to pin.
     expect(await seedDwellPings(tenantA, 6)).toBe(6);
     expect(await seedDwellPings(tenantB, 4)).toBe(4);
+    // The appointment ids SURVIVED the router's assignment gate — every ping
+    // still names the visit it was dwelling at. If the assignment above were
+    // dropped, these would come back 0 and the fixture would be silently
+    // appointment-less.
+    expect(
+      await pingRepo.listByAppointment(tenantA.tenant.tenantId, tenantA.appointmentId),
+    ).toHaveLength(6);
+
     // The service location really carries the coordinates the pings dwell on,
     // so the fixture is a geofence signal and not merely a set of rows.
     const [site] = await locationRepo.findByCustomer(
@@ -383,6 +474,38 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     expect(technicianEvents.map((e) => e.eventType)).toContain(
       'technician_location.batch_ingested',
     );
+
+    // POSITIVE CONTROL for the assignment gate. The dwell fixture's ids
+    // surviving proves nothing on its own — they would survive an ABSENT gate
+    // too. So submit a ping naming an appointment this technician is NOT
+    // assigned to: the location is still accepted, but `sanitizeAppointmentIds`
+    // (routes/technician-location.ts:77) must strip the appointmentId. If this
+    // comes back linked, the gate is not wired in this harness and the dwell
+    // fixture is not production-shaped.
+    const unassignedClientPingId = crypto.randomUUID();
+    const unassigned = await request(productionLocationApp(tenantA))
+      .post('/api/technician-location')
+      .send({
+        technicianId: tenantA.technicianId,
+        pings: [
+          {
+            clientPingId: unassignedClientPingId,
+            appointmentId: tenantB.appointmentId, // never assigned to this tech
+            lat: SITE.lat,
+            lng: SITE.lng,
+            recordedAt: new Date().toISOString(),
+            source: 'gps',
+          },
+        ],
+      });
+    expect(unassigned.status).toBe(201);
+    const { rows: strippedRows } = await pool.query(
+      `SELECT appointment_id FROM technician_location_pings
+        WHERE tenant_id = $1 AND client_ping_id = $2`,
+      [tenantA.tenant.tenantId, unassignedClientPingId],
+    );
+    expect(strippedRows).toHaveLength(1);
+    expect(strippedRows[0].appointment_id).toBeNull();
     expect(technicianEvents.every((e) => e.tenantId === tenantA.tenant.tenantId)).toBe(true);
 
     // The neighbour tenant reads none of it.

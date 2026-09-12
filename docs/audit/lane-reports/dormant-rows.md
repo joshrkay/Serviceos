@@ -502,6 +502,51 @@ technician**, because nothing evaluates the pings.
 PROVEN-REAL-DB** — the write and its audit event are both proven. It does not
 move the row: 4.7 turns on the evaluation half, which is still absent.
 
+### Review round 4 — the dwell fixture was not production-shaped (Codex, P2)
+
+Correct, and the same class of defect as the coordinates one — a fixture that
+looks right and could not have come from production. `app.ts:5528-5531` supplies
+`isAppointmentAssignedToTechnician` to the location router, so
+`sanitizeAppointmentIds` (`routes/technician-location.ts:50`) STRIPS the
+`appointmentId` from any ping naming an appointment the submitting technician is
+not assigned to. Neither seeded appointment had an assignment, and the pings were
+inserted directly via `insertMany` — so the fixture held appointment-linked pings
+production could never produce, and an evaluator reading pings by appointment
+would find nothing. The `it.fails` could have stayed red after the row was
+correctly wired.
+
+Fixed on three fronts:
+- each tenant now seeds a **real technician user** (`assignTechnician` refuses any
+  other role) and a **primary assignment** on the appointment
+- `seedDwellPings` ingests through the **production router** — the same
+  repository, assignment gate and audit repo `app.ts` wires — not `insertMany`
+- `beforeAll` asserts the six pings came back still linked to the appointment,
+  i.e. they survived the gate
+
+And, because "the ids survived" would also be true of an ABSENT gate, a
+**positive control**: a ping naming an appointment this technician is not
+assigned to is accepted (201) with its `appointment_id` stripped to NULL, read
+raw from the table. If the gate ever stops being wired in this harness, that
+assertion fails.
+
+### Review round 4 — the two PRD cells, corrected (Codex, two P2s)
+
+Both cells were wrong, both traceable to this report, and Codex asked for them to
+be fixed rather than only flagged. Corrected — **factual clauses only. Every rung
+number and tenant grade is exactly as Fable set it** (3.8 stays `4 (T1)`, 4.7
+stays `2 — dormant, pinned`). Codex's alternative for 3.8, "or lower the
+unconditional criterion's grade", is a rung judgement and was NOT taken; it stays
+Fable's.
+
+- **3.8** — the qualification now reads "holds only where a delivery provider is
+  configured **and** the tenant has not set `autoSendAppointmentReminders =
+  false`", and the note body carries the T3 evidence plus the point that this
+  second skip is owner-reachable.
+- **4.7** — "no audit event" replaced with what the router actually does
+  (`technician_location.batch_ingested` on the `technician` entity, ingestion leg
+  PROVEN-REAL-DB), naming the correction and what the absent audit really is
+  (lateness/delay, on either entity).
+
 ### Judgment calls
 
 - The structural test asserts on the *symbol*, not the import specifier. `board-query.ts`
