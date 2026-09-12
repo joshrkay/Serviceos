@@ -893,14 +893,35 @@ Full 8-file touched-file suite re-run together afterward: 40/40 passing,
 no regressions. `tsc --noEmit -p tsconfig.json` clean for both changed
 files.
 
+**Seventh round (`3760245`):** Codex's re-review on `dab9c23` raised one
+more finding, this lane's row (fixed):
+
+- **I10 (P2, fixed):** `live-call-booking-timezone.test.ts` wires a real
+  `PgAuditRepository` into `ProposalExecutor` for every `approveAndExecute`
+  call, but never read or asserted an audit row anywhere in the file —
+  only appointment rows. Under §8.0, PROVEN-REAL-DB requires both the
+  write and its audit event; a regression that stopped appointment
+  execution from emitting `proposal.executed` would have left all three
+  tests in this file green. Added `proposal.executed` assertions (via
+  `PgAuditRepository.findByEntity`) at all three call sites — the
+  live-call leg, the memo-path parity leg, and both T3 tenants — plus
+  cross-tenant audit-isolation checks for the T3 pair. RED: temporarily
+  flipped the live-call leg's assertion to expect no audit row — failed
+  as expected (`expected false, got true`). GREEN after restoring the
+  correct assertion: 3/3 passing against real Postgres.
+
+Full 8-file touched-file suite re-run together afterward: 40/40 passing,
+no regressions. `tsc --noEmit -p tsconfig.json` clean for both changed
+files.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus six follow-up commits (`cfe12f1`,
-  `b033257`, `fdb5257`, `3809785`, `0b2ae16`, `dab9c23`) fixing the ten
-  Codex findings above across six review rounds.
+  this report committed, plus seven follow-up commits (`cfe12f1`,
+  `b033257`, `fdb5257`, `3809785`, `0b2ae16`, `dab9c23`, `3760245`)
+  fixing the eleven Codex findings above across seven review rounds.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
