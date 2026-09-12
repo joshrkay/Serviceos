@@ -54,3 +54,18 @@ O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered
 - **What:** `TechnicianAssignmentNotifier` is now registered (PR #1029). Every assign/unassign/reassign texts the technician whenever a delivery provider is wired; the only switches are the global `SMS_ENABLED` kill switch and whether the tech has a mobile on file. Dispatch churn sends one text per hop.
 - **Josh's call:** add a per-tenant `notifyTechniciansBySms` (default on or off?) and/or a churn window? Push notifications are unaffected (per-user mutes apply).
 - **Until decided:** nothing to build; issue #1033 holds the analysis.
+
+### §8.5 payments — three blockers surfaced by the #1022 lane (branch `cloud/payments-8-8`, 2026-09-12)
+- **Saving a card on file writes no audit event** (engineering gap that needs a money-code change, so no lane on
+  this map may close it): `packages/api/src/webhooks/routes.ts:1074-1139` stores the PaymentMethod (ids, brand,
+  last4, expiry, default flag, Connect account) and records it with `logger.info` only. No
+  `entityType: 'payment_method'` event exists anywhere in `src`. **Row waiting:** §8.5's stored-card half — its
+  move is *the audit read-back*, and there is nothing to read; it stays where the #1009 entry audit put it
+  (4−, T1, no audit) until someone lands the emission in a money-class branch. Full evidence:
+  `docs/audit/lane-reports/1022-payments.md` (row 8.5b).
+- **Stripe test-mode credentials** (none in the cloud sandbox, no recorded cassettes in the repo): `chargeOffSession`
+  (`src/payments/stripe-saved-card.ts:184`) is proven only against a hand-written `StripeFetch` stub. **Row
+  waiting:** §8.5's off-session-charge half — a mocked client is not proof, so it stays at 3.
+- **Card-present hardware + Terminal credentials:** `src/payments/stripe-terminal.ts` is likewise stubbed-fetch
+  only (`test/payments/stripe-terminal.test.ts`). Per #1022 no Terminal proof was built; shares #1018's 5.5
+  finding. **Row waiting:** §8.5's card-present half — stays at 3.
