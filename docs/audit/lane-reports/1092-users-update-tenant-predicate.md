@@ -353,6 +353,65 @@ One audit row in total, under tenant A, for tenant A's own successful edit.
 **No audit row under any victim tenant** — the four victim tenants have no
 `audit_events` rows at all, so they do not appear in the grouped result.
 
+## 7b. A read-after-commit race in this test's own control leg (fixed)
+
+PR CI on `41d02530` failed — in **this PR's new test**, not anywhere else:
+
+```
+ FAIL  test/integration/users-update-tenant-predicate.test.ts > #1092 … >
+       (c) control — A's owner PATCHing A's own dispatcher still succeeds and audits
+AssertionError: expected 'dispatcher' to be 'technician' // Object.is equality
+
+Expected: "technician"
+Received: "dispatcher"
+
+ ❯ test/integration/users-update-tenant-predicate.test.ts:242:32
+
+ Test Files  1 failed | 256 passed (257)
+      Tests  1 failed | 1500 passed | 7 expected fail | 1 skipped (1509)
+```
+
+**Root cause, not a flake.** Under `/api` the `withTenantTransaction`
+middleware COMMITs on `res.finish` — *after* the response is flushed
+(`src/middleware/tenant-context.ts:24` and `:239`; the same asynchronous
+response-time COMMIT that `routes/users.ts`'s account-deletion handler
+documents at length). supertest resolves on the client side, so the raw
+`SELECT` that leg (c) issued the instant the PATCH returned 200 ran on a
+different pool connection and could still observe the pre-update row. The
+assertion won that race on this machine and lost it on the slower CI runner.
+
+**Fix:** a `readCommitted(read, settled)` helper that polls (25 ms, 10 s cap)
+until the committed state is visible and otherwise returns the last value
+seen, so a genuine failure still reports the real row. Applied to leg (c)'s
+row read and its audit read — the two reads that follow a successful write.
+Nothing was weakened: the value must still land in Postgres, it just isn't
+required to have landed before the client socket closed. The cross-tenant
+legs are untouched, because their primary detector is the response status (a
+regression answers 200, not 404, and fails before any row is read).
+
+**Re-verified both directions after the change**, since the test itself moved:
+
+```
+# product fix reverted (git checkout 3919dd9 -- packages/api/src/users/pg-user.ts)
+ × (a) … [RLS_RUNTIME_ROLE=false]
+ × (b) … [RLS_RUNTIME_ROLE=false]
+ Test Files  1 failed (1)
+      Tests  2 failed | 4 passed (6)
+
+# fix restored
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+```
+
+and the whole suite, exactly as CI runs it (`npm run test:integration` →
+`RLS_RUNTIME_ROLE=true vitest run --config vitest.integration.config.ts`):
+
+```
+ Test Files  257 passed (257)
+      Tests  1501 passed | 7 expected fail | 1 skipped (1509)
+   Duration  214.62s
+```
+
 ## 8. Not done / notes for the reviewer
 
 - **Not fixed:** `src/settings/pg-pack-activation.ts:108` (tenant-less

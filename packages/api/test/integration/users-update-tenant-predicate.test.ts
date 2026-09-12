@@ -56,6 +56,36 @@ function bearerFor(clerkSub: string): string {
 }
 
 /**
+ * Read until the committed state is visible, or give up and hand back the last
+ * value seen so the caller's own assertion reports the real row.
+ *
+ * Necessary because under `/api` the `withTenantTransaction` middleware COMMITs
+ * on `res.finish` (middleware/tenant-context.ts:24, 239) — i.e. AFTER the
+ * response has been flushed. supertest resolves on the client side, so a raw
+ * read issued the instant a PATCH returns 200 runs on a different connection
+ * and can legitimately still see the pre-update row. Polling here removes that
+ * ordering race without weakening the assertion: the value must genuinely land
+ * in Postgres, it just isn't required to have landed before the client's socket
+ * closed.
+ *
+ * Only the POSITIVE leg needs this. The cross-tenant legs assert that a row did
+ * NOT change, and their primary detector is the response status (a regression
+ * returns 200, not 404, and fails before the row is ever read).
+ */
+async function readCommitted<T>(
+  read: () => Promise<T>,
+  settled: (value: T) => boolean,
+  timeoutMs = 10_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (settled(value) || Date.now() >= deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+/**
  * Run `fn` with `RLS_RUNTIME_ROLE` pinned. `isRlsRuntimeRoleEnabled()` reads
  * `process.env` at query time (a deliberate raw read — see its doc comment), so
  * toggling around a request is honored by the already-booted app.
@@ -236,15 +266,23 @@ describe('#1092 — PgUserRepository.update is scoped to the tenant', () => {
       expect(res.body.role).toBe('technician');
       expect(res.body.tenantId).toBe(tenantA.tenantId);
 
-      const row = await pool.query(`SELECT role, first_name, tenant_id FROM users WHERE id = $1`, [
-        dispatcherOfA,
-      ]);
+      const row = await readCommitted(
+        () =>
+          pool.query(`SELECT role, first_name, tenant_id FROM users WHERE id = $1`, [
+            dispatcherOfA,
+          ]),
+        (r) => r.rows[0].role === 'technician',
+      );
       expect(row.rows[0].role).toBe('technician');
       expect(row.rows[0].first_name).toBe('Dana');
       expect(row.rows[0].tenant_id).toBe(tenantA.tenantId);
 
       // The audit row is read back through the REAL repository, under tenant A.
-      const events = await auditRepo.findByEntity(tenantA.tenantId, 'user', dispatcherOfA);
+      // Same request transaction, so the same commit ordering applies.
+      const events = await readCommitted(
+        () => auditRepo.findByEntity(tenantA.tenantId, 'user', dispatcherOfA),
+        (e) => e.some((event) => event.eventType === 'user.updated'),
+      );
       expect(events.some((e) => e.eventType === 'user.updated')).toBe(true);
     });
   });
