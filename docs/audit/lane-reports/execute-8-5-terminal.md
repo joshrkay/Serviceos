@@ -241,6 +241,44 @@ The ticket's "no `payment_intents` row" resolves to: the card_present intent exi
 
 ---
 
+**F5 — 🚨 A CONNECTED ACCOUNT CAN MARK ANOTHER TENANT'S INVOICE PAID. `event.account` is never validated.** *(Raised by Codex on PR #1097, verified against source, pinned by an `it.fails` test.)*
+
+The settlement branch (`webhooks/routes.ts:1519`) reads `pi.metadata.tenant_id` and `pi.metadata.invoice_id` and **nothing else**. `event.account` — the connected account the money actually landed in — is never compared against that tenant's own `tenants.stripe_connect_account_id`. The only `event.account` read in the file (`:1095`) is the unrelated `payment_method.attached` branch. The HMAC check does not help: it attests that *Stripe* sent the event, not whose account earned it.
+
+Any tenant holding a connected account on this platform can therefore create a PaymentIntent **on their own account** carrying a neighbour's `tenant_id` + `invoice_id` in metadata. Stripe delivers a genuine, correctly-signed `payment_intent.succeeded`, and this handler credits the neighbour's invoice while the money sits in the attacker's Stripe balance.
+
+The `it.fails` leg proves it at real Postgres, with the starkest victim available — a tenant that **never enabled Connect at all**:
+
+```
+ ✓ … > PRODUCT DEFECT: a connected account can settle ANOTHER tenant's invoice — event.account is never validated 45ms
+ Tests  7 passed | 1 expected fail (8)
+```
+
+```
+               tenant               | invoice_number | status | amount_paid_cents | amount_due_cents
+------------------------------------+----------------+--------+-------------------+------------------
+ A (VICTIM — never enabled Connect) | INV-e7effb0a   | open   |                 0 |            24500
+ A (VICTIM — never enabled Connect) | INV-280fef96   | open   |                 0 |            24500
+ A (VICTIM — never enabled Connect) | INV-25f6cebc   | paid   |             24500 |                0   ← credited by tenant B's account
+
+        check         | amount_cents |  status   |       reference_number        |   created_by
+----------------------+--------------+-----------+-------------------------------+----------------
+ VICTIM payments rows |        24500 | completed | pi_term_attacker_7d7a0eb66ddd | stripe_webhook
+
+       check       |       event_type       | actor_role
+-------------------+------------------------+------------
+ VICTIM audit rows | payment.recorded       | system
+ VICTIM audit rows | invoice.status_changed | system
+```
+
+A $245.00 invoice reads **paid**, with a completed payments row and a full audit trail saying the money arrived. It did not.
+
+**Not fixed here** — `webhooks/routes.ts` is money code and outside this lane's scope (the brief permits a product fix only on the 409 path, in `routes/terminal.ts` / `payments/stripe-terminal.ts`). The assertions in the `it.fails` leg are what the product *should* do, so it flips green by itself once the handler validates the account. **Needs an issue and a decision from Josh.** The likely fix is small — resolve the tenant's `stripe_connect_account_id` and refuse (or skip) when a connected-origin event's `account` does not match — but it is a money-path change with a blast radius across every settlement branch, including the platform-origin events where `event.account` is absent by design.
+
+**This also corrects the T1 claim on the settlement leg in §3.** The T1 leg proves the *weak* cross-tenant case (one tenant's id paired with another's invoice, which the tenant-scoped lookup rejects for free). The consistent-pair-with-foreign-account case is **not** isolated, and now has a failing test saying so.
+
+**F6 — the file does not exercise `createApp()`.** *(Codex, P2 — correct.)* The PRD stamp said these routes run "through `createApp()`"; they do not. The test mounts the real `createTerminalRouter` with the production wiring copied from `app.ts:5122`, injects `req.auth`, and supplies deps directly. A regression in the production mount, in the env-based Stripe configuration, or in `app.ts`'s dependency wiring would leave this file green. The PRD cell has been corrected to say so rather than restated. §1 of this report was already accurate on this point; the stamp was not.
+
 ## 6. Research (report-only, nothing run against Stripe)
 
 **Q: does Stripe provide a simulated Terminal reader / test helpers usable server-side?** **Yes**, and it needs no hardware and no SDK — plain REST, which is all this repo speaks (F4).

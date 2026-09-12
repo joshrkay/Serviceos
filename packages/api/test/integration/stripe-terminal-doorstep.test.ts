@@ -726,4 +726,64 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       await auditRepo.findByEntity(noConnect.tenantId, 'invoice', invoiceId),
     ).toEqual([]);
   });
+
+  // ───────────── PRODUCT DEFECT — pinned, not fixed here ─────────────
+  //
+  // Raised by Codex on PR #1097 and verified against source. The leg above is
+  // the WEAK cross-tenant case: it pairs one tenant's id with another's
+  // invoice, which the tenant-scoped lookup rejects for free. The case that
+  // matters is a *consistent* pair — the victim's own tenant_id AND the
+  // victim's own invoice_id — arriving on a connected-account event whose
+  // `event.account` belongs to SOMEBODY ELSE.
+  //
+  // `webhooks/routes.ts:1519` reads `pi.metadata.tenant_id` / `.invoice_id`
+  // and nothing else: `event.account` is never compared against the tenant's
+  // own `tenants.stripe_connect_account_id`. (The only `event.account` read in
+  // the file, `:1095`, is the payment_method.attached branch.) Stripe signs
+  // the delivery with OUR platform webhook secret, so the signature check
+  // passes — it attests that Stripe sent it, not whose account earned it.
+  //
+  // Consequence: any tenant with a connected account on this platform can
+  // create a card_present (or any) PaymentIntent on their OWN account carrying
+  // a neighbour's tenant_id + invoice_id in metadata. Stripe delivers a
+  // genuine, correctly-signed `payment_intent.succeeded`, and this handler
+  // marks the neighbour's invoice PAID while the money sits in the attacker's
+  // Stripe balance. The victim below never even enabled Connect.
+  //
+  // `it.fails` per the repo convention (cf. i3-voice-approval-challenge-lock,
+  // #1051): the assertions are what the product SHOULD do, so this goes green
+  // by itself the day the handler validates the account. Not fixed in this
+  // lane — `webhooks/routes.ts` is money code and out of its scope. Surfaced
+  // on the PR and in docs/audit/lane-reports/execute-8-5-terminal.md.
+  it.fails(
+    'PRODUCT DEFECT: a connected account can settle ANOTHER tenant\'s invoice — event.account is never validated',
+    async () => {
+      // The victim is the tenant that never enabled Connect at all.
+      const victimInvoiceId = await seedOpenInvoice(noConnect);
+      expect((await connectService.getAccount(noConnect.tenantId)).accountId).toBeNull();
+
+      // A capture on the OTHER tenant's connected account, whose metadata
+      // names the victim's own tenant and the victim's own invoice.
+      const eventId = `evt_${randomUUID()}`;
+      const attackerIntentId = `pi_term_attacker_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+      const event = terminalSucceededEvent(
+        eventId,
+        attackerIntentId,
+        noConnect.tenantId,
+        victimInvoiceId,
+      );
+      expect((event as { account: string }).account).toBe(CONNECT_ACCOUNT_ID);
+
+      await postSignedStripe(event);
+
+      // WHAT SHOULD HAPPEN — the event is refused or skipped and nothing moves.
+      // WHAT HAPPENS TODAY — the invoice is 'paid' and a payments row exists.
+      const victimInvoice = await invoiceRepo.findById(noConnect.tenantId, victimInvoiceId);
+      expect(victimInvoice?.status).toBe('open');
+      expect(victimInvoice?.amountPaidCents).toBe(0);
+      expect(
+        await paymentRepo.findByInvoice(noConnect.tenantId, victimInvoiceId),
+      ).toHaveLength(0);
+    },
+  );
 });
