@@ -757,13 +757,46 @@ answered on the thread rather than fixed unilaterally:
   default `tsconfig.json`, not the mandated `tsconfig.build.json`, which
   excludes test files and was already clean).
 
+**Second round (`b033257`):** Codex's re-review on `642668c` raised one
+more finding, this lane's row, fixed and pushed:
+
+- **I13 (P2, fixed):** the same audit-leg gap as I9 — `seedInjectedSession`
+  hand-stamped `contentProvenance: 'untrusted'` directly into `markEnded`
+  and never wired a `PgAuditRepository` or verified the
+  `prompt_injection_detected` audit row the production FSM actually emits,
+  so a regression in the detection/audit path would have left the test
+  green. Rewritten to drive the real FSM handler
+  (`session.machine.dispatch({type: 'prompt_injection_detected'})`) and the
+  real `VoiceTurnProcessor.executeSideEffects` against a real
+  `PgAuditRepository`, asserting the
+  `agent.calling.<state>.prompt_injection_detected` row, and deriving
+  `contentProvenance` from the FSM's real `injectionFlagged` context
+  (mirroring `persistSessionEnded`) rather than a hand-typed literal. RED
+  confirmed the row was genuinely absent without dispatching the real
+  event; GREEN after.
+- Fixing I13 surfaced three more `tsc` errors (under the full
+  `tsconfig.json`, not the mandated `tsconfig.build.json` — same
+  blind spot as the `addressType` gap above) introduced by this lane's own
+  files, all fixed in the same commit: a missing required `businessName`
+  on two `createVoiceTurnProcessor` calls (I8, I13), an unnarrowed
+  `SafetyTier` literal on the I8 event (needs a type assertion after the
+  runtime `expect(safety.tier).toBe('E1')` check, since TS can't narrow
+  from a runtime assertion), and a second missing `addressType` on this
+  lane's own I4 neighbour-tenant `locationRepo.create` call. Two
+  pre-existing `addressType` gaps in `invoice-pricing-source.test.ts`'s
+  original (not-this-lane's) `beforeAll` blocks were left as-is — real,
+  but out of scope for a review-driven fix pass on this lane's own rows.
+- One stray reply meant for the I13 thread was accidentally posted on the
+  I3/I12′ thread first (wrong comment ID) and immediately corrected with a
+  note; harmless, flagged here for the record.
+
 ---
 
 ## Delivery
 
 - Branch: `cloud/invariants-s5-a`
 - One commit per row (8 commits: I2, I8, I13, I4, I10, I12, I17, I9),
-  this report committed, plus one follow-up commit (`cfe12f1`) fixing the
-  two Codex findings above.
+  this report committed, plus two follow-up commits (`cfe12f1`, `b033257`)
+  fixing the three Codex findings above.
 - `npx tsc --project tsconfig.build.json --noEmit`: clean.
 - `git status --porcelain`: empty.
