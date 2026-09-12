@@ -581,6 +581,21 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       expect(invoice!.amountPaidCents).toBe(19_900);
       expect(invoice!.amountDueCents).toBe(0);
 
+      // The PAYMENT ROW itself, not just the invoice projection it feeds
+      // (review finding, PR #1053). `providerReference` is what reconciliation
+      // and refunds look the charge up by, so a collector that stopped passing
+      // `result.paymentIntentId` would leave money moved and unfindable — the
+      // exact shape `collected_unrecorded` exists to make loud — while every
+      // invoice-level assertion above still passed.
+      const payments = await paymentRepo.findByInvoice(t.tenantId, invoice!.id);
+      expect(payments).toHaveLength(1);
+      expect(payments[0]).toMatchObject({
+        amountCents: 19_900,
+        method: 'credit_card',
+        status: 'completed',
+        providerReference: 'pi_dues_ok',
+      });
+
       const audits = await auditRepo.findByEntity(t.tenantId, 'service_agreement', membership.id);
       expect(audits.map((a) => a.eventType)).toContain('service_agreement.dues_collected');
     });
@@ -620,6 +635,10 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
         declineCode: 'insufficient_funds',
         paymentIntentId: 'pi_dues_declined',
       });
+      // The other direction of the same claim: a decline records NO payment.
+      // A phantom row here would overstate collected revenue and mark the
+      // invoice partly paid, taking it back out of the cadence's reach.
+      expect(await paymentRepo.findByInvoice(t.tenantId, invoice!.id)).toEqual([]);
 
       // And the collections cadence really can select it now — the overdue
       // sweep's own prefilter, run against this invoice 40 days on.
