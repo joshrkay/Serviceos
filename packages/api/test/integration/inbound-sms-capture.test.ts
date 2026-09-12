@@ -4,6 +4,7 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type { Customer } from '../../src/customers/customer';
 import {
   createInboundCaptureHandler,
@@ -37,6 +38,7 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
   let conversationRepo: PgConversationRepository;
   let customerRepo: PgCustomerRepository;
   let leadRepo: PgLeadRepository;
+  let auditRepo: PgAuditRepository;
   let tenant: { tenantId: string; userId: string };
 
   beforeAll(async () => {
@@ -44,6 +46,7 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
     conversationRepo = new PgConversationRepository(pool);
     customerRepo = new PgCustomerRepository(pool);
     leadRepo = new PgLeadRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     tenant = await createTestTenant(pool);
   });
 
@@ -56,7 +59,7 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
       baseCustomer(tenant.tenantId, tenant.userId, { primaryPhone: '+15555550199' }),
     );
 
-    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo });
+    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo, auditRepo });
     const result = await handler.handle({
       tenantId: tenant.tenantId,
       fromE164: '+15555550199',
@@ -79,6 +82,18 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
     expect(messages[0].source).toBe('sms');
     expect(messages[0].senderRole).toBe('customer');
     expect(messages[0].metadata).toMatchObject({ direction: 'inbound', channel: 'sms' });
+
+    // The audit leg — read back through PgAuditRepository, not asserted at
+    // all before this row.
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'conversation', threads[0].id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId: tenant.tenantId,
+      eventType: 'sms.inbound.captured',
+      entityType: 'conversation',
+      entityId: threads[0].id,
+      metadata: expect.objectContaining({ matched: true, linkedTo: 'customer', customerId: customer.id }),
+    });
   });
 
   it('appends a second inbound text onto the same open thread', async () => {
@@ -146,7 +161,7 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
   });
 
   it('threads as unmatched when no lead repo is wired', async () => {
-    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo });
+    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo, auditRepo });
     const result = await handler.handle({
       tenantId: tenant.tenantId,
       fromE164: '+15555558888',
@@ -160,6 +175,13 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
       '+15555558888',
     );
     expect(threads).toHaveLength(1);
+
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'conversation', threads[0].id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'sms.inbound.captured',
+      metadata: expect.objectContaining({ matched: false, linkedTo: 'unmatched' }),
+    });
   });
 
   it('collapses concurrent unmatched-number captures to one open thread (migration 200 index)', async () => {
