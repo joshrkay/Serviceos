@@ -836,3 +836,65 @@ the most likely cause. That is an account-level setting, not a code problem, and
 not something this branch can resolve; re-running has been spent and the
 evidence says it will not help. Surfaced for the owner rather than retried
 again.
+
+---
+
+## 15. Review round 6 — the scan matched one spelling (Codex, PR #1073)
+
+**Finding (P2, correct).** The per-occurrence scan from §14 still keyed on
+`req.auth.role` specifically. A handler that aliases or destructures first —
+
+```ts
+const { role } = req.auth!;
+if (role !== 'owner') throw new ForbiddenError(…);
+```
+
+— gates the whole route unconditionally, is invisible to `asyncRoute` and so to
+the executed-guard arm, and would not appear in the scan either. It could ship
+with no inventory row and no budget change.
+
+**Fixed by matching the COMPARISON, not the expression that feeds it.** The scan
+now finds every `… === 'owner'` / `… !== 'owner'` in `src`, excluding
+`requireRole(…)` / `requirePermission(…)` call lines — those are the
+discoverable middleware that arm (1) already settles by execution. How the role
+got into the variable no longer matters.
+
+That widens the net from 3 hits to **17**, and the expectation now classifies
+every one. Exactly **one** is a route gate (`entity-aliases.ts`); the other
+sixteen are labelled for what they are, so a future reader does not have to
+re-derive the judgment:
+
+| Kind | Count | Examples |
+|---|---|---|
+| The one owner-only route gate | 1 | `entity-aliases.ts` |
+| Conditional self-service (`targetId !== actor.id && …`) | 2 | `routes/users.ts` |
+| Domain rules about the TARGET user (last-owner protection, role changes) | 5 | `users/user.ts`, `routes/users.ts` |
+| Prompt-shaping flags, not authorization | 4 | `inapp-adapter.ts`, `routes/assistant.ts` |
+| Not a caller role at all (recipient class, `can_field_serve`, owner-or-dispatcher) | 5 | `gated-message-delivery.ts`, `routes/me.ts`, `routes/time-entries.ts` |
+
+The noise is the point: a new owner comparison of *any* kind now has to be
+looked at and labelled rather than landing silently.
+
+Negative control planting Codex's exact example — destructured **and** twice in
+one file, so it covers this round and §14's together. RED at the old behaviour's
+answer (`0`), then GREEN at `2`:
+
+```
+ FAIL  … > sees an ALIASED owner gate, and every occurrence of it
+AssertionError: expected [ …(2) ] to have a length of +0 but got 2
+```
+
+**Residual ceiling, stated in the code rather than implied.** A source scan
+cannot be exhaustive against every spelling: comparing against a constant
+(`ROLE_OWNER`) or computing the string would evade it. The durable fix is the
+*convention* — owner gating belongs in the discoverable middleware, where arm
+(1) sees it by execution and no scanning is needed at all. Changing that
+convention means editing `packages/api/src`, which is outside this
+docs-and-tests lane; it is the third follow-up this lane has surfaced without
+taking.
+
+```
+ Test Files  1 passed (1) · Tests 24 passed (24)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 327 tests passed
+```
