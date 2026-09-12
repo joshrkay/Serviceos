@@ -536,3 +536,53 @@ queued, so it was not a supersede-cancel. Re-run once (the legitimate "died
 before any test body ran" case): `playwright`, `mobile-typecheck`,
 `corpus-integrity` and `voice-quality-cassette-drift` all went green, so the
 cancellation was transient rather than an account limit.
+
+---
+
+## 10. Review round 2 — a channel claim is not bound to its action (Codex, PR #1073)
+
+**Finding (P2, correct):** `channelReaches` takes only the `reached_via` string
+— it never sees the row's route. It answers *"does this channel exist?"*, not
+*"does this channel perform THIS row's action?"*. A row could name a real but
+unrelated channel (marking some other daily route
+`voice_intent:add_catalog_item`), stay green, and drop itself out of
+`ownerRequiredDailyWebActions`. Same failure direction as §9: a row escapes the
+budget while the build stays green.
+
+**What was closed, and what honestly cannot be.** Uniqueness is now enforced —
+no two rows may claim the same channel, so a row cannot help itself to an
+on-ramp another row already owns, which is the realistic drift (copy-paste, or
+reaching for the nearest plausible intent). New assertion plus a negative
+control planting Codex's literal example; both RED first:
+
+```
+ FAIL  … > binds each channel claim to exactly one action
+AssertionError: expected [] to not deeply equal []
+
+ FAIL  … > negative controls > catches two rows claiming the same channel
+AssertionError: expected [ Array(1) ] to have a length of +0 but got 1
+```
+
+then GREEN, 20/20.
+
+The **general** case is not closed and this report does not pretend it is.
+Proving that voice intent X performs the same business action as HTTP route Y
+needs a route → action → channel map, and no such map exists in this codebase:
+a route reaches its action through an Express handler, an intent through a
+proposal type and an execution handler, and the two universes are joined
+nowhere. Manufacturing one would mean inventing a correspondence rather than
+deriving it — the opposite of what this lane is for. **The per-row route ↔
+channel binding is therefore human-reviewed, and that is now a stated ceiling**
+recorded in three places: `duplicateChannelClaims`'s comment, the test header's
+KNOWN LIMITS block, and `docs/reference/owner-daily-actions.md` under
+Reachability channels. There are four such bindings today, listed in §1.
+
+Closing it properly would mean giving each owner-only route an explicit action
+identity that both a route and a channel can be mapped onto — a real piece of
+design work, and the second follow-up this lane has surfaced without taking.
+
+```
+ Test Files  1 passed (1) · Tests 20 passed (20)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 323 tests passed
+```

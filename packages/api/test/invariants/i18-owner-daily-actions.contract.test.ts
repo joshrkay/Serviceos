@@ -58,11 +58,19 @@
  * `keyword:` against the inbound-SMS registry as the booted app populated it,
  * `one_tap:` against a route the booted app actually mounts.
  *
- * KNOWN LIMIT, stated rather than hidden: in a 1–3-truck shop the owner is
- * often the only user, so they perform plenty of actions that are not
- * owner-ONLY and therefore never enter this inventory. §5.0c specifies this
- * derivation ("every `role: owner` route"); it is a lower bound on I18's real
- * surface, not the whole of it.
+ * TWO KNOWN LIMITS, stated rather than hidden:
+ *
+ *  1. In a 1–3-truck shop the owner is often the only user, so they perform
+ *     plenty of actions that are not owner-ONLY and therefore never enter this
+ *     inventory. §5.0c specifies this derivation ("every `role: owner` route");
+ *     it is a lower bound on I18's real surface, not the whole of it.
+ *  2. A channel claim is checked for EXISTENCE and for UNIQUENESS across rows,
+ *     not for performing that row's specific action — proving voice intent X
+ *     does the same thing as HTTP route Y would need a route → action → channel
+ *     map, and the two universes (Express handler vs. proposal type + execution
+ *     handler) are joined nowhere in this codebase. The per-row binding is
+ *     human-reviewed. See `duplicateChannelClaims` for what that does and does
+ *     not close.
  */
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -294,6 +302,40 @@ const VOICE_ACTION_INTENTS = new Set(
   SUPPORTED_INTENTS.filter((intent) => intent in INTENT_TO_PROPOSAL_TYPE),
 );
 
+/**
+ * Channel claims must be unique across the inventory.
+ *
+ * `channelReaches` answers "does this channel exist?", not "does this channel
+ * perform THIS row's action" — it never sees the row's route. So a row could
+ * name a real-but-unrelated channel (marking some other daily route
+ * `voice_intent:add_catalog_item`), stay green, and drop itself out of
+ * `ownerRequiredDailyWebActions`. Uniqueness closes the realistic version of
+ * that — copy-paste drift, and reusing a channel another row already owns.
+ *
+ * It does NOT close the general case, and nothing here pretends otherwise:
+ * proving that voice intent X performs the same business action as HTTP route Y
+ * would need a route → action → channel map, and no such map exists in this
+ * codebase — a route reaches its action through an Express handler, an intent
+ * through a proposal type and an execution handler, and the two universes are
+ * joined nowhere. **The route ↔ channel binding in each row is therefore
+ * human-reviewed, not derived**, and that is a stated ceiling of this contract
+ * rather than a gap someone forgot. (Raised in review of #1073 by Codex.)
+ */
+function duplicateChannelClaims(rows: InventoryRow[]): string[] {
+  const claimedBy = new Map<string, string>();
+  const duplicates: string[] = [];
+  for (const row of rows) {
+    if (!row.smsReachable) continue;
+    const prior = claimedBy.get(row.reachedVia);
+    if (prior !== undefined) {
+      duplicates.push(`${row.reachedVia} claimed by both ${prior} and ${row.route}`);
+    } else {
+      claimedBy.set(row.reachedVia, row.route);
+    }
+  }
+  return duplicates;
+}
+
 /** Resolves a `reached_via` claim against code. Unknown prefix → not reached. */
 function channelReaches(reachedVia: string, mountedRoutes: Set<string>): boolean {
   const separator = reachedVia.indexOf(':');
@@ -470,6 +512,10 @@ describe('I18: owner daily actions ↔ code contract', () => {
     }
   });
 
+  it('binds each channel claim to exactly one action', () => {
+    expect(duplicateChannelClaims(inventory.rows)).toEqual([]);
+  });
+
   it('leaves reached_via as none wherever sms_reachable is false', () => {
     for (const row of inventory.rows) {
       if (row.smsReachable) continue;
@@ -601,6 +647,32 @@ describe('I18: owner daily actions ↔ code contract', () => {
       expect(deriveOwnerOnlyRoutes(planted)).toEqual([
         'GET /api/planted-surface/composed',
       ]);
+    });
+
+    it('catches two rows claiming the same channel', () => {
+      const row = (route: string, reachedVia: string): InventoryRow => ({
+        route,
+        cadence: 'daily',
+        why: 'planted',
+        smsReachable: true,
+        reachedVia,
+        exemptionReason: '',
+      });
+      // The literal drift Codex named: a second row helping itself to a
+      // channel that already belongs to the catalog row, which would quietly
+      // remove it from ownerRequiredDailyWebActions.
+      const planted = [
+        row('POST /api/catalog/items/', 'voice_intent:add_catalog_item'),
+        row('POST /api/some/other/surface', 'voice_intent:add_catalog_item'),
+      ];
+      expect(duplicateChannelClaims(planted)).toHaveLength(1);
+      // An unreachable row carries no claim, so it can never collide.
+      expect(
+        duplicateChannelClaims([
+          { ...row('POST /a', 'none'), smsReachable: false },
+          { ...row('POST /b', 'none'), smsReachable: false },
+        ]),
+      ).toHaveLength(0);
     });
 
     it('rejects a reached_via claim no channel actually reaches', () => {

@@ -67,6 +67,16 @@ here.
 | `one_tap:<path>` | a route the booted app actually mounts (`routes/one-tap-approve.ts`, `routes/one-tap-undo.ts`) |
 | `none` | nothing — only legal with `sms_reachable: false` |
 
+Two things the contract test checks about a claim, and one it cannot. It checks
+that the channel **exists** in code, and that no two rows claim the **same**
+channel (so a row cannot help itself to an on-ramp another row already owns, and
+quietly leave the budget). It does **not** check that the channel performs
+*that row's* action: proving voice intent X does the same thing as HTTP route Y
+would need a route → action → channel map, and the two universes — an Express
+handler on one side, a proposal type and execution handler on the other — are
+joined nowhere in this codebase. **The per-row binding below is human-reviewed,
+and that is a stated ceiling of this pin rather than an oversight.**
+
 ---
 
 ## Budgets (PRD §5.0c (b))
