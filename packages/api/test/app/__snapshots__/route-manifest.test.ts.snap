@@ -100,16 +100,16 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /google/callback
 036  authenticated use    /api/integrations    [router: router]
          └─ GET /quickbooks/callback
-037  authenticated use    /api/telephony    [router: router]
+037  authenticated use    /api/telephony/whisper    [middleware: <anonymous>]
+038  authenticated use    /api/telephony    [router: router]
+         └─ GET /whisper/:escalationId
+039  authenticated use    /api/telephony    [router: router]
          └─ GET /health
          └─ POST /callback-message
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice
          └─ POST /voice/gather-fallback
-038  authenticated use    /api/telephony    [middleware: <anonymous>]
-039  authenticated use    /api/telephony    [router: router]
-         └─ GET /whisper/:escalationId
 040  authenticated use    /api/calls    [router: router]
          └─ POST /bridge
 041  authenticated use    /api    [middleware: <anonymous>]
