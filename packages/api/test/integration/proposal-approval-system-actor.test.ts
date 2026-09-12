@@ -28,7 +28,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { approveProposal } from '../../src/proposals/actions';
 import { createProposal, Proposal, ProposalStatus } from '../../src/proposals/proposal';
-import { ForbiddenError } from '../../src/shared/errors';
+import { ForbiddenError, NotFoundError } from '../../src/shared/errors';
 
 // Every member of ProposalStatus — a system actor must be refused from ALL
 // of them, not just the reachable ones, because the D-019 guard in
@@ -172,6 +172,23 @@ describe('I2 — system: actor approval is refused at the real Postgres lifecycl
     expect(await auditRepo.findByEntity(tenantB.tenantId, 'proposal', proposalB.id)).toHaveLength(
       0,
     );
+
+    // Cross-tenant reads/writes: tenant B's scope can never see or act on
+    // tenant A's proposal — the tenant predicate itself, not just the
+    // outcome of the rejected system-actor attempt, is what's under test
+    // here. A regression that dropped the tenant_id filter from
+    // PgProposalRepository.findById or the approval lookup would fail this.
+    expect(await proposalRepo.findById(tenantB.tenantId, proposalA.id)).toBeNull();
+    await expect(
+      approveProposal(
+        proposalRepo,
+        tenantB.tenantId,
+        proposalA.id,
+        tenantB.userId,
+        'owner',
+        auditRepo,
+      ),
+    ).rejects.toThrow(NotFoundError);
 
     // Tenant B can still have ITS proposal approved by a human — the D-019
     // guard on tenant A did not wedge anything tenant-wide.
