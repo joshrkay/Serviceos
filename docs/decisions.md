@@ -856,7 +856,7 @@ normally-provisioned tenant, with nobody intervening, the capability does not ru
    - **The brand-voice configurator** (`brand_voice_configurator`) is seeded explicitly
      `enabled: false`, and the settings UI is gated on it (`SettingsPage.tsx:1150`).
    - **Dropped-call recovery** is gated per tenant. Its dedicated writer is unwired —
-     `setTenantFlag` has zero callers and no route — but a platform admin can scope the
+     `setTenantFlag` has zero production callers and no route — but a platform admin can scope the
      platform flag by `tenantIds` (`PUT /api/admin/feature-flags/:name`), which
      `PgTenantFeatureFlagRepository._resolve` evaluates for the calling tenant. Admin-API-only,
      not unreachable. See PRD §12.4.

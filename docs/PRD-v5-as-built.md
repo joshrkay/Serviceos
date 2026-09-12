@@ -1408,7 +1408,7 @@ approval.
 | **4.8** | **As M**, I want one tech texting OUT to produce one proposal **per affected customer**, so I can handle the difficult one differently | **Given** a verified tech OUT, **when** processed, **then** an unavailable block, a reschedule proposal **per appointment** each carrying a brand-voiced message, and an audit row — idempotent same-day, and **an OUT from an unregistered number is not actioned** | 4 | **D:** `tech-status-sms.test.ts` |
 | **4.9** | **As M**, I want the closest certified tech assigned automatically, so I stop doing routing math in my head | **Given** a job needing a skill, **when** assignment runs, **then** only qualified techs are offered | **0** | The whole file is nine lines returning `[]`. 🚨 **And it is wired into `checkFeasibility`, so the empty skill list reads as "always feasible"** rather than as a visible gap |
 | **4.10** | **As M**, I want my day sequenced to cut windshield time, so I fit one more call in | — | **0** | Absent. No module, no test |
-| **4.11** | **As Carlos**, I want to be told when I'm assigned to something new, so I'm not surprised at 7am | **Given** an assignment change, **when** it commits, **then** the technician is notified | **2** 🚨 | `setTechnicianAssignmentNotifier` has **zero callers**. Every production assignment fires a **silent no-op** — while the module's doc-comment says *"app.ts registers one notifier."* **Carlos is never notified** |
+| **4.11** | **As Carlos**, I want to be told when I'm assigned to something new, so I'm not surprised at 7am | **Given** an assignment change, **when** it commits, **then** the technician is notified | **2** 🚨 | `setTechnicianAssignmentNotifier` has **zero production callers** (it is unit-tested — `assignment-notifications.test.ts`). Every production assignment fires a **silent no-op** — while the module's doc-comment says *"app.ts registers one notifier."* **Carlos is never notified** |
 
 ### 8.5 Execute — the field
 
@@ -2427,10 +2427,14 @@ Every one of these represents engineering already paid for.
   *(An earlier draft of this document listed conversational onboarding itself as
   dormant. That was wrong — inherited from a stale audit and corrected here. The
   conversational route is mounted and has a real web client.)*
-- **A workflow-trigger subsystem** with modes and configuration — **zero callers
-  anywhere**, not even tests.
-- **A guardrail expiration module** — superseded by the worker, still present with
-  zero callers.
+- **A workflow-trigger subsystem** with modes and configuration — **zero
+  production callers**, but **unit-tested**: `test/ai/orchestration/triggers.test.ts`
+  exercises `shouldAutoTrigger`, `evaluateTrigger`, `getTriggerConfig` and
+  `validateTriggerInput` across ten cases. Unwired, not unproven — deleting it
+  discards behaviour that is currently pinned.
+- **A guardrail expiration module** (`ai/guardrails/expiration.ts`) — superseded
+  by the worker, **zero production importers**, and likewise unit-tested by
+  `test/ai/guardrails-expiration.test.ts`.
 - **Two AI skills** (customer-history summarization, AI-identity disclosure) —
   tests only.
 - **The escalation-outcome route is a stub** that validates its input and returns
@@ -2442,6 +2446,26 @@ Every one of these represents engineering already paid for.
   through to draft. The ledger that would graduate them does not exist. The data
   is attached so it *can* be built retroactively, which is the right call, but
   the product currently has one trust tier and four names for it.
+
+> **Two entries above said "zero callers" where the evidence only supported
+> "zero *production* callers"** *(corrected 2026-09-12, Codex review)*. The
+> workflow-trigger bullet went further and said *"not even tests"* — which no
+> `src`-scoped grep can establish, and which is false. Both modules are
+> unit-tested.
+>
+> **A claim may not be wider than the command that supports it.** The evidence
+> here was `grep -rn "<symbol>" packages/api/src`; that command can say
+> something about `src` and nothing at all about `test`. This is mechanically
+> checkable in a way most of §12.4d is not — compare the paths a claim ranges
+> over against the paths its command searched — and the other three bullets in
+> this same list get it right (*"zero **production** callers"*, *"no worker or
+> route invokes it"*, *"zero **non-test** importers"*), so the correct phrasing
+> was three lines away.
+>
+> The consequence is not cosmetic: this list is read as a delete-or-wire
+> backlog, and *"not even tests"* invites deleting a module whose behaviour is
+> pinned. The document already had the right category for it two bullets down —
+> *"Two AI skills … tests only."*
 
 > **RAG retrieval was on this list and has been removed** *(corrected
 > 2026-09-12, Codex review)*. It does not belong here: it has **production
@@ -2581,7 +2605,7 @@ ever be enabled. That is wrong, and the distinction is operationally important:
   `DATABASE_URL` is present; it fails closed only without a database. A row in
   `platform_admins` plus `PUT /api/admin/feature-flags/:name` works today. There
   is no UI for it, but there is a path.
-- **`setTenantFlag` has zero callers and no route** — true, and that is where an
+- **`setTenantFlag` has zero *production* callers and no route** — true (four test files do call it), and that is where an
   earlier draft stopped. **The conclusion drawn from it was wrong.**
 
   Per-tenant ramping *is* reachable, through a different mechanism:
@@ -2722,7 +2746,7 @@ previously listed, **no surface can** — not even an admin API:
 
 | Capability | The blocker |
 |---|---|
-| Technician assignment notification | `setTechnicianAssignmentNotifier` has **zero callers**. The accessor is `await instance?.notifyChange(change)`, so every production assignment fires a silent no-op — while the module's own doc-comment says *"app.ts registers one notifier"* and *"Called once in app.ts."* |
+| Technician assignment notification | `setTechnicianAssignmentNotifier` has **zero production callers** (unit-tested, never wired). The accessor is `await instance?.notifyChange(change)`, so every production assignment fires a silent no-op — while the module's own doc-comment says *"app.ts registers one notifier"* and *"Called once in app.ts."* |
 
 It is rung 2 — built, never called — and what it needs is one wiring line, not a
 feature.
@@ -2738,7 +2762,7 @@ is the more useful finding:
 
 Three of four "no surface can enable this" claims were wrong, each for the same
 reason: **a grep proving one specific writer is unwired was read as proving no
-writer exists.** `setTenantFlag` really does have zero callers; that fact is
+writer exists.** `setTenantFlag` really does have zero production callers; that fact is
 true and the conclusion drawn from it was not. Only the technician-assignment
 notifier survives, and it survives because nothing anywhere calls it.
 
@@ -2780,7 +2804,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how sixteen of these were got wrong
+### 12.4d A note on method — how seventeen of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -3115,6 +3139,40 @@ written without opening the file. It is not; the catches write to stderr. Caught
 before publishing only by running the rule the same paragraph had just stated,
 which is the strongest argument in this section for **mechanising** these checks
 rather than adding another one to the list.
+
+**The seventeenth is the one shape here a machine could check today**, and it is
+the inverse of every other entry in this section. The others are claims that
+*under-read* the evidence — one file, one migration, one grep, taken for the
+whole. This one **over-read** it: §12.4 said the workflow-trigger subsystem had
+*"zero callers anywhere, not even tests."* Production callers: zero, correct.
+Tests: `test/ai/orchestration/triggers.test.ts` exercises four exports across
+ten cases. The same overreach sat in the next bullet, for the guardrail
+expiration module.
+
+**Applying the rule to the rest of the document found three more**, none of them
+raised in review: story 4.11 and §12.4c both said `setTechnicianAssignmentNotifier`
+has *"zero callers"* (it has an `assignment-notifications.test.ts`), and §12.4's
+own flag analysis said `setTenantFlag` has *"zero callers"* — **four** test files
+call it, three of them Docker-gated. All now read *production* callers. That the
+sweep found three more on the first pass is the argument for the rule; that none
+of them needed judgement to find is the argument for automating it.
+
+**A claim may not be wider than the command that supports it.** The evidence was
+a `packages/api/src`-scoped grep, which can say something about `src` and
+nothing whatever about `test`. Unlike *"is this rung earned"* or *"does this
+claim contradict another"*, this one needs no judgement at all — compare the
+paths a claim ranges over with the paths its command searched — and it is the
+first entry in this section that could be a lint rule rather than a habit.
+
+Two details make it worse than a wording slip. First, **the correct phrasing was
+three lines away**: the other three bullets in the same list are scoped
+precisely (*"zero **production** callers"*, *"no worker or route invokes it"*,
+*"zero **non-test** importers"*), and the document already had the right
+category two bullets down — *"Two AI skills … tests only."* Second, the
+consequence runs the wrong way. Everywhere else in §12, an overclaim inflates
+what the product can do; here it **erases evidence that exists**, in a list read
+as a delete-or-wire backlog. *"Not even tests"* is an invitation to delete a
+module whose behaviour is currently pinned.
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
