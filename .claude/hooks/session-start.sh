@@ -97,8 +97,11 @@ install_dependencies() {
   # dynamic, so this sees $snapshot and $had_lockfile from the caller.
   _restore_lockfile() {
     # Idempotent: the signal handler calls this and so does the normal path.
+    # The flag is set at the END, not here — bash defers a trap to the next
+    # command boundary, so a signal arriving mid-restore re-enters this
+    # function. Redoing an identical restore is harmless; returning early from
+    # a half-finished one is not.
     [ "$restored" -eq 1 ] && return 0
-    restored=1
     if [ "$had_lockfile" -eq 1 ]; then
       # No `-s` test on the snapshot: `had_lockfile` already proves the file
       # existed and was copied. Testing for non-empty here silently exempted a
@@ -122,6 +125,7 @@ install_dependencies() {
       echo "[session-start]          a bootstrap hook does not get to decide that a repo has a"
       echo "[session-start]          lockfile. node_modules is installed either way."
     fi
+    restored=1
     rm -f "$snapshot"
   }
   # A trap handler that RETURNS does not terminate the script — bash resumes
@@ -142,8 +146,13 @@ install_dependencies() {
 
   npm install || echo "[session-start] WARNING: npm install also failed — dependencies are incomplete."
 
-  trap - EXIT INT TERM HUP
+  # Restore FIRST, then clear the traps. The other order leaves a window: a
+  # signal arriving after `trap -` but before the restore takes bash's default
+  # termination action and the fallback's rewritten lockfile survives (Codex
+  # P2, #994 — sixth finding on this function). Idempotency makes a signal
+  # during the restore itself safe.
   _restore_lockfile
+  trap - EXIT INT TERM HUP
 }
 
 install_dependencies
