@@ -291,9 +291,13 @@ async function main(): Promise<void> {
   console.log(`\n[seed-journey] wrote ${result.envFilePath}`);
 }
 
+// CLI entry — only when invoked directly via `tsx seed-journey-fixtures.ts`.
+// The CommonJS check is sufficient here; mixing in `import.meta.url` forces
+// Playwright's TypeScript transform into ESM mode and breaks `exports` — see
+// setup-test-db.ts:219-223 for the same fix and explanation.
 const isMainModule =
   typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module;
-if (isMainModule || import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule) {
   main().catch((err) => {
     console.error('[seed-journey] failed:', err);
     process.exit(1);

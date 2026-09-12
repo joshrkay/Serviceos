@@ -10,6 +10,14 @@
  *  2. concurrent same-refund deliveries apply exactly once
  *  3. an over-refund rejection strands no claim row
  *  4. RLS: the claim ledger is invisible cross-tenant
+ *
+ * #1022 row 8.8 addition — the refund must adjust the record WITHOUT lying
+ * about what happened, so the audit leg is read back through the real
+ * PgAuditRepository too: the original payment row keeps its full history
+ * (amount_cents untouched, still 'completed'), each applied refund leaves one
+ * `payment.refunded` event carrying its delta and the new cumulative total, a
+ * deduped redelivery leaves none, and a neighbour tenant can read neither the
+ * claim rows nor the audit events.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import crypto from 'crypto';
@@ -20,6 +28,7 @@ import { PgPaymentRepository } from '../../src/invoices/pg-payment';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { recordRefund } from '../../src/payments/payment-service';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import type { Payment } from '../../src/invoices/payment';
@@ -28,6 +37,7 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let paymentRepo: PgPaymentRepository;
+  let auditRepo: PgAuditRepository;
   let tenant: { tenantId: string; userId: string };
   let invoiceId: string;
 
@@ -56,6 +66,7 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
     pool = await getSharedTestDb();
     invoiceRepo = new PgInvoiceRepository(pool);
     paymentRepo = new PgPaymentRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     const customerRepo = new PgCustomerRepository(pool);
     const locationRepo = new PgLocationRepository(pool);
     const jobRepo = new PgJobRepository(pool);
@@ -137,12 +148,14 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
     const r1 = await recordRefund(
       { tenantId: tenant.tenantId, paymentId: payment.id, refundCents: 3000, stripeRefundId: 're_pg_1' },
       paymentRepo,
+      auditRepo,
     );
     expect(r1.totalRefundedCents).toBe(3000);
 
     const r2 = await recordRefund(
       { tenantId: tenant.tenantId, paymentId: payment.id, refundCents: 2000, stripeRefundId: 're_pg_2' },
       paymentRepo,
+      auditRepo,
     );
     expect(r2.totalRefundedCents).toBe(5000);
 
@@ -151,6 +164,7 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
     const retry = await recordRefund(
       { tenantId: tenant.tenantId, paymentId: payment.id, refundCents: 3000, stripeRefundId: 're_pg_1' },
       paymentRepo,
+      auditRepo,
     );
     expect(retry.refundCents).toBe(0);
     expect(retry.totalRefundedCents).toBe(5000);
@@ -162,6 +176,40 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
     );
     expect(rows[0].n).toBe(2); // one claim per distinct refund
     expect(Number(rows[0].total)).toBe(5000);
+
+    // The record is ADJUSTED, not rewritten: the original payment row keeps
+    // its full magnitude and its settled status; only the cumulative refund
+    // columns move. (D2-4: "the original row keeps its full amountCents for
+    // accounting integrity".)
+    const original = await pool.query<{
+      amount_cents: string;
+      status: string;
+      refunded_amount_cents: string;
+      last_refund_stripe_id: string | null;
+    }>(
+      `SELECT amount_cents::text, status, refunded_amount_cents::text, last_refund_stripe_id
+         FROM payments WHERE tenant_id = $1 AND id = $2`,
+      [tenant.tenantId, payment.id],
+    );
+    expect(Number(original.rows[0].amount_cents)).toBe(10000);
+    expect(original.rows[0].status).toBe('completed');
+    expect(Number(original.rows[0].refunded_amount_cents)).toBe(5000);
+
+    // …and each APPLIED refund left exactly one audit event, read back
+    // through the real PgAuditRepository. The deduped redelivery returns
+    // before the audit write, so it must add nothing — three events here
+    // would claim 8000 was refunded when 5000 was.
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'payment', payment.id);
+    const refunded = events.filter((e) => e.eventType === 'payment.refunded');
+    expect(refunded).toHaveLength(2);
+    const byRefundId = new Map(refunded.map((e) => [e.metadata!.stripeRefundId as string, e]));
+    expect(byRefundId.get('re_pg_1')!.metadata!.refundCents).toBe(3000);
+    expect(byRefundId.get('re_pg_1')!.metadata!.totalRefundedCents).toBe(3000);
+    expect(byRefundId.get('re_pg_2')!.metadata!.refundCents).toBe(2000);
+    expect(byRefundId.get('re_pg_2')!.metadata!.totalRefundedCents).toBe(5000);
+    // The provider refund id is the correlation key for reconciliation.
+    expect(byRefundId.get('re_pg_2')!.correlationId).toBe('re_pg_2');
+    expect(refunded.every((e) => e.tenantId === tenant.tenantId)).toBe(true);
   });
 
   it('two concurrent deliveries of one refund id apply exactly once (FOR UPDATE + unique claim)', async () => {
@@ -212,17 +260,35 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
     await recordRefund(
       { tenantId: tenant.tenantId, paymentId: payment.id, refundCents: 1000, stripeRefundId: 're_pg_rls' },
       paymentRepo,
+      auditRepo,
     );
 
-    const other = await createTestTenant(pool);
+    const otherTenant = await createTestTenant(pool);
     // A same-id refund attempt from another tenant must not see (or be
     // deduped by) this tenant's claim — it fails on ITS missing payment row.
     await expect(
       recordRefund(
-        { tenantId: other.tenantId, paymentId: payment.id, refundCents: 1000, stripeRefundId: 're_pg_rls' },
+        { tenantId: otherTenant.tenantId, paymentId: payment.id, refundCents: 1000, stripeRefundId: 're_pg_rls' },
         paymentRepo,
+        auditRepo,
       ),
     ).rejects.toThrow(/Payment/);
+
+    // The refund is on THIS tenant's audit trail…
+    expect(
+      (await auditRepo.findByEntity(tenant.tenantId, 'payment', payment.id)).filter(
+        (e) => e.eventType === 'payment.refunded',
+      ),
+    ).toHaveLength(1);
+    // …and invisible to the neighbour, who also wrote no event of its own
+    // (the rejection happens before the audit leg).
+    expect(await auditRepo.findByEntity(otherTenant.tenantId, 'payment', payment.id)).toEqual([]);
+    // The claim ledger stays one-sided too.
+    const claims = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM payment_refunds WHERE tenant_id = $1 AND stripe_refund_id = 're_pg_rls'`,
+      [otherTenant.tenantId],
+    );
+    expect(claims.rows[0].n).toBe(0);
   });
 });
 

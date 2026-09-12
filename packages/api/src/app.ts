@@ -78,6 +78,10 @@ import { OwnerNotificationService } from './notifications/owner-notification-ser
 import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import {
+  TechnicianAssignmentNotifier,
+  setTechnicianAssignmentNotifier,
+} from './appointments/assignment-notifications';
 import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
 import {
   createMeRouter,
@@ -95,6 +99,7 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
+import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
@@ -253,6 +258,11 @@ import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
 import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
 import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
 import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
+import {
+  resolveTenantOwnerEmail,
+  isWeeklyFeedbackEnabledForTenant,
+  resolveTenantBusinessName,
+} from './digest/weekly-feedback-config';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { runReviewRequestSweep } from './workers/review-request-worker';
@@ -359,6 +369,7 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
+import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
@@ -3731,51 +3742,46 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   });
   const realtimeHealthCircuit = new RealtimeHealthCircuit();
 
-  // Per-tenant Twilio token + tenant-id resolvers, keyed off
-  // tenant_integrations. Falls back to the legacy single-account env
-  // vars when no row matches — preserves the in-production single-tenant
-  // flow while unblocking inbound calls on provisioned subaccounts.
-  // Reads the table outside withTenantTransaction (FORCE RLS) using a
-  // dedicated transaction with set_config('app.current_tenant_id', ...).
-  // Both helpers issue cross-tenant lookups against tenant_integrations
-  // (we don't know the tenant yet — that's what we're looking up).
-  // Migration 074 added a permissive read policy gated on
-  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
-  // transaction; SET LOCAL drops on COMMIT and the connection returns
-  // to the pool clean.
+  // Per-tenant Twilio credential + tenant-id resolvers, keyed off
+  // tenant_integrations. Both issue cross-tenant lookups (an inbound webhook
+  // arrives with no tenant context — finding the tenant is the point), which
+  // migration 074's permissive read policy gates on app.system_lookup = 'true',
+  // set LOCAL inside a short transaction so it drops on COMMIT and the
+  // connection returns to the pool clean.
+  //
+  // #1072 — the credential resolver is keyed on the DIALLED NUMBER, not on the
+  // payload's AccountSid: the token that may sign for a number is the one
+  // belonging to the tenant that owns it. See
+  // telephony/twilio-webhook-credential.ts for the full resolution order and
+  // the refusal cases.
+  const resolveTwilioWebhookCredential = createTwilioWebhookCredentialResolver(
+    pool ? { pool } : {},
+  );
+
+  /**
+   * Plain `AccountSid → token` view of the same resolver, for the two callers
+   * that are NOT inbound-webhook verification and must not be bound to a
+   * dialled number:
+   *   - the outbound REST client (`createTwilioCallRedirector`), which needs a
+   *     token to CALL Twilio with, not one to check a signature against;
+   *   - the outbound call-bridge callbacks, whose `To` is the CUSTOMER's
+   *     number, so binding on it would refuse a legitimate callback the moment
+   *     a tenant dials a number another tenant happens to own.
+   * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
+   * when we hold one, deployment token otherwise.
+   */
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
-    const encKey = process.env.TENANT_ENCRYPTION_KEY;
-    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
-    try {
-      const { decrypt } = await import('./integrations/crypto');
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ auth_token_primary_enc: string | null }>(
-          `SELECT auth_token_primary_enc FROM tenant_integrations
-           WHERE provider = 'twilio' AND subaccount_sid = $1
-           LIMIT 1`,
-          [accountSid],
-        );
-        await client.query('COMMIT');
-        const enc = result.rows[0]?.auth_token_primary_enc;
-        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
-      } catch (err) {
-        // Roll back before release: the outer catch swallows the error to a
-        // fallback, so without this the connection would silently return to
-        // the pool with the transaction (and system_lookup GUC) still open.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_AUTH_TOKEN;
+    const decision = await resolveTwilioWebhookCredential(
+      accountSid ? { accountSid } : {},
+    );
+    if (typeof decision === 'object') {
+      return decision.outcome === 'verify'
+        ? decision.authToken
+        : process.env.TWILIO_AUTH_TOKEN;
     }
+    return decision ?? process.env.TWILIO_AUTH_TOKEN;
   };
 
   const resolveTenantIdByPhoneNumber = async (
@@ -3797,7 +3803,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
       } catch (err) {
-        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        // Same dirty-connection guard as the credential resolver's lookups.
         await client.query('ROLLBACK').catch(() => {});
         throw err;
       } finally {
@@ -3815,11 +3821,42 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the env-var seam in dev (with a loud WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
+  // GETs (no Clerk session) are accepted, and BEFORE the telephony router
+  // below because that router's signature middleware runs for EVERY
+  // /api/telephony/* request, matched route or not: mounting whisper after it
+  // would subject this route to the router's dialled-number binding no matter
+  // what credential view were passed here.
+  //
+  // #1072 — whisper deliberately keeps the AccountSid-only view. This is the
+  // OUTBOUND dispatcher leg of an escalation, so its `To` is the DISPATCHER's
+  // number, not the tenant's inbound DID (and Twilio sends the standard call
+  // params as QUERY parameters on a GET, so the binding would see it). If that
+  // dispatcher number is also some other tenant's DID — two businesses under
+  // one owner, a sister branch, an answering service that is itself a tenant —
+  // binding on `To` picks THAT tenant, finds the originating subaccount
+  // foreign, and refuses, killing the whisper on an escalation; an error on
+  // this URL risks dropping the call entirely (see whisper-route.ts's header).
+  // Found by Codex review on PR #1082. The signature check still gates the
+  // route — whisper TwiML carries PII (caller name, phone, intent).
+  //
+  // The middleware is scoped to the whisper path rather than the router mount
+  // so a POST to /voice does not pay a second, weaker signature check on its
+  // way past.
+  app.use(
+    '/api/telephony/whisper',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+  );
+  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
-      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
@@ -3997,20 +4034,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       callMeBackRepo,
       businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
-  );
-
-  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
-  // signed GETs (no Clerk session) are accepted. Path is under
-  // /api/telephony so it's co-located with the main telephony webhook.
-  // Twilio signature verification is enforced to prevent unauthenticated
-  // access to whisper TwiML (which contains PII: caller name, phone, intent).
-  app.use(
-    '/api/telephony',
-    requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
-    whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
   // Owner→customer click-to-call. The authed POST /api/calls is wired only when
@@ -4421,7 +4444,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             handlePendingDialogueSilence: (session, tenantId) =>
               twilioAdapter.handlePendingDialogueSilence(session, tenantId),
             // Resolve the account bound by the verified inbound webhook.
-            authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+            authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
             // Section 7 (CRITICAL): wire the gather adapter's shared Map so
             // Dial TwiML built inside handleEscalateWithContext is visible to
@@ -5307,14 +5330,52 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // producer seams (inbound call/SMS, appointment reminder/cancellation,
   // payment, lead, escalation). Each type targets the permission its descriptor
   // declares (owner+dispatcher, never a technician device).
-  setOwnerNotifications(
-    new OwnerNotificationService({
-      deviceTokenRepo,
-      provider: expoPushProvider,
-      resolveUserIds: userIdsWithPermissionResolver(userRepo),
-      // U10 — honor per-user category opt-outs before sending.
-      resolveMutedUserIds: (tenantId, type) =>
-        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  const ownerNotificationService = new OwnerNotificationService({
+    deviceTokenRepo,
+    provider: expoPushProvider,
+    resolveUserIds: userIdsWithPermissionResolver(userRepo),
+    // U10 — honor per-user category opt-outs before sending.
+    resolveMutedUserIds: (tenantId, type) =>
+      notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  });
+  setOwnerNotifications(ownerNotificationService);
+  // 4.11 — register the technician-assignment notifier (the doc-comment on
+  // TechnicianAssignmentNotifier already claimed this happened; it never
+  // did, so every assign/reassign silently no-op'd in production). Reuses
+  // ownerNotificationService as the `notifier` — it already implements
+  // notifyUser() and its NOTIFICATION_DESCRIPTORS registry already carries
+  // appointment_assigned / appointment_unassigned copy, built for exactly
+  // this user-targeted (not permission-broadcast) path. All deps this needs
+  // (appointment/job/customer/user/location repos) exist unconditionally in
+  // both Pg- and in-memory-backed boots, so — unlike messageDelivery below —
+  // registration itself is never gated.
+  setTechnicianAssignmentNotifier(
+    new TechnicianAssignmentNotifier({
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      userRepo,
+      locationRepo,
+      notifier: ownerNotificationService,
+      // Staff SMS is the raw, ungated `recipientClass: 'owner'` path (bypasses
+      // the customer DNC/consent gate — mirrors the emergency owner-cell
+      // paging call sites) — only available when a real delivery provider is
+      // wired (messageDelivery is null in dev/test without credentials), in
+      // which case the notifier's own doc-contract applies: no SMS sender ⇒
+      // in-app push only.
+      ...(messageDelivery
+        ? {
+            smsSender: (args: { to: string; body: string; tenantId: string; idempotencyKey?: string }) =>
+              messageDelivery!.sendSms({
+                to: args.to,
+                body: args.body,
+                tenantId: args.tenantId,
+                idempotencyKey: args.idempotencyKey,
+                recipientClass: 'owner',
+              }),
+          }
+        : {}),
+      logger: requestLogger,
     }),
   );
   // Render the real customer name in payment/cancellation pushes (best-effort;
@@ -5388,6 +5449,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       },
       // D2-1c — audit-log tenant-settings + language mutations.
       auditRepo,
+      // #1011 — owner-settable per-tenant capabilities (rows 2.6, 2.7). The
+      // FIRST route wiring of setTenantFlag, which shipped with zero call
+      // sites. Reuses the single shared PgTenantFeatureFlagRepository built
+      // above so the route and the capability gates read one cache. OPTIONAL:
+      // without a pool there is no tenant_feature_flags table, the dep is
+      // omitted, and both routes answer 503 — the in-memory boot and every
+      // app-booting test are unaffected.
+      tenantFeatureFlags
+        ? { tenantFlags: tenantFeatureFlags, platformFlags: featureFlagRepo, userRepo }
+        : undefined,
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
@@ -5747,11 +5818,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           runRepo: agreementRunRepo,
           jobsService: agreementsJobsService,
           invoicesService: agreementsInvoicesService,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           duesCollector,
           logger: agreementsLogger,
@@ -5812,11 +5879,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 },
               }
             : {}),
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           logger: callMeBackLogger,
         });
@@ -5959,11 +6022,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           settingsRepo,
           runRepo: batchInvoiceRunRepo,
           txRunner: batchInvoiceTxRunner,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           logger: batchInvoiceLogger,
         });
@@ -6011,11 +6070,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // WS22 — "K fixed" (flagged proposal edited after review).
             auditRepo,
           },
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           // Narrative through the brand-voice composer ONLY when a real LLM
           // provider is configured — the mock gateway's canned JSON must not
           // become an owner-facing narrative. Composer failures fall back to
@@ -6108,11 +6163,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           dunningEventRepo,
           // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
           customerRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: overdueInvoiceLogger,
         });
       }).catch((err) => {
@@ -6156,11 +6207,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // In-memory dev (no pool): no reader, no tenants — the sweep no-ops.
             ...(moneyReconciliationReader ? { reader: moneyReconciliationReader } : {}),
             auditRepo,
-            listTenantIds: async () => {
-              if (!pool) return [];
-              const r = await pool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(pool),
             logger: moneyReconciliationLogger,
           });
         }).catch((err) => {
@@ -6197,11 +6244,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             hfcrSendRepo: hfcrWeeklySendRepo,
             resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
             sendSms: (args) => oneTapOwnerSms(args.to, args.body),
-            listTenantIds: async () => {
-              if (!pool) return [];
-              const r = await pool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(pool),
             logger: hfcrWeeklyLogger,
           });
         }).catch((err) => {
@@ -6233,21 +6276,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // WS22 — "same mistake twice" weekly rate (repeatCorrections).
             buildSnapshot: (tenantId, weekStart, weekEnd) =>
               buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
-            resolveOwnerEmail: async (tenantId) => {
-              const r = await weeklyFeedbackPool.query(
-                'SELECT owner_email FROM tenants WHERE id = $1',
-                [tenantId],
-              );
-              return (r.rows[0]?.owner_email as string | undefined) ?? null;
-            },
-            isFeedbackEnabled: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.weeklyFeedbackEnabled !== false;
-            },
-            resolveBusinessName: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.businessName ?? null;
-            },
+            // Extracted to digest/weekly-feedback-config.ts so the per-tenant
+            // scoping is exercised by the sweep fan-out integration test
+            // against real rows, rather than substituted by it (D-032).
+            resolveOwnerEmail: (tenantId) =>
+              resolveTenantOwnerEmail(weeklyFeedbackPool, tenantId),
+            isFeedbackEnabled: (tenantId) =>
+              isWeeklyFeedbackEnabledForTenant(settingsRepo, tenantId),
+            resolveBusinessName: (tenantId) =>
+              resolveTenantBusinessName(settingsRepo, tenantId),
             sendEmail: (args) =>
               weeklyFeedbackDelivery.sendEmail({
                 to: args.to,
@@ -6255,10 +6292,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 text: args.text,
                 html: args.html,
               }),
-            listTenantIds: async () => {
-              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(weeklyFeedbackPool),
             logger: weeklyFeedbackLogger,
             ...(config.AI_PROVIDER_API_KEY
               ? {
@@ -6331,11 +6365,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           customerRepo,
           settingsRepo,
           dispatchRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: appointmentReminderLogger,
         });
       }).catch((err) => {
@@ -6363,11 +6393,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
         // Resolved once and shared by both sweeps below (one SELECT per tick).
-        const tenantIds = await (async (): Promise<string[]> => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        })();
+        const tenantIds = await listAllTenantIds(pool);
         await runHoldReaperSweep({
           appointmentRepo,
           auditRepo,
@@ -6422,11 +6448,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           sendService,
           auditRepo,
           pool: pool ?? null,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: estimateReminderLogger,
         });
       }).catch((err) => {
@@ -6452,11 +6474,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           estimateRepo,
           auditRepo,
           moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: estimateExpiryLogger,
         });
       }).catch((err) => {
@@ -6482,11 +6500,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         await runProposalExpirySweep({
           proposalRepo,
           auditRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: proposalExpiryLogger,
         });
       }).catch((err) => {
@@ -6556,11 +6570,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           reviewRepo: googleReviewsReviewRepo,
           pollStateRepo: googleReviewsPollStateRepo,
           credentialResolver: googleReviewsCredResolver,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: googleReviewsLogger,
           // Refresh-token handling: on 401 the sweep refreshes via the
           // stored refresh token, persists the rotated access token to
@@ -6956,11 +6966,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
         await runSupervisorAnnotationSweep({
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           proposalRepo,
           gateway: llmGateway,
           ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
