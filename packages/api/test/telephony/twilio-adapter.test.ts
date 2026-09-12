@@ -1422,6 +1422,17 @@ describe('TwilioGatherAdapter.handleGather', () => {
   // Confidence is processed as before, and repeated low confidence hands the
   // caller off instead of looping.
   describe('low acoustic Gather Confidence', () => {
+    // PR #975 F5 — the ladder's terminal branch now kicks off the (LLM-backed,
+    // best-effort) call summary. Stub it so the `gateway.complete` assertions
+    // below keep isolating the classifier/turn pipeline; the summary kick
+    // itself is pinned in gather-max-call-duration.test.ts.
+    beforeEach(() => {
+      vi.spyOn(
+        (adapter as unknown as { processor: { runSummary: (s: unknown) => Promise<void> } }).processor,
+        'runSummary',
+      ).mockResolvedValue(undefined);
+    });
+
     it('reprompts without running the classifier when Confidence is below the floor', async () => {
       const xml = await adapter.handleGather({
         sessionId,
@@ -1556,6 +1567,17 @@ describe('TwilioGatherAdapter.handleGather', () => {
   // confidence: reprompt below the cap, escalation + hangup at it, and a
   // single combined streak for mixed silence/mumble sequences.
   describe('silent caller (empty SpeechResult) shares the low-confidence ladder', () => {
+    // PR #975 F5 — the ladder's terminal branch now kicks off the (LLM-backed,
+    // best-effort) call summary. Stub it so the `gateway.complete` assertions
+    // below keep isolating the classifier/turn pipeline; the summary kick
+    // itself is pinned in gather-max-call-duration.test.ts.
+    beforeEach(() => {
+      vi.spyOn(
+        (adapter as unknown as { processor: { runSummary: (s: unknown) => Promise<void> } }).processor,
+        'runSummary',
+      ).mockResolvedValue(undefined);
+    });
+
     it('first silent turn reprompts with a new <Gather> and no <Hangup/>', async () => {
       const xml = await adapter.handleGather({
         sessionId,

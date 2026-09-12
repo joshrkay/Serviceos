@@ -163,6 +163,17 @@ export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
   "I didn't quite catch that — could you say that again?";
 
 /**
+ * U5 — spoken when a call reaches the absolute per-call duration cap
+ * (`VOICE_MAX_CALL_DURATION_MS`). Media streams speak it 30 s before the
+ * limit and then end the leg at the limit; Gather speaks it on the first
+ * turn that arrives past the limit, immediately before `<Hangup/>`. One
+ * line serves both transports so they can never drift; it is the
+ * exact-match key of its es translation in {@link SENTENCE_CATALOG_ES}.
+ */
+export const MAX_CALL_DURATION_WRAP_UP_COPY =
+  "We're almost out of time for this call, so I'll need to wrap up now. If you need anything else, please call back and we'll pick up where we left off.";
+
+/**
  * RV-071 / RV-225 — spoken when a proposal approve/reject/edit is asked for
  * by VOICE on an in-app session.
  *
@@ -234,6 +245,9 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
   // A3 — low acoustic STT confidence reprompt.
   [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
     'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
+  // U5 — absolute per-call duration cap wrap-up.
+  [MAX_CALL_DURATION_WRAP_UP_COPY]:
+    'Estamos por llegar al límite de tiempo de esta llamada, así que tendré que terminar ahora. Si necesita algo más, por favor llame de nuevo y continuaremos donde lo dejamos.',
   'Of course! What else can I help you with?':
     '¡Por supuesto! ¿En qué más puedo ayudarle?',
   'This call has been terminated due to policy violations.':

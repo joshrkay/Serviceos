@@ -248,6 +248,40 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
+  // U10 — session grouping for LLM trace export (the Langfuse sessionId).
+  // Carried in request.metadata ONLY, never in the prompt, so voice-quality
+  // cassette hashes and gateway cache keys are unaffected.
+  it('passes sessionId and callSid to the gateway in request metadata when the context supplies them', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent(
+      'create an invoice',
+      { tenantId: 'tenant-xyz', sessionId: 'voice-sess-1', callSid: 'CA0123456789' },
+      gateway,
+    );
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.metadata).toEqual({
+      tenantId: 'tenant-xyz',
+      sessionId: 'voice-sess-1',
+      callSid: 'CA0123456789',
+    });
+  });
+
+  it('session identifiers never change the prompt messages (cassette hashes / cache keys stable)', async () => {
+    const plain = mockGateway(JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }));
+    const withSession = mockGateway(JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }));
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, plain);
+    await classifyIntent(
+      'create an invoice',
+      { tenantId: 'tenant-xyz', sessionId: 'voice-sess-1', callSid: 'CA0123456789' },
+      withSession,
+    );
+    const plainCall = (plain.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const sessionCall = (withSession.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(sessionCall.messages).toEqual(plainCall.messages);
+  });
+
   it('uses the dedicated voice-safe classifier deadline instead of the lightweight tier deadline', async () => {
     const gateway = mockGateway(
       JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })

@@ -8,7 +8,57 @@
  * Cost cap: if the cumulative session cost has already consumed
  * `maxSentimentBudgetRatio` of `sessionCostCapCents`, skip the LLM
  * call (returns score=0) to protect tenant budgets.
+ *
+ * #895: the classifier's OWN completion is recorded on that same tracker
+ * (`recordCompletionUsage`), so its spend counts against the cap it guards.
  */
+import { estimateCostMicroCents, type TokenUsage } from '../../skills/session-cost-tracker';
+import { computeCostMicroCents } from '../../gateway/model-pricing';
+
+/**
+ * What the customer-calling classifiers (this one and the vulnerability
+ * grader) need from one LLM completion: the gateway's `content`, its
+ * provider-reported `tokenUsage` and the resolved `model` id, adapted at the
+ * wiring site (app.ts). `tokenUsage` absent → the call is not recorded.
+ */
+export interface ClassifierCompletion {
+  text: string;
+  tokenUsage?: { input: number; output: number };
+  model?: string;
+}
+
+/**
+ * The slice of `SessionCostTracker` these classifiers use: `totals` for the
+ * budget guard, `recordUsage` so their own spend is visible to that guard.
+ */
+export interface ClassifierCostTracker {
+  totals: { costCents: number };
+  recordUsage(usage: TokenUsage): unknown;
+}
+
+/**
+ * Record one completion's spend on the session tracker. Priced from the
+ * gateway's model table when the model id is known; otherwise the same
+ * directional estimate the main voice turn records — never a silent zero.
+ *
+ * Recorded as raw micro-cents, never pre-rounded: a typical per-turn
+ * classification is sub-cent (~600 input / 10 output tokens on a cheap
+ * model), so rounding each call to integer cents here stored 0 every time
+ * and a long call's classifier spend never moved `totals.costCents` — the
+ * budget-ratio guard above was blind to its own cost (PR #975 review
+ * finding 4). The tracker accumulates micro-cents and derives whole cents.
+ */
+export function recordCompletionUsage(
+  costTracker: ClassifierCostTracker | undefined,
+  completion: ClassifierCompletion,
+): void {
+  if (!costTracker || !completion.tokenUsage) return;
+  const { input, output } = completion.tokenUsage;
+  const costMicroCents =
+    computeCostMicroCents(completion.model, completion.tokenUsage) ??
+    estimateCostMicroCents(input, output);
+  costTracker.recordUsage({ inputTokens: input, outputTokens: output, costMicroCents });
+}
 
 export interface SentimentInput {
   transcript: string;
@@ -24,8 +74,8 @@ export interface SentimentInput {
 }
 
 export interface SentimentDeps {
-  llm: { complete(args: { prompt: string }): Promise<{ text: string }> };
-  costTracker?: { totals: { costCents: number } };
+  llm: { complete(args: { prompt: string }): Promise<ClassifierCompletion> };
+  costTracker?: ClassifierCostTracker;
   sessionCostCapCents?: number;
   maxSentimentBudgetRatio?: number;
 }
@@ -82,6 +132,9 @@ export async function classifyTurnSentiment(
   let raw: string;
   try {
     const res = await deps.llm.complete({ prompt });
+    // #895 — record before parsing: the tokens were bought even if the
+    // text turns out to be unparseable.
+    recordCompletionUsage(deps.costTracker, res);
     raw = res.text;
   } catch {
     return { frustrationScore: 0 };

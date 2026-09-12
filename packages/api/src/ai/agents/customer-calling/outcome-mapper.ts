@@ -68,12 +68,17 @@ export function deriveCallOutcome(input: DeriveOutcomeInput): CallOutcome {
     return 'no_intent';
   }
 
+  // U5 — 'max_call_duration': the absolute per-call cap ended the call.
+  // Nothing broke, so it is classified like the other clean ends (from what
+  // the caller achieved), never the infra 'failed' bucket the unknown-reason
+  // default below falls to.
   if (
     endedReason === 'normal_close' ||
     endedReason === 'closed' ||
     endedReason === 'session_ended' ||
     endedReason === 'manual_end' ||
-    endedReason === 'idle_timeout'
+    endedReason === 'idle_timeout' ||
+    endedReason === 'max_call_duration'
   ) {
     if (hasProposal) return 'completed';
     if (intentSet) return 'completed';

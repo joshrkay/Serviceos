@@ -19,6 +19,13 @@ on:
     # Nightly against Railway dev (02:00 UTC)
     - cron: '0 2 * * *'
 
+# `contents: read` is mandatory: a permissions block drops every unlisted
+# scope to none and actions/checkout needs it. `issues: write` is for the
+# gate-red issue step at the end of the job (plan 2026-09-05-001 U2).
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   qa-matrix-gate:
     runs-on: ubuntu-latest
@@ -122,3 +129,17 @@ jobs:
           name: qa-matrix-report-${{ github.run_id }}
           path: qa/reports/
           retention-days: 30
+
+      # U2 (R3) — this gate has no Slack step, so without this a red
+      # nightly run is invisible. `if: always()` so the green run closes
+      # the issue; job.status carries the conclusion. No continue-on-error
+      # on purpose: a reporter that cannot reach GitHub must be loud.
+      - name: Open or close gate-red issue
+        if: always()
+        run: npx tsx .github/scripts/report-gate-failure.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GATE_NAME: ${{ github.workflow }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

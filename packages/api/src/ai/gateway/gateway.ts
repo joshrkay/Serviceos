@@ -19,6 +19,7 @@ import {
   shouldWarnForUnmappedTaskType,
 } from './router';
 import { computeCostMicroCents } from './model-pricing';
+import type { LLMTraceCompletionEvent, LLMTraceExporter } from './trace-exporter';
 
 /** Image detail hint passed through to vision-capable providers. */
 export type LLMImageDetail = 'low' | 'high' | 'auto';
@@ -143,6 +144,55 @@ export interface LLMGatewayLogger {
 
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
+
+/**
+ * The attempt trail a resilience wrapper leaves on the error it gives up
+ * with: the ordered `provider:model` entries it tried (same shape as
+ * `LLMResponse.providerPath`) and the provider whose failure it surfaced.
+ * `ProviderFailoverWrapper` (compose-resilience.ts) puts both on the
+ * `details` of the AppError it throws on exhaustion, and stamps them onto a
+ * raw provider error it re-throws without failing over (4xx). The gateway's
+ * failure-path trace export reads it so the error event names the provider
+ * that actually failed last, not the primary route (PR #975 finding 6).
+ */
+export interface ProviderAttemptTrail {
+  providerPath: string[];
+  lastProvider: string;
+}
+
+/** Stamp the trail onto an error object (no-op for non-object throwables). */
+export function stampProviderAttemptTrail<T>(err: T, trail: ProviderAttemptTrail): T {
+  if (err && typeof err === 'object') {
+    Object.assign(err, {
+      providerPath: [...trail.providerPath],
+      lastProvider: trail.lastProvider,
+    });
+  }
+  return err;
+}
+
+function readTrailFrom(source: unknown): ProviderAttemptTrail | undefined {
+  if (!source || typeof source !== 'object') return undefined;
+  const { providerPath, lastProvider } = source as {
+    providerPath?: unknown;
+    lastProvider?: unknown;
+  };
+  if (
+    !Array.isArray(providerPath) ||
+    providerPath.length === 0 ||
+    !providerPath.every((p): p is string => typeof p === 'string') ||
+    typeof lastProvider !== 'string'
+  ) {
+    return undefined;
+  }
+  return { providerPath: [...providerPath], lastProvider };
+}
+
+/** Read the trail off an AppError's `details` or a stamped raw error. */
+export function readProviderAttemptTrail(err: unknown): ProviderAttemptTrail | undefined {
+  const details = err instanceof AppError ? err.details : undefined;
+  return readTrailFrom(details) ?? readTrailFrom(err);
+}
 
 /**
  * taskTypes carried in the canonical `TASK_TYPES` list purely so the
@@ -363,17 +413,37 @@ export class LLMGateway {
   private readonly providers: Map<string, LLMProvider>;
   private readonly logger?: LLMGatewayLogger;
   private readonly aiRunRepo?: AiRunRepository;
+  private readonly traceExporter?: LLMTraceExporter;
 
   constructor(
     config: LLMGatewayConfig,
     providers: Map<string, LLMProvider>,
     logger?: LLMGatewayLogger,
-    aiRunRepo?: AiRunRepository
+    aiRunRepo?: AiRunRepository,
+    traceExporter?: LLMTraceExporter,
   ) {
     this.config = config;
     this.providers = providers;
     this.logger = logger;
     this.aiRunRepo = aiRunRepo;
+    this.traceExporter = traceExporter;
+  }
+
+  /**
+   * U10 — export one completion to the trace sink. Best-effort, exactly like
+   * the aiRunRepo calls: a throw is logged with the correlation id and never
+   * reaches the completion (or the error the caller is about to receive).
+   */
+  private exportTrace(event: LLMTraceCompletionEvent): void {
+    if (!this.traceExporter) return;
+    try {
+      this.traceExporter.recordCompletion(event);
+    } catch (exportErr) {
+      this.logger?.error('LLM trace export failed (best-effort)', {
+        correlationId: event.correlationId,
+        error: exportErr instanceof Error ? exportErr.message : String(exportErr),
+      });
+    }
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -456,6 +526,8 @@ export class LLMGateway {
     const correlationId =
       (request.metadata?.correlationId as string | undefined) ?? uuidv4();
     const promptVersionId = request.metadata?.promptVersionId as string | undefined;
+    // U10 — trace-session grouping (voice session id / chat conversation id).
+    const sessionId = request.metadata?.sessionId as string | undefined;
 
     // Create the ai_runs row (best-effort — failure must not abort the LLM call).
     // A single create() writes the run with status 'pending' and startedAt already
@@ -588,9 +660,44 @@ export class LLMGateway {
         }
       }
 
+      // U10 — trace export (best-effort). Built from the same values the
+      // ai_runs row and the metrics above already use: served model/provider
+      // post-failover, the response's own providerPath/fallbackStage/degraded.
+      this.exportTrace({
+        correlationId,
+        tenantId,
+        taskType: request.taskType,
+        sessionId,
+        resolvedModel,
+        servedModel: costModel,
+        provider: costProvider,
+        providerPath: result.providerPath,
+        fallbackStage: result.fallbackStage,
+        cached: result.cached ?? false,
+        degraded: result.degraded ?? false,
+        promptVersionId,
+        tokenUsage: result.tokenUsage,
+        costMicroCents,
+        latencyMs,
+        startedAt: new Date(startTime),
+        input: request.messages,
+        output: result.content,
+      });
+
       return result;
     } catch (err) {
       const latencyMs = Date.now() - startTime;
+      // Attribution mirrors the success path: when the resilience stack
+      // failed over before giving up, the error it throws carries the
+      // attempt trail, and the provider that FAILED LAST is the one the
+      // failure belongs to — not the primary route (PR #975 finding 6). With
+      // no trail (no wrapper in the chain) the routed provider is the only
+      // candidate and stays the attribution.
+      const trail = readProviderAttemptTrail(err);
+      const failedProvider = trail?.lastProvider ?? providerName;
+      const providerPath = trail?.providerPath;
+      const failedOver = (providerPath?.length ?? 0) > 1;
+      const fallbackStage = failedOver ? 'fallback-provider' : undefined;
       gatewayRequestsTotal.inc({
         tenant_tier: tier,
         model: resolvedModel,
@@ -613,10 +720,12 @@ export class LLMGateway {
         // is traceable end-to-end (it keys the ai_runs row written below).
         correlationId,
         taskType: request.taskType,
-        provider: providerName,
+        provider: failedProvider,
         model: resolvedModel,
         latencyMs,
         error: err instanceof Error ? err.message : String(err),
+        fallbackStage,
+        providerPath,
       });
 
       // Persist failed ai_run (best-effort).
@@ -638,6 +747,30 @@ export class LLMGateway {
           });
         }
       }
+
+      // U10 — trace export of the failure (best-effort): message + latency,
+      // no usage/cost (none was reported). Provider / providerPath /
+      // fallbackStage come from the attempt trail above, so a failure after
+      // failover is filed under the provider that failed, like a success
+      // after failover is filed under the provider that served it.
+      this.exportTrace({
+        correlationId,
+        tenantId,
+        taskType: request.taskType,
+        sessionId,
+        resolvedModel,
+        servedModel: resolvedModel,
+        provider: failedProvider,
+        providerPath,
+        fallbackStage,
+        cached: false,
+        degraded: failedOver,
+        promptVersionId,
+        latencyMs,
+        startedAt: new Date(startTime),
+        input: request.messages,
+        error: err instanceof Error ? err.message : String(err),
+      });
 
       if (err instanceof AppError) {
         throw err;

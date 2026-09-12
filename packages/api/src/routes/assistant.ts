@@ -1672,6 +1672,24 @@ async function findPendingClarification(
   return undefined;
 }
 
+type AssistantUsage = { input: number; output: number; total: number };
+
+/**
+ * #913 — the reply envelope's `usage` for a turn that paid for a real
+ * classify call. The classifier surfaces `{ input, output }` only when it
+ * actually hit the gateway (absent on a short-circuit), so an absent usage
+ * is an honest zero, not a masked one.
+ */
+function usageOf(tokenUsage: { input: number; output: number } | undefined): AssistantUsage {
+  const input = tokenUsage?.input ?? 0;
+  const output = tokenUsage?.output ?? 0;
+  return { input, output, total: input + output };
+}
+
+function sumUsage(a: AssistantUsage, b: AssistantUsage): AssistantUsage {
+  return { input: a.input + b.input, output: a.output + b.output, total: a.total + b.total };
+}
+
 /**
  * The reply envelope `generateAssistantReply` returns for a proposal-bearing
  * turn — the same literal shape the single-intent dispatch builds, named here
@@ -2409,6 +2427,11 @@ async function generateAssistantReply(
   let guardIntent: string | undefined;
   let guardConfidence: number | undefined;
   let guardIntentError: string | undefined;
+  // #913 — what the top-level classify call on this turn actually spent.
+  // Every reply built after that call reports it (the chain path adds each
+  // segment's classify on top); the pre-classifier deterministic paths and
+  // the error-fallback envelope keep their honest zeros.
+  let classifierUsage: AssistantUsage = usageOf(undefined);
   if (lastUserText.trim().length > 0) {
     try {
       // §3B/3D/3E — resolve the tenant's vertical context (terminology +
@@ -2576,9 +2599,13 @@ async function generateAssistantReply(
         extendedIntents: true,
         ownerSession: callerRole === 'owner',
         ...(verticalPromptSection ? { verticalPromptSection } : {}),
+        // U10 — trace-session grouping: the conversation id (always minted
+        // by the route before drafting, #909 — so turn one is grouped too).
+        ...(conversationId ? { sessionId: conversationId } : {}),
       };
 
       const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+      classifierUsage = usageOf(classification.tokenUsage);
       guardIntent = classification.intentType;
       guardConfidence = classification.confidence;
 
@@ -2614,7 +2641,9 @@ async function generateAssistantReply(
               reason: lookupReply.message.reasoning,
             });
           }
-          return lookupReply;
+          // The lookup itself is deterministic (zero usage); the classify
+          // call that routed here was not.
+          return { ...lookupReply, usage: sumUsage(classifierUsage, lookupReply.usage) };
         }
         logger.info('assistant/chat: lookup intent has no wired skill on this surface', {
           correlationId,
@@ -2655,7 +2684,7 @@ async function generateAssistantReply(
         ) => ({
           taskType: 'assistant.en_route',
           model: 'direct-act',
-          usage: { input: 0, output: 0, total: 0 },
+          usage: classifierUsage,
           ...(degraded ? { degraded: true, fallbackStage: 'en-route-unavailable' } : {}),
           message: { role: 'assistant' as const, content, reasoning },
         });
@@ -2783,7 +2812,7 @@ async function generateAssistantReply(
         return {
           taskType: 'assistant.voice_approval_refused',
           model: 'policy-guard',
-          usage: { input: 0, output: 0, total: 0 },
+          usage: classifierUsage,
           message: {
             role: 'assistant' as const,
             content: VOICE_APPROVAL_REFUSAL,
@@ -2849,6 +2878,8 @@ async function generateAssistantReply(
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
         const carried: Record<string, unknown> = {};
+        // #913 — top-level classify plus every segment classify that landed.
+        let chainUsage = classifierUsage;
         for (const segment of chainSegments) {
           let segClass;
           try {
@@ -2858,6 +2889,7 @@ async function generateAssistantReply(
           } catch {
             continue;
           }
+          chainUsage = sumUsage(chainUsage, usageOf(segClass.tokenUsage));
           // create_customer is the one documented exception to
           // CHAT_INTENT_TO_REGISTRY_KEY (see that constant's doc comment) —
           // the chain path has no conversational "ask for a name" fallback,
@@ -3049,7 +3081,7 @@ async function generateAssistantReply(
           return {
             taskType: 'assistant.chain',
             model: 'intent-classifier',
-            usage: { input: 0, output: 0, total: 0 },
+            usage: chainUsage,
             message: {
               role: 'assistant' as const,
               content: `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}`,
@@ -3061,7 +3093,7 @@ async function generateAssistantReply(
           return {
             taskType: 'assistant.chain',
             model: 'intent-classifier',
-            usage: { input: 0, output: 0, total: 0 },
+            usage: chainUsage,
             message: {
               role: 'assistant' as const,
               content:
@@ -3300,7 +3332,7 @@ async function generateAssistantReply(
         return {
           taskType: `assistant.${handler.taskType}`,
           model: 'intent-classifier',
-          usage: { input: 0, output: 0, total: 0 },
+          usage: classifierUsage,
           message: {
             role: 'assistant' as const,
             // #909 — an ambiguous reference asks ONE question instead of
@@ -3344,7 +3376,7 @@ async function generateAssistantReply(
           return {
             taskType: 'assistant.create_customer.needs_name',
             model: 'intent-classifier',
-            usage: { input: 0, output: 0, total: 0 },
+            usage: classifierUsage,
             message: {
               role: 'assistant' as const,
               content:
@@ -3398,7 +3430,7 @@ async function generateAssistantReply(
         return {
           taskType: 'assistant.create_customer',
           model: 'intent-classifier',
-          usage: { input: 0, output: 0, total: 0 },
+          usage: classifierUsage,
           message: {
             role: 'assistant' as const,
             content: uiProposal.title + '. Review and approve to add them to your CRM.',
@@ -3502,7 +3534,13 @@ async function generateAssistantReply(
       ],
       temperature: 0.2,
       maxTokens: 700,
-      metadata: { source: 'assistant-chat-route', tenantId, correlationId },
+      metadata: {
+        source: 'assistant-chat-route',
+        tenantId,
+        correlationId,
+        // U10 — same trace session as this turn's classify call(s).
+        ...(conversationId ? { sessionId: conversationId } : {}),
+      },
     });
 
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));
@@ -3558,7 +3596,9 @@ async function generateAssistantReply(
     return {
       taskType,
       model: response.model,
-      usage: response.tokenUsage,
+      // #913 — an 'unknown' classify still paid for its tokens before
+      // falling through to this generic reply.
+      usage: sumUsage(classifierUsage, response.tokenUsage),
       degraded: response.degraded ?? false,
       fallbackStage: response.fallbackStage,
       message: {
