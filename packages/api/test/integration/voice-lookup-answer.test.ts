@@ -170,7 +170,7 @@ describe('Postgres integration — voice lookup answers (U3)', () => {
 });
 
 /**
- * #1019 6.7 (G1 4, T1 → T3) — "As M, I want to ask for my numbers out loud
+ * #1019 6.7 (G1 4, T1 → T2) — "As M, I want to ask for my numbers out loud
  * and hear them." Every test above round-trips a HAND-BUILT `ANSWER`
  * literal — real for the JSONB column, but never a real COMPUTED number.
  * This suite drives `executeLookupAnswer` (the production entry point the
@@ -178,8 +178,21 @@ describe('Postgres integration — voice lookup answers (U3)', () => {
  * outstanding balances, in ONE run, and persists each through the same
  * two-phase `recordAnswer` contract above — proving neither tenant ever
  * hears the other's figure, not merely that each hears "a" figure.
+ *
+ * T2, NOT T3 (review follow-up, chatgpt-codex-connector on PR #1048): the
+ * PRD's own tenant-grade legend (docs/PRD-v5-as-built.md, "The tenant grade
+ * — the second half of the definition of done") defines T2 as "a second
+ * tenant's data does not change the first's answer — aggregates,
+ * availability, selection, counters" and reserves T3 for two tenants with
+ * DIFFERENT SETTINGS each producing their own correct result (the Phoenix
+ * timezone case is the canonical example). The two tenants below differ
+ * only in DATA (their invoice balances) — an aggregate non-interference
+ * proof, textbook T2 — not in any per-tenant CONFIGURATION, so this is not
+ * a T3 claim. A genuine T3 upgrade here would need a per-tenant setting
+ * that changes the ANSWER's shape (e.g. two different tenant timezones
+ * changing `oldestDueDate`'s rendered day), which this suite does not add.
  */
-describe('Postgres integration — lookup_balance speaks each tenant\'s OWN numbers (#1019 6.7, T3)', () => {
+describe('Postgres integration — lookup_balance speaks each tenant\'s OWN numbers (#1019 6.7, T2)', () => {
   let pool: Pool;
   let voiceRepo: PgVoiceRepository;
 

@@ -10,7 +10,7 @@
  * testcontainer's default connection is a superuser and superusers bypass
  * RLS unconditionally.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
 import {
@@ -34,8 +34,10 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
-import { AddMaterialTaskHandler } from '../../src/ai/tasks/add-material-task';
-import type { TaskContext } from '../../src/ai/tasks/task-handlers';
+import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
+import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { QueueMessage } from '../../src/queues/queue';
+import type { Logger } from '../../src/logging/logger';
 
 /**
  * Insert the customer -> location -> job FK chain under tenant RLS context.
@@ -560,6 +562,44 @@ describe('Postgres integration — material items', () => {
   // in the free-text description — material_items has no separate unit
   // column) survive the full round trip, not just the description string
   // alone.
+  /** Replays scripted JSON classifier replies in call order; repeats the last one. */
+  function scriptedGateway(responses: unknown[]): LLMGateway {
+    let i = 0;
+    return {
+      complete: vi.fn(async () => ({
+        content: JSON.stringify(responses[Math.min(i++, responses.length - 1)]),
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 10, output: 10, total: 20 },
+        latencyMs: 1,
+      } satisfies LLMResponse)),
+    } as unknown as LLMGateway;
+  }
+
+  function silentLogger(): Logger {
+    const noop = (..._args: unknown[]) => {};
+    const base = {
+      debug: noop,
+      info: noop,
+      warn: noop,
+      error: noop,
+      child: () => base,
+    } as unknown as Logger;
+    return base;
+  }
+
+  function msg<T>(payload: T): QueueMessage<T> {
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 10)}`,
+      type: 'voice_action_router',
+      payload,
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: `idem-${Math.random().toString(36).slice(2, 10)}`,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
   describe('add_material end-to-end: task -> approve -> execute -> material_items + audit (#1019 6.9)', () => {
     it('persists quantity and the spoken unit, and emits a readable material.requested audit event', async () => {
       const t = await createTestTenant(pool);
@@ -569,21 +609,46 @@ describe('Postgres integration — material items', () => {
       const guard = new IdempotencyGuard(new PgProposalExecutionRepository(pool), proposalRepo);
       const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
 
-      // 1) Draft via the REAL task handler from the entities a spoken
-      // "three-quarter copper, twenty feet" would extract to.
-      const taskContext: TaskContext = {
-        tenantId: t.tenantId,
-        userId: t.userId,
-        message: 'three-quarter copper, twenty feet',
-        existingEntities: {
-          materialDescription: '3/4" copper pipe, sold by the foot',
-          materialQuantity: 20,
+      // 1) Draft via the REAL voice-action-router, from a SCRIPTED classifier
+      // reply carrying the extractedEntities a spoken "three-quarter copper,
+      // twenty feet" would produce — not the task handler called directly
+      // with hand-fed existingEntities (review follow-up, chatgpt-codex-
+      // connector on PR #1048: a hand-fed TaskContext cannot catch a
+      // classifier/router regression that drops "feet" or mis-parses
+      // "twenty", since AddMaterialTaskHandler only COPIES
+      // materialDescription/materialQuantity and never parses `message`
+      // itself). Routing through the worker proves the classifier's
+      // extractedEntities survive `entitiesForProposal` and land on the
+      // drafted payload unchanged.
+      const gateway = scriptedGateway([
+        {
+          intentType: 'add_material',
+          confidence: 0.95,
+          extractedEntities: {
+            materialDescription: '3/4" copper pipe, sold by the foot',
+            materialQuantity: 20,
+          },
         },
-      };
-      const { proposal: drafted } = await new AddMaterialTaskHandler().handle(taskContext);
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+      await worker.handle(
+        msg({
+          tenantId: t.tenantId,
+          userId: t.userId,
+          transcript: 'three-quarter copper, twenty feet',
+        }),
+        silentLogger(),
+      );
+
+      const draftedList = await proposalRepo.findByTenant(t.tenantId);
+      expect(draftedList).toHaveLength(1);
+      const drafted = draftedList[0]!;
       expect(drafted.proposalType).toBe('add_material');
       expect(missingFieldsFor(drafted)).toEqual([]);
-      await proposalRepo.create(drafted);
+      const payload = drafted.payload as Record<string, unknown>;
+      expect(payload.quantity).toBe(20);
+      expect(payload.description).toContain('foot');
+      expect(payload.description).toContain('3/4');
 
       // 2) Real approval gate.
       const approved: Proposal = await approveProposal(

@@ -15,23 +15,37 @@ the G1 grades from ticket #1006 comments on #1019, quoted per-row below.
 **File:** `packages/api/test/integration/material-items.test.ts`
 **G1 finding:** "25/25 real-DB write at T1, no audit event → add it → 4."
 
-**What was added:** a new test driving the REAL voice-drafted payload
+**What was added (first pass):** a new test driving a voice-drafted payload
 ("three-quarter copper, twenty feet" → `materialDescription: '3/4" copper pipe, sold by
-the foot'`, `materialQuantity: 20`) through `AddMaterialTaskHandler` → the real approval
-gate (`approveProposal`) → the production execution registry
+the foot'`, `materialQuantity: 20`) through `AddMaterialTaskHandler` directly → the real
+approval gate (`approveProposal`) → the production execution registry
 (`createExecutionHandlerRegistry` + `ProposalExecutor`), then reads the audit event back
 through `PgAuditRepository.findByEntity` — the read path G1 flagged as missing. Asserts
 both the NUMBER (`quantity = 20`, a real integer column, `typeof === 'number'`) and the
 UNIT ("foot"/"3/4", carried in `description` since `material_items` has no separate unit
 column) survive the round trip.
 
+**Review finding addressed (chatgpt-codex-connector, PR #1048, P2/Testing,
+`material-items.test.ts:578-581`):** *"This fixture supplies the expected description and
+quantity directly in `existingEntities`, while `AddMaterialTaskHandler` only copies those
+fields and never interprets `message`. Consequently, a regression where the classifier
+drops 'feet' or parses 'twenty' incorrectly would still leave this test green... Route the
+transcript through the classifier/router, or narrow the evidence claim."* Verified as
+real — `AddMaterialTaskHandler.handle()` reads `context.existingEntities.materialDescription`
+/`.materialQuantity` and never parses `context.message` itself, so the original test could
+not catch a classifier-wiring regression. **Fix pushed:** redrafted through the REAL
+`createVoiceActionRouterWorker` with a scripted classifier reply carrying
+`extractedEntities: { materialDescription, materialQuantity }`, proving those fields
+survive `entitiesForProposal` (`voice-action-router.ts`) onto the persisted payload
+unchanged — the same fix shape as 6.4's below.
+
 **Command:**
 ```
 cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts --reporter=verbose test/integration/material-items.test.ts
 ```
 
-**RED** (deliberately wrong expectations: `quantity` expected `999`, audit events expected
-`0`):
+**RED, first pass** (deliberately wrong expectations: `quantity` expected `999`, audit
+events expected `0`):
 ```
  × ... persists quantity and the spoken unit, and emits a readable material.requested audit event
    → expected 20 to be 999 // Object.is equality
@@ -39,7 +53,14 @@ AssertionError: expected 20 to be 999 // Object.is equality
  Tests  1 failed | 25 passed (26)
 ```
 
-**GREEN:**
+**RED, router-driven fix** (drafted payload's `quantity` deliberately flipped to `999`):
+```
+ × ... persists quantity and the spoken unit, and emits a readable material.requested audit event
+   → expected 20 to be 999 // Object.is equality
+ Tests  1 failed | 25 skipped (26)
+```
+
+**GREEN (final):**
 ```
  ✓ ... add_material end-to-end: task -> approve -> execute -> material_items + audit (#1019 6.9) > persists quantity and the spoken unit, and emits a readable material.requested audit event 47ms
  Test Files  1 passed (1)
@@ -47,8 +68,10 @@ AssertionError: expected 20 to be 999 // Object.is equality
 ```
 
 **Evidence class:** real Postgres write (`material_items`) + real Postgres audit
-read-back through `PgAuditRepository.findByEntity` — T1 held (this row was not asked to
-move tenant-grade, only to close the audit gap).
+read-back through `PgAuditRepository.findByEntity`, now drafted through the real router
+with a scripted classifier reply rather than a hand-fed task context — T1 held (this row
+was not asked to move tenant-grade, only to close the audit gap and, per the review
+finding, the classifier-wiring gap).
 
 **Tenant-grade grep** (`grep -nE "tenantB|otherTenant|secondTenant|cross-tenant|another tenant|across tenants"`):
 ```
@@ -249,7 +272,7 @@ AssertionError: expected 'e9825e25-...' to be '02b7c74d-...' // Object.is equali
 one run, both the `resolved` fast path and the forced `ambiguous` picker path.
 **T-grade: T1 → T2.**
 
-### 6.7 — lift to T3: two tenants hear their own numbers, in one run
+### 6.7 — lift to T2: two tenants hear their own numbers, in one run
 
 **File:** `packages/api/test/integration/voice-lookup-answer.test.ts`
 
@@ -281,7 +304,17 @@ AssertionError: expected 4500 to be 99900 // Object.is equality
 ```
 
 **Evidence class:** real Postgres invoices for two tenants, computed (not hand-built)
-figures, one run, plus the real JSONB persistence round-trip. **T-grade: T1 → T3.**
+figures, one run, plus the real JSONB persistence round-trip.
+
+**Correction (chatgpt-codex-connector review, PR #1048):** this section originally claimed
+**T1 → T3**. Per the PRD's own tenant-grade legend (`docs/PRD-v5-as-built.md`, "The tenant
+grade — the second half of the definition of done"), T2 is "a second tenant's data does not
+change the first's answer — aggregates, availability, selection, counters"; T3 is reserved
+for two tenants with **different settings** each producing their own correct result (the
+Phoenix timezone case). The two tenants here differ only in DATA (their invoice balances),
+not in any tenant-level configuration — textbook T2, not T3. Corrected in both this report
+and the test file's own doc comment/describe title; the PRD stamp is corrected too.
+**T-grade: T1 → T2.**
 
 ### 6.5 / 6.6 — report only, no code change (cheap-lift check found nothing cheap)
 
