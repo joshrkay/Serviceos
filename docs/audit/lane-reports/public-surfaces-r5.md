@@ -139,6 +139,8 @@ Running 1 test using 1 worker
 - See "Reachability boundary" above — the single biggest judgment call in this lane.
 - `page.getByText('$500.00')` needed `.first()` — the amount renders in more than one place on the invoice page (line total + amount due).
 
+**Update (post-gate review, Codex finding on PR #1087, commit 55633e6):** the settlement webhook originally carried metadata constructed independently of the minted link (`tenantA.tenantId`/`invoiceA.invoiceId` typed directly), so the test would have stayed green even if the mint call had issued an unusable link or embedded the wrong metadata — confirmed real: no test in the repo inspects what metadata `createInvoicePaymentLink`'s `generateLink()` call actually sends (every fake `generateLink` in `invoice-payment-link.test.ts` only checks `stripeAccountId`). Fixed by threading the invoice's own persisted `stripePaymentLinkId` (read back via `GET /api/invoices/:id` after minting) into the webhook's `payment_link` field, so settlement is now tied to the specific link this test issued rather than an independently-fabricated one. **Residual gap, not closed by this lane:** verifying that the mint call's `metadata: {tenant_id, invoice_id}` actually reaches a real Stripe object needs a live Stripe test-mode key or a spy-capable fake provider (a product-code change) — this sandbox has neither. Flagged inline in the spec and on the PR for whoever states the rung to weigh.
+
 ---
 
 ## Row 2.9 — website self-booking
