@@ -913,7 +913,7 @@ underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
    - *A mocked dependency caps the claim at the mock.* This restates CLAUDE.md's existing rule; it
      is what demoted the dunning cadence, the 4★ review gate and the service-credit cap.
 3. **Every rung carries a command.** Acceptance criteria, evidence classes and confirming commands
-   live in `docs/PRD-v5-acceptance.md`, one falsifiable sentence per row. A rung published without a
+   live inline in `docs/PRD-v5-as-built.md` §5 and §8, one falsifiable sentence per row. A rung published without a
    command behind it is a prediction and is to be read as one.
 4. **Reachability is part of the score, and "dark by default" is not its weakest form.** Four
    capabilities are *unlit-able*: no product surface can enable them at all

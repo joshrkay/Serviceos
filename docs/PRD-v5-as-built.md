@@ -46,12 +46,25 @@ using the ladder this repository itself invented in PRD v4 Part E:
 | **5 Reachable** | Proven *and* reachable by a real user on the surface the requirement names |
 | **6 Live** | Observed working in production, with real tenants |
 
-**Every rung in §8 was re-derived from the test suite on 2026-09-11.** The first
-edition of this document asserted them from reading the source, which is a
-prediction, not a verdict — 28 rows were overclaimed and 16 underclaimed. The
-acceptance criteria, evidence classes and confirming commands now live in
-**[`docs/PRD-v5-acceptance.md`](PRD-v5-acceptance.md)**, and §8.0 explains how to
-read them. A rung without a command behind it should be treated as a guess.
+**Every rung in §5 and §8 was re-derived from the test suite on 2026-09-11.**
+The first edition asserted them from reading the source, which is a prediction,
+not a verdict — 28 rows were overclaimed and 16 underclaimed. **§8.0 explains how
+a rung is now earned**, and every row carries the command that confirms or
+refutes it. A rung without a command behind it should be treated as a guess.
+
+**Three ways to read the requirement sections.** §5 and §8 each state the same
+thing three ways, so one document serves three readers:
+
+| If you are asking | Read | Which column |
+|---|---|---|
+| *What did the user need?* | the **story** — a named persona's voice | User story |
+| *How would we know it works?* | the **acceptance criterion** — one falsifiable Given/When/Then | Acceptance criterion |
+| *Can we confirm it today?* | the **rung**, and the command beside it | Rung · Confirm |
+
+The third question is the one this edition exists to answer, and it is not the
+same as the first two. **A rung is a verdict on evidence, not on value** — five
+stories sit at rung 4 and still fail their user (§12.4c), and at least one
+rung-3 story is probably fine (§8.0).
 
 **Rung 6 is empty across the entire product.** That is the single most
 important fact in this document, and §12 treats it as such rather than burying
@@ -124,6 +137,16 @@ dedicated office staff, $200K–$1M revenue**, US, English (with Spanish
 supported end-to-end at the language layer).
 
 ### 3.1 Personas
+
+**The story columns in §5 and §8 refer to these people by initial.**
+
+| | Persona | The shape of their problem |
+|---|---|---|
+| **M** | **Mike Rivera** — HVAC, Phoenix, 2 trucks, ~$680K | Dispatcher, CSR, estimator, bookkeeper and tech. Peak season is 102°F and the phone never stops |
+| **J** | **Jenna Walsh** — plumbing, Cleveland, solo, ~$340K | Single-threaded by choice. Frozen-pipe season at 4am. Wants her life back, not a fleet |
+| **T** | **The tech going independent** | No systems, no price book, no processes. Rivet is the first software they buy |
+| **S** | **The owner's spouse, doing the books Saturday morning** | The unseen second user. The digest and the weekly summary are their whole product |
+
 
 **Mike Rivera — HVAC, Phoenix, 2 trucks, ~$680K.** 38, married, two kids, wife
 works full-time. One employee (Carlos, his cousin, a tech who won't touch
@@ -503,55 +526,56 @@ structurally, and many are pinned by a test that fails the build if broken.
 They are listed before the feature sections because everything downstream is a
 consequence of them.
 
-| # | Invariant | How it is enforced |
-|---|---|---|
-| **I1** | **The AI never writes to an operational entity.** It drafts a typed proposal; a deterministic handler executes after approval. | D-004. Execution handlers are the only code permitted to mutate money or schedule state from a proposal. |
-| **I2** | **No `system:` actor may ever approve a proposal.** | D-019. A structural guard in the single lifecycle transition seam, so the rule survives future callers. |
-| **I3** | **Approval is a human control act.** Owner voice approval is permitted on a verified owner line; money and irreversible classes additionally require a spoken challenge, capped at three failures then locked for the session. | D-025. The readback is composed **from the proposal payload, never from the owner's utterance**, and the confirm is a deterministic matcher, never an LLM. |
-| **I4** | **An AI-emitted price is never authoritative.** | A pure, deterministic, LLM-free catalog resolver ahead of proposal creation; uncatalogued lines force review through a flag a tenant cannot override. |
-| **I5** | **Ambiguity becomes a clarification, never a silent guess** — on every surface, in that surface's own idiom, through one shared disambiguation matcher so the surfaces cannot drift. | D-029. |
-| **I6** | **A gate on an entity id must have a resolver behind it.** | D-029. A gate nothing can lift is a capability that can never be approved. |
-| **I7** | **The AI never discounts, never commits scope, never promises a human.** | Deterministic negotiation guardrail; discount policy fails closed at zero. |
-| **I8** | **Safety escalation beats containment. No config flag may override it.** | Deterministic emergency detection ahead of the classifier; complaint escalation has no tenant toggle (D-027). |
-| **I9** | **All money is integer cents**, end to end, with one shared engine as the only source of totals math and **one** percent-of-money helper so rounding cannot drift. | D-003. Line totals are recomputed server-side, discarding the client's number. |
-| **I10** | **All times stored UTC, rendered in the tenant's timezone.** | An unset tenant timezone makes booking **refuse**, never fall back to a default zone — a Phoenix mis-booking postmortem removed the column default. |
-| **I11** | **Every entity carries `tenant_id`; RLS is FORCED at the database**, under a dedicated non-bypassing runtime role the server refuses to boot without in production. | The database, not application code, is the isolation boundary. Exactly two tables are exempt, each with its rationale recorded as a SQL comment, and the runtime role is dynamically revoked from any table that would otherwise slip through. |
-| **I12** | **Every mutation emits an audit event** attributable to actor id, role, and channel. The guarantee has **two tiers, and they are not the same strength** — see below. | Execution-outcome audit is transactional on the DB-only path; handler-emitted domain audit is best-effort. |
-| **I13** | **Caller speech is untrusted data for its whole lifetime** — including when read back to the operator hours later. | Fenced with explicit hardening copy before entering any operator-facing model context; fence-closing markers in the caller's own text are neutralized. |
-| **I14** | **A revocation of contact consent blocks every channel; a grant never crosses channels.** | D-017, on an append-only ledger behind both outbound gates. |
-| **I15** | **All LLM calls route through one gateway.** No module outside it may import a provider SDK. | D-005, enforced by a CI guard. |
-| **I16** | **A capability's surface coverage is declared, not accidental.** Undeclared (capability × surface) cells fail a structural test. | The coverage table. Refusals happen on purpose; silence is impossible. |
-| **I17** | **Auto-approval is a scoped, opt-in, reversible exception — never a posture.** | D-015: two capture-class types, default OFF, stricter floor, kill switch, one-tap UNDO, digest visibility. |
-| **I18** | **No feature ships that adds admin work to the owner's day.** | The litmus test; the reason seven planned v1 phases were cut or deferred (D-011). |
+They are also the **negative user stories** — the epic whose acceptance
+criterion is that something *never happens*. An anti-persona is defined against
+them: *"the owner who wants AI fully unsupervised"* is explicitly not the
+customer, and the refusal is structural rather than policy. So each invariant is
+stated three ways below — as a law, as the story a persona would tell, and as a
+criterion a command can refute.
 
-### 5.0a Which of these are enforced, and which are merely true today
+**Eleven of eighteen clear the real-Postgres or structural-guard bar. Five carry
+a universal quantifier nothing proves. One has no enforcement at all.**
 
-Every invariant above was audited against the test suite on 2026-09-11. The
-per-invariant criteria, evidence classes and confirming commands are in
-[`docs/PRD-v5-acceptance.md`](PRD-v5-acceptance.md) §A.3. Four results belong
-here, because they change what the table above means:
+| # | The law, and the story behind it | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **I1** | **The AI never writes to an operational entity.** It drafts a typed proposal; a deterministic handler executes after approval (D-004). · *As M, I want the AI to never write to my records directly, only propose, so nothing happens without me* | **Given** a drafted proposal, **then** **zero** rows exist in the target table; after approval, exactly one row **and** its audit event | 4 | **D:** `integration/create-job-execution.test.ts` |
+| **I1′** | *…and I want that true of **every** path, not just the ones someone tested* | **Given** any AI module, **then** it cannot call a repository write | **2** 🚨 | **CODE-ONLY** — no lint rule, no import guard. Per-path D-004 pins exist. *A tested behaviour, not an enforced invariant* |
+| **I2** | **No `system:` actor may ever approve a proposal** (D-019) — a structural guard in the single lifecycle transition seam, so the rule survives future callers. · *As M, I want no automated actor able to approve on my behalf, so "approved" always means a human did it* | **Given** any starting status, **when** a `system:` actor attempts `approved`, **then** it throws `ForbiddenError` | 3 | **U:** `proposals/lifecycle.test.ts`. 🚨 *In-memory objects only; **zero** integration tests attempt a `system:` approval* |
+| **I3** | **Approval is a human control act** (D-025). Owner voice approval on a verified owner line; money and irreversible classes additionally require a spoken challenge, capped at three failures then locked. · *As M, I want spoken approval of money to require a challenge, so a stranger with my phone can't approve a refund* | **Given** three wrong codes in one session — **including across a cancelled and restarted dialogue** — **then** the session locks for money/irreversible while capture-class still approves | 3 | **U:** `ai/tasks/proposal-approval-task.test.ts`, `telephony/voice-approval-gather.test.ts` |
+| **I3′** | *…and I want the readback composed from the proposal, never from what I just said* | **Given** an approval readback, **then** its text derives from the payload, not the utterance | **2** 🚨 | **CODE-ONLY** — no provenance assertion exists |
+| **I4** | **An AI-emitted price is never authoritative.** A pure, deterministic, LLM-free catalog resolver ahead of proposal creation; uncatalogued lines force review through a flag a tenant cannot override. · *As M, I want an AI-invented price to never be authoritative, so my catalog is the only source of truth* | **Given** one uncatalogued line, **then** `requiresReview === true` regardless of tenant settings or confidence, and `pricing_source` is CHECK-constrained on disk | 4 | **U:** `ai/resolution/catalog-resolver.test.ts` · **D:** `integration/invoice-pricing-source.test.ts` |
+| **I5** | **Ambiguity becomes a clarification, never a silent guess** — on every surface, in that surface's own idiom (D-029). · *As M, I want it to ask instead of guessing, so it never acts on the wrong customer* | **Given** two same-named customers, **then** **exactly one** question is asked and no id persists until a follow-up names a candidate | 4 | **D:** `integration/chat-entity-resolution.test.ts` |
+| **I5′** | *…through one shared matcher, so the surfaces cannot drift* | **Given** one disambiguation matcher, **when** surfaces diverge, **then** the build fails | **2** 🚨 | **FALSE AS WRITTEN.** A second, deliberately broader gate exists (`gated-reference-resolution.ts:602`) whose own comment says it *"is allowed to be slightly BROADER than the matcher behind it."* Nothing fails if they drift |
+| **I6** | **A gate on an entity id must have a resolver behind it** (D-029). A gate nothing can lift is a capability that can never be approved (#909). · *As M, I want every question it asks me to be answerable, so it never blocks on something I can't resolve* | **Given** any entity-id gate a proposal contract can emit, **then** it is a key of `GATED_REFERENCE_SOURCES` | **2** 🚨 | **NO EVIDENCE** — and a test pins the **opposite** as supported: an unresolvable gate is a legal state (`gated-reference-resolution.test.ts:115`). **Both cannot be true. The weakest invariant in the table** |
+| **I7** | **The AI never discounts, never commits scope, never promises a human.** Deterministic negotiation guardrail; discount policy fails closed at zero. · *As M, I want it to never give away my margin* | **Given** no configured discount policy, **then** zero concession on every ask — **and no registered proposal type can even express an AI-applied discount** | 4 | **U:** `proposals/guardrails/negotiation-invariant.test.ts`, `discount-evaluator.test.ts` — *a type-level impossibility proof, not a behaviour sample* |
+| **I8** | **Safety escalation beats containment** (D-027). Deterministic emergency detection ahead of the classifier. · *As J, I want safety to beat every other consideration, so containment never wins over a life* | **Given** a tier-1 phrase, **then** E1 **with no rules loaded**, and complaint escalation fires from **every** live FSM state | 3 | **U:** `emergency-tier.test.ts`, `emergency-tier-transitions.test.ts`, `complaint-guardrail.test.ts` |
+| **I8′** | *…and I want no setting anywhere able to switch that off, so a misconfiguration can't be fatal* | **Given** any tenant configuration, **then** safety cannot be suppressed | **2** 🚨 | **NO EVIDENCE.** Rests on the *absence* of a parameter, which nothing pins. A future flag would break it silently |
+| **I9** | **All money is integer cents**, end to end, with one shared engine and **one** percent-of-money helper so rounding cannot drift (D-003). · *As M, I want the arithmetic exactly right, so I never have to explain a penny* | **Given** ≥1000 randomized documents, **then** every money field is an integer and totals never go negative; `createInvoice` persists the server total, **discarding the client's** | 4 | **U:** `shared/billing-engine.property.test.ts`, `line-item-normalization.test.ts` |
+| **I9′** | *…from one engine as the only source of totals math* | **Given** any module, **then** it cannot compute document totals itself | **2** | **CODE-ONLY** — nothing forbids it |
+| **I10** | **All times stored UTC, rendered in the tenant's timezone.** An unset zone makes booking **refuse** — a Phoenix mis-booking postmortem removed the column default. · *As M (Phoenix), I want a missing timezone to refuse, not guess* | **Given** no configured zone, **then** the draft has no window, approval **refuses**, and **zero** appointment rows exist | 4 | **D:** `integration/live-call-booking-timezone.test.ts` |
+| **I11** | **Every entity carries `tenant_id`; RLS is FORCED at the database**, under a dedicated non-bypassing role the server refuses to boot without in production. The database, not application code, is the isolation boundary. · *As M, I want my data mine at the database, so a code bug can't leak it* | **Given** every `tenant_id` table, **then** RLS is **enabled and forced** with exactly two documented exemptions — and production **refuses to boot** without the role | 4 | **D:** `integration/rls-force-catalog.test.ts`, `rls-runtime-audit.test.ts`, `rls-runtime-role.test.ts` — **the best-evidenced invariant in the product** |
+| **I12** | **Every mutation emits an audit event** attributable to actor id, role and channel. **Two tiers, and they are not the same strength — see §5.0b.** · *As M, I want every change to leave a trail I can audit* | **Tier 1: Given** an execution, **when** the audit insert fails, **then** the **whole unit rolls back** — no state change without its audit row | 4 | **D:** `integration/executor-audit-atomicity.test.ts` (both directions) |
+| **I12′** | *Tier 2 — handler domain audit, best-effort* | **Given** a handler whose `auditRepo.create` throws, **then** it still succeeds with its mutation committed | 3 🚨 | **U:** `proposals/callback-handler.test.ts` — **one handler family only**, ~40 swallow sites untested, and no real-DB test of the §5.0b outage consequence |
+| **I13** | **Caller speech is untrusted data for its whole lifetime** — including when read back to the operator hours later. · *As M, I want nobody able to talk the AI into doing something later* | **Given** a transcript containing fence-marker lookalikes, **then** marker counts are exactly 1 each and the caller block sits in the lowest-authority slot | 3 | **U:** `ai/untrusted-content.test.ts`, `customer-calling/untrusted-content.test.ts`, `i13-provenance.test.ts` |
+| **I13′** | *…in **every** operator-facing model context* | **Given** any operator-facing prompt, **then** caller text is fenced | **2** 🚨 | **CODE-ONLY** — exactly three call sites; a new prompt inlining a transcript passes CI |
+| **I14** | **A revocation of contact consent blocks every channel; a grant never crosses channels** (D-017), on an append-only ledger behind both outbound gates. · *As a customer, I want "STOP" to stop everything* | **Given** an SMS `STOP`, **then** an outbound **call** is blocked even while `consent_status` reads granted; **given** `START`, **then** SMS restores and the voice rollup stays revoked | 4 | **D:** `integration/consent-cross-channel.test.ts`, `stop-reply-unify.test.ts` |
+| **I15** | **All LLM calls route through one gateway** (D-005). No module outside it may import a provider SDK. · *As M, I want every AI call through one place, so cost, retries and the audit trail can't be bypassed* | **Given** the clean tree, **then** the guard exits 0; **given** a planted offending file, **then** it exits non-zero | 4 | **STRUCTURAL with a genuine negative control.** **U:** `ai/gateway-ci-guard.test.ts`. *Scope caveat: OpenAI-specific — an `@anthropic-ai/sdk` import would pass it* |
+| **I16** | **A capability's surface coverage is declared, not accidental.** Undeclared (capability × surface) cells fail a structural test; refusals happen on purpose and silence is impossible. · *As M, I want behaviour on each surface declared, so nothing is silently missing* | **Given** 11 families × 4 surfaces, **then** every cell is declared with no unknown keys — **and** every handler in the shared drafting registry is reachable or in a declared exception set on both voice/memo and chat | 4 | **U:** `ai/voice-turn/coverage-table.structural.test.ts`, `proposals/drafting-surface-parity.test.ts`. *The coverage table is inert at runtime; **cite `drafting-surface-parity` when defending this*** |
+| **I17** | **Auto-approval is a scoped, opt-in, reversible exception — never a posture** (D-015): two capture-class types, default OFF, stricter floor, kill switch, one-tap UNDO, digest visibility. · *As M, I want "AI books it" to never become "AI runs it"* | **Given** a fresh tenant, **then** the lane is off at 0.95; a raw SQL drop to 0.80 is **refused by a DB CHECK**; and the lane is ineligible for each of 19 single-gate mutations, with the platform kill switch outranking tenant opt-in | 4 | **D:** `integration/settings-autonomous-booking.test.ts` · **U:** `proposals/autonomous-lane.test.ts`, `one-tap-undo.test.ts` |
+| **I18** | **No feature ships that adds admin work to the owner's day** — the litmus test, and the reason seven planned v1 phases were cut (D-011). · *As M, this is the entire reason I bought this* | **Given** any owner-role action required on a normal day, **then** it is reachable by SMS, one-tap or voice — or is in a reviewed exemption list | **0** 🚨 | **No enforcement of any kind, and no test.** The product's founding promise is the only invariant with nothing behind it — see §5.0c |
+| **C5** | *(not an invariant — founding commitment #5, listed here because it reads like one)* **A second classifier reviews every booking and quote.** · *As M, I want a second pair of eyes before a quote reaches a customer* | **Given** any booking/quote reaching an owner-facing dispatch — **any** origin, **any** status — **then** exactly one supervisor review exists first | **2** 🚨🚨 | **NOT KEPT — see §12.4e.** The gate has **2 call sites against 93 proposal-creation sites**; one is conditional on `ready_for_review` so **low-confidence quotes are skipped precisely because the agent was unsure**; default mode is `shadow` where nothing ever holds; and `pricing_anomaly` is not a harm check, so **it cannot hold even in `enforce`**. **Raised as O-9** |
 
-- **Eleven of eighteen are proven against real Postgres or by a structural guard
-  with a negative control.** I11 (RLS), I12-Tier-1 (transactional audit), I14
-  (consent), I17 (bounded autonomy) and I10 (timezone refusal) are the strongest.
-- **Five invariants are proven for the instance and unproven for the
-  universal.** I1 ("the AI *never* writes"), I8 ("*no* config flag may override
-  it"), I9 ("*one* engine as the *only* source of totals math"), I13 ("*every*
-  operator-facing model context") and I3's payload-provenance clause all rest on
-  the absence of a counterexample that nothing checks for. They are tested
-  behaviours, not enforced invariants, and the distinction matters when someone
-  adds the next code path.
-- **I5's "one shared disambiguation matcher" is false as written.** A second,
-  deliberately broader gate exists (`gated-reference-resolution.ts:602`), whose
-  own comment says it "is allowed to be slightly BROADER than the matcher behind
-  it." Nothing fails if the two diverge.
-- **I6 has no evidence, and a test pins the opposite behaviour as supported** —
-  an unresolvable gate is a legal state (`gated-reference-resolution.test.ts:115`).
-  I6's text says such a gate "is a capability that can never be approved" (#909).
-  Both cannot be true. **I6 is the weakest invariant in the table.**
-- **I18 has no enforcement of any kind.** It is a product-process rule, not a
-  code invariant, and it should not sit unmarked beside I1–I17. Three ways to
-  make it falsifiable are in §A.6 of the acceptance register.
+### 5.0a The five invariants whose universal quantifier is unproven
+
+I1′, I3′, I5′, I8′, I9′ and I13′ share one shape: **the instance is proven and
+the universal is not.** "The AI never writes" is proven for the paths someone
+thought to test; nothing stops the next path. That is the difference between a
+tested behaviour and an enforced invariant, and it matters when someone adds the
+next code path.
+
+**I6 is the weakest**, because a test pins the opposite behaviour as supported.
+I6's text says an unresolvable gate "is a capability that can never be approved."
+The test says such a gate is a legal state. Both cannot be true.
 
 ### 5.0b I12 in detail — the audit guarantee is two-tiered
 
@@ -585,6 +609,35 @@ tiers differ by design, not by oversight.
 
 Whether Tier 2 should be strengthened is a real product question, recorded in
 §12.2 rather than resolved here.
+
+### 5.0c Making I18 falsifiable
+
+I18 is a product-process rule, not a code invariant, and it should not sit
+unmarked beside I1–I17. Three mechanisms could operationalize it, in ascending
+cost — **all three already have working precedent in this repo.**
+
+**(a) A pinned inventory of owner-required daily actions.** The repo does this
+exact thing twice: `voice-action-catalog.contract.test.ts:75` pins
+`docs/reference/voice-action-catalog.md` to `INTENT_TO_PROPOSAL_TYPE` — its own
+comment explains why: *"`docs/remaining-features.md` rotted because it was prose
+with no test behind it."* And `route-manifest.test.ts` snapshots every mount with
+its exposure class.
+
+Apply the same shape: a machine-readable `docs/reference/owner-daily-actions.md`
+listing every action an owner **must** perform in a web or mobile session on a
+normal day, each tagged `sms_reachable: true|false`. A contract test derives the
+same set from code — every `role: owner` route not also reachable via an SMS
+keyword handler, a one-tap token action, or a voice intent — and fails on
+divergence. Adding an owner-only, non-SMS-reachable daily surface then **breaks
+the build**.
+
+**(b) A budget assertion on the count.** `expect(ownerRequiredDailyWebActions).toHaveLength(N)`.
+Cheap, mechanical, and a PR incrementing `N` is self-documenting in review.
+
+**(c) An e2e "SMS-only day."** Drive a full simulated day — inbound call, quote,
+approval, payment, review response — entirely through the SMS/webhook surface
+with **zero authenticated web requests**. Most faithful to the intent; most
+expensive to maintain.
 
 ### 5.1 The trust thesis
 
@@ -1008,62 +1061,141 @@ treats this as a first-class gap.
 
 ## 8. Functional requirements by lifecycle
 
-Organized along the ten-stage spine the product's own verification uses.
+Organized along the ten-stage spine the product's own verification uses. Each
+stage is an **epic**, each row is a **user story in a named persona's voice**
+with a falsifiable acceptance criterion, the **rung** that says how far we can
+confirm it, and **the command that confirms or refutes it.**
 
-### 8.0 How to read these rungs — and what changed on 2026-09-11
+### 8.0 How to read these rows
 
-**Every rung below has been verified against the test suite. The numbers in the
-first edition of this document were not.** They were an honest reading of the
-source, which is a different thing, and the repo's own QA harness says why that
-is not good enough:
+**Every rung below was derived from the test suite on 2026-09-11. The first
+edition of this document asserted them from reading the source.** That is a
+prediction of what a test would find, not a verdict, and the repo's own QA
+harness forbids exactly that substitution:
 
 > `expected` documents the pre-run prediction. **It is NOT the pass criterion** —
 > actual pass/fail comes from runtime checks. — `packages/api/test/qa/matrix.ts`
 
-The full audit — one falsifiable acceptance criterion per row, the evidence class
-behind it, and the command that confirms or refutes it — lives in
-**[`docs/PRD-v5-acceptance.md`](PRD-v5-acceptance.md)**. The tables here carry the
-corrected number and a one-line reason; the register carries the proof.
+Re-deriving them found **28 rows overclaimed and 16 underclaimed**, concentrated
+in §8.7 Quote (7 of 12) — the surface where a wrong number becomes a price a
+customer is bound to. Several capabilities were *undersold*: MMS-to-quote,
+estimate nudges, voice invoicing, voice book/move/cancel, the correction loop
+and QuickBooks sync are all stronger than claimed.
 
-**[`docs/PRD-v5-stories.md`](PRD-v5-stories.md)** is the same evidence seen from
-the user's side: 117 stories across 10 epics, each in a named persona's voice
-with a Given/When/Then criterion and its rung. Read that one to answer *"would
-Mike accept this?"* — which is a different question from *"is the code proven?"*,
-and comes apart in both directions. Five stories are proven at rung 4 and still
-fail their user, the digest among them.
+#### A rung is earned by an evidence class, never assigned by inspection
 
-**The ladder, restated as evidence rather than judgment:**
+| Class | Meaning | Highest rung |
+|---|---|---|
+| **NO EVIDENCE** | No test asserts the claim | 2 |
+| **CODE-ONLY** | The code reads correctly; nothing pins it. A refactor could silently remove it | 2 |
+| **PROVEN-UNIT** | Behaviour proven against in-memory or mocked dependencies | 3 |
+| **STRUCTURAL** | A guard or contract test **with a negative control** — plant a violation, the build fails | 4 |
+| **REAL-DB-WRITE-ONLY** (**4−**) | Docker-gated test proves the row against real Postgres; the audit leg uses an in-memory repository | 4− |
+| **PROVEN-REAL-DB** | Docker-gated test proves **the write AND its audit event** against real Postgres | 4 |
 
-| Rung | Earned by |
-|---|---|
-| 0 | Absent, or a stub |
-| 1 | Specced only |
-| 2 | Implemented, **zero production callers** — or implemented with no test at all |
-| 3 | Wired, proven against in-memory or mocked dependencies |
-| **4−** | Real-Postgres **write** proven; the audit leg still uses an in-memory repository |
-| 4 | A Docker-gated test proves **the write AND its audit event** against real Postgres |
-| 5 | Rung 4, **plus reachable** — a normally-provisioned tenant gets there with no SQL, no platform-admin action, no env var |
-| 6 | Live production traffic. **Nothing in this product is rung 6.** |
+Rung **5** additionally requires **reachability**: a normally-provisioned tenant
+gets there with no SQL, no platform-admin action, no environment variable. Rung
+**6** requires live production traffic.
 
-**Three rules this audit had to learn:**
+**The honest reading of the scale:** below 4, the story is a belief. At 4 it is
+proven but may be unreachable. Only at **5** has the persona been served, and
+only at **6** have we watched them be served. **Rung 6 is empty.**
+
+#### A rung is a verdict on evidence, not on value
+
+The two come apart in **both** directions, and neither direction is visible in
+an engineering-only view:
+
+- **Rung 4 and the story still fails.** 9.6 (the end-of-day digest) and 2.7
+  (dropped-call recovery) are proven at real Postgres and **Mike cannot turn
+  either on**. 4.11 is worse: Carlos is never notified of an assignment, and the
+  module's own doc-comment claims otherwise.
+- **Rung 3 and the story is probably fine.** 2.5 (emergency detection) has a
+  thorough bilingual corpus and an upward-only bias. It is very likely correct.
+  We simply cannot *confirm* it survives a real database — and for a life-safety
+  path, that gap is itself the finding.
+
+#### Three rules this audit had to learn the hard way
 
 1. **Documentation is never evidence.** Two modules carry doc-comments that are
    actively false about their own wiring.
-2. **Directory location is not evidence.** Three files in
-   `packages/api/test/integration/` never open a pool; one of them was carrying a
-   rung-5 claim on a `vi.fn()`.
-3. **A mocked dependency caps the claim at the mock.** This is CLAUDE.md's own
-   rule — *"tests that mock the DB are never the only proof a query works"* —
-   and it demoted eleven rows below.
+2. **Directory location is not evidence.** `packages/api/test/integration/` is
+   not synonymous with real Postgres — three files there never open a pool, and
+   one was carrying a **rung-5 claim on a `vi.fn()`**:
 
-**Net result: 28 rows were overclaimed and 16 were underclaimed.** The overclaims
-concentrate in §8.7 Quote (7 of 12), which is the surface where a wrong number
-becomes a price a customer is bound to. Several capabilities were *undersold* —
-MMS-to-quote, estimate nudges, voice invoicing, voice book/move/cancel, the
-correction loop and QuickBooks sync are all stronger than the first edition
-claimed.
+   ```bash
+   for f in packages/api/test/integration/*.test.ts; do
+     grep -q "getSharedTestDb\|TEST_DB_URL\|new Pool(\|withTestDb\|testDb" "$f" || echo "NO-DB: $f"
+   done
+   ```
+
+3. **A mocked dependency caps the claim at the mock.** CLAUDE.md's own rule —
+   *"tests that mock the DB are never the only proof a query works"* — and it is
+   what demoted the dunning cadence, the 4★ review gate and the service-credit
+   cap.
+
+#### Running any command in this section
+
+| Prefix | Lane | Command |
+|---|---|---|
+| **D:** | Docker / real Postgres (`pgvector/pgvector:pg16` testcontainer, `maxWorkers:1`) | `npm run test:integration --workspace=packages/api -- <path>` |
+| **U:** | Unit — **excludes `test/integration/**`**, no Docker | `npm test --workspace=packages/api -- <path>` |
+| **W:** | Web (jsdom) | `npm test --workspace=packages/web -- <path>` |
+| **E:** | End-to-end | `npx playwright test <path>` |
+| **S:** | Structural falsifier — a shell command whose **output is the verdict** | given inline |
+
+Narrow to one case with `-t "<test title>"`. Paths under **D:** and **U:** are
+relative to `packages/api/test/`. The integration lane requires a running Docker
+daemon; **without one it does not fail, it skips** — which is its own trap, and
+the reason `S:` falsifiers appear wherever a claim is load-bearing.
+
+Rows marked ✅ *executed* were run during this audit rather than inspected —
+§8.1, §8.5 and §8.6 were produced by running the Docker-gated suite (12 files,
+70 tests, all passing).
+
+#### The epics at a glance
+
+| § | Epic | Jobs | Stories | Median rung | The one thing in the way |
+|---|---|---|---|---|---|
+| 8.1 | Stand up the back office | precondition | 11 | 4 | Invite emails 404 — `/accept-invitation` has no route |
+| 8.2 | Answer my phone when I can't | J1, J3, J10 | 12 | 3 | Emergency detection has no real-DB proof; recording consent is mocked |
+| 8.3 | Book the job without me | J2 | 12 | 4 | The customer never provably gets a confirmation |
+| 8.4 | Run the day | J1, J10 | 11 | 3 | The drag→proposal guarantee is untested at the DB |
+| 8.5 | Capture the work in the field | J5 | 5 | 4 | Field screens aren't pinned to the glove/daylight contract |
+| 8.6 | Let me fix it by talking | J9 | 9 | 4 | No spoken-address entity — nobody can say "the house on Elm" |
+| 8.7 | Draft the quote from what was said | J4, J10 | 12 | 4− | 7 of 12 overstated; the stale-revision guard has never met a real DB |
+| 8.8 | Bill it and chase the money | J5, J6 | 13 | 4 | Dunning cadence idempotency is unproven — duplicate collections texts |
+| 8.9 | Tell me what happened, and what you got wrong | J7, J8 | 12 | 4 | **The digest cannot be turned on by anyone** |
+| §5 | Never exceed your authority | J8, J10 | 26 | 4 | The second classifier reaches 2 of 93 origins |
+
+**123 stories. Zero at rung 6.** Nothing in this product has been observed
+serving a real tenant.
+
+#### What each rung shape actually costs to close
+
+The rungs are not interchangeable, and the work each one needs is different:
+
+| Gap shape | Work it needs |
+|---|---|
+| **0** | Build it (4.9, 4.10, 6.8, I18) |
+| **2 — unreachable** | Wire it. Usually one call site (4.11, 2.12) |
+| **2 — unguarded invariant** | Write the structural test (I1′, I5′, I6, I8′) |
+| **3** | Write the Docker-gated test. **The code is probably fine** |
+| **4−** | Swap `InMemoryAuditRepository` → `PgAuditRepository`. *One import closes four §8.7 rows* |
+| **4 — unlit-able** | Ship a write path. Not a feature — a route and a toggle |
+| **5** | Nothing. Get a tenant on it and earn rung 6 |
+
+**The single highest-value item is C5 / §12.4e**, because it is the only row
+where the honest fix might be to **change the commitment** rather than the code —
+and that is a product decision, not an engineering one (O-9).
 
 ### 8.1 Setup — the first 15 minutes
+
+**Epic: Stand up the back office** · **Jobs:** the precondition for every other epic
+
+**Primary persona: T (the tech going independent), then M.** This epic is the
+precondition for every other one. T has no price book and no processes; the
+product has to manufacture them during onboarding or nothing downstream works.
 
 **Requirement: onboarding status is derived from facts, never stored as wizard
 state.** Seven ordered steps — signup, identity, pack, phone, billing, AI check,
@@ -1079,41 +1211,30 @@ default was deliberately *dropped* after a Phoenix mis-booking. Without a chosen
 zone, a spoken booking becomes a clarification — the system asks rather than
 books the wrong hour.
 
-*The §8.1, §8.5 and §8.6 rungs below were produced by **running** the relevant
-Docker-gated suite (12 files, 70 tests, all passing) rather than by inspection.*
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **1.1** | **As T**, I want an account the moment I sign up, so I never see a "setting up your workspace" screen | **Given** a Clerk signup webhook, **when** it is delivered twice, **then** exactly one tenant exists and the replay window is enforced *before* signature verification | 4 | **D:** `clerk-owner-membership.test.ts` |
+| **1.2** | **As T**, I want to type my business details once and have the system remember them, so I'm not re-entering my address in four places | **Given** a valid identity payload, **when** I submit it and later resubmit, **then** the row upserts idempotently, an omitted `serviceAreaRadius` keeps its stored value while `null` clears it, and a `tenant.identity_set` audit event is written | **5** | **D:** `onboarding-identity.test.ts` ✅ *executed* |
+| **1.3** | **As T**, I want a price book I didn't have to build, so I can quote on day one | **Given** I pick HVAC, **when** the pack activates twice concurrently, **then** one seeding occurs under an advisory lock and my catalog holds the pack's SKUs at the pack's prices | **4−** | **D:** `onboarding-pack.test.ts`, `onboarding-pack-seed-concurrency.test.ts` — *no audit assertion* |
+| **1.4** | **As T**, I want to close the laptop mid-setup and come back to exactly where I was, so onboarding survives a service call | **Given** a partially-configured tenant, **when** I return, **then** the current step is derived from *facts about my tenant* — never a stored wizard flag — and cannot disagree with reality | 4 | **D:** `onboarding-status.test.ts` ✅ *executed* |
+| **1.5** | **As T**, I want to look around before finishing setup, so I can decide if this is worth my time | **Given** identity is saved, **when** I navigate anywhere, **then** the CRM is unlocked and later steps nudge rather than hard-block | 3 | soft-gate logic; no DB-level proof |
+| **1.6** | **As M**, I want my own phone number on my own subaccount, so my call records are mine | **Given** production credentials, **when** provisioning runs, **then** a subaccount, messaging service and number are created — and **without** real credentials it throws rather than faking success | 3 | **U:** provisioning unit tests. *Capped by the third-party dependency, not by neglect* |
+| **1.7** | **As T**, I want a 14-day trial with no card surprises, so I can try this without commitment | **Given** a plan whose price fails live Stripe validation, **when** checkout renders, **then** that plan is **omitted, never shown at a wrong price** | 4 | **D:** subscription integration tests |
+| **1.8** | **As T**, I want proof the AI works before I point my real number at it, so I'm not experimenting on customers | **Given** verification runs, **when** it passes, **then** the step completes with DB status `passed`; **when** it fails, **then** I get an `ai_verification_failed` blocker and a retry that resets to pending and re-enqueues | **4** ↑ | **D:** `onboarding-ai-check.test.ts` ✅ *executed* |
+| **1.9** | **As T**, I want to set this up by talking instead of filling a form, because I'm doing it in the truck | **Given** the conversational path, **when** I complete up to 15 turns, **then** transcript, extractions and clarification counts round-trip through JSONB, RLS is ENABLE + FORCE, and cross-tenant reads are refused — with the form wizard still available as fallback and edit surface | **4−** | **D:** `onboarding-conversation.test.ts` ✅ *executed* — *no audit assertion* |
+| **1.10** | **As M**, I want the AI to sound like my shop and then **stop changing**, so my customers hear one voice | **Given** six captured fields, **when** the first write lands, **then** the voice locks; every later edit is cool-down gated under a `FOR UPDATE` lock with no lost update, rollback never mutates history, and a spoken *"lock my brand voice"* can **never** set the lock | **4** ↑ | **D:** `brand-voice.integration.test.ts`, `update-brand-voice-voice-execution.test.ts` ✅ *executed* |
+| **1.11** | **As M**, I want to invite Carlos and have him actually get in, so my tech can see his own day | **Given** an invite, **when** Clerk is down, **then** the local invitation row is already written so tenant intent is never lost — **and** the last owner cannot be demoted | 4 / **0** | **D:** `clerk-owner-membership.test.ts`. 🚨 **The story fails anyway: `/accept-invitation` has no route. Every invite email 404s** |
 
-| Capability | Rung | Note |
-|---|---|---|
-| Tenant bootstrap on signup (webhook, idempotent) | 4 | Signature verified with replay window enforced *before* verification |
-| Identity, hours, timezone, service area, rate | 5 | Upsert + idempotent re-PUT + `tenant.identity_set` audit event, all at real Postgres |
-| Vertical pack selection + price-book seeding | **4−** | One shared implementation for the form and conversational paths, serialized by an advisory lock. Write proven; **no audit assertion** |
-| Onboarding status derived from facts | 4 | A fresh tenant returns `identity`; `isComplete` only when all seven steps are satisfied by facts |
-| Phone number provisioning (own subaccount, messaging service, number) | 3 | Production path throws without real credentials; CI gets a magic test number. Capped by the dependency, not by neglect |
-| Subscription + 14-day trial | 4 | Plan prices validated live against Stripe; a plan that fails validation is **omitted, never shown wrong** |
-| AI verification + test call | **4** ↑ | Pass → step done + DB `passed`; fail → `ai_verification_failed` blocker; retry resets and re-enqueues |
-| Conversational onboarding (multi-turn, bounded at 15 turns) | **4−** | Route mounted unconditionally, real web client, reachable as a toggle on `identity` and `pack`. Transcript/extractions round-trip through JSONB and **migration 195 pins ENABLE + FORCE RLS**; no audit assertion |
-| Brand voice capture | **4** ↑ | Six fields, v1 history, audit-logged edits under a 15-minute cooldown and a `FOR UPDATE` lock with no lost update, rollback never mutating history. **Web configurator behind a default-off flag; the spoken path is not** |
-| Team invites | 4 | Local invitation row written **first**, so a Clerk outage cannot lose tenant intent; refuses to demote the last owner |
-
-> **Carve-out, unchanged:** `/accept-invitation` has no route. Every invite email
-> 404s. Tracked separately; it is not a scoring question.
+> **Epic verdict.** Strong on the parts T touches alone; **1.11 is broken end to
+> end** and it is the one story in this epic with a second human in it.
 
 ### 8.2 Capture — answering the phone
 
-| Capability | Rung | Why |
-|---|---|---|
-| Answer 24/7 in the shop's voice, tenant resolved from the dialed number | 5 | Dialed-number→tenant resolves against the real `phoneE164` column |
-| Recording disclosure spliced before capture; audio is not forwarded to ASR until it has played | **3** ↓ | Ordering proven — but the consent-ledger write is a `vi.fn()` in a file that never opens a pool |
-| Caller identification from caller-ID; unknown → lead | 4 | E.164 matching proven, including the non-NANP false-match case. The *voice* unknown→lead leg is untested at real DB |
-| Intent + urgency classification, surface-conditional | **3** ↓ | Fixture-proven. No Docker-gated test references `intent_off_surface` or the surface profile |
-| Deterministic emergency detection (E1/E2/E3), pre-LLM, bilingual | **3** ↓ | **Unit tests only.** The nearest integration test covers the downstream dispatch handler and uses an in-memory audit repo. The largest single overclaim in the first edition |
-| Vulnerability grading → patch the owner's cell with a 5-second non-PII preface | 3 | Unit only, and its flag has no production write path either |
-| Dropped-call SMS recovery at 60 s, durable, re-evaluated at send | 4 — **unlit-able** | Pipeline proven at real Postgres *including the flag-on transition*. `setTenantFlag` has **zero production callers** (§12.4c) |
-| Customer photo → draft estimate (MMS) | **4** ↑ | Proposal row + `tenant_id` + audit; ambiguous sender yields a clarification, never a draft |
-| Public web booking, no login, real availability | **3** ↓ | Route mounted and `/book` ships, so reachability is real — but the only test is in-memory supertest |
-| Unclaimed inbound SMS → threaded conversation | 4 | Concurrent captures collapse to one open thread; no cross-tenant bleed |
-| Never quotes a firm price, never negotiates | **3** ↓ | Holding line, single callback, idempotence — all unit. Nothing at real DB |
-| B2B / property-manager recognition | **3** ↑ | Correction: the context *is* consumed — assembled onto the session and read by one supervisor check. The narrower claim stands: **no routing difference** |
+**Epic: Answer my phone when I can't** · **Jobs:** J1, J3, J10
+
+**Primary personas: M in an attic with gloves on; J at 4am.** This is the epic
+the product is named for. It is also the epic with the widest gap between what
+we believe and what we can prove.
 
 **Requirement: the voice gate is a ladder, and every rung fails to voicemail.**
 Subscription status, then go-live, then trial caps (60 minutes/day, 100 total, 2
@@ -1126,96 +1247,116 @@ returns a retryable status so the provider retries, and a handler exception
 returns a graceful hangup rather than an error — because a retry would duplicate
 the session.
 
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **2.1** | **As M**, I want my phone answered 24/7 in my shop's voice, so I stop losing jobs to whoever answers first | **Given** a customer dials my number, **when** the call lands, **then** the tenant is resolved from the real `phoneE164` column and the greeting is my shop's | 5 | **D:** `voice-inbound-appointment.test.ts -t "routes a dialed number"` |
+| **2.2** | **As M**, I want callers told they're being recorded **before** anything is captured, so I'm not exposed in a two-party-consent state | **Given** an inbound call, **when** the greeting plays, **then** the disclosure precedes `<Start><Record>`, Media Streams consumes no audio until it has played, **and the implicit-consent ledger row is written** | **3** 🚨 | Ordering proven; **the ledger write is a `vi.fn()`** in a file that never opens a pool. **S:** `grep -c "new Pool(" …/conversation-consent-ordering.test.ts` → **0** |
+| **2.3** | **As M**, I want a known customer recognised by their number and a stranger turned into a lead, so nothing falls on the floor | **Given** an inbound number, **when** it matches a stored customer in E.164, **then** they are identified — **and** a non-NANP caller sharing the last 10 digits is **not** matched | 4 | **D:** `identify-caller.test.ts`. *The voice unknown→lead leg is untested at real DB; only the SMS caller is* |
+| **2.4** | **As M**, I want a stranger on the phone to be unable to reach owner-only capability, so my phone line isn't an admin console | **Given** a caller-surface session, **when** the classifier returns an off-profile intent, **then** it becomes `unknown` and is **audited**, never silently dropped | **3** 🚨 | Fixture-proven only. **S:** `grep -rln "intent_off_surface" packages/api/test/integration/` → **empty** |
+| **2.5** | **As J**, I want a gas leak recognised before any AI thinks about it, so a life-safety call never waits on a model | **Given** any transcript chunk in English **or** Spanish, **when** a tier-1 phrase appears, **then** E1 is returned **with no rules loaded**, the safety script speaks first, pending bookings are revoked, and it **never books** | **3** 🚨 | **Unit only.** The nearest integration test covers the downstream handler with an in-memory audit repo. *Also: the E1 script is still a self-declared placeholder* |
+| **2.6** | **As J**, I want an elderly caller on oxygen in 104°F heat to reach me personally, so vulnerability isn't handled by a queue | **Given** age + weather + critical urgency, **when** triage runs, **then** my cell is patched with a 60s dial and a non-PII preface; if I don't answer, a high-priority booking plus an owner SMS — **never a normal booking** | 3 | **U:** `vulnerability-triage-hook.test.ts`. *Its flag has no production write path either* |
+| **2.7** | **As M**, I want a caller who hangs up mid-booking to get a text back, so a dropped call isn't a lost job | **Given** a call ending in `dropped`/`failed` with a usable number, **when** 60s elapse, **then** exactly one recovery SMS sends, stamped and audited, re-evaluated at send time | **4 — unlit-able** 🚨 | Pipeline **proven at real Postgres including the flag-on transition**. But `setTenantFlag` has **zero production callers** — *Mike cannot turn this on* |
+| **2.8** | **As J**, I want a customer's photo of a leaking heater to become a draft quote, so I can price it from the truck | **Given** an MMS from an unknown number, **when** ingest runs, **then** a `draft_estimate` proposal persists with `tenant_id` and an audit row — and an **ambiguous sender yields a clarification, never a draft** | **4** ↑ | **D:** `mms-to-quote.int.test.ts` |
+| **2.9** | **As M**, I want customers to book themselves on my website without a login, so I stop playing phone tag | **Given** the public page, **when** a customer picks a real open slot, **then** a held appointment is written pending my approval | **3** 🚨 | Route mounted, `/book` ships — **but the only test is in-memory supertest** |
+| **2.10** | **As M**, I want an unclaimed text to become a thread I can answer, so SMS isn't a black hole | **Given** concurrent inbound texts from one unmatched number, **when** captured, **then** they collapse to a single open thread with no cross-tenant bleed | 4 | **D:** `inbound-sms-capture.test.ts` |
+| **2.11** | **As M**, I want the AI to refuse to quote a firm price or haggle, so it never commits me to a number I'd lose money on | **Given** a price-pressure turn, **when** the guardrail fires, **then** it speaks the holding line, mints exactly one owner callback, stays in state, and is idempotent when already flagged | **3** 🚨 | **All unit.** The one integration file tests the context read, not the guardrail |
+| **2.12** | **As M**, I want a property manager's call to be handled as a portfolio account, so my biggest customer isn't treated like a stranger | **Given** a caller resolving to `property_manager`, **when** the call runs, **then** the outcome is **observably different** from a residential call — prompt, priority, and proposal context | **3** | Context *is* assembled and read by one supervisor check. 🚨 **But nothing routes on it** — `buildAccountContextPromptSection` has zero production callers. **The story as written is not met** |
+
+> **Epic verdict.** The two stories carrying the most liability — **2.2 recording
+> consent** and **2.5 life-safety detection** — are the two with the weakest
+> evidence. Neither is broken; both are *unproven where it counts*.
+
 ### 8.3 Book
 
-| Capability | Rung | Why |
-|---|---|---|
-| Call → booking **proposal**, never a booking | 5 | Free text → real resolver → real drafting task → approve → production execution registry |
-| Availability: 30-minute grid, per-day business hours, DST-correct wall-clock math, travel buffer, technician hours and time-off | **4 / 3** | Real-DB proof covers business hours, the buffered window and tenant isolation. **DST, per-day hours, technician hours and time-off are unit-only** — the row is over-broad as written |
-| **Config provenance on availability** — cold tenants are told these are defaults | **3** ↓ | In-memory supertest only, and **the web app never calls this endpoint**; only mobile does |
-| Write-side twin guarantees a POST can only book what GET would offer | **3** ↓ | Unit only |
-| Held slots (24 h) so a second prospect gets a conflict with fresh alternatives, reaped on a sweep | 4 | Reaper cancels, clears, audits, spares live holds, idempotent on re-sweep |
-| Conflict detection; double-booking excluded at the **database** level | 4 | A real concurrent race against the real `EXCLUDE` constraint. **The strongest capability row in the product** |
-| Owner approves; ambiguity clarifies | 5 | Duplicate names yield both candidates; approve → execute emits exactly one audit event |
-| Confirmation to the customer on approval | **3** ↓ | No test proves the dispatch row; the default is a **no-op notifier**, and the class whose doc-comment claims to be the live path is never instantiated |
-| Day-before reminder | 3 / 4 | The **owner push** is real-DB with durable idempotency; the **customer** reminder is not |
-| Book / move / cancel by speaking | **5** ↑ | All three mapped with wired handlers, each with a real-DB approve→execute test emitting exactly one audit event |
-| Schedule proposals expire after 48 h and are re-proposable | 3 | Unit only. **Two TTL regimes coexist** — 48 h in the worker, 24 h default and 4 h for `create_appointment` in the guardrail |
-| Drive-time feasibility (real provider, or great-circle fallback, flagged as unverified) | 3 | Five callers, all dispatch-side. **The three booking-creation paths call `createAppointment` with no feasibility check at all** |
+**Epic: Book the job without me** · **Jobs:** J2
+
+**Primary persona: J at 4am, frozen pipe, whoever answers first wins.**
+
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **3.1** | **As J**, I want a call to produce a *proposed* booking, not a booking, so the AI never puts something on my calendar I didn't agree to | **Given** a spoken booking request, **when** the pipeline runs, **then** free text → real resolver → real drafting task → approval → production executor, and **zero appointment rows exist before approval** | 5 | **D:** `voice-inbound-appointment.test.ts` |
+| **3.2** | **As J**, I want offered times to respect my actual working day, so I'm not booked at 7pm | **Given** my configured hours, **when** slots are generated, **then** only in-hours slots are offered, the buffered booked window is removed, and tenant A's calendar never blocks tenant B | **4 / 3** | **D:** `dispatch-availability.test.ts`. 🚨 **DST, per-day hours, technician hours and time-off are unit-only** — the story is broader than the proof |
+| **3.3** | **As T**, I want to be told when the times I'm being offered are just defaults, so I don't discover my hours were wrong after a customer books | **Given** a tenant with no configured hours, **when** availability returns, **then** hours, buffer and timezone are each labelled as defaults | **3** 🚨 | In-memory supertest only — **and the web app never calls this endpoint**; only mobile does |
+| **3.4** | **As M**, I want a booking POST to be unable to take a slot the calendar wouldn't have offered, so the public page can't be gamed | **Given** an out-of-hours slot, **when** a POST attempts it, **then** the write-side twin refuses | **3** 🚨 | **Unit only** |
+| **3.5** | **As J**, I want a slot held while I decide, and released if I don't, so a second prospect gets a real answer | **Given** a 24h hold, **when** it expires, **then** the reaper cancels it, clears the flag, emits audit, spares live holds, and a second sweep is a no-op — and an expired hold **stops blocking** the slot | 4 | **D:** `hold-reaper.test.ts`, `slot-conflict-checker.test.ts` |
+| **3.6** | **As M**, I want it to be *impossible* to double-book Carlos, so I never send one truck to two houses | **Given** two concurrent assignments for the same tech and slot, **when** both race, **then** exactly one succeeds — enforced by a DB `EXCLUDE` constraint, not application code | 4 | **D:** `technician-double-booking-race.test.ts` — **the strongest capability row in the product** |
+| **3.7** | **As M**, I want the AI to ask instead of guessing when two customers share a name, so it never books the wrong Henderson | **Given** duplicate display names, **when** resolution runs, **then** the result is an ambiguity carrying **both** candidates — never a silent pick | 5 | **D:** `entity-resolution.test.ts`, `cancel-appointment-voice.test.ts` |
+| **3.8** | **As M**, I want my customer to get a confirmation when I approve, so they don't call back to check | **Given** an approved `create_appointment`, **when** it executes, **then** an `appointment_confirmation` dispatch row is written | **3** 🚨 | **No test proves the dispatch row.** The default is a **no-op notifier**, and the class whose doc-comment claims to be the live path is never instantiated. *This story most likely fails in production and nothing would tell us* |
+| **3.9** | **As J**, I want customers reminded the day before, so I stop eating no-shows | **Given** an appointment 24h out, **when** the sweep runs, **then** exactly one reminder sends, durably idempotent | **3 / 4** | The **owner push** is real-DB with durable idempotency; **the customer reminder is not** |
+| **3.10** | **As M**, I want to book, move and cancel by talking, so I can do it between attics | **Given** any of the three spoken intents, **when** approved and executed, **then** the real row changes and **exactly one** audit event is emitted per action | **5** ↑ | **D:** `voice-inbound-appointment.test.ts`, `reschedule-appointment-voice.test.ts`, `cancel-appointment-voice.test.ts` |
+| **3.11** | **As M**, I want stale schedule proposals to expire, so I'm not approving yesterday's plan | **Given** an unactioned schedule proposal, **when** the TTL passes, **then** it expires and can be re-proposed | 3 | **U:** only. 🚨 **Two TTL regimes coexist** — 48h in the worker, 24h default and 4h for `create_appointment` in the guardrail |
+| **3.12** | **As M**, I want to be warned when back-to-back jobs aren't drivable, so I stop promising times Carlos can't make | **Given** a proposed move, **when** drive time is checked, **then** infeasibility surfaces — flagged as unverified when the fallback is great-circle | 3 | 🚨 **The three booking-*creation* paths call `createAppointment` with no feasibility check at all.** Only dispatch-side moves are checked |
 
 ### 8.4 Dispatch
 
-| Capability | Rung | Why |
-|---|---|---|
-| Dispatch board, day view, drag-and-drop | 5 | Board queries by date, refuses cross-tenant access |
-| Drag produces a **proposal**, never a direct mutation | **3** ↓ | `createSchedulingProposal` has **zero** integration coverage. The UI is reachable; the proof is not |
-| Live multi-user collaboration: revision tokens with total ordering, presence leases showing who is dragging which card | **3** ↓ | Presence is in-memory or Redis-backed — **structurally incapable** of a real-Postgres proof |
-| Technician day view with a same-tenant ownership guard | 4 | The 23:00-local case is pinned with its own negative control; cross-tenant submission refused |
-| "On my way" — app, voice, and SMS keyword, all one audited act | 4 / 3 | Voice, phone and chat legs proven with audit + ETA dispatch row. **The SMS-keyword leg is unit-only** — the row claims four legs and proves three |
-| Running late with a 10/20/30-minute chip picker where the chip row *is* the confirm | **3** ↓ | In-memory supertest plus a jsdom test that the chip hits the right endpoint; no real-DB write proof |
-| Geofence/dwell lateness engine with a confidence breakdown | 3 | Unit only — and the server module's **only importer uses it as a type-only import**; the evaluator has no runtime caller |
-| Tech texts OUT → one reschedule **proposal per appointment**, each carrying a brand-voiced customer message for review | 4 | Unavailable block + proposal + audit; idempotent same-day; anti-spoof proven |
-| Skill-based assignment | **0 — a nine-line stub** | And it is *wired*, so the always-empty skill list reads as an always-feasible verdict rather than a visible gap |
-| Route optimization / multi-stop sequencing | **0 — absent** | No module, no test |
-| *(unlisted in the first edition)* Technician assignment notification | **2** | `setTechnicianAssignmentNotifier` has **zero callers**; every production assignment fires a silent no-op whose own doc-comment claims otherwise |
+**Epic: Run the day** · **Jobs:** J1, J10
+
+**Primary persona: M as dispatcher, which is the job title he never wanted.**
 
 **Requirement: the tech-out cascade is per-appointment, never bulk.** Each
 affected customer is a separate proposal with its own drafted message, because
 the owner may want to handle one differently. Three or more offers batch
 approval.
 
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **4.1** | **As M**, I want one board showing today, so I stop reconstructing the day from texts | **Given** a date, **when** the board loads, **then** it returns that day's work and **refuses cross-tenant access** | 5 | **D:** `dispatch.test.ts` |
+| **4.2** | **As M**, I want dragging a card to *propose* a change, not make one, so a slip of the thumb can't move a customer's appointment | **Given** a drag, **when** it lands, **then** a proposal is created and **the appointment is not mutated** | **3** 🚨 | `createSchedulingProposal` has **zero** integration coverage. The UI is reachable; the guarantee is not proven |
+| **4.3** | **As M**, I want to see when someone else is dragging the same card, so my wife and I don't fight over the board Saturday morning | **Given** two users, **when** both act, **then** revision tokens order the writes and presence shows who holds which card | **3** | Presence is in-memory/Redis — **structurally incapable** of a real-Postgres proof. Score it honestly and stop calling it 4 |
+| **4.4** | **As Carlos (M's tech)**, I want my own day view and nobody else's, so I see my work and not the shop's books | **Given** a technician session, **when** the day loads, **then** a 23:00-local appointment lands on the tenant date and a tech of tenant B is not submittable by tenant A | 4 | **D:** `dispatch-technician-day-window.test.ts`, `technician-location-authz.test.ts` |
+| **4.5** | **As Carlos**, I want "on my way" to work the same whether I tap, speak, or text it, so I don't have to remember which app | **Given** any of the four entry points, **when** fired, **then** one audited act with a TECH actor plus a customer ETA dispatch row | **4 / 3** | Voice, phone and chat legs proven. 🚨 **The SMS-keyword leg is unit-only** — the story claims four legs and proves three |
+| **4.6** | **As Carlos**, I want to tell the customer I'm running late in one tap with gloves on, so I don't pull over to type | **Given** the chip row, **when** I tap 10/20/30, **then** **the chip row *is* the confirm** — no second dialog — and a delay notice is written | **3** 🚨 | In-memory supertest plus a jsdom test that the chip hits the right endpoint; **no real-DB write proof** |
+| **4.7** | **As M**, I want lateness detected from where the truck actually is, so I hear it before the customer does | **Given** geofence/dwell signals, **when** evaluated, **then** a lateness state with a confidence breakdown | 3 | 🚨 The server module's **only importer uses it as a type-only import** — the evaluator has no runtime caller in `packages/api` |
+| **4.8** | **As M**, I want one tech texting OUT to produce one proposal **per affected customer**, so I can handle the difficult one differently | **Given** a verified tech OUT, **when** processed, **then** an unavailable block, a reschedule proposal **per appointment** each carrying a brand-voiced message, and an audit row — idempotent same-day, and **an OUT from an unregistered number is not actioned** | 4 | **D:** `tech-status-sms.test.ts` |
+| **4.9** | **As M**, I want the closest certified tech assigned automatically, so I stop doing routing math in my head | **Given** a job needing a skill, **when** assignment runs, **then** only qualified techs are offered | **0** | The whole file is nine lines returning `[]`. 🚨 **And it is wired into `checkFeasibility`, so the empty skill list reads as "always feasible"** rather than as a visible gap |
+| **4.10** | **As M**, I want my day sequenced to cut windshield time, so I fit one more call in | — | **0** | Absent. No module, no test |
+| **4.11** | **As Carlos**, I want to be told when I'm assigned to something new, so I'm not surprised at 7am | **Given** an assignment change, **when** it commits, **then** the technician is notified | **2** 🚨 | `setTechnicianAssignmentNotifier` has **zero callers**. Every production assignment fires a **silent no-op** — while the module's doc-comment says *"app.ts registers one notifier."* **Carlos is never notified** |
+
 ### 8.5 Execute — the field
 
-| Capability | Rung | Why |
-|---|---|---|
-| One-handed, gloved, daylight-legible field screens | 3 | The ≥44px + 320px pattern exists for estimate approval and review response; **field screens are not pinned the same way** |
-| Job photos with categories and before/after pairing | 4 | Category and pairing round-trip |
-| Time entries by voice | **4** ↑ | Row with resolved `jobId`, **exactly one** audit event, tenant-scoped, **and counted by the job-profit query** |
-| Offline capture with a crash-safe journal, poison-parking, and flush on the reconnect edge | **4** ↓ | Client journal/relocation/flush are unit-proven (real Postgres is inapplicable to a device queue); the **server leg is real-DB** — same key twice yields one row and one effective job, and a create-then-crash replay re-enqueues. Rung 5 needs a device-level proof of the reconnect edge, which does not exist |
-| Tap-to-pay card-present on mobile | 3 | Requires an active Connect account, else a clean 409. **No Docker-gated test** |
+**Epic: Capture the work in the field** · **Jobs:** J5
+
+**Primary persona: Carlos, and M when he's the tech. Gloves, daylight, one hand.**
 
 **Requirement: the durable artifact is deleted only on confirmed flush.** The
 offline queue removes local audio only after the server acknowledges, and never
 attaches credentials on public paths.
 
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **5.1** | **As Carlos**, I want to use this with gloves on in the sun, so I don't take them off forty times a day | **Given** any field screen, **when** rendered at 320px, **then** every tap target is ≥44px and nothing overflows horizontally | **3** | The jsdom + Playwright contract exists for **estimate approval and review response**; 🚨 **field screens are not pinned the same way** |
+| **5.2** | **As M**, I want before/after photos attached to the job, so I can defend the invoice | **Given** a captured photo, **when** stored, **then** category and before/after pairing survive the round trip | 4 | **D:** job-photo integration tests |
+| **5.3** | **As Carlos**, I want to log my hours by talking, so paperwork never follows me home | **Given** a spoken duration, **when** executed, **then** a `time_entries` row lands with the resolved `jobId`, **exactly one** audit event, tenant-scoped — **and it is counted by the job-profit query** | **4** ↑ | **D:** `log-time-entry-execution.test.ts` ✅ *executed* |
+| **5.4** | **As J**, I want a note dictated in a basement with no signal to survive and arrive later, so I never lose work to dead zones | **Given** an offline capture, **when** connectivity returns, **then** the journal flushes, the same key twice yields **one** row and one effective job, a create-then-crash replay re-enqueues, and **local audio is deleted only on confirmed flush** | **4** ↓ | **D:** `voice-idempotency.test.ts` ✅ *executed* · **U:** mobile `queue/flush/audioRelocation`. *Rung 5 needs a device-level proof of the reconnect edge; none exists* |
+| **5.5** | **As J**, I want to take a card on the doorstep, so I get paid before I drive away | **Given** an active Connect account, **when** I tap to pay, **then** the charge completes — **and without one, a clean 409, never a silent failure** | 3 | **U:** `stripe-terminal.test.ts`. 🚨 **No Docker-gated test** |
+
 ### 8.6 Narrate — the owner's spoken command line
 
-| Capability | Rung | Why |
-|---|---|---|
-| Push-to-talk from any screen | 5 | |
-| Speech → typed proposal pipeline | 5 | |
-| Free-text references resolve to ids across nine entity kinds | 4 | Duplicate names resolve to an ambiguity carrying both candidates, against real rows |
-| Job status by voice | 5 | |
-| Spoken line item onto an existing estimate | **4** ↑ | *"Add two hours of labor to the Garcia estimate"* persists qty 2 / unit hour and recomputes totals in integer cents on the real row |
-| Dictated notes, expenses, mileage, materials, time | **4** ↑ | Note persists with **exactly one** audit event; *"$40 in parts for the Henderson job"* links through the resolver, carries `job_id` and **counts in job P&L**; two Henderson jobs clarify; no mention logs **unlinked** |
-| Read-only lookups by voice | 4 | Two-phase contract, **write-once** against a redelivered stamp, `failed` stays retryable, tenant-isolated, out-of-enum refused by a DB CHECK |
-| Spoken address as a first-class resolvable entity | **0 — no place entity kind exists** | |
-| Parts capture with quantity **and unit** | 3 | Units round-trip; `listPending` scopes by job, orders by `needed_by`, excludes NULL bounds, breaks ties on insertion order. **Correction: a job-level parts domain does exist** — `material_items` (migration 272) carries `job_id`, with a handler, a lookup skill and a classifier intent |
+**Epic: Let me fix it by talking** · **Jobs:** J9
+
+**Primary persona: M driving to the next job.** This epic is the product's
+actual interface thesis — *voice directs, SMS approves* (D-030).
+
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **6.1** | **As M**, I want to talk to it from any screen without hunting for a button, so speaking is always the fastest path | **Given** any authenticated screen, **when** I press to talk, **then** a session opens with an SSE event stream | 5 | **W:** `useVoiceRecorder.test.ts` |
+| **6.2** | **As M**, I want what I say to become a typed, validated proposal, so a mumble can't become a malformed invoice | **Given** a spoken sentence, **when** classified, **then** a Zod-validated proposal of the mapped type is drafted with vertical context | 5 | **U:** `operator-voice-golden-path.test.ts` · **D:** `voice-inbound-appointment.test.ts` |
+| **6.3** | **As M**, I want to say "the Henderson job" and have it find the right one, so I don't have to know IDs | **Given** a free-text reference across nine entity kinds, **when** resolved, **then** a real row is found — or an ambiguity carrying **both** candidates | 4 | **D:** `entity-resolution.test.ts`, `chat-entity-resolution.test.ts` |
+| **6.4** | **As M**, I want to ask where a job stands and get an answer, not a proposal, so a question doesn't create work | **Given** a status question, **when** dispatched, **then** a spoken answer and **no proposal minted** | 5 | **D:** `update-job-execution.test.ts` |
+| **6.5** | **As M**, I want to add a line to an existing quote by talking, so I don't reopen a laptop for two hours of labor | **Given** *"add two hours of labor to the Garcia estimate"*, **when** executed, **then** the line persists at qty 2 / unit hour and totals recompute in integer cents on the real row | **4** ↑ | **D:** `update-estimate-execution.test.ts` |
+| **6.6** | **As Carlos**, I want notes, expenses, mileage, materials and time to all work by voice, so the truck *is* the back office | **Given** *"$40 in parts for the Henderson job"*, **when** executed, **then** the expense carries `job_id` and **counts in job P&L**; two Henderson jobs **clarify**; no job mention logs **unlinked** and P&L does not count it. A dictated note persists with **exactly one** audit event | **4** ↑ | **D:** `add-note-voice-execution.test.ts`, `log-expense-job-link.test.ts` ✅ *executed* |
+| **6.7** | **As M**, I want to ask for my numbers out loud and hear them, so I don't open a dashboard at a red light | **Given** a lookup, **when** answered, **then** a two-phase contract (`completed` + `pending`, then answered), **write-once** against a redelivered stamp, `failed` stays retryable, tenant-isolated, out-of-enum refused by a DB CHECK | 4 | **D:** `voice-lookup-answer.test.ts` ✅ *executed* |
+| **6.8** | **As M**, I want to say "the house on Elm" and have it resolve, because that's how I think about jobs | **Given** a spoken address, **when** resolved, **then** it matches a service location | **0** | 🚨 **No `place` entity kind exists anywhere in the product** |
+| **6.9** | **As Carlos**, I want to say "three-quarter copper, twenty feet" and have both number and unit stick, so the parts list is usable | **Given** quantity and unit, **when** stored, **then** both round-trip; `listPending` scopes by job, orders by `needed_by`, excludes NULL bounds, and breaks ties on insertion order | 3 | **D:** `material-items.test.ts` ✅ *executed*. **Correction to the PRD:** a job-level parts domain **does** exist (`material_items`, migration 272) |
 
 ### 8.7 Quote
 
-**Seven of these twelve rows were overclaimed — the heaviest concentration in the
-document, on the surface where a wrong number becomes a price a customer is bound
-to.**
+**Epic: Draft the quote from what was already said** · **Jobs:** J4, J10
 
-| Capability | Rung | Why |
-|---|---|---|
-| Estimate from a spoken description or a photo | **5** ↑ | Both paths persist a real row **plus** their audit event |
-| Catalog-resolved pricing; uncatalogued caps confidence and forces review | **4 / 3** ↓ | Grounding proven at real DB. **The uncatalogued confidence cap is not** — the half that protects you from quoting a number you cannot defend |
-| Confidence markers surfaced on the line that earned them | 5 | Every valid `pricingSource` round-trips; an invalid one is refused by a DB CHECK on a raw UPDATE; a badge renders per line |
-| Good / better / best tiers with add-ons | **4−** ↓ | Write proven; audit leg is `InMemoryAuditRepository` |
-| **Headline total is the default selection, not the sum of all options** | **4−** ↓ | Shares its single assertion with the row above |
-| Customer approval by token link, with signature | **4− / 2** ↓ | Token approval proven. **The signature is not** — the only integration reference sets it as fixture data |
-| Stale-revision guard: once revised, approval requires the version the customer saw | **3** ↓ | **A guard deciding which price a customer is legally bound to has never touched a real database** |
-| **One accepted estimate per job**, enforced by a partial unique index and race-mapped to a clean conflict | **4− / 3** | The race genuinely is tested against the real index. **The conflict *mapping* is not** — the test never inspects the rejected settlement, so nothing proves a `ConflictError`/409 rather than a raw `23505` → 500 |
-| Deposits — percentage or fixed, before- or after-approval policy | **4− / 3** ↓ | `after_approval` proven. **`before_approval` blocking an unpaid approve, and the fixed-amount rule, are in-memory only** |
-| Auto follow-up on unviewed estimates | **5** ↑ | Nine real-DB tests: exactly one send under concurrency, cadence advances once, audit rows, crash recovery, 48 h cooldown |
-| Supervisor review of quotes | 3 | Annotations persist with a real `ai_run_id` FK. **But the gate reaches 2 of 93 proposal-creation sites — see §12.4e** |
-| Negotiation pushback → owner proposal; the AI never concedes | **3** ↓ | All in-memory; the one integration file touching negotiation tests the context read, not the guardrail |
-
-> **One import closes four of these.** Rows 4, 5, 8 and 9 sit at 4− only because
-> `estimate-phases.test.ts:11` imports `InMemoryAuditRepository`.
-> `correction-loop.test.ts:29` shows the fix.
+**Primary persona: M at 6:15am making lunches one-handed.** **This epic has the
+heaviest concentration of overstatement in the product — 7 of 12 rows.** It is
+also the epic where a wrong number becomes a price a customer is legally bound
+to.
 
 **Requirement: a locked estimate is cloned, never edited.** Acceptance, or any
 paid deposit, locks the document. The escape hatch is an explicit clone, so the
@@ -1226,23 +1367,28 @@ uncatalogued, or missing a pricing source, the estimate is not grounded and the
 voice agent speaks **no numbers at all** — rather than reading out the subset it
 happens to trust.
 
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **7.1** | **As M**, I want a quote drafted from the call that already happened, so I'm not re-typing what the customer told the AI | **Given** a spoken description **or** a customer photo, **when** drafted, **then** a real estimate/proposal row persists **plus** its audit event | **5** ↑ | **D:** `draft-estimate-execution.test.ts`, `mms-to-quote.int.test.ts` |
+| **7.2** | **As M**, I want every price to come from *my* price book, and anything it can't find flagged, so the AI never invents a number | **Given** a drafted line, **when** grounded, **then** the catalog price is stamped into JSONB and `missingFields` cleared — **and any uncatalogued line caps confidence below the auto-approve floor** | **4 / 3** 🚨 | Grounding proven. 🚨 **The confidence cap is not** — *the half that protects M from quoting a number he can't defend* |
+| **7.3** | **As M**, I want doubt shown on the specific line that earned it, so I know where to look | **Given** a mixed document, **when** rendered, **then** each line carries its own `pricingSource`, an invalid one is refused by a DB CHECK on a raw UPDATE, and a badge renders per line | 5 | **D:** `estimates.test.ts -t "pricing_source"` · **W:** `AIProposalCard.test.tsx` |
+| **7.4** | **As M**, I want good/better/best tiers, so I stop leaving money on the table | **Given** three tiers with add-ons, **when** persisted, **then** all tier rows and the accepted selection survive | **4−** 🚨 | Write proven; **audit leg is `InMemoryAuditRepository`** |
+| **7.5** | **As M**, I want the headline price to be the option I recommended, not the sum of all three, so the customer isn't scared off by a number I never quoted | **Given** tiers, **when** the total renders, **then** it equals the **default selection**, strictly less than the sum of all tiers | **4−** 🚨 | Shares its single assertion with 7.4 |
+| **7.6** | **As M**, I want the customer to approve and sign from a link with no login, so approval isn't blocked by a password reset | **Given** a token link, **when** the customer approves with a signature, **then** acceptance and the signature both persist | **4− / 2** 🚨 | Token approval proven. 🚨 **The signature is not** — the only integration reference *sets it as fixture data* and never asserts the round trip |
+| **7.7** | **As M**, I want a customer who approves an old version to be stopped, so nobody holds me to a price I already revised | **Given** a revised estimate, **when** approval arrives with the stale version, **then** it is **rejected** and the status stays `sent`; with the current version it is accepted | **3** 🚨🚨 | **A guard deciding which price M is legally bound to has never touched a real database** |
+| **7.8** | **As M**, I want exactly one accepted estimate per job, so I can't accidentally have two live prices | **Given** two concurrent approvals on one job, **when** they race, **then** exactly one is accepted — **and the loser gets a clean conflict, not a 500** | **4− / 3** | The race **is** genuinely tested against the real partial unique index. 🚨 **The conflict mapping is not** — the test never inspects the rejected settlement |
+| **7.9** | **As J**, I want a deposit before I order parts, so I'm not financing the customer | **Given** `before_approval` and an unpaid deposit, **when** the customer approves, **then** it is **blocked** and the estimate stays `sent` | **4− / 3** 🚨 | `after_approval` proven. 🚨 **The `before_approval` block and the fixed-amount rule are in-memory only** |
+| **7.10** | **As M**, I want unviewed quotes chased automatically, so my pipeline doesn't die of silence | **Given** concurrent nudges for one estimate, **when** dispatched, **then** exactly one send, cadence advances once, audit rows written, a 48h cooldown respected, and a crash mid-send recovers | **5** ↑ | **D:** `estimate-nudge.test.ts` — *nine real-DB tests* |
+| **7.11** | **As M**, I want a second pair of eyes on a quote before it goes out, so an obvious pricing mistake gets caught | **Given** any quote reaching an owner-facing dispatch, **when** it does, **then** exactly one supervisor review exists first | 3 | Annotations persist with a real `ai_run_id` FK. 🚨 **But the gate reaches 2 of 93 origins and cannot hold a pricing anomaly in any mode — see E10.18** |
+| **7.12** | **As M**, I want the AI to refuse to negotiate and hand it to me instead, so it never discounts my work | **Given** a discount request, **when** handled, **then** a capture-class owner callback in `ready_for_review` with **zero** customer-facing dispatch and no concession | **3** 🚨 | **All in-memory.** The one integration file tests the context read, not the guardrail |
+
 ### 8.8 Bill
 
-| Capability | Rung | Why |
-|---|---|---|
-| Invoice from a spoken sentence (two steps: draft, then issue) | **5** ↑ | Real row, integer cents, exactly one `invoice.created` audit event |
-| Estimate → invoice, billing exactly the accepted selection | 3 | Linkage and idempotency proven at real DB; **selection fidelity — the actual claim — is in-memory only** |
-| Auto-invoice on completion (opt-in, still a proposal) | **4** ↑ | A completed transition stamps `completed_at` **and** runs completion effects |
-| Payment links, hosted checkout, embedded elements | 4 / 3 | CAS-guarded persist/clear and a signed `checkout.session.completed` proven. **Embedded elements are jsdom-only** |
-| Card-present, ACH with the full processing→settled→reversed lifecycle, saved cards off-session | **4 / 3 / 2–3** ↓ | ACH is strong in all three directions. **Card-present has no Docker-gated test; off-session charging has none at all.** A composite averaging one strong leg with two weak ones |
-| Partial payments and deposit credits via guarded atomic updates | 4 | Five Docker-gated files, nine lost-update/overpay/clamp tests. **The best-evidenced row in the money surface** |
-| Void and cancel — deactivating links and cancelling in-flight intents | **3** ↓ | The *consequences* of void are proven at real DB. **The deactivation itself is proven only against a mock provider** — the scenario this row exists to prevent is the untested one |
-| Refunds as accumulating adjustments, never a status flip, idempotent per provider refund id | 4 | Concurrent duplicate deliveries apply once; interleave, stranded-claim, RLS and migration-backfill all covered |
-| Dunning: three reminders at 3/7/14 days, idempotent per step key | **3** ↓↓ | **Every cadence test uses an in-memory ledger.** The only real-DB dunning test keys on `manual:<proposalId>`. Nothing proves a cadence step key has met the real `UNIQUE` index — and a duplicate sweep double-texting a customer about money is exactly the failure this row claims is closed |
-| Late fees, capped, idempotent | **5 / 3** ↑ | Idempotency proven at real DB on both the proposal and voice paths. **The cap is unit-only** |
-| Progress/milestone billing, with a remainder milestone absorbing rounding | 3 | Unit only |
-| Memberships: auto-renew, member pricing, priority booking, dues auto-collection | 3 | Every integration test proves a **column**, not a **behaviour**. Generous at 3 |
-| Integer cents end to end | **4** ↓ | The engine invariants hold over 4000 randomized inputs — but that suite is a **seeded PRNG fuzz, not a property-based test** (its own header says so), lives outside the Docker lane, and never crosses the DB boundary. Real-DB proof is hand-picked examples. And the reconciliation sweep **expects rounding mismatches in live data** and reports them as informational |
+**Epic: Bill it and chase the money** · **Jobs:** J5, J6
+
+**Primary personas: J walking out of the job; M 30 days later with $12K
+outstanding.** The money surface is the best-evidenced area in the product and
+also holds its single largest overclaim.
 
 **Requirement: nothing auto-sends.** The overdue sweep does not text the
 customer. It raises a **proposal** the owner approves with one tap. Collections
@@ -1257,21 +1403,34 @@ consume a sequence number and leave a gap in the tenant's books.
 because an ACH return is a real event and a system that cannot represent it will
 lie about the balance.
 
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **8.1** | **As J**, I want to invoice by saying one sentence, so I bill before I drive away | **Given** a spoken invoice, **when** approved and executed, **then** a real invoice row with integer-cent totals and **exactly one** `invoice.created` audit event | **5** ↑ | **D:** `draft-invoice-execution.test.ts` |
+| **8.2** | **As M**, I want the invoice to bill exactly the tier the customer chose, so I don't bill for options they declined | **Given** a tiered accepted estimate, **when** converted, **then** the invoice lines equal `accepted_selection` **only** | 3 | Linkage and idempotency proven at real DB. 🚨 **Selection fidelity — the actual story — is in-memory only** |
+| **8.3** | **As M**, I want a completed job to offer me an invoice, so nothing ages unbilled | **Given** a job transitioning to completed, **when** it commits, **then** `completed_at` is stamped **and** completion effects auto-draft an invoice proposal | **4** ↑ | **D:** `update-job-execution.test.ts` |
+| **8.4** | **As M**, I want the customer to pay from a link on their phone, so I stop chasing checks | **Given** a payable invoice, **when** a link is issued, **then** it persists only on a payable, unchanged, link-free invoice — and a signed `checkout.session.completed` flips it to paid | **4 / 3** | **D:** `payment-credit-guards.test.ts`, `invoice-webhook-paid.test.ts`. *Embedded elements are jsdom-only* |
+| **8.5** | **As M**, I want ACH, cards on file and card-present all to settle correctly, including when they fail later | **Given** an ACH `processing → succeeded`, **then** one completed payment + paid invoice + audit chain; **given** `processing → payment_failed`, **then** the in-flight credit reverses and the invoice reopens; **given** a duplicate delivery, **then** no double-credit | **4 / 3 / 2–3** 🚨 | ACH is strong in all three directions. 🚨 **Card-present has no Docker-gated test; charging a stored card off-session has none at all** — storage round-trips, nothing proves money lands |
+| **8.6** | **As M**, I want two payments arriving at once to both count, so my balance is never wrong | **Given** a $100 cash entry racing a $150 ACH webhook, **when** both commit, **then** both credit with no lost update; two concurrent full-balance payments credit **exactly once**; the SQL cap rejects a credit that no longer fits | 4 | **D:** five Docker-gated files, nine tests — **the best-evidenced row in the money surface** |
+| **8.7** | **As M**, I want voiding an invoice to kill its payment link immediately, so nobody pays an invoice I cancelled | **Given** a void, **when** it commits, **then** `stripe_payment_link_id`/`_url` are NULL on the persisted row, in-flight intents are cancelled, and a `payment_link.deactivated` audit event is written | **3** 🚨 | The *consequences* of void are proven at real DB (a voided invoice takes no credit). 🚨 **The deactivation itself is proven only against a mock provider — the exact scenario this story exists to prevent** |
+| **8.8** | **As M**, I want a refund to adjust the record without lying about what happened, so my books stay honest | **Given** two concurrent deliveries of one `stripe_refund_id`, **when** processed, **then** `amount_refunded_cents` increments **exactly once**, one claim row exists, and the status is **never flipped** | 4 | **D:** `payment-refunds.test.ts` — *interleave, stranded-claim, RLS and migration-backfill all covered* |
+| **8.9** | **As M**, I want overdue invoices chased on a schedule **and never chased twice**, so I don't damage a relationship over a duplicate text | **Given** an invoice 15 days past due, **when** swept twice, **then** exactly **three** dunning rows exist with `step_key IN ('3:sms','7:sms','14:sms')` and a duplicate insert of `'7:sms'` raises 23505 | **3** 🚨🚨 | **Every cadence test uses an in-memory ledger.** The only real-DB dunning test keys on `manual:<proposalId>`. **Nothing proves the cadence key has ever met the real `UNIQUE` index** — and a duplicate sweep double-texting a customer about money is exactly the failure this story exists to prevent. **The largest single overclaim in the product** |
+| **8.10** | **As M**, I want late fees applied consistently and capped, so I'm firm without being punitive | **Given** a re-executed `apply_late_fee`, **when** it runs again, **then** no second fee line appears on the real invoice; **and** a fee exceeding the cap is clamped | **5 / 3** ↑ | **D:** `late-fee-idempotency.test.ts`, `voice-collections-execution.test.ts`. *The cap is unit-only* |
+| **8.11** | **As M**, I want to bill a big job in stages, so cash flow matches the work | **Given** a 3-milestone schedule on a total that doesn't divide evenly, **when** split, **then** Σ milestones === total, with the remainder milestone absorbing every stray cent | 3 | **Unit only** |
+| **8.12** | **As M**, I want memberships to renew and bill themselves, so recurring revenue is actually recurring | **Given** a lapsed auto-renew agreement, **when** the sweep runs, **then** `ends_on` advances, `renewal_count` bumps, member pricing applies to a document, and dues collect | 3 | 🚨 **Every integration test here proves a *column*, not a *behaviour*.** No renewal sweep, no member price applied, no priority in dispatch, no dues charge. *Generous at 3* |
+| **8.13** | **As M**, I want the arithmetic to be exactly right, every time, so I never have to explain a penny | **Given** ≥1000 randomized documents, **when** totalled, **then** every money field is an integer and totals never go negative | **4** 🚨 | The 4000-iteration suite is a **seeded PRNG fuzz, not a property-based test** (its own header says so), lives **outside the Docker lane**, and never crosses the DB boundary. 🚨 **And the reconciliation sweep *expects* rounding mismatches in live data and reports them as informational** |
+
+> **Separately tracked, not a story:** the discount/tax defect — the full
+> discount is subtracted from **both** the tax base and the subtotal,
+> systematically under-taxing mixed invoices. See PRD §12.3. *Q12 (fail closed,
+> alert loudly, or leave it) is still unanswered and blocks that fix.*
+
 ### 8.9 Close
 
-| Capability | Rung | Why |
-|---|---|---|
-| Thank-you SMS +2 h after completion, stamped for idempotency | 4 | Concurrent sweeps send once with an audit row; a "sent" claim with a NULL stamp is reconciled, not resent |
-| Review request +24 h, default on | **4−** | Column default TRUE (migration 214), double sweep enqueues once. No audit assertion |
-| Review gating: 4★+ routed to public review, below kept private | **3** ↓↓ | Proven only by a mocked-repo route test. **This is the row that decides whether a 2★ experience becomes a public Google review** |
-| Google review monitoring, classified, with drafted public and private responses | **4 / 3** ↑ | Monitoring is strong — idempotent re-sweep, 429 backoff with counter, RLS isolation. **Classification and drafting are unit-only** |
-| **Service credits by tier, capped per customer per 12 months** | 3 | The existing test calls itself a smoke test that stubs `pool.connect()` |
-| End-of-day digest, tenant-local, with "what I wasn't sure about" and "what I learned" | **4 — unlit-able** | The write and **both named sections** are proven at real Postgres. `digest_enabled` defaults false and **no route or UI writes it** (§12.4c) |
-| Weekly owner summary including a *repeat-correction* rate | **4** ↑ | Joins the real correction repository, omits at zero; send ledger idempotent, and a failing send leaves no row so the week retries |
-| Correction loop: lessons forward, digest-reported, reversible | 5 | One real-Postgres test proves forward, reported and reversible, with `PgAuditRepository` asserting both ends and FORCE RLS isolating lessons. **The best-evidenced row in the lifecycle sections** |
-| Repeated corrections mint an owner-reviewed fix proposal | 4 | The third correction mints a meta-proposal that updates the real catalog through the **production** registry and executor |
-| QuickBooks one-way sync | **4** ↑ | Idempotent re-sweep, full-backlog pagination, RLS-isolated `sync_log`. Rung 5 is blocked on a live OAuth connection, not on code |
-| Unified comms inbox with AI-suggested replies (owner edits and sends; never auto-sent) | **4 / 3** ↓ | Inbox and guarded send proven — including that a DNC reply writes **no** dispatch row, which is the "never auto-sent" half. **The AI-suggestion leg has no integration test at all** |
+**Epic: Tell me what happened, and what you got wrong** · **Jobs:** J7, J8
+
+**Primary personas: M at 9:30pm with the kids in bed; S doing the books Saturday
+morning.** This epic is the trust pillar and the product's stated thesis that
+**the digest is the dashboard.**
 
 **Requirement: the review classifier degrades to the safer label.** Below a
 confidence floor, an ambiguous review is treated as a *vague* complaint rather
@@ -1280,6 +1439,54 @@ understanding than put words in a customer's mouth.
 
 **Requirement: an over-cap service credit is omitted, not zeroed.** Proposing
 "$0 credit" is worse than proposing no credit.
+
+| # | User story | Acceptance criterion | Rung | Confirm |
+|---|---|---|---|---|
+| **9.1** | **As M**, I want a customer thanked 2h after the job, so the last thing they remember is courtesy | **Given** two concurrent sweeps over one eligible job, **when** they run, **then** exactly one send and one `notification.thank_you_sms.sent` audit row — and a "sent" claim with a NULL stamp is **reconciled, not resent** | 4 | **D:** `thank-you-sms-worker.test.ts` |
+| **9.2** | **As M**, I want a review asked for automatically, so my rating grows without me thinking about it | **Given** a completed job 24h old, **when** swept twice, **then** one `feedback_send` enqueued, with the setting defaulting **on** at the column level | **4−** | **D:** `review-request-sweep.test.ts` — *no audit assertion* |
+| **9.3** | **As M**, I want an unhappy customer routed to me privately and a happy one to Google, so a bad day doesn't become a permanent 2★ | **Given** `rating: 3`, **when** submitted, **then** the response persists and **no** review links return; **given** `rating: 5`, **then** the configured link returns | **3** 🚨🚨 | Proven only by a mocked-repo route test. **This is the row deciding whether a 2★ experience becomes a public Google review, and it has no real-DB proof** |
+| **9.4** | **As M**, I want new Google reviews found and a response drafted for my approval, so I reply within a day without watching for them | **Given** a connected tenant, **when** a sweep runs, **then** new reviews persist, the cursor advances, a re-sweep persists nothing new, a 429 stamps backoff, and reviews are RLS-invisible cross-tenant — with a PII-redacted draft response awaiting approval | **4 / 3** ↑ | **D:** `google-reviews-worker.test.ts`. *Classification and drafting are unit-only* |
+| **9.5** | **As M**, I want to make a bad experience right without over-giving, so goodwill doesn't become a leak | **Given** $80 already issued in 12 months and a $50 tier proposed, **when** the cap applies, **then** the credit is **omitted, not zeroed** — because proposing "$0 credit" is worse than proposing none | 3 | 🚨 The existing test calls itself a *smoke test that stubs `pool.connect()`* |
+| **9.6** | **As M**, I want one text at the end of the day telling me what happened, so I never open a dashboard | **Given** a tenant at its local digest time, **when** the sweep runs, **then** a digest sends once — not duplicated, not re-sent — carrying **"what I wasn't sure about"** and **"what I learned today"** | **4 — unlit-able** 🚨🚨 | The write **and both named sections** are proven at real Postgres. 🚨 **`digest_enabled` defaults false and *nothing in web or mobile writes it*. Mike cannot turn on the product's central promise without someone running SQL against production** |
+| **9.7** | **As S**, I want a weekly summary I can read Saturday morning, including how often it repeated a mistake, so I can see whether it's learning | **Given** a week of corrections, **when** summarised, **then** total / repeats / rate come from the real corrections table, and the field is **omitted at zero**; the send ledger is idempotent and a failed send leaves **no** row so the week retries | **4** ↑ | **D:** `weekly-feedback-builder.test.ts`, `hfcr-weekly-send-worker.test.ts` |
+| **9.8** | **As M**, I want a correction I make once to stick, so I never fix the same thing twice | **Given** a labor-rate correction, **when** executed, **then** the config changes so the **next same-day draft reflects it**, it appears in the day's applied lessons, and `correction_lesson.applied` is written | 5 | **D:** `correction-loop.test.ts` |
+| **9.9** | **As M**, I want to undo a lesson it learned wrong, so teaching it is not a one-way door | **Given** an applied lesson, **when** undone, **then** the prior value is restored **exactly**, `correction_lesson.reverted` is emitted **exactly once**, a second undo is a no-op, and it drops from the day | 5 | **D:** `correction-loop.test.ts` — *asserts both audit ends with `PgAuditRepository`; the best-evidenced row in the lifecycle sections* |
+| **9.10** | **As M**, I want a mistake I've corrected three times to become a permanent fix I approve, so the system stops needing me for it | **Given** a third same-target correction, **when** it lands, **then** a meta-proposal is minted that, once approved, updates the real catalog **through the production registry and executor** | 4 | **D:** `correction-repetition-meta-proposal.test.ts` |
+| **9.11** | **As S**, I want paid invoices to reach QuickBooks without me re-keying them, so Saturday is shorter | **Given** already-synced paid invoices, **when** swept again, **then** **zero** QuickBooks calls and zero new `sync_log` rows; pagination syncs **every** paid invoice, not one page; `sync_log` is RLS-isolated | **4** ↑ | **D:** `accounting-sync.test.ts`. *Rung 5 is blocked on a live OAuth connection, not on code* |
+| **9.12** | **As M**, I want one inbox for every channel with a reply drafted for me, and **nothing sent without my hand on it** | **Given** a thread, **when** I ask for a suggestion, **then** a draft returns and **zero** dispatch rows are written; **given** a DNC number, **then** a reply writes **no** dispatch row at all | **4 / 3** 🚨 | Inbox and guarded send proven — including the DNC refusal, which is the "never auto-sent" half. 🚨 **The AI-suggestion leg has no integration test at all** |
+
+### 8.10 The fourteen founding commitments
+
+From `docs/strategy/day-in-the-life.md:190-243` — *"What this forces on the
+product."* These are the oldest statements of intent in the repository, and the
+question they answer is not "is it built" but **"is it still true."**
+
+**6 kept and proven · 3 kept but dark · 2 partial · 2 kept but unproven · 1 not kept.**
+
+| # | Commitment | Verdict | Acceptance criterion | Confirm |
+|---|---|---|---|---|
+| 1 | Voice directs, SMS approves (D-030) | **KEPT-AND-PROVEN** | A spoken instruction produces a persisted proposal, that proposal renders an owner SMS with a one-tap link, and a `Y` reply approves through the same `approveProposal` path as a dashboard click — **with no web session involved**. Proven in three abutting segments; no single test spans the whole arc. | **U:** `operator-voice-golden-path.test.ts` `voice-action-router-unsupervised-sms.test.ts` `proposals/sms/reply-handler.test.ts` |
+| 2 | End-of-day digest is the dashboard | **KEPT-BUT-DARK** | A tenant created through normal onboarding — no SQL, no raw API call — receives a digest at its configured local time, and an owner can toggle it from a shipped UI. `digest_enabled` defaults **false**; the field is in the update contract but **no web or mobile code writes it**. The "Weekly digest" toggle in `TemplatesPage.tsx:913` is unwired local state for a different feature. | **S:** `grep -rn "digestEnabled\|digest_enabled" packages/web/src packages/mobile/src` → **empty** |
+| 3 | One-tap approvals with dictation edits | **PARTIAL** | After replying `EDIT`, an owner can deliver the change **by voice** and the delta applies to the same proposal. One-tap and the 10-minute text edit session are proven; dictation is proven only on the in-app surfaces. **The SMS edit session accepts text only** — no path carries dictated audio into an open session. | **U:** `reply-handler.test.ts` `voice/estimate-edit-flow.test.ts` · **W:** `useVoiceCommands.test.ts` |
+| 4 | Confidence surfaced, not hidden | **KEPT-AND-PROVEN** | A low/medium marker renders a visible `(?)`/`Check:` line in the owner SMS, is **denied a one-tap link** at low confidence, and appears in the digest's "what I wasn't sure about." High confidence is byte-identical to absent metadata. (The digest half inherits #2's darkness.) | **U:** `proposals/sms/render.test.ts` `ai/guardrails-confidence.test.ts` `digest/digest-service.test.ts` |
+| 5 | **A second classifier reviews every booking and quote** | **NOT-KEPT** | See A.7. The gate has **two call sites**, both in one file; one is conditional on `ready_for_review`, so **low-confidence quotes are excluded**; the default mode is `shadow`, where `hold` is always false; and `pricing_anomaly` is **not** in `CUSTOMER_HARM_CHECKS`, so a pricing anomaly on a quote **can never hold in any mode**. | **S:** `grep -rn "getSupervisorReviewGate()" packages/api/src` → **2 call sites** |
+| 6 | Emergency intent overrides automation | **KEPT-AND-PROVEN** | An E1/E2 utterance with a vulnerability signal, on a tenant configured with nothing but an owner phone, dials the owner's cell within the same turn; if unanswered for 60 s it produces a high-priority booking plus an owner SMS, never a normal booking. The tier classifier works with **no rules loaded**. Open item: `E1_SCRIPT_REVIEW_REQUIRED` is still `true`. | **U:** `emergency-tier.test.ts` `triage-decision.test.ts` `voice/triage/` `emergency-immediate-dial.test.ts` `gather-vulnerability-triage.test.ts` |
+| 7 | Never discounts or promises scope changes | **KEPT-AND-PROVEN** | On an unconfigured tenant every price-pressure utterance produces a capture-class, low-confidence owner callback carrying a recommendation — never a committed price — **and no registered proposal type can express an AI-applied discount.** That second clause is a type-level impossibility proof, not a behaviour sample. **The strongest of the fourteen.** | **U:** `negotiation-invariant.test.ts` `discount-evaluator.test.ts` `settings/discount-policy.test.ts` |
+| 8 | Dropped calls trigger SMS recovery | **KEPT-BUT-DARK** | A normally-provisioned tenant receives a recovery SMS 60 s after a dropped inbound call. The pipeline is proven at real Postgres **including the flag-on transition** — but `setTenantFlag` has **zero production callers**, no route writes `tenant_feature_flags`, and no web UI references the admin endpoint. Rows are scheduled, then expire unsent. | **S:** `grep -rn "setTenantFlag" packages/api/src packages/web/src` → **definition only** |
+| 9 | B2B account recognition is first-class | **KEPT-BUT-DARK** | Two identical calls — one from a `property_manager`, one residential — produce **observably different** outcomes. The context is assembled onto the session and read by one supervisor check; **`buildAccountContextPromptSection` has zero production callers** and nothing routes on `ctx.priority`. Recognition is implemented and tested; *routed differently* is not implemented. | **S:** `grep -rn "buildAccountContextPromptSection" packages/api/src` → **definition only** |
+| 10 | Vertical packs genuinely differ | **KEPT-BUT-UNPROVEN** | For every pair of shipped packs, the `sttKeywords`, terminology key sets, `repairTemplates` and SKU sets are pairwise non-identical. **They genuinely differ** — 12 vs 12 fully disjoint STT keywords, disjoint terminology, plumbing-only `minor_issue` objection, different rates *and* different SKUs. **But only pricing has a cross-pack test.** A refactor collapsing `sttKeywords` to a shared list would keep the suite green. | **U:** `test/verticals/` `test/packs/seed-pack-defaults.test.ts` |
+| 11 | Google review monitoring with draft-response approval | **KEPT-AND-PROVEN** | A new review on a connected tenant produces a draft `review_response_proposal` with PII redacted **on input and output**, approvable from the inbox, never duplicated on re-sweep. Reachable — no feature flag; the OAuth connect flow has a shipped settings UI. | **U:** `workers/google-reviews.test.ts` `test/reputation/` · **W:** `InboxPage.reviewResponse.test.tsx` · **E:** `e2e/review-response-approval-mobile.spec.ts` |
+| 12 | Brand voice configurable, then locked | **PARTIAL** | *(a)* A default tenant can configure brand voice from a shipped web UI without platform-admin action — **false**, `brand_voice_configurator` is seeded `enabled: false`. The **spoken** path is unflagged and works. *(b)* `BRAND_VOICE_INTENTS` covers every customer-facing generated-text surface — **false**, it is exactly five, and **the live voice agent's spoken utterances do not read brand voice at all**. The commitment names calls, texts, invoices, follow-ups and review responses; two of five are covered. The **lock itself is real and well proven**: first write sets `brand_voice_locked`, then every edit is cool-down gated under `FOR UPDATE`, and a spoken *"lock my brand voice"* can never set it. | **S:** `grep -rn "brandVoice" packages/api/src/telephony/twilio-adapter.ts` → **empty** |
+| 13 | Every AI mistake is a learning event | **KEPT-AND-PROVEN** | An owner edit, once executed, writes a `correction_lessons` row, **changes the corresponding config so the next same-day draft reflects it**, emits `correction_lesson.applied`, and is fully reversible — restoring the prior value exactly and emitting `.reverted` **exactly once**, idempotently. Proven in-memory *and* against real Postgres with RLS. | **U:** `test/learning/` · **D:** `correction-loop.test.ts` `correction-lesson-on-execution.test.ts` |
+| 14 | No feature ships that adds admin work | **KEPT-BUT-UNPROVEN** | Unfalsifiable as stated — see A.6. | — |
+
+> **Correction to D-030.** D-030 named four dark commitments (digest,
+> brand-voice configurator, dropped-call recovery, B2B). All four are confirmed.
+> But **#5 is a fifth and more serious finding**, and D-030's remediation
+> framing — *"a launch checklist, not an architecture change"* — does not hold
+> for it.
+
+---
 
 ---
 
@@ -1491,7 +1698,81 @@ strongest capability rows — RLS isolation, DB-level double-booking exclusion,
 payment concurrency, refund idempotency and the correction loop. But five rows
 rested on files in `test/integration/` that never open a pool, and eleven more
 rested on a mocked dependency. **The bar was right; the accounting against it was
-not.** Both are in [`docs/PRD-v5-acceptance.md`](PRD-v5-acceptance.md).
+not.**
+
+### 11.0a The audit scorecard
+
+| Section | Rows | Overclaimed | Underclaimed | Confirmed |
+|---|---|---|---|---|
+| Invariants I1–I18 (§5) | 18 + 6 sub-clauses | 6 sub-clauses unproven, 1 invariant unenforced | — | 11 at PROVEN-REAL-DB or STRUCTURAL |
+| §8.1 Setup | 11 | 1 | 2 | 8 |
+| §8.2 Capture | 12 | 5 | 2 | 5 |
+| §8.3 Book | 12 | 4 | 1 | 7 |
+| §8.4 Dispatch | 11 | 3 | — | 8 |
+| §8.5 Execute | 5 | 1 | 1 | 3 |
+| §8.6 Narrate | 9 | — | 3 | 6 |
+| §8.7 Quote | 12 | **7** | 2 | 3 |
+| §8.8 Bill | 13 | 5 | 2 | 6 |
+| §8.9 Close | 12 | 2 | 3 | 7 |
+| §8.10 Founding commitments | 14 | 1 not kept · 3 dark · 2 partial · 2 unproven | — | 6 |
+
+**Net: 28 rows overclaimed, 16 underclaimed.** The corrected picture is not
+worse, it is **differently shaped**. Overclaims concentrate in quoting,
+collections cadence and review gating. Several capabilities were undersold:
+MMS-to-quote, estimate nudges, voice invoicing, voice book/move/cancel, the
+correction loop and QuickBooks sync.
+
+### 11.0b The five strongest things in the product
+
+Ranked by evidence, not by ambition:
+
+1. **RLS isolation (I11)** — every `tenant_id` table proven enabled-and-forced at
+   runtime, exemptions pinned to exactly two, boot refusal proven.
+2. **Double-booking exclusion (8.3.6)** — a real concurrent race against a real
+   `EXCLUDE` constraint.
+3. **Payment concurrency (8.8.6)** — five Docker-gated files, nine
+   lost-update/overpay/clamp tests.
+4. **The correction loop (8.9.8–8.9.9)** — apply, cascade, report and undo, all
+   proven on real Postgres with audit rows on both ends.
+5. **The negotiation guardrail (I7)** — a type-level impossibility proof.
+
+**The first edition called emergency detection "the strongest thing in the
+product." That is the inverse of true** — it is unit-tested only, with no
+Docker-gated proof and a self-declared placeholder script. It was the single
+largest overclaim in the document.
+
+### 11.0c The eight tests that would close the most ground
+
+In the order they should be written:
+
+1. `test/ai/supervisor/review-coverage.test.ts` — the §12.4e finding. Highest
+   value; **the only one that changes an architecture decision rather than a
+   score.**
+2. Dunning cadence at real Postgres — `'3:sms' | '7:sms' | '14:sms'` against the
+   real `UNIQUE` index. Closes the largest money overclaim.
+3. Review gating at real Postgres — a 3★ returns no links, a 5★ does.
+4. Swap `InMemoryAuditRepository` → `PgAuditRepository` in
+   `estimate-phases.test.ts`. **One import; moves four §8.7 rows from 4− to 4.**
+5. Stale-revision guard at real Postgres — `expectedVersion` 1 vs 2.
+6. Emergency classification at real Postgres, with its audit event.
+7. Void → link deactivation + intent cancellation at real Postgres.
+8. Uncatalogued line → confidence capped below the auto-approve floor, on disk.
+
+### 11.0d Keeping this document honest
+
+This document has the same failure mode as every document it replaces: it is
+prose, and prose drifts. Two defences:
+
+1. **Every rung carries its command.** A claim you cannot run is a claim you
+   should not trust — including the claims here.
+2. **The `S:` falsifiers are the load-bearing ones.** They are single shell
+   commands whose *output is the verdict*. When one starts returning something
+   different, the row is stale. The natural next step is a script that runs them
+   as a batch and diffs against the expectations recorded here — the same trick
+   `voice-action-catalog.contract.test.ts` plays on the capability catalog.
+
+Until that script exists, §5, §8 and §12 are a **snapshot with a decay rate, not
+a standing truth.** They were accurate on 2026-09-11.
 
 **Current state, 2026-09-06 full verification** — every automated gate green:
 
@@ -1746,6 +2027,25 @@ work, and they light four of the capabilities the strategy documents cite most.
 The last row is also the clearest instance of §12.4d's first rule: **a
 doc-comment claiming a module is wired is a claim, not a wiring.**
 
+#### Stories that pass their rung and fail their user
+
+Worth stating as its own list, because it is invisible in any engineering-only
+view. These are rows where **the engineering is done and the user is not
+served** — a different backlog from the test-writing one, much cheaper, and the
+one a customer would notice first:
+
+| Story | Rung | Why it still fails |
+|---|---|---|
+| **9.6** End-of-day digest | 4 | No route or UI writes `digest_enabled`. **The product's central promise cannot be switched on** |
+| **2.7** Dropped-call recovery | 4 | `setTenantFlag` has zero production callers |
+| **1.11** Team invites | 4 | The invite row is written perfectly and the email 404s — `/accept-invitation` has no route |
+| **4.11** Technician assignment notice | 2 | Silent no-op on every assignment; doc-comment says otherwise |
+| **2.12** B2B recognition | 3 | Recognised, assembled, and **never routed on** |
+
+**Five stories where a passing rung hides a failing story.** Together they are
+roughly a day of work and they light four of the capabilities the strategy
+documents cite most.
+
 ### 12.4d A note on method — how four of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
@@ -1784,9 +2084,8 @@ errors of *evidence*, not of currency:
 
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
-the source.** Every rung in §8 now carries a command in
-[`docs/PRD-v5-acceptance.md`](PRD-v5-acceptance.md); a number without one should
-be treated as a prediction.
+the source.** Every rung in §5 and §8 now carries the command that confirms it;
+a number without one should be treated as a prediction.
 
 ### 12.4e The supervisor gate is not dark — it is structurally incomplete
 
