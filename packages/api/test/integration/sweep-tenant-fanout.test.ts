@@ -64,7 +64,6 @@ import { PgDroppedCallRecoveryRepository } from '../../src/sms/recovery/schedule
 import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
-import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
 import { createAppointment } from '../../src/appointments/appointment';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
