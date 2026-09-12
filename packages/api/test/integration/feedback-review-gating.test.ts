@@ -30,9 +30,13 @@
  * feedback_responses, which nothing but the owner's authenticated dashboard
  * (GET /api/feedback via requirePermission('settings:view')) can read, and
  * no public link is ever produced. There is no active "route to owner"
- * mechanism to pin. The it.fails below documents the gap rather than
- * asserting something the code doesn't do — do not delete it without either
- * building the notify-owner path or striking the claim from the PRD row.
+ * mechanism to pin. The it.fails below watches the real process-wide
+ * OwnerNotificationService/notifyOwner() seam every other owner push uses
+ * (notifications/owner-notifications-instance.ts) — not an invented audit
+ * event — so it documents the gap rather than asserting something the code
+ * doesn't do, and will correctly flip red the moment a real implementation
+ * routes through that seam. Do not delete it without either building the
+ * notify-owner path or striking the claim from the PRD row.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
@@ -45,6 +49,10 @@ import { PgFeedbackResponseRepository } from '../../src/feedback/pg-feedback-res
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createFeedbackRequest } from '../../src/feedback/feedback-request';
+import { OwnerNotificationService } from '../../src/notifications/owner-notification-service';
+import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
+import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
+import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
 
 async function createJob(pool: Pool, tenant: TestTenant): Promise<string> {
   const customerId = crypto.randomUUID();
@@ -190,23 +198,41 @@ describe('Postgres integration — 9.3 review-gating (rating >= 4 ⇒ review lin
    * see the file header. This assertion is EXPECTED to fail; it.fails
    * flips vitest's pass/fail so a real "private routing" implementation
    * (which should make this pass) is what turns this file red, not green.
+   *
+   * Watches the REAL mechanism, not an invented audit contract. An earlier
+   * version of this test asserted a `feedback_response.owner_notified` audit
+   * event — a type this codebase has no reason to ever emit. Every other
+   * owner-facing notification (payment received, lead captured, escalation,
+   * appointment reminders, …) fans out through the single process-wide
+   * `OwnerNotificationService` / `notifyOwner()` seam
+   * (notifications/owner-notifications-instance.ts), backed by
+   * `PushDeliveryProvider`; a real "route privately to the owner"
+   * implementation would almost certainly use that same seam (adding a new
+   * `NotificationType` to `@ai-service-os/shared`'s contract — none exists
+   * for feedback today), not a bespoke audit row. Caught in review on this PR
+   * (Codex): the old assertion would have stayed "passing" (as an expected
+   * failure) even after a real implementation shipped through this seam,
+   * because it was watching a signal nothing would ever produce.
    */
   it.fails('story claim not met in code: a 3★ submission notifies the owner privately', async () => {
-    const token = await mintRequest();
-    const res = await request(app).post(`/public/feedback/${token}`).send({ rating: 2 });
-    const found = await requestRepo.findByToken(token);
-    // The route's OWN audit write keys on the response id, not the request id
-    // (`feedback_response.submitted` is written with `entityId: response.id`
-    // — see routes/public-feedback.ts). Querying by the request id here meant
-    // this sentinel would keep failing — and it.fails would keep vacuously
-    // passing — even after a real owner-notification event were added,
-    // because it would never look at the right row. Caught in review on this
-    // PR. Match the real contract: resolve the response first.
-    const response = await responseRepo.findByRequest(tenant.tenantId, found!.id);
-    const events = await auditRepo.findByEntity(tenant.tenantId, 'feedback_response', response!.id);
-    // No event type for an owner notification exists in the codebase today —
-    // this is the assertion a real implementation would need to satisfy.
-    expect(events.map((e) => e.eventType)).toContain('feedback_response.owner_notified');
-    expect(res.status).toBe(201);
+    const tokenRepo = new InMemoryDeviceTokenRepository();
+    await tokenRepo.register({
+      tenantId: tenant.tenantId,
+      userId: 'owner-1',
+      expoPushToken: 'ExponentPushToken[feedback-gating-owner]',
+      platform: 'ios',
+    });
+    const pushProvider = new InMemoryPushDeliveryProvider();
+    setOwnerNotifications(new OwnerNotificationService({ deviceTokenRepo: tokenRepo, provider: pushProvider }));
+    try {
+      const token = await mintRequest();
+      const res = await request(app).post(`/public/feedback/${token}`).send({ rating: 2 });
+      expect(res.status).toBe(201);
+      // No code path in routes/public-feedback.ts calls notifyOwner(...)
+      // today — this is what a real implementation would need to do.
+      expect(pushProvider.sent.length).toBeGreaterThan(0);
+    } finally {
+      setOwnerNotifications(undefined);
+    }
   });
 });
