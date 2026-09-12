@@ -156,6 +156,23 @@ date from the BROWSER's local clock, not the tenant's timezone).
 **Screenshots:** `4.1-dispatch-board-owner-a-before-reload.png`,
 `4.1-dispatch-board-owner-a-after-reload.png`.
 
+**Post-review addition (Codex, round 4):** two findings, verified and fixed,
+re-run GREEN:
+- `toHaveCount(2)` plus `expect(locator).toBeTruthy()` doesn't prove the
+  browser rendered THESE two seeded appointments — a `Locator` object is
+  truthy whether or not it matches anything, and `hasText: ''` matches
+  every element. Replaced with explicit `[data-appointment-id="<id>"]`
+  visibility assertions for both seeded appointments' real ids (resolved
+  from the board API response), before and after reload.
+- Owner A's board relied on `DispatchBoard.tsx` defaulting its date to the
+  BROWSER's local date coincidentally matching `todayStr` (computed from
+  UTC) — true only because CI runners happen to run UTC. Pinned the board
+  to `todayStr` explicitly via the `date-nav-picker` input (the same
+  mechanism already used for owner B's T3 leg), both on initial load and
+  after reload (a reload remounts the board, re-defaulting to the
+  browser's local date). The drag-proposal spec (row 4.2) had the same
+  latent assumption; fixed there too.
+
 **Judgment calls:**
 - Used `timezone: 'Etc/UTC'` for both tenants specifically to make
   "today"/"tomorrow" a pure UTC-calendar-date question — no DST/offset
@@ -243,6 +260,34 @@ redundant, not new information.
 (identical row, both snapshots — `4.2-drag-proposal-appointment-before.snapshot.txt` / `-after.snapshot.txt`)
 
 **Screenshots:** `4.2-drag-proposal-before-drag.png`, `4.2-drag-proposal-after-drag.png`.
+
+**Post-review addition (Codex, round 3):** three findings on the drag
+assertions, all verified and fixed, re-run GREEN:
+- The payload-shape checks (`status`, `proposalType`) would still pass if
+  the browser wiring submitted the WRONG appointment id or a no-op
+  destination time. Added assertions that `payload.appointmentId` matches
+  the dragged appointment and that `payload.newScheduledStart` differs
+  from the original start (a genuine reschedule, not a no-op), with the
+  proposed duration checked against the original slot's duration.
+- The two inbox checks used `.some(...)`, which does not establish
+  "EXACTLY one proposal" for these freshly seeded tenants — a duplicate-
+  insert regression would stay green. Added `inbox.data.length === 1` and
+  a direct id check on the sole entry, for both tenants.
+
+**Post-review addition (Codex, round 4):** two more findings, verified and
+fixed, re-run GREEN:
+- The round-3 fix (`not.toBe(originalStart)` + duration-preserved) would
+  still pass if the drag proposed ANY other one-hour slot, not just the
+  one actually targeted. Traced `DispatchBoard.tsx`'s
+  `computeProposedSlot`: dragging the 09:00 card onto the lane's LAST gap
+  (with the 13:00-14:00 appointment remaining) packs it immediately after
+  that appointment ends — `insertIndex >= lane length` -> `pack(lastEnd)`.
+  Replaced the not-a-no-op check with an exact assertion that
+  `newScheduledStart`/`newScheduledEnd` equal `14:00:00.000Z`/`15:00:00.000Z`
+  (the real final-gap timestamp), for both tenants.
+- Same browser-local-vs-UTC date assumption as row 4.1: added the
+  `date-nav-picker` pin to `fixture.todayStr` before asserting the lane's
+  two cards.
 
 **Judgment calls:**
 - Dragged within the SAME lane (`reschedule_appointment`) rather than
@@ -442,6 +487,14 @@ Audit (`1.2-onboarding-identity-audit-events.snapshot.txt`):
 ```
 
 **Screenshots:** `1.2-onboarding-identity-before-submit.png`, `1.2-onboarding-identity-after-reload.png`.
+
+**Post-review addition (Codex, round 3):** the T2 "untouched" claim for
+tenant B only checked `businessName`/`hourlyRateCents`/`serviceAreaRadius`
+— three of B's several distinctly-seeded fields — so a regression clobbering
+B's `timezone`, `businessHours`, or `jobBufferMinutes` would have stayed
+green. Added assertions on all three: `timezone` still `America/Denver`,
+`jobBufferMinutes` still `30`, and `businessHours` (mon/sat/sun) still
+B's original seeded shape. Re-run GREEN.
 
 **Judgment calls:**
 - `timezone` ended up `UTC` in the persisted row for tenant A even though

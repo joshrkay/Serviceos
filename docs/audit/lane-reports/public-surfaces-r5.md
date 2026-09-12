@@ -78,6 +78,13 @@ Re-run once more after a `drawSignature` robustness fix (below), still green:
   1 passed (2.3m)
 ```
 
+Re-run twice more, on fresh testcontainers each time, after a second `drawSignature` fix (below, Codex finding on PR #1087):
+
+```
+  1 passed (2.2m)
+  1 passed (2.2m)
+```
+
 **Reached:** the full 7.6 acceptance criterion — token link, tier pick, real signature, durable acceptance + signature/IP/UA persistence, `public_estimate.approved` audit row, stale-version refusal, T2 isolation, plus the owner-side `estimate.converted` leg. Nothing stopped short.
 
 **Tenant grade:** T1 (the estimate-approval and conversion audit rows are queried scoped to tenant A only) + **T2** (tenant B's token opens only tenant B's data, asserted in-browser).
@@ -88,7 +95,9 @@ Re-run once more after a `drawSignature` robustness fix (below), still green:
 
 **Judgment calls:**
 - Two real bugs surfaced and fixed during RED (not the product's — the spec's own first draft): (1) `page.getByText('Bexar Plumbing 7.6')` and `page.getByText('Acme HVAC 7.6')` were strict-mode ambiguous — the business name also appears inside "No account needed · {businessName}" beneath the CTA — fixed with `{ exact: true }`. (2) `page.reload()` after acceptance exceeded the default 30s Playwright test timeout (this test does two tenant bootstraps, several real page loads, and a revise round-trip) — fixed with `test.setTimeout(180_000)` and `{ waitUntil: 'domcontentloaded' }`.
-- `drawSignature` retries its mouse-down/move/up stroke up to 3 times, gated on the "Clear" button appearing (which only renders once the canvas's own `onChange(true)` fires) — a single headless mouse-event dispatch occasionally lands before the canvas's pointer handlers attach, leaving the Approve button disabled. Documented as a Playwright/headless-timing issue, not a product bug.
+- `drawSignature` went through two fixes, both driven by real review, not planted:
+  1. **First fix:** the initial retry-based `page.mouse` stroke (up to 3 attempts, gated on the "Clear" button appearing) passed in the original sandbox but was reproduced FAILING TWICE on review (Josh: name filled, canvas empty, Accept disabled). Per explicit review direction ("make the stroke robust rather than retried"), it was rewritten to dispatch `mousedown`/`mousemove`/`mouseup` directly on the canvas element via `canvas.dispatchEvent(...)`, plus a fixed 350ms wait for the approval sheet's CSS animation to settle before reading the canvas's bounding box.
+  2. **Second fix (Codex P1, PR #1087):** that rewrite was itself a real regression in what the test proves — `dispatchEvent` invokes the element's handlers directly from JS, bypassing Playwright/Chromium's actionability and hit-testing pipeline entirely, so the test would stay green even if the canvas were covered, off-viewport, or otherwise unreachable by an actual customer, which undercuts the rung-5 reachability claim this whole lane exists to support. Root-caused properly instead of re-arguing: the flakiness was never about missing pointer listeners (SignatureCanvas's real `onMouseDown`/`onMouseMove`/`onMouseUp` handlers respond fine to genuine mouse events) — it was that the approval sheet slides in via a 0.3s CSS `animation` (`sheetUp`), not a `transition`, so there's no `transitionend` to await, and the canvas's bounding box was being read before that animation settled, targeting a position it had since moved away from. Fixed by polling the bounding box until it stops changing (instead of guessing a fixed delay) and switching back to genuine, hit-tested `page.mouse.move/down/up` input. Re-verified GREEN twice on fresh testcontainers (see above) with no retries.
 - `estimate.converted` is not emitted by the public approval path itself (`convertEstimateToInvoice` is a separate, owner-triggered action — confirmed by reading `packages/api/src/invoices/convert-estimate.ts` and `packages/api/src/estimates/public-estimate-service.ts`). The task's own wording asked for both audit rows, so this spec drives the natural owner-side follow-on call rather than fabricating the event or skipping half the ask.
 
 ---
@@ -138,6 +147,10 @@ Running 1 test using 1 worker
 **Judgment calls:**
 - See "Reachability boundary" above — the single biggest judgment call in this lane.
 - `page.getByText('$500.00')` needed `.first()` — the amount renders in more than one place on the invoice page (line total + amount due).
+
+**Update (post-gate review, Codex finding on PR #1087, commit 55633e6):** the settlement webhook originally carried metadata constructed independently of the minted link (`tenantA.tenantId`/`invoiceA.invoiceId` typed directly), so the test would have stayed green even if the mint call had issued an unusable link or embedded the wrong metadata — confirmed real: no test in the repo inspects what metadata `createInvoicePaymentLink`'s `generateLink()` call actually sends (every fake `generateLink` in `invoice-payment-link.test.ts` only checks `stripeAccountId`). Partial fix: threaded the invoice's own persisted `stripePaymentLinkId` (read back via `GET /api/invoices/:id` after minting) into the webhook's `payment_link` field.
+
+**Correction (Codex re-review, PR #1087, after commit 55633e6):** that fix does not close the gap it claimed to. Verified directly against `packages/api/src/webhooks/routes.ts`'s `checkout.session.completed` branch: it destructures only `metadata`, `payment_status`, `amount_total` and `payment_intent` off the Stripe session — it never reads `payment_link`. The field added in 55633e6 is inert in production; the spec would still pass today if `issuedLinkId` were replaced with an arbitrary string, because the invoice is selected purely from `metadata.invoice_id`/`tenant_id`, which the test constructs independently rather than reading back from the real minted link. The spec and this report have been corrected (comment on `e2e/journeys/public-invoice-pay-link.spec.ts:363` and here) to stop claiming this ties settlement to the minted link. **Residual gap, not closed by this lane, now stated plainly as OPEN rather than partially addressed:** tying settlement to the exact minted link needs production code that validates the incoming session's link or metadata against the invoice's persisted `stripePaymentLinkId` — a product-code change, out of scope for this test-only, no-product-code-change lane. Verifying that the mint call's `metadata: {tenant_id, invoice_id}` actually reaches a real Stripe object separately needs a live Stripe test-mode key or a spy-capable fake provider — this sandbox has neither. Both flagged inline in the spec and on the PR for whoever states the rung to weigh; the 8.4 row should not be read as having closed the mint→settlement traceability gap.
 
 ---
 

@@ -133,7 +133,7 @@ interface TenantDragFixture {
   tenantId: string;
   techId: string;
   jobEarly: CreatedEntity;
-  earlyAppt: { id: string; jobId: string; scheduledStart: string; status: string };
+  earlyAppt: { id: string; jobId: string; scheduledStart: string; scheduledEnd: string; status: string };
   todayStr: string;
 }
 
@@ -247,7 +247,7 @@ async function seedOwnerTechAndTwoAppointments(
   );
   expect(boardBeforeRes.ok()).toBeTruthy();
   const boardBefore = (await boardBeforeRes.json()) as {
-    technicianLanes: Array<{ technicianId: string; appointments: Array<{ id: string; jobId: string; scheduledStart: string; status: string }> }>;
+    technicianLanes: Array<{ technicianId: string; appointments: Array<{ id: string; jobId: string; scheduledStart: string; scheduledEnd: string; status: string }> }>;
   };
   const laneBefore = boardBefore.technicianLanes.find((l) => l.technicianId === techId);
   expect(laneBefore, `${label}'s technician lane must exist on the board`).toBeTruthy();
@@ -263,7 +263,8 @@ async function dragEarlyCardAndConfirm(
   page: import('@playwright/test').Page,
   baseURL: string,
   fixture: TenantDragFixture,
-): Promise<{ id: string; status: string; proposalType: string }> {
+  beforeDragScreenshotPath?: string,
+): Promise<{ id: string; status: string; proposalType: string; payload: Record<string, unknown> }> {
   await installClerkStub(page, { signedIn: true, sub: fixture.ownerSub, token: fixture.ownerJwt });
   await page.addInitScript(
     ({ welcomeKey, whatsNewKey }) => {
@@ -279,11 +280,24 @@ async function dragEarlyCardAndConfirm(
   await blockExternalHosts(page, baseURL);
   await page.goto('/dispatch');
   await expect(page.getByTestId('dispatch-board')).toBeVisible({ timeout: 15_000 });
+  // Codex review (dispatch-board.spec.ts finding, same assumption here):
+  // DispatchBoard.tsx defaults `selectedDate` from the browser's LOCAL date
+  // parts, while `fixture.todayStr` is the UTC calendar date the jobs were
+  // seeded against — those only coincide on a UTC-clocked runner. Pin the
+  // board to the fixture's date explicitly rather than relying on that.
+  await page.getByTestId('date-nav-picker').fill(fixture.todayStr);
 
   const lane = page.locator(`[data-testid="technician-lane"][data-technician-id="${fixture.techId}"]`);
   await expect(lane).toBeVisible({ timeout: 15_000 });
   const cards = lane.getByTestId('appointment-card');
   await expect(cards).toHaveCount(2, { timeout: 15_000 });
+
+  // Screenshot AFTER the board has actually loaded the two cards — taking
+  // it any earlier (e.g. before this navigation) would capture a blank
+  // initial document, making the "before" audit evidence meaningless.
+  if (beforeDragScreenshotPath) {
+    await page.screenshot({ path: beforeDragScreenshotPath, fullPage: true });
+  }
 
   const sourceCard = cards.first(); // earliest (09:00) — sorted by scheduledStart
   const lastGap = lane.getByTestId('technician-lane-gap').last();
@@ -298,21 +312,30 @@ async function dragEarlyCardAndConfirm(
   await page.getByTestId('confirm-proposal-confirm').click();
   const proposalRes = await proposalPromise;
   expect(proposalRes.status(), `POST /api/proposals -> ${proposalRes.status()}`).toBe(200);
-  return (await proposalRes.json()) as { id: string; status: string; proposalType: string };
+  return (await proposalRes.json()) as { id: string; status: string; proposalType: string; payload: Record<string, unknown> };
 }
 
-function pollDbSnapshot(label: string, sql: string): void {
+/**
+ * Reads the FULL appointments row (every column) as a single delimited
+ * string, for byte-for-byte before/after equality — not just the two
+ * fields (scheduledStart, status) the API happens to expose. Also writes
+ * the pretty-printed form to the report's snapshot file, so the report
+ * evidence and the assertion come from the same read.
+ */
+function snapshotFullAppointmentRow(label: string, appointmentId: string): string {
   const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) return;
-  try {
-    const out = execFileSync('psql', [databaseUrl, '-c', sql], { encoding: 'utf8' });
-    writeFileSync(`docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`, out);
-  } catch (err) {
-    writeFileSync(
-      `docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`,
-      `psql poll failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  if (!databaseUrl) return '';
+  const prettyOut = execFileSync(
+    'psql',
+    [databaseUrl, '-c', `SELECT * FROM appointments WHERE id = '${appointmentId}';`],
+    { encoding: 'utf8' },
+  );
+  writeFileSync(`docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`, prettyOut);
+  return execFileSync(
+    'psql',
+    [databaseUrl, '-t', '-A', '-F', '|', '-c', `SELECT * FROM appointments WHERE id = '${appointmentId}';`],
+    { encoding: 'utf8' },
+  ).trim();
 }
 
 test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
@@ -337,30 +360,51 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
 
     // ── Tenant A: owner + technician + two appointments ─────────────────────
     const fixtureA = await seedOwnerTechAndTwoAppointments(page, 'a');
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-a-before',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureA.earlyAppt.id}';`,
-    );
+    const rowABefore = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-a-before', fixtureA.earlyAppt.id);
 
     // ── Tenant B, SAME run: its OWN owner + technician + two appointments —
     //    not a passive bystander, it performs its own drag below. ───────────
     const bContext = await context.browser()!.newContext();
     const bPage = await bContext.newPage();
     const fixtureB = await seedOwnerTechAndTwoAppointments(bPage, 'b');
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-b-before',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureB.earlyAppt.id}';`,
-    );
+    const rowBBefore = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-b-before', fixtureB.earlyAppt.id);
 
     // ── Browser reachability: EACH tenant drags its own card, isolated
-    //    browser contexts, in the same run. ─────────────────────────────────
-    await page.screenshot({
-      path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-before-drag.png',
-      fullPage: true,
-    });
-    const proposalA = await dragEarlyCardAndConfirm(page, baseURL!, fixtureA);
+    //    browser contexts, in the same run. The "before" screenshot is taken
+    //    INSIDE dragEarlyCardAndConfirm once the board has actually loaded
+    //    the two cards — not here, before /dispatch has even been visited. ──
+    const proposalA = await dragEarlyCardAndConfirm(
+      page,
+      baseURL!,
+      fixtureA,
+      'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-before-drag.png',
+    );
     expect(proposalA.status, 'A\'s drag-created proposal must land in draft').toBe('draft');
     expect(proposalA.proposalType).toBe('reschedule_appointment');
+    // ── Codex review: a wrong appointmentId or a no-op destination time
+    //    would still satisfy every assertion above. Assert the payload
+    //    actually targets the DRAGGED appointment, at a genuinely
+    //    different time (the final gap, not a no-op), for the same
+    //    duration as the original slot. ───────────────────────────────────
+    expect(proposalA.payload.appointmentId, 'A\'s proposal payload must target the dragged appointment').toBe(
+      fixtureA.earlyAppt.id,
+    );
+    // Codex review round 4: `not.toBe` + duration-preserved would still pass
+    // for ANY other one-hour slot (e.g. 10:00-11:00), not just the ACTUAL
+    // final gap the drag targeted. The lane holds two 60-min appointments
+    // (09:00 and 13:00-14:00 UTC); dragging the 09:00 card to the lane's
+    // LAST gap packs it immediately after the 13:00-14:00 appointment ends
+    // (DispatchBoard.tsx's `computeProposedSlot`, insertIndex >= lane
+    // length -> `pack(lastEnd)`) — assert that EXACT destination.
+    const aExpectedFinalGapStart = `${fixtureA.todayStr}T14:00:00.000Z`;
+    const aExpectedFinalGapEnd = `${fixtureA.todayStr}T15:00:00.000Z`;
+    expect(
+      proposalA.payload.newScheduledStart,
+      'A\'s proposal must target the ACTUAL final gap (right after the 13:00-14:00 appointment), not just any other time',
+    ).toBe(aExpectedFinalGapStart);
+    expect(proposalA.payload.newScheduledEnd, 'A\'s proposed end must preserve the dragged appointment\'s duration').toBe(
+      aExpectedFinalGapEnd,
+    );
     await page.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-after-drag.png',
       fullPage: true,
@@ -369,6 +413,18 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     const proposalB = await dragEarlyCardAndConfirm(bPage, baseURL!, fixtureB);
     expect(proposalB.status, 'B\'s drag-created proposal must land in draft').toBe('draft');
     expect(proposalB.proposalType).toBe('reschedule_appointment');
+    expect(proposalB.payload.appointmentId, 'B\'s proposal payload must target the dragged appointment').toBe(
+      fixtureB.earlyAppt.id,
+    );
+    const bExpectedFinalGapStart = `${fixtureB.todayStr}T14:00:00.000Z`;
+    const bExpectedFinalGapEnd = `${fixtureB.todayStr}T15:00:00.000Z`;
+    expect(
+      proposalB.payload.newScheduledStart,
+      'B\'s proposal must target the ACTUAL final gap (right after the 13:00-14:00 appointment), not just any other time',
+    ).toBe(bExpectedFinalGapStart);
+    expect(proposalB.payload.newScheduledEnd, 'B\'s proposed end must preserve the dragged appointment\'s duration').toBe(
+      bExpectedFinalGapEnd,
+    );
     await bPage.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/4.2-drag-proposal-tenant-b-after-drag.png',
       fullPage: true,
@@ -376,15 +432,20 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     await bContext.close();
 
     // ── T2 — each tenant's appointment row is unchanged regardless of the
-    //      OTHER tenant's concurrent drag. ──────────────────────────────────
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-a-after',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureA.earlyAppt.id}';`,
+    //      OTHER tenant's concurrent drag. Compare the FULL row (every
+    //      column via `SELECT *`), not just the two fields the board API
+    //      happens to expose — a regression touching scheduled_end,
+    //      timezone, hold_pending_approval, etc. would otherwise stay
+    //      undetected. ─────────────────────────────────────────────────────
+    const rowAAfter = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-a-after', fixtureA.earlyAppt.id);
+    const rowBAfter = snapshotFullAppointmentRow('4.2-drag-proposal-appointment-b-after', fixtureB.earlyAppt.id);
+    expect(rowAAfter, 'A\'s appointment row must be BYTE-FOR-BYTE unchanged (every column) after the drag').toBe(
+      rowABefore,
     );
-    pollDbSnapshot(
-      '4.2-drag-proposal-appointment-b-after',
-      `SELECT id, status, scheduled_start, updated_at FROM appointments WHERE id = '${fixtureB.earlyAppt.id}';`,
+    expect(rowBAfter, 'B\'s appointment row must be BYTE-FOR-BYTE unchanged (every column) after the drag').toBe(
+      rowBBefore,
     );
+
     for (const fixture of [fixtureA, fixtureB]) {
       const boardAfterRes = await page.request.get(
         `${API_URL}/api/dispatch/board?date=${fixture.todayStr}&timezone=Etc/UTC`,
@@ -412,6 +473,11 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     expect(inboxA.data.some((p) => p.proposal.id === proposalB.id), 'B\'s proposal must NEVER be in A\'s inbox').toBe(
       false,
     );
+    // ── Codex review: `.some()` alone doesn't prove EXACTLY one proposal
+    //    exists — these are freshly seeded tenants with no other proposal
+    //    activity, so the inbox must hold precisely the one drag produced. ──
+    expect(inboxA.data.length, 'A\'s inbox must hold EXACTLY one proposal (this drag\'s)').toBe(1);
+    expect(inboxA.data[0].proposal.id, 'A\'s sole inbox entry must be this drag\'s proposal').toBe(proposalA.id);
 
     const inboxBRes = await page.request.get(`${API_URL}/api/proposals/inbox`, { headers: fixtureB.ownerHeaders });
     expect(inboxBRes.ok(), `GET /api/proposals/inbox (B) -> ${inboxBRes.status()}`).toBeTruthy();
@@ -420,6 +486,8 @@ test.describe('dispatch drag-to-propose (4.2) — real Postgres', () => {
     expect(inboxB.data.some((p) => p.proposal.id === proposalA.id), 'A\'s proposal must NEVER be in B\'s inbox').toBe(
       false,
     );
+    expect(inboxB.data.length, 'B\'s inbox must hold EXACTLY one proposal (this drag\'s)').toBe(1);
+    expect(inboxB.data[0].proposal.id, 'B\'s sole inbox entry must be this drag\'s proposal').toBe(proposalB.id);
 
     expect(pageErrors, 'no uncaught page errors during the drag-to-propose journey').toEqual([]);
   });
