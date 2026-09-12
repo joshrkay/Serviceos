@@ -355,6 +355,45 @@ async function ownerComparisons(rootOverride?: string): Promise<string[]> {
   return found.sort();
 }
 
+/**
+ * Locates the unconditional owner comparison in a route file and reports the
+ * `router.<verb>('<path>', …)` it sits inside.
+ *
+ * Binds a declared in-handler gate to the route it actually guards, so moving
+ * the check to a sibling handler in the same file fails the build instead of
+ * leaving the file-level text — and therefore the contract — unchanged.
+ * Deliberately simple: walk back from the matched line to the nearest
+ * `router.<verb>(` and take its first string literal. This repo declares every
+ * route that way; if that ever stops being true, this returns undefined and the
+ * assertion fails loudly rather than passing on a bad parse.
+ */
+async function enclosingRouteOfOwnerCheck(
+  source: string,
+): Promise<{ method: string; path: string } | undefined> {
+  const text = await fs.readFile(path.resolve(REPO_ROOT, source), 'utf8');
+  const lines = text.split('\n');
+  // Unconditional only: a `&&` before the comparison makes it self-service.
+  const hit = lines.findIndex(
+    (line) =>
+      /req\.auth!?\??\.role\s*[!=]==\s*'owner'/.test(line) && !line.includes('&&'),
+  );
+  if (hit < 0) return undefined;
+
+  for (let i = hit; i >= 0; i -= 1) {
+    const declaration =
+      /router\.(get|post|put|patch|delete)\(\s*$|router\.(get|post|put|patch|delete)\(\s*'([^']+)'/.exec(
+        lines[i],
+      );
+    if (!declaration) continue;
+    const method = (declaration[1] ?? declaration[2]).toUpperCase();
+    // `router.patch(` on its own line puts the path on the next one.
+    const inline = declaration[3];
+    const path_ = inline ?? /'([^']+)'/.exec(lines[i + 1] ?? '')?.[1];
+    return path_ ? { method, path: path_ } : undefined;
+  }
+  return undefined;
+}
+
 /** Every `METHOD /path` the booted app mounts, owner-only or not. */
 function allMountedRoutes(app: express.Express): Set<string> {
   const root = (app as unknown as { _router?: { stack?: Layer[] } })._router;
@@ -433,11 +472,19 @@ function duplicateChannelClaims(rows: InventoryRow[]): string[] {
   const duplicates: string[] = [];
   for (const row of rows) {
     if (!row.smsReachable) continue;
-    const prior = claimedBy.get(row.reachedVia);
+    // Canonicalize first: `channelReaches` lowercases a keyword token and the
+    // registry trims and lowercases on registration, so `keyword:Y` and
+    // `keyword:y` are ONE channel. Comparing the raw strings would let two rows
+    // hold the same SMS action with the uniqueness check still green.
+    // (Codex, #1073.)
+    const claim = row.reachedVia.startsWith('keyword:')
+      ? `keyword:${row.reachedVia.slice('keyword:'.length).trim().toLowerCase()}`
+      : row.reachedVia;
+    const prior = claimedBy.get(claim);
     if (prior !== undefined) {
-      duplicates.push(`${row.reachedVia} claimed by both ${prior} and ${row.route}`);
+      duplicates.push(`${claim} claimed by both ${prior} and ${row.route}`);
     } else {
-      claimedBy.set(row.reachedVia, row.route);
+      claimedBy.set(claim, row.route);
     }
   }
   return duplicates;
@@ -603,14 +650,28 @@ describe('I18: owner daily actions ↔ code contract', () => {
         `${route} is declared in-handler owner-only but not mounted`,
       ).toContain(route);
     }
-    // …and it cannot be stale: the check must still be in the source. If it
-    // moved into a middleware guard, the executed-guard arm now covers it and
-    // this declaration must be deleted, or the route is counted twice.
+    // …and it cannot be stale: the check must still gate THIS route. Asserting
+    // only that the FILE still contains the comparison is not enough — moving
+    // the same check from `/deactivate` to a sibling handler in the same file
+    // leaves the file-level text identical, so the contract would keep
+    // documenting a route that is no longer owner-gated while missing the one
+    // that now is. (Codex, #1073.) So the check is located and bound to the
+    // `router.<verb>('<path>', …)` it sits inside.
     for (const { route, source } of IN_HANDLER_OWNER_ROUTES) {
-      const text = await fs.readFile(path.resolve(REPO_ROOT, source), 'utf8');
-      expect(text, `${route}: ${source} no longer gates on owner in the handler`).toMatch(
-        /req\.auth!?\??\.role\s*[!=]==\s*'owner'/,
-      );
+      const enclosing = await enclosingRouteOfOwnerCheck(source);
+      expect(
+        enclosing,
+        `${route}: no owner comparison found inside a route in ${source}`,
+      ).not.toBeUndefined();
+      const [method, routePath] = route.split(' ');
+      expect(
+        enclosing!.method,
+        `${route}: the owner check now sits in a ${enclosing!.method} handler`,
+      ).toBe(method);
+      expect(
+        routePath.endsWith(enclosing!.path),
+        `${route}: the owner check moved to '${enclosing!.path}' — update IN_HANDLER_OWNER_ROUTES and the inventory`,
+      ).toBe(true);
       expect(
         deriveOwnerOnlyRoutes(app),
         `${route} is now guard-gated — remove it from IN_HANDLER_OWNER_ROUTES`,
@@ -900,6 +961,29 @@ describe('I18: owner daily actions ↔ code contract', () => {
       const occurrences = await ownerComparisons(dir);
       expect(occurrences).toHaveLength(2);
       expect(occurrences.every((o) => o.startsWith('aliased.ts :: '))).toBe(true);
+    });
+
+    it('binds a declared owner check to the route it actually sits in', async () => {
+      // If the check moves to a sibling handler in the same file, the
+      // file-level text is unchanged — so only a route-level binding notices.
+      // Here it sits in the SECOND handler; the binding must say so.
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'i18-binding-'));
+      const file = path.join(dir, 'moved.ts');
+      await fs.writeFile(
+        file,
+        [
+          "router.patch('/:id/deactivate', requireAuth, asyncRoute(async (req, res) => {",
+          '  res.json({});',
+          '}));',
+          "router.post('/:id/reactivate', requireAuth, asyncRoute(async (req, res) => {",
+          "  if (req.auth!.role !== 'owner') throw new ForbiddenError('nope');",
+          '}));',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const enclosing = await enclosingRouteOfOwnerCheck(file);
+      expect(enclosing).toEqual({ method: 'POST', path: '/:id/reactivate' });
     });
 
     it('rejects a reached_via claim no channel actually reaches', () => {

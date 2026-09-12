@@ -26,12 +26,16 @@ after the #1021 lane left it unstarted.
 **Under this derivation the owner's normal day costs one forced web action,
 plus a six-action one-time activation.**
 
+*(Counts here are the FINAL ones, after the review hardening in §9–§16. They
+started at 53 routes / 45 `occasional`; §11 records why one more route was
+found. The headline budgets never moved.)*
+
 | Count | |
 |---|---|
-| Owner-only routes the booted app serves | **53** |
+| Owner-only routes the booted app serves | **54** |
 | …classified `daily` (the day's work forces it) | **2** |
 | …classified `onboarding` (forced once, before the tenant can operate) | **6** |
-| …classified `occasional` (administration no normal day forces) | **45** |
+| …classified `occasional` (administration no normal day forces) | **46** |
 | Reachable off the web (SMS keyword / one-tap / voice intent) | **4** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ unreachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ unreachable | **6** |
@@ -897,4 +901,60 @@ taking.
  Test Files  1 passed (1) · Tests 24 passed (24)
 npx tsc --project tsconfig.build.json --noEmit → clean
 neighbouring suites → 24 files, 327 tests passed
+```
+
+---
+
+## 16. Review round 7 (Codex, PR #1073) — three findings
+
+### 16.1 A declared check was bound to a FILE, not to its route
+
+**Finding (P2, correct), and the same granularity bug one level up.** §14 fixed
+the *scan* to be per-occurrence but left the *verification* file-level: it
+asserted only that `entity-aliases.ts` still contained the comparison. Move that
+unchanged check from `/deactivate` to a sibling handler in the same file and the
+file text is identical — so the contract keeps documenting `/deactivate`, which
+is no longer owner-gated, and misses the route that now is. Both stay mounted;
+nothing fails.
+
+Fixed by locating the comparison and walking back to the enclosing
+`router.<verb>('<path>', …)`, then asserting the declared method and path
+match. Negative control plants the check in the **second** of two handlers and
+asserts the binding says so; RED at the file-level answer, GREEN at the real
+one:
+
+```
+ FAIL  … > binds a declared owner check to the route it actually sits in
+AssertionError: expected { method: 'POST', …(1) } to deeply equal { method: 'PATCH', …(1) }
+-   "method": "PATCH",  "path": "/:id/deactivate"
++   "method": "POST",   "path": "/:id/reactivate"
+```
+
+### 16.2 Keyword claims were compared before canonicalization
+
+**Finding (P2, correct).** `channelReaches` lowercases a keyword token and the
+registry trims and lowercases on registration, so `keyword:Y` and `keyword:y`
+are one channel — but `duplicateChannelClaims` compared the raw strings and saw
+no duplicate. Two rows could hold the same SMS action with the uniqueness check
+and the web-action budget both green. Latent today (no row claims a keyword),
+real the moment one does. Claims are now canonicalized with the registry's own
+trim/lowercase rule before comparison.
+
+### 16.3 The report's own headline counts were stale
+
+**Finding (P2, correct).** §1's "honest number" table still read 53 / 45 while
+§11 recorded the 54 / 46 correction — the audit artifact contradicted itself,
+and §1 is what a reader sees first. Updated, with a line making explicit that
+§1 carries the FINAL counts and where the earlier ones went.
+
+Worth noting against my own §13: I wrote there that the findings all lived in
+the *enumeration* rather than the assertions. 16.3 is a different and more
+embarrassing kind — the report describing the work incorrectly. An audit
+artifact that misstates its own result is exactly the rot this lane exists to
+prevent, and it was caught by review rather than by me.
+
+```
+ Test Files  1 passed (1) · Tests 25 passed (25)
+npx tsc --project tsconfig.build.json --noEmit → clean
+neighbouring suites → 24 files, 328 tests passed
 ```
