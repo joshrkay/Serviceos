@@ -66,7 +66,7 @@ the whole point of this edition:**
   mutation-tested in §11.0e.
 - **Every other row in §5 and §8 is ungraded**, and its printed rung should be
   read as un-capped and therefore provisional. The scan behind the aggregate is
-  a keyword heuristic: sound across 217 files, not sound row by row. Publishing
+  a keyword heuristic: sound across the suite's 219 files, not sound row by row. Publishing
   a guessed grade would repeat the exact error this edition exists to correct
   (§12.4d), so the rows say nothing rather than something unverified.
 
@@ -2233,8 +2233,17 @@ Order of work:
 **Earned and published (7 rows, 8 sweeps):** the sweeps in the table above —
 digest (9.6) and weekly feedback (9.7) at **T3+T4**, hold reaper (3.5),
 estimate nudge (7.10), HFCR weekly send (also 9.7), Google reviews (9.4),
-thank-you SMS (9.1) and review request (9.2) at **T4**. Each was proven against the real enumerator
-and mutation-tested.
+thank-you SMS (9.1) and review request (9.2) at **T4**. Each was proven against **its own
+production fan-out path** and mutation-tested — which is not the same path for all of them, and
+saying "the real enumerator" for all eight was wrong:
+
+| Sweeps | Proven against |
+|---|---|
+| digest, weekly feedback, hold reaper, estimate nudge, HFCR weekly send, Google reviews | the real enumerator — `listAllTenantIds`, not a stub |
+| **thank-you SMS, review request** | their **production cross-tenant query** — these take no enumerator at all (see the two-shapes note above) |
+
+The distinction is the one this section spends a page establishing, so
+flattening it in the summary sentence undoes the point. Caught in review.
 
 **Ungraded (everything else in §5 and §8).** Their printed rungs are
 **un-capped and therefore provisional** — §0 says so, so a reader does not try
@@ -2242,7 +2251,7 @@ to apply a capping rule to a row that has no grade.
 
 > **Deliberately not claimed.** Per-row T-grades are absent from the remaining
 > rows on purpose. The scan behind the aggregate above is a keyword heuristic —
-> sound across 217 files, not sound row by row — and publishing a guessed grade
+> sound across the suite's 219 files, not sound row by row — and publishing a guessed grade
 > would repeat the exact error this edition exists to correct (§12.4d). An
 > unstated grade costs a reader one lookup; a wrong one costs them the trust
 > that makes the whole document worth reading.

@@ -1030,11 +1030,15 @@ entity resolver shipping with nonexistent column names because its `Pool` was mo
   `test/integration/sweep-tenant-fanout.test.ts`, every isolation assertion mutation-tested.
 - **Per-row T-grades are published only where earned.** As of 2026-09-12 that is the seven
   tenant-iterating sweeps (PRD §11.0e, "Graded so far") — digest and weekly feedback at T3+T4, the
-  other five at T4, each proven against the real enumerator and mutation-tested. **Those seven
+  other five at T4, each proven against **its own production fan-out path** and mutation-tested — the
+  real enumerator for six of the eight workers, and the production cross-tenant query for thank-you
+  SMS and review request, which take no enumerator (*corrected 2026-09-12: this said "the real
+  enumerator" for all of them, flattening the two-shapes distinction PRD §11.0e exists to draw*).
+  **Those seven
   grades do cap their rungs.** Every other row in §5 and §8 is **ungraded**, so its printed rung is
   un-capped and provisional, and the capping rules do not apply to it until it is graded. Asserting
   a grade on a row without running that row's falsifier would repeat the error D-031 exists to
-  correct — the aggregate scan is a keyword heuristic, sound across 217 files and not sound row by
+  correct — the aggregate scan is a keyword heuristic, sound across the suite's 219 files and not sound row by
   row.
 
 **Alternatives rejected:**
