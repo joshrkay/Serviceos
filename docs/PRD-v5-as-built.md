@@ -1025,6 +1025,13 @@ behind it, and the command that confirms or refutes it — lives in
 **[`docs/PRD-v5-acceptance.md`](PRD-v5-acceptance.md)**. The tables here carry the
 corrected number and a one-line reason; the register carries the proof.
 
+**[`docs/PRD-v5-stories.md`](PRD-v5-stories.md)** is the same evidence seen from
+the user's side: 117 stories across 10 epics, each in a named persona's voice
+with a Given/When/Then criterion and its rung. Read that one to answer *"would
+Mike accept this?"* — which is a different question from *"is the code proven?"*,
+and comes apart in both directions. Five stories are proven at rung 4 and still
+fail their user, the digest among them.
+
 **The ladder, restated as evidence rather than judgment:**
 
 | Rung | Earned by |

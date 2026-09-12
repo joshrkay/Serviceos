@@ -30,6 +30,15 @@ Every row below carries four things:
 4. **How to confirm it** — the command, so the next person does not have to
    trust this document either.
 
+## A.0b The same evidence, from the user's side
+
+This document proves things about code. [`docs/PRD-v5-stories.md`](PRD-v5-stories.md)
+asks the prior question — whose problem is this, and would they accept it — as
+117 persona-voiced stories with Given/When/Then criteria mapped to the same
+rungs. Use this register to answer *"is it proven?"*; use that one to answer
+*"is the user served?"* They disagree in five places, and those five are the
+cheapest backlog in the product.
+
 ---
 
 ## A.1 The evidence classes
