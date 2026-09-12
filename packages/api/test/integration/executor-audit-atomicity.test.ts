@@ -299,4 +299,70 @@ describe('ProposalExecutor — WS11 audit-event atomicity', () => {
       executionError: 'handler refused (WS11 failure-path test)',
     });
   });
+
+  it('T1 — a cross-tenant assertion: tenant A\'s rolled-back audit-insert failure never touches tenant B\'s customer, proposal, or audit trail', async () => {
+    const tenantA = await createTestTenant(pool);
+    const tenantB = await createTestTenant(pool);
+    const handlerA = new InsertCustomerHandler(customerRepo);
+    const handlerB = new InsertCustomerHandler(customerRepo);
+
+    const failingExecutor = new ProposalExecutor(
+      new Map<ProposalType, ExecutionHandler>([['create_customer', handlerA]]),
+      proposalRepo,
+      makeGuard(),
+      new DbFailingAuditRepository(pool),
+      { executionRepo },
+    );
+    const happyExecutor = new ProposalExecutor(
+      new Map<ProposalType, ExecutionHandler>([['create_customer', handlerB]]),
+      proposalRepo,
+      makeGuard(),
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
+
+    const proposalA = await makeApprovedProposal(
+      proposalRepo,
+      tenantA.tenantId,
+      tenantA.userId,
+      `ws11-cross-tenant-fail-${randomUUID()}`,
+    );
+    const proposalB = await makeApprovedProposal(
+      proposalRepo,
+      tenantB.tenantId,
+      tenantB.userId,
+      `ws11-cross-tenant-happy-${randomUUID()}`,
+    );
+
+    // Tenant A's execution rolls back (audit-insert failure, per the test
+    // above) WHILE tenant B's own execution on the SAME executor family
+    // succeeds — proving the rollback is scoped to tenant A's transaction,
+    // never tenant-wide.
+    await expect(
+      failingExecutor.execute(proposalA, { tenantId: tenantA.tenantId, executedBy: tenantA.userId }),
+    ).rejects.toThrow(/null value|not-null|row-level security/i);
+    const { proposal: afterB } = await happyExecutor.execute(proposalB, {
+      tenantId: tenantB.tenantId,
+      executedBy: tenantB.userId,
+    });
+
+    // Tenant B is completely unaffected by tenant A's rollback.
+    expect(afterB.status).toBe('executed');
+    expect(await countCustomers(pool, tenantB.tenantId)).toBe(1);
+    const rowsB = await auditRowsForProposal(pool, tenantB.tenantId, proposalB.id);
+    expect(rowsB).toHaveLength(1);
+    expect(rowsB[0].event_type).toBe('proposal.executed');
+
+    // Tenant A really did roll back — zero customers, zero audit rows,
+    // proposal still 'approved'.
+    expect(await countCustomers(pool, tenantA.tenantId)).toBe(0);
+    expect(await auditRowsForProposal(pool, tenantA.tenantId, proposalA.id)).toHaveLength(0);
+    const strandedA = await proposalRepo.findById(tenantA.tenantId, proposalA.id);
+    expect(strandedA?.status).toBe('approved');
+
+    // Cross-tenant reads: tenant A's audit query never sees tenant B's row,
+    // and vice versa.
+    expect(await auditRowsForProposal(pool, tenantA.tenantId, proposalB.id)).toHaveLength(0);
+    expect(await auditRowsForProposal(pool, tenantB.tenantId, proposalA.id)).toHaveLength(0);
+  });
 });
