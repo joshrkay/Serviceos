@@ -1258,7 +1258,8 @@ The rungs are not interchangeable, and the work each one needs is different:
 | **2 — unguarded invariant** | Write the structural test (I1′, I5′, I6, I8′) |
 | **3** | Write the Docker-gated test. **The code is probably fine** |
 | **4−** | Swap `InMemoryAuditRepository` → `PgAuditRepository`. *One import closes four §8.7 rows* |
-| **4 — unlit-able** | Ship a write path. Not a feature — a route and a toggle |
+| **4 — unlit-able** | Ship a write path. Not a feature — a route and a toggle (2.7) |
+| **4 — no client control** | The write path exists; ship the toggle only (9.6) |
 | **5** | Nothing. Get a tenant on it and earn rung 6 |
 
 **The single highest-value item is C5 / §12.4e**, because it is the only row
@@ -1523,7 +1524,7 @@ understanding than put words in a customer's mouth.
 | **9.3** | **As M**, I want an unhappy customer routed to me privately and a happy one to Google, so a bad day doesn't become a permanent 2★ | **Given** `rating: 3`, **when** submitted, **then** the response persists and **no** review links return; **given** `rating: 5`, **then** the configured link returns | **3** 🚨🚨 | Proven only by a mocked-repo route test. **This is the row deciding whether a 2★ experience becomes a public Google review, and it has no real-DB proof** |
 | **9.4** | **As M**, I want new Google reviews found and a response drafted for my approval, so I reply within a day without watching for them | **Given** a connected tenant, **when** a sweep runs, **then** new reviews persist, the cursor advances, a re-sweep persists nothing new, a 429 stamps backoff, and reviews are RLS-invisible cross-tenant — with a PII-redacted draft response awaiting approval | **4 / 3** ↑ | **D:** `google-reviews-worker.test.ts`. *Classification and drafting are unit-only* |
 | **9.5** | **As M**, I want to make a bad experience right without over-giving, so goodwill doesn't become a leak | **Given** $80 already issued in 12 months and a $50 tier proposed, **when** the cap applies, **then** the credit is **omitted, not zeroed** — because proposing "$0 credit" is worse than proposing none | 3 | 🚨 The existing test calls itself a *smoke test that stubs `pool.connect()`* |
-| **9.6** | **As M**, I want one text at the end of the day telling me what happened, so I never open a dashboard | **Given** a tenant at its local digest time, **when** the sweep runs, **then** a digest sends once — not duplicated, not re-sent — carrying **"what I wasn't sure about"** and **"what I learned today"** | **4 — unlit-able** 🚨🚨 | The write **and both named sections** are proven at real Postgres. 🚨 **`digest_enabled` defaults false and *nothing in web or mobile writes it*. Mike cannot turn on the product's central promise without someone running SQL against production** |
+| **9.6** | **As M**, I want one text at the end of the day telling me what happened, so I never open a dashboard | **Given** a tenant at its local digest time, **when** the sweep runs, **then** a digest sends once — not duplicated, not re-sent — carrying **"what I wasn't sure about"** and **"what I learned today"** | **4 — no client control** 🚨 | The write **and both named sections** are proven at real Postgres. 🚨 **`digest_enabled` defaults false and *nothing in web or mobile writes it*.** `PUT /api/settings` does accept `digestEnabled` behind `settings:update`, so this is reachable by API — but Mike cannot turn the product's central promise on from any shipped surface |
 | **9.7** | **As S**, I want a weekly summary I can read Saturday morning, including how often it repeated a mistake, so I can see whether it's learning | **Given** a week of corrections, **when** summarised, **then** total / repeats / rate come from the real corrections table, and the field is **omitted at zero**; the send ledger is idempotent and a failed send leaves **no** row so the week retries | **4** ↑ | **D:** `weekly-feedback-builder.test.ts`, `hfcr-weekly-send-worker.test.ts` |
 | **9.8** | **As M**, I want a correction I make once to stick, so I never fix the same thing twice | **Given** a labor-rate correction, **when** executed, **then** the config changes so the **next same-day draft reflects it**, it appears in the day's applied lessons, and `correction_lesson.applied` is written | 5 | **D:** `correction-loop.test.ts` |
 | **9.9** | **As M**, I want to undo a lesson it learned wrong, so teaching it is not a one-way door | **Given** an applied lesson, **when** undone, **then** the prior value is restored **exactly**, `correction_lesson.reverted` is emitted **exactly once**, a second undo is a no-op, and it drops from the day | 5 | **D:** `correction-loop.test.ts` — *asserts both audit ends with `PgAuditRepository`; the best-evidenced row in the lifecycle sections* |
@@ -2268,12 +2269,31 @@ ever be enabled. That is wrong, and the distinction is operationally important:
   recovery, vulnerability triage — is all-or-nothing at the platform level, with
   no ramp mechanism. That is the real structural gap.
 
-**Settings unreachable even by API.** `updateSettingsSchema` is `.strict()`, so
-a `PUT` carrying an unknown key is *rejected*, not ignored. Four settings exist
-in the repository interface but not in that schema, making them settable only by
-direct SQL: `speedToLeadEnabled`, `autonomousCloseEnabled`, `brandVoiceLocked`,
-`weeklyFeedbackEnabled`. The last means a tenant cannot turn *off* a recurring
-email the product sends them.
+**Settings unreachable even by API — and the failure is silent.**
+`updateSettingsSchema` is a plain `z.object(…).superRefine(…)`. It is **not**
+`.strict()` — an earlier draft of this document said it was, which got the
+consequence exactly backwards. Zod's default is to **strip** unrecognized keys,
+so a `PUT` carrying one returns **200 with the key silently discarded**. That is
+worse than the rejection this document claimed, because the caller is told the
+write succeeded.
+
+Four settings exist in the repository interface and its column map but not in
+that schema, making them settable only by direct SQL: `speedToLeadEnabled`,
+`autonomousCloseEnabled`, `brandVoiceLocked`, `weeklyFeedbackEnabled`. The last
+means a tenant cannot turn *off* a recurring email the product sends them — and
+receives a success response for trying.
+
+Blanket `.strict()` is **not** the remediation. The schema relies on strip
+semantics deliberately: `voice_approval_pin_hash` is omitted **on purpose** so a
+raw hash can never be injected through the generic settings `PUT`, and the
+schema says exactly that in its own comment. Going strict would convert that
+designed-silent drop into a 400 and newly reject every client that sends an
+extra key. The narrow fix is to add the four missing keys, with the same
+route-boundary validation their siblings already get.
+
+> **S:** `awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' packages/api/src/shared/contracts.ts | grep -c 'strict()'`
+> → **1**, and that one is the nested `autoApproveThreshold` object, not the
+> settings schema itself.
 
 **Two smaller items with outsized effect**, both one-line fixes:
 
@@ -2286,21 +2306,36 @@ email the product sends them.
   it through `instance?.notifyChange(...)` — so the optional chain makes a
   permanent no-op completely silent.
 
-#### "Dark by default" understates three of these — they are unlit-able
+#### "Dark by default" understates two of these — they are unlit-able
 
-A default-off flag implies someone can turn it on. For three of the items above,
+A default-off flag implies someone can turn it on. For two of the items above,
 and one module not previously listed, **no product surface can**:
 
 | Capability | The blocker |
 |---|---|
 | Dropped-call SMS recovery | `setTenantFlag` has **zero production callers**. No route writes `tenant_feature_flags`; no web UI references the platform-admin endpoint. The only writer is SQL by hand |
 | Voice vulnerability triage | Same flag mechanism, same absence |
-| End-of-day digest | `digest_enabled` defaults false. The field is in the update contract, but `grep -rn "digestEnabled" packages/api/src/routes packages/web/src packages/mobile/src` returns **nothing**. The "Weekly digest" toggle in `TemplatesPage.tsx:913` is unwired local state for a different feature |
 | Technician assignment notification | `setTechnicianAssignmentNotifier` has **zero callers**. The accessor is `await instance?.notifyChange(change)`, so every production assignment fires a silent no-op — while the module's own doc-comment says *"app.ts registers one notifier"* and *"Called once in app.ts."* |
 
-Each of these is fully built and, in three cases, proven at real Postgres. What
-they need is a write path, not a feature. Together they are roughly a day of
-work, and they light four of the capabilities the strategy documents cite most.
+Each of these is fully built, and **one** — dropped-call recovery — is proven at
+real Postgres; 2.6 is rung 3 (unit-only) and 4.11 is rung 2. *(An earlier draft
+said "three cases" while the table held four rows, one of which was rung 2 — the
+count was wrong before the digest was removed from it.)* What they need is a
+write path, not a feature.
+
+**The end-of-day digest was listed here and does not belong.** Its blocker is a
+different and cheaper one: `PUT /api/settings` already accepts `digestEnabled`,
+`digestTime` and `digestChannel` behind `settings:update`, and
+`PgSettingsRepository` maps all three to their columns — so an owner with the
+permission can switch the digest on through the API today. What is missing is a
+**client control**, not a write path. The falsifier published in an earlier
+draft, `grep -rn "digestEnabled" packages/api/src/routes packages/web/src packages/mobile/src`,
+does return nothing — but only because the key lives in `src/shared/contracts.ts`,
+which the route imports. It was scoped where it could not see the thing it was
+meant to test (§12.4d).
+
+Together with the digest's missing toggle these are roughly a day of work, and
+they light four of the capabilities the strategy documents cite most.
 
 The last row is also the clearest instance of §12.4d's first rule: **a
 doc-comment claiming a module is wired is a claim, not a wiring.**
@@ -2314,7 +2349,7 @@ one a customer would notice first:
 
 | Story | Rung | Why it still fails |
 |---|---|---|
-| **9.6** End-of-day digest | 4 | No route or UI writes `digest_enabled`. **The product's central promise cannot be switched on** |
+| **9.6** End-of-day digest | 4 | `PUT /api/settings` accepts `digestEnabled` today; **no web or mobile control sends it**. The product's central promise ships off, with no switch an owner can reach |
 | **2.7** Dropped-call recovery | 4 | `setTenantFlag` has zero production callers |
 | **1.11** Team invites | 4 | The invite row is written perfectly and the email 404s — `/accept-invitation` has no route |
 | **4.11** Technician assignment notice | 2 | Silent no-op on every assignment; doc-comment says otherwise |
@@ -2324,7 +2359,7 @@ one a customer would notice first:
 roughly a day of work and they light four of the capabilities the strategy
 documents cite most.
 
-### 12.4d A note on method — how four of these were got wrong
+### 12.4d A note on method — how six of these were got wrong
 
 Two claims in earlier drafts of this document were false, and both failed the
 same way: **they were inherited from the July state audit and repeated without
@@ -2360,10 +2395,45 @@ errors of *evidence*, not of currency:
   the service-credit cap. The entity resolver shipped with nonexistent column
   names for this reason once already.
 
+**Two more failed a third way, and PR review caught them.** Both concerned the
+settings surface, and neither was a stale fact — both were wrong on the day they
+were written:
+
+- **A claim was stated backwards from reading the source.**
+  `updateSettingsSchema` was described as `.strict()`, so unknown keys were said
+  to be *rejected*. The schema is a plain `z.object`, which **strips** them — the
+  opposite consequence, and the worse one, because the caller gets a 200 for a
+  write that did not happen. The `.strict()` I saw was on the nested
+  `autoApproveThreshold` object and I attributed it to the enclosing one. No
+  command was ever run against the claim.
+
+- **A falsifier was scoped where it could not see what it tested.** The digest
+  was filed as having no write path on the strength of
+  `grep -rn "digestEnabled" packages/api/src/routes …` returning nothing. It does
+  return nothing — the key lives in `src/shared/contracts.ts`, which the route
+  imports. `PUT /api/settings` has accepted `digestEnabled` the whole time.
+
+The second is the more dangerous of the two, and it is worth separating from
+plain carelessness: **a falsifier that searches the wrong place does not fail
+loudly — it passes, and launders a guess into evidence.** The other rungs in this
+document rest on commands of exactly that shape. A command is only as good as
+its scope, so a falsifier's *search path* is part of the claim and has to be
+justified like one.
+
+The document also already contained the right answer. §12.4's own flag table
+says the digest is *"accepted by `PUT /api/settings` — but no control in web or
+mobile writes it,"* which is correct, while the table three pages later said no
+route writes it at all. **An internal contradiction is a free falsifier and this
+edition did not run one.** A `grep` for each capability's name across this file,
+reading every hit together, would have caught it — as it later caught the
+tenant-grade contradiction in §0 and D-032.
+
 The general lesson is narrower than "be careful." It is that **a rung is a claim
 about evidence, so it must be derived from the evidence and never from reading
 the source.** Every rung in §5 and §8 now carries the command that confirms it;
-a number without one should be treated as a prediction.
+a number without one should be treated as a prediction — and a number *with* one
+should be treated as a prediction until someone has checked that the command
+looks where the claim lives.
 
 ### 12.4e The supervisor gate is not dark — it is structurally incomplete
 
