@@ -2089,6 +2089,30 @@ wrong reason is worse than no test:
 |---|---|
 | Delete the per-tenant `catch` so the throw escapes the loop | failure-isolation test **fails** ✓ |
 | Hard-code `localMinutesOfDay` to one shared timezone | **both** tests fail ✓ |
+| Swallow the error **and `break`** out of the tenant loop — all six enumerator sweeps | all six isolation tests **fail** ✓ |
+
+**The last row is the one that had to be earned twice, and it is the clearest
+warning in this section about what a fan-out test is worth.** Every isolation
+test here seeds a doomed tenant and asserts the others were still served —
+which only proves anything if the failure happened **first**. Two separate
+mechanisms decided that ordering and neither was controlled:
+
+| Sweep shape | Ordering | Pre-fix result under the `break` mutation |
+|---|---|---|
+| cross-tenant query | `ORDER BY completed_at ASC`, all fixtures sharing one instant | caught it in **2 runs of 6** — an actively broken detector |
+| enumerator | `SELECT id FROM tenants`, no `ORDER BY` | caught it in **6 runs of 6** — but only because the heap happened to return insertion order |
+
+The second row is a **latent** defect, not an active one, and saying so
+precisely matters: the pre-fix enumerator tests did catch the regression every
+time it was run. Re-seeding so the doomed tenant is enumerated **last** — the
+order Postgres is free to choose after any `UPDATE`, `VACUUM`, page reuse or
+plan change — flips **four of the six to passing against a live regression.**
+
+Both are fixed by removing the dependency rather than pinning the order:
+fixtures get distinct `completed_at` values, and the enumerator seams now throw
+for **whichever of the test's tenants the sweep reaches first**, so "the failure
+preceded the surviving work" is true by construction. Caught in review (Codex
+P2, twice — the first fix addressed only the cross-query half).
 
 **All eight sweeps now carry fan-out coverage** — 16 tests in
 `sweep-tenant-fanout.test.ts`. Eight sweep *workers*, seven requirement *rows*:
@@ -2337,7 +2361,7 @@ that schema. Earlier drafts of this paragraph said four, then three, and both
 were hand-written lists — which is why this one is **computed**, and the command
 that computes it is published below rather than its output being retyped.
 
-**Nine have no write path at all** (direct SQL only):
+**Eight have no write path at all** (direct SQL only):
 
 | Setting | What a tenant cannot do |
 |---|---|
@@ -2346,12 +2370,24 @@ that computes it is published below rather than its output being retyped.
 | `weeklyFeedbackEnabled` | Turn off a recurring email the product sends them |
 | `speedToLeadEnabled`, `speedToLeadTemplate` | Configure or disable speed-to-lead |
 | `autonomousCloseEnabled`, `autonomousCloseMaxCents` | Set or bound the autonomous-close lane (D-018) |
-| `laborRateCentsPerHour` | Set the labor rate their own reports divide by (`reports.ts` reads it; nothing writes it) |
 | `e1ReviewedScript` | Clear the E1 script-review flag |
 
-**Three more are written once at onboarding and never again** — `aiModel`,
-`nextEstimateNumber`, `nextInvoiceNumber`, all set to fixed bootstrap values by
-`activate-pack-with-seed.ts`. Reachable at provisioning, unreachable afterwards.
+**Three have a dedicated writer and are not user-settable** — a different thing:
+
+| Setting | Written by |
+|---|---|
+| `laborRateCentsPerHour` | The **correction loop**: a learned rate cascades into tenant config through `ConfigPorts.setLaborRateCents` (`app.ts:1271`). An owner cannot set it; the product learns it |
+| `nextEstimateNumber`, `nextInvoiceNumber` | `PgSettingsRepository.incrementEstimateNumber` / `incrementInvoiceNumber`, on **every allocation**. Seeded at onboarding, then written constantly |
+
+*An earlier draft of this table filed all three as "written once at onboarding
+and never again," and `laborRateCentsPerHour` as direct-SQL-only. Both were
+wrong, and wrong in the way the note under the command warns about — which was
+already written, one paragraph below, when I made the mistake. Reading a key's
+absence from the generic schema as absence of any writer is the same error as
+the `brandVoiceLocked` one earlier in this section, made a third time.*
+
+`aiModel` is the genuine write-once case: `activate-pack-with-seed.ts:115` sets
+it from `resolveBootstrapAiModel()` at provisioning and nothing else writes it.
 (`updatedAt` is bookkeeping, not a setting.)
 
 The first two rows are the ones that matter most and neither earlier draft
@@ -2388,12 +2424,12 @@ semantics deliberately: `voice_approval_pin_hash` is omitted **on purpose** so a
 raw hash can never be injected through the generic settings `PUT`, and the
 schema says exactly that in its own comment. Going strict would convert that
 designed-silent drop into a 400 and newly reject every client that sends an
-extra key. The narrow fix is to add the **nine** unreachable keys to the schema
-with the same route-boundary validation their siblings already get, starting
-with `sendThankYouSms` and `sendReviewRequest` — and to leave `brandVoiceLocked`
-on its dedicated workflow. The three onboarding-only keys are a separate
-question (whether `aiModel` and the two numbering counters should be editable at
-all is a product decision, not an omission).
+extra key. The narrow fix is to add the **eight** genuinely unreachable keys to
+the schema with the same route-boundary validation their siblings already get,
+starting with `sendThankYouSms` and `sendReviewRequest` — and to leave
+`brandVoiceLocked`, `laborRateCentsPerHour` and the two numbering counters on
+their dedicated writers, which are correct as they stand. Whether `aiModel`
+should be editable after provisioning is a product question, not an omission.
 
 > **S:** `awk '/^export const updateSettingsSchema/,/^\}\)\.superRefine/' packages/api/src/shared/contracts.ts | grep -c 'strict()'`
 > → **1**, and that one is the nested `autoApproveThreshold` object, not the

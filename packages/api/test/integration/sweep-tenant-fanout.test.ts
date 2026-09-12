@@ -79,13 +79,32 @@ function emptyComputeDeps(settingsRepo: SettingsRepository): DigestComputeDeps {
   } as unknown as DigestComputeDeps;
 }
 
-/** Same stubs, except every read throws for one chosen tenant. */
-function computeDepsFailingFor(settingsRepo: SettingsRepository, failTenantId: string): DigestComputeDeps {
+/**
+ * Same stubs, except every read throws for the FIRST of `ours` the sweep
+ * actually reaches — not for a tenant chosen in advance.
+ *
+ * `listAllTenantIds` runs `SELECT id FROM tenants` with no `ORDER BY`, so the
+ * enumeration order is unspecified and these tests cannot pick the doomed
+ * tenant up front: if the survivors happened to be served first, a sweep that
+ * aborted after the first error would already have written their rows and the
+ * assertions would pass anyway. Failing whoever comes first makes "the failure
+ * preceded the surviving work" true by construction rather than by luck.
+ * Caught in review on this PR (Codex P2) after the same defect was fixed for
+ * the cross-tenant-query sweeps with distinct `completed_at` values — which
+ * fixed only half of it.
+ */
+function computeDepsFailingForFirstOf(
+  settingsRepo: SettingsRepository,
+  ours: string[],
+): { deps: DigestComputeDeps; doomed: () => string | null } {
   const base = emptyComputeDeps(settingsRepo) as unknown as Record<string, Record<string, unknown>>;
+  let failed: string | null = null;
   const guard = (fn: unknown) =>
     async (...args: unknown[]) => {
-      if (args.some((a) => a === failTenantId)) {
-        throw new Error(`synthetic failure for tenant ${failTenantId}`);
+      const mine = args.find((a) => typeof a === 'string' && ours.includes(a)) as string | undefined;
+      if (mine !== undefined && (failed === null || failed === mine)) {
+        failed = mine;
+        throw new Error(`synthetic failure for tenant ${mine}`);
       }
       return (fn as (...a: unknown[]) => Promise<unknown>)(...args);
     };
@@ -95,7 +114,7 @@ function computeDepsFailingFor(settingsRepo: SettingsRepository, failTenantId: s
       if (typeof fn === 'function') repo[method] = guard(fn);
     }
   }
-  return base as unknown as DigestComputeDeps;
+  return { deps: base as unknown as DigestComputeDeps, doomed: () => failed };
 }
 
 describe('Postgres integration — per-tenant sweep fan-out (T4)', () => {
@@ -165,25 +184,33 @@ describe('Postgres integration — per-tenant sweep fan-out (T4)', () => {
   });
 
   it('keeps going when one tenant throws — the other tenants are still served', async () => {
-    const doomed = await seedDigestTenant({ timezone: 'America/Chicago', digestTime: '18:00', enabled: true });
-    const survivorA = await seedDigestTenant({ timezone: 'America/Chicago', digestTime: '18:00', enabled: true });
-    const survivorB = await seedDigestTenant({ timezone: 'America/Phoenix', digestTime: '16:00', enabled: true });
+    const ours = [
+      await seedDigestTenant({ timezone: 'America/Chicago', digestTime: '18:00', enabled: true }),
+      await seedDigestTenant({ timezone: 'America/Chicago', digestTime: '18:00', enabled: true }),
+      await seedDigestTenant({ timezone: 'America/Phoenix', digestTime: '16:00', enabled: true }),
+    ];
+    const failing = computeDepsFailingForFirstOf(settingsRepo, ours);
 
     const result = await runDailyDigestSweep({
       settingsRepo,
       digestRepo,
-      computeDeps: computeDepsFailingFor(settingsRepo, doomed),
+      computeDeps: failing.deps,
       listTenantIds: () => listAllTenantIds(pool),
       publicBaseUrl: 'https://app.example.com',
       logger,
       now: () => DUE_NOW,
     });
 
+    // Whichever of ours the sweep reached first is the one that threw, so every
+    // surviving assertion below describes work done AFTER a failure.
+    const doomed = failing.doomed();
+    expect(doomed).not.toBeNull();
+    expect(ours).toContain(doomed);
     expect(result.failed).toBeGreaterThanOrEqual(1);
-    expect(await digestRepo.findByTenantAndDate(doomed, LOCAL_DATE)).toBeNull();
-    // The point of the test: the sweep did not abort at the first throw.
-    expect(await digestRepo.findByTenantAndDate(survivorA, LOCAL_DATE)).not.toBeNull();
-    expect(await digestRepo.findByTenantAndDate(survivorB, LOCAL_DATE)).not.toBeNull();
+    expect(await digestRepo.findByTenantAndDate(doomed as string, LOCAL_DATE)).toBeNull();
+    for (const survivor of ours.filter((t) => t !== doomed)) {
+      expect(await digestRepo.findByTenantAndDate(survivor, LOCAL_DATE)).not.toBeNull();
+    }
   });
 });
 
@@ -235,16 +262,19 @@ describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
   async function runWeekly(opts: {
     enabled: string[];
     emailOf: Map<string, string>;
-    failFor?: string;
-  }): Promise<{ sentTo: string[]; failed: number }> {
+    /** Throw for the FIRST of these the sweep reaches — see the digest seam. */
+    failFirstOf?: string[];
+  }): Promise<{ sentTo: string[]; failed: number; doomed: string | null }> {
     const sentTo: string[] = [];
+    let doomed: string | null = null;
     const result = await runWeeklyFeedbackSweep({
       auditRepo,
       listTenantIds: () => listAllTenantIds(pool),
       isFeedbackEnabled: async (tenantId) => opts.enabled.includes(tenantId),
       resolveOwnerEmail: async (tenantId) => opts.emailOf.get(tenantId) ?? null,
       buildSnapshot: async (tenantId, weekStart, weekEnd) => {
-        if (opts.failFor && tenantId === opts.failFor) {
+        if (opts.failFirstOf?.includes(tenantId) && (doomed === null || doomed === tenantId)) {
+          doomed = tenantId;
           throw new Error(`synthetic failure for tenant ${tenantId}`);
         }
         return snapshotWithWork(weekStart.toISOString(), weekEnd.toISOString());
@@ -255,7 +285,7 @@ describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
       },
       logger,
     });
-    return { sentTo, failed: result.failed };
+    return { sentTo, failed: result.failed, doomed };
   }
 
   it('serves each enabled tenant at its OWN address and skips the opted-out one', async () => {
@@ -277,22 +307,27 @@ describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
   });
 
   it('keeps going when one tenant throws — the other tenants are still served', async () => {
-    const doomed = (await createTestTenant(pool)).tenantId;
-    const survivor = (await createTestTenant(pool)).tenantId;
-    const emailOf = new Map([
-      [doomed, `doomed-${doomed.slice(0, 8)}@example.com`],
-      [survivor, `alive-${survivor.slice(0, 8)}@example.com`],
-    ]);
+    const ours = [
+      (await createTestTenant(pool)).tenantId,
+      (await createTestTenant(pool)).tenantId,
+    ];
+    const emailOf = new Map(ours.map((t, i) => [t, `t${i}-${t.slice(0, 8)}@example.com`]));
 
-    const { sentTo, failed } = await runWeekly({
-      enabled: [doomed, survivor],
+    const { sentTo, failed, doomed } = await runWeekly({
+      enabled: ours,
       emailOf,
-      failFor: doomed,
+      failFirstOf: ours,
     });
 
+    // The thrower is whoever the sweep reached first, so the survivor's email
+    // is provably work done after a failure rather than before one.
+    expect(doomed).not.toBeNull();
+    expect(ours).toContain(doomed);
     expect(failed).toBeGreaterThanOrEqual(1);
-    expect(sentTo).not.toContain(emailOf.get(doomed));
-    expect(sentTo).toContain(emailOf.get(survivor));
+    expect(sentTo).not.toContain(emailOf.get(doomed as string));
+    for (const survivor of ours.filter((t) => t !== doomed)) {
+      expect(sentTo).toContain(emailOf.get(survivor));
+    }
   });
 });
 
@@ -307,13 +342,22 @@ describe('Postgres integration — weekly-feedback sweep fan-out (T4)', () => {
  * what they *do* for a tenant; these prove *which tenants they reach*, on the
  * real enumerator, which no other test covers.
  */
-function recordingSeam<T>(failFor: string | null, result: T) {
+function recordingSeam<T>(failFirstOf: string[] | null, result: T) {
   const visited: string[] = [];
+  // The thrower is chosen by the enumerator, not by the caller: whichever of
+  // `failFirstOf` the sweep reaches first. `listAllTenantIds` has no ORDER BY,
+  // so picking one in advance would leave these tests unable to distinguish
+  // "kept going after a failure" from "did the survivors before the failure."
+  let doomed: string | null = null;
   return {
     visited,
+    doomed: () => doomed,
     fn: async (tenantId: string): Promise<T> => {
       visited.push(tenantId);
-      if (tenantId === failFor) throw new Error(`synthetic failure for tenant ${tenantId}`);
+      if (failFirstOf?.includes(tenantId) && (doomed === null || doomed === tenantId)) {
+        doomed = tenantId;
+        throw new Error(`synthetic failure for tenant ${tenantId}`);
+      }
       return result;
     },
   };
@@ -335,14 +379,14 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
   });
 
   describe('hold-reaper sweep', () => {
-    const run = async (failFor: string | null) => {
-      const { visited, fn } = recordingSeam(failFor, []);
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
       const result = await runHoldReaperSweep({
         appointmentRepo: { findExpiredHolds: fn } as never,
         listTenantIds: () => listAllTenantIds(pool),
         logger,
       });
-      return { visited, failed: result.failed };
+      return { visited, failed: result.failed, doomed: doomed() };
     };
 
     it('reaches every tenant through the real enumerator', async () => {
@@ -352,16 +396,20 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
     });
 
     it('keeps going when one tenant throws', async () => {
-      const [doomed, x, y] = await seedTrio(pool);
-      const { visited, failed } = await run(doomed);
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
       expect(failed).toBeGreaterThanOrEqual(1);
-      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
     });
   });
 
   describe('estimate-reminder sweep', () => {
-    const run = async (failFor: string | null) => {
-      const { visited, fn } = recordingSeam(failFor, []);
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
       const result = await runEstimateReminderSweep({
         estimateRepo: { findByTenant: fn } as never,
         sendService: {} as never,
@@ -369,7 +417,7 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
         listTenantIds: () => listAllTenantIds(pool),
         logger,
       });
-      return { visited, failed: result.failed };
+      return { visited, failed: result.failed, doomed: doomed() };
     };
 
     it('reaches every tenant through the real enumerator', async () => {
@@ -379,16 +427,20 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
     });
 
     it('keeps going when one tenant throws', async () => {
-      const [doomed, x, y] = await seedTrio(pool);
-      const { visited, failed } = await run(doomed);
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
       expect(failed).toBeGreaterThanOrEqual(1);
-      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
     });
   });
 
   describe('hfcr weekly-send sweep', () => {
-    const run = async (failFor: string | null) => {
-      const { visited, fn } = recordingSeam(failFor, null);
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, null);
       const result = await runHfcrWeeklySendSweep({
         hfcrSendRepo: { findByWeek: fn } as never,
         paymentRepo: { findByTenant: async () => [] } as never,
@@ -399,7 +451,7 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
         listTenantIds: () => listAllTenantIds(pool),
         logger,
       });
-      return { visited, failed: result.failed };
+      return { visited, failed: result.failed, doomed: doomed() };
     };
 
     it('reaches every tenant through the real enumerator', async () => {
@@ -409,16 +461,20 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
     });
 
     it('keeps going when one tenant throws', async () => {
-      const [doomed, x, y] = await seedTrio(pool);
-      const { visited, failed } = await run(doomed);
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
       expect(failed).toBeGreaterThanOrEqual(1);
-      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
     });
   });
 
   describe('google-reviews sweep', () => {
-    const run = async (failFor: string | null) => {
-      const { visited, fn } = recordingSeam(failFor, null);
+    const run = async (failFirstOf: string[] | null) => {
+      const { visited, fn, doomed } = recordingSeam(failFirstOf, null);
       const result = await runGoogleReviewsSweep({
         pollStateRepo: { getPollState: fn } as never,
         credentialResolver: { getCredential: async () => null } as never,
@@ -428,7 +484,7 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
         listTenantIds: () => listAllTenantIds(pool),
         logger,
       });
-      return { visited, failed: result.failed };
+      return { visited, failed: result.failed, doomed: doomed() };
     };
 
     it('reaches every tenant through the real enumerator', async () => {
@@ -438,10 +494,14 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
     });
 
     it('keeps going when one tenant throws', async () => {
-      const [doomed, x, y] = await seedTrio(pool);
-      const { visited, failed } = await run(doomed);
+      const ours = await seedTrio(pool);
+      const { visited, failed, doomed } = await run(ours);
       expect(failed).toBeGreaterThanOrEqual(1);
-      expect(visited).toEqual(expect.arrayContaining([doomed, x, y]));
+      // Whoever the enumerator reached first is the thrower, so every other
+      // tenant in `visited` was reached AFTER a failure — which is the claim.
+      expect(doomed).not.toBeNull();
+      expect(ours).toContain(doomed);
+      expect(visited).toEqual(expect.arrayContaining(ours));
     });
   });
 });
