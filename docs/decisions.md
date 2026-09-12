@@ -996,15 +996,22 @@ entity resolver shipping with nonexistent column names because its `Pool` was mo
   carry fan-out coverage in `test/integration/sweep-tenant-fanout.test.ts` (16 tests). Digest and
   weekly-feedback reach T3+T4; the rest reach T4. See PRD §11.0e for the per-sweep depth, including
   the second sweep shape (cross-tenant query, no enumerator) that this decision did not anticipate.
-- The precondition for any T4 proof is structural: the ten inlined copies of
-  `SELECT id FROM tenants` become one exported, tested `listAllTenantIds(pool)`. A sweep test cannot
-  run the production selector while that selector exists only as ten anonymous closures in `app.ts`.
+- The precondition for any T4 proof is structural: the inlined copies of `SELECT id FROM tenants`
+  become one exported, tested `listAllTenantIds(pool)`. A sweep test cannot run the production
+  selector while that selector exists only as anonymous closures in `app.ts`. **Done 2026-09-12 —
+  fifteen sites, not the ten this decision first counted; that number came from a truncated
+  listing.**
 - One shared sweep harness — 3 divergently-configured tenants, real enumerator, assert 3 outcomes
-  and that a throw on tenant 1 still processes 2 and 3 — earns T4 for every sweep at once. It is now
-  the ninth and arguably first item in §11.0c.
-- **Per-row T-grades are deliberately not published yet.** The aggregate above is measured; the
-  per-row grading is not. Asserting a grade per row without running that row's falsifier would
-  repeat the error D-031 exists to correct.
+  and that a throw on tenant 1 still processes 2 and 3. **Done 2026-09-12**, 16 tests in
+  `test/integration/sweep-tenant-fanout.test.ts`, every isolation assertion mutation-tested.
+- **Per-row T-grades are published only where earned.** As of 2026-09-12 that is the seven
+  tenant-iterating sweeps (PRD §11.0e, "Graded so far") — digest and weekly feedback at T3+T4, the
+  other five at T4, each proven against the real enumerator and mutation-tested. **Those seven
+  grades do cap their rungs.** Every other row in §5 and §8 is **ungraded**, so its printed rung is
+  un-capped and provisional, and the capping rules do not apply to it until it is graded. Asserting
+  a grade on a row without running that row's falsifier would repeat the error D-031 exists to
+  correct — the aggregate scan is a keyword heuristic, sound across 217 files and not sound row by
+  row.
 
 **Alternatives rejected:**
 - *Fold multi-tenancy into the existing rungs (e.g. "rung 4 now means two tenants").* Rejected: it
