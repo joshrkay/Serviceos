@@ -365,11 +365,43 @@ One audit row in total, under tenant A, for tenant A's own successful edit.
   changed.
 - **Not touched:** RLS policies, migrations, routes, permissions, and the
   `users` route's 404 shape (the fix reuses the existing not-found path).
-- The pinned RED in `e2e/journeys/accept-invitation.spec.ts` › *T1 — an
-  owner cannot PATCH another tenant's user* (branch
-  `cloud/owner-surfaces-r5`, PR #1085) asserts the secure behavior under
-  `test.fail()`. It is **not** on this branch, so this PR does not flip it;
-  once both land, that `test.fail()` wrapper will report an unexpected pass
-  and should be removed. Flagged for whoever merges second.
+- **The pinned RED is now un-pinned, and that is the one change beyond the
+  three commits above.** `e2e/journeys/accept-invitation.spec.ts` › *T1 — an
+  owner cannot PATCH another tenant's user* (from `cloud/owner-surfaces-r5`,
+  PR #1085) asserted the secure behavior under `test.fail(true, …)`. It
+  reached this branch when the base merge to `41d02530` brought main's
+  batch-5 merge in, and with the fix present the leg passes — which
+  Playwright reports as a failure:
+
+  ```
+    1 failed
+      [chromium] › e2e/journeys/accept-invitation.spec.ts:431:7 › … › T1 — an owner
+      cannot PATCH another tenant's user …
+      Expected to fail, but passed.
+    4 passed (1.6m)
+  ```
+
+  Removing the `test.fail()` call (and rewriting its now-false comment into a
+  regression note) is the only correct resolution: the leg's assertions were
+  already the secure behavior. Nothing was skipped or weakened. Re-run of the
+  same spec, unchanged otherwise:
+
+  ```
+    5 passed (1.5m)
+  ```
+
+  Command (the owner-surfaces lane's own recipe):
+  ```bash
+  TESTCONTAINERS_RYUK_DISABLED=true npx tsx e2e/fixtures/setup-test-db.ts
+  CLERK_DEV_HMAC_TOKENS=true DB_SSL=false DATABASE_URL=<that url> \
+    E2E_USE_TEST_DB=true \
+    VITE_CLERK_PUBLISHABLE_KEY=pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA== \
+    QA_CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome \
+    npx playwright test e2e/journeys/accept-invitation.spec.ts --project=chromium --reporter=line
+  ```
+
+  The base merge brought **no** `packages/api/src` or `packages/web/src`
+  changes (`git diff --stat ff8dde7 41d0253 -- packages/api/src
+  packages/web/src` is empty), so the API runs in §4 still stand.
 - No PRD rung is claimed here — only Fable states rungs.
 - The PR is a **draft** and must not be merged or marked ready by this lane.
