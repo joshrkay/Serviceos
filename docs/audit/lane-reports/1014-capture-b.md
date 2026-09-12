@@ -252,6 +252,46 @@ Fixing it means changing `emergency-tier.ts` **semantics**, which the lane B sco
 1. A passing **characterization** test records exactly what happens today — tier absent, not terminated, dispatcher copy, booking still live.
 2. An **`it.fails`** test states the DESIRED behaviour in full (the English assertions, in Spanish). It reports as `1 expected fail`, keeps CI honest, and **starts failing loudly the day someone fixes the product** — which is the signal to delete it, promote its assertions into the English test, and re-grade row 2.5.
 
+### Why this was invisible — the Spanish corpus encodes the E2 behaviour as correct
+
+Worth knowing before anyone fixes it, because the fix will break a currently
+green test.
+
+This PR's own CI run posted **Voice Quality Report: PASS, 73/73 (100%)**, with
+bucket `11-spanish` at **4/4, threshold 90%**. That bucket contains the exact
+scenario — and it passes because it asserts the behaviour that exists rather
+than the behaviour §8.2's acceptance criterion requires.
+
+`src/ai/voice-quality/corpus/scripts/11-spanish/es-emergency-escalation.json`
+carries the same utterance this lane used:
+
+```json
+{
+  "caller": "¡Hay una fuga de gas en mi casa, se siente el olor a gas muy fuerte!",
+  "expected": {
+    "escalates": true,
+    "spokenAnswerMatches": "Si alguien está en peligro inmediato, cuelgue y llame al 911."
+  }
+}
+```
+
+`escalates: true` is the **E2** disposition. The quoted line is
+`EMERGENCY_SAFETY_LINE` in Spanish — the generic dispatcher-path 911 line — not
+the E1 evacuation script ("leave the building … without using light switches").
+Its golden (`corpus/golden/es-emergency-escalation.json`) is `[]`. Even the
+script's own id and the bucket's doc comment say *escalation*
+(`11-spanish.test.ts:18` — *"fuga de gas" escalates with the Spanish 911 safety
+line*).
+
+So the corpus does not miss the case; it **records the E2 outcome as the
+expected one**. That is why a life-safety gap sat behind a 100% Spanish score.
+
+**Consequence for #1056:** fixing the product will turn this cassette RED — E1
+terminates rather than escalates, and speaks a different script. The corpus
+script, its golden, and the bucket's doc comment have to be updated in the same
+change. A fix that only touches `emergency-tier.ts` will look like a
+regression.
+
 **Recommended routing:** a life-safety fix ticket with a named owner, plus an entry on `docs/audit/blocked-on-josh.md` (#1000) if the owner is not immediate. I did not add either — that is the orchestrator's call, and the row note is the honest place for it until then.
 
 ---
@@ -488,6 +528,83 @@ $ docker exec … -c "SELECT count(*) AS appointments FROM appointments;"
 --------------
             0                                                       <- no booking left behind by any E1 call
 ```
+
+---
+
+## 🚨 SECOND GAP FOUND — cross-tenant auth on `/api/telephony/voice` (surfaced, NOT fixed)
+
+Found while acting on a Codex review finding against this PR, and verified end
+to end before being claimed.
+
+**A tenant that legitimately holds its own Twilio credential can drive inbound
+calls into ANY other tenant.**
+
+### Cause
+
+`/api/telephony/voice` resolves the signing credential and the tenant from two
+INDEPENDENT body fields and never checks that they agree:
+
+- `resolveTwilioAuthTokenForSubaccount` (`packages/api/src/app.ts:3756`) picks
+  the auth token by the body's **`AccountSid`**;
+- `resolveTenantIdByPhoneNumber` (`app.ts:3791`) picks the tenant by the body's
+  **`To`**.
+
+So `requireTwilioSignature` verifies *"is this signed by SOME tenant"*, never
+*"is this signed by THE tenant that owns the dialled number"*.
+
+### Proof (real API process, real Postgres)
+
+Attacker is tenant A, using **only credentials it legitimately owns**. The one
+hostile field is `To`.
+
+```
+AccountSid=B_SUBACCOUNT, signed with A_TOKEN          -> 403
+   (this is the ordinary bad-signature case — the middleware verifies an
+    A-signed payload with B's token, so the 403 is guaranteed by construction
+    and proves NOTHING about the boundary)
+
+AccountSid=A_SUBACCOUNT, signed with A_TOKEN, To=B_DID -> 200
+   body: <?xml ...><Say voice="Polly.Joanna">Thank you for calling our team.
+         This call may be recorded ... How can I help you today?</Say>...
+
+   voice_sessions rows for that CallSid:
+     [{"tenant_id":"95a776b4-0956-486d-8c19-8702cf426673"}]   <- tenant B
+   landed in tenantB? true
+```
+
+### Impact
+
+Creates voice sessions, leads and customers under the victim tenant, consumes
+their trial minutes, and writes into their audit trail. The victim's DID is
+public information — it is their business phone number — and the signature
+check is the only auth on this surface.
+
+### Why this lane did not fix it
+
+Lane B is test-only and explicitly forbidden from changing auth code. Same
+treatment as the Spanish E1 gap: pinned both ways in
+`e2e/telephony-e1-signed-webhook.spec.ts` — the current behaviour as a passing
+characterization, and the required refusal as a Playwright `test.fail()` that
+runs for real and **fails the run the day it starts passing**, forcing the
+re-grade.
+
+### Credit
+
+The Codex review on this PR caught that my original cross-tenant test was
+**vacuous** — it used `AccountSid: B_SUBACCOUNT` signed with `A_TOKEN`, a
+combination that 403s by construction. It was right, and the hole behind it is
+real. That is two Codex findings on this branch that were both genuine (the
+other is the trailing-slash signing-base bug, fixed in `3bdb050`).
+
+---
+
+## Codex review findings on this PR — both verified, both acted on
+
+| Finding | Verdict | Action |
+|---|---|---|
+| P2 — normalize the signing base before constructing webhook URLs | **Correct.** With a trailing slash on `PUBLIC_API_URL` the spec signs `//api/telephony/...` while `reconstructWebhookUrl` (`twilio-signature.ts:61`) verifies `/api/telephony/...`; every signed request 403s, and it reads as the *product* rejecting valid signatures | Fixed in `3bdb050`; verified with a real API + Postgres at `PUBLIC_API_URL` both with and without the trailing slash (4 passed each) |
+| P2 — assert that the E1 turn never invokes the gateway | **Correct.** A rejecting gateway proves resilience, not absence: a handler that called the model, caught the rejection and fell back would satisfy every other assertion | Tightened — the turn's gateway calls are now snapshotted and asserted to contain **zero** non-summary calls. (The one call that does occur is `taskType: 'summarize_conversation'`, fired by `runSummary` *after* the FSM terminated, so it cannot influence the safety decision; it is excluded explicitly and the reason is documented in the test) |
+| P1 — send the attacker's AccountSid in the forged webhook | **Correct, and it exposed a real product defect** | Test replaced with the real attack; the underlying cross-tenant hole is surfaced above, not fixed |
 
 ---
 
