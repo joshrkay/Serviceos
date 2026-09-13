@@ -7,26 +7,51 @@ import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
 
 /**
- * 4.4 — technician day view reachability, real Postgres.
+ * 4.4 — technician day view reachability, real Postgres, harness issue #1086
+ * CLOSED.
  *
- * `test/integration/dispatch-technician-day-window.test.ts` proves
+ * `test/integration/dispatch-technician-day-window.test.ts` already proves
  * `getDayBoundaries` includes a 23:00-local appointment for a
  * negative-UTC-offset tenant, and `technician-location-authz.test.ts`
- * proves `PgTechnicianLocationAuthorizer` refuses a cross-tenant
- * technician id — both at the function level, real Postgres, T1. This
- * spec proves the SAME two guarantees reachable through the real running
- * app: Carlos (tenant A, role technician) opens `/technician/day` and
- * sees only his own appointments, including one scheduled at 23:00
- * America/Los_Angeles local time on the tenant's calendar date; and a
- * forged request substituting tenant B's technician id — issued from
- * Carlos's own authenticated session — is refused with 403 (the SEC-22
- * guard in packages/api/src/dispatch/routes.ts).
+ * proves `PgTechnicianLocationAuthorizer` refuses a cross-tenant technician
+ * id — both at the function level, real Postgres, T1. This spec proves the
+ * SAME two guarantees reachable through the real running app: Carlos
+ * (tenant A, role technician) opens `/technician/day` and sees only his own
+ * appointments, including one scheduled at 23:00 America/Los_Angeles local
+ * time on the tenant's calendar date; and a forged request substituting
+ * tenant B's technician id — issued from Carlos's own authenticated session
+ * — is refused with 403 (the SEC-22 guard in packages/api/src/dispatch/routes.ts).
+ *
+ * ISSUE #1086 (harness, not product): every OTHER real-Postgres Playwright
+ * project in this repo (`chromium`'s legacy pair, `chromium-devauth`) forces
+ * `DEV_AUTH_BYPASS=true` on its api webServer so the owner's unsigned-JWT
+ * bootstrap works. But `app.ts` only wires the DB-authoritative
+ * authorization loader (the one that fills `req.auth.canonicalUserId`) when
+ * `pool && !isDevAuthBypassEnabled()` — so under those projects
+ * canonicalUserId is NEVER populated, and the SEC-22 guard in this exact
+ * route (`technicianId !== req.auth!.canonicalUserId`) is vacuously true for
+ * ANY id, including a technician's own. This file now runs EXCLUSIVELY under
+ * the `chromium-noauthbypass` Playwright project (playwright.config.ts;
+ * technician-day-view.spec.ts is excluded from `chromium`'s testIgnore and
+ * listed in NO_AUTH_BYPASS_SPECS) — that project's api webServer does not
+ * set DEV_AUTH_BYPASS, so the real loader IS wired. Since the unsigned-JWT
+ * bypass shortcut is unavailable there, the OWNER's session is now also an
+ * HMAC-signed token (see bootstrapOwnerTenant below) — nothing in this file
+ * depends on DEV_AUTH_BYPASS anymore.
  *
  * Bootstrap pattern mirrors e2e/journeys/accept-invitation.spec.ts (owner
  * bootstrap + technician invite/webhook-join + HMAC tenant-scoped token).
  */
 
-const API_URL = process.env.E2E_API_URL ?? 'http://localhost:3000';
+const API_URL =
+  process.env.E2E_NOAUTHBYPASS_API_URL ?? process.env.E2E_API_URL ?? 'http://localhost:3002';
+
+const REPORT_DIR = 'docs/audit/lane-reports/8-4-technician-surfaces';
+
+// Suppress the welcome / what's-new walkthrough modals so they don't cover
+// the day view in the screenshot (mirrors dispatch-drag-proposal.spec.ts).
+const WELCOME_SEEN_KEY = 'walkthrough.welcome.v1';
+const WHATS_NEW_SEEN_KEY = 'walkthrough.whatsnew.lastSeen';
 
 const CLERK_WEBHOOK_SECRET =
   process.env.E2E_CLERK_WEBHOOK_SECRET ??
@@ -39,14 +64,14 @@ function b64url(obj: unknown): string {
   return Buffer.from(JSON.stringify(obj)).toString('base64url');
 }
 
-function unsignedJwt(sub: string): string {
-  return `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({
-    sub,
-    sid: 'dev-session',
-    role: 'owner',
-  })}.x`;
-}
-
+/**
+ * HMAC-SHA256 dev token carrying an EXPLICIT tenant_id claim, verified by
+ * verifyClerkSession's CLERK_DEV_HMAC_TOKENS path (packages/api/src/auth/clerk.ts
+ * decodeClerkToken). Signed with '' to match `CLERK_SECRET_KEY ?? ''` when
+ * the API runs with no real Clerk secret configured. Used for BOTH the owner
+ * and the technician in this file — see the issue #1086 comment above for
+ * why the owner can no longer use the unsigned-JWT DEV_AUTH_BYPASS shortcut.
+ */
 function hmacToken(sub: string, tenantId: string, role: string): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const payload = {
@@ -106,15 +131,39 @@ async function postJson(
   return (await res.json()) as CreatedEntity;
 }
 
+/** Read-only psql SELECT — no writes, no bypass. Mirrors queryOne/queryScalar
+ * in e2e/journeys/onboarding-identity.spec.ts and accept-invitation.spec.ts. */
+function queryScalar(sql: string): string {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) return '';
+  return execFileSync('psql', [databaseUrl, '-t', '-A', '-c', sql], { encoding: 'utf8' }).trim();
+}
+
+/**
+ * #1133 workaround: the request transaction commits on `res.finish`, AFTER
+ * the HTTP response is already flushed to the client — a read fired
+ * immediately after a 200/201 can race the commit and see nothing yet.
+ * Retries a scalar read for up to ~2s until it's non-empty.
+ */
+function queryScalarUntilNonEmpty(sql: string, timeoutMs = 2000): string {
+  const deadline = Date.now() + timeoutMs;
+  let last = '';
+  while (Date.now() < deadline) {
+    last = queryScalar(sql);
+    if (last) return last;
+  }
+  return last;
+}
+
 function pollDbSnapshot(label: string, sql: string): void {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) return;
   try {
     const out = execFileSync('psql', [databaseUrl, '-c', sql], { encoding: 'utf8' });
-    writeFileSync(`docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`, out);
+    writeFileSync(`${REPORT_DIR}/${label}.snapshot.txt`, out);
   } catch (err) {
     writeFileSync(
-      `docs/audit/lane-reports/owner-surfaces-r5/${label}.snapshot.txt`,
+      `${REPORT_DIR}/${label}.snapshot.txt`,
       `psql poll failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
@@ -160,14 +209,22 @@ function todayInTz(timezone: string): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(new Date());
 }
 
+/**
+ * Bootstraps a fresh owner tenant through the REAL Clerk webhook, then mints
+ * the owner an HMAC-signed session token (issue #1086 — no DEV_AUTH_BYPASS
+ * available in this project, so the old unsigned-JWT shortcut cannot work).
+ * The webhook itself creates the tenant + the owner's `users` row
+ * (webhooks/routes.ts's "create the OWNER's membership row" insert); the
+ * tenant id is read back with a read-only SQL SELECT (no writes) so the
+ * HMAC token can carry the real `tenant_id` claim `decodeClerkToken`/
+ * `resolveAuthorization` require.
+ */
 async function bootstrapOwnerTenant(
   request: APIRequestContext,
   label: string,
-): Promise<{ sub: string; jwt: string; authHeaders: Record<string, string>; tenantId: string }> {
+): Promise<{ sub: string; authHeaders: Record<string, string>; tenantId: string }> {
   const sub = `user_e2e_${label}_${randomUUID().replace(/-/g, '')}`;
   const email = `${label}-${Date.now()}@serviceos-hermetic.test`;
-  const jwt = unsignedJwt(sub);
-  const authHeaders = { Authorization: `Bearer ${jwt}` };
 
   const webhookRes = await postSignedWebhook(request, {
     type: 'user.created',
@@ -175,11 +232,15 @@ async function bootstrapOwnerTenant(
   });
   expect(webhookRes.status(), `${label} bootstrap webhook -> ${await webhookRes.text()}`).toBe(200);
 
+  const tenantId = queryScalarUntilNonEmpty(`SELECT tenant_id FROM users WHERE clerk_user_id = '${sub}' LIMIT 1;`);
+  expect(tenantId, `${label}: real webhook must have created a users row for ${sub}`).toMatch(UUID_RE);
+
+  const authHeaders = { Authorization: `Bearer ${hmacToken(sub, tenantId, 'owner')}` };
+
   const meRes = await request.get(`${API_URL}/api/me`, { headers: authHeaders });
-  expect(meRes.status()).toBe(200);
+  expect(meRes.status(), `${label} /api/me -> ${await meRes.text()}`).toBe(200);
   const me = (await meRes.json()) as { tenant_id?: string };
-  expect(me.tenant_id).toMatch(UUID_RE);
-  const tenantId = me.tenant_id!;
+  expect(me.tenant_id, `${label}: the DB-authoritative loader must resolve the SAME tenant`).toBe(tenantId);
 
   const identityRes = await request.put(`${API_URL}/api/onboarding/identity`, {
     headers: { 'content-type': 'application/json', ...authHeaders },
@@ -193,7 +254,7 @@ async function bootstrapOwnerTenant(
   });
   expect(identityRes.ok(), `PUT /api/onboarding/identity (${label}) -> ${identityRes.status()}`).toBeTruthy();
 
-  return { sub, jwt, authHeaders, tenantId };
+  return { sub, authHeaders, tenantId };
 }
 
 async function inviteAndJoinTechnician(
@@ -231,7 +292,7 @@ async function inviteAndJoinTechnician(
   return { sub: techSub, token, techId: techMe.internal_user_id! };
 }
 
-test.describe('technician day view (4.4) — real Postgres', () => {
+test.describe('technician day view (4.4) — real Postgres, no DEV_AUTH_BYPASS (issue #1086)', () => {
   const canRun =
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
@@ -240,12 +301,9 @@ test.describe('technician day view (4.4) — real Postgres', () => {
     !canRun,
     'Requires the local webServer pair against a real Postgres: leave E2E_BASE_URL unset, ' +
       'set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok), and E2E_USE_TEST_DB=true with DATABASE_URL ' +
-      'pointing at the test container.',
+      'pointing at the test container. Run with --project=chromium-noauthbypass.',
   );
 
-  // Shared across both tests below via beforeAll so the KNOWN-GAP test
-  // (test.fail(), see its own comment) doesn't need to re-seed a whole
-  // owner/technician/job graph just to hit one endpoint.
   let apiCtx: APIRequestContext;
   let laToday: string;
   let ownerA: Awaited<ReturnType<typeof bootstrapOwnerTenant>>;
@@ -308,32 +366,32 @@ test.describe('technician day view (4.4) — real Postgres', () => {
     await apiCtx?.dispose();
   });
 
-  test('Carlos sees only his own day, including a 23:00-local appointment; tenant B\'s technician id is refused', async ({
+  test('Carlos\'s OWN request succeeds now that canonicalUserId is DB-resolved (issue #1086 closed for this route)', async () => {
+    const carlosHeaders = { Authorization: `Bearer ${carlos.token}` };
+    const ownRequestRes = await apiCtx.get(
+      `${API_URL}/api/dispatch/technician/${carlos.techId}/appointments?date=${laToday}`,
+      { headers: carlosHeaders },
+    );
+    expect(
+      ownRequestRes.status(),
+      `Carlos's own request -> ${ownRequestRes.status()}: ${await ownRequestRes.text()}`,
+    ).toBe(200);
+    const ownBody = (await ownRequestRes.json()) as { appointments: Array<{ jobId: string }> };
+    expect(
+      ownBody.appointments.some((a) => a.jobId === lateJob.id),
+      'the 23:00-local job must be on Carlos\'s OWN day, read through Carlos\'s OWN session',
+    ).toBe(true);
+  });
+
+  test('Carlos sees only his own day in the real browser, including a 23:00-local appointment; tenant B\'s technician id is refused', async ({
     page,
     baseURL,
   }) => {
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
-    // ── API proof: the 23:00-local job lands on Carlos's tenant-local day.
-    //    Read through the OWNER's session (owner/dispatcher are exempt from
-    //    the SEC-22 same-technician check — see the note below) — this is
-    //    the same route the technician day view itself calls, so it proves
-    //    the day-boundary/timezone correctness the story cares about
-    //    reachable over real HTTP against real Postgres. ─────────────────────
-    const dayResAsOwner = await page.request.get(
-      `${API_URL}/api/dispatch/technician/${carlos.techId}/appointments?date=${laToday}`,
-      { headers: ownerA.authHeaders },
-    );
-    expect(dayResAsOwner.ok(), `GET technician day (as owner) -> ${dayResAsOwner.status()}`).toBeTruthy();
-    const dayAsOwner = (await dayResAsOwner.json()) as { appointments: Array<{ jobId: string }> };
-    expect(
-      dayAsOwner.appointments.some((a) => a.jobId === lateJob.id),
-      '23:00-local job must be on Carlos\'s day',
-    ).toBe(true);
-
     // ── The 4xx refusal: Carlos's OWN session requesting tenant B's
-    //    technician id — the story's explicit ask. ──────────────────────────
+    //    technician id — the story's explicit ask (SEC-22). ─────────────────
     const carlosHeaders = { Authorization: `Bearer ${carlos.token}` };
     const forgedRes = await page.request.get(
       `${API_URL}/api/dispatch/technician/${techB.techId}/appointments?date=${laToday}`,
@@ -343,74 +401,38 @@ test.describe('technician day view (4.4) — real Postgres', () => {
     const forgedBody = (await forgedRes.json()) as { error?: string };
     expect(forgedBody.error).toBe('FORBIDDEN');
 
-    // ── Browser reachability: Carlos's real /technician/day page. The SPA
-    //    route/shell renders (data-testid="technician-day-view"), but the
-    //    appointments FETCH 403s in THIS harness (see the KNOWN-GAP test
-    //    below for why) — asserted honestly as the last reachable step for
-    //    Carlos's own browser session, not papered over. ─────────────────────
+    // ── Browser reachability: Carlos's real /technician/day page, now
+    //    actually rendering his appointments (issue #1086 closed). ─────────
     await installClerkStub(page, { signedIn: true, sub: carlos.sub, token: carlos.token });
+    await page.addInitScript(
+      ({ welcomeKey, whatsNewKey }) => {
+        try {
+          localStorage.setItem(welcomeKey, '1');
+          localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
+        } catch {
+          /* private mode — ignore */
+        }
+      },
+      { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
+    );
     await blockExternalHosts(page, baseURL!);
     await page.goto('/technician/day');
     await expect(page.getByTestId('technician-day-view')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('technician-day-loading')).toHaveCount(0, { timeout: 15_000 });
-    await expect(page.getByTestId('technician-day-error')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('technician-day-error')).toHaveCount(0, { timeout: 15_000 });
+
+    const appointmentCard = page.getByTestId('technician-day-appointment').first();
+    await expect(appointmentCard).toBeVisible({ timeout: 15_000 });
+    await expect(appointmentCard.getByTestId('technician-day-customer')).toContainText('LateNight');
+    // 23:00-local boundary — the card must show the tenant-local wall-clock
+    // time, not a UTC-shifted one.
+    await expect(appointmentCard.getByTestId('technician-day-time')).toContainText('11:00');
 
     await page.screenshot({
-      path: 'docs/audit/lane-reports/owner-surfaces-r5/4.4-technician-day-before-reload.png',
-      fullPage: true,
-    });
-    await page.reload();
-    await expect(page.getByTestId('technician-day-view')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('technician-day-error')).toBeVisible({ timeout: 15_000 });
-    await page.screenshot({
-      path: 'docs/audit/lane-reports/owner-surfaces-r5/4.4-technician-day-after-reload.png',
+      path: `${REPORT_DIR}/4.4-technician-day-own-appointments.png`,
       fullPage: true,
     });
 
     expect(pageErrors, 'no uncaught page errors on the technician day view').toEqual([]);
-  });
-
-  test('KNOWN GAP — Carlos\'s own technician-day request should succeed (expected to fail under this harness)', async () => {
-    // This test asserts the CORRECT/desired behavior, not the current bug —
-    // test.fail() tells Playwright "this is expected to fail right now"; if
-    // it ever starts PASSING, Playwright reports that as an error, which is
-    // exactly the signal needed to remove test.fail() once the gap below is
-    // closed. (CLAUDE.md / testing-strategy.md's own convention for a real,
-    // confirmed defect: "a real defect gets a failing test marked
-    // test.fail() and a report line" — this is that report line.)
-    //
-    // Root cause (packages/api/src/app.ts, "wire the DB-authoritative
-    // authorization loader"): the loader that populates
-    // req.auth.canonicalUserId is wired only when `pool &&
-    // !isDevAuthBypassEnabled()`. The `chromium` Playwright project's api
-    // webServer runs with DEV_AUTH_BYPASS=true UNCONDITIONALLY
-    // (playwright.config.ts apiWebServerEnv — required for the owner's
-    // hermetic unsigned-JWT bootstrap every real-Postgres journey in this
-    // repo depends on), so the loader is NEVER wired for this whole lane.
-    // Carlos's session is authenticated via a real, verified HMAC token
-    // (CLERK_DEV_HMAC_TOKENS), so `devAuthBypass` skips him too (`if
-    // (req.auth) return next()` in dev-auth-bypass.ts) — meaning
-    // canonicalUserId is undefined for EVERY technician-role request in
-    // this harness, and the SEC-22 guard's `technicianId !==
-    // req.auth!.canonicalUserId` is vacuously true for ANY id, including a
-    // technician's own. This is a test-harness artifact, not a production
-    // defect: production never sets DEV_AUTH_BYPASS=true, so the loader is
-    // always wired there and canonicalUserId always DB-resolved from the
-    // real Clerk session.
-    test.fail(
-      true,
-      'KNOWN LANE GAP: canonicalUserId is never populated under this repo\'s forced ' +
-        'DEV_AUTH_BYPASS=true, so the SEC-22 guard 403s a technician\'s own request too. ' +
-        'See the comment above this test for the full root cause.',
-    );
-
-    const carlosHeaders = { Authorization: `Bearer ${carlos.token}` };
-    const ownRequestRes = await apiCtx.get(
-      `${API_URL}/api/dispatch/technician/${carlos.techId}/appointments?date=${laToday}`,
-      { headers: carlosHeaders },
-    );
-    expect(ownRequestRes.status(), 'once fixed, Carlos\'s own request should succeed').toBe(200);
-    const ownBody = (await ownRequestRes.json()) as { appointments: Array<{ jobId: string }> };
-    expect(ownBody.appointments.some((a) => a.jobId === lateJob.id)).toBe(true);
   });
 });
