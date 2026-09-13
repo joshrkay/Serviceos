@@ -6669,6 +6669,81 @@ export const MIGRATIONS = {
       ON material_items (tenant_id, needed_by, created_at, id)
       WHERE status = 'pending';
   `,
+
+  // #1061 — one tenant per DID.
+  //
+  // `tenant_integrations.provider_data->>'phoneE164'` had no uniqueness
+  // constraint, so two tenants could each be provisioned with the same Twilio
+  // number. Three call sites then pick a row with `LIMIT 1` and no ORDER BY:
+  // PgPhoneNumberRepository.findByNumber, app.ts's resolveTenantIdByPhoneNumber
+  // (inbound /voice + /gather routing), and — since PR #1082 — tenant
+  // credential selection in integrations/credentials.ts. An inbound call to a
+  // shared DID lands in an arbitrary tenant and replies on arbitrary
+  // credentials. Every one of those resolves the tenant FROM the DID, so there
+  // is no tenant scope in which application code could check for the conflict:
+  // the guarantee has to be a database constraint.
+  //
+  // ADDITIVE. Creates an index; drops nothing. 070's UNIQUE (tenant_id,
+  // provider) stays as-is (it forbids two twilio rows for ONE tenant; this
+  // forbids one DID across TWO tenants — different, complementary guarantees).
+  //
+  // ── OPERATOR PRE-FLIGHT — RUN BEFORE DEPLOYING THIS ────────────────────
+  // The runner has no ledger: getMigrationSQL() re-executes every migration on
+  // every boot, and applyMigrations() sends the whole corpus as ONE statement,
+  // so a CREATE UNIQUE INDEX that fails on pre-existing duplicates fails the
+  // entire migration run and blocks the deploy (migrate.ts sets
+  // process.exitCode = 1). Confirm there are no duplicate claims first:
+  //
+  //   SET app.system_lookup = 'true';  -- tenant_integrations is FORCE RLS (074)
+  //   SELECT provider_data->>'phoneE164'              AS phone_e164,
+  //          count(*)                                 AS claim_count,
+  //          array_agg(tenant_id  ORDER BY created_at) AS tenant_ids,
+  //          array_agg(status     ORDER BY created_at) AS statuses,
+  //          array_agg(created_at ORDER BY created_at) AS created_ats
+  //     FROM tenant_integrations
+  //    WHERE provider = 'twilio'
+  //      AND provider_data->>'phoneE164' IS NOT NULL
+  //      AND coalesce(provider_data->>'stub', 'false') <> 'true'
+  //    GROUP BY 1
+  //   HAVING count(*) > 1
+  //    ORDER BY claim_count DESC, phone_e164;
+  //
+  // Zero rows → this migration applies cleanly. Any rows → reconcile them
+  // first (decide which tenant keeps the DID; the loser's phoneE164 must be
+  // cleared and its line re-provisioned), because the index cannot be created
+  // while a duplicate exists. See docs/audit/lane-reports/1061-did-uniqueness.md.
+  //
+  // ── Why not CONCURRENTLY ───────────────────────────────────────────────
+  // The runner does NOT support it. applyMigrations() issues the whole corpus
+  // via a single client.query(), which node-pg sends as a simple query — an
+  // implicit transaction block — and CREATE INDEX CONCURRENTLY is rejected
+  // inside one (25001). It also sets statement_timeout = '25s'. On a table
+  // this size (one row per tenant per provider) a plain build takes
+  // milliseconds and the ACCESS EXCLUSIVE lock is negligible. If
+  // tenant_integrations ever grows large enough to matter, an operator can
+  // build it CONCURRENTLY out-of-band BEFORE the deploy — the
+  // `IF NOT EXISTS` below then finds it already present and no-ops:
+  //
+  //   CREATE UNIQUE INDEX CONCURRENTLY uq_tenant_integrations_twilio_phone_e164
+  //     ON tenant_integrations (provider, (provider_data->>'phoneE164'))
+  //     WHERE provider = 'twilio'
+  //       AND provider_data->>'phoneE164' IS NOT NULL
+  //       AND coalesce(provider_data->>'stub', 'false') <> 'true';
+  //
+  // ── Why the `stub` carve-out ───────────────────────────────────────────
+  // workers/provision-twilio.ts assigns the SAME Twilio magic test number
+  // (+15005550006, STUB_DEV_PHONE_E164) to EVERY tenant provisioned without
+  // real Twilio credentials, tagging the row `stub: true`. Those numbers are
+  // not dialable and never route a real inbound call, so they are not part of
+  // the defect — but without this predicate the second dev/CI tenant onward
+  // would fail to provision. Real DIDs are never tagged `stub`.
+  '274_tenant_integrations_unique_twilio_did': `
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_integrations_twilio_phone_e164
+      ON tenant_integrations (provider, (provider_data->>'phoneE164'))
+      WHERE provider = 'twilio'
+        AND provider_data->>'phoneE164' IS NOT NULL
+        AND coalesce(provider_data->>'stub', 'false') <> 'true';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
