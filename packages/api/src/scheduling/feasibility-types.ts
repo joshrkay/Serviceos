@@ -31,12 +31,33 @@ export interface TravelTimeSummary {
   degraded: boolean;
 }
 
+/**
+ * 4.9 / issue #1001 — why the skill gate was clean.
+ *
+ * The wired `SkillMatcher` is `StubSkillMatcher`, whose `requiredSkillsForJob`
+ * returns `[]`. Before this field existed, that empty list produced no issue
+ * and no trace, so a feasibility report could not be distinguished from one
+ * where a real skills model had been consulted and matched: an empty skill
+ * list read as "always feasible". These three values keep the report honest
+ * without building skills-based assignment (explicitly out of scope, #1001):
+ *
+ *  - `none_configured` — the check RAN and the tenant models no required
+ *    skills for this job. Feasible on the skill axis, but only vacuously.
+ *  - `evaluated` — the check ran against a non-empty required-skill list;
+ *    a mismatch is reported as a blocking `skill_match` issue.
+ *  - `not_evaluated` — the check never ran (no technician to check, see
+ *    `checkFeasibility`'s #909/A11 guard), so nothing about skills is known.
+ */
+export type SkillConstraintStatus = 'none_configured' | 'evaluated' | 'not_evaluated';
+
 export interface FeasibilityResult {
   feasible: boolean;
   blocking: FeasibilityIssue[];
   warnings: FeasibilityIssue[];
   info: FeasibilityIssue[];
   travelTime: TravelTimeSummary | null;
+  /** 4.9 / #1001 — never omitted: silence is exactly what this field fixes. */
+  skillConstraints: SkillConstraintStatus;
 }
 
 export interface FeasibilityInput {

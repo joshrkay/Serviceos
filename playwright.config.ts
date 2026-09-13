@@ -50,6 +50,18 @@ const webServerEnv: NodeJS.ProcessEnv = {
     process.env.VITE_CLERK_PUBLISHABLE_KEY ?? process.env.E2E_CLERK_PUBLISHABLE_KEY,
 };
 
+// Snapshot of DATABASE_URL at CONFIG-LOAD time — this module evaluates before
+// e2e/global-setup.ts ever runs, and before the webServer processes are
+// spawned with webServerEnv above baked in. A spec that needs to know
+// whether the API server it's talking to actually got a real Postgres URL
+// (vs. E2E_USE_TEST_DB=true alone, which global-setup can backfill into
+// THIS process's env AFTER the webServer already booted in-memory) must
+// check this snapshot, not `process.env.DATABASE_URL` read from within the
+// spec file itself — by the time a spec's module body runs, global setup
+// has already executed and may have mutated process.env, making that read
+// describe global-setup's environment, not the webServer's.
+export const DATABASE_URL_AT_WEBSERVER_BOOT = webServerEnv.DATABASE_URL;
+
 // Hermetic webhook secret for the always-on browser Journey-1
 // (e2e/journeys/signup-to-first-estimate.hermetic.spec.ts). A base64 `whsec_`
 // TEST value — NOT a real Clerk secret — so the spec's signed `user.created`
