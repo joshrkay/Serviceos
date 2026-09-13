@@ -25,7 +25,8 @@ import type { CustomerNegotiationContextProvider } from '../customers/customer-n
 import {
   classifyIntent,
   isLookupIntent,
-  isExtendedIntent,
+  isCustomerProtectionIntent,
+  isOwnerExtendedLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
   ExtractedEntities,
@@ -46,15 +47,16 @@ import {
   payloadPathFor,
 } from '../proposals/chain';
 import { v4 as uuidv4 } from 'uuid';
-import { DEFAULT_TENANT_TIMEZONE } from '../ai/scheduling/resolve-datetime';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
+import type { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
 import { DunningEventRepository } from '../invoices/dunning-config';
 import type { CustomerRepository } from '../customers/customer';
+import type { LocationRepository } from '../locations/location';
 import {
   EntityCandidate,
   EntityKind,
@@ -73,6 +75,7 @@ import { selectInjectedStandingInstructions } from '../ai/standing-instructions-
 import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import { RespondToReviewTaskHandler } from '../ai/tasks/review-response-task';
 import { CreateStandingInstructionTaskHandler } from '../ai/tasks/standing-instruction-task';
+import { UpdateBrandVoiceTaskHandler } from '../ai/tasks/brand-voice-task';
 import type { ReviewRepository } from '../reputation/review';
 import type { BuildReviewResponseProposalDeps } from '../reputation/build-proposal';
 import { instrument } from '../monitoring/instrumentation';
@@ -87,9 +90,12 @@ import type { VoiceAnswerStatus, VoiceLookupAnswer } from '@ai-service-os/shared
 import type { VoiceRepository } from '../voice/voice-service';
 import {
   executeLookupAnswer,
-  OWNER_GRADE_LOOKUP_INTENTS,
+  LOOKUP_REQUIRED_PERMISSION,
   type VoiceLookupAnswerDeps,
 } from './voice-lookup-answer';
+import type { UserRepository } from '../users/user';
+import type { EnRouteEnqueuer } from '../dispatch/routes';
+import { handleEnRouteVoiceIntent } from '../dispatch/en-route-voice';
 
 // Re-export for callers that import these from this module (e.g. router tests).
 export { complaintSeverity, COMPLAINT_HIGH_SEVERITY_REASON };
@@ -133,6 +139,19 @@ export interface VoiceActionRouterPayload {
    * caller instead of asking the LLM to guess.
    */
   customerId?: string;
+  /**
+   * U9 (voicemail → action) — set to 'voicemail' by the transcription hook
+   * when this transcript came off an inbound voicemail recording. The
+   * transcript's author is an UNAUTHENTICATED phone caller (RIVET I13:
+   * `voice_recordings.source='inbound_call'` classifies untrusted,
+   * unconditionally), even though the owner-line gate let the job through.
+   * Every proposal built from it is therefore stamped
+   * `sourceContext.sourceChannel='voicemail'` and force-held for human
+   * review (`holdIfUntrustedSource`) — no auto-approval, no autonomous-lane
+   * exception, regardless of handler trust tier or supervisor presence.
+   * Absent ⇒ byte-identical legacy behavior (in-app operator memos).
+   */
+  sourceChannel?: 'voicemail';
 }
 
 /**
@@ -399,6 +418,16 @@ export interface VoiceActionRouterDeps {
    */
   customerRepo?: CustomerRepository;
   /**
+   * create_appointment draft-time bookability. `jobs.location_id` is NOT
+   * NULL, so a customer with zero `service_locations` rows cannot be booked
+   * — the execution handler fails with "Customer has no service location".
+   * Threaded into `buildTaskHandlers` so the drafting handler detects that
+   * up front and gates the proposal (`missingFields: ['locationId']`) rather
+   * than auto-approving it into a guaranteed failure. Optional; absent → no
+   * gate (pre-existing behavior).
+   */
+  locationRepo?: LocationRepository;
+  /**
    * U3 (E-lane answers) — routed-outcome back-channel for the recorded-memo
    * path. When wired, the worker stamps `voice_recordings.answer_status`
    * (pending → answered | proposal | clarification | skipped | failed) at
@@ -416,6 +445,22 @@ export interface VoiceActionRouterDeps {
    * an executed answer with nowhere to persist would be dropped.
    */
   lookupAnswers?: VoiceLookupAnswerDeps;
+  /**
+   * B5.5 / Part F decision F-3 — deps for the `en_route` intent's
+   * router-facing orchestrator (dispatch/en-route-voice.ts). Not a proposal:
+   * a resolved "on my way" fires the SAME audited direct status act the app
+   * button does (`triggerEnRoute`) and stamps its outcome as an E-lane
+   * answer (mirrors the lookup family's `answered`/`clarification`
+   * outcomes). `userRepo` resolves the memo creator's canonical technician
+   * id; `assignmentRepo` scopes resolution to that technician's OWN
+   * assignments (never tenant-wide); `enRouteCoordinator` is the SAME
+   * coordinator instance dispatch/routes.ts wires for the app button.
+   * Optional: any dep missing ⇒ the intent is skipped (no answer surface on
+   * this path), same posture as an unwired lookup.
+   */
+  userRepo?: Pick<UserRepository, 'findByTenant'>;
+  assignmentRepo?: Pick<AssignmentRepository, 'findByTechnician'>;
+  enRouteCoordinator?: EnRouteEnqueuer;
 }
 
 // THE intent → proposal-type map now lives in `proposals/voice-intent-map.ts`
@@ -456,6 +501,9 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     thresholdResolver: deps.thresholdResolver,
     // B8 — create_customer draft-time duplicate detection parity.
     customerRepo: deps.customerRepo,
+    // Draft-time bookability gate for create_appointment (no service
+    // location ⇒ missingFields, never an auto-approved doomed execution).
+    ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
   });
   // The handlers below stay surface-specific by design — see the doc
   // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)
@@ -469,6 +517,11 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // UB-A2 — persistent directives ("from now on…"); normalized via the LLM
   // gateway, ALWAYS drafts for review (no sourceTrustTier).
   handlers.set('create_standing_instruction', new CreateStandingInstructionTaskHandler(deps.gateway));
+  // B1.18 — brand voice captured by voice ("Set my brand voice: ..."). Voice-
+  // only by design (mirrors create_standing_instruction above): a spoken
+  // edit to the tenant's own outbound identity, not a customer-calling-FSM
+  // concern, so it's excluded from the shared registry (handler-registry.ts).
+  handlers.set('update_brand_voice', new UpdateBrandVoiceTaskHandler(deps.gateway));
   // RV-080 — complaint uses 'add_note' proposal type but needs its own
   // handler (pinned-prefix note + companion callback). Registered under
   // a synthetic key ('_complaint') so it doesn't collide with the plain
@@ -784,6 +837,27 @@ function clarificationSummary(transcript: string): string {
  * suggestion" expando.
  */
 function clarificationExplanation(classification: IntentClassification): string {
+  // Task 13 (2026-08-07 tradesperson plan) — these three are real,
+  // CONFIRMED classifications, never 'unknown': classifyIntentRaw's
+  // low_confidence/unknown_intent guards always force intentType to
+  // 'unknown' whenever unknownReason would be set, so a classification
+  // that reaches here with intentType === one of these never carries an
+  // unknownReason at all. They land in this function via the miss branch
+  // in processSegment's INTENT_TO_PROPOSAL_TYPE lookup: each is a genuine,
+  // understood action with no home on a recorded memo (no live pending
+  // question / live call / live operator), not something the classifier
+  // failed to understand — so the copy says why instead of falling into
+  // the generic "didn't recognize an action" line below.
+  switch (classification.intentType) {
+    case 'confirm':
+      return "It sounds like you were confirming something, but recorded memos don't have a pending question — say the full action instead.";
+    case 'language_switch':
+      return 'Language preferences apply to live calls — this memo was processed as recorded.';
+    case 'operator_request':
+      return "Talking to a person isn't available from a recorded memo — call the office line instead.";
+    default:
+      break;
+  }
   switch (classification.unknownReason) {
     case 'low_confidence':
       return classification.lowConfidenceIntent
@@ -820,6 +894,14 @@ async function emitClarification(
      * must not collide on one key.
      */
     idempotencyKey?: string;
+    /**
+     * U9 — voicemail-sourced transcripts. Clarifications persist HERE
+     * (not through processSegment's proposal return), so the untrusted-
+     * source stamp must be applied here too — otherwise a voicemail
+     * clarification (and any redraft that copies its sourceContext, e.g.
+     * proposals/resolve-entity.ts) loses the 'voicemail' marker.
+     */
+    sourceChannel?: 'voicemail';
     /**
      * P8 — set when the intent classified fine but an entity reference
      * matched several records ("three Bobs"). The clarification carries
@@ -994,10 +1076,15 @@ async function emitClarification(
     // `expired`.
   });
 
-  await createDeduped(deps.proposalRepo, proposal, recordingId, log);
+  // U9 — voicemail clarifications carry the untrusted-source marker on
+  // sourceContext, same as every other voicemail-sourced proposal (a
+  // clarification is already 'draft', so the stamp is the only effect).
+  const stamped = holdIfUntrustedSource(proposal, input.sourceChannel);
+
+  await createDeduped(deps.proposalRepo, stamped, recordingId, log);
 
   log.info('voice-action-router: clarification proposal emitted', {
-    proposalId: proposal.id,
+    proposalId: stamped.id,
     reason,
     confidence: classification.confidence,
     lowConfidenceIntent: classification.lowConfidenceIntent,
@@ -1024,8 +1111,10 @@ interface SegmentParams {
    * intent via `selectApplicableInstructions` (≤5) before drafting.
    */
   activeStandingInstructions?: StandingInstruction[];
-  /** Phase-2 Track A — tenant opted in to the extended operator intents. */
+  /** Phase-2 Track A — tenant opted in to owner extended READ-ONLY lookups. */
   extendedIntents?: boolean;
+  /** Customer protection (complaint/negotiation) — always on for live voice. */
+  customerProtectionIntents?: boolean;
   /**
    * When true (single-action path only), thread `recordingId` into the task
    * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
@@ -1034,6 +1123,8 @@ interface SegmentParams {
    * must not collide on these per-recording keys.
    */
   applyDedup?: boolean;
+  /** U9 — see VoiceActionRouterPayload.sourceChannel. */
+  sourceChannel?: 'voicemail';
 }
 
 type SegmentOutcome =
@@ -1093,9 +1184,11 @@ async function processSegment(
     {
       tenantId,
       ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
-      // Phase-2 Track A — opt-in only: leaves the classifier prompt
-      // byte-identical for tenants without the flag (cassette hashes).
+      // Owner extended lookups — opt-in only (cassette stability).
       ...(params.extendedIntents ? { extendedIntents: true } : {}),
+      // Customer protection — on when the surface opted in (live telephony
+      // / operator router always pass true).
+      ...(params.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
     },
     deps.gateway,
   );
@@ -1117,6 +1210,7 @@ async function processSegment(
         classification,
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         // Single-action only: dedup a redelivered clarification atomically.
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
@@ -1127,20 +1221,16 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
-  // Phase-2 Track A — belt-and-braces gate: extended intents (complaint,
-  // lookup_day_overview, lookup_digest, lookup_pending_items) are ONLY
-  // actionable when the calling surface opted in via extendedIntentsEnabled.
-  // The classifier prompt gate (appending EXTENDED_INTENTS_PROMPT_SECTION
-  // only when opted in) is the primary defence; this re-check is the
-  // backstop against LLM hallucination on a non-opted surface. Route to
-  // the clarification path (same as 'unknown') rather than silently
-  // skipping, so the caller gets an auditable response.
-  // Must run BEFORE the isLookupIntent check so that hallucinated
-  // lookup_day_overview / lookup_digest / lookup_pending_items on a
-  // non-opted surface produce an auditable clarification rather than a
-  // silent skip.
-  if (isExtendedIntent(classification.intentType) && !params.extendedIntents) {
-    log.warn('voice-action-router: extended intent refused — surface not opted in', {
+  // Belt-and-braces gates (split customer protection vs owner lookups):
+  //  - complaint/negotiation: require customerProtectionIntents OR extendedIntents
+  //  - owner lookups: require extendedIntents
+  // Primary defence is the classifier prompt sections; this is the backstop
+  // against LLM hallucination. Must run BEFORE isLookupIntent so refused
+  // owner lookups clarify instead of silent-skip.
+  const protectionOk =
+    params.customerProtectionIntents === true || params.extendedIntents === true;
+  if (isCustomerProtectionIntent(classification.intentType) && !protectionOk) {
+    log.warn('voice-action-router: customer protection intent refused — surface not opted in', {
       intent: classification.intentType,
     });
     await emitClarification(
@@ -1152,6 +1242,28 @@ async function processSegment(
         classification: { ...classification, intentType: 'unknown' as IntentType },
         conversationId,
         recordingId,
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+  if (isOwnerExtendedLookupIntent(classification.intentType) && !params.extendedIntents) {
+    log.warn('voice-action-router: owner extended lookup refused — surface not opted in', {
+      intent: classification.intentType,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification: { ...classification, intentType: 'unknown' as IntentType },
+        conversationId,
+        recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
           : {}),
@@ -1207,6 +1319,7 @@ async function processSegment(
           classification,
           conversationId,
           recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
           entityAmbiguity: {
             entityKind: lookupAnnotation.entityKind,
             reference: lookupAnnotation.reference,
@@ -1231,17 +1344,25 @@ async function processSegment(
       : undefined;
 
     // The memo creator (voice_recordings.created_by) is the authoritative
-    // identity for the owner-grade authorization gate — the enqueue
-    // payload's userId can be 'system' on this path. Resolved only for
-    // owner-grade intents; a read failure falls through to the adapter's
-    // fail-closed refusal.
+    // identity for the permission-gated authorization gate — the enqueue
+    // payload's userId can be 'system' on this path. Resolved for
+    // permission-gated intents AND for `lookup_my_day` (Task 10): that
+    // intent carries no permission, but it still needs the memo creator's
+    // identity to resolve the SPEAKER to a technician — self-scoping is
+    // its entire access-control story (workers/voice-lookup-answer.ts's
+    // `lookup_my_day` case fails the turn when this is absent, rather than
+    // ever falling back to an unscoped answer). A read failure falls
+    // through to the adapter's fail-closed refusal either way.
     let memoCreatorId: string | undefined;
-    if (OWNER_GRADE_LOOKUP_INTENTS.has(classification.intentType)) {
+    if (
+      LOOKUP_REQUIRED_PERMISSION.has(classification.intentType) ||
+      classification.intentType === 'lookup_my_day'
+    ) {
       try {
         const recording = await deps.voiceRepo.findById(tenantId, recordingId);
         memoCreatorId = recording?.createdBy;
       } catch (err) {
-        log.warn('voice-action-router: memo creator lookup failed — owner-grade ask will refuse', {
+        log.warn('voice-action-router: memo creator lookup failed — permission-gated ask will refuse', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -1267,6 +1388,18 @@ async function processSegment(
         ...(classification.extractedEntities?.jobReference
           ? { jobReference: classification.extractedEntities.jobReference }
           : {}),
+        // Task 10 — the resolver-verified crew-member id (TECHNICIAN_REF_
+        // INTENTS membership, entity-resolution.ts) and the raw spoken
+        // reference/day phrase, for lookup_crew_schedule/lookup_timesheets.
+        ...(lookupAnnotation.resolved.technicianId
+          ? { technicianId: lookupAnnotation.resolved.technicianId }
+          : {}),
+        ...(classification.extractedEntities?.targetTechnicianName
+          ? { technicianReference: classification.extractedEntities.targetTechnicianName }
+          : {}),
+        ...(classification.extractedEntities?.dateTimeDescription
+          ? { dateTimeDescription: classification.extractedEntities.dateTimeDescription }
+          : {}),
         ...(lookupScheduling?.timezone ? { timezone: lookupScheduling.timezone } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
@@ -1277,6 +1410,10 @@ async function processSegment(
         customerRepo: deps.customerRepo,
         proposalRepo: deps.proposalRepo,
         availabilityFinder: deps.availabilityFinder,
+        // Task 10 — crew roster / technician names / speaker resolution
+        // (lookup_crew_schedule, lookup_timesheets, lookup_my_day). Already
+        // carried by this worker for en_route's speaker resolution below.
+        userRepo: deps.userRepo,
       },
     );
 
@@ -1302,6 +1439,83 @@ async function processSegment(
       classification,
       answerStatus: 'answered',
       answer: execution.answer,
+    };
+  }
+
+  // B5.5 / Part F decision F-3 — `en_route` ("on my way") is a technician
+  // acting directly, not an AI proposal: it is deliberately NOT in
+  // INTENT_TO_PROPOSAL_TYPE (registered instead in the documented
+  // non-proposal set, proposals/voice-intent-map.ts, the same way lookup_*
+  // is). Resolve → fire the SAME audited direct status act the app button
+  // uses, or answer honestly (ambiguous → clarification; nothing upcoming →
+  // an explicit "no upcoming appointment" answer, never silent). Handled
+  // here, before the generic proposalType lookup below, for the same reason
+  // isLookupIntent is: there is no proposal type to look up.
+  if (classification.intentType === 'en_route') {
+    const enRoute = await handleEnRouteVoiceIntent(
+      {
+        userRepo: deps.userRepo,
+        voiceRepo: deps.voiceRepo,
+        assignmentRepo: deps.assignmentRepo,
+        appointmentRepo: deps.appointmentRepo,
+        jobRepo: deps.jobRepo,
+        // "on my way to the Garcia job" names the CUSTOMER, not the work —
+        // without this the reference is matched against jobs.summary alone
+        // and a normal job ("AC repair") for Garcia answers "no upcoming
+        // appointment". Already in scope for the telephony FSM (app.ts).
+        customerRepo: deps.customerRepo,
+        enRouteCoordinator: deps.enRouteCoordinator,
+        auditRepo: deps.auditRepo,
+        settingsRepo: deps.settingsRepo,
+        ...(deps.now ? { now: deps.now } : {}),
+      },
+      {
+        tenantId,
+        recordingId,
+        ...(classification.extractedEntities?.jobReference
+          ? { jobReference: classification.extractedEntities.jobReference }
+          : {}),
+      },
+    );
+
+    if (enRoute.kind === 'unavailable') {
+      log.info('voice-action-router: en_route intent — no answer surface on this path', {
+        intent: classification.intentType,
+      });
+      return { kind: 'skipped', classification };
+    }
+    if (enRoute.kind === 'ambiguous') {
+      await emitClarification(
+        deps,
+        {
+          tenantId,
+          userId,
+          transcript: segmentText,
+          classification,
+          conversationId,
+          recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
+          entityAmbiguity: {
+            entityKind: 'appointment',
+            reference: enRoute.reference,
+            candidates: enRoute.candidates,
+          },
+          ...(params.applyDedup && recordingId
+            ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+            : {}),
+        },
+        log,
+      );
+      return { kind: 'clarified', classification };
+    }
+    log.info('voice-action-router: en_route resolved on the memo path', {
+      result: enRoute.answer.result,
+    });
+    return {
+      kind: 'answered',
+      classification,
+      answerStatus: 'answered',
+      answer: enRoute.answer,
     };
   }
 
@@ -1344,6 +1558,57 @@ async function processSegment(
           ? handlers.get(proposalType)
           : undefined;
   if (!handler) {
+    // Task 13 (2026-08-07 tradesperson plan) — three real, understood
+    // intents have no recorded-memo action: `confirm` has no live pending
+    // question to confirm, `language_switch` has no live call to change
+    // language on, and `operator_request` has no live operator to transfer
+    // to. Route them through the SAME clarification path every other miss
+    // in this file uses, instead of the silent `{kind:'skipped'}` an
+    // operator could never see. Every OTHER unmapped intent keeps the
+    // warn+skip below — that branch protects future taxonomy growth (a
+    // new classifier intent shipped before its proposal mapping/handler is
+    // wired fails loud in logs, not silently in the operator's queue with
+    // a clarification nobody has decided how to phrase yet).
+    if (
+      classification.intentType === 'confirm' ||
+      classification.intentType === 'language_switch' ||
+      classification.intentType === 'operator_request'
+    ) {
+      await emitClarification(
+        deps,
+        {
+          tenantId,
+          userId,
+          transcript: segmentText,
+          classification,
+          conversationId,
+          recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
+          ...(params.applyDedup && recordingId
+            ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+            : {}),
+        },
+        log,
+      );
+      return { kind: 'clarified', classification };
+    }
+    // Invariant, verified during Task 13's review (2026-08-07 tradesperson
+    // plan): as of the current taxonomy, NO real IntentType member reaches
+    // this branch. A reviewer probed all 48 intents mapped in
+    // INTENT_TO_PROPOSAL_TYPE against `buildTaskHandlers` (every one
+    // resolves to a handler) plus all 30 unmapped intents (lookup_* by its
+    // startsWith prefix — 20 members, count-independent — plus en_route,
+    // complaint, negotiation, confirm, language_switch, operator_request,
+    // approve_proposal, reject_proposal, edit_proposal, and 'unknown' itself
+    // — every one of these 30 has a dedicated branch earlier in
+    // processSegment that returns before reaching here, INCLUDING 'unknown'
+    // (its own emitClarification call, before the belt-and-braces gates).
+    // So this line is dead in production today; it only fires for a FUTURE
+    // taxonomy bump that ships a new classifier intent before its proposal
+    // mapping/handler exists. The `vi.mock` in
+    // voice-action-router-silent-skip.test.ts that forces a fake
+    // 'future_unmapped_intent' to reach this branch is therefore deliberate
+    // (no real intent can be used to exercise it), not lazy.
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,
       proposalType,
@@ -1376,6 +1641,7 @@ async function processSegment(
         classification,
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         entityAmbiguity: {
           entityKind: annotation.entityKind,
           reference: annotation.reference,
@@ -1472,6 +1738,10 @@ async function processSegment(
     userId,
     message: segmentText,
     conversationId,
+    // Quality-review fix (2026-08-09, Task 11) — the raw classified intent,
+    // for handlers that alias multiple intents onto the same taskType (see
+    // TaskContext.intent's doc comment, ai/tasks/task-handlers.ts).
+    intent: classification.intentType,
     ...(standingInstructions ? { standingInstructions } : {}),
     ...(handler.taskType === 'draft_estimate' ? { clarificationCount } : {}),
     existingEntities: {
@@ -1493,7 +1763,13 @@ async function processSegment(
       // tenant ownership. Keep it last so no classifier/resolver value can win.
       ...(jobId ? { jobId } : {}),
     },
-    timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
+    // Pass the tenant's zone through ONLY when it actually resolved from
+    // tenant_settings. Defaulting to America/New_York here re-created the
+    // exact bug the scheduling handlers now gate on: an unresolved zone is
+    // indistinguishable from a real Eastern tenant once it's been filled in,
+    // so a Phoenix operator's bookings landed three hours early and
+    // auto-executed. Absent ⇒ the handler emits a clarification.
+    ...(scheduling?.timezone ? { timezone: scheduling.timezone } : {}),
     ...(scheduling?.businessHours !== undefined
       ? { businessHours: scheduling.businessHours }
       : {}),
@@ -1583,9 +1859,16 @@ async function processSegment(
   // to thread presence can't slip an auto-approved (→ auto-executing) proposal
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
+  //
+  // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
+  // proposal can never leave here 'approved', including through the
+  // autonomous-lane exception holdIfUnsupervised deliberately preserves.
   return {
     kind: 'proposal',
-    proposal: holdIfUnsupervised(annotated, supervisorPresent),
+    proposal: holdIfUntrustedSource(
+      holdIfUnsupervised(annotated, supervisorPresent),
+      params.sourceChannel,
+    ),
     classification,
     supervisorPresent,
   };
@@ -1611,6 +1894,47 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
     return proposal;
   }
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * U9 — voicemail (untrusted-source) chokepoint. Pure; a no-op when
+ * `sourceChannel` is unset (every legacy path).
+ *
+ * For voicemail-sourced transcripts it does two things:
+ *
+ *   1. Stamps `sourceContext.sourceChannel='voicemail'` on EVERY proposal
+ *      so the review surface (and tests) can trace the proposal to an
+ *      unauthenticated-caller recording. Untrusted provenance itself is
+ *      carried by the recording row (`source='inbound_call'`, reachable
+ *      via sourceContext.recordingId → classifyRecordingProvenance) —
+ *      this stamp is the proposal-side pointer, not a parallel trust bit.
+ *
+ *   2. Demotes any 'approved' status to 'ready_for_review'. Unlike
+ *      holdIfUnsupervised there is NO autonomous-lane exception and no
+ *      supervisor-presence bypass: the owner's caller-ID gated only
+ *      whether the router ran — it never elevates the transcript's trust
+ *      (RIVET I13; ratified U9 provenance decision). Injection-bearing
+ *      voicemail text therefore stays data: whatever it talks the drafting
+ *      LLM into, the result stays held un-executable in the review queue.
+ *      NOTE (runtime-verified): in today's direct voicemail flows nothing
+ *      upstream computes 'approved' — proposals arrive 'draft' — so this
+ *      demotion branch is defense-in-depth against a future handler or
+ *      trust-tier change, not the path that normally holds voicemail
+ *      proposals.
+ *
+ * Exported for the chokepoint tests.
+ */
+export function holdIfUntrustedSource(
+  proposal: Proposal,
+  sourceChannel: 'voicemail' | undefined,
+): Proposal {
+  if (!sourceChannel) return proposal;
+  const stamped: Proposal = {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), sourceChannel },
+  };
+  if (stamped.status !== 'approved') return stamped;
+  return { ...stamped, status: 'ready_for_review', approvedAt: undefined };
 }
 
 /**
@@ -1874,6 +2198,7 @@ export function createVoiceActionRouterWorker(
         recordingId,
         customerId,
         jobId,
+        sourceChannel,
       } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
@@ -2060,6 +2385,10 @@ export function createVoiceActionRouterWorker(
                 verticalPromptSection,
                 ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
                 ...(extendedIntents ? { extendedIntents: true } : {}),
+                // Operator voice memos: always enable protection intents so a
+                // dictated complaint/negotiation still reaches the guardrails.
+                customerProtectionIntents: true,
+                ...(sourceChannel ? { sourceChannel } : {}),
               },
               log,
             );
@@ -2094,6 +2423,8 @@ export function createVoiceActionRouterWorker(
             verticalPromptSection,
             ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
             ...(extendedIntents ? { extendedIntents: true } : {}),
+            customerProtectionIntents: true,
+            ...(sourceChannel ? { sourceChannel } : {}),
             // Single-action path: apply the per-recording dedup keys.
             applyDedup: true,
           },

@@ -29,6 +29,10 @@ describe('matchVoiceCommand — navigation intents route correctly', () => {
     ['add a new customer', '/customers/new'],
     ['create a new estimate', '/estimates/new'],
     ['add an estimate', '/estimates/new'],
+    // #881: exact phrase the Home "New invoice" quick action submits via ?q=
+    ['Create a new invoice', '/invoices/new'],
+    ['new invoice', '/invoices/new'],
+    ['add a bill', '/invoices/new'],
   ];
 
   it.each(createCases)('routes %j → %s', (transcript, route) => {
@@ -58,6 +62,7 @@ describe('matchVoiceCommand — dictation is NOT hijacked into navigation', () =
     'remind me to call about the estimate later',
     'note that the calendar invite was declined',
     'tell them the quote looks good',
+    'add a note about the invoice',
   ];
 
   it.each(passThrough)('does not match %j', (transcript) => {

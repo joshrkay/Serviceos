@@ -5,6 +5,7 @@ import {
   listUsers,
   updateUser,
   validateUpdateUserInput,
+  resolveCanonicalUser,
   User,
 } from '../../src/users/user';
 
@@ -130,5 +131,47 @@ describe('users — Tier 4 Team members (PR 1: read + role-edit primitives)', ()
       const list = await listUsers(TENANT, repo, { limit: 1000 });
       expect(list).toHaveLength(5);
     });
+  });
+});
+
+// (2026-08-09, Task 10 quality-review I7) — moved here from
+// dispatch/en-route-voice.ts (named `resolveCanonicalTechnician` there),
+// which had NO direct test — only indirect coverage via en_route's
+// integration tests. First direct coverage for the dual-check.
+describe('resolveCanonicalUser', () => {
+  let repo: InMemoryUserRepository;
+  beforeEach(() => {
+    repo = new InMemoryUserRepository();
+  });
+
+  it('matches on clerkUserId (the common case — voice_recordings.created_by / req.auth.userId)', async () => {
+    const created = await seedUser(repo, { clerkUserId: 'clerk_abc123' });
+    const found = await resolveCanonicalUser(repo, TENANT, 'clerk_abc123');
+    expect(found?.id).toBe(created.id);
+  });
+
+  it('falls back to matching on the canonical users.id', async () => {
+    const created = await seedUser(repo, { id: 'internal-id-1', clerkUserId: 'clerk_other' });
+    const found = await resolveCanonicalUser(repo, TENANT, 'internal-id-1');
+    expect(found?.id).toBe('internal-id-1');
+  });
+
+  it('returns null when nothing matches', async () => {
+    await seedUser(repo, { clerkUserId: 'clerk_someone' });
+    const found = await resolveCanonicalUser(repo, TENANT, 'clerk_nobody');
+    expect(found).toBeNull();
+  });
+
+  it('does NOT filter by role — any tenant user matches, technician or not', async () => {
+    const owner = await seedUser(repo, { clerkUserId: 'clerk_owner', role: 'owner' });
+    const found = await resolveCanonicalUser(repo, TENANT, 'clerk_owner');
+    expect(found?.id).toBe(owner.id);
+    expect(found?.role).toBe('owner');
+  });
+
+  it('is tenant-scoped — a matching clerkUserId in a different tenant never resolves', async () => {
+    await seedUser(repo, { tenantId: 'tenant-other', clerkUserId: 'clerk_cross_tenant' });
+    const found = await resolveCanonicalUser(repo, TENANT, 'clerk_cross_tenant');
+    expect(found).toBeNull();
   });
 });

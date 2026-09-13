@@ -7,7 +7,7 @@ import {
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
   ExternalLink, Lock, Building2, Smartphone, Briefcase,
 } from 'lucide-react';
-import type { InvoiceResponse, LineItem as InvoiceLineItem } from '@ai-service-os/shared';
+import type { InvoiceResponse, LineItem as InvoiceLineItem, CatalogUnitValue } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -49,7 +49,7 @@ interface ApiLead {
 }
 
 /** Convert a shared line item to the UI LineItem shape */
-function apiLineToUi(item: InvoiceLineItem): LineItem {
+export function apiLineToUi(item: InvoiceLineItem): LineItem {
   return {
     id: item.id,
     description: item.description,
@@ -59,6 +59,12 @@ function apiLineToUi(item: InvoiceLineItem): LineItem {
     // Persisted rows arrive as `category: null`; normalize to undefined so a
     // round-trip PUT never sends null at a `.optional()` (non-nullable) field.
     category: item.category ?? undefined,
+    // B7.5 — descriptive unit of measure. MUST be carried into the editor
+    // model: PgInvoiceRepository.update DELETEs every invoice_line_items row
+    // and re-INSERTs the payload, so any field the editor drops is written
+    // back as NULL — even for lines the operator never touched. Purely
+    // descriptive; no money math reads it (totals stay qty × rate in cents).
+    unit: item.unit ?? undefined,
   };
 }
 
@@ -68,7 +74,7 @@ function makeLineId(): string {
 }
 
 /** Convert a UI LineItem back to a shared line item for saving. */
-function uiLineToApi(item: LineItem, sortOrder: number): InvoiceLineItem {
+export function uiLineToApi(item: LineItem, sortOrder: number): InvoiceLineItem {
   return {
     id: item.id ?? makeLineId(),
     description: item.description,
@@ -78,6 +84,10 @@ function uiLineToApi(item: LineItem, sortOrder: number): InvoiceLineItem {
     totalCents: Math.round(item.qty * item.rate * 100),
     sortOrder,
     taxable: item.taxable ?? false,
+    // B7.5 — echo the descriptive unit back so a save of ANY line does not
+    // NULL it out on the untouched ones (the repo replaces all rows). Omitted
+    // rather than sent as null when absent, matching the `category` treatment.
+    ...(item.unit ? { unit: item.unit } : {}),
   };
 }
 
@@ -107,6 +117,8 @@ type LineItem = {
   rate: number;
   taxable?: boolean;
   category?: 'labor' | 'material' | 'equipment' | 'other';
+  /** B7.5 — descriptive unit of measure; never read by money math. */
+  unit?: CatalogUnitValue;
 };
 
 // ─── Payment Journey Timeline ─────────────────────────────────────────────
@@ -317,7 +329,24 @@ function InvoiceLineItems({ items, editable, onChange }: {
             ) : (
               <>
                 <p className="text-sm text-foreground truncate">{item.description}</p>
-                <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                {/* B7.5 (operator side) — the descriptive unit sits UNDER the
+                    quantity as a block child of the SAME fixed Qty track, not
+                    a new column, so it can only add height, never width: it
+                    wraps (break-words) inside the existing cell. Mirrors the
+                    customer-facing fix on InvoicePaymentPage — the operator
+                    who spoke "three hours of labor" should see the same unit
+                    their customer sees. */}
+                <p className="text-sm text-muted-foreground text-right">
+                  {item.qty}
+                  {item.unit && (
+                    <span
+                      data-testid={`line-item-unit-${i}`}
+                      className="block min-w-0 break-words text-[10px] leading-tight text-muted-foreground"
+                    >
+                      {item.unit}
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-muted-foreground text-right">${formatDollars(item.rate)}</p>
                 <p className="text-sm text-foreground text-right">${formatDollars(item.qty * item.rate)}</p>
               </>
@@ -373,9 +402,9 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   /** The invoice's real Stripe payment link, when one exists. */
   paymentLink?: string;
   onClose: () => void; onSent: () => void;
-  /** When set, the sheet calls the real /api/invoices/:id/send endpoint
+  /** The invoice's API id — the sheet posts to /api/invoices/:id/send
    *  (and /:id/issue first, when the invoice is still a draft). */
-  apiId?: string;
+  apiId: string;
 }) {
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
   const [recipient, setRecipient] = useState<string>('');
@@ -396,7 +425,7 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   type SendResp = { viewUrl: string; viewToken: string };
   const { mutate: sendInvoice } = useMutation<SendBody, SendResp>(
     'POST',
-    apiId ? `/api/invoices/${apiId}/send` : '/api/invoices/_/send'
+    `/api/invoices/${apiId}/send`
   );
   // A still-draft invoice has no due date and can't produce a working
   // payment link — POST /:id/send now rejects it outright with a clear
@@ -409,27 +438,23 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   // reach.
   const { mutate: issueInvoice } = useMutation<Record<string, never>, unknown>(
     'POST',
-    apiId ? `/api/invoices/${apiId}/issue` : '/api/invoices/_/issue'
+    `/api/invoices/${apiId}/issue`
   );
 
   async function handleSend() {
     setSending(true);
     setSendError(null);
     try {
-      if (apiId) {
-        if (inv.status === 'Draft') {
-          await issueInvoice({});
-        }
-        const result = await sendInvoice({
-          channel,
-          recipientPhone: channel === 'sms' ? recipient : undefined,
-          recipientEmail: channel === 'email' ? recipient : undefined,
-          customMessage: msg,
-        });
-        if (result?.viewUrl) setSentUrl(result.viewUrl);
-      } else {
-        await new Promise((r) => setTimeout(r, 1200));
+      if (inv.status === 'Draft') {
+        await issueInvoice({});
       }
+      const result = await sendInvoice({
+        channel,
+        recipientPhone: channel === 'sms' ? recipient : undefined,
+        recipientEmail: channel === 'email' ? recipient : undefined,
+        customMessage: msg,
+      });
+      if (result?.viewUrl) setSentUrl(result.viewUrl);
       setSending(false);
       setSent(true);
       setTimeout(() => { onSent(); onClose(); }, 1200);
@@ -1039,7 +1064,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           inv={invCompat}
           amountDueCents={amountDueCents}
           paymentLink={paymentLink}
-          apiId={inv?.id}
+          apiId={inv.id}
           onClose={() => setSendOpen(false)}
           // Refetch so a draft invoice's now-issued status (and the
           // "Payment journey" it drives) is reflected immediately, without

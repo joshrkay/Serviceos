@@ -144,13 +144,13 @@ describe('AIApprovalRulesSheet', () => {
     render(<AIApprovalRulesSheet onClose={() => {}} />);
 
     const toggle = await screen.findByRole('switch', {
-      name: /Autonomous booking \(no supervisor\)/i,
+      name: /Confirm appointments on the call/i,
     });
     expect(toggle.getAttribute('aria-checked')).toBe('false');
     // ≥44px tap target (mobile UI rule) — class contract.
     expect(toggle.className).toContain('min-h-11');
     expect(
-      screen.getByText(/confirm instantly with no one watching/i),
+      screen.getByText(/confirm a high-confidence appointment while the/i),
     ).toBeTruthy();
     expect(screen.getByText(/one-tap UNDO/i)).toBeTruthy();
     // Threshold input only appears once the lane is enabled.
@@ -164,7 +164,7 @@ describe('AIApprovalRulesSheet', () => {
     render(<AIApprovalRulesSheet onClose={() => {}} />);
 
     const toggle = await screen.findByRole('switch', {
-      name: /Autonomous booking \(no supervisor\)/i,
+      name: /Confirm appointments on the call/i,
     });
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     const input = (await screen.findByLabelText(/Confidence threshold/i)) as HTMLInputElement;
@@ -178,7 +178,7 @@ describe('AIApprovalRulesSheet', () => {
     render(<AIApprovalRulesSheet onClose={onClose} />);
 
     const toggle = await screen.findByRole('switch', {
-      name: /Autonomous booking \(no supervisor\)/i,
+      name: /Confirm appointments on the call/i,
     });
     fireEvent.click(toggle);
     const input = (await screen.findByLabelText(/Confidence threshold/i)) as HTMLInputElement;
@@ -199,7 +199,7 @@ describe('AIApprovalRulesSheet', () => {
     render(<AIApprovalRulesSheet onClose={() => {}} />);
 
     const toggle = await screen.findByRole('switch', {
-      name: /Autonomous booking \(no supervisor\)/i,
+      name: /Confirm appointments on the call/i,
     });
     fireEvent.click(toggle);
     const input = (await screen.findByLabelText(/Confidence threshold/i)) as HTMLInputElement;

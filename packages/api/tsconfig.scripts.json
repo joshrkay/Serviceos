@@ -1,0 +1,40 @@
+{
+  // Review follow-up N6 (2026-08-09) — nothing in CI typechecked `scripts/`.
+  //
+  // `tsconfig.lint.json` is `include: ["src/**/*"], exclude: ["test/**/*"]`
+  // and `tsconfig.build.json` is src-only, so every operational script was
+  // covered by NO gate, and no CI job runs one. That is exactly how
+  // `scripts/seed-voice-quality-cassettes.ts` came to fail its `ts-node`
+  // typecheck: `test/voice-quality/voice-quality-driver-factory.ts`'s
+  // hand-rolled `SettingsRepository` stub went stale when the interface grew
+  // a method, and vitest's esbuild transform does not typecheck, so nothing
+  // caught it until someone ran the script by hand.
+  //
+  // Scope, deliberately narrow: the `scripts/` tree plus the ONE test-tree
+  // helper a script imports. The rest of `test/**` is not included — it is
+  // large, already exercised by vitest, and pulling it in here would turn a
+  // fast, targeted gate into a second full typecheck.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "types": ["vitest/globals", "node"]
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "test/voice-quality/voice-quality-driver-factory.ts"
+  ],
+  "exclude": [
+    // The ONE pre-existing failure this gate surfaced, scoped out rather
+    // than allowed to sink the whole check:
+    //   scripts/voice-load-selfcheck.ts(38,34): error TS1343: The
+    //   'import.meta' meta-property is only allowed when the '--module'
+    //   option is 'es2020' | ... | 'nodenext'.
+    // It is an ESM-shaped script run under `tsx` (`npm run
+    // voice-load:selfcheck`), so it is genuinely incompatible with this
+    // package's commonjs `module` setting — not a type error in its logic.
+    // Typechecking it needs its own ESM tsconfig; that is a separate change,
+    // and blocking this gate on it would mean shipping no gate at all.
+    "scripts/voice-load-selfcheck.ts"
+  ]
+}

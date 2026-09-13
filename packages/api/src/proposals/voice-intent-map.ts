@@ -36,7 +36,11 @@
  * so the caller-reachable proposal set is byte-identical — what changes is that
  * the block is now recorded honestly as `voice.surface_violation_blocked` with
  * the real `requestedProposalType`, instead of masquerading as a contract
- * failure on a `voice_clarification` nobody asked for.
+ * failure on a `voice_clarification` nobody asked for. (#887/#902: on live
+ * caller paths most off-surface intents are now intercepted one layer earlier,
+ * at classification, and audited as `voice.intent_off_surface` — this
+ * proposal-gate event still fires for whatever reaches minting, e.g. the
+ * guard-exempt intents.)
  *
  * The allowlist — not this map — is therefore the security boundary. Adding an
  * intent here can never make a proposal type reachable from an unauthenticated
@@ -50,6 +54,75 @@ import type { ProposalType } from './proposal';
  * Twilio adapter routes them to the lookup-skill family directly. They are
  * omitted from this map on purpose; every consumer falls back to
  * `voice_clarification` for any IntentType not present here.
+ *
+ * B5.5 / Part F decision F-3: `en_route` ("on my way") is ALSO deliberately
+ * omitted, for a different reason than lookup_* — it isn't read-only, it's a
+ * DIRECT status act. "On my way" on any surface invokes the exact same
+ * audited act the shipped app en-route button already executes
+ * (dispatch/routes.ts `triggerEnRoute` → `appointment.en_route_triggered`
+ * audit + branded ETA SMS) rather than drafting an AI proposal for a human
+ * to approve — the technician IS the human acting, the precedent PRD B10.10
+ * already blesses. The shared core is
+ * dispatch/en-route-voice.ts#handleEnRouteForTechnician; its callers (#847)
+ * are workers/voice-action-router.ts (the recorded-memo `en_route` branch,
+ * handled before the proposalType lookup below, via the
+ * handleEnRouteVoiceIntent wrapper), ai/voice-turn/phone-en-route-surface.ts
+ * (BOTH live phone transports: the Gather branch in
+ * telephony/twilio-adapter.ts and media-streams finals via speechTurn in
+ * create-voice-turn-processor.ts), routes/assistant.ts (the chat branch,
+ * before the unmapped-capability refusal), and
+ * ai/voice-turn/inapp-en-route-surface.ts (in-app voice, called from
+ * `InAppVoiceAdapter.handleAdapterAct` before the FSM — SCH-D4; until it
+ * landed, in-app was the one live surface with no branch and produced
+ * exactly the dead clarification card this comment predicts). The SMS OMW
+ * keyword
+ * (sms/tech-status/en-route-keyword.ts) fires the SAME audited
+ * `triggerEnRoute` act but predates the core and still resolves inline —
+ * folding it in is a filed follow-up, so don't read it as a caller here.
+ * Registered
+ * here, next to lookup_*, so the drift test
+ * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
+ * see this as an intentional exclusion, not a gap.
+ *
+ * Task 13 (2026-08-07 tradesperson plan): `confirm`, `language_switch`, and
+ * `operator_request` are a THIRD kind of deliberate omission, distinct from
+ * both of the above — they are real, understood intents (never absorbed
+ * into 'unknown'; see intent-classifier.ts's low_confidence/unknown_intent
+ * guards) that simply have no recorded-memo action: a memo has no live
+ * pending question to confirm (`confirm`), no live call whose language can
+ * be switched (`language_switch`), and no live operator to transfer to
+ * (`operator_request`). On the memo path (workers/voice-action-router.ts)
+ * the miss on this map is caught by a dedicated branch, just above the
+ * generic warn+skip, that emits a `voice_clarification` explaining why —
+ * not the same silent skip that branch protects against.
+ *
+ * On a live call all three DO have a real target (the in-progress dialogue,
+ * the live call's language, the on-call human), so every live surface must
+ * intercept them BEFORE reaching this map's lookup — an intent that falls
+ * through here silently becomes a clarification card. Who intercepts what:
+ *
+ *   - `operator_request` — FSM global guard (customer-calling/transitions.ts
+ *     checkGlobalGuards) → escalating. All live surfaces.
+ *   - `confirm` — the approval/readback dialogues consume their turns before
+ *     classification; a bare confirm with nothing pending, in EITHER state
+ *     the adapters classify in (intent_capture or closing), is answered by
+ *     the FSM's spoken re-prompt guard (#846 + D-027,
+ *     CONFIRM_NOTHING_PENDING_LINE), never a clarification card.
+ *   - `language_switch` — per-transport adapter branches (the FSM is pure
+ *     and cannot mutate session.language): media-streams'
+ *     `switchLanguage`/pre-scan, the Gather adapter's
+ *     `handleLanguageSwitchGather` (#846 — before it, this one was real: the
+ *     Gather production path had NO branch and degraded to a clarification),
+ *     and the in-app adapter's `switchSessionLanguage`. In-app was the LAST
+ *     live surface missing a branch, and it degraded exactly as predicted
+ *     here — see `handleAdapterAct` in `inapp-adapter.ts` for the live
+ *     evidence (sweep rows C03/C05/C07) and the same-shaped out-of-FSM
+ *     routing it now uses for approve/reject/edit_proposal.
+ *   - The eval harness (`text-mode-driver.ts` `evaluateTurn`) additionally
+ *     intercepts `confirm`/`language_switch` → `{kind:'noop'}` and
+ *     `operator_request` → `{kind:'escalate'}` before dispatching through
+ *     `createVoiceActionRouterWorker`, which is why the harness never
+ *     double-emits against the memo-path branch above.
  */
 export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
@@ -90,6 +163,67 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   create_invoice_schedule: 'create_invoice_schedule',
   respond_to_review: 'review_response_proposal',
   create_standing_instruction: 'create_standing_instruction',
+  // B1.18 — brand voice captured by voice. `manual` action class (never
+  // auto-approves at any trust tier — proposals/proposal.ts). Lock stays
+  // tap-only: the payload has no field capable of expressing
+  // `brand_voice_locked` (see contracts/brand-voice.ts).
+  update_brand_voice: 'update_brand_voice',
+  // Tradesperson wave 1 — alias intents onto existing proposal types.
+  // Drafting + execution handlers are keyed by PROPOSAL type, so these
+  // inherit the create_appointment / add_note / create_job legs unchanged.
+  schedule_inspection: 'create_appointment',
+  log_permit: 'add_note',
+  log_warranty_claim: 'create_job',
+  // Tradesperson wave 1, Task 2 — WS20 type + handler pre-exist; this adds
+  // the voice on-ramp. NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  update_catalog_item: 'update_catalog_item',
+  // Tradesperson wave 1, Task 3 — record_refund is a NEW money-class
+  // proposal type (manual cash/check/external refunds only). NOT
+  // S1-allowed (operator-only): see proposals/surface.ts
+  // S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  record_refund: 'record_refund',
+  // Tradesperson wave 1, Task 4 — apply_credit is a NEW money-class
+  // proposal type: reduces what a customer owes on an issued invoice
+  // (goodwill, warranty labor, price match). NOT S1-allowed (operator-only):
+  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  apply_credit: 'apply_credit',
+  // Tradesperson wave 1, Task 5 — send_customer_message is a NEW comms-class
+  // proposal type: a free-form outbound customer message. NOT S1-allowed
+  // (operator-only): see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and
+  // its contract test.
+  send_customer_message: 'send_customer_message',
+  // Tradesperson wave 1, Task 6 — create_change_order is a NEW capture-class
+  // proposal type: mints a NEW estimate pinned to an EXISTING job, flagged
+  // isChangeOrder (migration 271). NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  create_change_order: 'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement is a
+  // NEW capture-class proposal type: signs a customer up to a recurring
+  // maintenance plan/membership. NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  create_service_agreement: 'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material is a NEW
+  // capture-class proposal type: adds a row to the voice-captured shopping
+  // list (material_items, migration 272, Task 8's substrate). NOT
+  // S1-allowed (operator-only): see proposals/surface.ts
+  // S1_ALLOWED_PROPOSAL_TYPES and its contract test. `lookup_materials` is
+  // deliberately OMITTED from this map — like every other lookup_*
+  // intent, it is read-only and never produces a proposal.
+  add_material: 'add_material',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // the EXISTING log_expense proposal type: no new ProposalType, no new
+  // execution handler, no migration. Drafting + execution are keyed by
+  // PROPOSAL type, so this inherits the log_expense leg unchanged; only
+  // LogExpenseTaskHandler's own drafting branches on the intent-specific
+  // `mileageMiles` extracted-entity field (ai/tasks/voice-extended-tasks.ts).
+  log_mileage: 'log_expense',
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+  // capture-class proposal type: an owner adds a price-book entry by
+  // voice. NOT S1-allowed (operator-only), same as update_catalog_item:
+  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract
+  // test.
+  add_catalog_item: 'add_catalog_item',
 };
 
 /**
@@ -135,6 +269,49 @@ export function voiceProposalSummary(
   if (intent === 'draft_estimate') return `Draft estimate${name ? ` for ${name}` : ''}`;
   if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
   if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
+  if (intent === 'update_brand_voice') return 'Update brand voice';
+  // Quality-review fix (2026-08-08) — Tradesperson wave 1 alias intents were
+  // falling through to the generic `Voice intent: ${intent}` fallback below,
+  // since both call sites (inapp-adapter.ts, create-voice-turn-processor.ts)
+  // pass the raw CLASSIFIER intent, not the mapped proposal type. For
+  // schedule_inspection this isn't just a cosmetic miss: it aliases
+  // create_appointment, whose execution handler falls back to
+  // `proposal.summary` to name an auto-opened job when the classifier
+  // emitted no jobTitle — so a phone caller booking an inspection with no
+  // explicit jobTitle got a job literally named "Voice intent:
+  // schedule_inspection", the exact historical bug this function exists to
+  // prevent for plain create_appointment (see the module doc comment above).
+  if (intent === 'schedule_inspection') return `Schedule inspection${name ? ` for ${name}` : ''}`;
+  if (intent === 'log_permit') return `Log permit${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  if (intent === 'log_warranty_claim') return `Log warranty claim${name ? ` for ${name}` : ''}`;
+  if (intent === 'record_refund') return `Record refund${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
+  if (intent === 'apply_credit') return `Apply credit${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
+  // Tradesperson wave 1, Task 5 — "Message <customer>" mirrors the shape
+  // every other named-recipient summary above uses (Record refund for
+  // <name>, Apply credit for <name>).
+  if (intent === 'send_customer_message') return `Message${name ? ` ${name}` : ''}`;
+  // Tradesperson wave 1, Task 6 — job-scoped, mirrors log_permit's shape
+  // (job reference takes precedence over a bare customer name, since a
+  // change order is meaningless without its job).
+  if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 7 — mirrors apply_credit's shape (named-recipient summary).
+  if (intent === 'create_service_agreement') return `Service agreement${name ? ` for ${name}` : ''}`;
+  // Task 9 — job-scoped, mirrors create_change_order's precedence rule
+  // (job reference takes precedence over a bare customer name — a
+  // shopping-list item is usually about the job, not the customer).
+  if (intent === 'add_material') return `Add material${ref ? ` for ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 11 — mirrors log_permit's preposition convention ("on" for a job,
+  // "for" for a bare customer name) rather than add_material's uniform
+  // "for" — both log_mileage and log_permit are "Log <noun>" intents.
+  if (intent === 'log_mileage') return `Log mileage${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 12 — the new catalog item's own name (catalogItemNewName), not
+  // entities.customerName/jobReference — a price-book entry names an
+  // item, not a customer or a job.
+  if (intent === 'add_catalog_item') {
+    const itemName =
+      entities && typeof entities.catalogItemNewName === 'string' ? entities.catalogItemNewName : undefined;
+    return `Add catalog item${itemName ? `: ${itemName}` : ''}`;
+  }
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

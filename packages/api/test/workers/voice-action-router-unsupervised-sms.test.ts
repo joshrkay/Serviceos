@@ -96,6 +96,9 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
   it('queue_and_sms: sends the owner a one-tap approve SMS and audits the routing', async () => {
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {
@@ -158,6 +161,9 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
 
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {
@@ -185,6 +191,9 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
   it('queue_only: no SMS is sent, routing decision is still audited', async () => {
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {
@@ -212,6 +221,9 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
     setSupervisorPresenceLoader(async () => true);
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {

@@ -88,6 +88,46 @@ describe('N-011 — BrandVoiceSheet', () => {
     expect(formal.className).toContain('min-h-11');
   });
 
+  // B1.18 AC-5 — the sheet has no notion of "how" the current version was
+  // created (form save vs. an approved voice proposal executing through
+  // UpdateBrandVoiceExecutionHandler): both write the SAME
+  // GET /api/settings/brand-voice-shaped state through
+  // updateBrandVoice, so a voice-created version renders identically to a
+  // form-created one — same version badge, same read-only six fields, no
+  // distinguishing "via voice" chrome anywhere in the component.
+  it('AC-5: a voice-created version renders identically to a form-created one', async () => {
+    // Shape of the state GET /api/settings/brand-voice would return right
+    // after a voice-approved "Set my brand voice: friendly, plain-spoken,
+    // no slang, always sign off 'Thanks — Bob's HVAC'" proposal executed.
+    const voiceCreatedState = state({
+      register: 'friendly',
+      opening_lines: [],
+      signoff: "Thanks — Bob's HVAC",
+      banned_phrases: [],
+      persona_name: undefined,
+      pronoun: 'we',
+      version: 3,
+      locked: true,
+      updated_at: '2026-07-29T12:00:00.000Z',
+      cooldown_until: null,
+    });
+    render(<BrandVoiceSheet onClose={() => {}} api={mockApi({ fetch: vi.fn().mockResolvedValue(voiceCreatedState) })} />);
+
+    // Same read-only surface + version badge as the form-created case.
+    expect(await screen.findByTestId('brand-voice-version-badge')).toHaveTextContent('v3');
+    expect(screen.getByRole('button', { name: /edit brand voice/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^save$/i })).not.toBeInTheDocument();
+
+    // The sign-off the voice proposal wrote renders in the (read-only) field.
+    fireEvent.click(screen.getByRole('button', { name: /edit brand voice/i }));
+    expect(screen.getByLabelText(/sign-off/i)).toHaveValue("Thanks — Bob's HVAC");
+    expect(screen.getByRole('button', { name: /friendly/i })).toHaveAttribute('aria-pressed', 'true');
+
+    // No source-specific badge, label, or chrome exists anywhere in the
+    // component — searching for any "voice" text finds nothing.
+    expect(screen.queryByText(/voice.created|via voice|from a call/i)).not.toBeInTheDocument();
+  });
+
   it('cooldownMinutesRemaining rounds up and clamps at zero', () => {
     const base = Date.parse('2026-07-10T12:00:00.000Z');
     expect(cooldownMinutesRemaining('2026-07-10T12:14:00.000Z', base)).toBe(14);

@@ -11,6 +11,7 @@ import {
 import { apiFetch } from '../../utils/api-fetch';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useEstimateTerm } from '../../hooks/useEstimateTerm';
+import { ErrorState } from '../ErrorState';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -731,15 +732,21 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
   // page size (500, matching the CSV import cap) so larger Price Books are
   // fully reachable here. The shared editor's CatalogPicker pages smaller
   // because it has server-side search.
-  const { data: apiCatalog, isLoading: catalogLoading } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 500 });
+  const { data: apiCatalog, isLoading: catalogLoading, error: catalogError, refetch: refetchCatalog } =
+    useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 500 });
   const realCatalog = Array.isArray(apiCatalog) ? apiCatalog.map(apiCatalogToCatalogItem) : [];
   // Don't fall back to the bundled starter catalog while the Price Book is
   // still loading — otherwise a tenant that *has* items could briefly tap
   // hardcoded starter pricing before the real list lands. Only fall back once
-  // the fetch has settled and confirmed there are no items (covers empty + error).
+  // the fetch has settled SUCCESSFULLY and confirmed the Price Book is
+  // genuinely empty. A fetch FAILURE must never fall back: rendering the
+  // bundled starter prices would mask the outage and let an operator quote
+  // hardcoded prices (same class as the EstimateApprovalPage mock-fallback
+  // blocker) — it renders an ErrorState with retry instead.
+  const catalogFailed = !catalogLoading && catalogError !== null && realCatalog.length === 0;
   const catalog = realCatalog.length > 0
     ? realCatalog
-    : (catalogLoading ? [] : MANUAL_CATALOG[svcType]);
+    : (catalogLoading || catalogError ? [] : MANUAL_CATALOG[svcType]);
   const total   = selected.reduce((s, i) => s + i.qty * i.rate, 0);
 
   function toggleItem(item: CatalogItem) {
@@ -806,7 +813,11 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
         </div>
       </div>
 
-      {/* Catalog list */}
+      {/* Catalog list — a failed Price Book fetch renders a retryable error
+          state, never the bundled starter catalog (no invented prices). */}
+      {catalogFailed ? (
+        <ErrorState message="Failed to load your price book" onRetry={refetchCatalog} />
+      ) : (
       <div>
         <p className="text-xs text-muted-foreground mb-2">Tap items to add — prices pre-filled &amp; editable</p>
         <div className="flex flex-col gap-1.5">
@@ -904,6 +915,7 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
           )}
         </div>
       </div>
+      )}
 
       {/* Selected items cart */}
       {selected.length > 0 && (

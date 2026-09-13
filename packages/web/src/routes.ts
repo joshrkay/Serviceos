@@ -67,6 +67,21 @@ export const router = createBrowserRouter([
       // The index (home) renders on the hottest path — keep it eager.
       { index: true,            Component: RoleHome        },
       { path: 'assistant',      lazy: async () => ({ Component: (await import('./components/assistant/AssistantPage')).AssistantPage }) },
+      // Focused live-session view — the supervisor wall's
+      // CompressedSessionStrip mini-cards NavLink here. Must live inside the
+      // Shell tree: the page reads the ActiveSessionsProvider Shell mounts.
+      {
+        path: 'sessions/:id',
+        lazy: async () => {
+          const { SessionFocusPage } = await import('./pages/sessions/SessionFocusPage');
+          function SessionFocusRoute() {
+            const params = useParams<{ id: string }>();
+            if (!params.id) return null;
+            return React.createElement(SessionFocusPage, { sessionId: params.id });
+          }
+          return { Component: SessionFocusRoute };
+        },
+      },
       { path: 'jobs',           lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
       { path: 'jobs/new',       lazy: async () => ({ Component: (await import('./pages/jobs/JobCreate')).JobCreate }) },
       { path: 'jobs/:id',       lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
@@ -87,6 +102,23 @@ export const router = createBrowserRouter([
       { path: 'schedule',       lazy: async () => ({ Component: (await import('./components/schedule/SchedulePage')).SchedulePage }) },
       { path: 'dispatch',       lazy: async () => ({ Component: (await import('./pages/dispatch/DispatchBoard')).DispatchBoard }) },
       { path: 'customers',      lazy: async () => ({ Component: (await import('./components/customers/CustomersPage')).CustomersPage }) },
+      // Registered BEFORE customers/:id so the literal "new" segment can
+      // never be captured as an id (that was the bug: GET /api/customers/new
+      // 500'd — see the uuid-id guard added to packages/api/src/routes/customers.ts).
+      {
+        path: 'customers/new',
+        lazy: async () => {
+          const { CustomerEdit } = await import('./pages/customers/CustomerEdit');
+          function CustomerCreateRoute() {
+            const navigate = useNavigate();
+            return React.createElement(CustomerEdit, {
+              onSaved: (id: string) => navigate(`/customers/${id}`),
+              onCancel: () => navigate('/customers'),
+            });
+          }
+          return { Component: CustomerCreateRoute };
+        },
+      },
       {
         path: 'customers/:id',
         lazy: async () => {
@@ -247,6 +279,11 @@ export const router = createBrowserRouter([
       { path: 'digest/:date',   lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
       { path: 'reports/revenue-by-source', lazy: async () => ({ Component: (await import('./components/reports/RevenueBySourcePage')).RevenueBySourcePage }) },
       { path: 'technician/day', lazy: async () => ({ Component: (await import('./components/technician/TechnicianDayPage')).TechnicianDayPage }) },
+      // 1.11 — invited teammate's landing page (inviteTeamMember redirects
+      // here after Clerk's invitation sign-up completes). Auth-wrapped: a
+      // signed-out visit falls through to ProtectedRoute's existing
+      // unauthenticated handling (redirect to /login with a return path).
+      { path: 'accept-invitation', lazy: async () => ({ Component: (await import('./components/auth/AcceptInvitationPage')).AcceptInvitationPage }) },
       { path: 'design',         lazy: async () => ({ Component: (await import('./pages/design/Showcase')).Showcase }) },
     ],
     }],

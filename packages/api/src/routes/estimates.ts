@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createEstimateSchema,
   updateEstimateSchema,
@@ -396,6 +397,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const result = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
@@ -419,6 +421,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!revisionDeps?.editDeltaRepo) {
@@ -440,6 +443,67 @@ export function createEstimateRouter(
           req.params.id,
         );
         res.json(history);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // GET /:id/revisions — the document-revision read path. Every edit/revise
+  // snapshots two revisions (before + after) and records an edit delta whose
+  // summary describes the diff between them (see recordEstimateMutation);
+  // this surfaces that list newest-first with each revision's source
+  // (manual | ai_generated | ai_revised) and, where an edit delta produced
+  // the revision, the diff summary. 503 when the subsystem isn't wired.
+  router.get(
+    '/:id/revisions',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:view'),
+    notFoundOnMalformedId('Estimate not found'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!revisionDeps?.docRevisionRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate revisions are not configured for this environment',
+          });
+          return;
+        }
+        // Tenant-ownership check: only surface revisions for an estimate the
+        // caller can actually see (cross-tenant ids 404, never leak).
+        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        if (!estimate) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        const revisions = await revisionDeps.docRevisionRepo.findByDocument(
+          req.auth!.tenantId,
+          'estimate',
+          req.params.id,
+        );
+        // Join the diff summary: an edit delta's toRevisionId is the revision
+        // that edit produced, and its summary describes what changed.
+        const summaryByRevisionId = new Map<string, string>();
+        if (revisionDeps.editDeltaRepo) {
+          const deltas = await revisionDeps.editDeltaRepo.findByEstimate(
+            req.auth!.tenantId,
+            req.params.id,
+          );
+          for (const delta of deltas) {
+            summaryByRevisionId.set(delta.toRevisionId, delta.summary);
+          }
+        }
+        res.json(
+          revisions.map((rev) => ({
+            id: rev.id,
+            version: rev.version,
+            source: rev.source,
+            createdAt: rev.createdAt,
+            summary: summaryByRevisionId.get(rev.id),
+          })),
+        );
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -474,6 +538,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     updateHandler
   );
 
@@ -482,6 +547,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     updateHandler
   );
 
@@ -495,6 +561,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
@@ -525,6 +592,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:delete'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
@@ -554,6 +622,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:create'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const estimateNumber = await getNextEstimateNumber(req.auth!.tenantId, settingsRepo);
@@ -594,6 +663,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:create'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!templateRepo) {
@@ -640,6 +710,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:create'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!jobRepo || !moneyStateDeps) {
@@ -720,6 +791,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const { status } = req.body;
@@ -837,6 +909,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!sendService) {

@@ -18,18 +18,17 @@
  */
 
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
-import {
-  createProposal,
-  CreateProposalInput,
-  ProposalType,
-} from '../../proposals/proposal';
+import { createProposal } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
+import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
+import { MAX_UNIT_PRICE_CENTS } from '../../proposals/contracts/add-catalog-item';
 import type { InvoiceRepository } from '../../invoices/invoice';
-import type { EstimateRepository } from '../../estimates/estimate';
+import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
-import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { resolveDateTime } from '../scheduling/resolve-datetime';
+import { isRuntimeTimezone, localDateKey, tzMidnight } from '../../shared/timezone';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import {
   DunningEvent,
@@ -38,12 +37,17 @@ import {
 } from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
 import { candidatesForReference } from '../resolution/reference-candidates';
+import type { EntityCandidate } from '../resolution/entity-resolver';
+import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
+import { formatCents } from '../skills/spoken-format';
+import {
+  formatUsdCentsFixed,
+  parseSpokenAddressParts,
+  REQUIRED_LOCATION_FIELDS,
+} from '@ai-service-os/shared';
+import { entitiesFrom, baseSourceContext, inputFor, resolveTenantTimezone } from './task-input';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-function entitiesFrom(context: TaskContext): ExtractedEntities {
-  return (context.existingEntities ?? {}) as ExtractedEntities;
-}
 
 // Mirrors the execution-side check (isUuid in
 // proposals/execution/voice-extended-handlers.ts / UUID_RE in
@@ -157,45 +161,77 @@ async function resolveActiveAppointmentId(
   return active.length === 1 ? active[0].id : undefined;
 }
 
-function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
-  if (!context.conversationId) return undefined;
-  return { conversationId: context.conversationId };
+/**
+ * The appointment id the router's entity resolver already verified, if any.
+ *
+ * Found-by-proof (rivet-voice-19 item 9): the scheduling tasks used to skip
+ * this seam entirely and re-resolve from scratch via
+ * `resolveActiveAppointmentId`, which can only answer when the tenant has
+ * exactly ONE active appointment. So in any shop with two jobs on the books,
+ * "Move the Garcia job to Thursday at 10" could not resolve — even though the
+ * router had already disambiguated "the Garcia job" and threaded the correct
+ * id onto `existingEntities.appointmentId`
+ * (workers/voice-action-router.ts:1490-1508). The verified id must win; the
+ * single-active-appointment fallback stays for the references the resolver
+ * could not answer (the SCH-03 first-turn case it was built for).
+ */
+function resolvedAppointmentIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.appointmentId;
+  return isUuid(id) ? id : undefined;
 }
 
-function inputFor(
-  context: TaskContext,
-  proposalType: ProposalType,
-  payload: Record<string, unknown>,
-  missingFields: string[],
-  opts?: {
-    trust?: 'autonomous' | undefined;
-    /**
-     * B2 — additional sourceContext entries to merge on top of
-     * baseSourceContext (e.g. entityCandidates/entityKind/entityReference).
-     * Optional and additive; existing call sites are unaffected.
-     */
-    sourceContext?: Record<string, unknown>;
-  }
-): CreateProposalInput {
-  const base = baseSourceContext(context);
-  const extra = opts?.sourceContext;
-  const sourceContext = extra ? { ...(base ?? {}), ...extra } : base;
-  return {
-    tenantId: context.tenantId,
-    proposalType,
-    payload,
-    summary: context.message,
-    sourceContext,
-    createdBy: context.userId,
-    missingFields: missingFields.length > 0 ? missingFields : undefined,
-    sourceTrustTier: opts?.trust,
-    // PR B — pass through the tenant threshold override the router
-    // resolved at request entry. All 8 voice-extended task call sites
-    // route through this helper, so this is a single touch point.
-    ...(context.tenantThresholdOverride
-      ? { tenantThresholdOverride: context.tenantThresholdOverride }
-      : {}),
-  };
+/**
+ * The estimate id the router's entity resolver already verified, if any.
+ * House style matches `resolvedAppointmentIdFrom` above: `send_estimate` and
+ * `send_estimate_nudge` are `ESTIMATE_DOC_INTENTS` (ai/agents/customer-calling/
+ * entity-resolution.ts), so the router already plans an 'estimate' kind
+ * lookup for a spoken jobReference/customerName before the task handler ever
+ * runs. Still just a shape check — SendEstimateNudgeTaskHandler.handle
+ * additionally VERIFIES this against the repo before trusting it (never trust
+ * an LLM/router-shaped UUID on its own; see resolveEstimateIdGate,
+ * estimate-edit-task.ts:427-461, for the pattern this copies), while
+ * SendEstimateTaskHandler consumes it the same way
+ * ReassignAppointmentTaskHandler consumes `appointmentId` (B5.3): resolved id
+ * → payload, gate lifts; anything else keeps today's gated behavior.
+ */
+function resolvedEstimateIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.estimateId;
+  return isUuid(id) ? id : undefined;
+}
+
+/**
+ * The invoice id the router's entity resolver already verified, if any.
+ * `send_invoice` / `send_payment_reminder` / `apply_late_fee` / `update_invoice`
+ * are all `INVOICE_DOC_INTENTS` (ai/agents/customer-calling/entity-resolution.ts),
+ * so the router plans an 'invoice' kind lookup for the spoken reference and
+ * threads a unique high-confidence match onto `existingEntities.invoiceId`
+ * (workers/voice-action-router.ts, annotation.resolved.invoiceId — and, on
+ * chat, routes/assistant.ts's `resolveVerifiedIdsForDraft`, run BEFORE every
+ * task handler regardless of proposal type). Shape check only, mirroring
+ * `resolvedAppointmentIdFrom` — an ambiguous reference never reaches a task
+ * handler (the router short-circuits to voice_clarification; chat asks one
+ * clarifying question instead), and a not_found/low-confidence one leaves
+ * this seam empty so the legacy missing-fields gate holds.
+ *
+ * Exported (A04 fix, 2026-08-29 AI-catalog sweep, fix/approve-stall-five) —
+ * `InvoiceEditTaskHandler` (invoice-edit-task.ts) now consumes this SAME
+ * seam too. It used to run an entirely separate, internal free-text search
+ * (`resolveInvoiceId`) that — by explicit, deliberate design — never lifted
+ * the `invoiceId` gate for ANY free-text reference, even a resolver-verified
+ * unambiguous one, because a search-resolved id isn't verbatim in the
+ * operator's text and so isn't safe to allowlist against
+ * routes/assistant.ts's `dropUnverifiedIds` scrub *on its own*. But this
+ * shared seam's id IS already safe — `resolveVerifiedIdsForDraft` stamps it
+ * into `sourceContext.verifiedIds` before dropUnverifiedIds ever runs — so
+ * an update_invoice proposal whose invoice reference the shared resolver
+ * unambiguously resolved was gated with `missingFields: ['invoiceId']` it
+ * could NEVER clear: a gate with a lifter sitting right next to it that the
+ * handler simply never consulted (the #909 class). `resolveInvoiceId`'s own
+ * bespoke search stays as the fallback for when this seam comes up empty.
+ */
+export function resolvedInvoiceIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.invoiceId;
+  return isUuid(id) ? id : undefined;
 }
 
 // ───────────── reschedule_appointment ─────────────
@@ -222,15 +258,32 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    // Resolve the concrete appointment id from the caller's active
-    // appointment (the classifier only gives a natural-language ref).
-    const resolvedId = await resolveActiveAppointmentId(
-      this.appointmentRepo,
-      context.tenantId,
-      { customerId: context.customerId, jobRepo: this.jobRepo },
-    );
+    // #920 fix — both sources below are DB lookups (the router's
+    // entity resolver, or this handler's own single-active-appointment
+    // repo query), never LLM/classifier text, so whichever one answers is
+    // verifiable by construction exactly like NotifyDelayTaskHandler's A31
+    // fix. Without stamping it, a tenant with exactly one active
+    // appointment hits the resolveActiveAppointmentId fallback branch and
+    // routes/assistant.ts's dropUnverifiedIds scrub strips
+    // payload.appointmentId right back out (a spoken customer name never
+    // contains the appointment's UUID) — and because this branch never
+    // pushes 'appointmentId' onto `missing` either, the proposal ends up
+    // with NO appointmentId and NO gate: approvable, but doomed to fail at
+    // execution (`invalid input syntax for type uuid: ""`).
+    let verifiedIds: Record<string, string> | undefined;
+
+    // Prefer the id the entity resolver already verified for the spoken
+    // reference; only fall back to the caller's single-active-appointment
+    // lookup when it could not answer.
+    const resolvedId =
+      resolvedAppointmentIdFrom(context) ??
+      (await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+        customerId: context.customerId,
+        jobRepo: this.jobRepo,
+      }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -266,13 +319,25 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     // in draft for the dispatcher to complete.
     const phrase =
       typeof ee.newDateTimeDescription === 'string' ? ee.newDateTimeDescription.trim() : '';
-    const resolved = phrase
-      ? resolveDateTime(phrase, {
-          timezone: context.timezone ?? DEFAULT_TENANT_TIMEZONE,
-          now: context.now ?? new Date(),
-          ...(originalDurationMin ? { defaultDurationMin: originalDurationMin } : {}),
-        })
-      : undefined;
+    // No tenant timezone ⇒ no resolution. Falling back to a product-default
+    // zone here silently moved a Phoenix tenant's appointment three hours
+    // (the create-side bug this mirrors — see create-appointment-task.ts's
+    // "NO DEFAULT TIMEZONE" note). Leaving the ISO fields unresolved routes
+    // through the SAME missingFields gate an unparseable phrase already
+    // takes: the reschedule stays in draft for the dispatcher instead of
+    // moving a real appointment to a guessed hour.
+    const tenantTimezone =
+      typeof context.timezone === 'string' && isRuntimeTimezone(context.timezone.trim())
+        ? context.timezone.trim()
+        : undefined;
+    const resolved =
+      phrase && tenantTimezone
+        ? resolveDateTime(phrase, {
+            timezone: tenantTimezone,
+            now: context.now ?? new Date(),
+            ...(originalDurationMin ? { defaultDurationMin: originalDurationMin } : {}),
+          })
+        : undefined;
 
     if (resolved && resolved.ok) {
       payload.newScheduledStart = resolved.startUtc;
@@ -283,7 +348,11 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
@@ -309,13 +378,14 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    // Resolve the concrete appointment id from the caller's active
-    // appointment; fall back to the natural-language reference.
-    const resolvedId = await resolveActiveAppointmentId(
-      this.appointmentRepo,
-      context.tenantId,
-      { customerId: context.customerId, jobRepo: this.jobRepo },
-    );
+    // Resolver-verified id first (see resolvedAppointmentIdFrom), then the
+    // caller's single-active-appointment lookup, then the free-text gate.
+    const resolvedId =
+      resolvedAppointmentIdFrom(context) ??
+      (await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+        customerId: context.customerId,
+        jobRepo: this.jobRepo,
+      }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
@@ -349,6 +419,17 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
 // short-circuits to a voice_clarification picker). Only when the name
 // stayed unresolved (not_found / no resolver) do we keep the legacy
 // missing-marker so the review UI resolves it before approval.
+//
+// B5.3 (defect fix) — this used to push 'appointmentId' onto missing
+// UNCONDITIONALLY, ignoring the id the router's entity resolver already
+// verified and threaded onto `existingEntities.appointmentId` (the same
+// seam RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler read
+// via `resolvedAppointmentIdFrom`). So even a fully-resolved "Assign Carlos
+// to the Johnson job" — appointment AND technician both verified — landed
+// with `missingFields: ['appointmentId']` and could never auto-clear the
+// gate. Fix: resolve-then-gate, exactly the sibling handlers' shape —
+// resolved id -> payload; free-text reference -> carry the reference AND
+// gate; nothing -> gate.
 export class ReassignAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'reassign_appointment' as const;
 
@@ -357,12 +438,18 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    // The execution handler acts only on a concrete appointmentId (uuid), so
-    // a free-text reference always flags the id for review-time resolution.
-    // Pre-U1 this was masked by the always-missing toTechnicianId; now that
-    // the technician can resolve, the appointment gate must stand on its own.
-    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
-    missing.push('appointmentId');
+    // Resolver-verified id first (see resolvedAppointmentIdFrom) — the same
+    // precedence RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler
+    // use. Only a free-text reference that never resolved falls to the gate.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) {
+      payload.appointmentId = resolvedAppointmentId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
 
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
     const resolvedTechnicianId = resolvedTechnicianIdFrom(context);
@@ -397,17 +484,28 @@ function resolvedTechnicianIdFrom(context: TaskContext): string | undefined {
 // appointment. The classifier returns a technician NAME and an appointment
 // REFERENCE, never UUIDs. U1: the router's technician resolver fills
 // `context.existingEntities.technicianId` when the spoken name uniquely
-// matches a team member, so only the appointmentId still needs review-time
-// resolution; an unresolved name keeps the legacy technicianId
-// missing-marker. Capture-class, but the missing appointmentId keeps the
-// proposal in draft until an operator resolves it.
+// matches a team member. U2 (B7.10): both intents are now
+// APPOINTMENT_REF_INTENTS too, so the router's appointment resolver resolves
+// "the 2pm tomorrow" the same way reassign's does — a unique verified match
+// rides `existingEntities.appointmentId` (resolvedAppointmentIdFrom, the
+// B5.3 seam) and lifts the gate; an ambiguous reference never reaches here
+// (voice_clarification picker first, bounded at the resolver's candidate
+// cap — the P-43 overflow rule); an unresolved one keeps the missing-marker.
+// Capture-class, but any missing id keeps the proposal in draft until an
+// operator resolves it.
 export class AddCrewMemberTaskHandler implements TaskHandler {
   readonly taskType = 'add_crew_member' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = ['appointmentId'];
+    const missing: string[] = [];
+
+    // U2 — resolver-verified appointment id first (B5.3 shape); only a
+    // reference the resolver could not answer falls to the gate.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) payload.appointmentId = resolvedAppointmentId;
+    else missing.push('appointmentId');
 
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
@@ -428,7 +526,12 @@ export class RemoveCrewMemberTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = ['appointmentId'];
+    const missing: string[] = [];
+
+    // U2 — same resolve-then-gate seam as AddCrewMemberTaskHandler above.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) payload.appointmentId = resolvedAppointmentId;
+    else missing.push('appointmentId');
 
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
@@ -444,24 +547,87 @@ export class RemoveCrewMemberTaskHandler implements TaskHandler {
 }
 
 // ───────────── add_note ─────────────
+//
+// B7.4 — this used to be the most dangerous voice defect in the product: the
+// handler set only `targetReference` (free text) and left `missingFields`
+// EMPTY, so "Note on the Patel job — wants morning visits" was approvable
+// straight from drafting, and then AddNoteExecutionHandler
+// (proposals/execution/voice-extended-handlers.ts:92-97) refused it because
+// `targetId` was never a UUID. The owner tapped approve and the note was
+// silently lost — no row, no error reaching them.
+//
+// The fix is the tiered resolve-then-gate ladder ComplaintTaskHandler already
+// uses (ai/tasks/complaint-task.ts:92-107): consume the id the router's entity
+// resolver already put on `existingEntities` (voice-action-router.ts:1490-1508)
+// for the target kind, and gate honestly whenever no id is resolvable. An
+// AMBIGUOUS reference never arrives here — the router short-circuits to a
+// voice_clarification picker before drafting.
+//
+// `targetKind` is also gated (not silently defaulted) when the classifier
+// emitted a kind the note store cannot hold: NOTE_ENTITY_TYPES has no
+// 'appointment', so an appointment-scoped note is another approve-then-fail
+// shape. Gating it keeps the refusal at review time, where it is visible.
+
+/** Note target kinds the execution handler can actually persist. */
+const EXECUTABLE_NOTE_TARGET_KINDS = ['job', 'customer', 'invoice', 'estimate'] as const;
+type ExecutableNoteTargetKind = (typeof EXECUTABLE_NOTE_TARGET_KINDS)[number];
+
+function isExecutableNoteTargetKind(value: unknown): value is ExecutableNoteTargetKind {
+  return (
+    typeof value === 'string' &&
+    (EXECUTABLE_NOTE_TARGET_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The resolver-verified id for a note's target kind, read from the same
+ * `existingEntities` seam every other voice task consumes. `customer` also
+ * accepts the verified caller identity (`context.customerId`), matching
+ * ComplaintTaskHandler's precedence: caller-ID first, then resolver output.
+ */
+function resolvedNoteTargetId(
+  context: TaskContext,
+  kind: ExecutableNoteTargetKind,
+): string | undefined {
+  const ee = entitiesFrom(context) as Record<string, unknown>;
+  const candidate =
+    kind === 'customer' ? context.customerId ?? ee.customerId : ee[`${kind}Id`];
+  return isUuid(candidate) ? candidate : undefined;
+}
+
 export class AddNoteTaskHandler implements TaskHandler {
   readonly taskType = 'add_note' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
+    const targetKind = ee.noteTargetKind ?? 'job';
     const payload: Record<string, unknown> = {
-      targetKind: ee.noteTargetKind ?? 'job',
+      targetKind,
+      // The dictated note verbatim. Falls back to the whole utterance only
+      // when the classifier extracted no distinct body.
       body: ee.noteBody ?? context.message,
     };
     const missing: string[] = [];
 
-    if (ee.customerName || ee.jobReference) {
-      payload.targetReference = ee.jobReference ?? ee.customerName;
-    } else {
-      missing.push('targetId');
+    if (!isExecutableNoteTargetKind(targetKind)) {
+      // 'appointment' (or anything unmapped): the note store has no such
+      // entity type, so approving could only ever fail at execution.
+      missing.push('targetKind');
     }
 
-    if (!ee.noteTargetKind) missing.push('targetKind');
+    const resolvedId = isExecutableNoteTargetKind(targetKind)
+      ? resolvedNoteTargetId(context, targetKind)
+      : undefined;
+
+    if (resolvedId) {
+      payload.targetId = resolvedId;
+    } else {
+      // No verified id — carry the spoken reference so the review card has
+      // something to resolve from, and hold the proposal at the gate.
+      const reference = ee.jobReference ?? ee.customerName;
+      if (reference) payload.targetReference = reference;
+      missing.push('targetId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -480,25 +646,34 @@ export class AddNoteTaskHandler implements TaskHandler {
 // looks a bare/"INV-0042"-style reference up by repo), SendInvoiceExecutionHandler
 // (proposals/execution/voice-extended-handlers.ts) requires payload.invoiceId
 // to ALREADY be a UUID and never reads invoiceReference at all — there is no
-// resolution step anywhere between drafting and execution for this proposal
+// resolution step between the REVIEW GATE and execution for this proposal
 // type. This handler used to flag invoiceId missing only when NO reference
 // was extracted, so e.g. "send the Henderson invoice" landed with
 // invoiceReference: 'Henderson' and an EMPTY missingFields. approveProposal
 // (proposals/actions.ts) only blocks on missingFields, so the proposal was
 // approvable straight from drafting and execution would then fail on the
 // unresolved reference — approval succeeding for an action that can never
-// execute. Mirrors the established sibling convention (ApplyLateFeeTaskHandler,
-// SendEstimateNudgeTaskHandler, SendPaymentReminderTaskHandler,
-// ReassignAppointmentTaskHandler): always gate the id for review-time
-// resolution unless the extracted reference already IS a usable id.
+// execute.
+//
+// U1 (voice back-office workflows) — resolve-then-gate. `send_invoice` is one
+// of INVOICE_DOC_INTENTS, so the router's entity resolver ALREADY resolves the
+// spoken reference pre-draft and threads a unique verified match onto
+// `existingEntities.invoiceId` (annotateResolvedEntities → annotation.resolved
+// .invoiceId). This handler now consumes that seam (resolvedInvoiceIdFrom),
+// exactly the B5.3 ReassignAppointmentTaskHandler shape: resolver-verified id
+// → payload, gate lifts; free-text reference that never resolved → gate +
+// B2 candidates (unchanged); nothing → gate. Comms class is untouched — a
+// fully-resolved draft still lands in 'draft' and waits for a human tap.
 export interface SendInvoiceTaskDeps {
   /**
    * B2 — optional. When present, a gated free-text invoiceReference is
    * additionally searched (candidatesForReference, the same
    * findByTenant({search,limit}) ILIKE technique InvoiceEditTaskHandler
    * uses) so the review card can offer a one-tap AmbiguityPicker instead
-   * of a dead end. Candidates are recorded on sourceContext ONLY — they
-   * NEVER lift the missingFields gate below; see the class doc comment.
+   * of a dead end. Candidates are recorded on sourceContext ONLY — on the
+   * UNRESOLVED branch they NEVER lift the missingFields gate (an ILIKE
+   * display-text match is not the entity resolver; only the resolver seam
+   * or a literal UUID reference lifts it); see the class doc comment.
    */
   invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'>;
 }
@@ -520,7 +695,18 @@ export class SendInvoiceTaskHandler implements TaskHandler {
     let extraSourceContext: Record<string, unknown> | undefined;
 
     const reference = ee.jobReference ?? ee.customerName;
-    if (isUuid(reference)) {
+    // U1 — the router's entity resolver already verified the spoken
+    // reference (INVOICE_DOC_INTENTS) and threaded the unique match onto
+    // existingEntities.invoiceId. That seam wins; a literal UUID reference
+    // is next; only a reference that never resolved falls to the gate.
+    const resolvedInvoiceId = resolvedInvoiceIdFrom(context);
+    if (resolvedInvoiceId) {
+      payload.invoiceId = resolvedInvoiceId;
+      // Keep the spoken reference for the review card's display.
+      if (typeof reference === 'string' && !isUuid(reference)) {
+        payload.invoiceReference = reference;
+      }
+    } else if (isUuid(reference)) {
       // Already a resolved id — the execution handler can use it directly,
       // no review-time resolution needed.
       payload.invoiceId = reference;
@@ -529,8 +715,8 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       missing.push('invoiceId');
 
       // B2 — layer candidates ON TOP of the gate above; never a substitute
-      // for it (a search match, even a single unambiguous one, still does
-      // not lift missingFields — see SendInvoiceTaskDeps doc comment).
+      // for it (an ILIKE search match, even a single unambiguous one, still
+      // does not lift missingFields — see SendInvoiceTaskDeps doc comment).
       // Re-reads ee.jobReference/customerName fresh (rather than reusing
       // `reference` above) so this isn't subject to isUuid's type-predicate
       // narrowing of that binding to `undefined` in this branch.
@@ -552,6 +738,12 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       }
     }
 
+    // NOTE deliberately NO verifiedIds stamping here: `existingEntities` can
+    // carry classifier output, and dropUnverifiedIds' allowlist must only
+    // ever be fed by code that itself performed the DB lookup (see the
+    // CRITICAL SECURITY note on IssueInvoiceTaskHandler). The chat surface
+    // (routes/assistant.ts) runs the entity resolver pre-draft and stamps
+    // `sourceContext.verifiedIds` from that resolver call directly.
     return {
       proposal: createProposal(
         inputFor(context, this.taskType, payload, missing, { sourceContext: extraSourceContext }),
@@ -566,18 +758,27 @@ export class SendInvoiceTaskHandler implements TaskHandler {
 // Comms class — never auto-approves. Mirrors SendInvoiceTaskHandler
 // EXACTLY: SendEstimateExecutionHandler requires payload.estimateId to
 // ALREADY be a UUID and never reads estimateReference — there is no
-// resolution step between drafting and execution. A free-text reference
-// ("the Khan estimate", "EST-0042") must ALWAYS land with
-// missingFields: ['estimateId'] so approveProposal blocks until the
-// review card resolves it. The previous implementation only gated when
+// resolution step between the REVIEW GATE and execution. A free-text
+// reference ("the Khan estimate", "EST-0042") that never resolved must
+// land with missingFields: ['estimateId'] so approveProposal blocks until
+// the review card resolves it. The previous implementation only gated when
 // NO reference was extracted, leaving "send the Khan estimate"
 // approvable and doomed at execution — the same bug fixed for
 // send_invoice (see class comment above).
+//
+// U1 — resolve-then-gate, same as SendInvoiceTaskHandler: `send_estimate`
+// is one of ESTIMATE_DOC_INTENTS, so the router's entity resolver already
+// resolves the spoken reference pre-draft and threads a unique verified
+// match onto `existingEntities.estimateId` (resolvedEstimateIdFrom). That
+// seam lifts the gate; anything unresolved keeps today's gated behavior.
 export interface SendEstimateTaskDeps {
   /**
    * B2 — optional. When present, a gated free-text estimateReference is
    * searched (candidatesForReference) so the review card can offer a
-   * one-tap AmbiguityPicker. Candidates NEVER lift the missingFields gate.
+   * one-tap AmbiguityPicker. On the UNRESOLVED branch candidates NEVER
+   * lift the missingFields gate (an ILIKE display-text match is not the
+   * entity resolver; only the resolver seam or a literal UUID reference
+   * lifts it).
    */
   estimateRepo?: Pick<EstimateRepository, 'findByTenant'>;
 }
@@ -599,7 +800,16 @@ export class SendEstimateTaskHandler implements TaskHandler {
     let extraSourceContext: Record<string, unknown> | undefined;
 
     const reference = ee.jobReference ?? ee.customerName;
-    if (isUuid(reference)) {
+    // U1 — resolver-verified seam first (ESTIMATE_DOC_INTENTS), then a
+    // literal UUID reference, then the gate. Same ladder as send_invoice.
+    const resolvedEstimateId = resolvedEstimateIdFrom(context);
+    if (resolvedEstimateId) {
+      payload.estimateId = resolvedEstimateId;
+      // Keep the spoken reference for the review card's display.
+      if (typeof reference === 'string' && !isUuid(reference)) {
+        payload.estimateReference = reference;
+      }
+    } else if (isUuid(reference)) {
       // Already a resolved id — the execution handler can use it directly.
       payload.estimateId = reference;
     } else {
@@ -636,30 +846,353 @@ export class SendEstimateTaskHandler implements TaskHandler {
 // ───────────── send_estimate_nudge ─────────────
 //
 // Comms class — never auto-approves. A nudge re-sends the link for an
-// ALREADY-sent estimate (the execution handler enforces a 48h cooldown and
-// requires the estimate to be in 'sent'). Mirrors SendEstimateTaskHandler:
-// carry estimateReference (free text) and flag estimateId missing so the
-// operator resolves it in the review card before approval.
+// ALREADY-sent estimate (SendEstimateNudgeExecutionHandler enforces a 48h
+// cooldown and requires estimate.status === 'sent').
+//
+// B8.10 (rivet-voice-19, see projects/rivet-voice-19/b8.10-design.md) —
+// "Nudge the Khan estimate" used to be blocked by a design comment
+// (missing = ['estimateId'] unconditional), not a missing capability: the
+// resolution technique already existed elsewhere. This reuses
+// EstimateEditTaskHandler.resolveEstimateIdGate's VERIFICATION half exactly
+// (estimate-edit-task.ts:427-461) — an id-shaped reference is only trusted
+// once a repo lookup confirms it, never from raw LLM/router text — but goes
+// one step further: a unique, VERIFIED, NUDGEABLE match lifts the gate
+// outright (payload.estimateId set, missingFields: []), because that is
+// this item's whole point. A free-text reference that resolves to more than
+// one nudgeable estimate still asks (voice_clarification) rather than
+// guessing.
+//
+// Nudgeable states: only 'sent' participates in matching. There is no
+// separate 'viewed' EstimateStatus (view activity is tracked on
+// estimate.firstViewedAt, a substate of 'sent', not a distinct status) — so
+// the design doc's "sent/viewed" language collapses to exactly
+// `status === 'sent'`, matching SendEstimateNudgeExecutionHandler's own gate
+// (`estimate.status !== 'sent'`) verbatim. No drift is possible between
+// draft-time and execute-time nudgeability.
+//
+// DECISION (b8.10-design.md, AC-3 — logged, not re-litigated here): a
+// UNIQUE match that exists but is in a non-nudgeable status (draft/
+// accepted/rejected/expired) GATES with a reason, it does NOT become a
+// clarification. Rationale: clarification is for picking among several
+// live options; here there is nothing to pick — the estimate is simply not
+// nudgeable, and "the Khan estimate was already accepted" beats a picker
+// with one disabled row. The reason rides `Proposal.explanation` (not the
+// payload — sendEstimateNudgePayloadSchema has no reason field and
+// proposals/contracts.ts is out of scope for this item).
+const NUDGEABLE_ESTIMATE_STATUSES = new Set<Estimate['status']>(['sent']);
+
+/** AC-2 — nudge disambiguation candidate: estimate number + amount + age,
+ *  so a spoken picker ("the first one" / "EST-0042") is answerable by ear —
+ *  a bare label/status hint (mapEstimatesToCandidates) isn't enough here. */
+function nudgeCandidateFrom(estimate: Estimate, now: Date): EntityCandidate {
+  return {
+    id: estimate.id,
+    kind: 'estimate',
+    label: estimate.estimateNumber,
+    hint: `${formatCents(estimate.totals.totalCents)} • ${nudgeAgeDescription(estimate, now)}`,
+    score: 1,
+  };
+}
+
+/** "sent today" / "sent 1 day ago" / "sent 12 days ago" — falls back to
+ *  createdAt for the (should-never-happen) case of a 'sent' row with no
+ *  sentAt, rather than throwing on a null date. */
+function nudgeAgeDescription(estimate: Estimate, now: Date): string {
+  const since = estimate.sentAt ?? estimate.createdAt;
+  const days = Math.max(0, Math.floor((now.getTime() - since.getTime()) / DAY_MS));
+  return days === 0 ? 'sent today' : `sent ${days} ${days === 1 ? 'day' : 'days'} ago`;
+}
+
+export interface SendEstimateNudgeTaskDeps {
+  /**
+   * B8.10 — powers BOTH halves of resolution: `findById` verifies a
+   * router-resolved `existingEntities.estimateId` (resolvedEstimateIdFrom)
+   * before it's trusted; `findByTenant` runs the customer-scoped
+   * `job_id = ANY(...)` query (with `jobRepo` below) and, as a fallback, the
+   * same ILIKE estimate_number/customer_message search
+   * `candidatesForReference` uses — widened here to ALSO see non-nudgeable
+   * matches so a unique non-nudgeable hit (AC-3) can be told apart from real
+   * ambiguity (AC-2).
+   * Absent → today's unconditional gate (AC-4 fallback only) — unchanged.
+   */
+  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  /**
+   * Maps the router-resolved customerId to that customer's jobs, which is
+   * the ONLY real path from a spoken person's name to their estimates
+   * (estimates carry job_id; jobs carry customer_id — there is no
+   * estimates.customer_id). Optional by the same convention as
+   * `estimateRepo` and SendPaymentReminderTaskDeps: absent (or an
+   * implementation without the optional `findByCustomer`) degrades to the
+   * ILIKE display-text search alone, exactly today's behavior.
+   */
+  jobRepo?: Pick<JobRepository, 'findByCustomer'>;
+}
+
+/**
+ * Cap on the customer-anchored candidate set. Generous compared with the
+ * ILIKE search's `limit: 5` because the status filter runs client-side (a
+ * customer with many old accepted estimates must not push their one 'sent'
+ * estimate out of the window), still bounded so a pathological account can't
+ * pull an unbounded result set into a draft-time path.
+ */
+const NUDGE_CUSTOMER_JOB_LIMIT = 50;
+const NUDGE_CUSTOMER_ESTIMATE_LIMIT = 25;
+
 export class SendEstimateNudgeTaskHandler implements TaskHandler {
   readonly taskType = 'send_estimate_nudge' as const;
+  private readonly deps: SendEstimateNudgeTaskDeps;
+
+  constructor(deps: SendEstimateNudgeTaskDeps = {}) {
+    this.deps = deps;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    // estimateId is a required UUID for the execution handler and is NOT
-    // resolved by the customer/job entity resolver — always flag it missing so
-    // the approval gate holds until the operator resolves the estimate (matches
-    // reassign_appointment's toTechnicianId contract). The reference, when
-    // present, gives the review card something to resolve from.
-    const missing: string[] = ['estimateId'];
+    const reference = ee.jobReference ?? ee.customerName;
+    if (reference) payload.estimateReference = reference;
 
-    if (ee.jobReference) payload.estimateReference = ee.jobReference;
-    else if (ee.customerName) payload.estimateReference = ee.customerName;
+    const repo = this.deps.estimateRepo;
+    const now = context.now ?? new Date();
 
+    if (repo) {
+      // Router-verified id first (mirrors resolvedAppointmentIdFrom's
+      // convention) — VERIFY it against the repo before trusting it; a
+      // repo miss (or a hallucinated id) is never trusted on its own.
+      const resolvedId = resolvedEstimateIdFrom(context);
+      if (resolvedId) {
+        const verified = await safeFindEstimateById(repo, context.tenantId, resolvedId);
+        if (verified) {
+          return NUDGEABLE_ESTIMATE_STATUSES.has(verified.status)
+            ? this.liftGate(context, payload, verified)
+            : this.gateNonNudgeable(context, payload, verified);
+        }
+        // Unverifiable — fall through to the reference search below rather
+        // than trusting an id that didn't check out.
+      }
+
+      // No router-verified id (or it didn't verify) — build the candidate set
+      // from the customer relationship when one was resolved, else from the
+      // ILIKE display-text search. Either way keep ALL matches (any status)
+      // so a unique-but-non-nudgeable hit (AC-3) is distinguishable from
+      // genuine ambiguity (AC-2) and from no match at all (AC-4).
+      {
+        const matches = await this.candidateEstimates(context, repo, reference);
+        const nudgeable = matches.filter((m) => NUDGEABLE_ESTIMATE_STATUSES.has(m.status));
+
+        if (nudgeable.length === 1) {
+          return this.liftGate(context, payload, nudgeable[0]);
+        }
+        // A picker needs the spoken phrase to echo back. Caller-identity-only
+        // resolution (no reference at all) has nothing to echo, so genuine
+        // ambiguity there falls through to the AC-4 gate rather than asking a
+        // question the operator can't tie to anything — still never a guess.
+        if (nudgeable.length > 1 && reference) {
+          return this.clarify(context, reference, nudgeable, now);
+        }
+        if (matches.length === 1) {
+          // AC-3 — exactly one estimate matched the reference at all, and it
+          // isn't nudgeable. Multiple non-nudgeable matches (0 nudgeable,
+          // >1 total) fall through to the plain AC-4 gate below instead: the
+          // "one disabled row" rationale for a custom explanation doesn't
+          // extend cleanly to "several disabled rows", and the ACs don't
+          // require it — scope stays literal to what was asked.
+          return this.gateNonNudgeable(context, payload, matches[0]);
+        }
+      }
+    }
+
+    // AC-4 — no repo wired, no reference extracted, or nothing matched:
+    // today's behavior becomes the fallback, not the default.
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(inputFor(context, this.taskType, payload, ['estimateId'])),
       taskType: this.taskType,
     };
+  }
+
+  /**
+   * Candidate set for the spoken request, strongest signal first.
+   *
+   * 1. The REAL relationship: a router-resolved customerId (spoken name →
+   *    `existingEntities.customerId`, CUSTOMER_REF_INTENTS) or the verified
+   *    inbound caller → that customer's jobs → `findByTenant({ jobIds })`,
+   *    the same customer → jobs → estimates traversal the estimates list
+   *    route already uses (pg-estimate.ts's `job_id = ANY(...)` branch).
+   *    "Nudge the Khan estimate" must not depend on the optional, operator-
+   *    authored `customer_message` happening to contain the word "Khan".
+   * 2. Fallback: the ILIKE estimate_number/customer_message search. This is
+   *    the path for a spoken DOCUMENT NUMBER ("nudge EST-0042"), for tenants
+   *    whose caller wasn't resolved, and whenever `jobRepo` isn't wired.
+   */
+  private async candidateEstimates(
+    context: TaskContext,
+    repo: Pick<EstimateRepository, 'findByTenant'>,
+    reference: string | undefined,
+  ): Promise<Estimate[]> {
+    const byCustomer = await this.estimatesForResolvedCustomer(context, repo);
+    if (byCustomer.length > 0) {
+      // "Nudge EST-0042 for the Khans" — when the spoken reference also names
+      // a specific document, narrow within the customer's own estimates
+      // rather than handing back every one of them as ambiguous. Narrowing
+      // only ever applies when it matches something.
+      const narrowed = reference ? narrowByEstimateNumber(byCustomer, reference) : [];
+      return narrowed.length > 0 ? narrowed : byCustomer;
+    }
+    if (typeof reference === 'string' && reference.trim().length > 0) {
+      return safeFindEstimatesByTenant(repo, context.tenantId, reference.trim());
+    }
+    return [];
+  }
+
+  /**
+   * customer → jobs → estimates. Empty (never throws) when no customer was
+   * resolved, when `jobRepo` isn't wired or lacks the OPTIONAL
+   * `findByCustomer`, or when the customer has no jobs/estimates — each of
+   * which degrades to the display-text fallback above, i.e. today's behavior.
+   */
+  private async estimatesForResolvedCustomer(
+    context: TaskContext,
+    repo: Pick<EstimateRepository, 'findByTenant'>,
+  ): Promise<Estimate[]> {
+    const customerId = resolvedCustomerIdFrom(context);
+    const jobRepo = this.deps.jobRepo;
+    if (!customerId || !jobRepo?.findByCustomer) return [];
+    try {
+      // Default scope (active jobs — canceled excluded) is deliberate: an
+      // estimate on a canceled job isn't something to chase. If that scope
+      // yields nothing the display-text fallback still runs.
+      const jobs = await jobRepo.findByCustomer(context.tenantId, customerId, {
+        limit: NUDGE_CUSTOMER_JOB_LIMIT,
+      });
+      if (jobs.length === 0) return [];
+      return await repo.findByTenant(context.tenantId, {
+        jobIds: jobs.map((j) => j.id),
+        limit: NUDGE_CUSTOMER_ESTIMATE_LIMIT,
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /** AC-1 — unique, verified, NUDGEABLE match: lifts the gate outright. */
+  private liftGate(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+    target: Estimate,
+  ): TaskResult {
+    payload.estimateId = target.id;
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, [], {
+          // Repo-confirmed, not copied from LLM/router text — safe to
+          // allowlist against assistant.ts's dropUnverifiedIds the same way
+          // resolveEstimateIdGate's verifiedIds does.
+          sourceContext: { verifiedIds: { estimateId: target.id } },
+        }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+
+  /** AC-2 — two or more nudgeable matches: ask, never guess. */
+  private clarify(
+    context: TaskContext,
+    reference: string,
+    candidates: Estimate[],
+    now: Date,
+  ): TaskResult {
+    return {
+      proposal: createProposal({
+        tenantId: context.tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          transcript: context.message,
+          reason: 'ambiguous_entity',
+          entityReference: reference,
+          entityCandidates: candidates.map((c) => nudgeCandidateFrom(c, now)),
+        },
+        summary: `Which estimate? "${reference}" matched ${candidates.length} sent, unanswered estimates`,
+        explanation: `Heard the request, but ${candidates.length} sent-and-unanswered estimates match. Tap the right one below.`,
+        sourceContext: baseSourceContext(context),
+        createdBy: context.userId,
+      }),
+      taskType: 'voice_clarification',
+    };
+  }
+
+  /**
+   * AC-3 (decision, logged above and in b8.10-design.md) — a unique match
+   * exists but its status isn't nudgeable: gate honestly with the reason on
+   * `explanation`, rather than a clarification picker with one dead row.
+   * estimateId is still stamped (review-card context, exactly as
+   * resolveEstimateIdGate stamps a free-text-resolved target) but the gate
+   * never lifts.
+   */
+  private gateNonNudgeable(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+    target: Estimate,
+  ): TaskResult {
+    payload.estimateId = target.id;
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, ['estimateId'], {
+          explanation:
+            `The ${target.estimateNumber} estimate is '${target.status}' — only a sent, ` +
+            'still-unanswered estimate can be nudged.',
+        }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+}
+
+/** Never throws — a repo hiccup fails closed to "unverified", same posture
+ *  as resolveTargetEstimate (estimate-edit-task.ts). */
+async function safeFindEstimateById(
+  repo: Pick<EstimateRepository, 'findById'>,
+  tenantId: string,
+  id: string,
+): Promise<Estimate | null> {
+  try {
+    return await repo.findById(tenantId, id);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The customer the request is about: the router-resolved spoken name first
+ * (`existingEntities.customerId`, populated for send_estimate_nudge via
+ * CUSTOMER_REF_INTENTS), then the verified inbound caller
+ * (`context.customerId`) — the same precedence SendPaymentReminderTaskHandler
+ * uses for its customer → jobs → invoices walk. UUID-shaped only, so
+ * free-text that leaked into the id slot is never used as a scope.
+ */
+function resolvedCustomerIdFrom(context: TaskContext): string | undefined {
+  const fromRouter = context.existingEntities?.customerId;
+  if (isUuid(fromRouter)) return fromRouter;
+  return isUuid(context.customerId) ? context.customerId : undefined;
+}
+
+/** Estimates whose number contains the spoken reference ("EST-0042"). */
+function narrowByEstimateNumber(estimates: Estimate[], reference: string): Estimate[] {
+  const needle = reference.trim().toLowerCase();
+  if (needle.length === 0) return [];
+  return estimates.filter((e) => e.estimateNumber.toLowerCase().includes(needle));
+}
+
+/** Never throws — a repo hiccup degrades to "no matches", same posture as
+ *  candidatesForReference (resolution/reference-candidates.ts). */
+async function safeFindEstimatesByTenant(
+  repo: Pick<EstimateRepository, 'findByTenant'>,
+  tenantId: string,
+  search: string,
+): Promise<Estimate[]> {
+  try {
+    return await repo.findByTenant(tenantId, { search, limit: 5 });
+  } catch {
+    return [];
   }
 }
 
@@ -669,7 +1202,9 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
 // Smith invoice") delivers the same overdue notice the dunning sweep sends,
 // but on demand. The execution handler only acts on invoiceId; the cadence
 // fields (stepKey / offsetDays / channel) are audit-only metadata, so we stamp
-// manual defaults and flag invoiceId missing for the review UI to resolve.
+// manual defaults. U1: the router's entity resolver (INVOICE_DOC_INTENTS)
+// resolves the spoken reference pre-draft — a unique verified match lifts the
+// invoiceId gate; anything else stays flagged missing for the review UI.
 export class SendPaymentReminderTaskHandler implements TaskHandler {
   readonly taskType = 'send_payment_reminder' as const;
 
@@ -692,10 +1227,19 @@ export class SendPaymentReminderTaskHandler implements TaskHandler {
       offsetDays: 0,
       channel: ee.sendChannel ?? 'sms',
     };
-    // invoiceId is a required UUID for the execution handler and is NOT
-    // resolved by the customer/job entity resolver — always flag it missing so
-    // the approval gate holds until the operator resolves the invoice.
-    const missing: string[] = ['invoiceId'];
+    const missing: string[] = [];
+
+    // U1 — `send_payment_reminder` is one of INVOICE_DOC_INTENTS, so the
+    // router's entity resolver resolves the spoken reference pre-draft and a
+    // unique verified match rides existingEntities.invoiceId. Consume it
+    // (resolve-then-gate, B5.3 shape); only an unresolved reference keeps the
+    // legacy missing-marker for review-time resolution.
+    const resolvedInvoiceId = resolvedInvoiceIdFrom(context);
+    if (resolvedInvoiceId) {
+      payload.invoiceId = resolvedInvoiceId;
+    } else {
+      missing.push('invoiceId');
+    }
 
     if (ee.jobReference) payload.invoiceReference = ee.jobReference;
     else if (ee.customerName) payload.invoiceReference = ee.customerName;
@@ -791,17 +1335,26 @@ export class SendPaymentReminderTaskHandler implements TaskHandler {
 // distinguishes an on-demand fee from the dunning ledger's accrual steps and
 // makes the fee line idempotent (the execution handler keys on
 // `late-fee:<stepKey>`, so re-executing this proposal can't double-charge).
-// invoiceId is resolved from the reference by the review UI.
+// U1: `apply_late_fee` is one of INVOICE_DOC_INTENTS — the router's entity
+// resolver resolves the spoken reference pre-draft and a unique verified
+// match (existingEntities.invoiceId) lifts the gate; an unresolved reference
+// keeps invoiceId flagged for the review UI. feeCents stays integer cents
+// end-to-end (ee.amount is already cents from the classifier).
 export class ApplyLateFeeTaskHandler implements TaskHandler {
   readonly taskType = 'apply_late_fee' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = { stepKey: 'manual' };
-    // invoiceId is a required UUID for the execution handler and is NOT
-    // resolved by the customer/job entity resolver — always flag it missing so
-    // the approval gate holds until the operator resolves the invoice.
-    const missing: string[] = ['invoiceId'];
+    const missing: string[] = [];
+
+    // U1 — resolve-then-gate on the resolver seam (see class comment).
+    const resolvedInvoiceId = resolvedInvoiceIdFrom(context);
+    if (resolvedInvoiceId) {
+      payload.invoiceId = resolvedInvoiceId;
+    } else {
+      missing.push('invoiceId');
+    }
 
     if (ee.jobReference) payload.invoiceReference = ee.jobReference;
     else if (ee.customerName) payload.invoiceReference = ee.customerName;
@@ -949,9 +1502,34 @@ export class RecordPaymentTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
-    else if (ee.customerName) payload.invoiceReference = ee.customerName;
-    else missing.push('invoiceId');
+    // A22 fix — record_payment is an INVOICE_DOC_INTENT
+    // (ai/agents/customer-calling/entity-resolution.ts), so the router's
+    // entity resolver has ALREADY verified the spoken invoice reference and
+    // threaded the unique match onto existingEntities.invoiceId before this
+    // handler runs — exactly the seam SendInvoiceTaskHandler and
+    // RecordRefundTaskHandler consume for their own INVOICE_DOC_INTENT
+    // siblings. Before this fix the handler never read that seam and gated
+    // invoiceId unconditionally on every draft, even a fully-resolved one:
+    // the proposal approved cleanly and then execution deterministically
+    // failed with "Payload must include a valid invoiceId UUID" (see
+    // RecordPaymentExecutionHandler). See U1 in SendInvoiceTaskHandler above
+    // for the identical resolution ladder.
+    const reference = ee.jobReference ?? ee.customerName;
+    const resolvedInvoiceId = resolvedInvoiceIdFrom(context);
+    if (resolvedInvoiceId) {
+      payload.invoiceId = resolvedInvoiceId;
+      // Keep the spoken reference for the review card's display.
+      if (typeof reference === 'string' && !isUuid(reference)) {
+        payload.invoiceReference = reference;
+      }
+    } else if (isUuid(reference)) {
+      // Already a resolved id — the execution handler can use it directly,
+      // no review-time resolution needed.
+      payload.invoiceId = reference;
+    } else {
+      if (reference) payload.invoiceReference = reference;
+      missing.push('invoiceId');
+    }
 
     if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.amountCents = ee.amount;
@@ -960,6 +1538,80 @@ export class RecordPaymentTaskHandler implements TaskHandler {
     }
 
     if (ee.paymentReference) payload.paymentReference = ee.paymentReference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── record_refund ─────────────
+//
+// Tradesperson wave 1, Task 3 (2026-08-07 plan) — a NEW money-class
+// proposal type for recording a MANUAL refund (cash/check/external card)
+// given back to a customer. Money class — never auto-approves under any
+// confidence (D3). Stripe-AUTOMATED refunds are explicitly OUT OF SCOPE
+// (YAGNI) — see RecordRefundExecutionHandler
+// (proposals/execution/record-refund-handler.ts) for the full analysis of
+// why this rides the existing `recordRefund()` domain function instead of
+// a new refund ledger.
+//
+// Reference resolution: unlike `update_catalog_item` (whose reference has
+// no membership in the generic entity-resolver's `EntityKind`), an invoice
+// reference is a first-class kind the resolver already handles for
+// `record_payment` and its siblings — this intent joins
+// `INVOICE_DOC_INTENTS` (entity-resolution.ts) instead of re-resolving it
+// here. That means by the time this handler runs, the voice-action-router
+// has ALREADY resolved the spoken reference (carried on `ee.jobReference` —
+// there is no separate `invoiceReference` extraction field anywhere in this
+// taxonomy; every invoice-doc intent reuses jobReference, disambiguated by
+// intent-set membership) to a verified `invoiceId` and stamped it onto
+// `context.existingEntities`, OR short-circuited to a `voice_clarification`
+// on an ambiguous match, OR left it absent on no match / nothing spoken.
+// `invoiceId` is therefore read off `ee` with a local type-widening cast
+// (house pattern — see `ComplaintTaskHandler`, which does the same for a
+// router-resolved `jobId`/`customerId`): it is a ROUTER-INJECTED verified
+// id, never an LLM-extracted field, so it is deliberately NOT added to
+// `ExtractedEntities` or the classifier's JSON template/parse allowlist.
+//
+// Unlike `record_payment`'s contract, `record_refund`'s has NO
+// `invoiceReference` fallback field — an unresolved reference gates the
+// proposal (`missingFields: ['invoiceId']`) rather than persisting free
+// text (e.g. a bare customer name) as a stand-in "reference" for a later
+// step to puzzle out. This is a deliberately SAFER posture than
+// `record_payment`'s own precedent for the identical case.
+export class RecordRefundTaskHandler implements TaskHandler {
+  readonly taskType = 'record_refund' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context) as ExtractedEntities & { invoiceId?: string };
+    const payload: Record<string, unknown> = {
+      // Method defaults to 'cash' when unstated — the most common manual
+      // refund, and never blocks drafting on a detail the reviewer can
+      // correct with one tap before approving.
+      method: ee.refundMethod ?? 'cash',
+    };
+    const missing: string[] = [];
+
+    if (typeof ee.invoiceId === 'string' && ee.invoiceId.length > 0) {
+      payload.invoiceId = ee.invoiceId;
+    } else {
+      missing.push('invoiceId');
+    }
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.amountCents = Math.round(ee.amount);
+    } else {
+      missing.push('amountCents');
+    }
+
+    if (typeof ee.refundReason === 'string' && ee.refundReason.trim().length > 0) {
+      payload.reason = ee.refundReason.trim();
+    }
+    if (typeof ee.refundCheckNumber === 'string' && ee.refundCheckNumber.trim().length > 0) {
+      payload.checkNumber = ee.refundCheckNumber.trim();
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -1029,31 +1681,167 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
   }
 }
 
-// ───────────── log_expense ─────────────
+/**
+ * The 2026 IRS standard mileage rate, in cents per mile. A CONSTANT, not
+ * tenant config — the IRS publishes one national rate per year; this is
+ * not a per-tenant business setting the way a labor rate or tax rate is.
+ * Bump this literal (with a comment naming the new year/rate) when the IRS
+ * publishes an updated rate — never make it configurable per Task 11's
+ * scope decision.
+ */
+export const DEFAULT_MILEAGE_RATE_CENTS_PER_MILE = 70;
+
+/**
+ * Quality-review correction (2026-08-09) — this is a SANITY BOUND on a
+ * spoken figure, not an overflow guard: `expenses.amount_cents` is Postgres
+ * INTEGER (int4, max 2,147,483,647), which at this rate would need roughly
+ * 30.7 MILLION miles to overflow. 10,000 is a domain judgment ("no single
+ * logged trip is five figures of miles"), not a boundary the overflow math
+ * requires — the original 1,000 figure UNDERSOLD what a legitimate batch
+ * entry ("log 1,200 miles for the month") might need and gated it for no
+ * stated reason. `logExpensePayloadSchema` (contracts/log-expense.ts) has
+ * NO upper bound on `amountCents` — a real expense (a new work van)
+ * legitimately runs into the tens of thousands — so this handler-level
+ * cap on MILES is the only thing standing between an STT-garbled spoken
+ * figure and Postgres; that is the real argument for having any cap at
+ * all, not the overflow arithmetic.
+ */
+export const MAX_MILEAGE_MILES = 10_000;
+
+// ───────────── log_expense (+ Task 11 alias: log_mileage) ─────────────
 //
 // Owner/technician logs a business expense. Capture-class, moves no
 // money. Reuses the existing LogExpenseExecutionHandler. spentAt
 // defaults to today (the operator can edit before approval). jobId is
 // optional on the contract, so a missing job reference does not block.
+//
+// U3 (B7.8) — `log_expense` joined JOB_REF_INTENTS, so the router's entity
+// resolver resolves "the Henderson job" pre-draft and a unique verified
+// match rides existingEntities.jobId. The handler stamps it onto the
+// payload so LogExpenseExecutionHandler persists the link and job P&L
+// (lookup_job_profit) counts the spoken expense. No new gate: an expense
+// with no (or an unresolved) job mention still logs UNLINKED, exactly as
+// before — resolution only adds the link. An AMBIGUOUS job never reaches
+// here (the router short-circuits to a voice_clarification picker).
+//
+// ── Task 11 (2026-08-07 tradesperson plan): log_mileage alias ───────────
+//
+// `log_mileage` is an ALIAS intent onto this SAME `log_expense` proposal
+// type (voice-intent-map.ts) — no new ProposalType, no new execution
+// handler, no migration. House precedent for a NO-OP alias (schedule_
+// inspection → create_appointment, log_permit → add_note) is a thin
+// dispatch-only alias: the target handler runs completely unchanged.
+// log_mileage cannot follow that precedent byte-for-byte because it needs
+// its OWN math (miles × rate) the plain log_expense drafting never does —
+// so this handler grows a BRANCH instead of a second file/subclass.
+//
+// Quality-review fix (2026-08-09) — the branch keys on `context.intent ===
+// 'log_mileage'` (TaskContext.intent, ai/tasks/task-handlers.ts), NOT on
+// the presence of the `mileageMiles` extracted-entity field. It was
+// originally keyed on field presence, reasoned as safe because "a plain
+// log_expense utterance never extracts mileageMiles" — but that is a
+// PROMPT-LEVEL instruction to the model, not a structural guarantee:
+// `entitiesForProposal` (workers/voice-action-router.ts) is a passthrough
+// for every intent except `create_customer`, and the classifier's
+// "Return valid JSON with exactly this shape" template is ONE GLOBAL
+// object shared by every intent, not scoped per intent. A real utterance
+// mixing both signals ("drove 32 miles round trip, spent $240 on
+// fittings") can classify as `log_expense` while the model still emits
+// `mileageMiles` alongside the real `amount` — field-presence keying would
+// have silently eaten the real $240 expense for a bogus $22.40 mileage
+// entry, and the mirror image (a log_mileage turn where the model puts the
+// heard number on the shared `amount` key instead) would have produced a
+// fully-formed, zero-missing-fields WRONG expense with nothing for the
+// operator to notice. `context.intent` is the classifier's actual verdict,
+// not a proxy for it, so neither direction can happen: an off-intent
+// stray field is preserved (see the `expenseDescription`/stray-`amount`
+// handling below) but never allowed to redirect or silently vanish.
 export class LogExpenseTaskHandler implements TaskHandler {
   readonly taskType = 'log_expense' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
+    // spentAt = TODAY in the TENANT timezone, for BOTH log_expense and its
+    // log_mileage alias (Task 7's lesson: never raw `new Date()` UTC math;
+    // quality-review fix, 2026-08-09 — a bare 'YYYY-MM-DD' string is not
+    // enough either: `spent_at` is TIMESTAMPTZ (schema.ts) and
+    // `LogExpenseExecutionHandler` parses the payload's `spentAt` with
+    // `new Date(spentAtRaw)`, which reads a date-only string as UTC
+    // MIDNIGHT — silently rendering back as the PREVIOUS calendar day in
+    // any tenant west of UTC. `tzMidnight` (shared/timezone.ts) converts
+    // the tenant-local calendar date into the correct UTC instant; the
+    // contract explicitly allows a full ISO timestamp (contracts/
+    // log-expense.ts). Computed once, here, for both branches below —
+    // this used to be TWO different idioms (a raw UTC slice for plain
+    // log_expense, tenant-tz math only inside the log_mileage branch),
+    // which is its own smell once one of them is wrong.
+    const { timezone } = resolveTenantTimezone(context);
+    const spentAt = tzMidnight(localDateKey(context.now ?? new Date(), timezone), timezone).toISOString();
     const payload: Record<string, unknown> = {
       category: ee.expenseCategory ?? 'other',
       description: ee.expenseDescription ?? context.message,
-      spentAt: new Date().toISOString().slice(0, 10),
+      spentAt,
     };
     const missing: string[] = [];
 
-    if (typeof ee.amount === 'number' && ee.amount > 0) {
+    if (context.intent === 'log_mileage') {
+      const miles = ee.mileageMiles;
+      const validMiles =
+        typeof miles === 'number' && Number.isFinite(miles) && miles > 0 && miles <= MAX_MILEAGE_MILES;
+      // M1 (quality review) — gate on the COMPUTED CENTS, not the raw
+      // miles: any 0 < miles < 1/140 (~0.00714) rounds to 0 cents, which
+      // would pass a bare `miles > 0` check yet violate the contract's
+      // `amountCents.positive()` (and the DB CHECK) at execution — the
+      // exact "draft-time contract looser than what it feeds" drift class
+      // voice-payload-contract.test.ts exists to catch.
+      const mileageCents = validMiles
+        ? Math.round((miles as number) * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE)
+        : undefined;
+
+      payload.category = 'vehicle';
+
+      // Never silently discard a stray field from the shared/global JSON
+      // template: `expenseDescription` and the plain `amount` (dollars) key
+      // can both still arrive on a log_mileage-classified turn (see class
+      // doc comment). Fold them into the visible description instead of
+      // dropping them — the operator reviewing the draft sees everything
+      // the model heard, even when only the miles drive the math.
+      const descriptionParts: string[] = [
+        typeof miles === 'number' && Number.isFinite(miles) ? `Mileage — ${miles} miles` : 'Mileage',
+      ];
+      if (typeof ee.expenseDescription === 'string' && ee.expenseDescription.trim()) {
+        descriptionParts.push(ee.expenseDescription.trim());
+      }
+      if (typeof ee.amount === 'number' && ee.amount > 0) {
+        descriptionParts.push(`spoken amount also heard: ${formatCents(ee.amount)}`);
+      }
+      payload.description = descriptionParts.join(' — ');
+
+      if (mileageCents !== undefined && mileageCents > 0) {
+        payload.amountCents = mileageCents;
+      } else {
+        missing.push('amountCents');
+      }
+    } else if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.amountCents = ee.amount;
     } else {
       missing.push('amountCents');
     }
+    // Note the asymmetry with the log_mileage branch above: a stray `amount`
+    // heard on a log_mileage turn is folded into the description (nothing
+    // heard is silently lost), but a stray `mileageMiles` heard on a plain
+    // log_expense turn is dropped here without a trace — `ee.mileageMiles`
+    // is never read in this branch. This is intentional, not an oversight:
+    // `amount` is money (losing it would misstate a real expense the
+    // operator needs to see), while `mileageMiles` on a log_expense turn is
+    // very likely classifier noise with nothing financial riding on it.
 
     if (ee.vendor) payload.vendor = ee.vendor;
+
+    // U3 — resolver-verified job id (shape-checked; same seam every other
+    // voice task consumes). The spoken reference is kept for the review card.
+    const resolvedJobId = context.existingEntities?.jobId;
+    if (isUuid(resolvedJobId)) payload.jobId = resolvedJobId;
     if (ee.jobReference) payload.jobReference = ee.jobReference;
 
     return {
@@ -1105,12 +1893,25 @@ export class ConfirmAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
+    // #920 fix — `resolveActiveAppointmentId` is a REPO lookup (customer's
+    // own jobs → appointments), not LLM/classifier text, so a match it
+    // returns is verifiable by construction exactly like
+    // NotifyDelayTaskHandler's A31 fix. Without stamping it here,
+    // routes/assistant.ts's dropUnverifiedIds scrub strips
+    // payload.appointmentId right back out (a spoken customer name never
+    // contains the appointment's UUID), and because this branch never
+    // pushes 'appointmentId' onto `missing` either, the proposal ends up
+    // with NO appointmentId and NO gate: approvable, but doomed to fail at
+    // execution ("confirm_appointment requires a resolved appointmentId").
+    let verifiedIds: Record<string, string> | undefined;
+
     const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
       customerId: context.customerId,
       jobRepo: this.jobRepo,
     });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -1119,7 +1920,11 @@ export class ConfirmAppointmentTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
@@ -1152,9 +1957,18 @@ export class MarkLeadLostTaskHandler implements TaskHandler {
 
 // ───────────── add_service_location ─────────────
 //
-// Attaches a new service address to a customer. The classifier only has
-// a freeform address string; the structured street/city/state/zip are
-// resolved by the review UI, so they're flagged missing.
+// Attaches a new service address to a customer. The classifier only has a
+// freeform address string, so `parseSpokenAddressParts` (shared/contracts/
+// spoken-address.ts) runs the SAME best-effort deterministic parse used by
+// create_customer's voice path and the review card — reading a trailing ZIP,
+// then a trailing state (abbreviation or spelled out), then whatever's left
+// as city, with the remainder as street1. Parsing a spoken address is not
+// entity resolution (no resolver kind answers it — see #909's A29 note), so
+// this stays a plain deterministic parse rather than a resolver call.
+//
+// Whatever the parser recovers lands on the payload directly; whatever it
+// can't (a bare street with no city/state/zip, or no address at all) is
+// flagged missing for the review UI — never guessed, never invented.
 export class AddServiceLocationTaskHandler implements TaskHandler {
   readonly taskType = 'add_service_location' as const;
 
@@ -1172,9 +1986,14 @@ export class AddServiceLocationTaskHandler implements TaskHandler {
       missing.push('customerId');
     }
 
+    const parts = parseSpokenAddressParts(ee.serviceAddress);
     if (ee.serviceAddress) payload.addressText = ee.serviceAddress;
-    // The executor needs structured fields — always require resolution.
-    missing.push('street1', 'city', 'state', 'postalCode');
+    if (parts.street1) payload.street1 = parts.street1;
+    if (parts.street2) payload.street2 = parts.street2;
+    if (parts.city) payload.city = parts.city;
+    if (parts.state) payload.state = parts.state;
+    if (parts.postalCode) payload.postalCode = parts.postalCode;
+    missing.push(...REQUIRED_LOCATION_FIELDS.filter((field) => !parts[field]));
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -1291,6 +2110,20 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
+    // A31 fix — `resolveActiveAppointmentId` is a REPO lookup (customer's
+    // own jobs → appointments), not LLM/classifier text, so a match it
+    // returns is verifiable by construction exactly like
+    // InvoiceEditTaskHandler's repo-confirmed invoiceId. Without stamping it
+    // here, routes/assistant.ts's dropUnverifiedIds scrub — which strips any
+    // id-shaped payload value that doesn't literally appear in the
+    // operator's words — deletes `payload.appointmentId` right back out
+    // (a spoken customer name never contains the appointment's UUID), and
+    // because this branch never pushes 'appointmentId' onto `missing`
+    // either, the proposal ends up with NO appointmentId and NO gate: it
+    // reads as fully approvable but is doomed to fail at execution. See
+    // GatedReferenceSource's B4 verifiedIds allowlist doc comment
+    // (ai/resolution/gated-reference-resolution.ts) for the general pattern.
+    let verifiedIds: Record<string, string> | undefined;
 
     // Scope to the caller's own appointment — notify_delay emits a comms
     // proposal that texts the customer, so resolving to a *different*
@@ -1301,6 +2134,7 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -1313,7 +2147,11 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
@@ -1330,9 +2168,38 @@ export class RequestFeedbackTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    if (ee.jobReference) payload.jobReference = ee.jobReference;
-    else if (ee.customerName) payload.customerReference = ee.customerName;
-    else missing.push('jobId');
+    // A32 fix — request_feedback is a JOB_REF_INTENT
+    // (ai/agents/customer-calling/entity-resolution.ts), so the router's
+    // entity resolver has ALREADY verified a spoken job reference and
+    // threaded it onto existingEntities.jobId before this handler runs —
+    // the same seam LogTimeEntryTaskHandler consumes for `jobId`.
+    //
+    // Before this fix this handler had TWO bugs: it never read that
+    // resolved seam, AND — more severely — it never gated payload.jobId
+    // when a free-text jobReference/customerReference existed, so the
+    // proposal shipped with `missingFields: []` (fully approvable) while
+    // `payload.jobId` was never set, guaranteeing
+    // RequestFeedbackExecutionHandler's "request_feedback requires a
+    // resolved jobId" at execution. A free-text reference on its own is
+    // never enough to lift the gate — only a resolver-verified id does.
+    const resolvedJobId =
+      typeof context.existingEntities?.jobId === 'string'
+        ? context.existingEntities.jobId
+        : undefined;
+
+    if (resolvedJobId) {
+      payload.jobId = resolvedJobId;
+      // Keep the spoken reference for the review card's display.
+      if (ee.jobReference) payload.jobReference = ee.jobReference;
+    } else if (ee.jobReference) {
+      payload.jobReference = ee.jobReference;
+      missing.push('jobId');
+    } else if (ee.customerName) {
+      payload.customerReference = ee.customerName;
+      missing.push('jobId');
+    } else {
+      missing.push('jobId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -1377,6 +2244,334 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── update_catalog_item ─────────────
+//
+// Tradesperson wave 1, Task 2 (2026-08-07 plan) — the voice ON-RAMP for
+// WS20's existing correction-repetition proposal type
+// (proposals/contracts/update-catalog-item.ts) and its execution handler
+// (proposals/execution/update-catalog-item-handler.ts) — both pre-exist and
+// are NOT modified here. Capture-class: moves no money, only shapes a
+// FUTURE catalog write that is itself reviewed.
+//
+// Contract-compatibility notes (read before changing this class):
+//
+//   1. `evidence` (lessonIds + correctionCount) is an OPTIONAL nested object
+//      on `updateCatalogItemPayloadSchema` (follow-up fix, 2026-08-09 — it
+//      was REQUIRED until then), carrying the correction-repetition loop's
+//      real provenance ("you've corrected this N times") — a live voice
+//      utterance has no lesson to point to, and `lessonIds` requires at
+//      least one real id when the key IS present. This handler
+//      deliberately OMITS `evidence` rather than fabricating one:
+//        - UpdateCatalogItemExecutionHandler.execute() never reads
+//          payload.evidence (only catalogItemId + proposedUnitPriceCents),
+//          so omitting it does not affect execution.
+//        - approveProposal (proposals/actions.ts) only blocks on the
+//          tracked `missingFields` list, not full Zod re-validation, so an
+//          unambiguous price-only draft (missingFields: []) still approves
+//          with one tap — proven by this type's row in
+//          test/proposals/voice-payload-contract.test.ts.
+//        - editProposal (proposals/actions.ts) revalidates the FULL merged
+//          payload against the Zod schema on every field edit. While
+//          `evidence` was required, that meant a voice-drafted proposal
+//          ALWAYS failed the review card's EDIT action with "Invalid
+//          payload after edit" — not an edge case. Making `evidence`
+//          optional on the shared contract (nothing reads it, so
+//          "required" was pure ceremony) fixed this without touching
+//          approve/execute's behavior at all.
+//
+//   2. `catalogItemNewName`/`catalogItemNewDescription` changes cannot
+//      actually EXECUTE today: the contract's `name` field is documented as
+//      informational-only ("name at proposal time") and there is no
+//      `description` field on the contract at all — the execution handler
+//      only ever writes `proposedUnitPriceCents`. So a spoken rename/
+//      description change is never written to `payload.name`/
+//      `payload.description` (that would silently no-op on approval,
+//      misleading the reviewer into thinking it applied); instead it rides
+//      `proposal.explanation` as a human-readable note pointing at the
+//      Catalog screen. Only a price change is a real, executable proposal
+//      field here.
+//
+//   3. Reference resolution reuses `resolveLineItemToCatalog` (ai/resolution/
+//      catalog-resolver.ts) — the SAME matcher draft_invoice/draft_estimate
+//      use to ground spoken line items — rather than a bespoke substring
+//      match. Quality-review correction (2026-08-08): the real win here is
+//      RECOVERABLE ambiguity (a flat gate key + scored candidates the
+//      reviewer can pick from) and robustness to speech variants
+//      (punctuation/plural folding, token overlap) — NOT prefix
+//      disambiguation. A prefix-shadowed pair ("AC tune-up" vs "AC tune-up
+//      deluxe") still lands 'ambiguous' here: this task's own test proves
+//      it (the two candidates score within MARGIN=0.15 of each other, and a
+//      price-differing tie is never broken silently). 'exact'/'high' resolve
+//      outright; 'ambiguous' gates with candidates surfaced on
+//      `sourceContext.entityCandidates` (AC-3/B2 pattern — see
+//      SendEstimateNudgeTaskHandler); 'none' gates with no candidates.
+//      `missingFields` entries are FLAT payload keys (`catalogItemId` /
+//      `proposedUnitPriceCents`), never prose — prose reasons live on
+//      `explanation` instead, per `clearSatisfiedMissingFields`
+//      (missing-fields.ts): it only lifts a gate on an EXACT flat-key edit,
+//      so a prose entry can never clear.
+//
+//   4. Quality-review fix (2026-08-09, Task 12 review, "I4") — a spoken
+//      `unitPriceCents` above `MAX_UNIT_PRICE_CENTS` ($100,000,
+//      contracts/add-catalog-item.ts) is treated the same as an absent
+//      one (falls back to the current price, same as the existing
+//      negative-price guard). Added because Task 12's add_catalog_item
+//      sibling ceilings the SAME unitPriceCents field writing the SAME
+//      catalog_items.unit_price_cents column — without this, a misheard
+//      "290 thousand" gates on create but sails through on edit.
+//
+//      Follow-up fix (2026-08-09, same day) — this gate USED to be mirrored
+//      onto `updateCatalogItemPayloadSchema` itself
+//      (contracts/update-catalog-item.ts) too, but that placement was
+//      wrong and was reverted: `proposedUnitPriceCents` also carries the
+//      correction-repetition loop's `afterCents` (a persisted, never-spoken
+//      value) and this handler's own no-price-change fallback
+//      (`resolvedItem.unitPriceCents`, also never spoken), so a
+//      contract-level ceiling rejected legitimate >$100k prices neither
+//      producer ever spoke. This gate right here — the one place that ever
+//      writes a genuinely SPOKEN `unitPriceCents` into the proposal — is
+//      now the ONLY place `MAX_UNIT_PRICE_CENTS` is enforced for this
+//      intent.
+//
+//   5. Follow-up to note 4 (2026-08-09) — a price the gate REFUSES is now
+//      always REPORTED, never silently collapsed. The gate turns an
+//      untrusted spoken figure into "no price change" (proposed ===
+//      current). On its own that stayed visible: with nothing else spoken,
+//      the no-change gate below fired and the proposal could not be
+//      approved. But a name/description change also counts as a "real
+//      change" and SUPPRESSED that gate — so "rename the tune-up to
+//      seasonal service and make it two ninety thousand" drafted an
+//      approvable COMPLETE NO-OP with nothing on the card saying so.
+//      Silent data loss on an approval surface.
+//
+//      (Correcting an earlier version of this note, which described it as
+//      "an approvable rename with the spoken price thrown away". That is
+//      not what this handler does and the accurate statement is worse:
+//      `payload.name` is set to the resolved item's REAL CURRENT name —
+//      note 2 — and the explanation says the rename is "not applied by
+//      this proposal". With the price refused, `proposedUnitPriceCents`
+//      falls back to `resolvedItem.unitPriceCents`, so proposed ===
+//      current and nothing else differs either: approving it changed
+//      literally nothing.)
+//
+//      The refusal now pushes the flat `proposedUnitPriceCents` gate key
+//      unconditionally and states the dropped figure on `explanation`.
+//      Deliberately NOT a refusal-with-clarification of the whole
+//      utterance: the catalog item resolved and a real rename was heard,
+//      and this class's established posture for a partially-extracted
+//      utterance is exactly this — a FLAT gate key plus a prose reason on
+//      `explanation` (note 3, and the ambiguous-catalog-match path right
+//      above). Task 13's clarification cards
+//      (workers/voice-action-router.ts) are the precedent for "never
+//      silent", but its remedy was a clarification because there was
+//      NOTHING to draft — `confirm`/`language_switch`/`operator_request`
+//      have no proposal type, no handler, no payload. Emitting one here
+//      would discard everything successfully extracted and make the
+//      operator re-speak the whole sentence, where a `missingFields` gate
+//      costs them one field edit: `approveProposal` blocks on the tracked
+//      list (so a one-tap approval that drops the price is impossible) and
+//      `clearSatisfiedMissingFields` lifts the gate on an exact flat-key
+//      edit.
+//
+//      Same change also stops the no-change gate from claiming "No price,
+//      name, or description change was stated" when a price WAS stated and
+//      refused — that branch now only fires when nothing was spoken at all.
+/**
+ * Largest spoken figure worth ECHOING back on the card. Review N8 —
+ * `Number.isFinite` admits up to 1.79e308, so an ASR figure that absurd
+ * reached the refusal message and rendered as `$1.0000000000000001e+306`
+ * (`toFixed` goes exponential at >=1e21; `Intl` instead prints a 300-digit
+ * wall). Neither belongs on an approval surface, and the operator learns
+ * nothing from either that "an implausible amount" does not tell them.
+ */
+const MAX_ECHOED_SPOKEN_PRICE_CENTS = 100_000_000_000; // $1,000,000,000.00
+
+/**
+ * Render a REFUSED spoken price for the operator to read.
+ *
+ * Review N6 — `formatUsdCentsFixed` (shared/contracts/money.ts), NOT
+ * `formatCents` (ai/skills/spoken-format.ts). The latter is a TTS formatter
+ * that deliberately omits thousands separators because they confuse Polly;
+ * money.ts's own doc says to prefer the fixed formatter for display. This
+ * string is on-screen card prose (confirmed: the web assistant speaks
+ * `reply.content` only, never `explanation`), and `$100000.00` on a money
+ * approval surface is one misread from an order of magnitude. The sibling
+ * `formatCents` uses in this file feed spoken/hint contexts and stay.
+ */
+function describeRefusedPrice(cents: number): string {
+  if (!Number.isFinite(cents) || Math.abs(cents) > MAX_ECHOED_SPOKEN_PRICE_CENTS) {
+    return 'an implausibly large amount';
+  }
+  return formatUsdCentsFixed(Math.round(cents));
+}
+
+export class UpdateCatalogItemTaskHandler implements TaskHandler {
+  readonly taskType = 'update_catalog_item' as const;
+
+  constructor(private readonly catalogRepo?: CatalogItemRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+    const explanationParts: string[] = [];
+    let sourceContext: Record<string, unknown> | undefined;
+
+    const reference = typeof ee.catalogItemReference === 'string' ? ee.catalogItemReference.trim() : '';
+    let resolvedItem: CatalogItem | undefined;
+
+    if (!reference || !this.catalogRepo) {
+      missing.push('catalogItemId');
+    } else {
+      const items = await this.catalogRepo.listByTenant(context.tenantId);
+      const resolution = resolveLineItemToCatalog(reference, items);
+      if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
+        resolvedItem = resolution.match;
+      } else {
+        missing.push('catalogItemId');
+        if (resolution.tier === 'ambiguous' && resolution.candidates) {
+          explanationParts.push(
+            `No confident single match for "${reference}" — edit the proposal with the correct catalog item.`,
+          );
+          // 'catalogItem' is NOW a real `EntityKind` (#909, GATED_REFERENCE_
+          // SOURCES.catalogItemId) — but this shape stays exactly what it was
+          // (id/kind/label/hint/score, display-only): this type still has no
+          // resolve-entity.ts redraft handler, so a chat operator answers
+          // through the post-draft #909 loop below instead (payload.
+          // itemReference → PgEntityResolver.resolveCatalogItem), not through
+          // this candidate list. Kept for the review-card UI picker, which
+          // predates and is independent of the chat answer path.
+          sourceContext = {
+            entityCandidates: resolution.candidates.map((c) => ({
+              id: c.item.id,
+              kind: 'catalogItem',
+              label: c.item.name,
+              hint: formatCents(c.item.unitPriceCents),
+              score: c.score,
+            })),
+            entityKind: 'catalogItem',
+            entityReference: reference,
+          };
+        } else {
+          explanationParts.push(`No catalog item matches "${reference}".`);
+        }
+      }
+    }
+
+    // #909 — a reference that did NOT resolve to a real row must still ride
+    // the payload as the free text a resolver can work from, mirroring
+    // PR #935's A33 verify-or-gate pattern (create-appointment-task.ts): a
+    // malformed/unresolved id is never persisted, and the raw text survives
+    // on the field `GATED_REFERENCE_SOURCES.catalogItemId.payloadFields`
+    // reads (gated-reference-resolution.ts) so the post-draft chat loop
+    // (routes/assistant.ts's resolveGatedReferencesForChat, already called
+    // unconditionally for every registry-dispatched proposal) picks it up
+    // with no further wiring. Root cause this closes (live sweeps 9 and 10,
+    // proposal 4d370bef-...): without this, an unresolved reference left
+    // `missingFields: ['catalogItemId']` with literally nothing on the
+    // payload a resolver — or a human reading the card — could act on.
+    if (!resolvedItem && reference) {
+      payload.itemReference = reference;
+    }
+
+    // Only a stated, non-negative, in-range integer cents value is a real
+    // price change — mirrors the durationMinutes sanity check elsewhere in
+    // this file (an LLM occasionally answers with a negative or fractional
+    // number). The upper bound (quality-review fix, "I4") mirrors
+    // add_catalog_item's own MAX_UNIT_PRICE_CENTS ceiling — both intents
+    // write the SAME catalog_items.unit_price_cents column from the SAME
+    // spoken unitPriceCents field, so a misheard "290 thousand" must gate
+    // here exactly as it does on the create side, not fall back to "no
+    // price change" and sail through unchecked.
+    //
+    // `spokenPriceCents` is kept separately from `requestedPriceCents` (the
+    // TRUSTED value) so the refusal is reportable — see note 5.
+    const spokenPriceCents =
+      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents)
+        ? ee.unitPriceCents
+        : undefined;
+    const requestedPriceCents =
+      spokenPriceCents !== undefined &&
+      spokenPriceCents >= 0 &&
+      spokenPriceCents <= MAX_UNIT_PRICE_CENTS
+        ? Math.round(spokenPriceCents)
+        : undefined;
+    const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;
+    const hasDescription =
+      typeof ee.catalogItemNewDescription === 'string' && ee.catalogItemNewDescription.trim().length > 0;
+
+    if (spokenPriceCents !== undefined && requestedPriceCents === undefined) {
+      // A price WAS spoken and the gate refused it (note 5). Gate on the flat
+      // payload key regardless of what else was spoken, and say which figure
+      // was dropped — silently collapsing it to "no price change" behind an
+      // approvable rename is data loss on an approval surface.
+      missing.push('proposedUnitPriceCents');
+      explanationParts.push(
+        spokenPriceCents > MAX_UNIT_PRICE_CENTS
+          ? `Heard a price of ${describeRefusedPrice(spokenPriceCents)}, above the ${formatUsdCentsFixed(MAX_UNIT_PRICE_CENTS)} limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.`
+          : // Review N7 — symmetric with the branch above. A spoken `-$5.00`
+            // is as much a mishearing worth showing as `$290,000.00` is, and
+            // "not a valid catalog price" alone left the operator unable to
+            // tell what had actually been heard.
+            `Heard a price of ${describeRefusedPrice(spokenPriceCents)}, which is not a valid catalog price, so it was NOT applied. Set the price on this proposal.`,
+      );
+    } else if (requestedPriceCents === undefined && !hasName && !hasDescription) {
+      missing.push('proposedUnitPriceCents');
+      explanationParts.push('No price, name, or description change was stated.');
+    }
+
+    if (resolvedItem) {
+      payload.catalogItemId = resolvedItem.id;
+      // Informational per the contract's own doc comment (name AT PROPOSAL
+      // TIME, for the summary/UI) — the resolved item's REAL current name,
+      // never the requested new one (see class doc comment note 2).
+      payload.name = resolvedItem.name;
+      payload.currentUnitPriceCents = resolvedItem.unitPriceCents;
+      // No stated price change ⇒ proposed === current (an honest "no price
+      // change" value the schema's required field accepts) rather than a
+      // fabricated number.
+      payload.proposedUnitPriceCents = requestedPriceCents ?? resolvedItem.unitPriceCents;
+    } else if (requestedPriceCents !== undefined) {
+      // #909 root cause (live sweeps 9/10) — a REAL, validated, in-range
+      // spoken price must not vanish just because the item ALSO failed to
+      // resolve. Before this branch, `proposedUnitPriceCents` was written
+      // ONLY inside `if (resolvedItem)`, so an unresolved reference dropped
+      // it from BOTH the payload AND `missing` (the two `if`/`else if`
+      // blocks above only push the gate when the price itself was invalid
+      // or absent — a valid price does neither, so nothing signaled the
+      // loss). "Raise the QA Sweep Smart Thermostat Install price to 89
+      // dollars" against a not-yet-resolved item drafted a proposal whose
+      // payload carried NOTHING but `_meta` — no item reference (fixed
+      // above), no price. There is no `currentUnitPriceCents` to report
+      // here (no resolved item to read it from); the operator sees the
+      // spoken figure once they supply `catalogItemId` and re-approves, or
+      // once the post-draft resolver fills it for them.
+      payload.proposedUnitPriceCents = requestedPriceCents;
+    }
+
+    if (hasName) {
+      explanationParts.push(
+        `Requested new name: "${(ee.catalogItemNewName as string).trim()}" — not applied by this proposal; rename from the Catalog screen.`,
+      );
+    }
+    if (hasDescription) {
+      explanationParts.push(
+        `Requested new description: "${(ee.catalogItemNewDescription as string).trim()}" — not applied by this proposal; edit from the Catalog screen.`,
+      );
+    }
+
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(explanationParts.length > 0 ? { explanation: explanationParts.join(' ') } : {}),
+          ...(sourceContext ? { sourceContext } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }

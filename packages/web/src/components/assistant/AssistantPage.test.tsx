@@ -461,7 +461,9 @@ describe('B4 — proposal approve/reject', () => {
     });
     expect(bareFetch).not.toHaveBeenCalled();
     await waitFor(() => {
-      expect(screen.getByText('Applied successfully')).toBeInTheDocument();
+      // Review J7 — nothing has APPLIED at this instant on either branch:
+      // `findReadyForExecution` requires `approved_at <= NOW() - windowMs`.
+      expect(screen.getByText(/applying shortly/i)).toBeInTheDocument();
     });
   });
 
@@ -672,5 +674,172 @@ describe('UB-B2 — conversation mode', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument();
     });
+  });
+});
+
+/**
+ * Follow-up review remnant — undo parity for the AUTO-APPROVED path.
+ *
+ * When the operator taps Approve, the page raises the shared UndoToast off the
+ * approve response's server window (Finding 2, above). A proposal the server
+ * auto-approved never goes through that callback — no tap, no approve
+ * round-trip — so it reached the operator already committed with no way back,
+ * even though the row is 'approved' and still inside its undo window
+ * (`POST /api/proposals/:id/undo` accepts exactly that state).
+ *
+ * The reply's card now carries the server's `undoExpiresAt`, and the page
+ * raises the SAME toast off it. Anchoring to the server instant (not a fresh
+ * client 5s) is what keeps the affordance honest: useUndoableApproval leaves
+ * the toast inactive when the real window has already run out, so the page
+ * never offers an undo the server would 409.
+ */
+describe('auto-approved proposal — undo parity', () => {
+  const autoApproved = {
+    id: 'prop-auto-1',
+    title: 'Book Tuesday 9am for the Hendersons',
+    summary: 'Appointment booked automatically.',
+    explanation: 'High confidence, supervised tenant.',
+    confidence: 'High',
+    type: 'Schedule',
+    status: 'Approved',
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function renderWithAutoApproved(undoExpiresAt: string | undefined) {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message: {
+          content: 'Booked it.',
+          autoApplied: true,
+          proposal: { ...autoApproved, ...(undoExpiresAt ? { undoExpiresAt } : {}) },
+        },
+      }),
+    );
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Book Tuesday 9am for the Hendersons' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(screen.getByText('Booked it.')).toBeInTheDocument());
+  }
+
+  it('raises the shared undo toast for a proposal the server already auto-approved', async () => {
+    await renderWithAutoApproved(new Date(Date.now() + 5000).toISOString());
+
+    await waitFor(() => {
+      expect(screen.getByTestId('undo-toast')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /undo/i })).toBeInTheDocument();
+  });
+
+  it('clicking Undo POSTs the undo endpoint for the auto-approved proposal', async () => {
+    await renderWithAutoApproved(new Date(Date.now() + 5000).toISOString());
+    await waitFor(() => screen.getByTestId('undo-toast'));
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ id: 'prop-auto-1', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-auto-1/undo',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+  });
+
+  it('offers no undo once the server window has already closed', async () => {
+    await renderWithAutoApproved(new Date(Date.now() - 1000).toISOString());
+
+    // Give the effect a tick — the assertion is that nothing ever appears.
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('undo-toast')).toBeNull();
+  });
+
+  /**
+   * Review J3 — the guard checked only `status === 'Approved'` and passed
+   * `undoExpiresAt` through unconditionally; the hook's `now + windowMs`
+   * fallback then invented a fresh, FULL client 5s. That is exactly what the
+   * comment three lines above the guard swore never happens, and it
+   * contradicts the API-side contract ("no stamp ⇒ no window ⇒ no
+   * affordance"). It is reachable: the chat route parses the raw LLM
+   * completion with `assistantReplySchema`, whose `status` accepts
+   * 'Approved' FROM THE MODEL, and returns `parsed.proposal` UNMAPPED — no
+   * `undoExpiresAt`, possibly not even a real proposal id. Clicking Undo
+   * POSTed to a bogus id and the operator got a raw error toast.
+   */
+  it('offers NO undo for an "Approved" card the server sent no window for', async () => {
+    await renderWithAutoApproved(undefined);
+
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('undo-toast')).toBeNull();
+  });
+
+  it('accepts the server-sent remaining DURATION as the window (review N11)', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message: {
+          content: 'Booked it.',
+          autoApplied: true,
+          proposal: { ...autoApproved, undoRemainingMs: 4200 },
+        },
+      }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Book Tuesday 9am' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(screen.getByText('Booked it.')).toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByTestId('undo-toast')).toBeInTheDocument());
+  });
+
+  /**
+   * Review N10 — the page fired only the cross-surface `proposalsChanged`
+   * event after an undo, so the chat message's own `proposal` was never
+   * updated and the card went on saying "Applying shortly" about a write the
+   * operator had just cancelled.
+   */
+  it('updates the chat card itself after a successful undo', async () => {
+    await renderWithAutoApproved(new Date(Date.now() + 5000).toISOString());
+    await waitFor(() => screen.getByTestId('undo-toast'));
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ id: 'prop-auto-1', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/undone\. Nothing was applied\./i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/applying shortly/i)).toBeNull();
+  });
+
+  it('does not raise an undo toast for an ordinary Pending card', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message: {
+          content: 'Here is a draft invoice.',
+          proposal: { ...autoApproved, id: 'prop-pending-1', status: 'Pending' },
+        },
+      }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Draft an invoice' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(screen.getByText('Here is a draft invoice.')).toBeInTheDocument());
+
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('undo-toast')).toBeNull();
   });
 });

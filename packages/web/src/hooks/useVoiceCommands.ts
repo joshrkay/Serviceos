@@ -35,6 +35,11 @@ const COMMANDS: { patterns: RegExp; route: string; label: string }[] = [
   { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}job\b`, 'i'),                 route: '/jobs/new',      label: 'Creating new job' },
   { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}(estimate|quote)\b`, 'i'),    route: '/estimates/new', label: 'Creating new estimate' },
   { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}(customer|client)\b`, 'i'),   route: '/customers/new', label: 'Adding new customer' },
+  // #881: the Home "New invoice" quick action submits "Create a new invoice";
+  // without this row it fell through to the assistant chat while the other
+  // three creates navigated. `\bbill\b` cannot match "billing" (word boundary),
+  // so dictation like "billing is on hold" still falls through.
+  { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}(invoice|bill)\b`, 'i'),       route: '/invoices/new',  label: 'Creating new invoice' },
 
   // Direct page matches (less specific — checked last)
   { patterns: /^jobs?$/i,                                               route: '/jobs',        label: 'Opening jobs' },

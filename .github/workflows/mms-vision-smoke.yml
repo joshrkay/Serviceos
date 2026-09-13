@@ -46,7 +46,7 @@ jobs:
           AI_COMPLEX_MODEL: gpt-4o
       - name: Notify Slack on failure
         if: failure()
-        uses: slackapi/slack-github-action@v1.27.0
+        uses: slackapi/slack-github-action@v1.27.1
         with:
           payload: |
             {

@@ -1,6 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  catalogUnitSchema,
+  type AppointmentTypeValue,
+  type CatalogUnitValue,
+} from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
@@ -10,6 +15,10 @@ import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
+import { ApplyCreditExecutionHandler } from './apply-credit-handler';
+import { CreateChangeOrderExecutionHandler } from './create-change-order-handler';
+import { CreateServiceAgreementExecutionHandler } from './create-service-agreement-handler';
+import type { AgreementRepository } from '../../agreements/agreement';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
@@ -25,6 +34,7 @@ import {
   EstimateDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
+import { RecordRefundExecutionHandler } from './record-refund-handler';
 import {
   ReviewResponseExecutionHandler,
   GoogleBusinessReplyResolver,
@@ -32,7 +42,7 @@ import {
 } from './review-response-handler';
 import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
-import { PaymentRepository } from '../../invoices/payment';
+import { PaymentRepository, PaymentLinkCleanupDeps } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository, InMemoryAuditRepository, createAuditEvent } from '../../audit/audit';
 import type { ConsentEventRepository } from '../../compliance/consent-events';
@@ -86,6 +96,10 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
+import {
+  SendCustomerMessageExecutionHandler,
+  type CustomerMessenger,
+} from './send-customer-message-handler';
 import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
 import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
@@ -101,10 +115,36 @@ import { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 import type { EntityAliasRepository } from '../../learning/entity-aliases/entity-alias';
 import { EntityAliasExecutionHandler } from './entity-alias-handler';
+import {
+  OnboardingTenantSettingsExecutionHandler,
+  OnboardingServiceCategoryExecutionHandler,
+  OnboardingEstimateTemplateExecutionHandler,
+  OnboardingTeamMemberExecutionHandler,
+  OnboardingScheduleExecutionHandler,
+} from './onboarding-handlers';
+import { PackActivationRepository } from '../../settings/pack-activation';
+import type { PendingInvitationRepository } from '../../users/pending-invitation';
+import type { ClerkInvitationConfig } from '../../users/invite-team-member';
+import { EstimateTemplateRepository } from '../../templates/estimate-template';
+import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
+import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
+import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
+import { AddMaterialExecutionHandler } from './add-material-handler';
+import { AddCatalogItemExecutionHandler } from './add-catalog-item-handler';
+import type { MaterialItemRepository } from '../../materials/material-item';
+import { CallbackExecutionHandler } from './callback-handler';
 
 export interface ExecutionContext {
   tenantId: string;
   executedBy: string;
+  /**
+   * Role of the human whose approval authorized this execution, when the
+   * caller knows it. Config-writing handlers stamp it on their audit event
+   * instead of asserting 'owner', so the trail records who actually acted.
+   * Optional: the background execution sweep runs detached from the approving
+   * request and legitimately may not have it.
+   */
+  executedByRole?: string;
 }
 
 export interface ExecutionResult {
@@ -132,12 +172,17 @@ export interface ExecutionHandler {
    */
   performsExternalIo?: boolean;
   /**
-   * Optional capability signal for the boot-time wiring guard
+   * Capability signal for the boot-time wiring guard
    * (proposals/execution/wiring-assertions.ts). Returns false when the
-   * handler is missing a dependency it needs to PERSIST — i.e. it would
-   * fall back to a synthetic-id passthrough that returns success without
-   * saving anything. Handlers that always persist (or have no degraded
-   * path) omit this; the guard treats absence as "fully wired".
+   * handler is missing a dependency it needs for its core effect — i.e. it
+   * would fall back to a synthetic-id/echo passthrough (or an ok:true skip)
+   * that returns success without persisting/sending anything.
+   *
+   * U8 (C2) — structurally optional (non-voice-reachable handlers may omit
+   * it), but the guard FAILS CLOSED: every voice-reachable handler MUST
+   * implement it, and a missing probe counts as DEGRADED at boot. The
+   * registry-enumeration test (test/proposals/wiring-assertions.test.ts)
+   * pins full coverage of Object.values(INTENT_TO_PROPOSAL_TYPE).
    */
   isFullyWired?(): boolean;
 }
@@ -419,9 +464,25 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           : undefined;
       if (customerId && this.jobRepo && this.locationRepo) {
         const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        // An operator-supplied `locationId` wins: it is how the
+        // `missingFields: ['locationId']` gate (drafted by
+        // `detectServiceLocationGap`) gets cleared for a customer who had no
+        // location at draft time. Validated against THIS customer's own
+        // non-archived rows, so a stale or cross-customer id can never site a
+        // job at someone else's address.
+        const supplied =
+          typeof payload.locationId === 'string' && payload.locationId.length > 0
+            ? locations.find((loc) => loc.id === payload.locationId && !loc.isArchived)
+            : undefined;
+        if (typeof payload.locationId === 'string' && payload.locationId.length > 0 && !supplied) {
+          return {
+            success: false,
+            error: `Service location ${payload.locationId} does not belong to this customer (or is archived)`,
+          };
+        }
         const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
         const fallback = locations.find((loc) => !loc.isArchived);
-        const locationId = primary?.id ?? fallback?.id;
+        const locationId = supplied?.id ?? primary?.id ?? fallback?.id;
         if (!locationId) {
           return {
             success: false,
@@ -800,6 +861,18 @@ export function normalizeDraftLineItems(raw: unknown[]): {
       // otherwise drop it between the approved proposal and the persisted line
       // (the parity bug this unit exists to prevent).
       ...(typeof li.imageFileId === 'string' ? { imageFileId: li.imageFileId } : {}),
+      // B7.5 — forward the catalog-grounded unit of measure. Same parity bug
+      // as imageFileId above: `applyCatalogPricing` stamps `unit` from the
+      // matched catalog item and `lineItemSchema` (contracts.ts) validates it,
+      // but this whitelist dropped it, so the unit vanished between the
+      // approved proposal and `estimate_line_items.unit`. Re-validated against
+      // the enum here rather than trusted as a bare string — the persisted
+      // column is plain TEXT with no CHECK, so this whitelist is the last
+      // gate before the row. DESCRIPTIVE ONLY: totalCents above is computed
+      // from quantity × unitPriceCents and never reads this.
+      ...(catalogUnitSchema.safeParse(li.unit).success
+        ? { unit: li.unit as CatalogUnitValue }
+        : {}),
     });
   });
 
@@ -1003,6 +1076,14 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
     private readonly pool?: Pool | null,
   ) {}
 
+  // U8 — already fail-closed at runtime ('send service not configured'), but
+  // a boot-time report beats a per-execution failure an owner only discovers
+  // after approving. dispatchRepo is deliberately excluded: the cooldown has
+  // the estimate.lastReminderAt belt-and-braces fallback.
+  isFullyWired(): boolean {
+    return Boolean(this.estimateRepo) && Boolean(this.sendService);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 
@@ -1141,10 +1222,17 @@ export function createExecutionHandlerRegistry(deps?: {
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
+  /** P0-9 — record_payment execution deactivates a link its credit made stale. */
+  paymentLinkCleanup?: PaymentLinkCleanupDeps;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
   estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement writes
+  // a service_agreements row (migration 056, already live) via this repo.
+  // Absent → the handler degrades to a synthetic-id passthrough (saves
+  // nothing).
+  agreementRepo?: AgreementRepository;
   auditRepo?: AuditRepository;
   feasibilityDeps?: import('../../scheduling/feasibility-types').FeasibilityDependencies;
   // P7-026 PR c — review-response wiring. All three are optional;
@@ -1160,6 +1248,14 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  /**
+   * Tradesperson wave 1, Task 5 — send_customer_message's free-form
+   * owner-approved outbound message. Absent → the handler degrades to a
+   * synthetic-id passthrough (sends nothing). Production wires
+   * `TwilioCustomerMessageService` (notifications/twilio-customer-message-
+   * service.ts), built next to `delayNotificationService` in app.ts.
+   */
+  customerMessenger?: CustomerMessenger;
   // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
   // degrades per its own per-dep guards (job-only / passthrough).
   emergencySmsSender?: EmergencySmsSender;
@@ -1175,7 +1271,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // Absent → the handler degrades to a synthetic-id passthrough.
   standingInstructionRepo?: StandingInstructionRepository;
   // WS20 — update_catalog_item writes the new SKU price via the catalog repo.
-  // Absent → the handler degrades to a synthetic passthrough.
+  // Absent → the handler degrades to a synthetic passthrough. Also used by
+  // Task 12's add_catalog_item (create-side mirror) — same dep, same
+  // degraded behavior.
   catalogRepo?: CatalogItemRepository;
   // Tenant entity aliases activate only through an owner-approved proposal.
   // Absent fails closed inside the handler.
@@ -1184,6 +1282,38 @@ export function createExecutionHandlerRegistry(deps?: {
   // toggle appends to the consent ledger (kind 'sms', source 'manual') in the
   // SAME transaction as the customer update + audit event.
   consentEventRepo?: ConsentEventRepository;
+  // B1.19 — onboarding_* execution handlers. packActivationRepo/templateRepo
+  // mirror the deps POST /api/onboarding/pack and POST /api/templates already
+  // take; packSeedDeps threads the same catalog+template seeder the pack
+  // route uses. Absent → the corresponding handler(s) report isFullyWired()
+  // false and refuse to execute rather than passthrough.
+  packActivationRepo?: PackActivationRepository;
+  /**
+   * B1.19 — target for an approved `onboarding_team_member`. Exists since
+   * migration 082; the handler was previously refusing on the false premise
+   * that no persistence target existed.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Clerk config for that invitation, same values POST /api/users/invitations
+   * gets. Without it the teammate never receives an email — the local row on
+   * its own is intent, not an invitation.
+   */
+  clerkInvitationConfig?: ClerkInvitationConfig;
+  templateRepo?: EstimateTemplateRepository;
+  packSeedDeps?: SeedPackDefaultsDeps;
+  // B1.18 — update_brand_voice writes through the SAME versioned path the
+  // Brand-Voice Configurator sheet uses (tenants/brand/brand-voice-service.ts
+  // updateBrandVoice). Absent → the handler reports isFullyWired() false and
+  // refuses to execute (WS3 convention) rather than a synthetic passthrough.
+  brandVoiceRepo?: BrandVoiceRepository;
+  /**
+   * Task 9 (2026-08-07 tradesperson plan) — add_material writes a
+   * material_items row (migration 272, Task 8's substrate) via this repo.
+   * Absent -> the handler degrades to a synthetic-id passthrough (saves
+   * nothing).
+   */
+  materialItemRepo?: MaterialItemRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // WS3 — audit is a structural invariant for the consent/entity mutation
   // handlers below (their constructors take a non-optional AuditRepository).
@@ -1297,8 +1427,24 @@ export function createExecutionHandlerRegistry(deps?: {
       moneyStateDeps,
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.paymentLinkCleanup,
     ),
+    // Tradesperson wave 1, Task 3 — record_refund: records a MANUAL refund
+    // (cash/check/external) via the SAME paymentRepo record_payment uses
+    // (no new dep — see RecordRefundExecutionHandler's doc comment for why
+    // a dedicated refund repo would bypass the existing over-refund
+    // invariant). Money-class: only runs after explicit approval.
+    new RecordRefundExecutionHandler(deps?.paymentRepo, deps?.auditRepo),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement:
+    // writes a service_agreements row (migration 056, already live) via
+    // the SAME agreementRepo the authenticated route + recurring-sweep
+    // worker use. LogExpense-family posture: registered unconditionally,
+    // degrades to a synthetic-id passthrough without agreementRepo OR
+    // locationRepo — quality-review C1 fix, the drafting task never
+    // supplies a locationId, so the handler resolves the customer's
+    // service location itself (isFullyWired() requires both).
+    new CreateServiceAgreementExecutionHandler(deps?.agreementRepo, deps?.auditRepo, deps?.locationRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
@@ -1310,6 +1456,11 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.jobRepo,
       deps?.customerRepo,
     ),
+    // Tradesperson wave 1, Task 5 — send_customer_message: a free-form
+    // outbound message the owner has already read and approved. Comms-class
+    // — never auto-approves at any trust tier. Degrades to a synthetic-id
+    // passthrough (sends nothing) when no customerMessenger is wired.
+    new SendCustomerMessageExecutionHandler(deps?.customerMessenger, deps?.auditRepo),
     new RequestFeedbackExecutionHandler(deps?.feedbackRepo, requiredAuditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
@@ -1355,7 +1506,57 @@ export function createExecutionHandlerRegistry(deps?: {
     // but the correction loop creates it with no trust tier, so it only ever
     // runs after a human tap.
     new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
+    // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: the
+    // create-side mirror of update_catalog_item, over the SAME catalogRepo
+    // (no new dep). LogExpense-family posture: registered unconditionally,
+    // degrades to a synthetic-id passthrough without catalogRepo.
+    new AddCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
     new EntityAliasExecutionHandler(deps?.entityAliasRepo),
+    // B1.19 — conversational onboarding execution handlers. Each writes
+    // through the SAME shared function the form wizard's routes use
+    // (see proposals/execution/onboarding-handlers.ts doc comment).
+    new OnboardingTenantSettingsExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+      deps?.pool ?? undefined,
+    ),
+    new OnboardingServiceCategoryExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+      deps?.pool ?? undefined,
+    ),
+    new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
+    // No repo dep: this handler never persists (see its class doc) —
+    // always reports isFullyWired() === false.
+    new OnboardingTeamMemberExecutionHandler(
+      deps?.pendingInvitationRepo,
+      requiredAuditRepo,
+      deps?.clerkInvitationConfig,
+    ),
+    new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // B1.18 — update_brand_voice: writes through the SAME versioned
+    // read→cool-down-check→merge→bump path the Brand-Voice Configurator
+    // sheet uses (never re-implemented here — see brand-voice-handler.ts).
+    // manual action class, so it only ever runs after an explicit owner tap.
+    new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
+    // Task 9 (2026-08-07 tradesperson plan) — add_material: writes a
+    // material_items row (migration 272, Task 8's substrate) via the SAME
+    // repo lookup_materials reads from. LogExpense-family posture:
+    // registered unconditionally, degrades to a synthetic-id passthrough
+    // without materialItemRepo.
+    new AddMaterialExecutionHandler(deps?.materialItemRepo, deps?.auditRepo),
+    // Task 14 (2026-08-07 tradesperson plan) — callback: a deliberately
+    // dep-free acknowledgement handler. Registered UNCONDITIONALLY (no dep
+    // gate — there is nothing to wire; see callback-handler.ts's class doc
+    // comment for why a no-op is the correct semantic, not a gap). Fixes
+    // the pre-existing bug where an approved `callback` proposal had no
+    // registered handler at all and threw HANDLER_NOT_FOUND, retrying into
+    // terminal 'execution_failed'.
+    new CallbackExecutionHandler(deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered
@@ -1379,6 +1580,15 @@ export function createExecutionHandlerRegistry(deps?: {
       deps.auditRepo,
       moneyStateDeps,
     ));
+    // Tradesperson wave 1, Task 4 — apply_credit: appends a non-taxable,
+    // NEGATIVE, floor-guarded line to an issued invoice and refreshes the
+    // money-state rollup. Money-class: only runs after explicit owner
+    // approval.
+    handlers.push(new ApplyCreditExecutionHandler(
+      deps.invoiceRepo,
+      deps.auditRepo,
+      moneyStateDeps,
+    ));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(
@@ -1391,6 +1601,12 @@ export function createExecutionHandlerRegistry(deps?: {
       // Fail-closed inside the handler when the repo is absent.
       deps.jobRepo,
     ));
+    // Tradesperson wave 1, Task 6 — create_change_order: mints a NEW
+    // estimate pinned to an EXISTING job, flagged isChangeOrder (migration
+    // 271). Registered on the same estimateRepo trigger as update_estimate
+    // above; also needs settingsRepo for estimate numbering (same as
+    // DraftEstimateExecutionHandler) — isFullyWired() fails closed without it.
+    handlers.push(new CreateChangeOrderExecutionHandler(deps.estimateRepo, deps.settingsRepo, deps.auditRepo));
   }
   // B7 — update_job mutates an EXISTING job; only registered when the job
   // repo is wired (mirrors update_estimate/update_invoice above — no

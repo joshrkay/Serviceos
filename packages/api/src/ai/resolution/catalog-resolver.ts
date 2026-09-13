@@ -44,6 +44,7 @@
  */
 import type { CatalogItem } from '../../catalog/catalog-item';
 import type { ConfidenceLevel } from '../guardrails/confidence';
+import { catalogUnitSchema } from '@ai-service-os/shared';
 
 export type CatalogMatchTier = 'exact' | 'high' | 'ambiguous' | 'none';
 export type CatalogMatchType = 'exact' | 'prefix' | 'token_overlap' | 'fuzzy';
@@ -435,6 +436,15 @@ export interface CatalogPricingOutcome {
        * it must leave the line's own category untouched (resolve-line.ts).
        */
       category?: string;
+      /**
+       * B7.5 — the candidate catalog item's unit of measure, recorded so a
+       * one-tap resolution (resolve-line.ts) lands the SAME unit a direct
+       * exact/high match would have. Absent on the synthetic `spoken:`
+       * candidate (no catalog identity) and on candidates recorded before
+       * this field existed; either way resolution leaves the line's unit
+       * alone rather than clobbering it with undefined.
+       */
+      unit?: string;
     }>
   >;
   anyUncatalogued: boolean;
@@ -471,6 +481,39 @@ export interface CatalogPricingOutcome {
 /** Catalog categories → the proposal contract's line-item vocabulary. */
 function contractCategory(item: CatalogItem): string {
   return item.category === 'Labor' ? 'labor' : 'material';
+}
+
+/**
+ * B7.5 — drop a `unit` the LLM emitted ONLY when it is not a member of the
+ * catalog's own vocabulary (`catalogUnitSchema`). A unit and a price are
+ * NOT the same kind of claim: a price is a number the model can invent
+ * without limit, so an ungrounded line's price is always untrusted
+ * (contracts.ts `unit: catalogUnitSchema.optional()` — "DESCRIPTIVE ONLY:
+ * no billing arithmetic reads it"). A unit, by contrast, is a value drawn
+ * from a small closed enum. When the model's spoken/drafted unit parses
+ * as `catalogUnitSchema` it is not invention — it's a real member of a
+ * bounded vocabulary the tenant's catalog also draws from — so it survives
+ * onto a line this pass could not ground to a specific catalog item (e.g.
+ * "three 45-microfarad capacitors" when that part isn't catalogued: name
+ * and quantity would otherwise persist with the unit silently dropped).
+ * Anything that does NOT parse against the enum (a hallucinated or
+ * malformed string) is still dropped — that case remains indistinguishable
+ * from invention. This does not touch price/confidence/requiresReview:
+ * an uncatalogued line's PRICE stays untrusted and `anyUncatalogued` still
+ * drives `requiresReview` and the confidence cap exactly as before —
+ * only the descriptive `unit` field's fate changes.
+ *
+ * Returns the SAME object when there is no unit to touch, so the common
+ * path allocates nothing.
+ */
+export function dropOutOfVocabularyUnit(
+  li: Record<string, unknown>,
+): Record<string, unknown> {
+  if (li.unit === undefined) return li;
+  if (catalogUnitSchema.safeParse(li.unit).success) return li;
+  const next = { ...li };
+  delete next.unit;
+  return next;
 }
 
 /**
@@ -531,7 +574,7 @@ export function applyCatalogPricing(
         // choice. Nothing is priced yet, so `anyCatalogPriced` stays
         // false for this line.
         out.push({
-          ...li,
+          ...dropOutOfVocabularyUnit(li),
           pricingSource: 'ambiguous' satisfies PricingSource,
           needsPricing: true,
         });
@@ -543,6 +586,7 @@ export function applyCatalogPricing(
             unitPriceCents: item.unitPriceCents,
             score: 1,
             category: contractCategory(item),
+            ...(item.unit ? { unit: item.unit } : {}),
           },
           // Synthetic "keep spoken price" choice has no catalog identity —
           // no category is stamped, so picking it leaves the line's own
@@ -560,6 +604,12 @@ export function applyCatalogPricing(
         pricingSource: 'catalog' satisfies PricingSource,
         needsPricing: false,
         category: contractCategory(item),
+        // B7.5 — carry the catalog item's unit of measure onto the grounded
+        // line. It was previously dropped here, so a spoken "three
+        // capacitors" lost the fact that the catalog prices them per each.
+        // Descriptive only: the price above is still the authoritative one
+        // and no total is derived from this.
+        ...(item.unit ? { unit: item.unit } : {}),
         // EE-4 — carry the catalog item's photo onto the grounded line so
         // AI-drafted estimates show images with no separate AI code path.
         // Only when the item has one (else leave absent = no image).
@@ -578,7 +628,7 @@ export function applyCatalogPricing(
     }
     if (resolution.tier === 'ambiguous' && resolution.candidates) {
       out.push({
-        ...li,
+        ...dropOutOfVocabularyUnit(li),
         pricingSource: 'ambiguous' satisfies PricingSource,
         needsPricing: true,
       });
@@ -589,11 +639,12 @@ export function applyCatalogPricing(
         unitPriceCents: c.item.unitPriceCents,
         score: c.score,
         category: contractCategory(c.item),
+        ...(c.item.unit ? { unit: c.item.unit } : {}),
       }));
       return;
     }
     out.push({
-      ...li,
+      ...dropOutOfVocabularyUnit(li),
       pricingSource: 'uncatalogued' satisfies PricingSource,
       needsPricing: true,
     });
@@ -631,9 +682,17 @@ function markAllUncatalogued(
   const out = lineItems.map((li) => {
     if (typeof li[priceField] === 'number') {
       anyUncatalogued = true;
-      return { ...li, pricingSource: 'uncatalogued' satisfies PricingSource, needsPricing: true };
+      return {
+        ...dropOutOfVocabularyUnit(li),
+        pricingSource: 'uncatalogued' satisfies PricingSource,
+        needsPricing: true,
+      };
     }
-    return li;
+    // B7.5 — no catalog was consulted at all, so even an unpriced line's
+    // unit is ungrounded. (A line with no price carries no money risk and
+    // is dropped downstream, but it must not smuggle an invented unit
+    // through in the meantime.)
+    return dropOutOfVocabularyUnit(li);
   });
   return {
     lineItems: out,

@@ -53,6 +53,14 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
     private readonly resolveCustomerName?: CancellationCustomerNameResolver,
   ) {}
 
+  // U8 — degrades to an echo passthrough (cancels nothing) without the
+  // appointment repo — see the final return in execute(). The boot guard
+  // (wiring-assertions.ts) fails boot when a pool is configured but this is
+  // false, so that branch is unreachable in a real deployment.
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

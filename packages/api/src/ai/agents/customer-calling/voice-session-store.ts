@@ -26,6 +26,7 @@ import type {
   SideEffect,
 } from './types';
 import type { RepairTemplate } from '../../../verticals/registry';
+import type { TurnTrace } from './turn-trace';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
 import type { CallOutcome } from '../../../voice/voice-service';
 import type {
@@ -52,8 +53,22 @@ export const DEFAULT_IDLE_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export type VoiceSessionEvent =
-  /** FSM transitioned to a new state. */
-  | { type: 'transition'; state: CallingAgentState; event: string; sideEffects: SideEffect[] }
+  /**
+   * FSM transitioned to a new state.
+   *
+   * R1 — `trace` carries the same per-turn action-path summary the HTTP
+   * response does, so an SSE subscriber can see how far the turn got (and
+   * what stopped it) without re-deriving it from `sideEffects`. Optional
+   * because the telephony transports emit this event too and do not build
+   * one; the in-app adapter always sets it.
+   */
+  | {
+      type: 'transition';
+      state: CallingAgentState;
+      event: string;
+      sideEffects: SideEffect[];
+      trace?: TurnTrace;
+    }
   /** Session was ended (normally or by reap). */
   | { type: 'ended'; reason: string }
   /** A proposal was created during this turn. */
@@ -77,6 +92,20 @@ export type VoiceSessionEvent =
       skillName: string;
       durationMs: number;
       success: boolean;
+      error?: string;
+      ts: number;
+    }
+  /**
+   * #847: the `en_route` DIRECT status act ran on a live surface. Not a
+   * `lookup_executed` — "on my way" mutates (audit + customer ETA text), so
+   * dashboards must not count it among read-only lookups. Fires for EVERY
+   * outcome, same discipline as lookup_executed: a dead branch is a metric,
+   * not an audit finding.
+   */
+  | {
+      type: 'en_route_executed';
+      outcome: 'sent' | 'no_appointment' | 'ambiguous' | 'refused' | 'unavailable';
+      durationMs: number;
       error?: string;
       ts: number;
     }
@@ -151,6 +180,8 @@ export interface VoiceSession {
   channel: CallingAgentChannel;
   /** Twilio CallSid for telephony sessions; undefined for in-app. */
   callSid?: string;
+  /** Bound by the authenticated inbound webhook; never taken from a WS frame. */
+  twilioAccountSid?: string;
   /**
    * Caller's phone number (Twilio `From`), set by the inbound adapter. Lets a
    * later gather turn create/resolve a CUSTOMER for an unknown caller who books
@@ -172,6 +203,31 @@ export interface VoiceSession {
   leadId?: string;
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
+  /**
+   * #866 — the tenant user this call is authorised AS, resolved ONCE at
+   * session establishment from the caller-ID (`telephony/phone-actor.ts`)
+   * and never from utterance content. A Clerk subject when the user has
+   * one, else the users row id — both are accepted by the shared role
+   * resolver. Absent for customers and unrecognised numbers: permission-
+   * gated lookups then refuse honestly. Session-level (not FSM context) on
+   * purpose: the transition table must stay inert to it.
+   *
+   * Only the telephony establishment core populates this field —
+   * `TwilioGatherAdapter.establishInboundSession`, shared by BOTH phone
+   * transports, so a Media Streams session carries it today just as a Gather
+   * session does (pinned in test/telephony/owner-session.test.ts). What Media
+   * Streams lacks until #860 step 2 is the DISPATCH — `speechTurn` does not yet
+   * call `answerPhoneLookup`; step 2 adds that call and nothing about the actor.
+   *
+   * The IN-APP adapter stamps it too (`InAppVoiceAdapter.startSession`), from
+   * the authenticated operator the route passes — no caller-ID inference is
+   * involved or possible there, and the shared lookup RBAC gate needs the
+   * same subject on every surface. The voice-quality drivers
+   * (`text-mode-driver`, `audio-mode-driver`) create sessions outside both
+   * cores; `text-mode-driver` sets a synthetic owner actor for owner-line
+   * scripts and otherwise leaves it undefined.
+   */
+  actorUserId?: string;
   /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
@@ -225,6 +281,16 @@ export interface VoiceSession {
    */
   ttsVoice?: string;
   /**
+   * #846 — per-session count of honored mid-session language switches on
+   * the transports that have no adapter-side call state of their own: the
+   * Gather adapter and the in-app voice-session adapter. Both cap it at
+   * MAX_LANGUAGE_SWITCHES_PER_CALL (`ai/orchestration/language-detector.ts`),
+   * the same policy the media-streams adapter enforces — its counter lives
+   * in adapter state next to the Deepgram socket, so it does not ride the
+   * session. Adapter-side like `leadId`: the FSM never reads it.
+   */
+  languageSwitchCount?: number;
+  /**
    * RV-071 — in-flight owner voice-approval dialogue (readback awaiting
    * the explicit affirmative, clarification list, or challenge prompt).
    * Adapter-side state like `leadId`: the FSM never reads it. Carries no
@@ -275,6 +341,40 @@ export interface VoiceSession {
    * `[]` on a read failure (never rejects). GC'd with the session.
    */
   catalogPreload?: Promise<import('../../../catalog/catalog-item').CatalogItem[]>;
+  /**
+   * Consecutive AI infrastructure failures (quota/breaker/provider) on
+   * classify. First transient failure gets a hold-line retry; the next
+   * escalates. Cleared on a successful classify. Adapter-side; FSM never reads it.
+   */
+  aiInfraRetryCount?: number;
+  /**
+   * R2 — the previous operator turn on this session, recorded at the END of
+   * every turn (including the deterministic recovery turns). The duplicate
+   * detector compares the incoming utterance against `normalizedText`, the
+   * arrival gap against `at`, and the CURRENT FSM state against `stateAfter`
+   * — "the state is unchanged since that turn" means the FSM is still where
+   * the last turn left it, which is what makes a re-send a re-send rather
+   * than a legitimate repeat later in the dialogue.
+   *
+   * `lastSpoken` is the rendered line the operator already heard, re-spoken
+   * verbatim on a duplicate so a client retry is idempotent end to end.
+   * Adapter-side state like `leadId`: the FSM never reads it, and it carries
+   * only the operator's own words.
+   */
+  lastOperatorTurn?: {
+    normalizedText: string;
+    at: number;
+    stateBefore: CallingAgentState;
+    stateAfter: CallingAgentState;
+    lastSpoken?: string;
+  };
+  /**
+   * R2 — consecutive filler / mic-check turns answered by the deterministic
+   * noise reprompt. Reset by any turn that carried a real request. Bounds the
+   * free reprompt so a genuinely dead microphone still falls through to the
+   * classifier and the FSM's escalation budget. Adapter-side; FSM never reads it.
+   */
+  noiseTurnCount?: number;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**
@@ -449,8 +549,10 @@ export class VoiceSessionStore {
       escalationTriggers?: CallingAgentContext['escalationTriggers'];
       /** RV-070 — caller-ID matched an approver phone (owner / backup). */
       ownerSession?: boolean;
-      /** Phase-2 Track A — tenant opted into extended owner intents. */
+      /** Phase-2 Track A — tenant opted into extended owner lookups. */
       extendedIntents?: boolean;
+      /** Customer protection (complaint/negotiation) — always on for telephony. */
+      customerProtectionIntents?: boolean;
     } = {}
   ): VoiceSession {
     const id = uuidv4();
@@ -466,6 +568,7 @@ export class VoiceSessionStore {
         : {}),
       ...(opts.ownerSession ? { ownerSession: true } : {}),
       ...(opts.extendedIntents ? { extendedIntents: true } : {}),
+      ...(opts.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS

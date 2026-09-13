@@ -227,7 +227,17 @@ export interface TenantSettings {
   // emergency triage to patch a customer through to the owner. Never the
   // same as businessPhone (which the AI answers on).
   ownerPhone?: string | null;
-  timezone: string;
+  /**
+   * The tenant's IANA zone, or undefined when they have never chosen one.
+   *
+   * Optional on purpose (migration 263 dropped the column's NOT NULL and its
+   * `DEFAULT 'America/New_York'`). A required-and-defaulted timezone is what
+   * made the Phoenix mis-booking undetectable: every consumer read a valid
+   * Eastern zone and had no way to tell a guess from a choice. Consumers that
+   * merely DISPLAY a time may substitute a default; consumers that BOOK one
+   * must gate instead — see create-appointment-task.ts.
+   */
+  timezone?: string;
   estimatePrefix: string;
   invoicePrefix: string;
   nextEstimateNumber: number;
@@ -513,6 +523,17 @@ export interface TenantSettings {
   digestTime?: string;
   digestChannel?: DigestChannel;
   /**
+   * FIX 10(i) (ANS-001) — the tenant's REVIEWED E1 life-safety script.
+   * `LIFE_SAFETY_E1_SCRIPT` (emergency-tier.ts) is a PLACEHOLDER pending
+   * qualified (trade + legal) review — see `E1_SCRIPT_REVIEW_REQUIRED` /
+   * `e1ScriptReadiness()`. When set, `runEmergencyScan` (twilio-adapter.ts)
+   * passes this as `responseScript` on the `emergency_detected` event for
+   * E1 turns ONLY, overriding the placeholder with no code change. Null /
+   * undefined = placeholder still in effect. Migration 267 (renumbered
+   * from 197 on merge).
+   */
+  e1ReviewedScript?: string | null;
+  /**
    * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
    * migration 204), so pilots receive it unless they turn it off. Optional
    * on the type so pre-migration rows / legacy fixtures read as "on" via
@@ -680,6 +701,8 @@ export interface UpdateSettingsInput {
   digestTime?: string;
   /** RV-063 — 'sms' (owner SMS) or 'none' (store/web only). */
   digestChannel?: DigestChannel;
+  /** FIX 10(i) (ANS-001) — reviewed E1 script; null clears (reverts to the placeholder). */
+  e1ReviewedScript?: string | null;
   /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
@@ -688,8 +711,59 @@ export interface UpdateSettingsInput {
   autonomousBookingThreshold?: number;
   /** D-018 — opt into the autonomous close lane (column default false). */
   autonomousCloseEnabled?: boolean;
-  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
-  autonomousCloseMaxCents?: number;
+  /**
+   * D-018 — cap (integer cents) on the auto-closeable quote total.
+   * #1011: widened to accept `null` so the owner-facing PUT can CLEAR the cap
+   * (the column is a nullable BIGINT, db/schema.ts:6083), matching the shape
+   * `depositRequiredAboveCents` already has. `null` is an explicit clear;
+   * `undefined` still means "untouched".
+   */
+  autonomousCloseMaxCents?: number | null;
+}
+
+/**
+ * B1.19 — the identity-shaped subset of TenantSettings written by
+ * PUT /api/onboarding/identity (the form wizard). Every field is
+ * OPTIONAL and touches only its own column — this is the partial-upsert
+ * contract shared by the wizard route and the conversational
+ * onboarding_tenant_settings / onboarding_schedule execution handlers
+ * so both write through the SAME implementation instead of two
+ * divergent ones (see routes/onboarding.ts PUT /identity and
+ * proposals/execution/onboarding-handlers.ts).
+ */
+export interface TenantIdentityUpsertFields {
+  businessName?: string;
+  serviceAreaText?: string;
+  /**
+   * #874 tri-state: omit to keep the stored radius, `null` to explicitly
+   * clear it, a number to set it.
+   */
+  serviceAreaRadius?: number | null;
+  businessHours?: Record<string, { open: string; close: string } | null>;
+  jobBufferMinutes?: number;
+  hourlyRateCents?: number;
+  /**
+   * Omit to leave whatever's stored untouched. NEVER pass a guessed or
+   * default zone here — omitted means "not chosen" (migration 263 /
+   * the Phoenix mis-booking postmortem in routes/onboarding.ts). Once a
+   * zone is set, this call never clears it back to unset.
+   */
+  timezone?: string;
+  /**
+   * Tri-state via key presence: omit the KEY entirely to leave the
+   * stored phone untouched; pass `null` to explicitly clear it; pass a
+   * (caller-normalized) string to set it. Mirrors the route's
+   * `ownerPhoneToWrite` tri-state.
+   */
+  ownerPhone?: string | null;
+  /**
+   * Seeded only when the tenant has no ai_model yet (first-ever row, or
+   * an existing row that predates this bootstrap) — never overrides an
+   * existing tenant-specific override. Required so every call site is
+   * explicit about which model to bootstrap with (matches
+   * resolveBootstrapAiModel()) rather than this method guessing.
+   */
+  bootstrapAiModel: string;
 }
 
 export interface SettingsRepository {
@@ -698,6 +772,18 @@ export interface SettingsRepository {
   update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null>;
   incrementEstimateNumber(tenantId: string): Promise<number>;
   incrementInvoiceNumber(tenantId: string): Promise<number>;
+  /**
+   * Atomic partial upsert for the identity-shaped fields. See
+   * `TenantIdentityUpsertFields` — single source of truth for
+   * PUT /api/onboarding/identity AND the conversational onboarding
+   * execution handlers. A brand-new row gets '' for businessName
+   * (matches the established POST /api/onboarding/pack "seed a
+   * minimal row" convention) and schema defaults for everything else.
+   */
+  upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings>;
 }
 
 export interface ActiveVerticalPackValidationOptions {
@@ -933,7 +1019,9 @@ export async function createSettings(
     businessPhone: input.businessPhone,
     businessEmail: input.businessEmail,
     ownerPhone: input.ownerPhone,
-    timezone: input.timezone || 'America/New_York',
+    // No ET fallback — an unchosen zone stays unchosen so the booking path
+    // can gate on it rather than silently booking three hours off.
+    ...(input.timezone ? { timezone: input.timezone } : {}),
     estimatePrefix: input.estimatePrefix || 'EST-',
     invoicePrefix: input.invoicePrefix || 'INV-',
     nextEstimateNumber: 1,
@@ -1044,7 +1132,11 @@ export async function ensureTenantSettings(
     id: uuidv4(),
     tenantId,
     businessName: options?.businessName ?? 'My Business',
-    timezone: 'America/New_York',
+    // No ET fallback — same rationale as createSettings above: a seeded
+    // 'America/New_York' is indistinguishable from a chosen one, so the
+    // scheduling gate would treat a guessed zone as configured and book
+    // non-Eastern tenants hours off. The zone stays UNSET until the tenant
+    // picks one; drafting handlers gate on the absence instead of guessing.
     estimatePrefix: 'EST-',
     invoicePrefix: 'INV-',
     nextEstimateNumber: 1,
@@ -1204,5 +1296,57 @@ export class InMemorySettingsRepository implements SettingsRepository {
     s.nextInvoiceNumber += 1;
     this.settings.set(tenantId, s);
     return num;
+  }
+
+  async upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings> {
+    const existing = this.settings.get(tenantId);
+    if (!existing) {
+      const created: TenantSettings = {
+        id: uuidv4(),
+        tenantId,
+        businessName: fields.businessName ?? '',
+        serviceAreaText: fields.serviceAreaText,
+        serviceAreaRadius: fields.serviceAreaRadius,
+        businessHours: fields.businessHours,
+        jobBufferMinutes: fields.jobBufferMinutes,
+        hourlyRateCents: fields.hourlyRateCents,
+        // NO fallback zone — see TenantIdentityUpsertFields.timezone.
+        timezone: fields.timezone,
+        ownerPhone: fields.ownerPhone ?? undefined,
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1001,
+        nextInvoiceNumber: 1001,
+        defaultPaymentTermDays: 30,
+        aiModel: fields.bootstrapAiModel,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      this.settings.set(tenantId, created);
+      return { ...created };
+    }
+
+    const updates: Partial<TenantSettings> = {};
+    if (fields.businessName !== undefined) updates.businessName = fields.businessName;
+    if (fields.serviceAreaText !== undefined) updates.serviceAreaText = fields.serviceAreaText;
+    if (fields.serviceAreaRadius !== undefined) updates.serviceAreaRadius = fields.serviceAreaRadius;
+    if (fields.businessHours !== undefined) updates.businessHours = fields.businessHours;
+    if (fields.jobBufferMinutes !== undefined) updates.jobBufferMinutes = fields.jobBufferMinutes;
+    if (fields.hourlyRateCents !== undefined) updates.hourlyRateCents = fields.hourlyRateCents;
+    if (fields.timezone !== undefined) updates.timezone = fields.timezone;
+    if (Object.prototype.hasOwnProperty.call(fields, 'ownerPhone')) {
+      updates.ownerPhone = fields.ownerPhone;
+    }
+    if (!existing.aiModel) {
+      updates.aiModel = fields.bootstrapAiModel;
+    }
+    if (Object.keys(updates).length === 0) {
+      return { ...existing };
+    }
+    const updated = (await this.update(tenantId, updates)) ?? existing;
+    return { ...updated };
   }
 }

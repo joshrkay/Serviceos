@@ -39,6 +39,23 @@ export const VoiceQualityScriptSchema = z.object({
     appointments: z.array(z.unknown()).optional(),
     invoices: z.array(z.unknown()).optional(),
     /**
+     * B8.10 — jobs to seed so a script can carry a real job for an estimate
+     * (below) to reference, or for a job-reference intent to resolve
+     * against. Previously accepted by convention in a few scripts
+     * (`lookup-jobs-known-customer.json`) but silently stripped by this
+     * schema and never actually seeded (runner.ts's `seedFixtures` had no
+     * read for it) — both are now wired.
+     */
+    jobs: z.array(z.unknown()).optional(),
+    /**
+     * B8.10 — estimates to seed so a reference-resolution script
+     * (`send_estimate_nudge`'s unique-nudgeable-match ladder) has a real,
+     * findable row instead of an always-empty in-memory repo. Same
+     * previously-dead-fixture situation as `jobs` above
+     * (`lookup-estimates-recent.json`), now wired.
+     */
+    estimates: z.array(z.unknown()).optional(),
+    /**
      * WS21b — pending proposals to seed so an owner-approval script has
      * something to approve/reject. Rows are passed to `proposalRepo.create`
      * verbatim (already-shaped `Proposal` objects, `unknown` for

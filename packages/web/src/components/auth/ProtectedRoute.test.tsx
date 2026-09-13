@@ -253,6 +253,44 @@ describe('P0-031 ProtectedRoute — authenticated', () => {
     expect(screen.queryByTestId('protected-content')).toBeNull();
   });
 
+  // B1.19 — the conversational flow ends by telling the owner to approve the
+  // proposals it drafted, one of which writes the identity fields. Gating the
+  // approval queue made that instruction impossible to follow: the approval
+  // that opens the gate sat behind the gate. This pins the escape hatch.
+  it.each(['/inbox', '/proposals'])(
+    'allows %s through the soft gate so pre-identity users can approve onboarding proposals',
+    (path) => {
+      clerkState.isLoaded = true;
+      clerkState.isSignedIn = true;
+      onboardingState.isLoading = false;
+      onboardingState.data = {
+        steps: [
+          { id: 'signup', status: 'done' },
+          { id: 'identity', status: 'current' },
+        ],
+        isComplete: false,
+        currentStep: 'identity',
+        voiceAgentLive: false,
+        tenantId: 't-1',
+        subscriptionStatus: null,
+      };
+
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route path="/onboarding" element={<div data-testid="onboarding-page">ONBOARDING</div>} />
+            <Route element={<ProtectedRoute />}>
+              <Route path={path} element={<ProtectedContent />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      );
+
+      expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+      expect(screen.queryByTestId('onboarding-page')).toBeNull();
+    },
+  );
+
   it('allows CRM routes once identity is done even if onboarding is incomplete', () => {
     clerkState.isLoaded = true;
     clerkState.isSignedIn = true;

@@ -13,6 +13,7 @@ import {
 } from '../integrations/twilio/provisioning';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { isTwilioDeploymentEnv } from '../integrations/credentials';
+import { isTwilioTestNumber } from '../telephony/phone-policy';
 import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 
 // Status values match migration 071_widen_tenant_integrations_status:
@@ -328,6 +329,34 @@ export function createProvisionTwilioWorker(deps: {
             phoneNumberSid = number.sid;
             phoneE164 = number.phoneNumber;
             logger.info('Phone number purchased', { tenantId, phoneE164 });
+          }
+          // #880 — hard stop: never persist a Twilio magic test number
+          // (+1500555xxxx) as a tenant's real line. Reaching here with one —
+          // whether "purchased" or recovered from the subaccount — means the
+          // configured Twilio credentials are TEST credentials (test creds can
+          // only ever transact magic numbers). Retrying can't fix credentials,
+          // so record an operator-actionable failure and stop, exactly like
+          // the unavailable-preferred-number path above. The dev-stub branch
+          // near the top of this handler is intentionally NOT affected: it
+          // writes its stub (with `stub: true`) before this code runs.
+          if (phoneE164 && isTwilioTestNumber(phoneE164)) {
+            const msg =
+              `Refusing to persist Twilio test number ${phoneE164} as the tenant line — ` +
+              'the configured Twilio credentials appear to be TEST credentials; ' +
+              'fix TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN and re-run provisioning';
+            logger.error('Twilio returned a magic test number during real provisioning', {
+              tenantId,
+              phoneE164,
+            });
+            await tenantQuery(
+              pool,
+              tenantId,
+              `UPDATE tenant_integrations
+               SET status = 'failed', last_error = $1, updated_at = NOW()
+               WHERE tenant_id = $2 AND provider = 'twilio'`,
+              [msg, tenantId]
+            );
+            return;
           }
           await tenantQuery(
             pool,

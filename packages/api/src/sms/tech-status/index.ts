@@ -4,6 +4,7 @@ import {
 } from '../inbound-dispatch';
 import { TechStatusKeywordHandler } from './keyword-router';
 import { TechStatusHandlerDeps } from './handler';
+import { EnRouteSmsKeywordHandler, EnRouteSmsHandlerDeps } from './en-route-keyword';
 
 export { TechStatusKeywordHandler } from './keyword-router';
 export {
@@ -11,6 +12,12 @@ export {
   tenantLocalDate,
   type TechStatusHandlerDeps,
 } from './handler';
+// B5.5 — the en-route ('omw' / 'on my way') SMS keyword leg.
+export {
+  handleEnRouteSms,
+  EnRouteSmsKeywordHandler,
+  type EnRouteSmsHandlerDeps,
+} from './en-route-keyword';
 export {
   InMemoryTechStatusTodayRepository,
   PgTechStatusTodayRepository,
@@ -47,6 +54,21 @@ export function registerTechStatusKeywords(
   options: RegisterKeywordHandlerOptions = {},
 ): TechStatusKeywordHandler {
   const handler = new TechStatusKeywordHandler(deps);
+  registerKeywordHandler(handler, options);
+  return handler;
+}
+
+/**
+ * B5.5 — module init for the en-route SMS keyword(s) ('omw' / 'on my way').
+ * Separate registration from `registerTechStatusKeywords` above: different
+ * keyword set, different handler, routes to the SAME audited direct
+ * status act the app en-route button and the voice leg use.
+ */
+export function registerEnRouteSmsKeyword(
+  deps: EnRouteSmsHandlerDeps,
+  options: RegisterKeywordHandlerOptions = {},
+): EnRouteSmsKeywordHandler {
+  const handler = new EnRouteSmsKeywordHandler(deps);
   registerKeywordHandler(handler, options);
   return handler;
 }

@@ -8,9 +8,11 @@
  * and flags invoiceId missing for the review UI, so an ad-hoc "chase the Smith
  * invoice" works without changing the execution schema the sweep depends on.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { SendPaymentReminderTaskHandler } from '../../../src/ai/tasks/voice-extended-tasks';
+import { SendPaymentReminderExecutionHandler } from '../../../src/proposals/execution/send-payment-reminder-handler';
+import type { TransactionalCommsService } from '../../../src/notifications/transactional-comms-service';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 import { sendPaymentReminderPayloadSchema } from '../../../src/proposals/contracts/send-payment-reminder';
@@ -226,5 +228,61 @@ describe('SendPaymentReminderTaskHandler — duplicate-reminder marker', () => {
     expect(res.proposal.proposalType).toBe('send_payment_reminder');
     expect(res.proposal.payload._meta).toBeUndefined();
     expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+  });
+});
+
+// ── U1 — resolver-verified invoiceId lifts the gate (resolve-then-gate) ────
+//
+// `send_payment_reminder` is one of INVOICE_DOC_INTENTS: the router's entity
+// resolver resolves "the Smith invoice" pre-draft and a UNIQUE verified match
+// rides existingEntities.invoiceId. P-44: the lifted-gate case is proven by
+// the EXECUTED EFFECT — the real SendPaymentReminderExecutionHandler delivers
+// the overdue notice for exactly the resolved invoice — never just shape.
+describe('SendPaymentReminderTaskHandler — U1 resolver-verified invoiceId', () => {
+  const RESOLVED_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+
+  it('resolver seam lifts the gate; the drafted payload EXECUTES through the real handler (notice sent for the resolved invoice)', async () => {
+    const res = await new SendPaymentReminderTaskHandler().handle(
+      ctx({ existingEntities: { jobReference: 'the Smith invoice', invoiceId: RESOLVED_ID } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBe(RESOLVED_ID);
+    expect(res.proposal.payload.invoiceReference).toBe('the Smith invoice');
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    // Comms class — a fully-resolved draft STILL never auto-approves.
+    expect(res.proposal.status).toBe('draft');
+
+    // Executed effect: the real execution handler delivers through the
+    // transactional-comms path for exactly the resolved invoice, keyed on the
+    // per-proposal manual occurrence token.
+    const notifyInvoiceOverdue = vi.fn(async () => ({ status: 'sent' as const }));
+    const comms = { notifyInvoiceOverdue } as unknown as TransactionalCommsService;
+    const exec = await new SendPaymentReminderExecutionHandler(comms).execute(res.proposal, {
+      tenantId: 't-1',
+      executedBy: 'u-1',
+    });
+    expect(exec.success).toBe(true);
+    expect(exec.resultEntityId).toBe(RESOLVED_ID);
+    expect(notifyInvoiceOverdue).toHaveBeenCalledWith(
+      't-1',
+      RESOLVED_ID,
+      `manual:${res.proposal.id}`,
+    );
+  });
+
+  it('a non-UUID value in the invoiceId seam never lifts the gate', async () => {
+    const res = await new SendPaymentReminderTaskHandler().handle(
+      ctx({ existingEntities: { jobReference: 'the Smith invoice', invoiceId: 'smith invoice' } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+  });
+
+  it('an unresolved reference (empty seam) keeps today\'s gate + manual cadence defaults', async () => {
+    const res = await new SendPaymentReminderTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Smith' } }),
+    );
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    expect(res.proposal.payload.stepKey).toBe('manual');
+    expect(res.proposal.payload.offsetDays).toBe(0);
   });
 });

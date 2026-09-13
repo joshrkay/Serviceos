@@ -47,6 +47,46 @@ const runningLateBodySchema = z.object({
   delayMinutes: z.number().int().positive().optional(),
 });
 
+/**
+ * Read a string filter off `req.query`, treating a PRESENT-BUT-EMPTY value
+ * (`?technicianId=`, the shape a UI emits when its filter select is cleared)
+ * as ABSENT — "no filter", never "match the row whose column is the empty
+ * string".
+ *
+ * Follow-up to PR #815. The repositories already agreed on this for the value
+ * itself: `if (options?.technicianId)` / `if (options?.status)` are truthiness
+ * tests in PgAppointmentRepository.buildListWhere, in
+ * InMemoryAppointmentRepository.listWithMeta, and in listAppointmentsWithMeta's
+ * no-listWithMeta fallback (where a falsy technicianId also correctly skips the
+ * "cannot filter by technician" throw), so `''` never became a predicate.
+ * The ROUTE was the one place that disagreed: a bare
+ * `typeof req.query.x === 'string'` check kept `''`, which is `!== undefined`
+ * and therefore flipped `wantsPaginated` on. The damage was to the response
+ * ENVELOPE rather than the rows — `?jobId=x&technicianId=` silently traded the
+ * legacy bare-array contract for `{ data, total }`, and a bare
+ * `?technicianId=` turned the historical "jobId query parameter is required"
+ * 400 into a 200 listing the whole tenant.
+ *
+ * Whitespace is NOT trimmed away: `?technicianId=%20` is a caller asserting a
+ * value, and silently reinterpreting it as "no filter" would be the same class
+ * of guess this helper exists to remove — and a worse one here, because a
+ * whitespace-only technician filter would then WIDEN the response to every
+ * appointment in the tenant, the exact widening this helper removed.
+ *
+ * Follow-up review N5 — an earlier version of this note went on to call the
+ * untrimmed value "an honest zero-result filter". It was not: `job_id` and
+ * `appointment_assignments.technician_id` are `UUID NOT NULL` (db/schema.ts),
+ * so Postgres raised `invalid input syntax for type uuid` and the caller got
+ * a 500. The not-trimming DECISION stands; the zero-result is now actually
+ * DELIVERED, in PgAppointmentRepository (see its `isUuid` short-circuit,
+ * mirroring the idiom in materials/pg-material-item.ts) — at the layer that
+ * knows the column type, rather than by a route-level UUID check that would
+ * impose Postgres's id shape on the in-memory backend too.
+ */
+function stringFilter(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 export function createAppointmentRouter(
   appointmentRepo: AppointmentRepository,
   ownership: TenantOwnership,
@@ -199,13 +239,14 @@ export function createAppointmentRouter(
     requirePermission('appointments:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
-        const technicianId = typeof req.query.technicianId === 'string' ? req.query.technicianId : undefined;
-        const status = typeof req.query.status === 'string' ? req.query.status as AppointmentStatus : undefined;
+        // Empty-valued params mean "no filter" — see stringFilter's comment.
+        const jobId = stringFilter(req.query.jobId);
+        const technicianId = stringFilter(req.query.technicianId);
+        const status = stringFilter(req.query.status) as AppointmentStatus | undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
-        const fromRaw = typeof req.query.fromDate === 'string' ? req.query.fromDate : undefined;
-        const toRaw = typeof req.query.toDate === 'string' ? req.query.toDate : undefined;
+        const fromRaw = stringFilter(req.query.fromDate);
+        const toRaw = stringFilter(req.query.toDate);
         const fromDate = fromRaw ? new Date(fromRaw) : undefined;
         const toDate = toRaw ? new Date(toRaw) : undefined;
         if (fromDate && Number.isNaN(fromDate.getTime())) {
@@ -217,10 +258,22 @@ export function createAppointmentRouter(
           return;
         }
 
+        // Follow-up review J6 — `limit`/`offset` go through the SAME helper as
+        // every other string param, and `wantsPaginated` is derived from the
+        // FILTERED values. They were previously left on a bare
+        // `req.query.limit !== undefined`, twenty lines below the fix that
+        // removed exactly that check everywhere else, and for them the
+        // outcome was worse than a swapped envelope: `?jobId=x&limit=` flipped
+        // `wantsPaginated` on, `parseInt('', 10)` produced NaN, and the legacy
+        // bare-array contract became a hard 400 naming a bound the caller
+        // never crossed ("limit must be between 1 and 200").
+        const limitRaw = stringFilter(req.query.limit);
+        const offsetRaw = stringFilter(req.query.offset);
+
         const wantsPaginated =
           req.query.paginated === 'true' ||
-          req.query.limit !== undefined ||
-          req.query.offset !== undefined ||
+          limitRaw !== undefined ||
+          offsetRaw !== undefined ||
           fromDate !== undefined ||
           toDate !== undefined ||
           technicianId !== undefined ||
@@ -241,8 +294,6 @@ export function createAppointmentRouter(
           return;
         }
 
-        const limitRaw = req.query.limit as string | undefined;
-        const offsetRaw = req.query.offset as string | undefined;
         const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_APPOINTMENT_LIMIT;
         const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
         if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_APPOINTMENT_LIMIT)) {

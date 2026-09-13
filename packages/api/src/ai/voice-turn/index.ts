@@ -1,9 +1,17 @@
 export {
   createVoiceTurnProcessor,
+  classifierProfileForSession,
+  auditOffSurfaceClassification,
   type VoiceTurnProcessor,
   type VoiceTurnProcessorDeps,
 } from './create-voice-turn-processor';
-export { appendAgentTts, type AppendTranscriptStore } from './transcript-append';
+export {
+  appendAgentTts,
+  callerTranscriptText,
+  REDACTED_CHALLENGE_TEXT,
+  type AppendTranscriptStore,
+  type ChallengeAwareSession,
+} from './transcript-append';
 export {
   preloadSessionCatalog,
   resolveSessionCatalog,

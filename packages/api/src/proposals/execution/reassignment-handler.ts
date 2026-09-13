@@ -24,6 +24,15 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
   ) {}
 
+  // U8 — degrades to a synthetic-id passthrough (reassigns nothing) without
+  // the assignment repo, and skips existence/staleness/feasibility validation
+  // without the appointment repo (an assignment could persist against an
+  // arbitrary id). The boot guard (wiring-assertions.ts) fails boot when a
+  // pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo) && Boolean(this.assignmentRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

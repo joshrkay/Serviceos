@@ -74,7 +74,12 @@ export async function enforceCompliance(
   let hoursConfig: BusinessHoursConfig | null = null;
   try {
     const settings = await settingsRepo.findByTenant(tenantId);
-    if (settings) {
+    // A tenant that has never chosen a timezone (TenantSettings.timezone is
+    // optional since migration 263) leaves the window undecidable, so there
+    // is no config to check — the same fail-open state as the catch below and
+    // as a tenant with no schedule. Substituting a default zone here would
+    // decide "after hours" against a zone the tenant never picked.
+    if (settings?.timezone) {
       // TenantSettings carries timezone; schedule will be added by a future
       // story. Until then, no schedule ⇒ checkBusinessHours returns
       // `no_schedule_configured` which is treated as open.

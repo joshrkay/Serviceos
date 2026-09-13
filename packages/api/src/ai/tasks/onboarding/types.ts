@@ -101,6 +101,26 @@ export interface ScheduleExtraction {
   sla?: SLAEntry;
 }
 
+/**
+ * B1.19 — the `tools` capture state (PRD §8, AC-3). What software/tools
+ * the owner currently runs the business with (paper, a spreadsheet, a
+ * competitor CRM, QuickBooks, …) — free-text, non-canonical. Unlike the
+ * other five extraction states this never becomes an `onboarding_*`
+ * proposal: there is no tenant_settings column or other row for
+ * "tools currently used," so it's informational context only (surfaced
+ * in the review summary), not a config write. See the B1.19 report for
+ * the full rationale.
+ */
+export interface ToolEntry {
+  name: string;
+  confidence: number;
+  sourceText: string;
+}
+
+export interface ToolsExtraction {
+  tools: ToolEntry[];
+}
+
 // --- Combined extraction ---
 
 export interface OnboardingExtraction {
@@ -110,6 +130,10 @@ export interface OnboardingExtraction {
   pricing: PricingExtraction;
   team: TeamMemberExtraction;
   schedule: ScheduleExtraction;
+  // Optional: the dormant single-shot orchestrator (ai/orchestration/onboarding.ts)
+  // predates the `tools` capture state and does not populate it; only the
+  // conversational FSM (ai/orchestration/onboarding-conversation.ts) does.
+  tools?: ToolsExtraction;
 }
 
 // --- Proposal payloads ---
@@ -119,6 +143,26 @@ export interface OnboardingTenantSettingsPayload {
   city?: string;
   state?: string;
   verticalPacks: VerticalType[];
+  /**
+   * B1.20 — the owner's hourly rate (integer cents), when the pricing
+   * capture state extracted a `price_type: 'hourly_rate'` entry (see
+   * pricing-extractor.ts). Carried on the tenant-settings proposal
+   * (rather than a new proposal type) because both write through the
+   * same `upsertIdentityFields` handler that already owns the tenant's
+   * identity columns. Absent when the conversation never captured a
+   * rate — the handler must never invent one (a wrong hourly rate is a
+   * money defect, not just a UX gap).
+   */
+  hourlyRateCents?: number;
+  /**
+   * The tenant's IANA zone. No onboarding extractor captures one and this
+   * path never derives one from city/state or locale (a wrong zone silently
+   * misbooks — Phoenix postmortem, migration 263), so it is present only
+   * when the tenant had ALREADY chosen a zone or the operator supplied it on
+   * the gated review card. Required by
+   * `OnboardingTenantSettingsExecutionHandler`.
+   */
+  timezone?: string;
 }
 
 export interface OnboardingServiceCategoryPayload {
@@ -147,6 +191,12 @@ export interface OnboardingEstimateTemplatePayload {
 export interface OnboardingTeamMemberPayload {
   name: string;
   role: TeamMemberRole;
+  /**
+   * B1.19 — required to actually send the invitation. Voice cannot produce an
+   * address ("me and my cousin Carlos"), so the proposal is emitted gated on
+   * this field and the operator supplies it from the review card.
+   */
+  email?: string;
 }
 
 export interface OnboardingSchedulePayload {

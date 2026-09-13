@@ -22,6 +22,15 @@ export interface VoiceSessionRow {
   transcript?: string[];
   /** FK to customers — set by adapter when caller is identified. */
   customerId?: string;
+  /**
+   * I13 (FIX 10ii) — stamped 'untrusted' on the durable end-of-call record
+   * when the session's FSM context had `injectionFlagged` true at finalize
+   * (see `ai/agents/customer-calling/untrusted-content.ts`'s
+   * UNTRUSTED_PROVENANCE). Lets a caller-injection attempt be discovered
+   * from the persisted row without replaying the transcript. Rides the
+   * pre-existing `context` jsonb column (migration 066) — no new column.
+   */
+  contentProvenance?: 'untrusted';
 }
 
 export interface CreateVoiceSessionInput {
@@ -61,6 +70,8 @@ export interface MarkVoiceSessionEndedInput {
   transcript?: string[];
   /** Customer FK to stamp for the interactions list join. */
   customerId?: string;
+  /** I13 (FIX 10ii) — see `VoiceSessionRow.contentProvenance`. */
+  contentProvenance?: 'untrusted';
 }
 
 export interface ListVoiceSessionsOptions {
@@ -134,6 +145,7 @@ export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
     row.outcome = input.outcome;
     if (input.transcript !== undefined) row.transcript = input.transcript;
     if (input.customerId !== undefined) row.customerId = input.customerId;
+    if (input.contentProvenance !== undefined) row.contentProvenance = input.contentProvenance;
     this.rows.set(id, row);
     return { ...row };
   }

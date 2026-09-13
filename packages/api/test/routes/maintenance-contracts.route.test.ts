@@ -76,3 +76,59 @@ describe('Maintenance contracts router (persisted)', () => {
     expect(res.status).toBe(404);
   });
 });
+
+/**
+ * #882 — a non-UUID `:id` used to flow straight into
+ * PgMaintenanceContractRepository's uuid comparison, so Postgres threw
+ * `invalid input syntax for type uuid` and the route answered a bare 500.
+ * This PgLike subclass throws the same error Postgres would (pattern:
+ * customers.route.test.ts, the #871 precedent); the `notFoundOnMalformedId`
+ * guard must answer the route's 404 envelope first.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class PgLikeMaintenanceContractRepository extends InMemoryMaintenanceContractRepository {
+  async findById(tenantId: string, id: string) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.findById(tenantId, id);
+  }
+}
+
+function buildPgLikeApp() {
+  const repo = new PgLikeMaintenanceContractRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: 'user-1',
+      sessionId: 'sess-882',
+      tenantId: 'tenant-1',
+      role: 'owner',
+    };
+    next();
+  });
+  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter(repo, auditRepo));
+  return { app };
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)', () => {
+  it('GET /api/maintenance-contracts/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const { app } = buildPgLikeApp();
+    const res = await request(app).get('/api/maintenance-contracts/not-a-uuid');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+    expect(res.body.message).toBe('Contract not found');
+  });
+
+  it('a well-formed but unknown uuid still answers the ordinary 404', async () => {
+    const { app } = buildPgLikeApp();
+    const res = await request(app).get(
+      '/api/maintenance-contracts/11111111-1111-1111-1111-111111111111',
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+});

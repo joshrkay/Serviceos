@@ -33,8 +33,32 @@ export function assembleEstimateTemplates(
     const matchedPrices = findPricesForCategory(category, pricing.prices);
     const lineItems = buildLineItems(category, matchedPrices);
 
+    // Finding #1 (review) — when nothing captured lexically matches this
+    // category (e.g. category "AC Repair", spoken price "$85 per hour"
+    // against service ref "labor" — a realistic non-match, not an edge
+    // case), we still surface a template rather than dropping the category
+    // silently. But a $0 default price is a MONEY defect if it is ever
+    // approved as-is: approving installs the template, and its
+    // defaultUnitPriceCents flows straight into future estimates as a
+    // free line. `needsPriceGate` puts `missingFields: ['lineItems']` on
+    // the CreateProposalInput built below — it has to be stamped HERE, not
+    // by the caller, because `onboarding-conversation.ts` persists these
+    // proposals directly via `proposalRepo.create` and never passes them
+    // through the `inputs` path where the other proposal kinds get their
+    // gating. That bypass is what let a $0 template reach an approvable
+    // card in the first place. `lineItems` is a real top-level key of
+    // `onboardingEstimateTemplatePayloadSchema` (proposals/contracts/
+    // onboarding.ts), so `editProposal`'s flat-key clear-on-fill (see
+    // missing-fields.ts) lifts the gate the instant the operator supplies
+    // a priced `lineItems` array and re-validates against that schema —
+    // same instrument as the `onboarding_team_member` `email` gate below,
+    // applied here because it is the same shape: an approvable card that
+    // cannot succeed (well, WOULD succeed here, silently, at $0 — arguably
+    // worse than an execution failure, since nothing ever surfaces it).
+    let needsPriceGate = false;
     if (lineItems.length === 0) {
       // Create a placeholder template with no default pricing
+      needsPriceGate = true;
       lineItems.push({
         description: category.name,
         defaultQuantity: 1,
@@ -71,6 +95,7 @@ export function assembleEstimateTemplates(
       confidenceFactors: confidence.factors,
       sourceContext: conversationId ? { conversationId } : undefined,
       createdBy: userId,
+      ...(needsPriceGate ? { missingFields: ['lineItems'] } : {}),
     };
 
     proposals.push(createProposal(input));

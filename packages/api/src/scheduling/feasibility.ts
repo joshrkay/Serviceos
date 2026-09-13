@@ -10,6 +10,18 @@ import { LatLng } from './travel-time/provider';
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * #909/A11 (2026-08-31 live sweep) — every per-technician check below reads
+ * `proposedTechnicianId` as a real id (assignmentRepo.findByTechnician,
+ * workingHoursRepo.findByTechnician, unavailableBlockRepo.
+ * findByTechnicianAndDateRange, skillMatcher.skillsForTechnician all bind it
+ * into a `uuid`-typed query parameter). `checkFeasibility` narrows to this
+ * type ONCE, at its own top, and only calls these four with the narrowed
+ * value — see `checkFeasibility`'s doc comment for why the guard lives
+ * there rather than in each function.
+ */
+type TechnicianScopedInput = FeasibilityInput & { proposedTechnicianId: string };
+
 async function loadTechnicianAppointmentsInWindow(
   deps: FeasibilityDependencies,
   tenantId: string,
@@ -28,7 +40,7 @@ async function loadTechnicianAppointmentsInWindow(
 }
 
 async function overlapIssues(
-  input: FeasibilityInput,
+  input: TechnicianScopedInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityIssue[]> {
   const windowStart = new Date(input.proposedScheduledStart.getTime() - WINDOW_MS);
@@ -52,7 +64,7 @@ async function overlapIssues(
 }
 
 async function availabilityIssues(
-  input: FeasibilityInput,
+  input: TechnicianScopedInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityIssue[]> {
   const timezone = deps.timezone ?? input.appointment.timezone ?? 'UTC';
@@ -122,7 +134,7 @@ async function locationCoordsFor(
 }
 
 async function skillMatchIssues(
-  input: FeasibilityInput,
+  input: TechnicianScopedInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityIssue[]> {
   const required = await deps.skillMatcher.requiredSkillsForJob(input.tenantId, input.appointment.jobId);
@@ -143,7 +155,7 @@ async function skillMatchIssues(
 }
 
 async function travelTimeIssues(
-  input: FeasibilityInput,
+  input: TechnicianScopedInput,
   deps: FeasibilityDependencies,
 ): Promise<{ issues: FeasibilityIssue[]; summary: TravelTimeSummary }> {
   const windowStart = new Date(input.proposedScheduledStart.getTime() - WINDOW_MS);
@@ -225,11 +237,27 @@ export async function checkFeasibility(
   input: FeasibilityInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityResult> {
+  // #909/A11 (2026-08-31 live sweep) — an unassigned appointment (no
+  // technician has ever been assigned — e.g. RescheduleAppointmentExecution
+  // Handler's `proposedTechnicianId` fallback when `findByAppointment`
+  // returns no primary assignment) has no per-technician calendar to check
+  // feasibility against. Skip ALL FOUR checks below rather than let '' —
+  // or now, `undefined` — reach a `uuid`-typed repo query
+  // (`invalid input syntax for type uuid: ""`, Postgres 22P02); `create-
+  // scheduling.ts`'s own draft-time call already reached this same
+  // conclusion independently ("skip when the appointment has no assigned
+  // technician — there is no calendar to check against"). `feasible: true`
+  // is correct here, not a degraded/unknown state: there being no
+  // technician assigned yet is not itself a blocking scheduling conflict.
+  if (!input.proposedTechnicianId) {
+    return partition([], null);
+  }
+  const scoped: TechnicianScopedInput = { ...input, proposedTechnicianId: input.proposedTechnicianId };
   const [overlap, availability, travel, skill] = await Promise.all([
-    overlapIssues(input, deps),
-    availabilityIssues(input, deps),
-    travelTimeIssues(input, deps),
-    skillMatchIssues(input, deps),
+    overlapIssues(scoped, deps),
+    availabilityIssues(scoped, deps),
+    travelTimeIssues(scoped, deps),
+    skillMatchIssues(scoped, deps),
   ]);
   return partition([...overlap, ...availability, ...travel.issues, ...skill], travel.summary);
 }

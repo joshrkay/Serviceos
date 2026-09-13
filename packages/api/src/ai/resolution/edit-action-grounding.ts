@@ -31,6 +31,23 @@
  * price on a field the invoice editor never reads — the exact class of
  * bug the note documents.
  *
+ * UNIT OF MEASURE (B7.5). `unit` is DESCRIPTIVE — it never enters money
+ * math (`quantity × unitPriceCents = totalCents` does not read it) — and
+ * that is exactly why it is NOT grounded on the same terms as the price.
+ * A price is money and must be catalog-grounded (or explicitly untrusted).
+ * A unit is a value from a small closed enum (`catalogUnitSchema`): when
+ * the model's unit parses against that enum it is a real member of a
+ * bounded vocabulary, not an invented number, so it survives even on a
+ * line this pass could not match to a specific catalog item (e.g. "three
+ * 45-microfarad capacitors" when that part isn't catalogued — the unit
+ * "each" still persists). An exact/high match still stamps the catalog
+ * item's own unit over whatever the model emitted (the catalog is more
+ * specific than the model's guess), and any unit that does NOT parse
+ * against the enum is still dropped (`dropOutOfVocabularyUnit`) — that
+ * case remains indistinguishable from invention. The stamped/surviving
+ * value is what `estimate-editor.ts` / `invoice-editor.ts` read off
+ * `action.lineItem.unit` and what reaches the `line_items.unit` column.
+ *
  * SEMANTICS PARITY with the draft path:
  * - exact/high match, no price conflict → the catalog price OVERWRITES
  *   the LLM guess; `pricingSource: 'catalog'`.
@@ -101,6 +118,7 @@ import {
   CatalogLineResolution,
   isPriceConflict,
   resolveLineItemToCatalog,
+  dropOutOfVocabularyUnit,
   type PricingSource,
 } from './catalog-resolver';
 
@@ -117,6 +135,12 @@ export interface EditActionCatalogCandidate {
    * must leave the line's own category untouched (resolve-line.ts).
    */
   category?: string;
+  /**
+   * B7.5 — the candidate catalog item's unit of measure, so a one-tap
+   * resolution lands the same unit a direct exact/high match would have.
+   * Absent on the synthetic `spoken:{i}` choice (no catalog identity).
+   */
+  unit?: string;
 }
 
 export interface EditActionGroundingResult {
@@ -258,7 +282,12 @@ export function groundEditActionPricing(
       return {
         ...action,
         lineItem: {
-          ...lineItem,
+          // B7.5 — an ungrounded line's UNIT survives if it parses against
+          // the catalog's closed vocabulary (`catalogUnitSchema`) — that is
+          // a bounded value, not invention, unlike the untrusted price on
+          // this same line. Only a unit that does NOT parse against the
+          // enum is dropped. See catalog-resolver.ts dropOutOfVocabularyUnit.
+          ...dropOutOfVocabularyUnit(lineItem),
           unitPriceCents: null,
           pricingSource: source,
           needsPricing: true,
@@ -283,6 +312,7 @@ export function groundEditActionPricing(
             unitPriceCents: item.unitPriceCents,
             score: 1,
             category: contractCategory(item),
+            ...(item.unit ? { unit: item.unit } : {}),
           },
           // Synthetic "keep spoken price" choice has no catalog identity —
           // no category is stamped, so picking it leaves the line's own
@@ -298,7 +328,12 @@ export function groundEditActionPricing(
       return {
         ...action,
         lineItem: {
-          ...lineItem,
+          // An out-of-vocabulary `unit` the model emitted is dropped first
+          // (a vocabulary-valid one would otherwise survive unchanged);
+          // then the catalog item's own unit is stamped below, overwriting
+          // whatever survived — the catalog is more specific than the
+          // model's guess, so it always wins on a matched line.
+          ...dropOutOfVocabularyUnit(lineItem),
           description: item.name,
           // Catalog price ALWAYS overwrites the LLM guess. `unitPrice` is
           // the executable field (both editors read it); `unitPriceCents`
@@ -307,6 +342,14 @@ export function groundEditActionPricing(
           unitPriceCents: item.unitPriceCents,
           catalogItemId: item.id,
           category: contractCategory(item),
+          // B7.5 — carry the catalog item's unit of measure onto the grounded
+          // edit line, exactly as the draft path's `applyCatalogPricing` does
+          // (catalog-resolver.ts). This is the field that reaches the
+          // persisted `line_items.unit` column: estimate-editor.ts /
+          // invoice-editor.ts read `input.unit` off this very object.
+          // DESCRIPTIVE ONLY — the authoritative price is `unitPrice` above
+          // and no total is ever derived from this.
+          ...(item.unit ? { unit: item.unit } : {}),
           pricingSource: 'catalog' satisfies PricingSource,
           needsPricing: false,
           // Parity with the old per-task `groundEditActionPricing` (via
@@ -341,6 +384,7 @@ export function groundEditActionPricing(
           unitPriceCents: c.item.unitPriceCents,
           score: c.score,
           category: contractCategory(c.item),
+          ...(c.item.unit ? { unit: c.item.unit } : {}),
         }));
       }
       return markUntrusted(

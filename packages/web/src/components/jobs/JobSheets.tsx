@@ -338,7 +338,18 @@ export function EstimateSheet({ jobId, onClose }: { jobId: string; onClose: () =
                 <div key={item.id ?? i} className="flex items-start justify-between gap-3 px-3 py-3">
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground">{item.description}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.quantity} × {formatUsdCentsFixed(item.unitPriceCents)}</p>
+                    {/* B7.5 (operator side) — the descriptive unit was already
+                        carried by the shared LineItem contract (money.ts); it
+                        just wasn't rendered here. This row has no fixed-width
+                        grid track (unlike EstimatesPage/InvoicesPage) — it's a
+                        full-width paragraph inside a flex-1 min-w-0 column, so
+                        the unit is appended inline and wraps with the rest of
+                        the sentence; there is no column budget to protect. */}
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Qty: {item.quantity}
+                      {item.unit && <span data-testid={`line-item-unit-${i}`}> {item.unit}</span>}
+                      {' × '}{formatUsdCentsFixed(item.unitPriceCents)}
+                    </p>
                   </div>
                   <p className="text-sm text-foreground shrink-0">{formatUsdCentsFixed(item.totalCents)}</p>
                 </div>
@@ -432,7 +443,14 @@ export function InvoiceSheet({ jobId, customerName, customerPhone, onClose }: {
                 <div key={item.id ?? i} className="flex items-start justify-between gap-3 px-3 py-3">
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground">{item.description}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.quantity} × {formatUsdCentsFixed(item.unitPriceCents)}</p>
+                    {/* B7.5 (operator side) — see EstimateSheet above for why
+                        this is inline text rather than a block+break-words
+                        child: no fixed-width grid track exists on this row. */}
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Qty: {item.quantity}
+                      {item.unit && <span data-testid={`line-item-unit-${i}`}> {item.unit}</span>}
+                      {' × '}{formatUsdCentsFixed(item.unitPriceCents)}
+                    </p>
                   </div>
                   <p className="text-sm text-foreground shrink-0">{formatUsdCentsFixed(item.totalCents)}</p>
                 </div>

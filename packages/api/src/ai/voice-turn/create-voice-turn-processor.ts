@@ -46,8 +46,22 @@
  */
 
 import type { Pool } from 'pg';
-import { appendAgentTts } from './transcript-append';
-import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
+import { appendAgentTts, callerTranscriptText } from './transcript-append';
+import {
+  classifyIntent,
+  isLookupIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+  type IntentClassification,
+  type IntentType,
+} from '../orchestration/intent-classifier';
+import type { ClassifierProfile } from '../orchestration/classifier-profile';
+import {
+  AI_BUSY_HOLD_LINE,
+  classifyInfraFailure,
+  isTransientInfraFailure,
+  systemFailureReasonForInfra,
+} from './classify-infra-failure';
 import {
   startVoiceApproval,
   startVoiceBatchApproval,
@@ -60,10 +74,8 @@ import {
   type VoiceApprovalTurnResult,
 } from '../tasks/proposal-approval-task';
 import { createLlmEditInterpreter } from '../../proposals/edit-interpreter';
-import type {
-  CustomerNegotiationContext,
-  CustomerNegotiationContextProvider,
-} from '../../customers/customer-negotiation-context';
+import type { TaskHandler } from '../tasks/task-handlers';
+import type { CustomerNegotiationContextProvider } from '../../customers/customer-negotiation-context';
 import {
   brandVoiceNegotiationTts,
   NEGOTIATION_HOLDING_TTS_SOURCE,
@@ -82,8 +94,33 @@ import {
   costIncurredEvent,
   sessionTerminatedEvent,
   escalationStartedEvent,
+  languageSwitchedEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
+import { answerPhoneEnRoute, type PhoneEnRouteDeps } from './phone-en-route-surface';
+import { answerPhoneLookup, type PhoneLookupDeps } from './phone-lookup-surface';
+import { COVERAGE_TABLE, type CoverageSurface, type IntentFamilyId } from './coverage-table';
+import {
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
+} from '../orchestration/language-detector';
+import {
+  renderTtsText,
+  LANGUAGE_SWITCH_ACK,
+  LANGUAGE_UNSUPPORTED_LINE,
+  LANGUAGE_SWITCH_CAP_LINE,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  type SessionLanguage,
+} from '../agents/customer-calling/tts-copy';
+import {
+  CreateCustomerVoiceTaskHandler,
+  CREATE_CUSTOMER_CONFIRMATION_TTS,
+} from '../tasks/create-customer-task';
+import { isCustomerDuplicateLoader } from '../../customers/dedup';
+import { recordVoiceError } from '../../analytics/posthog';
+import { buildAccountContextPromptSection } from '../agents/customer-calling/b2b-account-context';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -119,7 +156,14 @@ import { checkBusinessHours } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 import { updateAppointment } from '../../appointments/appointment';
 import type { TenantSettings } from '../../settings/settings';
+import {
+  bookingSpeechForLane,
+  buildLaneInputFromSettings,
+  laneStampIfPresent,
+  timeReadbackFromHold,
+} from './inbound-booking-completion';
 import type {
+  CallingAgentChannel,
   CallingAgentEvent,
   SideEffect,
 } from '../agents/customer-calling/types';
@@ -130,7 +174,9 @@ import type {
 import { deriveCallOutcome } from '../agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../../voice/voice-session';
 import type {
+  Proposal,
   ProposalRepository,
+  ProposalStatus,
   ProposalType,
 } from '../../proposals/proposal';
 import { createProposal as buildProposal } from '../../proposals/proposal';
@@ -139,15 +185,9 @@ import {
   type ProposalSurface,
 } from '../../proposals/surface';
 import {
-  buildNegotiationCallbackContent,
-  evaluateNegotiationDiscount,
-} from '../../proposals/guardrails/negotiation-guardrail';
-import {
-  buildAllowDiscountCallbackContent,
-  buildDiscountClarificationPayload,
-  discountAuditMetadata,
-  DISCOUNT_CLARIFICATION_QUESTION,
-} from '../../conversations/negotiation/discount-proposal-content';
+  buildAndPersistNegotiationProposal,
+  buildAndPersistComplaintProposal,
+} from '../../proposals/guardrails/voice-protection-proposal';
 import type { CurrentQuoteResolver } from '../../conversations/negotiation/current-quote-resolver';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
@@ -197,7 +237,15 @@ import type {
 import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
-import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
+import { isRuntimeTimezone } from '../../shared/timezone';
+import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
+import type { DeviceTokenRepository } from '../../push/device-token-service';
+import type { PushDeliveryProvider } from '../../notifications/push-delivery-provider';
+import {
+  MIN_STT_CONFIDENCE,
+  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+  type SpeechTurnHandler,
+} from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
 
 const logger = createLogger({
@@ -397,6 +445,177 @@ function finalizeGroundedQuote(
   };
 }
 
+/**
+ * I6 — the ALLOWLIST of channels whose sessions are trusted by default.
+ * `inapp` is the owner's own authenticated app surface. Everything else is
+ * untrusted until it is consciously added here.
+ */
+const TRUSTED_CHANNELS: ReadonlySet<CallingAgentChannel> = new Set<CallingAgentChannel>([
+  'inapp',
+]);
+
+/**
+ * True when this session is the untrusted inbound-customer (S1) surface: a
+ * session arriving on a channel that is NOT on the trusted allowlist and that
+ * was not placed from an authenticated approver number. Owner (approver) calls
+ * are the RV-070/RV-071 elevated exception and are not S1.
+ *
+ * Fail-CLOSED by construction: a channel added later (sms, web_chat, …) is S1
+ * from the moment it exists and stays S1 until someone deliberately puts it in
+ * `TRUSTED_CHANNELS`. The previous `channel === 'telephony'` form failed OPEN —
+ * any new channel would have silently skipped the S1 proposal-type gate.
+ */
+function isUntrustedS1Session(session: VoiceSession): boolean {
+  return (
+    !TRUSTED_CHANNELS.has(session.channel) &&
+    session.machine.currentContext.ownerSession !== true
+  );
+}
+
+/**
+ * #962 (PR-B) — the coverage-table gate for the per-family turn branches.
+ *
+ * The processor is CAPABLE of every family Gather's own loop serves
+ * (lookup, language_switch, P18-001 create_customer, the silence/low-STT
+ * ladder) plus the families it already served; the table decides, per
+ * surface, whether a branch RUNS. A branch runs only when the surface's
+ * cell (a) is `reachable` AND (b) declares THIS branch as the serving
+ * module — status alone is not enough, because a `reachable` cell may be
+ * served by a different module (media-streams language_switch = the
+ * adapter pre-scan; media-streams create_customer = the generic FSM path;
+ * media-streams silence ladder = the adapter-side A3/T2-F05 handling), and
+ * running the ported branch there would CHANGE behavior — the exact drift
+ * this campaign closes on purpose, not by accident (#963/#966).
+ *
+ * `refuse` and `n/a` cells both leave the gate closed: the pipeline then
+ * takes exactly the path that surface takes today (for media-streams
+ * lookup, the fall-through into the drafting funnel — never a new spoken
+ * refusal line; introducing one is a phase-2 cell flip, not this port).
+ *
+ * The token is matched against the cell's declared `module` string. The
+ * table is TRUTH: when a later PR moves a family's serving branch (the
+ * Gather cutover), it updates the CELL in the same PR and this map's token
+ * for that family alongside it — never the other way around.
+ */
+const PORTED_BRANCH_TOKENS = {
+  lookup: 'answerPhoneLookup',
+  en_route: 'answerPhoneEnRoute',
+  language_switch: 'handleLanguageSwitchGather',
+  voice_approval: 'handleVoiceApprovalIntent',
+  voice_edit: 'handleVoiceEditIntent',
+  create_customer: 'handleCreateCustomerVoiceIntent',
+  emergency_immediate_dial: 'emergencyImmediateDial',
+  ws18_consent_capture: 'handlePendingConsentCapture',
+  ws18_post_quote_refinement: 'classifyPostQuoteUtterance',
+  silence_low_stt_ladder: 'runLowSttConfidenceGatherLadder',
+} as const satisfies Partial<Record<IntentFamilyId, string>>;
+
+type GatedIntentFamily = keyof typeof PORTED_BRANCH_TOKENS;
+
+function familyServedByDeclaredCell(
+  family: GatedIntentFamily,
+  surface: CoverageSurface,
+): boolean {
+  const cell = COVERAGE_TABLE[family][surface];
+  return cell.status === 'reachable' && cell.module.includes(PORTED_BRANCH_TOKENS[family]);
+}
+
+/**
+ * P18-001: detect a Twilio `From` value that represents a withheld /
+ * blocked / private caller-id. Mirrors `twilio-adapter.ts#isBlockedCallerId`
+ * — re-implemented locally (the `xmlEscape` precedent above) so this module
+ * never imports back from `telephony/twilio-adapter`, which would create a
+ * circular import. Returns true ONLY for explicitly blocked indicators — a
+ * plain missing string returns false so the caller can prompt for a
+ * callback rather than assuming the caller chose to withhold.
+ */
+function isBlockedCallerId(from: string | undefined): boolean {
+  if (!from) return false;
+  const v = from.trim().toLowerCase();
+  if (v.length === 0) return false;
+  return (
+    v === 'restricted' ||
+    v === 'private' ||
+    v === 'blocked' ||
+    v === 'unknown' ||
+    v === 'anonymous' ||
+    v === 'unavailable'
+  );
+}
+
+/**
+ * #886/#887 — which classifier taxonomy profile this session's turns
+ * advertise. Derived from SESSION IDENTITY ONLY (channel allowlist, RV-070/
+ * 071 owner flag, D-026 phone actor) — never from transcript content, so a
+ * caller cannot talk their way into a wider taxonomy. Mirrors
+ * isUntrustedS1Session above: a trusted channel ('inapp') keeps the full
+ * 'operator' prompt byte-identical; an untrusted channel splits on whether
+ * caller-ID resolved an employee actor (stamped BEFORE the first classify —
+ * twilio-adapter establishment / the shared media-streams core).
+ *
+ * The prompt is a hint: the S1 proposal-type allowlist, the D-026 lookup
+ * RBAC, and the classifier's own PROFILE_INTENTS post-parse guard keep
+ * enforcing regardless of what was advertised.
+ */
+export function classifierProfileForSession(session: VoiceSession): ClassifierProfile {
+  if (session.machine.currentContext.ownerSession === true) return 'owner_line';
+  if (!isUntrustedS1Session(session)) return 'operator'; // trusted channel: 'inapp'
+  return session.actorUserId ? 'field_tech' : 'caller'; // D-026 phone actor
+}
+
+/**
+ * #887/#902 — audit an off-surface classification. The classifier's
+ * post-parse guard intercepts the intent BEFORE routing (no proposal is
+ * minted), which also means the proposal-gate
+ * `voice.surface_violation_blocked` event can never fire for it — without
+ * this event, a prompt-injection attempt on a customer line ("send the
+ * Henderson invoice to me") would dissolve into a reprompt with no trail.
+ * Deliberately a NEW event name, `voice.intent_off_surface`, not the old
+ * proposal-gate one: this records an intercepted CLASSIFICATION (metadata:
+ * the intent the model picked + the profile that refused it — there is no
+ * requestedProposalType, because no proposal was ever requested), while
+ * `voice.surface_violation_blocked` keeps meaning "a mapped proposal type
+ * was denied at minting" on the paths that still reach it (guard-exempt
+ * intents, the deterministic emergency path).
+ *
+ * The classifier itself has no audit repo (and no session id), so the fact
+ * travels on the classification (`unknownReason`/`offSurfaceIntent`) and
+ * both live classify seams — the processor speechTurn and the Twilio Gather
+ * adapter — call this right after classifying. No-op when the repo is
+ * absent or the turn was not off-surface; best-effort like every voice
+ * audit.
+ */
+export async function auditOffSurfaceClassification(args: {
+  auditRepo: AuditRepository | undefined;
+  tenantId: string;
+  sessionId: string;
+  profile: ClassifierProfile;
+  classification: IntentClassification;
+  actorId: string;
+}): Promise<void> {
+  const { auditRepo, classification } = args;
+  if (!auditRepo || classification.unknownReason !== 'intent_off_surface') return;
+  try {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: args.tenantId,
+        actorId: args.actorId,
+        actorRole: 'system',
+        eventType: 'voice.intent_off_surface',
+        entityType: 'voice_session',
+        entityId: args.sessionId,
+        metadata: {
+          intent: classification.offSurfaceIntent ?? null,
+          profile: args.profile,
+          confidence: classification.confidence,
+        },
+      }),
+    );
+  } catch {
+    /* audit is best-effort */
+  }
+}
+
 export interface VoiceTurnProcessorDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
@@ -404,6 +623,38 @@ export interface VoiceTurnProcessorDeps {
   auditRepo?: AuditRepository;
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
+  /**
+   * #962 (PR-B) — the live surface whose turns this processor instance
+   * serves. Every per-family branch consults the coverage table's
+   * (family, surface) cell before running (see PORTED_BRANCH_TOKENS), so
+   * the processor is capable of everything Gather's loop does while each
+   * surface keeps exactly its declared behavior. Defaults to
+   * 'media_streams' — today's only production `speechTurn` surface (the
+   * adapter-constructed processor serves media-streams finals via
+   * `processCallerUtterance`; the Layer 2 harness drives the same path).
+   * The Gather cutover PR passes 'gather'.
+   */
+  coverageSurface?: CoverageSurface;
+  /**
+   * #962 (PR-B) — the phone lookup bundle (#866 shared dispatch). The SAME
+   * `PhoneLookupDeps` the Gather branch uses: app.ts wires ONE bundle onto
+   * the adapter deps and the adapter spreads `...this.deps` into this
+   * processor, so both phone transports dispatch through the identical
+   * instance. Consulted only when the surface's lookup cell declares the
+   * ported branch; absent → `answerPhoneLookup` speaks its own
+   * unavailable line (same degradation as Gather without the bundle).
+   */
+  lookups?: PhoneLookupDeps;
+  /**
+   * #847 — the en_route ("on my way") bundle for the transports whose turns
+   * run through `speechTurn` (media-streams finals via
+   * `processCallerUtterance`). The SAME `PhoneEnRouteDeps` the Gather branch
+   * uses — the Twilio adapter constructs this processor with `...this.deps`,
+   * so app.ts's one wiring site serves BOTH phone transports. Absent → the
+   * surface speaks the honest unavailable line and logs a wiring-gap
+   * warning (never a silent clarification card).
+   */
+  enRoute?: PhoneEnRouteDeps;
   leadRepo?: LeadRepository;
   /**
    * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
@@ -412,6 +663,27 @@ export interface VoiceTurnProcessorDeps {
   customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   /** P2-036 V2 — resolves the live caller's current quote for the discount engine. */
   negotiationQuoteResolver?: CurrentQuoteResolver;
+  /**
+   * A46 — `respond_to_review`'s ONLY correct drafting path. Before this dep
+   * existed, `intent === 'respond_to_review'` fell through to the generic
+   * `buildVoiceProposalPayload` scalar-promotion (same as every other
+   * unmapped-shape intent), which cannot synthesize `publicResponse.text` —
+   * that requires an LLM draft over the ACTUAL matched review, not a
+   * classifier-entity promotion. The persisted-but-broken payload then
+   * failed at approval ("review_response_proposal payload is missing the
+   * required publicResponse component" — live evidence, sweep row A46,
+   * 2026-08-30). `RespondToReviewTaskHandler` (ai/tasks/review-response-
+   * task.ts) already implements the correct behavior for the recorded-memo
+   * path — deterministic review resolution (star count / recency), dedup
+   * against a pending draft, `buildReviewResponseProposal` (which always
+   * fills `publicResponse`), and an honest `voice_clarification` degrade on
+   * 0/2+ matches or a drafting failure. Reusing it here — rather than a
+   * second copy of that ladder — gives the live surface the IDENTICAL
+   * behavior the poll worker and the memo on-ramp already have. Optional:
+   * when absent (review-response deps not wired), the branch below degrades
+   * honestly instead of falling through to the broken generic path.
+   */
+  respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
   /**
    * P0 voice-safety — shared, tenant-scoped entity resolver. Production wires
    * the SAME `AliasFirstEntityResolver → PgEntityResolver` the voice-action-
@@ -537,6 +809,24 @@ export interface VoiceTurnProcessorDeps {
   whisperCache?: WhisperCache;
   /** F4 — outbound SMS to dispatcher on escalation. */
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * ANS-001 — durable URGENT follow-up tasks (the same repo the call-me-back
+   * worker sweeps and the emergency page ladder falls back to). Wired so an E1
+   * alert that can't be delivered, and an E1 booking that can't be revoked,
+   * both leave a human-visible task instead of only a log line.
+   */
+  callMeBackRepo?: CallMeBackRepository;
+  /**
+   * ANS-001 — registered mobile devices for the tenant, for the E1 push
+   * fan-out. Structural (listByTenant only) so tests can pass a stub.
+   */
+  deviceTokenRepo?: Pick<DeviceTokenRepository, 'listByTenant'>;
+  /**
+   * ANS-001 — push transport for the E1 alert (main's Expo-backed
+   * PushDeliveryProvider; the same instance the proposal-push notifier uses).
+   * Best-effort: per-token failures come back as results, not throws.
+   */
+  pushDeliveryProvider?: PushDeliveryProvider;
   /**
    * Caller E.164 for the active leg. When set, used to build escalation
    * summaries; otherwise a placeholder is used.
@@ -694,6 +984,26 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[]>;
+  /**
+   * #962 (PR-B) — the transport-side entry of the ported Gather
+   * silence/low-STT ladder for a NON-empty turn: the acoustic confidence
+   * score arrives with the transport's webhook/final (outside the
+   * `SpeechTurnHandler` contract), so the transport gates the turn here
+   * BEFORE dispatching `speechTurn` (mirroring
+   * `maybeHandleLowSttConfidenceGather`'s position in the Gather loop).
+   * Returns the reprompt/hand-off side effects when the gate fires (caller:
+   * render them, do NOT dispatch the turn), or null when the turn should
+   * proceed (confidence high enough or absent — absent is treated as HIGH
+   * and clears the streak, so a turn is never blocked on missing data).
+   * Shares ONE streak with the empty-utterance ladder inside `speechTurn`
+   * (T2-F03), deliberately separate from the FSM's `confidence_low` cap
+   * (#965). No-op (null) on a surface whose silence-ladder cell does not
+   * declare the ported branch.
+   */
+  maybeHandleLowSttConfidence(
+    session: VoiceSession,
+    confidence: number | undefined,
+  ): SideEffect[] | null;
 }
 
 export function createVoiceTurnProcessor(
@@ -701,6 +1011,63 @@ export function createVoiceTurnProcessor(
 ): VoiceTurnProcessor {
   const pendingTransferTwiml =
     deps.pendingTransferTwiml ?? new Map<string, string>();
+
+  /**
+   * #962 (PR-B) — the surface whose declared coverage cells gate every
+   * per-family branch below. See the `coverageSurface` dep doc; default is
+   * today's only production `speechTurn` surface.
+   */
+  const coverageSurface: CoverageSurface = deps.coverageSurface ?? 'media_streams';
+
+  const servesFamilyHere = (family: GatedIntentFamily): boolean =>
+    familyServedByDeclaredCell(family, coverageSurface);
+
+  /**
+   * #962 (PR-B) — the ported Gather ladder's PRIVATE streak counter
+   * (`lowConfidenceGatherStreak` on the adapter), keyed by session id.
+   * Silence (empty SpeechResult) and low acoustic confidence share this ONE
+   * streak (T2-F03); it is deliberately NOT the FSM's `confidence_low`
+   * retry cap — counter unification is a separate, explicit decision
+   * (#965).
+   */
+  const lowConfidenceStreak = new Map<string, number>();
+
+  /**
+   * U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
+   * resolved ONCE per session (E1-script precedent: settings read per
+   * session, not per utterance). Keyed by the live session OBJECT so
+   * entries are garbage-collected with the session — no eviction hook
+   * needed. `undefined` (no settings repo, no configured zone, or a
+   * settings-read failure) is cached too: the session then refuses to
+   * resolve spoken times rather than guessing a zone (B5.5 precedent),
+   * and the next session retries the read.
+   */
+  const sessionTimezones = new WeakMap<VoiceSession, Promise<string | undefined>>();
+
+  function resolveSessionTimezone(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<string | undefined> {
+    const cached = sessionTimezones.get(session);
+    if (cached) return cached;
+    const pending = (async () => {
+      if (!deps.settingsRepo) return undefined;
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        const tz = settings?.timezone;
+        return typeof tz === 'string' && isRuntimeTimezone(tz.trim()) ? tz.trim() : undefined;
+      } catch (err) {
+        logger.warn('tenant timezone lookup failed; spoken times stay unresolved', {
+          tenantId,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    })();
+    sessionTimezones.set(session, pending);
+    return pending;
+  }
 
   // ─── Helpers (formerly private methods on TwilioGatherAdapter) ──────
 
@@ -1047,6 +1414,11 @@ export function createVoiceTurnProcessor(
   ): Promise<Record<string, string>> {
     let resolution: SchedulingEntityResolution;
     try {
+      // U4 — tenant zone (resolved once per session) so "Thursday at 2pm"
+      // books in the TENANT's timezone, matching the recorded-memo path.
+      // Unresolved zone ⇒ spoken times stay unresolved (never silent UTC)
+      // and the booking gates downstream instead of mis-booking.
+      const timezone = await resolveSessionTimezone(session, tenantId);
       resolution = await resolveSchedulingEntities(
         deps.entityResolver,
         tenantId,
@@ -1054,6 +1426,7 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
+        timezone ? { timezone } : undefined,
       );
     } catch (err) {
       // A resolver hiccup must never strand a live caller. The classifier's
@@ -1097,139 +1470,188 @@ export function createVoiceTurnProcessor(
       // `proposal_queued`: the negotiation guard stays in the current state, so
       // a proposal_queued transition would be wrong here.
       if (intent === 'negotiation') {
-        const askText = typeof entities.negotiationAsk === 'string' ? entities.negotiationAsk : '';
-        const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
-        const detectText = `${askText} ${transcript}`.trim();
-        const customerName =
-          typeof entities.customerName === 'string' ? entities.customerName : undefined;
-        const conversationId =
-          typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
-        const negotiationCustomerId =
-          typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined;
-        // Best-effort LTV/recency enrichment — a read failure never blocks the callback.
-        let customerContext: CustomerNegotiationContext | null = null;
-        if (negotiationCustomerId && deps.customerNegotiationContextProvider) {
-          try {
-            customerContext = await deps.customerNegotiationContextProvider.getContext(
-              tenantId,
-              negotiationCustomerId,
-            );
-          } catch {
-            customerContext = null;
-          }
-        }
-        // U6 (P2-036 V2) — additive discount evaluation on the live call. Only
-        // engages when fully wired AND a customer is resolved; a null result
-        // (unconfigured tenant / no quote / error) keeps the V1 path identical.
-        const evaluation =
-          negotiationCustomerId && deps.settingsRepo && deps.negotiationQuoteResolver
-            ? await evaluateNegotiationDiscount({
-                tenantId,
-                customerId: negotiationCustomerId,
-                askText: detectText || askText,
-                settingsRepo: deps.settingsRepo,
-                quoteResolver: deps.negotiationQuoteResolver,
-              })
-            : null;
-
-        let proposalType: 'callback' | 'voice_clarification' = 'callback';
-        let payload: Record<string, unknown>;
-        let summary: string;
-        let explanation: string;
-        if (evaluation?.decision.kind === 'CLARIFY') {
-          // Couldn't parse the target price — ask, never guess.
-          proposalType = 'voice_clarification';
-          payload = buildDiscountClarificationPayload({
-            transcript: detectText || askText,
-            ...(conversationId ? { conversationId } : {}),
-          });
-          summary = DISCOUNT_CLARIFICATION_QUESTION;
-          explanation =
-            'Heard a discount ask but couldn\'t make out the price they named. Tap to tell me what to quote — I never guess a discount.';
-        } else if (evaluation?.decision.kind === 'ALLOW') {
-          // Within policy — a CONFIDENCE-CAPPED one-tap owner action (never auto-applies).
-          const allow = buildAllowDiscountCallbackContent({
-            decision: evaluation.decision,
-            quote: evaluation.quote,
-            askText: askText || detectText,
-            ...(customerName ? { customerName } : {}),
-            ...(conversationId ? { conversationId } : {}),
-          });
-          payload = allow.payload;
-          summary = allow.summary;
-          explanation = allow.explanation;
-        } else {
-          // NEEDS_APPROVAL / REJECT_WITH_COUNTER → enriched callback; null → V1.
-          const content = buildNegotiationCallbackContent({
-            detectText,
-            ...(askText ? { askText } : {}),
-            ...(customerName ? { customerName } : {}),
-            ...(conversationId ? { conversationId } : {}),
-            customerContext,
-            ...(evaluation
-              ? { decision: evaluation.decision, quote: evaluation.quote }
-              : {}),
-          });
-          payload = content.payload;
-          summary = content.summary;
-          explanation = content.explanation;
-        }
-
-        if (evaluation && deps.auditRepo) {
-          try {
-            await deps.auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: deps.systemActorId ?? 'calling-agent',
-                actorRole: 'system',
-                eventType: 'negotiation.discount_evaluated',
-                entityType: 'voice_session',
-                entityId: session.id,
-                metadata: discountAuditMetadata(
-                  evaluation.decision,
-                  evaluation.quote.quotedCents,
-                ),
-              }),
-            );
-          } catch {
-            /* audit is best-effort */
-          }
-        }
-
-        const negotiationProposal = buildProposal({
-          tenantId,
-          proposalType,
-          payload,
-          summary,
-          explanation,
-          sourceContext: {
-            source: 'calling-agent',
-            channel: 'telephony',
-            // RIVET P4 — negotiation always routes to a human `callback` /
-            // clarification (both S1-safe), but the surface still travels with
-            // the proposal for audit + the execution-boundary re-check.
-            surface: (session.machine.currentContext.ownerSession === true
-              ? 'S2'
-              : 'S1') as ProposalSurface,
+        // One-core glue shared with the in-app adapter (see
+        // proposals/guardrails/voice-protection-proposal.ts's doc comment —
+        // this branch used to be the ONLY copy, which is exactly how the
+        // in-app surface silently missed it; #883/#914).
+        const negotiationSurface: ProposalSurface =
+          session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+        const storedNegotiation = await buildAndPersistNegotiationProposal(
+          entities,
+          {
+            tenantId,
             sessionId: session.id,
+            channel: 'telephony',
+            surface: negotiationSurface,
+            customerId:
+              typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined,
+            conversationId:
+              typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined,
+            aiRunId:
+              typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+                ? fx.payload.aiRunId
+                : undefined,
+            createdBy:
+              typeof fx.payload.customerId === 'string'
+                ? fx.payload.customerId
+                : deps.systemActorId ?? 'calling-agent',
+            tenantThresholdOverride,
           },
-          // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
-          // threaded from the classify call (surfaced via the gateway →
-          // classifyIntent → intent_classified event → side-effect payload);
-          // never fabricate one — a random uuid violates the FK and the
-          // swallowed insert error silently drops the proposal on Postgres.
-          // Left null when no run was persisted for this turn.
-          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
-            ? { aiRunId: fx.payload.aiRunId }
+          {
+            proposalRepo: deps.proposalRepo,
+            auditRepo: deps.auditRepo,
+            customerNegotiationContextProvider: deps.customerNegotiationContextProvider,
+            settingsRepo: deps.settingsRepo,
+            negotiationQuoteResolver: deps.negotiationQuoteResolver,
+          },
+        );
+        session.proposalIds.push(storedNegotiation.id);
+        return;
+      }
+
+      // #846 / D-027 — complaint guardrail paper trail. The FSM emits this
+      // when the caller reports dissatisfaction (transitions.ts) while it
+      // fast-paths the CALL to `escalating` — the caller gets a human; this
+      // proposal is the owner's record of it. The recorded-memo path
+      // (ComplaintTaskHandler) mints a pinned-prefix `add_note` PLUS an
+      // owner `callback` — but `add_note` is NOT S1-allowed, so the generic
+      // path below would coerce the live caller's complaint to a bare
+      // clarification: the exact silent degrade this branch exists to
+      // prevent. The live leg therefore mints only the `callback` follow-up
+      // (S1-allowed — it routes a human, never a mutation), carrying the
+      // SAME deterministic severity markers the memo path stamps, and does
+      // NOT dispatch `proposal_queued`: the guard already moved the FSM to
+      // `escalating`, so a proposal_queued transition would be wrong here.
+      if (intent === 'complaint') {
+        const complaintSurface: ProposalSurface =
+          session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+        const storedComplaint = await buildAndPersistComplaintProposal(
+          entities,
+          typeof fx.payload.utterance === 'string' ? fx.payload.utterance : undefined,
+          {
+            tenantId,
+            sessionId: session.id,
+            channel: 'telephony',
+            surface: complaintSurface,
+            customerId:
+              typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined,
+            conversationId:
+              typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined,
+            aiRunId:
+              typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+                ? fx.payload.aiRunId
+                : undefined,
+            createdBy:
+              typeof fx.payload.customerId === 'string'
+                ? fx.payload.customerId
+                : deps.systemActorId ?? 'calling-agent',
+            tenantThresholdOverride,
+          },
+          {
+            proposalRepo: deps.proposalRepo,
+            auditRepo: deps.auditRepo,
+          },
+        );
+        session.proposalIds.push(storedComplaint.id);
+        // Session-bus telemetry: a dead complaint branch must be a metric,
+        // not an audit finding. (The Gather adapter executes no
+        // emit_quality_event, so this is the phone leg's observable signal.)
+        session.events.emit('voice-event', {
+          type: 'proposal_created',
+          proposalId: storedComplaint.id,
+        });
+        return;
+      }
+
+      // A46 — respond_to_review's only correct drafting path (see
+      // `respondToReviewTaskHandler`'s doc comment above). Reuses the SAME
+      // resolution ladder + `buildReviewResponseProposal` the recorded-memo
+      // on-ramp already runs, so a live-call draft is never missing
+      // `publicResponse`. `.handle()` already returns a fully-built
+      // `Proposal` (including the honest voice_clarification degrade on
+      // 0/2+ review matches or a drafting failure) — persist it as-is.
+      //
+      // `review_response_proposal` is NOT S1-allowed (surface.ts) — an
+      // unauthenticated caller must never trigger an LLM draft of the
+      // owner's public review response for a review they merely NAME. Gate
+      // on the same `isUntrustedS1Session` predicate the generic path below
+      // uses (I6 defense-in-depth) before ever calling the handler, and
+      // coerce to `voice_clarification` — audited the same way the generic
+      // surface gate does — for an S1 caller.
+      if (intent === 'respond_to_review') {
+        const reviewSurface: ProposalSurface = isUntrustedS1Session(session) ? 'S1' : 'S2';
+        const reviewSurfaceAllowed = isProposalTypeAllowedOnSurface(
+          reviewSurface,
+          'review_response_proposal',
+        );
+        if (!deps.respondToReviewTaskHandler || !reviewSurfaceAllowed) {
+          if (!reviewSurfaceAllowed && deps.auditRepo) {
+            try {
+              await deps.auditRepo.create(
+                createAuditEvent({
+                  tenantId,
+                  actorId: deps.systemActorId ?? 'calling-agent',
+                  actorRole: 'system',
+                  eventType: 'voice.surface_violation_blocked',
+                  entityType: 'voice_session',
+                  entityId: session.id,
+                  metadata: {
+                    intent,
+                    requestedProposalType: 'review_response_proposal',
+                    surface: reviewSurface,
+                  },
+                }),
+              );
+            } catch {
+              /* audit is best-effort */
+            }
+          }
+          // Gate honestly rather than falling through to the generic
+          // buildVoiceProposalPayload path below, which cannot draft
+          // publicResponse and would persist the same broken payload A46
+          // caught live.
+          const clarification = buildProposal({
+            tenantId,
+            proposalType: 'voice_clarification',
+            payload: buildVoiceClarificationPayload({
+              transcript: session.transcript,
+              intent,
+              entities,
+              requestedProposalType: 'review_response_proposal',
+              sessionId: session.id,
+            }),
+            summary: "Review response drafting isn't available on this call yet.",
+            sourceContext: {
+              source: 'calling-agent',
+              channel: 'telephony',
+              surface: reviewSurface,
+              sessionId: session.id,
+            },
+            createdBy:
+              typeof fx.payload.customerId === 'string'
+                ? fx.payload.customerId
+                : deps.systemActorId ?? 'calling-agent',
+          });
+          const storedClarification = await deps.proposalRepo.create(clarification);
+          session.proposalIds.push(storedClarification.id);
+          return;
+        }
+        const result = await deps.respondToReviewTaskHandler.handle({
+          tenantId,
+          message: typeof entities.reviewReference === 'string' ? entities.reviewReference : '',
+          ...(typeof fx.payload.conversationId === 'string'
+            ? { conversationId: fx.payload.conversationId }
             : {}),
-          createdBy:
+          existingEntities: entities,
+          userId:
             typeof fx.payload.customerId === 'string'
               ? fx.payload.customerId
               : deps.systemActorId ?? 'calling-agent',
-          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+          intent: 'respond_to_review',
+          tenantThresholdOverride,
         });
-        const storedNegotiation = await deps.proposalRepo.create(negotiationProposal);
-        session.proposalIds.push(storedNegotiation.id);
+        const storedReview = await deps.proposalRepo.create(result.proposal);
+        session.proposalIds.push(storedReview.id);
         return;
       }
 
@@ -1250,8 +1672,13 @@ export function createVoiceTurnProcessor(
       // `voice_clarification` so no actionable S2 proposal is ever minted from
       // a caller's transcript. The execution boundary re-checks the stamped
       // surface (I6) as defense-in-depth.
-      const surface: ProposalSurface =
-        session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+      // I6 (merged) — the surface derives from the fail-closed
+      // `isUntrustedS1Session` predicate rather than the bare ownerSession
+      // flag: identical for all telephony traffic (the only production
+      // consumer of this processor — ownerSession ⇒ S2, everyone else S1),
+      // and any future channel is S1 from the moment it exists until it is
+      // deliberately added to TRUSTED_CHANNELS.
+      const surface: ProposalSurface = isUntrustedS1Session(session) ? 'S1' : 'S2';
       const requestedProposalType = intentToProposalType(intent);
       // The deterministic emergency-keyword path (transitions.ts) marks its
       // side effect systemDetected — a server-side safety detection, not a
@@ -1363,6 +1790,15 @@ export function createVoiceTurnProcessor(
               : session.customerId
                 ? { callerCustomerId: session.customerId }
                 : {}),
+            // The caller's words for the REQUEST turn (the FSM parks them on
+            // `context.lastUtterance` at intent_classified and threads them
+            // back here — transitions.ts). Same reason and same single reader
+            // as the in-app leg: a contract field the classifier never
+            // extracts, like update_job's spoken status. Threaded on BOTH
+            // voice surfaces so they cannot drift apart again.
+            ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
+              ? { utterance: fx.payload.utterance }
+              : {}),
           },
           {
             tenantId,
@@ -1376,6 +1812,12 @@ export function createVoiceTurnProcessor(
         payloadConfidence = built.confidence;
         if (built.ok) {
           payload = built.payload;
+          // A payload can satisfy its Zod contract and still be unapprovable:
+          // `updateCustomerPayloadSchema` requires only `customerId`, so an
+          // edit naming no new value validates and then executes as a silent
+          // no-op. `missingFieldPaths` is therefore read independently of
+          // `ok` — see voice-payload.ts `namedContractGap`.
+          contractMissingFields = built.missingFieldPaths;
         } else {
           const gateable =
             effectiveProposalType !== 'voice_clarification' &&
@@ -1442,6 +1884,113 @@ export function createVoiceTurnProcessor(
         };
       }
 
+      // U3 — live inbound book completion. When create_appointment has a
+      // verified customer + spoken time + job, place a hold and evaluate
+      // D-015 so opt-in tenants can confirm on-call. Always speak an honest
+      // outcome (confirmed vs pending) — never silent drop.
+      let bookingUtterance: string | undefined;
+      let autonomousLaneForCreate:
+        | { eligible: true; threshold: number }
+        | undefined;
+      let laneSourceStamp: Record<string, unknown> | undefined;
+      if (
+        !degradedFromContract &&
+        surfaceAllowed &&
+        payloadProposalType === 'create_appointment' &&
+        session.channel === 'telephony' &&
+        session.machine.currentContext.ownerSession !== true &&
+        deps.appointmentRepo &&
+        deps.settingsRepo
+      ) {
+        const customerId =
+          (typeof payload.customerId === 'string' && payload.customerId) ||
+          session.customerId ||
+          (typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined);
+        const jobId =
+          typeof payload.jobId === 'string' ? payload.jobId : undefined;
+        const dateTimeDescription = [
+          payload.dateTimeDescription,
+          payload.dateTimePhrase,
+          entities.dateTimeDescription,
+          entities.dateTimePhrase,
+        ].find((v): v is string => typeof v === 'string' && v.trim().length > 0);
+        if (customerId && jobId && dateTimeDescription) {
+          try {
+            const settings = await deps.settingsRepo.findByTenant(tenantId).catch(() => null);
+            const hold = await resolveAndPlaceAppointmentHold(
+              {
+                appointmentRepo: deps.appointmentRepo,
+                ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+              },
+              {
+                tenantId,
+                jobId,
+                customerId,
+                dateTimeDescription,
+                ...(settings?.timezone ? { timezone: settings.timezone } : {}),
+                createdBy: deps.systemActorId ?? 'calling-agent',
+                idempotencyKey: `inbound-book:${session.id}:${jobId}`,
+              },
+            );
+            if (hold.ok) {
+              const timeReadback = timeReadbackFromHold(
+                hold.scheduledStart,
+                hold.timezone,
+              );
+              const slotWithinBusinessHours = checkBusinessHours(
+                parseOnboardingBusinessHours(settings?.businessHours, hold.timezone),
+                new Date(hold.scheduledStart),
+              ).isOpen;
+              // Contract: `_meta.overallConfidence` is a label, not a 0–1 score
+              // (see packages/api/src/proposals/contracts.ts confidence envelope).
+              // Lane eval still uses the numeric score via confidenceScore below.
+              const bookingPayload: Record<string, unknown> = {
+                appointmentId: hold.appointmentId,
+                ...(typeof payloadConfidence === 'number'
+                  ? { _meta: { overallConfidence: getConfidenceLevel(payloadConfidence) } }
+                  : {}),
+              };
+              const laneEval = buildLaneInputFromSettings({
+                platformDisabled: process.env.AUTONOMOUS_BOOKING_DISABLED === 'true',
+                settings: {
+                  enabled: settings?.autonomousBookingEnabled ?? false,
+                  ...(settings?.autonomousBookingThreshold !== undefined
+                    ? { threshold: settings.autonomousBookingThreshold }
+                    : {}),
+                },
+                confidenceScore: payloadConfidence,
+                customerId,
+                holdExpiryAt: hold.holdExpiryAt,
+                now: new Date(),
+                slotWithinBusinessHours,
+                pendingReferenceCount: 0,
+                negotiationFlagged:
+                  session.machine.currentContext.negotiationFlagged === true,
+                payload: bookingPayload,
+              });
+              laneSourceStamp = laneStampIfPresent(laneEval) as
+                | Record<string, unknown>
+                | undefined;
+              bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
+              payloadProposalType = 'create_booking';
+              payload = bookingPayload;
+              if (laneEval.eligible) {
+                autonomousLaneForCreate = laneEval;
+              } else if (!laneEval.eligible) {
+                // Hold stays for owner confirmation window (24h); ineligible
+                // lane means draft create_booking, not auto-approve.
+              }
+            } else {
+              bookingUtterance = bookingSpeechForLane(undefined, undefined);
+            }
+          } catch {
+            bookingUtterance = bookingSpeechForLane(undefined, undefined);
+          }
+        } else if (payloadProposalType === 'create_appointment') {
+          bookingUtterance = bookingSpeechForLane(undefined, undefined);
+        }
+      }
+
       const proposal = buildProposal({
         tenantId,
         proposalType: payloadProposalType,
@@ -1486,6 +2035,7 @@ export function createVoiceTurnProcessor(
           ...(!degradedFromContract && estimateQuote?.catalogResolution
             ? { catalogResolution: estimateQuote.catalogResolution }
             : {}),
+          ...(laneSourceStamp ?? {}),
         },
         // WS5 — thread the (uncatalogued-capped) confidence and force 'draft'
         // for an ambiguous line, matching the EstimateTaskHandler. The voice
@@ -1527,6 +2077,24 @@ export function createVoiceTurnProcessor(
             ? fx.payload.customerId
             : deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+        // D-015 — only when every autonomous booking gate passed.
+        //
+        // followup-autoapprove-default audit — this call site never threads
+        // supervisorMode/supervisorPresent (intentionally left as-is; see
+        // that investigation), so decideInitialStatus's generic
+        // shouldAutoApprove(confidence, LEGACY_AUTO_APPROVE_THRESHOLD) check
+        // runs here instead of the lane's own dedicated threshold. Currently
+        // harmless only because AUTONOMOUS_BOOKING_THRESHOLD_FLOOR ===
+        // LEGACY_AUTO_APPROVE_THRESHOLD — see the doc comments on both
+        // constants (proposals/autonomous-lane.ts /
+        // proposals/auto-approve.ts) and the pinned invariant in
+        // test/proposals/autonomous-lane.test.ts before changing either.
+        ...(autonomousLaneForCreate
+          ? {
+              autonomousLane: autonomousLaneForCreate,
+              sourceTrustTier: 'autonomous' as const,
+            }
+          : {}),
       });
       const stored = await deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
@@ -1536,9 +2104,12 @@ export function createVoiceTurnProcessor(
         // WS5 — the grounded quote read-back the caller hears. Absent for
         // non-estimate proposals (and for a contract-degraded clarification,
         // which quoted nothing) → the FSM speaks the fixed confirmation.
+        // U3 — booking paths override with honest confirmed/pending copy.
         ...(estimateQuote && !degradedFromContract
           ? { utterance: estimateQuote.utterance }
-          : {}),
+          : bookingUtterance
+            ? { utterance: bookingUtterance }
+            : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
@@ -1841,6 +2412,378 @@ export function createVoiceTurnProcessor(
     }
   }
 
+  // ANS-001 — booking proposal types that would put a caller on the schedule.
+  // On an E1 life-safety signal these are revoked so a hazard call is never
+  // booked (goal clause 2). emergency_dispatch/callback are NOT booking writes.
+  const REVOCABLE_BOOKING_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+    'create_appointment',
+    'create_booking',
+    'create_job',
+    'create_customer',
+    'confirm_appointment',
+    'reschedule_appointment',
+  ]);
+  // Proposal statuses past the point where revoking is meaningful/safe.
+  const TERMINAL_PROPOSAL_STATUSES: ReadonlySet<string> = new Set([
+    'executed',
+    'executing',
+    'rejected',
+    'undone',
+    'expired',
+    'execution_failed',
+  ]);
+  // The complement of TERMINAL_PROPOSAL_STATUSES — the statuses a booking may
+  // still be revoked FROM. Passed as the precondition of the conditional write
+  // so a proposal that moves on mid-revocation is never clobbered.
+  const REVOCABLE_FROM_STATUSES: ProposalStatus[] = [
+    'draft',
+    'ready_for_review',
+    'approved',
+  ];
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /**
+   * ANS-001 — durable URGENT follow-up for an E1 call. Mirrors the emergency
+   * page ladder's exhaustion fallback (`telephony/emergency-page-retry.ts`):
+   * the same `call_me_back` task the CSR sweep already surfaces, so a human
+   * still sees the problem when every live channel failed. Best-effort — the
+   * caller is on the life-safety path and nothing here may throw.
+   *
+   * The repo dedups on (tenant_id, session_id, REASON) — see migration 268.
+   * Keying on the session alone silently discarded the second task, and since
+   * the FSM emits revoke_pending_bookings before notify_tenant_emergency, the
+   * one that lost was always the life-safety ALERT. Distinct reasons now each
+   * get a task; a retry of the same reason still dedups.
+   */
+  async function createE1FollowUpTask(
+    session: VoiceSession,
+    tenantId: string,
+    reason: string,
+    callbackMessage: string,
+  ): Promise<void> {
+    if (!deps.callMeBackRepo) {
+      logger.error('E1 follow-up task NOT created (no callMeBackRepo wired)', {
+        tenantId,
+        sessionId: session.id,
+        reason,
+      });
+      return;
+    }
+    try {
+      await deps.callMeBackRepo.create({
+        tenantId,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        // caller_phone is NOT NULL; an unresolvable caller still gets a task
+        // (the message carries the detail the CSR needs).
+        callerPhone: deps.callerPhoneResolver?.(session) ?? 'unknown',
+        callbackMessage,
+        intentSummary: 'emergency_dispatch',
+        reason,
+        scheduledFor: new Date(),
+      });
+    } catch (err) {
+      logger.error('E1 follow-up task create failed', {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId,
+        sessionId: session.id,
+        reason,
+      });
+    }
+  }
+
+  /**
+   * ANS-001 — compensation for a booking that could NOT be revoked: it already
+   * executed, or a racing writer moved it past the revocable window. That
+   * leaves a live appointment attached to a life-safety call, so it is never
+   * silent — an audit event records it and a durable URGENT task puts it in
+   * front of a human.
+   */
+  async function recordRevokeBlocked(
+    session: VoiceSession,
+    tenantId: string,
+    proposal: Proposal,
+  ): Promise<void> {
+    const metadata = {
+      proposalId: proposal.id,
+      status: proposal.status,
+      resultEntityId: proposal.resultEntityId ?? null,
+    };
+    logger.error('revoke_pending_bookings: booking still LIVE on an E1 call', {
+      sessionId: session.id,
+      tenantId,
+      ...metadata,
+    });
+    if (deps.auditRepo) {
+      try {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'agent.calling.e1_revoke_blocked_terminal',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata,
+          }),
+        );
+      } catch (err) {
+        logger.warn('e1_revoke_blocked_terminal audit persist failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+    }
+    await createE1FollowUpTask(
+      session,
+      tenantId,
+      'life_safety_e1_booking_live',
+      `EMERGENCY (E1): a booking from this call could NOT be revoked ` +
+        `(proposal ${proposal.id}, status ${proposal.status}). Cancel it by hand.`,
+    );
+  }
+
+  /**
+   * ANS-001 — E1 booking revocation. Rejects every still-live booking proposal
+   * created this session and best-effort releases any tentative appointment
+   * hold on a known job. A life-safety call must never leave a booking behind.
+   */
+  async function handleRevokePendingBookings(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    const reason =
+      typeof fx.payload.reason === 'string' ? fx.payload.reason : 'life_safety_e1';
+    if (deps.proposalRepo) {
+      for (const id of [...session.proposalIds]) {
+        try {
+          const p = await deps.proposalRepo.findById(tenantId, id);
+          if (!p) continue;
+          if (!REVOCABLE_BOOKING_TYPES.has(p.proposalType)) continue;
+          if (TERMINAL_PROPOSAL_STATUSES.has(p.status)) {
+            // Already past revocation — compensate instead of skipping.
+            await recordRevokeBlocked(session, tenantId, p);
+            continue;
+          }
+          // CONDITIONAL write: the execution worker can move this proposal
+          // approved → executing → executed between the read above and the
+          // write. `updateStatusIf` folds the precondition into the UPDATE, so
+          // a lost race returns null rather than rejecting an executed booking.
+          const revoked = await deps.proposalRepo.updateStatusIf(
+            tenantId,
+            id,
+            REVOCABLE_FROM_STATUSES,
+            'rejected',
+            {
+              rejectionReason: 'life_safety_emergency',
+              rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
+            },
+          );
+          if (revoked) {
+            // Repo rule: all mutations emit an audit event. Cancelling a
+            // customer's booking is exactly what an operator reconstructing an
+            // E1 call will need to see.
+            if (deps.auditRepo) {
+              try {
+                await deps.auditRepo.create(
+                  createAuditEvent({
+                    tenantId,
+                    actorId: deps.systemActorId ?? 'calling-agent',
+                    actorRole: 'system',
+                    eventType: 'agent.calling.e1_booking_revoked',
+                    entityType: 'proposal',
+                    entityId: revoked.id,
+                    correlationId: session.id,
+                    metadata: {
+                      proposalId: revoked.id,
+                      proposalType: revoked.proposalType,
+                      fromStatus: p.status,
+                      reason,
+                    },
+                  }),
+                );
+              } catch (err) {
+                logger.warn('e1_booking_revoked audit persist failed', {
+                  error: err instanceof Error ? err.message : String(err),
+                  sessionId: session.id,
+                  proposalId: revoked.id,
+                });
+              }
+            }
+          } else {
+            // Lost the race. Re-read so the audit/task carry the real status.
+            const current = await deps.proposalRepo.findById(tenantId, id);
+            await recordRevokeBlocked(session, tenantId, current ?? p);
+          }
+        } catch (err) {
+          logger.warn('revoke_pending_bookings: proposal void failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+            proposalId: id,
+          });
+        }
+      }
+    }
+    // Best-effort: release a tentative hold on a known (owned) job. The narrow
+    // held-appointment path only fires for an identified caller whose jobId is
+    // a UUID in the FSM context; otherwise the hold auto-expires via the reaper.
+    const jobId = session.machine.currentContext.extractedEntities?.['jobId'];
+    if (deps.appointmentRepo && typeof jobId === 'string' && UUID_RE.test(jobId)) {
+      try {
+        const appts = await deps.appointmentRepo.findByJob(tenantId, jobId);
+        for (const a of appts) {
+          if (a.holdPendingApproval === true) {
+            await deps.appointmentRepo.update(tenantId, a.id, {
+              holdPendingApproval: false,
+              status: 'canceled',
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('revoke_pending_bookings: hold release failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+    }
+  }
+
+  /**
+   * ANS-001 — push half of the E1 tenant alert. Reaches the owner's phone even
+   * when the text channel is degraded, and reaches every staff device the
+   * tenant registered rather than one number. Additive to the SMS below and
+   * best-effort: a push failure never changes the SMS/fallback outcome.
+   */
+  async function pushE1AlertToDevices(
+    session: VoiceSession,
+    tenantId: string,
+    keyword: string,
+    callerPhone: string | undefined,
+  ): Promise<void> {
+    if (!deps.deviceTokenRepo || !deps.pushDeliveryProvider) return;
+    try {
+      const devices = await deps.deviceTokenRepo.listByTenant(tenantId);
+      if (devices.length === 0) return;
+      const results = await deps.pushDeliveryProvider.sendPush(
+        devices.map((d) => ({
+          to: d.expoPushToken,
+          // "E1" is an internal tier label — a contractor's lock screen gets
+          // plain language.
+          title: '⚠️ EMERGENCY — life-safety call',
+          // Same I13 discipline as the SMS body: detected keyword + masked
+          // number only, never the caller's own words.
+          body:
+            `Detected: "${keyword}"` +
+            (callerPhone ? ` from ${maskPhone(callerPhone)}` : '') +
+            `. Caller directed to 911/the utility — follow up immediately.`,
+        })),
+      );
+      const failed = results.filter((r) => !r.ok).length;
+      if (failed > 0) {
+        logger.warn('notify_tenant_emergency: some push sends failed', {
+          tenantId,
+          sessionId: session.id,
+          failed,
+          total: results.length,
+        });
+      }
+    } catch (err) {
+      logger.warn('notify_tenant_emergency: push fan-out failed', {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId,
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /**
+   * ANS-001 — E1 tenant alert. Notifies the tenant that a life-safety call came
+   * in, WITHOUT bridging the caller into a live transfer (no <Dial>): the caller
+   * has been directed to 911/the utility and the call is closing. The durable
+   * "logged as E1" record is the FSM's audit_log side effect; this fans the
+   * alert out over the tenant's text + push channels, and falls back to a
+   * durable URGENT task when the text channel can't be used at all.
+   * Best-effort — never throws.
+   */
+  async function handleNotifyTenantEmergency(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    const keyword =
+      typeof fx.payload.keyword === 'string' ? fx.payload.keyword : 'emergency';
+    let recipients: string[] = [];
+    if (deps.settingsRepo) {
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        // A life-safety alert goes to EVERY configured number, not a
+        // preference chain. ownerPhone (P8-016) is the owner's personal
+        // emergency cell but doubles as an approver-identity field that can go
+        // stale; transferNumber is a proven delivery target — and a
+        // Twilio-ACCEPTED send to a stale number throws nothing, so a
+        // preference chain can silently alert nobody. A duplicate text is
+        // free; a missed E1 alert is not.
+        recipients = [
+          ...new Set(
+            [settings?.ownerPhone, settings?.transferNumber].filter(
+              (n): n is string => typeof n === 'string' && n.length > 0,
+            ),
+          ),
+        ];
+      } catch {
+        // best-effort — fall through to the durable fallback below
+      }
+    }
+    const callerPhone = deps.callerPhoneResolver?.(session);
+    // The caller's own words are UNTRUSTED (I13) and are NOT echoed into the
+    // alert body — only the detected keyword + masked caller number, so the
+    // tenant's tooling never renders instruction-eligible caller content here.
+    const body =
+      `⚠️ EMERGENCY (E1 life-safety) call just came in` +
+      (callerPhone ? ` from ${maskPhone(callerPhone)}` : '') +
+      `. Detected: "${keyword}". The caller was directed to 911/the utility. ` +
+      `Please follow up immediately.`;
+
+    // Push and SMS are independent channels, so START the push without
+    // awaiting it: a slow Expo endpoint costs up to 4s per 100-device batch,
+    // and awaiting it first would push the owner's TEXT behind that. Both are
+    // settled before returning; neither can throw.
+    const push = pushE1AlertToDevices(session, tenantId, keyword, callerPhone);
+    const provider = deps.deliveryProvider;
+    const sms = (async (): Promise<void> => {
+      if (recipients.length === 0 || !provider) {
+        logger.error('notify_tenant_emergency: no owner number / delivery provider', {
+          tenantId,
+          sessionId: session.id,
+          hasNumber: recipients.length > 0,
+        });
+        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
+        return;
+      }
+      const sends = await Promise.allSettled(
+        recipients.map((to) => provider.sendSms({ to, body })),
+      );
+      const failures = sends.filter((s) => s.status === 'rejected');
+      for (const f of failures) {
+        logger.error('notify_tenant_emergency: SMS dispatch failed', {
+          error:
+            f.reason instanceof Error ? f.reason.message : String(f.reason),
+          tenantId,
+          sessionId: session.id,
+        });
+      }
+      // The durable fallback fires only when NO text went out at all — one
+      // delivered alert is a notified tenant.
+      if (failures.length === sends.length) {
+        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
+      }
+    })();
+    await Promise.allSettled([push, sms]);
+  }
+
   async function executeSideEffects(
     session: VoiceSession,
     sideEffects: SideEffect[],
@@ -1875,6 +2818,10 @@ export function createVoiceTurnProcessor(
         await handleCreateProposal(session, fx, tenantId, sideEffects);
       } else if (fx.type === 'notify_oncall') {
         await handleNotifyOncall(session, fx, tenantId);
+      } else if (fx.type === 'revoke_pending_bookings') {
+        await handleRevokePendingBookings(session, fx, tenantId);
+      } else if (fx.type === 'notify_tenant_emergency') {
+        await handleNotifyTenantEmergency(session, fx, tenantId);
       }
     }
   }
@@ -1911,6 +2858,14 @@ export function createVoiceTurnProcessor(
         // the customers table and surface the linked customer.
         ...(session.customerId !== undefined
           ? { customerId: session.customerId }
+          : {}),
+        // I13 (FIX 10ii) — the FSM context's injectionFlagged was write-only
+        // (set by the prompt_injection_detected guard, never read). Stamp it
+        // into the durable end-of-call record so a caller injection attempt
+        // is discoverable without replaying the transcript. Sticky: once
+        // flagged this session, always flagged on the persisted row.
+        ...(session.machine.currentContext.injectionFlagged
+          ? { contentProvenance: 'untrusted' as const }
           : {}),
       });
     } catch {
@@ -2520,7 +3475,14 @@ export function createVoiceTurnProcessor(
     );
     if (!hold.ok) {
       return fallback(
-        hold.failed === 'unresolved_datetime' ? 'scheduling_incomplete' : 'hold_not_placed',
+        // `timezone_unconfigured` takes the same chute as an unparseable
+        // phrase: the turn declines to book and declines to speak a time.
+        // The caller is not told the business is misconfigured — that is the
+        // operator's problem, surfaced to them elsewhere — but nothing wrong
+        // is written or read aloud, which is the point.
+        hold.failed === 'unresolved_datetime' || hold.failed === 'timezone_unconfigured'
+          ? 'scheduling_incomplete'
+          : 'hold_not_placed',
       );
     }
 
@@ -2884,6 +3846,315 @@ export function createVoiceTurnProcessor(
 
   // ─── Speech turn (formerly processCallerUtterance) ──────────────────
 
+  /**
+   * #962 (PR-B) — the bounded reprompt→escalate ladder ported VERBATIM from
+   * `twilio-adapter.ts#runLowSttConfidenceGatherLadder` (Gather keeps its
+   * copy until the cutover PR removes it — expected strangler duplication).
+   * Shared by the two turn-failure modes: an empty utterance (silence,
+   * inside `speechTurn`) and low acoustic confidence (via
+   * `maybeHandleLowSttConfidence`). One streak for both, so a caller
+   * alternating silence and mumbling still terminates at
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. At the cap this path
+   * never touches the FSM, so the terminated-session finalize is called
+   * explicitly here (the same pattern Gather's ladder uses). The
+   * `recordVoiceError` channel stays 'gather' — the only surface whose cell
+   * declares this branch today.
+   */
+  function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const streak = (lowConfidenceStreak.get(session.id) ?? 0) + 1;
+
+    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
+      lowConfidenceStreak.delete(session.id);
+      const effects: SideEffect[] = [
+        {
+          type: 'tts_play',
+          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
+        },
+        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+      ];
+      if (!session.ended) {
+        session.ended = true;
+        finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+      }
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'gather',
+        callSid: session.callSid ?? undefined,
+        tenantId: session.tenantId,
+      });
+      return effects;
+    }
+
+    lowConfidenceStreak.set(session.id, streak);
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
+      },
+    ];
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'gather',
+      callSid: session.callSid ?? undefined,
+      tenantId: session.tenantId,
+    });
+    return effects;
+  }
+
+  /**
+   * #962 (PR-B) — A3 confidence gate, ported from
+   * `twilio-adapter.ts#maybeHandleLowSttConfidenceGather`. See the
+   * interface doc; gated on the surface's silence-ladder cell first so a
+   * surface whose ladder lives elsewhere (media-streams' adapter-side A3)
+   * is never double-gated.
+   */
+  function maybeHandleLowSttConfidence(
+    session: VoiceSession,
+    confidence: number | undefined,
+  ): SideEffect[] | null {
+    if (!servesFamilyHere('silence_low_stt_ladder')) return null;
+    if (
+      typeof confidence !== 'number' ||
+      !Number.isFinite(confidence) ||
+      confidence >= MIN_STT_CONFIDENCE
+    ) {
+      // High confidence (or no signal at all) clears the streak so a later
+      // isolated blip on this session gets its own reprompt budget.
+      lowConfidenceStreak.delete(session.id);
+      return null;
+    }
+
+    return runLowSttConfidenceLadder(session);
+  }
+
+  /**
+   * #962 (PR-B) — #846 mid-call language switch, ported from
+   * `twilio-adapter.ts#handleLanguageSwitchGather` (Gather keeps its copy
+   * until cutover). An ADAPTER-SHAPE act, out-of-FSM: the pure FSM cannot
+   * mutate `session.language`; the transport's next listen turn follows the
+   * flipped session fields. Policy identical to both telephony transports:
+   * the tenant `supported_languages` opt-in gates the target, the SAME
+   * per-call flap cap bounds flapping, and the TTS voice is re-resolved for
+   * the NEW language via the same settings read the adapter's
+   * `resolveTenantLanguage` performs (failure clears the override so the
+   * language-derived default voice applies). Never throws; always returns
+   * the side effects to speak.
+   */
+  async function handleLanguageSwitchTurn(
+    session: VoiceSession,
+    tenantId: string,
+    speechResult: string,
+  ): Promise<SideEffect[]> {
+    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    // The utterance's requested language when the heuristic can extract it,
+    // else the other half of the en/es pair (the classifier already said
+    // this turn IS a switch request) — same fallback as both adapters.
+    const target = detectLanguageSwitchIntent(speechResult) ?? (current === 'es' ? 'en' : 'es');
+
+    if (target === current) {
+      // Already speaking the requested language — just acknowledge; no
+      // counter spend, no event.
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
+    }
+    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
+    // opt-in gate is applied here (same as the media-streams pre-scan).
+    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) {
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
+    }
+    const switchCount = session.languageSwitchCount ?? 0;
+    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+      logger.info('speechTurn: language switch refused — flap guard', {
+        sessionId: session.id,
+        target,
+        switchCount,
+      });
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
+    }
+
+    session.language = target;
+    session.languageSwitchCount = switchCount + 1;
+    // Re-resolve the per-language TTS voice (settings.ttsVoiceEn/Es); a
+    // resolver failure clears the override so the language-derived default
+    // Polly voice applies rather than the stale other-language voice.
+    let ttsVoice: string | undefined;
+    if (deps.settingsRepo) {
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        ttsVoice = (target === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
+      } catch {
+        ttsVoice = undefined;
+      }
+    }
+    session.ttsVoice = ttsVoice;
+    session.events.emit(
+      'voice-event',
+      languageSwitchedEvent({
+        from: current,
+        to: target,
+        trigger: 'classified_intent',
+        switchCount: session.languageSwitchCount,
+      }),
+    );
+    // Acknowledge in the language being switched TO — the caller just told
+    // us that's the one they understand. Same copy as both adapters.
+    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
+  }
+
+  /**
+   * #962 (PR-B) — P18-001 `create_customer` one-turn flow, ported from
+   * `twilio-adapter.ts#handleCreateCustomerVoiceIntent` (Gather keeps its
+   * copy until cutover). Runs the `CreateCustomerVoiceTaskHandler` to build
+   * a contract-shaped proposal (name + caller-id phone + optional email)
+   * and persists it via the wired proposalRepo. Always asks a human to
+   * approve — money / identity creation is never auto-executed (D3,
+   * CLAUDE.md). The caller-id comes from `deps.callerPhoneResolver` — the
+   * adapter wires it to the SAME `callerIdBySession` map its own branch
+   * reads.
+   *
+   * Returns true when the flow handled this turn end-to-end (the caller
+   * renders the pushed effects and skips the FSM `intent_classified` →
+   * `intent_confirm` round-trip). Returns false when the precondition
+   * isn't met so the turn falls back to the standard FSM dispatch.
+   */
+  async function handleCreateCustomerVoiceIntentTurn(
+    session: VoiceSession,
+    classifierEntities: Record<string, unknown>,
+    classifierConfidence: number,
+    speechResult: string,
+    tenantId: string,
+    sideEffectsAll: SideEffect[],
+  ): Promise<boolean> {
+    // Caller already matched — confirm identity instead.
+    if (session.customerId) {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I've got you in our system already. Let me know what you'd like help with today.",
+        },
+      });
+      return true;
+    }
+
+    const callerIdRaw = deps.callerPhoneResolver?.(session);
+    const phoneBlocked = isBlockedCallerId(callerIdRaw);
+    const callerIdPhone = phoneBlocked ? undefined : callerIdRaw;
+
+    // 4.3 — wire the read-only dedup loader so the proposal card surfaces
+    // "possible duplicate" before a human approves the write.
+    const duplicateLoader =
+      deps.customerRepo && isCustomerDuplicateLoader(deps.customerRepo)
+        ? deps.customerRepo
+        : undefined;
+    const handler = new CreateCustomerVoiceTaskHandler({ duplicateLoader });
+    const outcome = await handler.run({
+      tenantId,
+      message: speechResult,
+      conversationId: session.id,
+      userId: deps.systemActorId ?? 'voice_agent',
+      existingEntities: {
+        ...classifierEntities,
+        callerIdPhone,
+        phoneBlocked,
+        sessionId: session.id,
+        callSid: session.callSid,
+        correlationId: session.id,
+        classifierConfidence,
+        ...(session.leadId ? { existingLeadId: session.leadId } : {}),
+      },
+    });
+
+    if (outcome.status === 'needs_name') {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text: "Of course — could I get your name to get you set up?",
+        },
+      });
+      return true;
+    }
+
+    if (outcome.status === 'needs_callback') {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+        },
+      });
+      return true;
+    }
+
+    if (!outcome.proposal) {
+      return false;
+    }
+
+    // Persist the proposal directly so we control the payload shape
+    // (instead of going through `handleCreateProposal` which builds
+    // the generic { intent, entities } envelope).
+    if (!deps.proposalRepo) {
+      logger.warn('create_customer: proposalRepo not wired; skipping persist', {
+        sessionId: session.id,
+      });
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: { text: CREATE_CUSTOMER_CONFIRMATION_TTS },
+      });
+      return true;
+    }
+
+    try {
+      const stored = await deps.proposalRepo.create(outcome.proposal);
+      session.proposalIds.push(stored.id);
+      // Audit row tying the proposal back to the voice session.
+      if (deps.auditRepo) {
+        try {
+          const ev = createAuditEvent({
+            tenantId,
+            actorId: deps.systemActorId ?? 'voice_agent',
+            actorRole: 'system',
+            eventType: 'proposal.created',
+            entityType: 'proposal',
+            entityId: stored.id,
+            correlationId: session.id,
+            metadata: {
+              proposalType: 'create_customer',
+              source: 'voice',
+              sessionId: session.id,
+              callSid: session.callSid,
+              classifierConfidence,
+            },
+          });
+          await deps.auditRepo.create(ev);
+        } catch (err) {
+          logger.warn('create_customer: audit persist failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
+      }
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: { text: CREATE_CUSTOMER_CONFIRMATION_TTS },
+      });
+      return true;
+    } catch (err) {
+      logger.warn('create_customer: persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+        },
+      });
+      return true;
+    }
+  }
+
   const speechTurn: SpeechTurnHandler = async ({
     session,
     speechResult,
@@ -2909,16 +4180,37 @@ export function createVoiceTurnProcessor(
     }
 
     // 1. Append caller utterance to transcript.
-    deps.store.appendTranscript(session.id, {
-      speaker: 'caller',
-      text: speechResult,
-      ts: Date.now(),
-    });
+    // #850 — redacted when the session is awaiting a spoken money-approval
+    // challenge. This site is REACHED TWICE on the media-streams path (the
+    // adapter routes through TwilioGatherAdapter#processCallerUtterance, which
+    // appends first), so an unguarded append here re-leaked the secret that
+    // the other site had just redacted.
+    // #962 (PR-B) — on a surface whose silence ladder is served HERE (the
+    // ported Gather ladder), an empty SpeechResult is a no-speech timeout:
+    // Gather's loop deliberately skips the empty `caller:` line so
+    // deriveCallOutcome reads a fully silent call as silent, and the ported
+    // ladder keeps that rule. Surfaces whose ladder lives elsewhere
+    // (media-streams: adapter-side A3/T2-F05) keep the unconditional
+    // append, byte-identical to main.
+    if (
+      speechResult.trim().length > 0 ||
+      !servesFamilyHere('silence_low_stt_ladder')
+    ) {
+      deps.store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: callerTranscriptText(session, speechResult),
+        ts: Date.now(),
+      });
+    }
 
     // RV-071 — an in-flight owner approval dialogue consumes the turn
     // BEFORE the FSM-state branch (including silence: an empty utterance
-    // is "anything else" → no action, keep for later).
-    const approvalTurn = await handlePendingVoiceApproval(session, speechResult, tenantId);
+    // is "anything else" → no action, keep for later). #962 (PR-B): gated
+    // on the (voice_approval, surface) cell — declared for both phone
+    // transports today.
+    const approvalTurn = servesFamilyHere('voice_approval')
+      ? await handlePendingVoiceApproval(session, speechResult, tenantId)
+      : null;
     if (approvalTurn) {
       await executeSideEffects(session, approvalTurn, tenantId);
       appendAgentTts(deps.store, session.id, approvalTurn);
@@ -2927,7 +4219,13 @@ export function createVoiceTurnProcessor(
 
     // WS18 — an in-flight on-call SMS consent capture also consumes the turn
     // before the FSM-state branch (the caller's utterance is the yes/no answer).
-    const consentTurn = await handlePendingConsentCapture(session, speechResult, tenantId);
+    // #962 (PR-B): gated on the (ws18_consent_capture, surface) cell — on a
+    // surface whose cell refuses (Gather today, its declared hole), the
+    // yes/no goes to the classifier and the capture stays pending, exactly
+    // as that surface behaves on main.
+    const consentTurn = servesFamilyHere('ws18_consent_capture')
+      ? await handlePendingConsentCapture(session, speechResult, tenantId)
+      : null;
     if (consentTurn) {
       await executeSideEffects(session, consentTurn, tenantId);
       appendAgentTts(deps.store, session.id, consentTurn);
@@ -2938,6 +4236,18 @@ export function createVoiceTurnProcessor(
     const currentState = session.machine.currentState;
 
     if (speechResult.trim().length === 0) {
+      // #962 (PR-B) — the surface's declared silence handler decides. When
+      // the (silence_low_stt_ladder, surface) cell names the ported Gather
+      // ladder, silence joins the same bounded streak as low acoustic
+      // confidence (T2-F03) — reprompt below the cap, graceful escalation +
+      // end_session at it — never touching the FSM. Every other surface
+      // keeps today's `confidence_low` dispatch (media-streams' own ladder
+      // is adapter-side).
+      if (servesFamilyHere('silence_low_stt_ladder')) {
+        const ladderFx = runLowSttConfidenceLadder(session);
+        appendAgentTts(deps.store, session.id, ladderFx);
+        return ladderFx;
+      }
       sideEffectsAll.push(
         ...session.machine.dispatch({
           type: 'confidence_low',
@@ -2947,6 +4257,17 @@ export function createVoiceTurnProcessor(
       );
       await executeSideEffects(session, sideEffectsAll, tenantId);
       return sideEffectsAll;
+    }
+
+    // #962 (PR-B) — a non-empty turn that proceeds clears the ported
+    // ladder's streak: the Gather loop treats an absent acoustic confidence
+    // as HIGH (maybeHandleLowSttConfidenceGather), and a transport that HAS
+    // a score gates the turn through `maybeHandleLowSttConfidence` before
+    // dispatching here. Turns consumed by the pending dialogues above never
+    // reach this line — same as the Gather loop, where the approval branch
+    // returns before the confidence gate.
+    if (servesFamilyHere('silence_low_stt_ladder')) {
+      lowConfidenceStreak.delete(session.id);
     }
 
     if (currentState === 'ask_caller') {
@@ -2999,9 +4320,17 @@ export function createVoiceTurnProcessor(
       // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
       // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
       // two" are handled here instead of being misread as a second intent that
-      // silently drops the quote.
+      // silently drops the quote. #962 (PR-B): gated on the
+      // (ws18_post_quote_refinement, surface) cell — a refuse-cell surface
+      // (Gather today, its declared hole) sends the turn to the classifier
+      // and silently drops the quote, exactly as that surface behaves on
+      // main.
       const pendingQuote = session.machine.currentContext.pendingQuote;
-      if (currentState === 'closing' && pendingQuote) {
+      if (
+        currentState === 'closing' &&
+        pendingQuote &&
+        servesFamilyHere('ws18_post_quote_refinement')
+      ) {
         const decision = classifyPostQuoteUtterance(speechResult);
         if (decision.kind === 'affirmative') {
           sideEffectsAll.push(...(await handlePostQuoteClose(session, tenantId, speechResult)));
@@ -3054,6 +4383,19 @@ export function createVoiceTurnProcessor(
         tenantId,
         session.customerId,
       );
+      // 2.12 — B2B/property-manager account context, assembled once by the
+      // twilio adapter at caller identification (twilio-adapter.ts:953) and
+      // stashed on the session. Resolved into its prompt-ready string here,
+      // same treatment as vertical/plan above — absent for a residential or
+      // unmatched caller, so that session's prompt stays byte-identical.
+      const b2bAccountPromptSection = session.b2bAccountContext
+        ? buildAccountContextPromptSection(session.b2bAccountContext)
+        : undefined;
+      // #886/#887 — surface-conditional taxonomy: derived from session
+      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
+      // so the off-surface audit below records the same profile the guard
+      // enforced.
+      const classifierProfile = classifierProfileForSession(session);
       try {
         const classification = await classifyIntent(
           speechResult,
@@ -3061,6 +4403,8 @@ export function createVoiceTurnProcessor(
             tenantId,
             verticalPromptSection,
             planPromptSection,
+            classifierProfile,
+            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
             // RV-071 — the owner-approval prompt section is appended ONLY
             // on a recognized owner line (caller-ID match; see
             // approver-identity.ts), keeping every other call's
@@ -3068,9 +4412,17 @@ export function createVoiceTurnProcessor(
             ...(session.machine.currentContext.ownerSession === true
               ? { ownerSession: true }
               : {}),
+            ...(session.machine.currentContext.extendedIntents === true
+              ? { extendedIntents: true }
+              : {}),
+            ...(session.machine.currentContext.customerProtectionIntents === true
+              ? { customerProtectionIntents: true }
+              : {}),
           },
           deps.gateway,
         );
+        // Successful classify clears infra-retry budget for this session.
+        session.aiInfraRetryCount = 0;
         session.events.emit(
           'voice-event',
           intentClassifiedEvent({
@@ -3079,6 +4431,16 @@ export function createVoiceTurnProcessor(
             tokenUsage: classification.tokenUsage,
           }),
         );
+        // #887/#902 — an off-surface classification was intercepted by the
+        // guard; leave the trail the interception would otherwise erase.
+        await auditOffSurfaceClassification({
+          auditRepo: deps.auditRepo,
+          tenantId,
+          sessionId: session.id,
+          profile: classifierProfile,
+          classification,
+          actorId: deps.systemActorId ?? 'calling-agent',
+        });
         const capExceeded = recordCost(session, classification.tokenUsage);
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };
@@ -3094,6 +4456,9 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            // The raw transcript rides the event so guards that persist
+            // caller words (complaint severity detection) see them.
+            utterance: speechResult,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
@@ -3112,28 +4477,141 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            utterance: speechResult,
           };
         }
       } catch (err) {
+        // Never map quota/breaker/provider brownouts to "didn't catch that".
+        const infraKind = classifyInfraFailure(err);
         logger.error('speechTurn: classifyIntent failed', {
           error: err instanceof Error ? err.message : String(err),
           sessionId: session.id,
+          infraKind,
         });
-        classifierEvent = {
-          type: 'intent_classified',
-          intentType: 'unknown',
-          entities: {},
-          confidence: 0,
-        };
+        if (isTransientInfraFailure(infraKind) && (session.aiInfraRetryCount ?? 0) < 1) {
+          session.aiInfraRetryCount = (session.aiInfraRetryCount ?? 0) + 1;
+          sideEffectsAll.push({
+            type: 'tts_play',
+            payload: { text: AI_BUSY_HOLD_LINE, source: 'ai_infrastructure_hold' },
+          });
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'system_failure',
+            reason: systemFailureReasonForInfra(infraKind),
+          }),
+        );
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #962 (PR-B) / P11-001 / #866 — lookup intents bypass the
+      // proposal-draft path, ported from the Gather branch (which keeps its
+      // copy until cutover). Routes through the SAME shared dispatch bundle
+      // (phone-lookup-surface → workers/voice-lookup-answer), speaks the
+      // line, and does NOT dispatch `intent_classified` — the FSM stays in
+      // `intent_capture` so the next turn can be another question. Gated on
+      // the (lookup, surface) cell: a refuse-cell surface (media-streams,
+      // the live D-026 hole) takes today's exact fall-through into the
+      // drafting funnel below — never a new spoken refusal line.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        isLookupIntent(classifierEvent.intentType as IntentType) &&
+        servesFamilyHere('lookup')
+      ) {
+        const lookupSummary = await answerPhoneLookup(deps.lookups, {
+          session,
+          tenantId,
+          intent: classifierEvent.intentType as IntentType,
+          entities: classifierEvent.entities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: lookupSummary, source: 'lookup_skill' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #847 (#860 step 2) — en_route ("on my way") on the transports whose
+      // turns run through speechTurn (media-streams finals). A DIRECT status
+      // act (Part F decision F-3): the technician IS the human acting, so it
+      // fires the SAME audited act the app en-route button executes — never
+      // a proposal, which is why it is deliberately absent from
+      // INTENT_TO_PROPOSAL_TYPE (falling through to the FSM would end in the
+      // clarification card this branch exists to prevent). Same out-of-FSM
+      // shape as the Gather branch in twilio-adapter: identity + role are
+      // checked in the surface adapter (session.actorUserId is stamped for
+      // BOTH phone transports by the shared establishment core), the outcome
+      // is spoken, and `intent_classified` is NOT dispatched — the FSM stays
+      // in intent_capture. High-confidence only, mirroring the Gather gate:
+      // a low-confidence en_route follows the normal repair path. #962
+      // (PR-B): gated on the (en_route, surface) cell — declared for both
+      // phone transports today.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'en_route' &&
+        classifierEvent.confidence >= TAU_INT &&
+        servesFamilyHere('en_route')
+      ) {
+        const enRouteLine = await answerPhoneEnRoute(deps.enRoute, {
+          session,
+          tenantId,
+          entities: classifierEvent.entities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: enRouteLine, source: 'en_route' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #962 (PR-B) / #846 — language_switch, ported from the Gather branch
+      // (which keeps its copy until cutover). An ADAPTER-SHAPE act, not an
+      // FSM transition or a proposal: handle, speak, and do NOT dispatch
+      // `intent_classified` — the FSM stays where it is and the transport's
+      // next listen turn follows the flipped session.language. Gated on the
+      // (language_switch, surface) cell: on media-streams the cell declares
+      // the ADAPTER (pre-scan + the classifier fallback that reads this
+      // turn's audit_log intentType), so the gate stays closed there and
+      // the intent keeps flowing to the FSM/audit_log exactly as on main.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'language_switch' &&
+        classifierEvent.confidence >= TAU_INT &&
+        servesFamilyHere('language_switch')
+      ) {
+        sideEffectsAll.push(...(await handleLanguageSwitchTurn(session, tenantId, speechResult)));
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
       }
 
       // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the
       // lookup-skill pattern: the FSM state is untouched and the dialogue
       // lives on the session). handleVoiceApprovalIntent hard-gates on
       // ownerSession — a non-owner "approve" gets the normal reprompt.
+      // #962 (PR-B): also gated on the (voice_approval, surface) cell.
       if (
         classifierEvent.type === 'intent_classified' &&
-        isVoiceApprovalIntent(classifierEvent.intentType)
+        isVoiceApprovalIntent(classifierEvent.intentType) &&
+        servesFamilyHere('voice_approval')
       ) {
         const approvalFx = await handleVoiceApprovalIntent(session, {
           intentType: classifierEvent.intentType,
@@ -3149,9 +4627,11 @@ export function createVoiceTurnProcessor(
 
       // RV-225 — owner voice edit. Same out-of-FSM routing as the approval
       // dialogue; handleVoiceEditIntent hard-gates on ownerSession.
+      // #962 (PR-B): also gated on the (voice_edit, surface) cell.
       if (
         classifierEvent.type === 'intent_classified' &&
-        isVoiceEditIntent(classifierEvent.intentType)
+        isVoiceEditIntent(classifierEvent.intentType) &&
+        servesFamilyHere('voice_edit')
       ) {
         const editFx = await handleVoiceEditIntent(session, {
           entities: classifierEvent.entities,
@@ -3164,17 +4644,54 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // #962 (PR-B) / P18-001 — `create_customer` through the dedicated
+      // task handler, ported from the Gather branch (which keeps its copy
+      // until cutover): a contract-validated payload (name + caller-ID
+      // phone + optional email) minted in ONE turn, bypassing the FSM's
+      // `entity_resolution` → `intent_confirm` round-trip — identity
+      // creation always asks a human, so we go straight from "intent
+      // classified" to "proposal queued" + the confirmation TTS (AC-5).
+      // Gated on the (create_customer, surface) cell: on media-streams the
+      // cell declares the generic FSM path (reachable + hole — the declared
+      // drift), so the gate stays closed there and the intent takes the
+      // multi-turn confirm round-trip below, exactly as on main.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'create_customer' &&
+        classifierEvent.confidence >= TAU_INT &&
+        servesFamilyHere('create_customer')
+      ) {
+        const handled = await handleCreateCustomerVoiceIntentTurn(
+          session,
+          classifierEvent.entities,
+          classifierEvent.confidence,
+          speechResult,
+          tenantId,
+          sideEffectsAll,
+        );
+        if (handled) {
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+      }
+
       // P12-004 — emergency-intent immediate Dial. When the classified
       // intent is in the emergency set AND the tenant is unsupervised
       // (checked inside the wrapper via isSupervisorPresent), bypass the
       // FSM/booking path entirely and Dial the on-call rotation now.
       // The wrapper emits the `emergency_immediate_dial` audit event.
       // Supervised tenants and non-emergency intents fall through to the
-      // unchanged FSM dispatch below.
+      // unchanged FSM dispatch below. #962 (PR-B): gated on the
+      // (emergency_immediate_dial, surface) cell — a refuse-cell surface
+      // (Gather today, its declared hole) keeps the FSM's own emergency
+      // fast-path (notify_oncall page ladder) with no immediate <Dial>,
+      // exactly as that surface behaves on main.
       if (
         classifierEvent.type === 'intent_classified' &&
         EMERGENCY_INTENTS.has(classifierEvent.intentType) &&
-        deps.onCallRepo
+        deps.onCallRepo &&
+        servesFamilyHere('emergency_immediate_dial')
       ) {
         try {
           const immediate = await emergencyImmediateDial({
@@ -3302,5 +4819,6 @@ export function createVoiceTurnProcessor(
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
     handleAskCaller,
+    maybeHandleLowSttConfidence,
   };
 }

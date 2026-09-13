@@ -236,4 +236,90 @@ describe('Postgres integration — B4: issue_invoice resolves "the one we just d
       approveProposal(proposalRepo, tenant.tenantId, proposal.id, tenant.userId, 'owner', auditRepo),
     ).rejects.toThrow(/unfilled required fields/);
   });
+
+  // B9.1 issue leg (10 · B7.6 + B8.1 restoration, AC-3) — the missing
+  // cross-tenant negative on the issue_invoice transition: tenant B must be
+  // able neither to RESOLVE tenant A's drafted invoice via conversation
+  // history nor to ISSUE it directly by id.
+  it('cross-tenant negative: tenant B cannot resolve or issue tenant A\'s invoice through this path', async () => {
+    const crossConversationId = 'conv-b9-1-cross-tenant';
+
+    // Draft (and execute) a real invoice for tenant A, stamped with the
+    // conversation id tenant B will attempt to reuse.
+    const draftInput: CreateProposalInput = {
+      tenantId: tenant.tenantId,
+      proposalType: 'draft_invoice',
+      payload: {
+        customerId,
+        jobId,
+        lineItems: [buildLineItem('1', 'B9.1 diagnostic', 1, 9000, 1, true, 'labor')],
+      },
+      summary: 'Draft invoice from voice (cross-tenant fixture)',
+      sourceContext: { conversationId: crossConversationId },
+      createdBy: tenant.userId,
+    };
+    let draftProposal: Proposal = createProposal(draftInput);
+    draftProposal = transitionProposal(draftProposal, 'ready_for_review', tenant.userId);
+    draftProposal = transitionProposal(draftProposal, 'approved', tenant.userId);
+    draftProposal = { ...draftProposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    await proposalRepo.create(draftProposal);
+
+    const draftContext: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const { result: draftResult } = await executor.execute(draftProposal, draftContext);
+    expect(draftResult.success).toBe(true);
+    const invoiceId = draftResult.resultEntityId as string;
+    expect(invoiceId).toBeTruthy();
+
+    const otherTenant = await createTestTenant(pool);
+
+    // 1) READ leg — tenant B asking to "issue the invoice we just drafted"
+    // against the SAME conversationId must not resolve tenant A's proposal:
+    // findByConversation is tenant-scoped (explicit tenant_id predicate +
+    // RLS), so tenant B sees no history and lands GATED, never tenant A's
+    // real invoiceId.
+    const issueHandler = new IssueInvoiceTaskHandler({ proposalRepo, invoiceRepo });
+    const { proposal: crossTenantProposal } = await issueHandler.handle({
+      tenantId: otherTenant.tenantId,
+      userId: otherTenant.userId,
+      message: 'Issue the invoice we just drafted',
+      conversationId: crossConversationId,
+    });
+    expect(crossTenantProposal.payload).toEqual({});
+    expect((crossTenantProposal.payload as Record<string, unknown>).invoiceId).toBeUndefined();
+    expect(missingFieldsFor(crossTenantProposal)).toEqual(['invoiceId']);
+
+    // 2) ISSUE leg — even if tenant B's payload somehow carried tenant A's
+    // real invoiceId directly (e.g. a forged/replayed proposal), execution
+    // is tenant-scoped: resolveInvoice looks the id up under context.tenantId,
+    // so it must refuse rather than issuing tenant A's invoice.
+    const forgedInput: CreateProposalInput = {
+      tenantId: otherTenant.tenantId,
+      proposalType: 'issue_invoice',
+      payload: { invoiceId },
+      summary: 'Issue invoice (cross-tenant forged attempt)',
+      createdBy: otherTenant.userId,
+    };
+    let forgedProposal: Proposal = createProposal(forgedInput);
+    forgedProposal = transitionProposal(forgedProposal, 'ready_for_review', otherTenant.userId);
+    forgedProposal = transitionProposal(forgedProposal, 'approved', otherTenant.userId);
+    forgedProposal = {
+      ...forgedProposal,
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    };
+    const forgedContext: ExecutionContext = {
+      tenantId: otherTenant.tenantId,
+      executedBy: otherTenant.userId,
+    };
+    const { result: forgedResult } = await executor.execute(forgedProposal, forgedContext);
+    expect(forgedResult.success).toBe(false);
+    expect(forgedResult.error).toMatch(/not found/);
+
+    // The invoice itself is untouched — still draft, not open, under tenant A.
+    const untouched = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    expect(untouched?.status).toBe('draft');
+
+    // And tenant B's own scoped read of it (as it would see it) is null.
+    const invisibleToB = await invoiceRepo.findById(otherTenant.tenantId, invoiceId);
+    expect(invisibleToB).toBeNull();
+  });
 });

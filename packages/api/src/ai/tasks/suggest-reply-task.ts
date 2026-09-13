@@ -20,6 +20,10 @@ import {
 } from '../standing-instructions-context';
 import { buildUntrustedContentSection } from '../untrusted-content';
 import { classifyMessageProvenance } from '../content-provenance';
+import {
+  buildRetrievedChunksPromptSection,
+  type RetrievedChunk,
+} from '../orchestration/context-builder';
 
 /** A thread message, trimmed to what the prompt needs. */
 export interface SuggestReplyMessage {
@@ -43,6 +47,15 @@ export interface SuggestReplyInput {
    * ask here: the task returns plain text, and an id list would corrupt it.
    */
   standingInstructions?: InjectedStandingInstruction[];
+  /**
+   * Phase 4a-2 — RAG chunks retrieved for this conversation via the
+   * `buildSourceContext` seam (first real consumer, behind
+   * `RAG_RETRIEVAL_ENABLED`). Optional: absent (or empty) leaves the prompt
+   * BYTE-IDENTICAL to the legacy draft path. Rendered through
+   * `buildRetrievedChunksPromptSection` — fenced DATA in the lowest-authority
+   * slot per I13, never instructions.
+   */
+  retrievedChunks?: RetrievedChunk[];
 }
 
 export interface SuggestReplyResult {
@@ -141,6 +154,17 @@ export class SuggestReplyTask {
     // the fence exists to deny caller text. A "Customer:" line that says
     // "ignore previous instructions" is quoted DATA to reply to.
     const userSections: string[] = [];
+    // Phase 4a-2 — retrieved reference notes lead the user message as fenced
+    // background DATA (I13: lowest-authority slot, inside the untrusted
+    // fence). Pushed only when a non-empty section renders, so the prompt
+    // stays byte-identical whenever the flag is off / nothing was retrieved.
+    const retrievedSection =
+      input.retrievedChunks && input.retrievedChunks.length > 0
+        ? buildRetrievedChunksPromptSection(input.retrievedChunks)
+        : undefined;
+    if (retrievedSection) {
+      userSections.push(retrievedSection);
+    }
     if (shopLines.length > 0) {
       userSections.push(`The shop's own messages in this conversation:\n${shopLines.join('\n')}`);
     }

@@ -51,8 +51,26 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { InMemoryPhoneNumberRepository } from '../../src/integrations/twilio/phone-number-repository';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { missingFieldsFor } from '../../src/proposals/proposal';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
+
+// U4 — the tenant's zone. Spoken times only resolve against a CONFIGURED
+// tenant timezone (never the old silent-UTC frame), matching the
+// recorded-memo path.
+const TENANT_TIMEZONE = 'America/Chicago';
+
+/** Wall-clock hour of a UTC instant in an IANA zone (assertion helper). */
+function hourInZone(instant: Date, zone: string): number {
+  return Number(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hour: 'numeric',
+      hour12: false,
+    }).format(instant),
+  );
+}
 
 // The tradesperson's provisioned business number (what the AI answers
 // on), the customer's caller-ID, and the tenant that owns the number.
@@ -60,6 +78,13 @@ const BUSINESS_NUMBER = '+15125550999';
 const CALLER_NUMBER = '+15125550100';
 const TENANT = 'tenant-hvac-inbound';
 const CALL_SID = 'CA-inbound-booking-1';
+// Round 4b — the caller-ID-resolved customer, threaded onto the session as
+// production would (a real customers.id lookup). Must be a genuine uuid:
+// create_appointment.customerId is now `z.string().uuid()` (sweep row A33's
+// fix tightened this schema, which this suite's own `validateProposalPayload`
+// assertion below enforces), so a human-readable placeholder like the old
+// 'cust-furnace' no longer satisfies the contract it is meant to prove.
+const CALLER_CUSTOMER_ID = '22222222-3333-4444-5555-666666666666';
 
 /** Gateway that replays one scripted JSON body per `complete()` call. */
 function gatewaySequence(contents: string[]): LLMGateway {
@@ -94,7 +119,17 @@ interface InboundHarness {
  * routes/telephony-tenant-lookup.test.ts; here we assert the booking
  * inherits whatever tenant that lookup returns.
  */
-async function makeInboundCall(gateway: LLMGateway): Promise<InboundHarness> {
+async function makeInboundCall(
+  gateway: LLMGateway,
+  opts: {
+    /**
+     * U4 — `false` builds a tenant with NO configured timezone, to pin the
+     * explicit-refusal path (spoken times must NOT silently resolve).
+     * Default: a configured non-UTC tenant, like every onboarded shop.
+     */
+    withTimezone?: boolean;
+  } = {},
+): Promise<InboundHarness> {
   // Property 1 — the dialed number routes to the owning tenant.
   const phoneRepo = new InMemoryPhoneNumberRepository({ [BUSINESS_NUMBER]: TENANT });
   const lookup = await phoneRepo.findByNumber(BUSINESS_NUMBER);
@@ -120,8 +155,22 @@ async function makeInboundCall(gateway: LLMGateway): Promise<InboundHarness> {
     tenantId: resolvedTenantId,
   });
   session.machine.dispatch({ type: 'greeted_ok' });
-  session.machine.dispatch({ type: 'caller_known', customerId: 'cust-furnace' });
-  session.customerId = 'cust-furnace';
+  session.machine.dispatch({ type: 'caller_known', customerId: CALLER_CUSTOMER_ID });
+  session.customerId = CALLER_CUSTOMER_ID;
+
+  // U4 — the tenant zone the spoken "Tuesday at 2pm" resolves against,
+  // exactly like production (twilioAdapterDeps.settingsRepo).
+  const settingsRepo = new InMemorySettingsRepository();
+  if (opts.withTimezone !== false) {
+    await settingsRepo.create({
+      id: 'settings-golden-1',
+      tenantId: resolvedTenantId,
+      businessName: 'Rivet HVAC',
+      timezone: TENANT_TIMEZONE,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as unknown as Parameters<InMemorySettingsRepository['create']>[0]);
+  }
 
   const processor = createVoiceTurnProcessor({
     store,
@@ -131,6 +180,7 @@ async function makeInboundCall(gateway: LLMGateway): Promise<InboundHarness> {
     auditRepo,
     proposalRepo,
     voiceSessionRepo,
+    settingsRepo,
   });
 
   return { processor, store, proposalRepo, auditRepo, session, resolvedTenantId };
@@ -203,17 +253,21 @@ describe('Inbound caller booking — golden path', () => {
     ).toEqual({ valid: true });
 
     // WHEN — the spoken phrase was RESOLVED to a concrete UTC window, not
-    // echoed. 2pm in the parser's UTC frame, on a future day.
+    // echoed — and U4: 2pm in the TENANT's zone (America/Chicago), never
+    // the parser's old UTC frame. Chicago is UTC-5/-6, so a UTC-frame parse
+    // (14:00Z) can NEVER equal 2pm Chicago — the second assertion is the
+    // regression pin for Part E punch #1.
     const start = new Date(payload.scheduledStart as string);
     const end = new Date(payload.scheduledEnd as string);
     expect(Number.isNaN(start.getTime())).toBe(false);
     expect(start.getTime()).toBeGreaterThan(Date.now());
-    expect(start.getUTCHours()).toBe(14);
+    expect(hourInZone(start, TENANT_TIMEZONE)).toBe(14);
+    expect(start.getUTCHours()).not.toBe(14);
     expect(end.getTime()).toBeGreaterThan(start.getTime());
 
     // WHO — the identified caller rides through as the customer the executor
     // opens the job against (session identity, never transcript content).
-    expect(payload.customerId).toBe('cust-furnace');
+    expect(payload.customerId).toBe(CALLER_CUSTOMER_ID);
 
     // WHAT — the caller's own words are still promoted flat AND preserved
     // verbatim under `entities` for the operator's review card / audit trail.
@@ -268,5 +322,42 @@ describe('Inbound caller booking — golden path', () => {
       'Expected no appointment proposals from a low-confidence utterance',
     ).toEqual([]);
     expect(h.session.machine.currentState).not.toBe('intent_confirm');
+  });
+
+  // U4 (B5.5 precedent) — a tenant with NO configured timezone must never
+  // have a spoken time silently parsed in UTC (or any default zone). The
+  // booking drafts GATED: the ISO window is absent, missingFields blocks
+  // approval, and the operator completes the time on the review card.
+  it('a tenant with NO timezone never books a silently-UTC time — the draft gates on the missing window', async () => {
+    const gateway = gatewaySequence([BOOKING_CLASSIFICATION, CONFIRM_YES]);
+    const h = await makeInboundCall(gateway, { withTimezone: false });
+
+    await h.processor.speechTurn({
+      session: h.session,
+      speechResult:
+        'Hi, my furnace stopped heating — can someone come out Tuesday at 2pm?',
+      callSid: CALL_SID,
+      tenantId: h.resolvedTenantId,
+    });
+    await h.processor.speechTurn({
+      session: h.session,
+      speechResult: 'Yes, that works',
+      callSid: CALL_SID,
+      tenantId: h.resolvedTenantId,
+    });
+
+    const proposals = await h.proposalRepo.findByTenant(h.resolvedTenantId);
+    expect(proposals).toHaveLength(1);
+    const booking = proposals[0]!;
+    expect(booking.proposalType).toBe('create_appointment');
+    // NEVER a silent UTC parse: no resolved window on the payload…
+    expect(booking.payload.scheduledStart).toBeUndefined();
+    expect(booking.payload.scheduledEnd).toBeUndefined();
+    // …and the draft is explicitly gated on it (approveProposal blocks on
+    // missingFields), so nothing can execute at a guessed hour.
+    expect(missingFieldsFor(booking)).toEqual(
+      expect.arrayContaining(['scheduledStart', 'scheduledEnd']),
+    );
+    expect(booking.status).toBe('draft');
   });
 });

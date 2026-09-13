@@ -48,9 +48,15 @@ const HIGH_CONFIDENCE_SCRIPTS = {
     ],
     confidence_score: 0.9,
   },
+  // B1.20 — the hourly_rate entry keeps pricing_capture a single
+  // high-confidence turn. `PricingExtractor` clarifies when a price list has
+  // no hourly rate, because the identity step hard-requires
+  // hourly_rate_cents; that path is covered in
+  // onboarding-conversation-no-hourly-rate.test.ts.
   extract_pricing: {
     prices: [
       { service_ref: 'service_call', amount_cents: 12500, price_type: 'exact', confidence: 0.9, source_text: '$125 service call' },
+      { service_ref: 'labor', amount_cents: 12000, price_type: 'hourly_rate', confidence: 0.9, source_text: '$120 an hour' },
     ],
     confidence_score: 0.9,
   },
@@ -60,6 +66,10 @@ const HIGH_CONFIDENCE_SCRIPTS = {
   },
   extract_schedule: {
     working_hours: [{ days: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'], start_time: '08:00', end_time: '17:00' }],
+    confidence_score: 0.9,
+  },
+  extract_tools: {
+    tools: [{ name: 'QuickBooks', confidence: 0.9, source_text: 'I use QuickBooks' }],
     confidence_score: 0.9,
   },
 };
@@ -118,11 +128,11 @@ describe('OnboardingConversationOrchestrator', () => {
     expect(session?.extractions.businessProfile?.businessName).toBe('Acme Plumbing');
   });
 
-  it('drives the full pipeline (profile → categories → pricing → team → schedule → review) over five high-confidence turns', async () => {
+  it('drives the full pipeline (profile → categories → pricing → team → schedule → tools → review) over six high-confidence turns', async () => {
     const orch = newOrchestrator(scriptedGateway(HIGH_CONFIDENCE_SCRIPTS));
     const opened = await orch.turn({ tenantId: TENANT, userId: USER });
     let last = opened;
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       last = await orch.turn({
         tenantId: TENANT,
         userId: USER,
@@ -137,13 +147,14 @@ describe('OnboardingConversationOrchestrator', () => {
     expect(session?.extractions.pricing).toBeDefined();
     expect(session?.extractions.team).toBeDefined();
     expect(session?.extractions.schedule).toBeDefined();
+    expect(session?.extractions.tools).toBeDefined();
   });
 
   it('an utterance in review state confirms and emits onboarding_* proposals into the proposal repo', async () => {
     const orch = newOrchestrator(scriptedGateway(HIGH_CONFIDENCE_SCRIPTS));
     const opened = await orch.turn({ tenantId: TENANT, userId: USER });
     // Drive to review.
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       await orch.turn({ tenantId: TENANT, userId: USER, sessionId: opened.sessionId, userMessage: `Turn ${i}` });
     }
     const confirmation = await orch.turn({
@@ -199,7 +210,7 @@ describe('OnboardingConversationOrchestrator', () => {
   it('a terminal session short-circuits — subsequent turn() calls return the last assistant message without re-driving the FSM', async () => {
     const orch = newOrchestrator(scriptedGateway(HIGH_CONFIDENCE_SCRIPTS));
     const opened = await orch.turn({ tenantId: TENANT, userId: USER });
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       await orch.turn({ tenantId: TENANT, userId: USER, sessionId: opened.sessionId, userMessage: `T${i}` });
     }
     await orch.turn({ tenantId: TENANT, userId: USER, sessionId: opened.sessionId, userMessage: 'looks good' });

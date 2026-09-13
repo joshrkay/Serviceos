@@ -7,10 +7,14 @@ import {
   lineItemSchema,
   documentTotalsSchema,
   lineItemCategorySchema,
+  catalogUnitSchema,
   formatUsdCents,
   formatUsdCentsFixed,
   formatUsdCentsWhole,
   formatUsdCentsPlain,
+  isCentsKey,
+  parseMoneyToCents,
+  centsToInputValue,
 } from './money.js';
 import { resolveDbCheckSet } from './db-check.js';
 
@@ -54,6 +58,39 @@ describe('lineItemSchema', () => {
     expect([...lineItemCategorySchema.options].sort()).toEqual([...Object.values(LineItemCategory)].sort());
     const dbSet = resolveDbCheckSet(schemaSource, 'estimate_line_items', 'category');
     expect([...lineItemCategorySchema.options].sort()).toEqual([...dbSet].sort());
+  });
+
+  // B7.5 — `unit` is descriptive only, so these pin the two things that could
+  // silently go wrong: the enum drifting from CatalogUnit, and the field
+  // leaking into money math.
+  it('catalogUnitSchema stays in lockstep with the API CatalogUnit union', () => {
+    // CatalogUnit is a type-only union in packages/api, so it cannot be
+    // reflected at runtime — read its literals from the source of truth
+    // instead, the same technique resolveDbCheckSet uses for the DB CHECK.
+    const catalogSource = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../../api/src/catalog/catalog-item.ts'),
+      'utf8',
+    );
+    const match = catalogSource.match(/export type CatalogUnit\s*=\s*([^;]+);/);
+    expect(match).not.toBeNull();
+    const declared = [...match![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect([...catalogUnitSchema.options].sort()).toEqual([...declared].sort());
+  });
+
+  it('accepts a line with a unit, and a unit never changes the money fields', () => {
+    const withUnit = lineItemSchema.parse({ ...baseLineItem, unit: 'hour' });
+    const withoutUnit = lineItemSchema.parse(baseLineItem);
+    expect(withUnit.unit).toBe('hour');
+    // Same money, unit or no unit.
+    expect(withUnit.quantity).toBe(withoutUnit.quantity);
+    expect(withUnit.unitPriceCents).toBe(withoutUnit.unitPriceCents);
+    expect(withUnit.totalCents).toBe(withoutUnit.totalCents);
+    // Legacy/absent rows still parse.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: null }).success).toBe(true);
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: undefined }).success).toBe(true);
+    // An invented unit is refused — this enum is the validation boundary,
+    // since the DB column deliberately carries no CHECK.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: 'furlong' }).success).toBe(false);
   });
 });
 
@@ -135,5 +172,44 @@ describe('formatUsdCentsPlain', () => {
     expect(formatUsdCentsPlain(0)).toBe('$0.00');
     expect(formatUsdCentsPlain(123450)).toBe('$1234.50');
     expect(formatUsdCentsPlain(2505)).toBe('$25.05');
+  });
+});
+
+/**
+ * Review J5 — the money-INPUT half (dollars typed by an operator ⇄ integer
+ * cents on the wire). Behaviour mirrors packages/mobile's local twins, which
+ * this module is the canonical home for.
+ */
+describe('isCentsKey / parseMoneyToCents / centsToInputValue', () => {
+  it('recognises integer-cents payload keys', () => {
+    expect(isCentsKey('proposedUnitPriceCents')).toBe(true);
+    expect(isCentsKey('amountCents')).toBe(true);
+    expect(isCentsKey('quantity')).toBe(false);
+    expect(isCentsKey('centsPerMile')).toBe(false);
+  });
+
+  it('parses dollar input to integer cents with string math', () => {
+    expect(parseMoneyToCents('80')).toBe(8000);
+    expect(parseMoneyToCents('123.45')).toBe(12345);
+    expect(parseMoneyToCents('123.4')).toBe(12340);
+    expect(parseMoneyToCents('$1,299.50')).toBe(129950);
+    // The classic float trap: 0.29 * 100 === 28.999999999999996.
+    expect(parseMoneyToCents(' 0.29 ')).toBe(29);
+    expect(parseMoneyToCents('290000')).toBe(29_000_000);
+  });
+
+  it('returns null rather than a wrong number for non-money input', () => {
+    expect(parseMoneyToCents('')).toBeNull();
+    expect(parseMoneyToCents('two ninety')).toBeNull();
+    expect(parseMoneyToCents('1.234')).toBeNull();
+    expect(parseMoneyToCents('-5')).toBeNull();
+  });
+
+  it('round-trips cents through the input representation', () => {
+    for (const cents of [0, 29, 8900, 12345, 29_000_000]) {
+      expect(parseMoneyToCents(centsToInputValue(cents))).toBe(cents);
+    }
+    expect(centsToInputValue(8900)).toBe('89.00');
+    expect(centsToInputValue(-500)).toBe('-5.00');
   });
 });

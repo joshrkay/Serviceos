@@ -266,3 +266,136 @@ describe('P7-026 listReviews', () => {
     expect(page.reviews[0].name).toBe('accounts/A/locations/L/reviews/R1');
   });
 });
+
+// ─── Review-monitoring self-serve: 401 detection + token refresh ────────────
+//
+// Google access tokens expire after ~1h. The client must surface a 401 as a
+// typed GoogleBusinessAuthError (distinct from quota/schema errors) so the
+// worker + reply resolver can branch into the shared refresh-and-retry path,
+// and `refreshAccessToken` must implement the refresh_token grant.
+import {
+  GoogleBusinessAuthError,
+  refreshAccessToken,
+  replyToReview,
+  listAccounts,
+  listLocations,
+} from '../../src/reputation/google-business-client';
+
+describe('GoogleBusinessAuthError (401 detection)', () => {
+  it('listReviews throws GoogleBusinessAuthError on 401', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(401, { error: 'invalid_token' });
+    await expect(listReviews('stale', 'A', 'L', null, fetchFn)).rejects.toThrow(
+      GoogleBusinessAuthError,
+    );
+  });
+
+  it('replyToReview throws GoogleBusinessAuthError on 401', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(401, { error: 'invalid_token' });
+    await expect(
+      replyToReview('stale', 'A', 'L', 'r1', 'Thanks!', fetchFn),
+    ).rejects.toThrow(GoogleBusinessAuthError);
+  });
+
+  it('is distinct from quota + schema errors', () => {
+    const err = new GoogleBusinessAuthError('nope');
+    expect(err).toBeInstanceOf(GoogleBusinessAuthError);
+    expect(err).not.toBeInstanceOf(GoogleBusinessQuotaError);
+    expect(err).not.toBeInstanceOf(GoogleBusinessApiError);
+    expect(err.status).toBe(401);
+  });
+
+  it('a 429 still throws GoogleBusinessQuotaError, not the auth error', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(429, 'slow down', { 'Retry-After': '30' });
+    await expect(listReviews('at', 'A', 'L', null, fetchFn)).rejects.toThrow(
+      GoogleBusinessQuotaError,
+    );
+  });
+});
+
+describe('refreshAccessToken', () => {
+  const config = {
+    clientId: 'cid',
+    clientSecret: 'csec',
+    redirectUri: 'https://api.example.com/cb',
+  };
+
+  it('POSTs the refresh_token grant and returns the rotated token + expiry', async () => {
+    let capturedBody = '';
+    const fetchFn = async (
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      capturedBody = String(init?.body);
+      return makeResponse(200, { access_token: 'AT-new', expires_in: 3600 });
+    };
+    const before = Date.now();
+    const rotated = await refreshAccessToken(config, 'RT-1', fetchFn);
+    expect(rotated.accessToken).toBe('AT-new');
+    expect(rotated.expiresAt.getTime()).toBeGreaterThanOrEqual(
+      before + 3600_000 - 5_000,
+    );
+    const params = new URLSearchParams(capturedBody);
+    expect(params.get('grant_type')).toBe('refresh_token');
+    expect(params.get('refresh_token')).toBe('RT-1');
+    expect(params.get('client_id')).toBe('cid');
+    expect(params.get('client_secret')).toBe('csec');
+  });
+
+  it('throws GoogleBusinessAuthError when Google rejects the refresh', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(400, { error: 'invalid_grant' });
+    await expect(refreshAccessToken(config, 'RT-revoked', fetchFn)).rejects.toThrow(
+      GoogleBusinessAuthError,
+    );
+  });
+
+  it('throws GoogleBusinessAuthError when no access_token comes back', async () => {
+    const fetchFn = async (): Promise<Response> => makeResponse(200, {});
+    await expect(refreshAccessToken(config, 'RT-1', fetchFn)).rejects.toThrow(
+      GoogleBusinessAuthError,
+    );
+  });
+});
+
+describe('listAccounts / listLocations (connect-flow discovery)', () => {
+  it('returns account resource names', async () => {
+    const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+      expect(String(input)).toContain('/v4/accounts');
+      return makeResponse(200, {
+        accounts: [{ name: 'accounts/123' }, { name: 'accounts/456' }],
+      });
+    };
+    expect(await listAccounts('at', fetchFn)).toEqual([
+      'accounts/123',
+      'accounts/456',
+    ]);
+  });
+
+  it('returns location resource names for an account', async () => {
+    const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+      expect(String(input)).toContain('/v4/accounts/123/locations');
+      return makeResponse(200, {
+        locations: [{ name: 'accounts/123/locations/999' }],
+      });
+    };
+    expect(await listLocations('at', '123', fetchFn)).toEqual([
+      'accounts/123/locations/999',
+    ]);
+  });
+
+  it('listAccounts throws GoogleBusinessAuthError on 401', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(401, { error: 'invalid_token' });
+    await expect(listAccounts('stale', fetchFn)).rejects.toThrow(
+      GoogleBusinessAuthError,
+    );
+  });
+
+  it('tolerates an empty accounts list', async () => {
+    const fetchFn = async (): Promise<Response> => makeResponse(200, {});
+    expect(await listAccounts('at', fetchFn)).toEqual([]);
+  });
+});

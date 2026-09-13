@@ -472,3 +472,615 @@ targets files that are already extracted); extract by file size alone (would
 split `schema.ts` and `app.ts` in the same change, making the diff
 unreviewable); leave `app.ts` alone (the 488-import, 223-instantiation single
 function is the main obstacle to onboarding and to testing wiring in isolation).
+
+### D-023: Part F ratified — F-1 two-step invoice issuance; F-2 brand-voice lock stays tap-only
+**Date:** 2026-08-01
+**Initiative:** Voice back-office workflows plan, U5 decision gate
+(`docs/plans/2026-08-01-001-feat-voice-back-office-workflows-plan.md`); Part F register
+(`docs/PRD-v4-part-F-decisions.md`).
+**Decision:** The product owner ratified both PROPOSED Part F entries on 2026-08-01 (via
+AskUserQuestion — recorded here as the provenance of the call):
+- **F-1 (B9.1 issuance semantics) = the TWO-STEP reading.** One utterance + one tap yields an
+  approvable `draft_invoice`; a second utterance ("issue it") + a second tap approves the
+  separate `issue_invoice` proposal, which is money-class and never auto-approves. Single-
+  utterance auto-issue is explicitly NOT built.
+- **F-2 (B1.18) = amended to "captured by voice; locked by tap."** Brand-voice capture/edit is
+  speakable (as an approval-gated `update_brand_voice` proposal); locking remains tap-only. The
+  payload contract has no lock-shaped field, so a spoken "lock my brand voice" can never set
+  `brand_voice_locked`.
+**Rationale:** Both ratifications adopt the register's own recommendations unchanged. F-1:
+`issue_invoice` makes a customer-visible, money-bearing document real; the action-class ladder
+(`actionClassForProposalType` → `money`) and the D-013 posture (approval is never
+voice-reachable) both treat "make it real" transitions as human-gated, and an auto-issue-on-
+approve tap doing double duty would be a new capability needing its own risk review. F-2: lock
+is a control act freezing the tenant's outbound identity — same theory as D-013's approval
+exception (control acts stay off the voice surface).
+**Constraints:** No code was gated on these ratifications — the shipped implementation already
+matches both readings (issue leg: `packages/api/src/ai/orchestration/task-router.ts`
+`IssueInvoiceTaskHandler` + `packages/api/src/proposals/execution/issue-invoice-handler.ts`;
+lock: `packages/api/src/proposals/contracts/brand-voice.ts` +
+`packages/api/src/proposals/execution/brand-voice-handler.ts`). Chain-set approval sweeps
+capture-class siblings only, so a chained issue leg still requires its own tap
+(`proposals/actions.ts` `approveChainSet`). Rung-4→5 score flips in
+`projects/rivet-voice-19/re-measurement.md` belong to that run's own process, not this entry.
+**Alternatives rejected:** Single-utterance auto-issue (new capability; approval tap doing
+double duty over a money transition); lock-by-voice (an utterance that irreversibly freezes
+tenant config — its own risk review, deliberately unbuilt).
+
+### D-024: `app.ts` decomposition is sequenced by construction kind, not by domain — D-022's per-domain half is deferred
+**Date:** 2026-08-19
+**Decision:** Execute the `packages/api/src/app.ts` decomposition in two stages and ship
+only the first for now. **Stage 1** slices by construction *kind* —
+`buildRepositories(pool)`, then `buildServices(repos, config)`, then the worker
+constructions — and gives `createApp` an **optional** overrides parameter
+(`createApp(overrides?: Partial<AppDeps>)`), so the production path is unchanged and the
+18 test files that boot the app keep working untouched. **Stage 2** — D-022's per-domain
+`registerXModule(app, deps)` functions — is explicitly deferred until Stage 1 has landed
+and the shared-dependency surface is visible in a type rather than inferred from a
+6,715-line function.
+**Rationale:** D-022's target shape ("repository/service factory modules **plus** per-domain
+`registerXModule(app, deps)` functions") names two pieces of work in one sentence, and
+measurement taken 2026-08-19 shows they should not be attempted together. Fan-out inside
+`createApp()` is extreme and cross-cutting: `auditRepo` has **90** distinct consumers
+spanning every domain (its own comment at `app.ts:1152` records ~270 audit-write sites
+threading through it), `pool` has 164, and eleven bindings exceed fifteen consumers
+(`settingsRepo` 46, `customerRepo` 41, `jobRepo` 37, `proposalRepo` 31, `invoiceRepo` 23,
+`appointmentRepo` 22, `messageDelivery` 20, `llmGateway` 19, `estimateRepo`/`userRepo`/`queue`
+16). Cross-domain edges are the norm, not the tail: `createVoiceActionRouterWorker` receives
+43 distinct bindings, `twilioAdapterDeps` 57, `createExecutionHandlerRegistry` 50, and only
+three construction clusters are contiguous and self-contained (integrations `3436–3521`,
+reputation `2148–2197`, media-streams `4427–4818`). A per-domain split executed today
+therefore yields twelve modules that each import most of a shared core bag — churn against
+the same 6,715 lines, which is the specific failure D-022 was written to prevent. Slicing by
+kind instead attacks the largest measured mass (~150 `new PgX(pool)` constructions behind 74
+`pool ? Pg : InMemory` ternaries), has a mechanical correctness criterion, and makes the core
+bag explicit so the Stage 2 domain question can be answered from a type instead of a guess.
+**Story:** Quality Sprint — `app.ts` wiring decomposition. Characterization groundwork landed
+in PR #828 (`chore/app-wiring-characterization`).
+**Constraints:**
+- D-022's constraints carry over unchanged: the route-manifest snapshot
+  (`test/app/route-manifest.test.ts`) must be regenerated and reviewed line-by-line in any
+  commit that moves wiring, with particular attention to exposure-class changes and the
+  pre-`requireAuth` `/api` allowlist; the migration corpus (`db/schema.ts`) stays a separate
+  workstream.
+- Two further characterization gates are prerequisites, added by PR #828:
+  `test/app/interval-registration-count.test.ts` pins the exact gated background-interval
+  count (`backgroundIntervalCount` is derived from registration *order* relative to the
+  `observabilityIntervalCount` snapshot at `app.ts:2674`, so a reordering changes it with no
+  type error), and `test/app/repository-instance-sharing.test.ts` pins per-boot construction
+  counts for the hoisted repositories.
+- The hoisting invariant is **not uniform** and Stage 1 must preserve it exactly:
+  `settingsRepo` (aliased `1106`), `jobRepo` (`1115`) and `pendingInvitationRepo` (`1119`) are
+  single shared instances, while `invoiceRepo`/`estimateRepo`/`paymentRepo` are each
+  constructed a second time for the webhook surface (`1108`–`1110`). The duplicates are
+  harmless in production (two Pg repos read one database) but diverge in hermetic mode.
+  Collapsing them is a behaviour change that must land on its own, never inside a wiring move.
+- Process-global setters are **partially** in scope: the auth, owner-notification and
+  supervisor-presence loaders become instance-scoped because last-write-wins is what currently
+  prevents two `createApp()` calls in one process from being isolated
+  (`configureSupervisorCreationHook`'s own comment records this, and the SMS keyword registry
+  passes `{ overwrite: true }` from ten sites specifically to survive re-entry). `setDraining`
+  and the `process.once` SIGTERM handler stay process-wide — that is correct behaviour.
+- The ~10 late-bound `let` slots (e.g. `supervisorSpendRecorder` declared `2341`, consumed
+  `2357`, assigned `7271`) become explicit providers so the ordering constraint is carried by
+  a type rather than by line position. An eager factory extraction would silently turn them
+  permanently `undefined`.
+**Alternatives rejected:**
+- Execute D-022 as one change (factories *and* per-domain registration). Rejected on the
+  fan-out measurement above — the domain modules cannot be made independent while `auditRepo`
+  has 90 consumers, so the split would move code without reducing coupling.
+- Make the deps parameter required (`createApp(deps: AppDeps)`). Rejected for Stage 1: it
+  forces all 18 booting test files to change in the same diff as the wiring move, which is the
+  unreviewable-diff failure D-022 already called out. It stays available as a mechanical
+  follow-up once every dependency is reachable through the overrides bag.
+- Leave `app.ts` alone. Rejected — it has grown from the 6,143 lines D-022 measured on
+  2026-07-25 to 6,715 (`app.ts:769–7484`), and the growth is per-feature wiring, so the cost
+  compounds with every voice intent added.
+
+### D-025: Owner voice approval is permitted — the "approval is never voice-reachable" posture was never decided
+**Date:** 2026-08-19
+**Initiative:** Voice-first on the phone (wayfinder map #833), ticket #834.
+**Decision:** Approval of a proposal **by voice, by a human owner on a transport-identified
+owner line, is permitted**. The shipped class boundary in `ai/tasks/proposal-approval-task.ts`
+(RV-071) is ratified as-is:
+- **capture / comms** — approve on a deterministic strict affirmative
+  (`classifyStrictConfirm`, never an LLM), after a readback composed from the **proposal
+  payload** rather than the owner's utterance.
+- **money / irreversible** — additionally require a spoken challenge
+  (`proposal-approval-task.ts:366`), with at most 3 failed attempts per voice session and a
+  session-wide lockout on the third.
+
+**Rationale:** D-023's rationale asserts "the D-013 posture (approval is never
+voice-reachable)". **D-013 contains no such posture** — it is the §5 status correction about
+QuickBooks sync and the correction loop, and mentions neither approval nor voice. The phrase
+"voice-reachable" occurs exactly once in this entire log, in that citation. So there was no
+decision to supersede: a posture was asserted in passing, attributed to an unrelated entry, and
+then contradicted by shipped code that nobody flagged. This entry records the real posture for
+the first time.
+
+The substantive invariant is **D-019**, and it is about *actors*, not *channels*: no `system:`
+actor may transition a proposal to `approved`, enforced structurally in
+`proposals/lifecycle.ts` (`isSystemActor`). A human owner speaking on a caller-ID-identified
+line is a human approving; it does not breach that invariant. Reading D-019 as a prohibition on
+the voice *channel* confuses who is authorising with how they are speaking.
+
+**Constraints:**
+- Gated on `ownerSession` (RV-070 caller-ID identity), re-checked inside the task as defence in
+  depth; blocked while `hasUnappliedEditRequest` holds, matching the SMS and one-tap paths.
+- **Money-class voice approval is NOT to be considered shipped** until the spoken challenge is
+  excluded from the stored transcript and every derived summary (#850). A static per-tenant PIN
+  re-spoken on every approval accumulates exposure with each recorded call.
+- **Not viable on the Gather transport.** An approval exchange costs ~5–7s against a `noHang` of
+  5s soft / 7s hard, so the approval turn trips the hang timer before any work runs (~2–3s on
+  Media Streams). Which transport carries voice approval is #838.
+- Recorded reservation: `comms` sits on the soft side of the boundary. An approved
+  `send_invoice` or `send_customer_message` is customer-visible and effectively not undoable,
+  yet needs no challenge. Ratified deliberately, not overlooked.
+
+**Alternatives rejected:**
+- *Gate the shipped voice-approval path off to match D-023's wording.* Rejected: it would delete
+  a carefully-designed capability on the strength of a parenthetical that cites a decision
+  saying something else.
+- *Require the challenge for `comms` as well.* Rejected for now — it would put a PIN in front of
+  routine customer messages, which is the friction voice-first exists to remove. Revisit if the
+  undo window proves insufficient for outbound comms.
+- *Leave the contradiction unrecorded.* Rejected: a reader of this log would conclude a live,
+  security-reviewed feature should not exist.
+
+### D-026: The phone authorises lookups by a caller-ID-resolved actor's DB role, through the shared dispatch
+**Date:** 2026-08-26
+**Initiative:** Voice-first on the phone (wayfinder map #833), Phase 0 of #852; spec #866, closes #843.
+**Decision:** The live phone is the third caller of the shared lookup dispatch
+(`workers/voice-lookup-answer.ts`); its private switch is deleted. Authorization on the phone is
+the shared module's DB-authoritative RBAC gate applied to an **actor** resolved **once at
+session establishment** from caller-ID (`telephony/phone-actor.ts`: registered mobile → active
+user, and a matched-but-inactive user resolves nothing; else owner line → the tenant's single
+active owner; else none), never from utterance content. The `ownerSession && extendedIntents`
+dispatch-side gate is removed; the tenant flag continues to gate only whether the classifier
+*offers* the owner-extended intents. One phone-specific rule remains at dispatch, stated as an
+**allowlist** (default-deny): with **no resolved actor** the phone answers only the caller's own
+customer-scoped records and tenant-public lookups (`lookup_availability`); every other lookup is
+refused with the shared module's refusal copy (`lookup_my_day` gets an identity-flavoured line).
+The phone is the only surface with anonymous/customer callers, and `lookup_day_overview` /
+`lookup_materials` carry no permission entry on purpose (any signed-in operator may hear them on
+memo/chat) — a denylist over the owner-extended set would have read the tenant's shopping list to
+any identified caller. `PHONE_PUBLIC_LOOKUP_INTENTS` has exactly one member, `lookup_availability`:
+it is the one lookup a customer legitimately asks ("when could you come out?"), it answered to
+customers before #866, and it reveals only aggregate booking density; anything added to that set
+must be argued for in this log. A table-driven pin over all 20 lookup intents makes the 21st fail
+loudly.
+**Rationale:** Five lookups were unreachable on the phone because the phone carried its own
+14-case copy of a 20-case switch (#843). The shared module's gate and `lookup_my_day`'s
+self-scoping both require an actor, so the "minimal fix" was not available through the shared
+path. Verified while specifying: `lookup_revenue` and `lookup_leads` sit in the base classifier
+prompt and the phone's dispatch applied no authorization after customer identification — an
+identified customer could be read the tenant's revenue. RBAC at dispatch is the missing
+defence-in-depth layer behind the prompt.
+**Constraints:** Caller-ID is the *authentication factor* that mints the phone actor. It is
+transport-level recognition, spoofable by design, and no stronger than the RV-070 owner-line
+check that already gated owner lookups and voice approval — `actorUserId` must never be read
+as a verified subject the way `req.auth.userId` is; note the blast radius widened from the owner
+line to any employee mobile on file (spoofing a dispatcher's number yields owner-grade reports),
+which is still a net tightening because revenue and leads previously had no gate at all. A spoken
+challenge for owner-grade lookups is a follow-up. No classifier prompt / taxonomy / cassette
+change. `ownerSession` keeps its RV-071 approval role unchanged (D-025). Customer-name resolution
+on the phone stays undecided (#833 "entity resolution per surface"). #860 step 2 (media-streams)
+calls the same surface adapter from `speechTurn`; the actor is already stamped for that transport by the
+shared establishment core, so step 2 adds the dispatch call and nothing about identity. It is not
+wired here.
+
+### D-027: A live-call complaint escalates to a human; bare confirm re-prompts; language_switch ships on Gather
+**Date:** 2026-08-28
+**Initiative:** Voice Phase 0 of #852; #846, review-fix pass on PR #883.
+**Decision:** Three behaviors from #846's Gather-path intent handling, ratified by the owner on
+2026-08-28 after the two-axis code review of PR #883:
+1. **Complaint escalates.** A `complaint` classified on a live call is handled like
+   `operator_request`: the FSM's global guard speaks a fixed acknowledgment
+   (`COMPLAINT_ESCALATION_LINE`) and fast-paths to `escalating` (audit log + `notify_oncall`,
+   `escalationReason: 'complaint'`). This SUPERSEDES the first cut, which deflected and continued
+   the call negotiation-style. The one-shot owner `callback` proposal is RETAINED as the
+   escalation's paper trail (idempotent via `complaintFlagged`), carrying the recorded-memo
+   path's deterministic severity markers — severity detection runs over the caller's raw
+   utterance, threaded through the `intent_classified` event, not just classifier-extracted
+   entities. On the untrusted S1 live-caller surface it stays a `callback` and never an
+   `add_note` (operator-only; coercion would reproduce the silent-degrade bug #846 fixed).
+   Unlike `operator_request` there is no `escalationTriggers` deflect branch: no tenant toggle
+   maps to complaints, and an unhappy caller always reaches a person.
+2. **Bare confirm re-prompts, in speech.** A bare `confirm` ("yes") with nothing pending is
+   answered by the FSM's spoken re-prompt (`CONFIRM_NOTHING_PENDING_LINE`) — never persisted as
+   a `voice_clarification` card. The guard covers BOTH states the adapters classify in,
+   `intent_capture` AND `closing` (the adapters gate on `intent_capture || closing`, so
+   covering only one left the closing "yes" minting cards); `intent_confirm`'s
+   intent-classified-as-correction handling is untouched, and a live post-quote "yes" is still
+   consumed by the deterministic pendingQuote pre-check before the classifier runs.
+3. **language_switch ships on Gather notwithstanding open #838.** The adapter-level Gather
+   branch (flip `session.language`, re-resolve the TTS voice, tenant `supported_languages`
+   gate, shared `MAX_LANGUAGE_SWITCHES_PER_CALL` flap cap) is live; whatever #838 decides about
+   the broader language posture applies on top of it rather than blocking it.
+**Rationale:** The review surfaced that "I've flagged this for the owner, anything else?" reads
+as a brush-off to a caller angry enough to say "complaint" — the cost of a wrongly-escalated call
+is one human minute, the cost of a wrongly-deflected complaint is a churned customer and an
+unheard refund/legal threat. Escalation with a paper-trail proposal keeps both: the human gets
+the call, the owner gets the severity-marked follow-up card.
+**Alternatives considered:**
+- *Deflect-and-continue (the first cut).* Rejected by the owner: a complaint is a request for a
+  person, not context to file.
+- *Escalate without the callback proposal.* Rejected: the on-call transfer is ephemeral; the
+  proposal is the reviewable record and carries the severity markers the digest/cards key on.
+- *Gate complaint escalation on an `escalationTriggers` toggle.* Rejected: `trigger_explicit_request`
+  means "caller asked for a person" and its deflect line ("I can help with scheduling…") would be
+  absurd against a complaint; adding a new toggle would default some tenants into the brush-off.
+
+### D-028: The classifier prompt is surface-conditional; session input caps are derived from a documented per-turn budget
+**Date:** 2026-08-28
+**Initiative:** P0 voice gate failure (#886, #887; folds #896, #899; PR #902).
+**Decision:** The classifier system prompt is assembled per **surface profile** from a verbatim
+block table (`ai/orchestration/intent-taxonomy-blocks.ts` + `classifier-profile.ts`):
+`'caller'` (anonymous/customer inbound phone, **18 advertised / 20 accepted** intents — the
+advertised slice is DERIVED as `PROFILE_INTENTS ∩ the block table`
+(`advertisedIntentsForProfile`), never hand-kept, so accepted ⊇ advertised structurally; the
+caller delta is exactly complaint/negotiation, which have no base block and ride the
+always-appended customer-protection section — plus money-ask preamble + 13-field entity
+dictionary), `'field_tech'` (caller-ID-resolved employee, D-026 actor, 15 trade-internal
+intents, advertised = accepted), `'owner_line'` (RV-070/071 verified owner, full taxonomy minus
+the 8 customer-scoped lookups — 60 advertised / 70 accepted, the delta being the section-gated
+approval/protection/extended-lookup families), and `'operator'` (everything — 68 base blocks,
+all 78 intents accepted; byte-identical to the historical `SYSTEM_PROMPT`, pinned by SHA-256,
+so the memo worker, in-app voice, chat, evals, and the 74 Layer-1 cassettes are untouched). The profile derives from **session identity only** —
+`classifierProfileForSession(session)` reads the trusted-channel allowlist, the `ownerSession`
+flag, and the D-026 phone actor; never transcript content — so a caller cannot talk their way
+into a wider taxonomy, and an unknown future channel fails **closed** to `'caller'`. The prompt
+is a hint, not a gate: a post-parse guard maps any classification outside the exported
+three-way accept rule `isIntentAcceptedOnProfile` (profile set ∪ lookup_* ∪ the exempt set) to
+`unknown`/`intent_off_surface` — and the interception is NOT silent: both live classify seams
+(processor speechTurn, Twilio Gather adapter) audit it as **`voice.intent_off_surface`**
+(session entity, blocked intent, refusing profile, confidence — #902), a new event name because
+the semantics differ from the proposal-gate `voice.surface_violation_blocked` (no proposal type
+was ever requested; that event still fires for whatever reaches minting, e.g. guard-exempt
+intents). The guard deliberately does NOT
+pre-empt layers that own their surface behavior downstream of classification: read-only
+`lookup_*` (D-026's dispatch RBAC refuses with purposeful copy), `emergency_dispatch` (the
+RV-140/142 deterministic-scan escalation fast-path — dropped from the S1 prompts, kept as the
+LLM second net), `approve/reject/edit_proposal` (the RV-071/RV-225 owner hard gates, which
+audit denied attempts), and `en_route` (the #847/D-027 phone surface owns identity — actor
+required, technician role required, honest refusals, en_route_executed audit — added to the
+exempt set at the #883/#902 merge, where the guard was found pre-empting that refusal). The I6 proposal-type gate remains as defense-in-depth behind all of it.
+**Cap re-derivation:** `SessionCostTracker.maxInputTokens` is cumulative per session, so gating
+alone only moves the first-turn escalation to a later turn. Caps are now derived, never picked:
+`CLASSIFY_TURN_INPUT_TOKEN_BUDGET = 9000` (#902 — worst STRUCTURAL gated first turn: caller
+profile + protection section + the full canonical HVAC pack incl. intake questions and
+objection scripts + `MAX_PROMPT_ASSETS` (5) tenant training assets saturating the prompt
+builder's own truncation caps + long utterance ≈ 7,004 tokens chars/4; every term is bounded by
+code, so this is a ceiling, not a sample. × 1.15 ≈ 8,055, rounded up to 9,000 so the 85% pin
+holds with ~8.4% real slack — the earlier 6,000 was derived from a 5,048 sample that omitted
+intake/objection blocks and training assets, leaving ~1% slack against a configuration tenants
+can actually reach) × `EXPECTED_MAX_CLASSIFY_TURNS = 8` ⇒ telephony 72,000 (was 5,000, which
+had fallen to ~⅓ of ONE ungated turn); in-app `× EXPECTED_MAX_INAPP_CLASSIFY_TURNS = 10` ⇒
+90,000 (was 10,000, also under one full-taxonomy turn — and briefly a bare 60,000 literal,
+now derived like its telephony sibling). Cost reconciliation: `estimateCostCents(72000, 1500)
+≈ 24¢` and `estimateCostCents(90000, 3000) ≈ 32¢` — both well under their 40¢/80¢ money caps,
+so tokens bind first and cost stays the financial backstop. The budget, the caps arithmetic,
+and the real assembled worst-case first turn are pinned together by
+`test/ai/orchestration/classifier-prompt-budget.test.ts` (worst first turn < 85% of budget;
+cap ≥ budget × turns) and `test/ai/skills/session-cost-tracker.test.ts` (both caps pinned as
+budget × turns, not literals).
+**Rationale:** The first-turn classifier request measured 60,749 chars ≈ 15,187 tokens against
+the 5,000-token session cap — `cost_cap_exceeded` at inputPct ~3.0 on the caller's first
+sentence, the root cause of the 2026-08-28 QA-matrix voice gate failure (10/20) and the weekly
+Layer-2 reds since 08-10 (#886). 58.5% of that prompt was intents structurally unable to act on
+S1 (#887), and the S1 coercion produced a false "taken care of" line on money asks.
+**Constraints:** Caps stay channel-set at session creation (before identity resolution) — no
+per-surface mutable caps in voice-session-store. The voice-quality harness/text-mode-driver is
+deliberately NOT profile-wired (#888/#897 follow-up; wiring it would invalidate all cassette
+hashes). `owner_line` still burns ~15.2k tokens/turn (~3 classify turns per session cap) —
+further owner-prompt conditioning is a follow-up. Lookup-bullet table compaction is a separate
+PR; #900 is out of scope. Numbering note: #883's complaint-escalation decision merged first and
+holds D-027; this entry renumbered to D-028 at merge time (2026-08-29).
+
+### D-029: A gate on an entity id must have a resolver behind it; chat asks its clarification in the chat
+**Date:** 2026-08-29
+**Initiative:** #909, from the 2026-08-29 AI-capability live sweep (99 probes against deployed dev).
+**Decision:** Two rules, one structural and one about where the question gets asked.
+
+1. **A `missingFields` gate on an entity id is only legitimate if a resolver can lift it.**
+Every reference-carrying proposal type pairs a required `xId` with the free-text `xReference` the
+classifier can actually produce; the drafting handler writes the reference and gates the id, and
+`approveProposal` refuses until the gate lifts. That gate is correct and stays. What did not exist
+was the thing that LIFTS it for references the proposal is ALREADY carrying: resolution ran only
+BEFORE drafting, over the classifier fields `planVoiceEntityLookups` happens to read. The sweep's
+dominant finding is what that costs — sixteen chat capabilities drafted a proposal carrying only
+free text and stalled at `ready_for_review` permanently, approve answering 400
+`{missingFields:[...]}` every time. `convert_lead` / `mark_lead_lost` were the pure case: they gate
+on `leadId` while no `lead` EntityKind existed at all, so that gate had NO resolver behind it on
+ANY surface and those two capabilities were unreachable by construction. The post-draft loop lives
+in `ai/resolution/gated-reference-resolution.ts` as a core with no surface knowledge and no
+persistence (D-026's "one core, thin adapters"); the chat route is its first and currently only
+adapter, and the voice surfaces keep their pre-draft loop unchanged.
+
+2. **Ambiguity is a clarification on every surface — asked in that surface's own idiom.** Voice asks
+it spoken and resolves it on the next FSM turn; chat asks ONE numbered question and the next chat
+turn answers it. Both run the SAME deterministic follow-up matcher
+(`resolveDisambiguationFollowUp`: ordinal, then distinct name, then address/phone hint, then a
+resolver re-resolve INTERSECTED with the offered candidate set), so neither surface can select a
+record the operator was never shown, and there is one disambiguation parser rather than two that
+drift.
+
+**Rationale:** The alternative for chat was to widen the pre-draft resolver's intent-membership sets
+and the `CHAT_CONTEXT_CUSTOMER_ID_INTENTS` allowlist until every row happened to resolve. That was
+rejected twice over: it is per-intent whack-a-mole that the seventeenth capability re-opens, and for
+the appointment family it would have activated `resolveActiveAppointmentId`'s customer-scoped
+auto-pick — a behavior the repo DELIBERATELY declined (that allowlist's own doc comment: "resolving
+to a different customer's appointment would message the wrong person"). Resolving the reference the
+operator actually gave, and asking when it is ambiguous, gets the same rows to green without
+adopting a guess the product already refused.
+
+**Constraints:** D-004 is untouched and load-bearing here. Resolution fills a field a human is about
+to review; it never approves, never executes, and never re-runs `decideInitialStatus` on the
+now-ungated payload — re-running it is precisely how a resolution loop grows an auto-approve nobody
+asked for. A gate absent from `GATED_REFERENCE_SOURCES` (a parsed time, a path-shaped catalog gate)
+is left strictly alone. A `low_confidence` match is NOT auto-adopted on chat: voice answers that
+band with a spoken one-tap confirm turn, and on a surface where the operator is already looking at
+a review card the honest equivalent is the card they already get. The chat pending question rides
+`sourceContext.pendingEntityAmbiguity` on the proposal it blocks rather than a new session store —
+that row is already persisted, tenant-scoped and conversation-stamped — and is bounded by the
+voice constant `MAX_DISAMBIGUATION_ATTEMPTS`, so an operator who moves on loses at most two turns.
+The four `CHAT_DISPATCH_EXCLUDED_INTENTS` stay excluded and `missingFieldsFor` is not weakened.
+
+### D-030: Voice-primary is ratified; `docs/PRD-v5-as-built.md` is the canonical PRD; four founding commitments shipped dark
+**Date:** 2026-09-11
+**Initiative:** As-built PRD reconstruction (PR #994) and the product review that followed it.
+**Decision:** Three rulings, taken together by the product owner after a structured review of the
+reconstruction against the founding commitments.
+
+1. **Voice-primary is the ratified interface thesis.** `docs/PRD.md` v2.0 locked decision #1 says
+"SMS is the primary interface"; `docs/PRD-rivet-master.md` says "the voice channel *is* the
+product". The shipped system implements neither literally — it implements **voice directs, SMS
+approves**: the owner's command line, the three voice surfaces and the intent taxonomy carry
+direction, while SMS carries the approval rail (one-tap HMAC links, `Y`/`N`/`EDIT` replies, the
+digest). That synthesis is hereby the canonical thesis, and v2.0's SMS-primacy claim is superseded.
+This is a refinement of mechanism, not a change of goal: the north star ("owner hours returned per
+week") and the founding sentence are unchanged.
+
+2. **`docs/PRD-v5-as-built.md` supersedes** `docs/PRD.md` (v2.0), `docs/PRD-rivet-master.md`, and
+PRD v4 Parts E and F. `docs/PRD-execution-catalog.md` is explicitly RETAINED as the story-level
+engineering archive — v5 does not replace it. Part E's **rung ladder is retained as method**
+(0 Absent … 6 Live, where rung 4 requires a real-database proof including the audit event): it is
+the instrument that got its own two worst findings fixed, and v5 scores against it.
+
+3. **Four founding commitments shipped dark**, and for one of them that is drift rather than
+staged rollout. Verified against code, and *dark* means the same thing for all four — on a
+normally-provisioned tenant, with nobody intervening, the capability does not run:
+
+   - **The digest** (`digest_enabled`) defaults false. `PUT /api/settings` accepts
+     `digestEnabled`, but **no control in web or mobile writes it**.
+   - **The brand-voice configurator** (`brand_voice_configurator`) is seeded explicitly
+     `enabled: false`, and the settings UI is gated on it (`SettingsPage.tsx:1150`).
+   - **Dropped-call recovery** is gated per tenant. Its dedicated writer is unwired —
+     `setTenantFlag` has zero production callers and no route — but a platform admin can scope the
+     platform flag by `tenantIds` (`PUT /api/admin/feature-flags/:name`), which
+     `PgTenantFeatureFlagRepository._resolve` evaluates for the calling tenant. Admin-API-only,
+     not unreachable. See PRD §12.4.
+   - **B2B account context** is assembled onto the session and **read nowhere**:
+     `session.b2bAccountContext` is written once and has no consumer.
+
+   **The drift-over-staging reading now rests on B2B context alone.** The other three each have
+a working write path, and a flag with a ramp path is what a staged rollout and an abandoned one
+look like *alike* — the brand-voice configurator (flag + per-tenant ramp + a UI already built
+behind it) is if anything better explained as staging than as drift. B2B context is the one that
+cannot be read either way: there is no flag, because there is nothing to ramp *to*. The capability
+was never finished, so no stage of a rollout describes its current state. Remediation is a launch
+checklist rather than an architecture change for all four regardless — that part of the ruling
+does not depend on which reading is right.
+
+*— corrected twice, both on 2026-09-12, and the second correction is the instructive one. This
+clause originally named **the digest** as the distinguishing evidence, on the premise that it had
+no switch; it has one (`PUT /api/settings`), just no UI. The first correction moved the argument
+to **dropped-call recovery** on the same premise, and that premise was wrong for the same reason:
+a platform admin can ramp it by `tenantIds`. The test itself was the defect. "A capability with no
+switch cannot have been staged" cannot distinguish drift from staging for anything that **has** a
+flag, which is three of the four — it only ever identified the capability that has no flag at all.
+Stated that way the conclusion is narrower and stops moving. (Both corrections: Codex review on
+PR #994.)*
+
+**Rationale:** This log's own history is the argument. D-025 found that a posture everyone cited
+("approval is never voice-reachable") had never actually been decided, was attributed to an
+unrelated entry, and had been contradicted by shipped code for months. Two canonical PRDs asserting
+different primary interfaces is the same failure one step earlier. Recording the ratification is
+what stops the next reader inferring a posture from whichever document they opened first.
+
+**Constraints:**
+- The superseded documents are **not deleted and not moved**. They carry a superseded header
+  pointing at v5 and stay at their current paths: they have 31 inbound references across the repo
+  (13 to `docs/PRD.md` alone, including `CLAUDE.md`), and breaking those to make a filing point is a
+  worse trade than a header. Part E in particular remains the best record of how the rung ladder works.
+- v5 is **not** covered by the voice-action-catalog contract test; that test pins
+  `docs/reference/voice-action-catalog.md`. v5's capability section is a point-in-time
+  transcription and says so. On disagreement, the pinned catalog wins.
+- v5's §12 gap register is a **snapshot with a decay rate**. Two of its claims were inherited from
+  Part E and were already stale when repeated (the review-response approval UI does exist;
+  conversational onboarding does have clients). Anything in §12 older than a sprint is re-verified
+  before it is acted on or quoted.
+
+**Alternatives rejected:**
+- *Reassert SMS-primacy and treat the build as drift to correct.* Rejected: the code has
+  implemented voice-directs/SMS-approves consistently across four surfaces, three transports and a
+  78-intent taxonomy. The documentation is what drifted.
+- *Declare the two theses equivalent.* Rejected: they imply different answers to what a demo shows,
+  what "done" means for the digest, and where the next engineering hour goes.
+- *Move the superseded PRDs to `docs/archive/`.* Rejected on the reference count above; revisit as
+  its own link-fixing change if the headers prove insufficient.
+
+---
+
+## D-031 — A rung is derived from evidence, never from reading the source
+
+**Date:** 2026-09-11
+**Status:** Accepted
+**Supersedes:** nothing. Amends the status convention in `docs/PRD-v5-as-built.md` §0 and the
+verification standard in §11.
+
+**Context.** PRD v5 scored roughly 100 capabilities and 18 invariants on the 0–6 ladder Part E
+invented. Every score was assigned by reading the implementation. That is a prediction of what a
+test would find, and the repository already forbids exactly this substitution — `packages/api/test/qa/matrix.ts`
+says of its own `expected` field: *"It is NOT the pass criterion — actual pass/fail comes from
+runtime checks."* A full re-derivation against the test suite found **28 rows overclaimed and 16
+underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
+
+**Decision.**
+
+1. **A rung is earned by an evidence class, not assigned by inspection.** The mapping is fixed:
+   NO EVIDENCE / CODE-ONLY → at most 2; PROVEN-UNIT (mocked or in-memory deps) → at most 3;
+   STRUCTURAL guard *with a negative control* → up to 4; real-Postgres write with an in-memory
+   audit repo → **4−**; real-Postgres write **and** audit event → 4; plus reachability → 5.
+2. **Three rules bind that mapping**, each earned by a mistake already made here:
+   - *Documentation is never evidence.* `assignment-notifications.ts:252` claims `app.ts` registers
+     a notifier; `app.ts` never imports the module.
+   - *Directory location is not evidence.* Three files in `packages/api/test/integration/` never
+     open a pool, and one was carrying a rung-5 claim on a `vi.fn()`.
+   - *A mocked dependency caps the claim at the mock.* This restates CLAUDE.md's existing rule; it
+     is what demoted the dunning cadence, the 4★ review gate and the service-credit cap.
+3. **Every rung carries a command.** Acceptance criteria, evidence classes and confirming commands
+   live inline in `docs/PRD-v5-as-built.md` §5 and §8, one falsifiable sentence per row. A rung published without a
+   command behind it is a prediction and is to be read as one.
+4. **Reachability is part of the score, and "dark by default" is not its weakest form.** **One**
+   capability is *unlit-able*: no surface can enable it at all
+   (`setTechnicianAssignmentNotifier` has zero production callers).
+   It caps at 4 regardless of test quality.
+
+   *— corrected 2026-09-12, twice. This said **four**, then **three**, and the answer is **one**.
+   Removed, in order: `digest_enabled` (→ `PUT /api/settings` accepts `digestEnabled` and
+   `PgSettingsRepository` maps it — missing a client control, not a write path); then dropped-call
+   recovery and voice vulnerability triage (→ a platform admin can scope their flag by `tenantIds`
+   via `PUT /api/admin/feature-flags/:name`, which `PgTenantFeatureFlagRepository._resolve`
+   honours — missing an owner-facing control, not a write path). Three of the four "unlit-able"
+   claims were the same mistake: **a grep proving one specific writer is unwired, read as proving
+   no writer exists.** See PRD §12.4.*
+
+**Consequences.**
+- §8 of the PRD now carries verified rungs and a per-row reason. §5 distinguishes invariants that
+  are enforced from those merely true today — **six sub-clauses** carry a universal quantifier
+  nothing proves (I1′, I3′, I5′, I8′, I9′, I13′), one (I6) has a test pinning the opposite
+  behaviour, and I18 has no enforcement at all. *— corrected 2026-09-12: six, not five. This was
+  the third copy of that count; the PRD's two were fixed first and this one was missed because the
+  sweep grepped the number rather than the concept. Enumerating the six inline so the next reader
+  can check the claim against the list instead of against another sentence.*
+- Eight named tests would close the most ground; the first, `test/ai/supervisor/review-coverage.test.ts`,
+  is the only one that changes an architecture decision rather than a score (see O-9).
+- The register is itself prose and will rot. Its defence is that every row is runnable, and the
+  `S:`-prefixed shell falsifiers are cheap enough to run as a batch — the natural next step is a
+  script that diffs them against the expectations recorded there, the same trick
+  `voice-action-catalog.contract.test.ts` plays on the capability catalog.
+
+**Alternatives rejected:**
+- *Leave the asserted rungs and add a caveat.* Rejected: a caveat on a number people quote does not
+  travel with the number.
+- *Score only what has a Docker-gated test and mark the rest unknown.* Rejected: it discards real
+  information about unit-proven and structurally-guarded behaviour, and would have hidden that
+  eleven of eighteen invariants are genuinely strong.
+- *Delete the ladder and describe capabilities in prose.* Rejected: prose is what rotted in
+  `docs/remaining-features.md`, which is why the ladder exists.
+
+---
+
+## D-032 — Definition of done is two-dimensional: an evidence class AND a tenant grade
+
+**Date:** 2026-09-12
+**Status:** Accepted
+**Amends:** D-031 (a rung is derived from evidence, never from reading the source).
+
+**Context.** D-031 fixed *how* a rung is earned but left the bar single-tenant. A rung-4 row
+means "a Docker-gated test proved the write and its audit event" — in a universe containing exactly
+one tenant. Rivet is multi-tenant and its isolation boundary is the database, not application code
+(I11), so a proof that never met a second tenant says nothing about the world the product ships
+into. Measured over `packages/api/test/integration/` on 2026-09-12 by the published lexical scan
+(PRD §11.0e): 214 of 217 files open a real pool and **at least 143 (66%) provision ≥2 tenants**
+— at least 145 (67%) after this branch adds two.
+
+*Corrected 2026-09-12.* This paragraph originally read *"140 (65%) provision ≥2 tenants, 120 (56%)
+carry a cross-tenant assertion, and 113 (52%) have both — about half the Docker-gated suite has
+never seen a neighbour."* Re-measuring with a now-published script (PRD §11.0e) reproduced four of
+five figures exactly; **≥2 tenants was 138 at the merge-base**, and the cross-tenant and "both"
+figures **could not be reproduced at all** — no command for them was ever published. They are
+withdrawn rather than restated, and the "about half" conclusion goes with them: it rested on the
+113/52% figure, not on anything this decision can still re-derive.
+
+*Corrected again, same day.* The surviving figure was reproducible and still mislabelled. "Provision
+≥2 tenants" counted files with ≥2 **literal** `createTestTenant(` call sites, so a file seeding two
+tenants through one helper counted as zero — `chat-entity-resolution.test.ts`, a genuinely
+cross-tenant test, was excluded. Widening to conventionally-named helpers recovers five files
+(138→143, 140→145), and that is still a **lower bound**, not a measurement: every figure in this
+paragraph counts strings in files. Caught in review (Codex P2). The companion audit figure, which
+D-032 does not cite, was mislabelled in the other direction — see §11.0e.
+
+The sharpest instance: seven integration files inject the tenant enumerator and **six pass exactly
+one tenant id**. Production supplies `SELECT id FROM tenants` at ten inlined call sites in
+`app.ts` — *corrected 2026-09-12: fifteen, not ten; this count came from a truncated listing and
+the error is left visible rather than silently patched* — and **no test exercises it.** `daily-digest-worker.test.ts` creates one tenant, stubs the
+enumerator to that id, and proves "skips a tenant whose `digest_enabled` is false" by toggling the
+flag on *the same tenant*. The stub replaces precisely the thing under test — the same shape as the
+entity resolver shipping with nonexistent column names because its `Pool` was mocked.
+
+**Decision.**
+
+1. **The definition of done requires a tenant grade T0–T4 alongside the rung**, defined in
+   `docs/PRD-v5-as-built.md` §8.0. It is required of any new or revised requirement, measured in
+   aggregate for the existing suite, and **published per row only where it has actually been
+   earned** — a row with no grade has an un-capped, provisional rung, and the capping rules below
+   do not apply to it until it is graded:
+   - **T0 Single** — one tenant existed; nothing about neighbours is known.
+   - **T1 Isolated** — a second tenant cannot see or touch the first's rows.
+   - **T2 Non-interfering** — a second tenant's *data* does not change the first's answer.
+   - **T3 Divergently configured** — two tenants with *different* settings each get their own
+     correct result in the same run.
+   - **T4 Really enumerated** — the production tenant selector runs (not a stub), every eligible
+     tenant is processed, and a failure on one does not abort the rest.
+2. **The tenant grade caps the rung.** Rung 4 requires T1. Rung 5 requires T2, plus T3 wherever the
+   capability reads per-tenant configuration. **Any capability that iterates tenants is capped at
+   rung 4 until T4.** Rung 6 requires T4 plus live traffic from ≥2 real tenants.
+3. **T1 and T2 are different failures and are graded separately.** A correctly tenant-scoped
+   `WHERE` gives T1 and says nothing about T2: a sweep can be perfectly scoped and still pick the
+   wrong rows, double-count, or starve a tenant. **T3 is where the Phoenix mis-booking lived** —
+   both tenants' queries were fine; the configuration was assumed shared.
+4. **Each grade is confirmed by a shell falsifier**, not by judgement. The T4 falsifier is the
+   sharpest: a single-element literal in `listTenantIds: async () => [...]` means the sweep is T0
+   whatever rung is printed beside it.
+
+**Consequences.**
+- Seven sweep-backed rows — digest (9.6), thank-you SMS (9.1), review request (9.2), hold reaper
+  (3.5), estimate nudge (7.10), Google review monitoring (9.4), weekly summary (9.7) — were **T0 and
+  capped at rung 4** until the enumerator was real in their tests.
+  **Status 2026-09-12: closed.** `listAllTenantIds` is extracted and proven, and all **eight**
+  sweep workers covering those seven rows — weekly feedback and HFCR weekly send both serve 9.7 —
+  carry fan-out coverage in `test/integration/sweep-tenant-fanout.test.ts` (16 tests). Digest and
+  weekly-feedback reach T3+T4; the rest reach T4. See PRD §11.0e for the per-sweep depth, including
+  the second sweep shape (cross-tenant query, no enumerator) that this decision did not anticipate.
+- The precondition for any T4 proof is structural: the inlined copies of `SELECT id FROM tenants`
+  become one exported, tested `listAllTenantIds(pool)`. A sweep test cannot run the production
+  selector while that selector exists only as anonymous closures in `app.ts`. **Done 2026-09-12 —
+  fifteen sites, not the ten this decision first counted; that number came from a truncated
+  listing.**
+- One shared sweep harness — 3 divergently-configured tenants, real enumerator, assert 3 outcomes
+  and that a throw on tenant 1 still processes 2 and 3. **Done 2026-09-12**, 16 tests in
+  `test/integration/sweep-tenant-fanout.test.ts`, every isolation assertion mutation-tested.
+- **Per-row T-grades are published only where earned.** As of 2026-09-12 that is the seven
+  tenant-iterating sweeps (PRD §11.0e, "Graded so far") — digest and weekly feedback at T3+T4, the
+  other five at T4, each proven against **its own production fan-out path** and mutation-tested — the
+  real enumerator for six of the eight workers, and the production cross-tenant query for thank-you
+  SMS and review request, which take no enumerator (*corrected 2026-09-12: this said "the real
+  enumerator" for all of them, flattening the two-shapes distinction PRD §11.0e exists to draw*).
+  **Those seven
+  grades do cap their rungs.** Every other row in §5 and §8 is **ungraded**, so its printed rung is
+  un-capped and provisional, and the capping rules do not apply to it until it is graded. Asserting
+  a grade on a row without running that row's falsifier would repeat the error D-031 exists to
+  correct — the aggregate scan is a keyword heuristic, sound across the suite's 219 files and not sound row by
+  row.
+
+**Alternatives rejected:**
+- *Fold multi-tenancy into the existing rungs (e.g. "rung 4 now means two tenants").* Rejected: it
+  silently redefines ~100 published numbers and conflates two independent questions — how strong the
+  evidence is, and how many tenants it covered.
+- *Rely on RLS and skip per-capability tenant proof.* Rejected: RLS gives T1 by construction and
+  nothing else. T2, T3 and T4 are behavioural and RLS cannot supply them — the digest sweep is
+  perfectly RLS-scoped and still unproven across tenants.
+- *Grade every row now from the existing scan.* Rejected: the scan is a keyword heuristic. It is
+  sound as an aggregate and not sound per row, and a wrong grade is worse than an absent one.

@@ -8,6 +8,12 @@
 export interface EstimatePrintLineItem {
   description: string;
   qty: number;
+  /**
+   * B7.5 — descriptive unit of measure ('each', 'hour', 'sq ft', …) printed
+   * next to the quantity so the document says what the rate measures.
+   * DESCRIPTIVE ONLY: the row and document totals below never read it.
+   */
+  unit?: string;
   /** Unit price in dollars. */
   rate: number;
   /** EE-4 — optional signed thumbnail URL shown beside the description. */
@@ -59,7 +65,7 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
       (item) => `
         <tr>
           <td class="desc">${item.imageUrl ? `<img class="thumb" src="${escapeHtml(item.imageUrl)}" alt="" />` : ''}${escapeHtml(item.description)}</td>
-          <td class="num">${item.qty}</td>
+          <td class="num">${item.qty}${item.unit ? ` <span class="unit">${escapeHtml(item.unit)}</span>` : ''}</td>
           <td class="num">${usd(item.rate)}</td>
           <td class="num">${usd(item.qty * item.rate)}</td>
         </tr>`,
@@ -91,6 +97,8 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
     td { font-size: 13px; padding: 10px 6px; border-bottom: 1px solid #f1f5f9; }
     td.desc { width: 60%; }
     .thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
+    /* B7.5 — descriptive unit beside the quantity; muted so the number reads first. */
+    .unit { color: #64748b; font-size: 11px; }
     .total { display: flex; justify-content: space-between; align-items: center; background: #0f172a; color: #fff; padding: 14px 16px; border-radius: 10px; font-size: 15px; }
     @media print { body { padding: 24px; } @page { margin: 16mm; } }
   </style>

@@ -1,0 +1,12 @@
+{
+  "id": "transcript-crew-001",
+  "type": "voice_memo",
+  "duration_seconds": 3,
+  "service_type": "electrical",
+  "transcript": "Dispatcher: Add Carlos to the Garcia appointment.",
+  "expected_entities": {
+    "target_technician_name": "Carlos",
+    "appointment_reference": "the Garcia appointment",
+    "intent_note": "\"Add\" attaches a non-primary technician, the existing primary stays on — add_crew_member, not reassign_appointment."
+  }
+}

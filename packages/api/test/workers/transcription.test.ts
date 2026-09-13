@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createTranscriptionWorker } from '../../src/workers/transcription';
+import {
+  createTranscriptionWorker,
+  voicemailRouterEnqueueAllowed,
+} from '../../src/workers/transcription';
 import type { VoiceRepository, TranscriptionProvider } from '../../src/voice/voice-service';
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -289,5 +292,95 @@ describe('createTranscriptionWorker — RIVET I13 provenance stamp (Codex)', () 
       'completed',
       expect.anything(),
     );
+  });
+});
+
+describe('createTranscriptionWorker — U9 voicemail context threading', () => {
+  const provider: TranscriptionProvider = {
+    transcribe: vi
+      .fn()
+      .mockResolvedValue({ transcript: 'send Riley the quote we talked about', metadata: {} }),
+  };
+
+  it('threads the voicemail context (caller phone) into the completion event', async () => {
+    const voiceRepo = makeVoiceRepo();
+    const onTranscribed = vi.fn();
+    const worker = createTranscriptionWorker(voiceRepo, provider, { onTranscribed });
+    await worker.handle(
+      makeMessage({ voicemail: { callerPhone: '+15125550100' } }),
+      logger,
+    );
+    expect(onTranscribed).toHaveBeenCalledOnce();
+    expect(onTranscribed.mock.calls[0][0]).toMatchObject({
+      tenantId: 'tenant-1',
+      recordingId: 'rec-1',
+      voicemail: { callerPhone: '+15125550100' },
+    });
+  });
+
+  it('omits the voicemail key entirely for non-voicemail jobs (legacy events unchanged)', async () => {
+    const voiceRepo = makeVoiceRepo();
+    const onTranscribed = vi.fn();
+    const worker = createTranscriptionWorker(voiceRepo, provider, { onTranscribed });
+    await worker.handle(makeMessage(), logger);
+    expect(onTranscribed).toHaveBeenCalledOnce();
+    expect('voicemail' in onTranscribed.mock.calls[0][0]).toBe(false);
+  });
+});
+
+describe('voicemailRouterEnqueueAllowed — U9 owner gate (router enqueue test)', () => {
+  const gateLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never;
+
+  it('always allows non-voicemail events without consulting the approver check', async () => {
+    const isApproverPhone = vi.fn();
+    const allowed = await voicemailRouterEnqueueAllowed(
+      { tenantId: 't-1', recordingId: 'rec-1' },
+      { isApproverPhone },
+      gateLogger,
+    );
+    expect(allowed).toBe(true);
+    expect(isApproverPhone).not.toHaveBeenCalled();
+  });
+
+  it('allows a voicemail whose caller-ID is in the approver set', async () => {
+    const isApproverPhone = vi.fn().mockResolvedValue(true);
+    const allowed = await voicemailRouterEnqueueAllowed(
+      { tenantId: 't-1', recordingId: 'rec-1', voicemail: { callerPhone: '+15125550100' } },
+      { isApproverPhone },
+      gateLogger,
+    );
+    expect(allowed).toBe(true);
+    expect(isApproverPhone).toHaveBeenCalledWith('t-1', '+15125550100');
+  });
+
+  it('blocks an unknown caller (notify-only unchanged)', async () => {
+    const isApproverPhone = vi.fn().mockResolvedValue(false);
+    const allowed = await voicemailRouterEnqueueAllowed(
+      { tenantId: 't-1', recordingId: 'rec-1', voicemail: { callerPhone: '+15550009999' } },
+      { isApproverPhone },
+      gateLogger,
+    );
+    expect(allowed).toBe(false);
+  });
+
+  it('forwards a MISSING caller phone (the approver check itself refuses undefined)', async () => {
+    const isApproverPhone = vi.fn().mockResolvedValue(false);
+    const allowed = await voicemailRouterEnqueueAllowed(
+      { tenantId: 't-1', recordingId: 'rec-1', voicemail: {} },
+      { isApproverPhone },
+      gateLogger,
+    );
+    expect(allowed).toBe(false);
+    expect(isApproverPhone).toHaveBeenCalledWith('t-1', undefined);
+  });
+
+  it('FAILS CLOSED when the approver lookup throws (degraded settings can never mint routing)', async () => {
+    const isApproverPhone = vi.fn().mockRejectedValue(new Error('settings db down'));
+    const allowed = await voicemailRouterEnqueueAllowed(
+      { tenantId: 't-1', recordingId: 'rec-1', voicemail: { callerPhone: '+15125550100' } },
+      { isApproverPhone },
+      gateLogger,
+    );
+    expect(allowed).toBe(false);
   });
 });

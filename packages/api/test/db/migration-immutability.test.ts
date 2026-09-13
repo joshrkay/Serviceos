@@ -288,7 +288,17 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
   // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
   ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
-  ['190_dispatch_entity_conversation_reply', 'f68dcf4009222fb5f516bb37d914124ba2e6eb761d3469c7c11eee7cc855641a'],
+  // Deploy-blocker fix (2026-08-29, branch fix/dispatch-vocab-reconciliation):
+  // this migration's ADD CONSTRAINT had no NOT VALID, unlike 092/125/164
+  // above and 070 (see that comment). The runner replays every migration on
+  // every boot with no ledger, so each redeploy re-validated the WHOLE
+  // message_dispatches table against this migration's (pre-269/270)
+  // vocabulary. Once the app started writing 'portal_session'/'custom_message'
+  // rows (legal under the final 270 constraint, applied on a prior deploy),
+  // the next redeploy replayed 190 first and rejected those rows —
+  // ATRewriteTable/SQLSTATE 23514, bricking every subsequent deploy of main.
+  // Added NOT VALID; hash regenerated to lock in the edit.
+  ['190_dispatch_entity_conversation_reply', 'fec82faa1028436ca7b262a44a36d29412bd3270830ec9750e245cd1ff1a1ab3'],
   // CRM two-way comms: extend leads_source_check to admit 'sms' (text-origin leads).
   ['191_extend_leads_source_check_sms', 'a255c4625c8fd00f4f0e1b4335d001f518bc20616e3c60af87ac2d87d836aef2'],
   // Add the missing tenant_dnc_list.source column (DNC UI used it without a migration).
@@ -449,10 +459,77 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // dependency on pre-existing tenant rows beyond normal foreign keys.
   ['261_create_tenant_entity_aliases', 'f355ecfc94bf9a067c28ba86988832801bc2357a0ab1b2b5db5e3baa3d04bfe0'],
   ['262_portal_sessions_contact_id', '31af90200a435cb285e39c6c180da71a09f82562759fb28844641dc47409b85b'],
+  ['263_tenant_settings_timezone_no_silent_default', '79215e9f7e13a00ba8f29a41d20a9b22c003df5483666c2e1471951fb505313a'],
   // FAIL-VIS — read-path indexes for the silent-failure monitor: one INCLUDE
   // index on ai_runs(created_at) and two partial indexes on proposals. Index
   // creation only; no columns, constraints, or data touched.
   ['263_failure_monitor_indexes', 'bb6aeb2d17dca2c8c7b3959155b642d2018a7df5063b3acb88a3f82cc22ae872'],
+  // D2-4a / P0-4 — per-refund idempotency ledger (payment_refunds table +
+  // unique claim index + RLS). New table only; nothing existing touched.
+  ['264_create_payment_refunds', '529b0d8cef10288a44c01c3065e815ed3b666b5d8ca47a312defa93861530376'],
+  // B7.5 — nullable, descriptive-only `unit` column on both line-item
+  // tables. Additive ALTER only; nothing existing touched.
+  ['265_line_items_unit', '6780eeea0dfeb24582c84b206e8cbdaf4ceaa21678ff849b58fa698e3b118f14'],
+  // Nullable `executed_by_role` on proposals — the approver's role at
+  // approval time, so a config write's audit names who authorized it.
+  // Additive ALTER only; nothing existing touched.
+  ['266_proposals_executed_by_role', '75a8f66b03c36528111b5a5743a1d03ab8676a9d6647a345fa0d44aa9f564727'],
+  // FIX 10(i) (ANS-001): per-tenant reviewed E1 life-safety script column.
+  // Renumbered 197→267 on the origin/main merge (SQL unchanged → hash preserved).
+  ['267_tenant_settings_e1_reviewed_script', '5bff650e5b0f0d8be04958f3fa5da7b71f22196fc7d3c2084e94c5dd6f7640a4'],
+  // ANS-001: call_me_back idempotency key gains `reason` so an E1 call's
+  // life-safety alert task is no longer swallowed by its booking task.
+  // Renumbered 198→268 on the origin/main merge (SQL unchanged → hash preserved).
+  ['268_call_me_back_session_reason_idempotency', '7807073281dad9a454020843788c85953d0a30f2b047b6ca05812ef3da2c7253'],
+  // Portal-link send (PR #802): widen message_dispatches entity_type CHECK
+  // for 'portal_session' — deliberate snapshot update for a new migration.
+  // Deploy-blocker fix (2026-08-29): also missing NOT VALID (same bug as
+  // 190 above); added, hash regenerated.
+  ['269_dispatch_entity_portal_session', '1a7f66659bc7c1229b306e3daf7d1a27b96f994aab8ceb5c1da661024967d3b7'],
+  // Tradesperson wave 1, Task 5 (2026-08-07 plan): widen message_dispatches
+  // entity_type CHECK for 'custom_message' (send_customer_message proposal)
+  // — deliberate snapshot update for a new migration.
+  // Deploy-blocker fix (2026-08-29): also missing NOT VALID (same bug as
+  // 190 above) — this is the row that actually broke prod: dev's live
+  // constraint had already validated up through 'custom_message', and the
+  // app was writing 'custom_message' dispatch rows under it, so the very
+  // next redeploy replayed 190/269 (narrower, non-NOT-VALID lists) first
+  // and rejected them. Added NOT VALID here too so a future widening after
+  // 270 doesn't reintroduce the same failure; hash regenerated.
+  ['270_dispatch_entity_custom_message', 'eab55bd6e392d09a8165963967d0a0e406d82e697a70f13b0795f25f3e794ceb'],
+  // Tradesperson wave 1, Task 6 (2026-08-07 plan): adds is_change_order to
+  // estimates + a partial index for reporting scope-adds separately from
+  // original bids (create_change_order proposal) — deliberate snapshot
+  // update for a new migration.
+  ['271_estimates_change_order_flag', '3ce6825664e4450cec463a8434906bd427ea84ea269d7d4df3db27f6d43498e3'],
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan): new material_items table
+  // (voice-captured materials/shopping list, add_material proposal
+  // substrate) — deliberate snapshot update for a new migration. Edited
+  // in place pre-merge (quality review) to fix the index shape: dropped
+  // the plain (tenant_id) index (no query used it) and made
+  // idx_material_items_pending cover (tenant_id, created_at) so
+  // listPending's ORDER BY is served by the index scan; hash regenerated.
+  // Regenerated 2026-08-09: Task 9's review reworded a comment INSIDE this
+  // migration's SQL string ("Task 9 may add markCancelled" -> "a future task
+  // may"), which changes the hash. 272 was unmerged then, so editing in place
+  // was still safe; it has since SHIPPED (PR #814), so from now on even a
+  // comment edit inside its SQL needs a new migration like any other change
+  // to the value.
+  //
+  // 272's own in-SQL comment ("the one real query shape ... ORDER BY
+  // created_at") went stale on 2026-08-10 when F2 reordered listPending by
+  // `needed_by` for every call. It is FROZEN WRONG on purpose: the comment
+  // lives inside the hashed value, so correcting it would mutate a shipped
+  // migration. The correction and the current index story live in 273's
+  // comment in schema.ts and in pg-material-item.ts's module doc comment
+  // (review follow-up N4) — read those, not 272's inline comment.
+  ['272_create_material_items', '364728f31ee0bada90eb104a2b77198624e5518002d38f28910d6b24a8e60622'],
+  // A3 (2026-08-10) — new migration adding the index that supplies
+  // listPending's full ORDER BY (tenant_id, needed_by, created_at, id)
+  // WHERE status = 'pending'. Reverses #819's declined-index decision; see
+  // schema.ts's comment on the key for why it flipped. Deliberate snapshot
+  // update for a NEW migration — 272 was NOT edited.
+  ['273_material_items_urgency_index', '0327e1316d8935b47272f639f98836551172168c4150eb8b6fed648a6c7242f0'],
 ];
 
 function hashMigration(value: string): string {

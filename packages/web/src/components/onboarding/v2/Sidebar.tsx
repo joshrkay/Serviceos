@@ -1,11 +1,16 @@
 import { useNavigate } from 'react-router';
-import { Zap, Check } from 'lucide-react';
+import { Zap, Check, Mic } from 'lucide-react';
 import type { OnboardingStatusResponse, OnboardingStepId, OnboardingStepStatus } from '../../../types/onboarding';
 
 interface SidebarProps {
   status: OnboardingStatusResponse;
   activeId: OnboardingStepId;
   onSelect: (id: OnboardingStepId) => void;
+  /** B1.19 — true while the active step (identity/pack) has a
+   *  conversational alternative to offer. */
+  voiceAvailable?: boolean;
+  voiceMode?: boolean;
+  onToggleVoice?: () => void;
 }
 
 const STEP_LABELS: Record<OnboardingStepId, string> = {
@@ -39,7 +44,14 @@ function statusGlyph(status: OnboardingStepStatus, isActive: boolean): React.Rea
   return <span className="size-2 rounded-full border border-slate-300" />;
 }
 
-export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
+export function Sidebar({
+  status,
+  activeId,
+  onSelect,
+  voiceAvailable,
+  voiceMode,
+  onToggleVoice,
+}: SidebarProps) {
   const navigate = useNavigate();
   const completedCount = status.steps.filter(
     (s) => s.status === 'done' || s.status === 'skipped',
@@ -58,6 +70,22 @@ export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
         </span>
         <span className="text-base tracking-tight text-slate-900">Rivet</span>
       </div>
+
+      {voiceAvailable && onToggleVoice && (
+        <button
+          type="button"
+          onClick={onToggleVoice}
+          aria-pressed={!!voiceMode}
+          className={`mb-4 flex min-h-11 w-full items-center gap-2 rounded-xl border px-3 text-left text-sm transition ${
+            voiceMode
+              ? 'border-green-300 bg-green-50 text-green-700'
+              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          <Mic size={14} />
+          {voiceMode ? 'Talking it through' : 'Talk it through instead'}
+        </button>
+      )}
 
       <div className="mb-4 text-xs uppercase tracking-widest text-slate-500">Setup</div>
 

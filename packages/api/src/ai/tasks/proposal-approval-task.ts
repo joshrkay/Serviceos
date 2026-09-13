@@ -8,9 +8,14 @@
  * session and feed the next utterance back in. The task never trusts an
  * utterance for identity and never acts without an explicit affirmative.
  *
- * Security note — PIN-in-transcript surface: spoken PINs necessarily appear
- * in the call transcript; transcript encryption (AES-256-GCM) is the at-rest
- * control; excluding the challenge turn from summaries is a tracked follow-up.
+ * Security note — PIN-in-transcript surface: the challenge turn is REDACTED at
+ * the transcript-append site (`ai/voice-turn/transcript-append.ts`
+ * `callerTranscriptText`, keyed on the `challenge` dialogue stage), so the
+ * spoken code never reaches the stored transcript or anything derived from it.
+ * Transcript encryption (AES-256-GCM) remains the at-rest control for
+ * everything else. Note the challenge is still a STATIC per-tenant secret —
+ * replacing it with a non-replayable per-approval code is an open question,
+ * tracked on the voice-first map (#833), not closed by the redaction.
  *
  * Safety model (D1):
  *   1. Routing gate — only reachable when `ownerSession` is true; the

@@ -30,7 +30,11 @@ import { Router, Request, Response } from 'express';
 import express from 'express';
 import type { Pool } from 'pg';
 import { TwilioGatherAdapter, xmlEscape } from '../telephony/twilio-adapter';
-import { requireTwilioSignature } from '../telephony/twilio-signature';
+import {
+  requireTwilioSignature,
+  sessionBelongsToAnotherTenant,
+  type TwilioAuthTokenGetter,
+} from '../telephony/twilio-signature';
 import {
   createRecordingRouter,
   type RecordingHandlerOptions,
@@ -47,7 +51,11 @@ import {
 import { getSentryClient, type SentryClient } from '../monitoring/sentry';
 import { buildVoicemailTwiml } from '../telephony/voicemail-fallback';
 import { isTenantAfterHours } from '../telephony/business-hours-loader';
-import { createVoicemailStatusRouter } from '../telephony/voicemail-status-route';
+import {
+  createVoicemailStatusRouter,
+  type VoicemailStatusHandlerOptions,
+  type VoicemailWebhookReceiptStore,
+} from '../telephony/voicemail-status-route';
 import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
@@ -66,12 +74,14 @@ const logger = createLogger({
 export interface TelephonyRouterDeps {
   adapter: TwilioGatherAdapter;
   /**
-   * Returns the Twilio account auth token for signature verification.
-   * Receives the AccountSid from Twilio's webhook body so per-tenant
-   * subaccount tokens can be looked up. Legacy single-account callers
+   * Resolves the credential an inbound webhook's signature is verified
+   * against. #1072: it receives the DIALLED NUMBER as well as the AccountSid,
+   * because the credential that may sign for a number is the one belonging to
+   * the tenant that owns it — and it may answer `refuse`, which the middleware
+   * turns into a 403 before any handler runs. Legacy single-account callers
    * may ignore the argument and return the master `TWILIO_AUTH_TOKEN`.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   /**
    * Optional explicit base URL Twilio called. When unset, the middleware
    * uses `PUBLIC_API_URL` from env, then falls back to req.protocol+host.
@@ -140,6 +150,18 @@ export interface TelephonyRouterDeps {
     twilioAuthToken?: string;
     /** Test seam — replace fetch / upload with stubs. */
     options?: RecordingHandlerOptions;
+  };
+  /**
+   * U9 (voicemail → action) — extra wiring for the voicemail-status
+   * callback's transcription leg. The storage/Twilio-cred deps are shared
+   * with `recording` above; this block carries only what is voicemail-
+   * specific: the replay-receipt store (lead-leg idempotency) and the
+   * app-layer hook that enqueues the transcription worker. Optional so
+   * legacy tests/dev keep the historical notify-only behavior.
+   */
+  voicemail?: {
+    webhookEventRepo?: VoicemailWebhookReceiptStore;
+    options?: VoicemailStatusHandlerOptions;
   };
   /**
    * P8-012 — when true, /voice returns a `<Connect><Stream/></Connect>`
@@ -275,16 +297,34 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   // below so its router-scoped middleware fully owns the /recording path.
   if (deps.recording?.store) {
     router.use(
-      createVoicemailStatusRouter({
-        store: deps.recording.store,
-        pool: deps.pool,
-        leadRepo: deps.leadRepo,
-        auditRepo: deps.auditRepo,
-        // Public Twilio callback — mounts its own urlencoded parser +
-        // signature check (it sits before the shared middleware below).
-        authTokenGetter: deps.authTokenGetter,
-        ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
-      }),
+      createVoicemailStatusRouter(
+        {
+          store: deps.recording.store,
+          pool: deps.pool,
+          leadRepo: deps.leadRepo,
+          auditRepo: deps.auditRepo,
+          // Public Twilio callback — mounts its own urlencoded parser +
+          // signature check (it sits before the shared middleware below).
+          authTokenGetter: deps.authTokenGetter,
+          ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
+          // U9 — transcription leg reuses the recording sink's storage +
+          // Twilio creds; the To-number fallback covers after-hours
+          // voicemails, which have no in-process session by construction.
+          resolveTenantIdFallback: deps.resolveTenantId,
+          storage: deps.recording.storage,
+          storageBucket: deps.recording.storageBucket,
+          ...(deps.recording.twilioAccountSid
+            ? { twilioAccountSid: deps.recording.twilioAccountSid }
+            : {}),
+          ...(deps.recording.twilioAuthToken
+            ? { twilioAuthToken: deps.recording.twilioAuthToken }
+            : {}),
+          ...(deps.voicemail?.webhookEventRepo
+            ? { webhookEventRepo: deps.voicemail.webhookEventRepo }
+            : {}),
+        },
+        deps.voicemail?.options ?? {},
+      ),
     );
   }
 
@@ -430,7 +470,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
               ? `${base}/api/telephony/voicemail-status`
               : '/api/telephony/voicemail-status';
             res.status(200).type('text/xml').send(
-              buildVoicemailTwiml({ shopName, recordingStatusCallback: callback }),
+              // U9 — caller/dialed numbers ride the callback URL: the
+              // recordingStatusCallback POST has no From/To of its own, and
+              // this branch answers BEFORE any session exists, so they are
+              // the handler's only route to caller identity + tenant.
+              buildVoicemailTwiml({
+                shopName,
+                recordingStatusCallback: callback,
+                callerPhone: from,
+                dialedNumber: to,
+              }),
             );
             return;
           }
@@ -452,7 +501,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         !!deps.mediaStreamsEnabled &&
         (await shouldUseRealtimeStream({ tenantId, callSid, deps }));
       const twiml = useStream
-        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId })
+        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId, accountSid: body.AccountSid })
         : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
@@ -496,6 +545,20 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const session = callSid ? deps.voiceSessionStore?.findByCallSid(callSid) : undefined;
+
+    // #1072 — this route hands back the session's own id in the <Gather>
+    // action URL, so letting a foreign tenant reach it would give away the
+    // `?sid=` the session-scoped routes are keyed on. No tenant is resolved on
+    // this branch, so the verifying credential's tenant is the only authority
+    // available; passing the session's own tenant as the fallback makes the
+    // check a no-op under the deployment token, where no tenant is implied.
+    if (sessionBelongsToAnotherTenant(req, session, session?.tenantId ?? '')) {
+      logger.warn('telephony/gather-fallback: session belongs to another tenant — refusing', {
+        callSid,
+      });
+      res.status(403).end();
+      return;
+    }
 
     if (session) {
       const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
@@ -603,6 +666,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
+    // #1072 — the signature proves the caller owns a number, not this call.
+    if (sessionBelongsToAnotherTenant(req, sessionStoreFor(deps)?.get(sessionId), tenantId)) {
+      logger.warn('telephony/gather: session belongs to another tenant — refusing', {
+        sessionId,
+        callSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     try {
       const twiml = await deps.adapter.handleGather({
         sessionId,
@@ -688,6 +761,17 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const adapter = deps.adapter;
     const adapterDeps = adapter.getDeps();
     const session = adapterDeps.store.get(sessionId);
+
+    // #1072 — the signature proves the caller owns a number, not this call.
+    if (sessionBelongsToAnotherTenant(req, session, tenantId)) {
+      logger.warn('telephony/dial-result: session belongs to another tenant — refusing', {
+        sessionId,
+        callSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (!session) {
       logger.warn('telephony/dial-result: unknown session', { sessionId, callSid });
       // Hangup gracefully — Twilio's leg is going away anyway.
@@ -843,7 +927,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     res
       .status(200)
       .type('text/xml')
-      .send(buildVoicemailTwiml({ shopName: businessName, recordingStatusCallback: callback }));
+      // U9 — same caller/dialed threading as the after-hours branch; the
+      // dial-result webhook carries the call's From/To as standard params.
+      .send(
+        buildVoicemailTwiml({
+          shopName: businessName,
+          recordingStatusCallback: callback,
+          ...(body.From ? { callerPhone: body.From } : {}),
+          ...(body.To ? { dialedNumber: body.To } : {}),
+        }),
+      );
   });
 
   /**
@@ -885,6 +978,15 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     if (!tenantId || !isValidTenantId(tenantId)) {
       logger.error('telephony/callback-message: no/invalid tenant resolved', { sessionId });
       res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
+      return;
+    }
+
+    // #1072 — the signature proves the caller owns a number, not this call.
+    if (sessionBelongsToAnotherTenant(req, sessionStoreFor(deps)?.get(sessionId), tenantId)) {
+      logger.warn('telephony/callback-message: session belongs to another tenant — refusing', {
+        sessionId,
+      });
+      res.status(403).end();
       return;
     }
 
@@ -1156,6 +1258,23 @@ function technicalDifficultiesTwiml(): string {
     `<Hangup/>` +
     `</Response>`
   );
+}
+
+/**
+ * The session store to check a `?sid=` against. `voiceSessionStore` is the
+ * router's own declared dep and is what app.ts wires (the SAME instance the
+ * adapter holds — there is one shared store per process); the adapter's own
+ * store is the fallback for callers that pre-date that dep. `getDeps` is
+ * accessed defensively because tests mount hand-rolled adapter fakes that do
+ * not implement it, and a guard must never be the thing that throws inside a
+ * webhook handler.
+ */
+function sessionStoreFor(
+  deps: TelephonyRouterDeps,
+): { get(id: string): { tenantId: string } | undefined } | undefined {
+  if (deps.voiceSessionStore) return deps.voiceSessionStore;
+  const getDeps = (deps.adapter as Partial<TwilioGatherAdapter>).getDeps;
+  return typeof getDeps === 'function' ? deps.adapter.getDeps().store : undefined;
 }
 
 /**

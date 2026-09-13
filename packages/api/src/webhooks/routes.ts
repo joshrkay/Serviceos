@@ -51,9 +51,19 @@ import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import { deactivateInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import type { Invoice } from '../invoices/invoice';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
+
+// Bounds the root-provisioning `provisioningQueue.send()` await below so a
+// wedged queue client (e.g. a stalled pool.connect()) fails the webhook
+// instead of hanging the response indefinitely. Matches the 10s bound
+// already used for the Clerk metadata PATCH calls in this same handler.
+const PROVISIONING_ENQUEUE_TIMEOUT_MS = 10_000;
 
 /**
  * Best-effort mapping from a Stripe payment object to our domain
@@ -217,6 +227,15 @@ export interface WebhookRouterDeps {
    * production when this is absent.
    */
   webhookRepo?: WebhookRepository;
+  /**
+   * P0-9 — when wired, a hosted payment link is deactivated (and its
+   * columns cleared) as soon as a credit settles or reprices the invoice it
+   * was minted against, so a stale link can't capture its original amount
+   * later. Optional: without it the audit trail below still surfaces every
+   * unapplied capture.
+   */
+  paymentLinkProvider?: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -237,6 +256,238 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     );
   }
   const webhookRepo: WebhookRepository = deps.webhookRepo ?? new InMemoryWebhookRepository();
+
+  /**
+   * P0-9 — every branch that keeps Stripe's money without a matching local
+   * credit must say so durably. `capturedCents` is what Stripe took,
+   * `creditedCents` what the invoice absorbed; the difference is money that
+   * exists only at Stripe. Best-effort (a failed audit write must not turn a
+   * correctly-handled event into a 500 retry loop), but always logged.
+   */
+  const auditUnappliedCapture = async (params: {
+    tenantId: string;
+    invoiceId: string;
+    eventId: string;
+    providerReference: string;
+    capturedCents: number;
+    creditedCents: number;
+    invoiceStatus: string;
+    reason: string;
+  }): Promise<void> => {
+    logger.warn('Stripe capture exceeds recorded credit (unapplied capture)', { ...params });
+    if (!deps.auditRepo) return;
+    await deps.auditRepo
+      .create(
+        createAuditEvent({
+          tenantId: params.tenantId,
+          actorId: 'system:stripe_webhook',
+          actorRole: 'system',
+          eventType: 'payment.unapplied_capture',
+          entityType: 'invoice',
+          entityId: params.invoiceId,
+          correlationId: params.providerReference,
+          metadata: {
+            stripeEventId: params.eventId,
+            capturedCents: params.capturedCents,
+            creditedCents: params.creditedCents,
+            unappliedCents: params.capturedCents - params.creditedCents,
+            invoiceStatus: params.invoiceStatus,
+            reason: params.reason,
+          },
+        }),
+      )
+      .catch((err) =>
+        logger.error('Failed to audit unapplied capture', {
+          eventId: params.eventId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+  };
+
+  /**
+   * P0-9 — a hosted payment link is priced at mint time and never re-priced,
+   * so once a credit lands the link is stale: settled invoices must not keep
+   * a live charge vector, and a repriced balance would capture its ORIGINAL
+   * amount with the excess silently discarded. Deactivate + clear whenever a
+   * credit touches an invoice that still carries a link. Best-effort; the
+   * pay-now flows mint a fresh link at the current balance on demand.
+   */
+  const killStaleInvoiceLink = async (tenantId: string, invoice: Invoice): Promise<void> => {
+    if (!deps.paymentLinkProvider || !deps.invoiceRepo) return;
+    if (!invoice.stripePaymentLinkId) return;
+    await deactivateInvoicePaymentLink({
+      tenantId,
+      invoice,
+      reason: invoice.amountDueCents <= 0 ? 'settled' : 'repriced',
+      invoiceRepo: deps.invoiceRepo,
+      provider: deps.paymentLinkProvider,
+      connectAccountResolver: deps.connectAccountResolver,
+      auditRepo: deps.auditRepo,
+    });
+  };
+
+  // ───────────────────── SECURITY #1102 — account binding ─────────────────────
+  //
+  // Every Stripe settlement branch used to key off the intent's metadata alone
+  // (`pi.metadata.tenant_id` / `.invoice_id`). The signature check does not
+  // help: it attests that STRIPE sent the event, not whose account earned the
+  // money. So any tenant holding a connected account on this platform could
+  // mint a PaymentIntent on their OWN account carrying a neighbour's tenant_id
+  // + invoice_id, and Stripe would deliver a genuine, correctly-signed
+  // `payment_intent.succeeded` that marked the neighbour's invoice paid while
+  // the cash sat in the attacker's balance. The victim need not have enabled
+  // Connect at all.
+  //
+  // The seam below is the ONE place that closes it: `event.account` (the
+  // connected account the money actually landed in) is compared against the
+  // named tenant's own `tenants.stripe_connect_account_id` BEFORE any branch
+  // touches an invoice or a payment.
+
+  /** The single reason string: response body, audit row, and error_message. */
+  const STRIPE_ACCOUNT_MISMATCH = 'stripe_account_mismatch';
+
+  type EventAccountBinding =
+    | { ok: true }
+    | { ok: false; eventAccount: string; tenantConnectAccountId: string | null };
+
+  /**
+   * The tenant's own connected account id, or null when it has none.
+   *
+   * Three sources in preference order, because the router is wired differently
+   * in production and in the test harnesses, and all three read the SAME
+   * `tenants.stripe_connect_account_id` column:
+   *   1. `connectAccountResolver` — what app.ts wires (app.ts:1108-1124).
+   *   2. `connectService`         — the StripeConnectService directly.
+   *   3. `pool`                   — the column, read straight.
+   *
+   * A tenant we cannot find owns no connected account, so an unknown /
+   * malformed tenant id resolves to null and the caller refuses. Nothing
+   * wired at all likewise resolves to null: a deployment with no Connect
+   * wiring has no connected accounts, so an `event.account` on it can never
+   * belong to one of our tenants. Both are fail-CLOSED by construction.
+   * A genuine infrastructure error (pool down) still throws, so the outer
+   * catch turns it into a 500 Stripe will retry — never a silent refusal of a
+   * real payment.
+   */
+  const resolveTenantConnectAccountId = async (tenantId: string): Promise<string | null> => {
+    try {
+      if (deps.connectAccountResolver) {
+        const view = await deps.connectAccountResolver.resolveTenantConnectAccount(tenantId);
+        return view?.accountId ?? null;
+      }
+      if (deps.connectService) {
+        return (await deps.connectService.getAccount(tenantId)).accountId;
+      }
+    } catch (err) {
+      // An absent tenant owns no account — that is a refusal, not an outage.
+      if (err instanceof NotFoundError) return null;
+      throw err;
+    }
+    if (deps.pool && isValidTenantId(tenantId)) {
+      const { rows } = await deps.pool.query<{ stripe_connect_account_id: string | null }>(
+        `SELECT stripe_connect_account_id FROM tenants WHERE id = $1`,
+        [tenantId],
+      );
+      return rows[0]?.stripe_connect_account_id ?? null;
+    }
+    return null;
+  };
+
+  /**
+   * Is this event's money the named tenant's to settle?
+   *
+   *   no `event.account`  → PLATFORM-ORIGIN delivery. Stripe only stamps
+   *                         `account` on deliveries from a Connected-accounts
+   *                         destination, so there is nothing to bind against
+   *                         and behaviour is unchanged (deliberately: platform
+   *                         payments must not regress).
+   *   account matches     → the tenant's own money. Settle.
+   *   anything else       → refuse (this covers BOTH a neighbour's account and
+   *                         a tenant that never enabled Connect).
+   *
+   * Resolves at most once per event: the settlement branches are mutually
+   * exclusive `if (event.type === …)` arms, so at most one calls this.
+   */
+  const assertEventAccountBelongsToTenant = async (
+    event: { id: string; type: string; account?: string },
+    tenantId: string,
+  ): Promise<EventAccountBinding> => {
+    const eventAccount = typeof event.account === 'string' ? event.account.trim() : '';
+    if (!eventAccount) return { ok: true };
+    const tenantConnectAccountId = await resolveTenantConnectAccountId(tenantId);
+    if (tenantConnectAccountId && tenantConnectAccountId === eventAccount) return { ok: true };
+    return { ok: false, eventAccount, tenantConnectAccountId };
+  };
+
+  /**
+   * Refuse an unbound settlement: 403 (a 4xx-class refusal, never a 500 — a
+   * 500 is indistinguishable from an outage and makes Stripe retry an event
+   * that can never succeed), an audit row on the NAMED tenant so the victim
+   * can see the attempt, and a `webhook_events` row left at 'failed' — the
+   * existing vocabulary's non-processed terminal status (the column's CHECK
+   * allows only received/processing/processed/failed), so `processed_at`
+   * stays null and no reader can mistake a refusal for a settlement.
+   */
+  const refuseUnboundStripeEvent = async (
+    res: Response,
+    webhookEventId: string,
+    ctx: {
+      tenantId: string;
+      invoiceId?: string;
+      eventId: string;
+      eventType: string;
+      eventAccount: string;
+      tenantConnectAccountId: string | null;
+    },
+  ): Promise<Response> => {
+    logger.warn('Stripe event refused — event.account is not the tenant\'s connected account', {
+      eventId: ctx.eventId,
+      type: ctx.eventType,
+      tenantId: ctx.tenantId,
+      invoiceId: ctx.invoiceId,
+      eventAccount: ctx.eventAccount,
+      tenantConnectAccountId: ctx.tenantConnectAccountId,
+      reason: STRIPE_ACCOUNT_MISMATCH,
+    });
+    // Best-effort (a failed audit write must not turn a correctly-refused
+    // event into a 500), and skipped for a malformed tenant id, which the
+    // tenant-scoped audit write could not accept anyway.
+    if (deps.auditRepo && isValidTenantId(ctx.tenantId)) {
+      await deps.auditRepo
+        .create(
+          createAuditEvent({
+            tenantId: ctx.tenantId,
+            actorId: 'system:stripe_webhook',
+            actorRole: 'system',
+            eventType: 'webhook.auth_failed',
+            entityType: 'webhook',
+            entityId: STRIPE_ACCOUNT_MISMATCH,
+            correlationId: ctx.eventId,
+            metadata: {
+              reason: STRIPE_ACCOUNT_MISMATCH,
+              stripeEventId: ctx.eventId,
+              stripeEventType: ctx.eventType,
+              eventAccount: ctx.eventAccount,
+              tenantConnectAccountId: ctx.tenantConnectAccountId,
+              invoiceId: ctx.invoiceId ?? null,
+            },
+          }),
+        )
+        .catch((err) =>
+          logger.error('Failed to audit refused Stripe event', {
+            eventId: ctx.eventId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    }
+    await webhookRepo.updateStatus(
+      webhookEventId,
+      'failed',
+      `${STRIPE_ACCOUNT_MISMATCH}: event.account '${ctx.eventAccount}' is not tenant ` +
+        `${ctx.tenantId}'s connected account (${ctx.tenantConnectAccountId ?? 'none'})`,
+    );
+    return res.status(403).json({ error: 'Forbidden', reason: STRIPE_ACCOUNT_MISMATCH });
+  };
 
   /**
    * POST /webhooks/clerk
@@ -567,10 +818,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             });
           }
 
-          // Enqueue Twilio subaccount provisioning for new tenants only.
-          // Idempotent — the worker checks tenant_integrations.status and
-          // skips if already active, so safe to re-enqueue on webhook replay.
-          if (result.created && deps.queue) {
+          // Retry enqueue even when bootstrapTenant finds an existing tenant:
+          // an earlier delivery may have persisted it before enqueue failed.
+          // Awaiting send propagates failures to the webhook retry handler.
+          // Keep the stable tenant key to dedupe a message still in the queue;
+          // the worker also checks existing provisioning before doing work.
+          if (deps.queue) {
             const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
             // Twilio callbacks land on the API origin and signatures are
             // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
@@ -633,7 +886,25 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }));
           }
 
-          if (deps.provisioningQueue && result.created) {
+          // Awaited (not fire-and-forget): `send()` is a single durable
+          // INSERT (ON CONFLICT DO NOTHING on the idempotency key below) —
+          // this awaits that durable write landing, NOT a worker receiving
+          // or completing the job. A failed enqueue THROWS so the webhook
+          // 500s and Clerk retries (same rethrow-to-retry contract as the
+          // owner-insert block below), instead of returning 200 with no
+          // durable record the send was ever attempted. Bounded by
+          // PROVISIONING_ENQUEUE_TIMEOUT_MS so a wedged queue client fails
+          // the webhook rather than hanging it.
+          //
+          // NOT gated on result.created: bootstrapTenant's idempotent
+          // re-check makes result.created false on a Clerk retry forced by a
+          // LATER failure (e.g. the owner-insert) — gating on it here would
+          // permanently skip re-enqueueing a tenant whose provisioning send
+          // never actually landed on the first attempt. The queue dedupes on
+          // the deterministic `tenant-provisioning:${tenantId}` idempotency
+          // key, so re-attempting on every retry is a harmless no-op when
+          // the first send already succeeded.
+          if (deps.provisioningQueue) {
             const queuePayload = {
               tenantId: result.tenantId,
               ownerId: userId,
@@ -642,38 +913,57 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               webhookEventId: svixId,
             };
 
-            void deps.provisioningQueue.send(
-              'tenant.provisioning.root.requested',
-              queuePayload,
-              `tenant-provisioning:${result.tenantId}`
-            ).then(async (queueMessageId) => {
-              if (deps.auditRepo) {
-                await deps.auditRepo.create(createAuditEvent({
-                  tenantId: result.tenantId,
-                  actorId: userId,
-                  actorRole: 'owner',
-                  eventType: 'tenant.signup.provisioning.enqueued',
-                  entityType: 'tenant',
-                  entityId: result.tenantId,
-                  correlationId: signupCorrelationId,
-                  metadata: {
-                    queueMessageId,
-                    queueType: 'tenant.provisioning.root.requested',
-                  },
-                }));
-              }
-              logger.info('Root provisioning orchestration enqueued', {
-                tenantId: result.tenantId,
-                queueMessageId,
-                signupCorrelationId,
-              });
-            }).catch((err) => {
-              logger.error('Failed to enqueue root provisioning orchestration', {
+            let enqueueTimer: ReturnType<typeof setTimeout> | undefined;
+            const enqueueTimedOut = new Promise<never>((_resolve, reject) => {
+              enqueueTimer = setTimeout(
+                () => reject(new Error('Root provisioning enqueue timed out')),
+                PROVISIONING_ENQUEUE_TIMEOUT_MS,
+              );
+              if (enqueueTimer && typeof enqueueTimer.unref === 'function') enqueueTimer.unref();
+            });
+
+            let queueMessageId: string;
+            try {
+              queueMessageId = await Promise.race([
+                deps.provisioningQueue.send(
+                  'tenant.provisioning.root.requested',
+                  queuePayload,
+                  `tenant-provisioning:${result.tenantId}`
+                ),
+                enqueueTimedOut,
+              ]);
+            } catch (err) {
+              logger.error('Failed to enqueue root provisioning orchestration — failing webhook so Clerk retries', {
                 tenantId: result.tenantId,
                 signupCorrelationId,
                 error: err instanceof Error ? err.message : 'Unknown error',
               });
+              throw err;
+            } finally {
+              if (enqueueTimer) clearTimeout(enqueueTimer);
+            }
+
+            logger.info('Root provisioning orchestration enqueued', {
+              tenantId: result.tenantId,
+              queueMessageId,
+              signupCorrelationId,
             });
+
+            if (deps.auditRepo) {
+              await deps.auditRepo.create(createAuditEvent({
+                tenantId: result.tenantId,
+                actorId: userId,
+                actorRole: 'owner',
+                eventType: 'tenant.signup.provisioning.enqueued',
+                entityType: 'tenant',
+                entityId: result.tenantId,
+                correlationId: signupCorrelationId,
+                metadata: {
+                  queueMessageId,
+                  queueType: 'tenant.provisioning.root.requested',
+                },
+              }));
+            }
           }
 
           // QUALITY-2026-07-12 WS4 (+ PR #669 review) — create the OWNER's
@@ -1042,6 +1332,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as {
+          /** Checkout session id (cs_...) — unique per checkout. */
+          id?: string;
           metadata?: {
             tenant_id?: string;
             invoice_id?: string;
@@ -1078,6 +1370,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const invoiceId = session.metadata?.invoice_id;
         const depositForJobId = session.metadata?.deposit_for_job_id;
         const amountTotal = session.amount_total; // already in cents
+
+        // SECURITY #1102 — before the deposit credit OR the invoice credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
 
         // Tier 4 (Deposit rules — PR 3b). Deposit branch: credit
         // depositPaidCents on the linked job. Cap at depositRequiredCents
@@ -1143,9 +1450,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         // Stripe creation paths attach tenant_id+invoice_id metadata
         // but NEVER payment_id, so without this the refund handler had
         // no way to find the originating row and silently ACKed every
-        // real refund as 'skipped'. Fall back to the previous literal
-        // for the edge case where payment_intent is absent (preserves
-        // legacy behavior for any pre-existing fixtures).
+        // real refund as 'skipped'.
+        //
+        // P0-5 — when payment_intent is absent, fall back to the SESSION id
+        // (cs_..., unique per checkout), then the event id. The old literal
+        // 'stripe_checkout' collided tenant-wide: the second intent-less
+        // checkout in a tenant hit the (tenant, provider_reference) unique
+        // index against a DIFFERENT invoice, recordPayment surfaced a
+        // conflict the catch below doesn't match, and the 500 made Stripe
+        // redeliver the same collision forever.
         const paymentIntentRef: string =
           typeof session.payment_intent === 'string'
             ? session.payment_intent
@@ -1153,7 +1466,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 session.payment_intent !== null &&
                 typeof session.payment_intent.id === 'string')
               ? session.payment_intent.id
-              : 'stripe_checkout';
+              : (session.id ?? event.id);
 
         // §6 Time-to-Cash. Refresh deps for the post-payment job
         // money-state rollup. Undefined unless all three repos are
@@ -1170,7 +1483,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             : undefined;
 
         try {
-          await recordPayment(
+          const { invoice: creditedInvoice } = await recordPayment(
             {
               tenantId,
               invoiceId,
@@ -1185,21 +1498,42 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentReceiptNotifier,
             deps.auditRepo,
             { actorRole: 'system', correlationId: paymentIntentRef },
+            undefined,
+            // The link that produced this capture is consumed (and any other
+            // stored link is now mispriced) — recordPayment kills it.
+            deps.paymentLinkProvider
+              ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+              : undefined,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
           if (payErr instanceof ValidationError) {
             if (payErr.message.includes('exceeds amount due')) {
-              // Overpayment: cap to whatever is still owed and retry.
+              // Overpayment: cap the INVOICE CREDIT to whatever is still owed
+              // (over-crediting would be worse) — but never silently. The
+              // uncredited remainder is real money sitting at Stripe with no
+              // local row; audit it so reconciliation can find it (P0-9).
               const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
               if (!invoice || invoice.amountDueCents <= 0) {
                 logger.info('Invoice already fully paid (overpayment scenario)', { tenantId, invoiceId });
+                if (invoice) {
+                  await auditUnappliedCapture({
+                    tenantId, invoiceId, eventId: event.id,
+                    providerReference: paymentIntentRef,
+                    capturedCents: amountTotal,
+                    creditedCents: 0,
+                    invoiceStatus: invoice.status,
+                    reason: 'zero_balance',
+                  });
+                  await killStaleInvoiceLink(tenantId, invoice);
+                }
               } else {
-                await recordPayment(
+                const capped = invoice.amountDueCents;
+                const { invoice: creditedInvoice } = await recordPayment(
                   {
                     tenantId,
                     invoiceId,
-                    amountCents: invoice.amountDueCents,
+                    amountCents: capped,
                     method: 'credit_card',
                     providerReference: paymentIntentRef,
                     processedBy: 'stripe_webhook',
@@ -1210,14 +1544,41 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.paymentReceiptNotifier,
                   deps.auditRepo,
                   { actorRole: 'system', correlationId: paymentIntentRef },
+                  undefined,
+                  deps.paymentLinkProvider
+                    ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+                    : undefined,
                 );
                 logger.info('Invoice paid at capped amount', {
-                  tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
+                  tenantId, invoiceId, requested: amountTotal, paid: capped,
+                });
+                await auditUnappliedCapture({
+                  tenantId, invoiceId, eventId: event.id,
+                  providerReference: paymentIntentRef,
+                  capturedCents: amountTotal,
+                  creditedCents: capped,
+                  invoiceStatus: creditedInvoice.status,
+                  reason: 'capped_to_balance',
                 });
               }
             } else if (payErr.message.includes('status')) {
-              // Invoice already settled (paid/void/canceled) — idempotent success.
+              // Invoice already settled (paid/void/canceled) — idempotent for
+              // the EVENT, but the capture itself is unapplied money (P0-9):
+              // audit it, and make sure no live link survives on the dead
+              // invoice (a failed void-time deactivation gets retried here).
               logger.info('Invoice already settled, ignoring Stripe payment', { tenantId, invoiceId });
+              const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+              if (invoice) {
+                await auditUnappliedCapture({
+                  tenantId, invoiceId, eventId: event.id,
+                  providerReference: paymentIntentRef,
+                  capturedCents: amountTotal,
+                  creditedCents: 0,
+                  invoiceStatus: invoice.status,
+                  reason: 'not_payable',
+                });
+                await killStaleInvoiceLink(tenantId, invoice);
+              }
             } else {
               throw payErr;
             }
@@ -1257,6 +1618,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         // `amount_received` is 0 — the to-be-credited amount is `amount`.
         const amountCents = pi.amount ?? pi.amount_received;
 
+        // SECURITY #1102 — before the in-flight credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
+
         if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
           logger.info('payment_intent.processing missing invoice metadata — skipping', {
             eventId: event.id, paymentIntentId: piId,
@@ -1280,7 +1656,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
 
         try {
-          await recordProcessingPayment(
+          const { invoice: creditedInvoice } = await recordProcessingPayment(
             {
               tenantId,
               invoiceId,
@@ -1298,6 +1674,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Recorded in-flight ACH payment via payment_intent.processing', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
+          // P0-9 — the in-flight credit repriced (or settled) the invoice; a
+          // hosted link minted at the old balance must not stay live.
+          await killStaleInvoiceLink(tenantId, creditedInvoice);
         } catch (payErr) {
           if (
             payErr instanceof ValidationError &&
@@ -1344,6 +1723,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const invoiceId = pi.metadata?.invoice_id;
         const piId = pi.id;
         const amountCents = pi.amount_received ?? pi.amount;
+
+        // SECURITY #1102 — before the settlement credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
 
         if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
           logger.info('payment_intent.succeeded missing invoice metadata — skipping', {
@@ -1448,7 +1842,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
 
         try {
-          await recordPayment(
+          const { invoice: creditedInvoice } = await recordPayment(
             {
               tenantId,
               invoiceId,
@@ -1463,6 +1857,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentReceiptNotifier,
             deps.auditRepo,
             { actorRole: 'system', correlationId: piId },
+            undefined,
+            // P0-9 — recordPayment kills any link still priced at the
+            // pre-credit balance.
+            deps.paymentLinkProvider
+              ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+              : undefined,
           );
           logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
@@ -1472,12 +1872,32 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             payErr instanceof ValidationError &&
             (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
           ) {
-            // Invoice already settled (e.g. checkout.session.completed used
-            // the 'stripe_checkout' provider_reference fallback so the dedup
-            // above missed) — idempotent success.
+            // Invoice already settled — idempotent for the EVENT, but this is
+            // still a succeeded capture with no intent-keyed payment row
+            // (P0-9): either the same money was recorded under the checkout
+            // session-id fallback reference (benign; the audit row is a
+            // reviewable false positive), or a genuinely stale/direct intent
+            // captured against a settled/void invoice (real unapplied money).
+            // Audit it either way and retry the stale-link kill — the
+            // reconciliation trail must not depend on which Stripe event
+            // shape happened to arrive.
             logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
               tenantId, invoiceId,
             });
+            const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+            if (invoice) {
+              await auditUnappliedCapture({
+                tenantId, invoiceId, eventId: event.id,
+                providerReference: piId,
+                capturedCents: amountCents,
+                creditedCents: 0,
+                invoiceStatus: invoice.status,
+                reason: payErr.message.includes('exceeds amount due')
+                  ? 'exceeds_balance_payment_intent'
+                  : 'not_payable_payment_intent',
+              });
+              await killStaleInvoiceLink(tenantId, invoice);
+            }
           } else {
             throw payErr;
           }
@@ -1506,6 +1926,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const tenantId = pi.metadata?.tenant_id;
         const invoiceId = pi.metadata?.invoice_id;
         const piId = pi.id;
+
+        // SECURITY #1102 — the failure branch is money-touching too: a
+        // payment_failed on a previously-settled intent REVERSES the payment
+        // and reopens the invoice, so an unbound delivery is a vandalism
+        // vector, not just a mis-credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
 
         if (!tenantId || !invoiceId || !piId) {
           logger.info('payment_intent.payment_failed missing invoice metadata — skipping', {
@@ -2028,9 +2466,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // cross-tenant lookup by payment_intent because the event
       // payload doesn't carry the parent charge's metadata.tenant_id.
       //
-      // Per-refund idempotency is in recordRefund() itself: when
-      // payment.lastRefundStripeId === refund.id, recordRefund
-      // short-circuits — so receiving the same refund via both
+      // Per-refund idempotency is in recordRefund() itself (D2-4a /
+      // P0-4): it claims a `payment_refunds` ledger row keyed
+      // (tenant_id, stripe_refund_id) in the SAME statement as the
+      // refunded-amount increment, and an already-claimed refund id is
+      // a duplicate no-op — so receiving the same refund via both
       // charge.refunded AND charge.refund.updated does NOT double-count.
       if (event.type === 'charge.refund.updated') {
         const refund = event.data.object as {

@@ -1,5 +1,9 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { isCaptureProposalType } from '@ai-service-os/shared';
+import {
+  isCaptureProposalType,
+  isFlatMissingField,
+  labelForMissingField,
+} from '@ai-service-os/shared';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged, PROPOSALS_CHANGED } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -16,6 +20,15 @@ import {
   needsAddressCompletion,
   type AddressValues,
 } from '../shared/ServiceAddressCompletion';
+import {
+  ReviewResponseReview,
+  anyReviewComponentSelected,
+  initialReviewResponseSelection,
+  needsReviewResponseReview,
+  reviewResponseEditsFrom,
+  type ReviewResponsePayloadView,
+  type ReviewResponseSelection,
+} from './ReviewResponseReview';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -93,6 +106,15 @@ interface InboxProposalRow {
     id: string;
     proposalType: string;
     summary: string;
+    /**
+     * Review J8 — the drafting handler's own reasoning. Already serialized by
+     * the inbox endpoint (`proposalResponseSchema` carries it); it was simply
+     * never declared here and therefore never read. On a gated proposal it is
+     * the ONLY place the operator learns what the draft refused to do —
+     * `update_catalog_item`'s refused spoken price ("Heard a price of
+     * $290,000.00 … NOT applied") being the case that exposed this.
+     */
+    explanation?: string;
     status: string;
     createdAt: string;
     expiresAt?: string;
@@ -126,6 +148,15 @@ interface InboxProposalRow {
       state?: string;
       postalCode?: string;
       country?: string;
+      // U6 — review_response_proposal components (shared contract
+      // review-response-proposal.ts). The inbox serializes the FULL payload,
+      // so these keys were already arriving at runtime; declaring them lets
+      // the card show the drafted reply and flip the per-component
+      // `approved` flags (drafted `false`) before approval.
+      classification?: ReviewResponsePayloadView['classification'];
+      publicResponse?: ReviewResponsePayloadView['publicResponse'];
+      privateFollowUp?: ReviewResponsePayloadView['privateFollowUp'];
+      serviceCredit?: ReviewResponsePayloadView['serviceCredit'];
     };
     sourceContext?: {
       catalogResolution?: Record<string, AmbiguityCandidate[]>;
@@ -222,6 +253,50 @@ function rowNeedsAddress(row: InboxProposalRow): boolean {
   );
 }
 
+/**
+ * U6 — does this row need the review-response card? Gated on the proposal
+ * type AND a non-empty drafted reply: the handler dispatches per-component
+ * `approved` flags (all drafted `false`), so this row's Approve must flip
+ * the selected flags via the edit endpoint first — a bare approve would
+ * execute nothing while marking the proposal done.
+ */
+function rowNeedsReviewResponse(row: InboxProposalRow): boolean {
+  return (
+    row.proposal.proposalType === 'review_response_proposal' &&
+    needsReviewResponseReview(row.proposal.payload)
+  );
+}
+
+/**
+ * Review J8 — the `missingFields` gate, as this surface must honour it.
+ *
+ * `approveProposal` (api proposals/actions.ts) REFUSES a proposal with a
+ * non-empty tracked list, so an Approve button offered over one is an
+ * approval that cannot succeed: the operator taps it and gets a 400. The
+ * inbox declared this field and never read it, so a voice-drafted
+ * `update_catalog_item` whose spoken price was refused looked identical to
+ * an ordinary approvable row — on the surface such a proposal primarily
+ * lands on.
+ *
+ * Returns EVERY entry (path-shaped included), because the server gates on
+ * every entry; `flatMissingFieldsFor` is the narrower list this UI can
+ * actually name.
+ */
+function missingFieldsFor(row: InboxProposalRow): string[] {
+  const raw = row.proposal.sourceContext?.missingFields;
+  return Array.isArray(raw) ? raw.filter((f): f is string => typeof f === 'string') : [];
+}
+
+/**
+ * The subset worth printing: flat keys an operator could fill. Path-shaped
+ * entries (`lineItems[0].catalogItemId`) belong to the ambiguous-line
+ * candidate picker `ProposalMarkers` already renders, and naming them in
+ * prose would just be a second, worse copy of that control.
+ */
+function flatMissingFieldsFor(row: InboxProposalRow): string[] {
+  return missingFieldsFor(row).filter(isFlatMissingField);
+}
+
 function holdExpiryLine(row: InboxProposalRow, timezone: string): string | null {
   if (row.proposal.proposalType !== 'create_booking' || !row.proposal.expiresAt) {
     return null;
@@ -308,7 +383,13 @@ function batchConfidence(proposal: InboxProposalRow['proposal']): number {
 function isBatchEligibleRow(row: InboxProposalRow): boolean {
   return (
     isCaptureProposalType(row.proposal.proposalType) &&
-    batchConfidence(row.proposal) >= 0.8
+    batchConfidence(row.proposal) >= 0.8 &&
+    // Review J8 — the hero is an Approve too. `approveProposal` refuses a
+    // proposal with a tracked `missingFields` entry, so sweeping one into
+    // the batch buys a per-id failure and a confusing partial result. A
+    // high-confidence `create_customer` with only a name is exactly this
+    // shape, so it is not hypothetical.
+    missingFieldsFor(row).length === 0
   );
 }
 
@@ -573,6 +654,18 @@ export function InboxPage() {
   const addressValuesFor = (row: InboxProposalRow): AddressValues =>
     addressDrafts[row.proposal.id] ?? initialAddressValues(row.proposal.payload);
 
+  /**
+   * U6 — per-row review-response component selections, keyed by proposal id.
+   * Same shape/rationale as `addressDrafts`: the Approve button (a sibling of
+   * the toggles) must send the flag flips as an edit BEFORE approving, so the
+   * selection lives here. Lazily seeded to "everything the draft carries".
+   */
+  const [reviewSelections, setReviewSelections] = useState<
+    Record<string, ReviewResponseSelection>
+  >({});
+  const reviewSelectionFor = (row: InboxProposalRow): ReviewResponseSelection =>
+    reviewSelections[row.proposal.id] ?? initialReviewResponseSelection(row.proposal.payload);
+
   async function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<void> {
     const removed = rows.find((r) => r.proposal.id === id);
     setRows((prev) => prev.filter((r) => r.proposal.id !== id));
@@ -595,7 +688,44 @@ export function InboxPage() {
           if (!editRes.ok) throw new Error(`HTTP ${editRes.status}`);
         }
       }
-      const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
+      // U6 — review-response: the execution handler dispatches per-component
+      // `approved` flags, which are drafted `false`. Flip the approver's
+      // selections through the SAME edit endpoint before approving; without
+      // this the approval would "succeed" while posting nothing. Approving
+      // with zero components selected is blocked (belt-and-braces — the
+      // button is also disabled in that state).
+      if (action === 'approve' && removed && rowNeedsReviewResponse(removed)) {
+        const selection = reviewSelectionFor(removed);
+        if (!anyReviewComponentSelected(removed.proposal.payload, selection)) {
+          setRows((prev) => [removed, ...prev]);
+          setError('Include at least one part of the review response, or reject the draft.');
+          return;
+        }
+        const edits = reviewResponseEditsFrom(removed.proposal.payload, selection);
+        if (edits) {
+          const editRes = await apiFetch(`/api/proposals/${id}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ edits }),
+          });
+          if (!editRes.ok) throw new Error(`HTTP ${editRes.status}`);
+        }
+      }
+      // The reject endpoint validates `rejectProposalBodySchema` — `reason`
+      // is REQUIRED, so a body-less POST 400s for every proposal type. The
+      // inbox is a one-tap surface with no reason form (unlike mobile's
+      // useProposalReview, which collects one), so send the surface as the
+      // reason — same spirit as the route's 'ui' rejection-source stamp.
+      const res = await apiFetch(
+        `/api/proposals/${id}/${action}`,
+        action === 'reject'
+          ? {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ reason: 'Rejected from inbox' }),
+            }
+          : { method: 'POST' },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       emitProposalsChanged();
       // D5 / Finding 2 — show the undo toast for approvals, anchored to the
@@ -843,6 +973,17 @@ export function InboxPage() {
             }
             const { row } = item;
             const badge = URGENCY_BADGE[row.urgency];
+            // U6 — a review-response approve with nothing selected would
+            // execute zero components; keep the button dead until at least
+            // one part is included (the card explains why).
+            // Review J8 — a tracked `missingFields` entry blocks approval
+            // SERVER-side, so offering Approve over one offers a 400.
+            const missingFields = missingFieldsFor(row);
+            const namedMissingFields = flatMissingFieldsFor(row);
+            const approveBlocked =
+              missingFields.length > 0 ||
+              (rowNeedsReviewResponse(row) &&
+                !anyReviewComponentSelected(row.proposal.payload, reviewSelectionFor(row)));
             return (
               <li
                 key={row.proposal.id}
@@ -862,7 +1003,34 @@ export function InboxPage() {
                       <p className="text-xs text-warning mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
+                    {/* Review J8 — the drafting handler's own reasoning. On a
+                        gated proposal it is the only thing that says what the
+                        draft REFUSED to do ("Heard a price of $290,000.00 …
+                        NOT applied"), and it was rendered nowhere on this
+                        surface. */}
+                    {row.proposal.explanation && (
+                      <p
+                        data-testid="proposal-explanation"
+                        className="text-xs text-muted-foreground mt-0.5"
+                      >
+                        {row.proposal.explanation}
+                      </p>
+                    )}
                     <ProposalMarkers row={row} onResolveLine={resolveLine} onResolveEntity={resolveEntity} />
+                    {/* Why Approve is dead, in the operator's words. Only the
+                        flat entries are named — a path-shaped one is the
+                        candidate picker's job, rendered by ProposalMarkers
+                        just above. Editing is not offered HERE: the inbox has
+                        no field-edit affordance and building one is a
+                        different piece of work (see the report). */}
+                    {namedMissingFields.length > 0 && (
+                      <p
+                        data-testid="proposal-missing-fields"
+                        className="text-xs text-warning mt-1"
+                      >
+                        Needs: {namedMissingFields.map(labelForMissingField).join(', ')}
+                      </p>
+                    )}
                     {/* A spoken address that can't yet become a
                         `service_location`. Completing it here is the obvious
                         path; leaving it blank is still allowed and the
@@ -878,19 +1046,41 @@ export function InboxPage() {
                         idPrefix={row.proposal.id}
                       />
                     )}
+                    {/* U6 — the drafted review response: the exact public
+                        reply text plus include/exclude toggles per component.
+                        Approve flips the selected `approved` flags via the
+                        edit endpoint before POSTing (see actOnProposal). */}
+                    {rowNeedsReviewResponse(row) && (
+                      <ReviewResponseReview
+                        payload={row.proposal.payload!}
+                        selection={reviewSelectionFor(row)}
+                        onChange={(next) =>
+                          setReviewSelections((prev) => ({ ...prev, [row.proposal.id]: next }))
+                        }
+                        idPrefix={row.proposal.id}
+                      />
+                    )}
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
+                  {/* Stacked below sm: two side-by-side buttons squeezed the
+                      content column to ~92px at 320px (one word per line in
+                      the draft text). A vertical pair costs ~70px, not
+                      ~150px. Desktop keeps the row. */}
+                  <div
+                    data-testid="row-actions"
+                    className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center"
+                  >
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'reject')}
-                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
+                      className="min-h-11 rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
                     >
                       Reject
                     </button>
                     <button
                       type="button"
+                      disabled={approveBlocked}
                       onClick={() => actOnProposal(row.proposal.id, 'approve')}
-                      className="rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
+                      className="min-h-11 rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90 disabled:opacity-50"
                     >
                       Approve
                     </button>

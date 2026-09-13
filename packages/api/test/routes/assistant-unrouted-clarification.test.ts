@@ -183,29 +183,35 @@ describe('POST /api/assistant/chat — an unrouted utterance never claims an act
   });
 
   it('a CONFIDENT intent with no handler never reaches the LLM at all', async () => {
-    // The hole PR #776 left open. 'remove_crew_member' is a real taxonomy
-    // intent wired into neither chat dispatch map, classified at 0.95 — so it
-    // is not a misunderstanding, it is a capability we do not have here. The
+    // The hole PR #776 left open. 'update_brand_voice' is a real taxonomy
+    // intent DELIBERATELY wired into neither chat dispatch map
+    // (handler-registry.ts's module doc: stays surface-specific by design),
+    // classified at 0.95 — so it is not a misunderstanding, it is a
+    // capability we do not have here. Was 'remove_crew_member' until Task 15
+    // (2026-08-07 tradesperson plan) wired that intent onto this surface's
+    // shared registry, which turned this into a false negative — the
+    // canonical "unmapped" example must be one of the four intents that STAY
+    // unmapped on purpose, not an incidental gap that closes over time. The
     // second scripted response is the fabrication the fallback LLM would have
     // returned; the gateway call count proves it was never asked.
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = scriptedGateway([
       JSON.stringify({
-        intentType: 'remove_crew_member',
+        intentType: 'update_brand_voice',
         confidence: 0.95,
-        reasoning: 'clear crew change',
+        reasoning: 'clear brand-voice change',
         extractedEntities: {},
       }),
-      JSON.stringify({ content: "I've taken Dave off the crew.", proposal: null }),
+      JSON.stringify({ content: "I've updated the brand voice.", proposal: null }),
     ]);
     const app = buildApp(gateway, proposalRepo);
 
     const res = await request(app)
       .post('/api/assistant/chat')
-      .send({ messages: [{ role: 'user', content: 'take Dave off the Miller crew' }] });
+      .send({ messages: [{ role: 'user', content: 'From now on sound more casual.' }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.taskType).toBe('assistant.unhandled.remove_crew_member');
+    expect(res.body.taskType).toBe('assistant.unhandled.update_brand_voice');
     expect(res.body.message.content).not.toMatch(COMPLETION_CLAIM_RE);
     expect(res.body.message.content).toMatch(/can't do that from here yet/i);
     expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);

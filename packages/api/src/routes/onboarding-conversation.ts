@@ -22,6 +22,20 @@ const TurnRequestSchema = z.object({
   /** User utterance. Required after the opening prompt; optional on the
    *  very first call so the UI can render the assistant's greeting. */
   userMessage: z.string().min(1).max(2000).optional(),
+  /**
+   * Browser-detected IANA zone — the SAME thing the form wizard's
+   * IdentityStep already sends on PUT /identity, so a "Talk it through"
+   * owner is not asked a question a wizard owner never sees. Send it on
+   * every turn; the terminal turn is the one that emits the proposals.
+   *
+   * Deliberately shape-only validation here (length, not IANA-ness): a
+   * malformed zone must not 400 an entire conversation turn. The
+   * proposer re-validates with `isRuntimeTimezone` and GATES the
+   * tenant-settings proposal when the value is missing or unrecognized —
+   * asking the operator, never guessing (migration 263 / the Phoenix
+   * mis-booking postmortem).
+   */
+  clientTimezone: z.string().trim().min(1).max(64).optional(),
 });
 
 export interface OnboardingConversationRouterDeps {
@@ -51,6 +65,7 @@ export function createOnboardingConversationRouter(
           userId: req.auth!.userId,
           sessionId: parsed.data.sessionId,
           userMessage: parsed.data.userMessage,
+          clientTimezone: parsed.data.clientTimezone,
         });
         res.json(result);
       } catch (err) {

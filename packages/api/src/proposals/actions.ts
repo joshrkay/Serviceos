@@ -27,6 +27,43 @@ const logger = createLogger({
 });
 
 /**
+ * Proposal types whose execution writes TENANT CONFIGURATION — the same
+ * surface `routes/onboarding.ts` (owner-only) and
+ * `tenants/brand/brand-voice-router.ts` (`settings:update`) protect at the
+ * HTTP layer. Approving one of these is equivalent to calling those routes,
+ * so it demands the same authority rather than the generic
+ * `proposals:approve` that every dispatcher holds.
+ *
+ * `update_catalog_item` joined this set for the same reason: the catalog
+ * item HTTP routes (routes/catalog-items.ts POST/PUT/DELETE) all require
+ * `settings:update`, and a dispatcher holds `proposals:approve` but NOT
+ * `settings:update` (auth/rbac.ts). Without this entry, a dispatcher could
+ * speak "raise the diagnostic fee to 89 dollars" and approve their own
+ * card — the exact approval-queue-as-route-permission-bypass this guard
+ * exists to close.
+ *
+ * `add_catalog_item` (Task 12, 2026-08-07 tradesperson plan) joined for the
+ * IDENTICAL reason: its execution handler writes a new row through the
+ * SAME catalog domain layer the `settings:update`-gated
+ * `POST /api/catalog-items` route writes through — same authority class as
+ * `update_catalog_item`, just the create side instead of the price-edit
+ * side. Without this entry, a dispatcher could speak "Add a catalog item:
+ * smart thermostat install, 385" and approve their own card, creating a
+ * price-book entry with only `proposals:approve` — the same bypass this
+ * guard closed for `update_catalog_item`.
+ */
+const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
+  'onboarding_tenant_settings',
+  'onboarding_service_category',
+  'onboarding_estimate_template',
+  'onboarding_team_member',
+  'onboarding_schedule',
+  'update_brand_voice',
+  'update_catalog_item',
+  'add_catalog_item',
+]);
+
+/**
  * N-009 / P2-038 — optional correction-loop reversal wired into `undoProposal`.
  * When supplied, undoing a proposal reverses every structured lesson that
  * proposal recorded (and the config each cascaded). Failure-soft: a throw is
@@ -191,6 +228,48 @@ export async function approveProposal(
     throw new ForbiddenError('Only an owner may approve an entity alias');
   }
 
+  // `voice_clarification` is deliberately the one ProposalType with no
+  // execution handler (proposals/execution/handlers.ts) — it is an ASK
+  // ("caller asked for X but the request was incomplete"), not a mutation,
+  // so there is nothing an approval could greenlight. Before this guard,
+  // tapping Approve on one (the Inbox UI renders the same Approve/Reject
+  // pair for every proposal type, clarification cards included — see
+  // proposal.ts's `voice_clarification` actionClass comment, "closes when
+  // the operator dismisses it or speaks again") transitioned it straight to
+  // 'approved'; the execution sweep then claimed it (status -> 'executing')
+  // and `ProposalExecutor.execute` threw HANDLER_NOT_FOUND, wedging the
+  // card in 'executing' through several stale-recovery retry cycles before
+  // resetStaleExecuting finally terminalized it as 'execution_failed' —
+  // dishonest bookkeeping for a card that never represented a failed
+  // action, only an unanswered question (2026-08-30 sweep row A49). Refuse
+  // the approve outright and point at the actual close actions instead:
+  // Reject (dismiss) or letting the caller answer by speaking again, which
+  // drafts a fresh proposal.
+  if (proposal.proposalType === 'voice_clarification') {
+    throw new ValidationError(
+      'voice_clarification proposals cannot be approved — they ask a question rather than propose an action. Dismiss it (reject), or let the caller answer by speaking again.',
+      { proposalId, proposalType: proposal.proposalType },
+    );
+  }
+
+  // Config-writing proposal types need the SAME authority their HTTP routes
+  // demand, not merely `proposals:approve`. Without this a dispatcher — who
+  // holds `proposals:approve` but not `settings:update` — could approve a
+  // card that rewrites tenant identity, activates a vertical pack (seeding
+  // the price book), or replaces the locked brand voice: authority the
+  // routes deliberately withhold from them
+  // (routes/onboarding.ts and tenants/brand/brand-voice-router.ts both gate
+  // on owner / settings:update). The approval queue must not become a way
+  // around the route's permission model.
+  if (
+    CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType) &&
+    !hasPermission(actorRole, 'settings:update')
+  ) {
+    throw new ForbiddenError(
+      `Approving ${proposal.proposalType} requires permission to update settings`,
+    );
+  }
+
   // §5.5 — a schedule proposal's 48h window is enforced by an HOURLY sweep, so
   // there is a window after expiresAt but before the sweep where the row still
   // reads ready_for_review. Guard the approval path directly (same predicate the
@@ -225,13 +304,20 @@ export async function approveProposal(
   // executor and undoProposal can agree on when the window opened.
   const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved', {
     approvedAt: transitioned.approvedAt,
-    // The execution worker normally attributes work to proposal.createdBy.
+    // The execution worker normally attributes work to proposal.createdBy —
+    // the DRAFTER. For anything where the approver is the one exercising
+    // authority, that is the wrong human, so carry the real approver through.
+    //
     // Alias candidates may be raised by a dispatcher, but activation must use
-    // the canonical OWNER who approved. Carry that actor through the existing
-    // execution attribution field until the executor writes the same value on
-    // completion.
+    // the canonical OWNER who approved. Config-writing types join for the same
+    // reason and one more: the sweep runs detached from this request, so if
+    // the approver's role isn't stamped here it cannot be recovered later, and
+    // the audit falls back to asserting 'owner' regardless of who acted.
     ...(proposal.proposalType === 'adopt_entity_alias'
       ? { executedBy: actorId }
+      : {}),
+    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType)
+      ? { executedBy: actorId, executedByRole: actorRole }
       : {}),
   });
   if (!updated) {

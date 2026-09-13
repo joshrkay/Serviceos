@@ -47,6 +47,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       business_hours: unknown | null;
       job_buffer_minutes: number | null;
       hourly_rate_cents: number | null;
+      timezone: string | null;
       onboarding_test_call_skipped_at: Date | null;
       onboarding_upgrade_prompt_shown_at: Date | null;
       voice_agent_live_at: Date | null;
@@ -55,7 +56,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       ai_verification_status: string | null;
       ai_verification_error: string | null;
     }>(
-      `SELECT business_hours, job_buffer_minutes, hourly_rate_cents,
+      `SELECT business_hours, job_buffer_minutes, hourly_rate_cents, timezone,
               onboarding_test_call_skipped_at, onboarding_upgrade_prompt_shown_at,
               voice_agent_live_at, activated_at,
               ai_model, ai_verification_status, ai_verification_error
@@ -83,6 +84,10 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       businessHours: ts?.business_hours ?? null,
       jobBufferMinutes: ts?.job_buffer_minutes ?? null,
       hourlyRateCents: ts?.hourly_rate_cents ?? null,
+      // Read from tenant_settings directly (like the other migration-098
+      // columns above) rather than the repo mapper, which folds NULL into
+      // `undefined` and loses the "never chosen" distinction.
+      timezone: ts?.timezone ?? null,
     },
     packActivated: activePackCount > 0 || settingsPacks > 0,
     twilioStatus: integRes.rows[0]?.status ?? null,

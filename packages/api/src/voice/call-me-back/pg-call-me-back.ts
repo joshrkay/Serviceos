@@ -43,17 +43,23 @@ export class PgCallMeBackRepository
   async create(input: CreateCallMeBackInput): Promise<CallMeBackTask> {
     const task = buildCallMeBackTask(input);
     return this.withTenant(input.tenantId, async (client) => {
-      // Idempotent on (tenant_id, session_id): a Twilio retry of
+      // Idempotent on (tenant_id, session_id, reason): a Twilio retry of
       // /callback-message must not insert a second pending callback for the
       // same call (which would notify the CSR twice). On conflict we DO
       // NOTHING and read the existing row back below.
+      //
+      // ANS-001 — `reason` is part of the key (migration 268). Keying on the
+      // session alone meant two DIFFERENT problems on one call collapsed into
+      // one row, and the loser was silently discarded: an E1 call that both
+      // left a live booking AND couldn't reach the tenant filed the booking
+      // task first, so the life-safety alert task vanished.
       const result = await client.query(
         `INSERT INTO call_me_back_tasks
             (id, tenant_id, session_id, call_sid, caller_phone, caller_name,
              callback_message, intent_summary, reason, status, scheduled_for,
              created_at, updated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
-          ON CONFLICT (tenant_id, session_id) WHERE session_id IS NOT NULL
+          ON CONFLICT (tenant_id, session_id, reason) WHERE session_id IS NOT NULL
             DO NOTHING
           RETURNING *`,
         [
@@ -71,13 +77,13 @@ export class PgCallMeBackRepository
         ],
       );
       if (result.rows.length > 0) return mapRow(result.rows[0]);
-      // Conflict — a callback already exists for this session; return it so
-      // the caller (and audit) reference the original task, not a new one.
+      // Conflict — a callback for this (session, reason) already exists; return
+      // it so the caller (and audit) reference the original task, not a new one.
       const existing = await client.query(
         `SELECT * FROM call_me_back_tasks
-          WHERE tenant_id = $1 AND session_id = $2
+          WHERE tenant_id = $1 AND session_id = $2 AND reason = $3
           LIMIT 1`,
-        [task.tenantId, task.sessionId],
+        [task.tenantId, task.sessionId, task.reason],
       );
       return mapRow(existing.rows[0]);
     });

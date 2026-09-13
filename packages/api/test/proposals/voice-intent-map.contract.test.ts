@@ -22,6 +22,8 @@ import {
 import { INTENT_TO_PROPOSAL_TYPE as ROUTER_REEXPORT } from '../../src/workers/voice-action-router';
 import { S1_ALLOWED_PROPOSAL_TYPES } from '../../src/proposals/surface';
 import { VALID_PROPOSAL_TYPES } from '../../src/proposals/proposal';
+import { PROFILE_INTENTS } from '../../src/ai/orchestration/classifier-profile';
+import type { IntentType } from '../../src/ai/orchestration/intent-classifier';
 
 const SRC = join(__dirname, '../../src');
 /** The one module allowed to define the mapping. */
@@ -72,6 +74,20 @@ describe('voice intent → proposal type: exactly one map', () => {
     }
   });
 
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // the EXISTING log_expense proposal type: no new ProposalType, no new
+  // execution handler.
+  it('maps log_mileage onto the log_expense proposal type', () => {
+    expect(intentToProposalType('log_mileage')).toBe('log_expense');
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+  // proposal type (not an alias), the create-side mirror of
+  // update_catalog_item.
+  it('maps add_catalog_item onto its own add_catalog_item proposal type', () => {
+    expect(intentToProposalType('add_catalog_item')).toBe('add_catalog_item');
+  });
+
   it('falls back to voice_clarification for unmapped / absent intents', () => {
     expect(intentToProposalType(undefined)).toBe('voice_clarification');
     // lookup_* intents are READ-ONLY and deliberately unmapped (P11-001).
@@ -86,8 +102,12 @@ describe('voice intent → proposal type: exactly one map', () => {
     // The security boundary is the ALLOWLIST, not this map: the phone path
     // gates the mapped type before building a payload, so an intent that
     // gains a mapping can only become reachable if its type is allowlisted.
-    // These five are the entire caller-reachable set, and adding intents here
-    // must never change that.
+    // Tradesperson wave 1 (2026-08-07 plan) added two INTENT NAMES to this
+    // set — schedule_inspection and log_warranty_claim — but zero new
+    // PROPOSAL TYPES: both alias onto create_appointment / create_job, which
+    // were already S1-allowed and already reachable via their own intents.
+    // The invariant this test guards (the reachable PROPOSAL TYPE set never
+    // grows without a matching S1_ALLOWED_PROPOSAL_TYPES edit) still holds.
     const s1Reachable = Object.entries(INTENT_TO_PROPOSAL_TYPE)
       .filter(([, proposalType]) => S1_ALLOWED_PROPOSAL_TYPES.has(proposalType!))
       .map(([intent]) => intent)
@@ -97,8 +117,33 @@ describe('voice intent → proposal type: exactly one map', () => {
       'create_customer',
       'create_job',
       'draft_estimate',
+      'log_warranty_claim',
       'reschedule_appointment',
+      'schedule_inspection',
     ]);
+  });
+
+  it('the caller profile advertises every S1-reachable intent except the field-tech aliases (#887)', () => {
+    // Structural coupling between the S1 allowlist computation above and the
+    // surface-conditional prompt (classifier-profile.ts): whatever an inbound
+    // caller can actually get proposed must stay advertised in their prompt.
+    // The two trade-internal phrasings are deliberately field_tech-only —
+    // "schedule the rough-in inspection" / "log a warranty callback" are
+    // spoken by the trade, not by the customer (design decision on #887).
+    const fieldTechAliases = new Set(['schedule_inspection', 'log_warranty_claim']);
+    const s1Reachable = Object.entries(INTENT_TO_PROPOSAL_TYPE)
+      .filter(([, proposalType]) => S1_ALLOWED_PROPOSAL_TYPES.has(proposalType!))
+      .map(([intent]) => intent as IntentType);
+    for (const intent of s1Reachable) {
+      if (fieldTechAliases.has(intent)) {
+        expect(PROFILE_INTENTS.field_tech.has(intent)).toBe(true);
+        continue;
+      }
+      expect(
+        PROFILE_INTENTS.caller.has(intent),
+        `S1 can act on ${intent} but the caller prompt no longer advertises it`,
+      ).toBe(true);
+    }
   });
 });
 
@@ -115,5 +160,94 @@ describe('voiceProposalSummary', () => {
       'Draft estimate for Jane Smith',
     );
     expect(voiceProposalSummary(undefined, {})).toBe('Voice clarification needed');
+  });
+
+  // Quality-review fix (2026-08-08) — the Tradesperson wave 1 alias intents
+  // were missing cases here entirely and fell through to the generic
+  // `Voice intent: ${intent}` fallback (both real call sites pass the raw
+  // classifier intent, never the mapped proposal type — see
+  // ai/agents/customer-calling/inapp-adapter.ts and
+  // ai/voice-turn/create-voice-turn-processor.ts). For schedule_inspection
+  // this is the SAME "Voice intent: create_appointment" job-naming bug the
+  // test above pins, just for the alias: CreateAppointmentExecutionHandler's
+  // SCH-02 fallback names an auto-opened job from this summary.
+  it('gives the Tradesperson wave 1 alias intents a human-readable summary, not the debug fallback', () => {
+    expect(voiceProposalSummary('schedule_inspection', { customerName: 'Patel' })).toBe(
+      'Schedule inspection for Patel',
+    );
+    expect(voiceProposalSummary('schedule_inspection', {})).toBe('Schedule inspection');
+    expect(voiceProposalSummary('log_permit', { jobReference: 'the Patel job' })).toBe(
+      'Log permit on the Patel job',
+    );
+    expect(voiceProposalSummary('log_permit', { customerName: 'Henderson' })).toBe(
+      'Log permit for Henderson',
+    );
+    expect(voiceProposalSummary('log_permit', {})).toBe('Log permit');
+    expect(voiceProposalSummary('log_warranty_claim', { customerName: 'Henderson' })).toBe(
+      'Log warranty claim for Henderson',
+    );
+    expect(voiceProposalSummary('log_warranty_claim', {})).toBe('Log warranty claim');
+  });
+
+  // Tradesperson wave 1, Task 5 — "Message <customer>" shape.
+  it('gives send_customer_message a human-readable summary', () => {
+    expect(voiceProposalSummary('send_customer_message', { customerName: 'Henderson' })).toBe(
+      'Message Henderson',
+    );
+    expect(voiceProposalSummary('send_customer_message', {})).toBe('Message');
+  });
+
+  // Task 7 — "Service agreement for <customer>" shape, mirrors
+  // send_customer_message's named-recipient summary.
+  it('gives create_service_agreement a human-readable summary', () => {
+    expect(voiceProposalSummary('create_service_agreement', { customerName: 'Garcia' })).toBe(
+      'Service agreement for Garcia',
+    );
+    expect(voiceProposalSummary('create_service_agreement', {})).toBe('Service agreement');
+  });
+
+  // Task 9 (spec-review drift-guard gap) — "Add material for <job or
+  // customer>" shape, mirrors create_change_order's job-takes-precedence
+  // rule (a shopping-list item is usually about the job, not the customer).
+  it('gives add_material a human-readable summary', () => {
+    expect(voiceProposalSummary('add_material', { jobReference: 'the Patel job' })).toBe(
+      'Add material for the Patel job',
+    );
+    expect(voiceProposalSummary('add_material', { customerName: 'Henderson' })).toBe(
+      'Add material for Henderson',
+    );
+    // jobReference wins over a bare customer name when both are present.
+    expect(
+      voiceProposalSummary('add_material', { jobReference: 'the Patel job', customerName: 'Henderson' }),
+    ).toBe('Add material for the Patel job');
+    expect(voiceProposalSummary('add_material', {})).toBe('Add material');
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — "Log mileage on <job>" /
+  // "for <customer>" shape, mirrors log_permit's preposition convention
+  // (both are "Log <noun>" intents) rather than add_material's uniform
+  // "for" — job reference wins when both are present.
+  it('gives log_mileage a human-readable summary', () => {
+    expect(voiceProposalSummary('log_mileage', { jobReference: 'the Patel job' })).toBe(
+      'Log mileage on the Patel job',
+    );
+    expect(voiceProposalSummary('log_mileage', { customerName: 'Henderson' })).toBe(
+      'Log mileage for Henderson',
+    );
+    expect(
+      voiceProposalSummary('log_mileage', { jobReference: 'the Patel job', customerName: 'Henderson' }),
+    ).toBe('Log mileage on the Patel job');
+    expect(voiceProposalSummary('log_mileage', {})).toBe('Log mileage');
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — "Add catalog item: <name>"
+  // shape — the new item's OWN name (catalogItemNewName), never
+  // customerName/jobReference (a price-book entry names an item, not a
+  // customer or a job).
+  it('gives add_catalog_item a human-readable summary', () => {
+    expect(voiceProposalSummary('add_catalog_item', { catalogItemNewName: 'Smart thermostat install' })).toBe(
+      'Add catalog item: Smart thermostat install',
+    );
+    expect(voiceProposalSummary('add_catalog_item', {})).toBe('Add catalog item');
   });
 });

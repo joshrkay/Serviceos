@@ -218,3 +218,52 @@ describe('P2-034 — punctuation-tolerant keyword lookup', () => {
     expect(handle).not.toHaveBeenCalled();
   });
 });
+
+describe('B5.5 — multi-word keyword whole-body fallback', () => {
+  it('matches a registered MULTI-WORD keyword ("on my way") that no single first token could', async () => {
+    const handle = vi.fn(async () => ({ handled: true, handler: 'en-route-sms' }));
+    registerKeywordHandler({ keywords: ['on my way'], handle });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: 'On my way!' });
+
+    expect(result.handled).toBe(true);
+    expect(result.handler).toBe('en-route-sms');
+    expect(handle).toHaveBeenCalledTimes(1);
+  });
+
+  it('a single-word registration is unaffected by the whole-body fallback (no change in matching)', async () => {
+    const handle = vi.fn(async () => ({ handled: true, handler: 'tech-status' }));
+    registerKeywordHandler({ keywords: ['omw'], handle });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: 'OMW' });
+
+    expect(result.handled).toBe(true);
+    expect(handle).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not match a multi-word keyword when only a PREFIX of the body matches', async () => {
+    const handle = vi.fn(async () => ({ handled: true }));
+    registerKeywordHandler({ keywords: ['on my way'], handle });
+
+    const result = await dispatchInboundSms({
+      ...ctxBase,
+      body: 'On my way, and also stopping for gas first',
+    });
+
+    expect(result.handled).toBe(false);
+    expect(handle).not.toHaveBeenCalled();
+  });
+
+  it('still refuses to match when the first token is punctuation-only, even if a phrase keyword is registered', async () => {
+    // Regression pin: the whole-body fallback must never resurrect the
+    // "corrupt prefix, salvage the rest" behavior the punctuation-only-first-
+    // token test above pins against single-word keywords.
+    const handle = vi.fn(async () => ({ handled: true }));
+    registerKeywordHandler({ keywords: ['on my way'], handle });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: '!!! on my way' });
+
+    expect(result.handled).toBe(false);
+    expect(handle).not.toHaveBeenCalled();
+  });
+});

@@ -26,6 +26,29 @@ describe('auditEventToProductEvent', () => {
     expect(auditEventToProductEvent(ev({ eventType: 'sms.inbound.captured' }))).toBeNull();
   });
 
+  /**
+   * Follow-up — proposal.execution_timed_out (emitted by execution-worker.ts
+   * when resetStaleExecuting moves a stale-claimed proposal to terminal
+   * execution_failed) is intentionally NOT allowlisted here, matching its
+   * sibling failure event `proposal.execution_failed` (also never
+   * allowlisted). Both are operational/debugging signals about WHY an
+   * execution didn't complete, not product-usage signals — PostHog only
+   * hears about the success side of the proposal lifecycle
+   * (proposal.executed, proposal.approved, proposal.rejected). Sentry/logs,
+   * not product analytics, are the intended consumer of failure detail.
+   */
+  it('does not forward proposal.execution_timed_out (operational signal, not product usage)', () => {
+    expect(
+      auditEventToProductEvent(
+        ev({
+          eventType: 'proposal.execution_timed_out',
+          metadata: { proposalType: 'create_customer', retryCount: 3, staleMinutes: 10, maxRetries: 3 },
+        }),
+      ),
+    ).toBeNull();
+    expect(ALLOWLISTED_AUDIT_EVENT_TYPES).not.toContain('proposal.execution_timed_out');
+  });
+
   it('maps proposal.approved with base props, feature_domain, and whitelisted metadata', () => {
     const pe = auditEventToProductEvent(
       ev({

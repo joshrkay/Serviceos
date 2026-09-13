@@ -355,3 +355,58 @@ describe('applyInvoiceEdits — pricingSource provenance', () => {
     expect(updatedInvoice.lineItems[2].pricingSource).toBeUndefined();
   });
 });
+
+describe('applyInvoiceEdits — unit passthrough', () => {
+  it('carries unit through add_line_item when the catalog match stamped one', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Gasket',
+          quantity: 2,
+          unitPrice: 4200,
+          category: 'material',
+          unit: 'each',
+        } satisfies InvoiceEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedInvoice.lineItems[2].unit).toBe('each');
+  });
+
+  it('carries unit through update_line_item when the catalog match stamped one', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'update_line_item',
+        index: 1,
+        lineItem: {
+          description: 'Premium filter',
+          quantity: 2,
+          unitPrice: 5500,
+          category: 'material',
+          unit: 'each',
+        } satisfies InvoiceEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedInvoice.lineItems[1].unit).toBe('each');
+  });
+
+  it('leaves unit undefined when the input carries none', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Manually entered line',
+          quantity: 1,
+          unitPrice: 1000,
+        } satisfies InvoiceEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedInvoice.lineItems[2].unit).toBeUndefined();
+  });
+});

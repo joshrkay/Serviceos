@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { resolveOwnerEmail } from '../auth/resolve-owner-email';
@@ -6,8 +7,9 @@ import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toErrorResponse } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
-import { PackActivationRepository, activatePack } from '../settings/pack-activation';
+import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { activatePackWithSeed } from '../onboarding/activate-pack-with-seed';
 import { v4 as uuidv4 } from 'uuid';
 import { loadOnboardingFacts } from '../onboarding/load-facts';
 import { deriveOnboardingStatus } from '../onboarding/derive-status';
@@ -24,7 +26,7 @@ import { searchAvailableNumbers } from '../integrations/twilio/provisioning';
 import { saveVoiceConfig } from '../voice/voice-config';
 import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
-import { BillingService } from '../billing/subscription';
+import { BillingService, BILLING_PLAN_IDS } from '../billing/subscription';
 import type { Queue } from '../queues/queue';
 import {
   PROVISION_TWILIO_JOB_TYPE,
@@ -32,7 +34,6 @@ import {
 } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import {
-  seedPackDefaults,
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
@@ -70,6 +71,13 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
   } = deps;
   const router = Router();
 
+  // Explicit plan selection only — the browser sends an id from this
+  // allowlist, never a Stripe price. See billing/subscription.ts
+  // BILLING_PLAN_IDS / createTrialCheckoutSession.
+  const BillingCheckoutInputSchema = z.object({
+    planId: z.enum(BILLING_PLAN_IDS),
+  });
+
   router.get(
     '/status',
     requireAuth,
@@ -105,6 +113,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
                 settings?.jobBufferMinutes ?? (softIdentityDone ? 15 : null),
               hourlyRateCents:
                 settings?.hourlyRateCents ?? (softIdentityDone ? 15000 : null),
+              // Soft-filled like the three above, and for the same
+              // CRM-unlock reason — `isIdentityDone` requires a zone because
+              // a tenant without one cannot book. This is NOT the defaulting
+              // migration 263 outlawed: nothing here is written to
+              // tenant_settings (there is no pool), so no appointment can be
+              // misbooked by it. Per settings.ts's rule, a consumer that
+              // merely DISPLAYS may substitute; one that BOOKS must gate —
+              // and the booking path still reads the real (absent) column.
+              timezone: settings?.timezone ?? (softIdentityDone ? 'UTC' : null),
             },
             packActivated: false,
             twilioStatus: null,
@@ -219,45 +236,30 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // owner_phone columns below.
         const bootstrapAiModel = resolveBootstrapAiModel();
 
-        await db.query(
-          `INSERT INTO tenant_settings (
-             id, tenant_id, business_name, service_area_text, service_area_radius,
-             business_hours, job_buffer_minutes, hourly_rate_cents,
-             timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix, next_estimate_number,
-             next_invoice_number, default_payment_term_days
-           )
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
-                   COALESCE($8, 'America/New_York'),
-                   $9, $11,
-                   'EST-', 'INV-', 1001, 1001, 30)
-           ON CONFLICT (tenant_id) DO UPDATE SET
-             business_name        = EXCLUDED.business_name,
-             service_area_text    = EXCLUDED.service_area_text,
-             service_area_radius  = EXCLUDED.service_area_radius,
-             business_hours       = EXCLUDED.business_hours,
-             job_buffer_minutes   = EXCLUDED.job_buffer_minutes,
-             hourly_rate_cents    = EXCLUDED.hourly_rate_cents,
-             timezone             = COALESCE($8, tenant_settings.timezone),
-             owner_phone          = CASE
-               WHEN $10::boolean THEN $9
-               ELSE tenant_settings.owner_phone
-             END,
-             ai_model             = COALESCE(tenant_settings.ai_model, $11),
-             updated_at           = now()`,
-          [
-            tenantId,
-            v.businessName,
-            v.serviceAreaText ?? null,
-            v.serviceAreaRadius ?? null,
-            JSON.stringify(v.businessHours),
-            v.jobBufferMinutes,
-            v.hourlyRateCents,
-            submittedTimezone,
-            ownerPhoneToWrite ?? null,
-            ownerPhoneToWrite !== undefined,
-            bootstrapAiModel,
-          ]
-        );
+        // B1.19 — the actual upsert lives in SettingsRepository.upsertIdentityFields
+        // (packages/api/src/settings/pg-settings.ts), a single atomic
+        // INSERT ... ON CONFLICT shared with the conversational
+        // onboarding_tenant_settings / onboarding_schedule execution
+        // handlers (proposals/execution/onboarding-handlers.ts) — both
+        // paths write tenant identity through the SAME implementation.
+        await settingsRepo.upsertIdentityFields(tenantId, {
+          businessName: v.businessName,
+          serviceAreaText: v.serviceAreaText ?? undefined,
+          // #874 tri-state: forward null (explicit clear) as-is; only an
+          // omitted field keeps the stored radius.
+          ...(v.serviceAreaRadius !== undefined
+            ? { serviceAreaRadius: v.serviceAreaRadius }
+            : {}),
+          businessHours: v.businessHours,
+          jobBufferMinutes: v.jobBufferMinutes,
+          hourlyRateCents: v.hourlyRateCents,
+          timezone: submittedTimezone ?? undefined,
+          // Tri-state: only include the key when the caller actually sent
+          // ownerPhone, so an omitted field leaves the stored value alone
+          // (matches the original ownerPhoneToWrite flag).
+          ...(v.ownerPhone !== undefined ? { ownerPhone: ownerPhoneToWrite ?? null } : {}),
+          bootstrapAiModel,
+        });
 
         // Feature 2 extras (migration 148) — persisted in a separate additive
         // UPDATE so the proven identity INSERT above stays untouched. Each
@@ -338,111 +340,28 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const userId = req.auth!.userId;
         const { packId } = parsed.data;
 
-        // Read current settings to get existing activeVerticalPacks
-        const existing = await settingsRepo.findByTenant(tenantId);
-        const currentPacks = existing?.activeVerticalPacks ?? [];
-        const newPacks = Array.from(new Set([...currentPacks, packId])); // Idempotent union
-
-        if (existing) {
-          // Update existing row
-          await settingsRepo.update(tenantId, { activeVerticalPacks: newPacks });
-        } else {
-          // Auto-create minimal settings row if tenant hasn't called /identity yet
-          await settingsRepo.create({
-            id: uuidv4(),
-            tenantId,
-            businessName: '', // Will remain empty until /identity is called
-            timezone: 'America/New_York',
-            estimatePrefix: 'EST-',
-            invoicePrefix: 'INV-',
-            nextEstimateNumber: 1001,
-            nextInvoiceNumber: 1001,
-            defaultPaymentTermDays: 30,
-            activeVerticalPacks: newPacks,
-            // Seed the platform default AI model so the onboarding
-            // "AI check" (Step 6) finds aiConfigPresent=true. Same
-            // value the ensureTenantSettings bootstrap path uses.
-            aiModel: resolveBootstrapAiModel(),
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-        }
-
-        // Serialize pack activation + seed per (tenant, pack) via a
-        // Postgres advisory transaction lock. Two concurrent /pack
-        // requests for the same tenant+pack could both pass the
-        // "already activated" branch and reach the seed probe before
-        // either has committed; both would then observe an empty
-        // catalog/template set and INSERT a full duplicate. Lock is
-        // held until COMMIT (end of this request transaction); a
-        // concurrent caller's try-lock returns false and gets a
-        // clear 409 message.
-        const ctx = currentTenantContext();
-        if (ctx) {
-          const lockRes = await ctx.client.query<{ locked: boolean }>(
-            `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked`,
-            [`pack:${tenantId}:${packId}`],
-          );
-          if (!lockRes.rows[0]?.locked) {
-            res.status(409).json({
-              error: 'PACK_ACTIVATION_IN_PROGRESS',
-              message: 'Another pack activation is already running for this tenant. Wait a moment and try again.',
-            });
-            return;
-          }
-        }
-
-        try {
-          await activatePack({ tenantId, packId }, packActivationRepo);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : '';
-          if (!msg.includes('already activated')) {
-            throw err;
-          }
-        }
-
-        // Auto-seed canonical job types, price book, and message-template
-        // defaults so the wizard's "we'll set this up for you" promise is
-        // real. Idempotent: safe to re-run because each helper checks
-        // for the canonical names first.
-        //
-        // We do NOT swallow seed errors here. Every /api route runs inside
-        // withTenantTransaction, and catching a SQL error mid-transaction
-        // leaves the connection in an aborted state — the auditRepo.create
-        // call below would then fail with "current transaction is aborted,
-        // commands ignored until end of transaction block." Letting the
-        // error propagate rolls the whole request back (including the
-        // pack_activation write) so the next click retries cleanly with
-        // no partial seed left behind.
-        let seedResult: Awaited<ReturnType<typeof seedPackDefaults>> | null = null;
-        if (packSeedDeps) {
-          seedResult = await seedPackDefaults(
-            { tenantId, packId, actorId: userId },
-            packSeedDeps,
-          );
-        }
-
-        // Emit audit event
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: userId,
-            actorRole: 'owner',
-            eventType: 'tenant.pack_activated',
-            entityType: 'tenant_packs',
-            entityId: packId,
-            metadata: {
-              packId,
-              ...(seedResult
-                ? {
-                    seedAlreadyApplied: seedResult.alreadySeeded,
-                    catalogItemsCreated: seedResult.catalogItemsCreated,
-                    templatesCreated: seedResult.templatesCreated,
-                  }
-                : {}),
-            },
-          })
+        // B1.19 — the actual activate+seed logic lives in
+        // activatePackWithSeed (src/onboarding/activate-pack-with-seed.ts),
+        // shared with the conversational onboarding_tenant_settings /
+        // onboarding_service_category execution handlers
+        // (proposals/execution/onboarding-handlers.ts) — both paths
+        // write through the SAME implementation. We do NOT swallow seed
+        // errors here: every /api route runs inside withTenantTransaction,
+        // and catching a SQL error mid-transaction leaves the connection
+        // aborted (the auditRepo.create call inside activatePackWithSeed
+        // would then fail too). Letting the error propagate rolls the
+        // whole request back so the next click retries cleanly.
+        const result = await activatePackWithSeed(
+          { tenantId, packId, actorId: userId, lockClient: currentTenantContext()?.client },
+          { settingsRepo, packActivationRepo, auditRepo, packSeedDeps },
         );
+        if (result.status === 'locked') {
+          res.status(409).json({
+            error: 'PACK_ACTIVATION_IN_PROGRESS',
+            message: 'Another pack activation is already running for this tenant. Wait a moment and try again.',
+          });
+          return;
+        }
 
         res.json({ ok: true, packId });
       } catch (error: unknown) {
@@ -482,7 +401,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             id: uuidv4(),
             tenantId,
             businessName: '', // placeholder; /identity will populate
-            timezone: 'America/New_York',
+            // No guessed timezone — see /pack's seeder above.
             estimatePrefix: 'EST-',
             invoicePrefix: 'INV-',
             nextEstimateNumber: 1001,
@@ -864,10 +783,53 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
   );
 
   /**
+   * GET /api/onboarding/billing/plans
+   *
+   * Validated, display-safe list of sellable plans (basic/enterprise) for
+   * the billing step's plan picker: id, canonical Stripe product name,
+   * and amount/interval — no price ids, no secrets. A plan whose env var
+   * is unset or whose Stripe price fails validation is simply omitted
+   * (see BillingService.listPlans); if nothing validates, this fails
+   * closed with an actionable, non-secret 503 rather than silently
+   * showing an empty/broken picker.
+   */
+  router.get(
+    '/billing/plans',
+    requireAuth,
+    requireTenant,
+    async (_req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!billingService) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+        const { plans } = await billingService.listPlans();
+        if (plans.length === 0) {
+          res.status(503).json({
+            error: 'BILLING_PLANS_UNAVAILABLE',
+            message: 'No billing plans are currently configured. Contact support.',
+          });
+          return;
+        }
+        res.json({ plans });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
    * POST /api/onboarding/billing/checkout-session
    *
    * Mints a Stripe Checkout Session for the 14-day trial subscription.
-   * Requires billingService (503 when Stripe is not configured).
+   * Requires billingService (503 when Stripe is not configured) AND an
+   * explicit `planId` (basic|enterprise) in the body — there is no
+   * default plan and no fallback price, so a missing/invalid selection
+   * 400s instead of ever charging the wrong plan.
    * Returns { url } for the operator to redirect to.
    */
   router.post(
@@ -885,6 +847,16 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           res.status(503).json({
             error: 'BILLING_NOT_CONFIGURED',
             message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+
+        const parsed = BillingCheckoutInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'A valid plan (basic or enterprise) is required.',
+            issues: parsed.error.issues,
           });
           return;
         }
@@ -911,6 +883,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           ownerEmail: email,
           successUrl,
           cancelUrl,
+          planId: parsed.data.planId,
         });
         res.json(result);
       } catch (err: unknown) {

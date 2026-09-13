@@ -11,6 +11,7 @@ import {
   PaymentMethod,
   recordPayment,
   PaymentReceiptNotifier,
+  PaymentLinkCleanupDeps,
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
@@ -164,6 +165,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
     private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
     private readonly auditRepo?: AuditRepository,
+    /** P0-9 — lets recordPayment kill a link the credit made stale. */
+    private readonly paymentLinkCleanup?: PaymentLinkCleanupDeps,
   ) {}
 
   // WS3 — degrades to a synthetic-id passthrough (records no payment) without
@@ -213,6 +216,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
         this.paymentReceiptNotifier,
         this.auditRepo,
         { actorRole: 'system', correlationId: proposal.id },
+        undefined,
+        this.paymentLinkCleanup,
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {
@@ -295,6 +300,15 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
 
   constructor(private readonly provider?: EstimateDeliveryProvider) {}
 
+  // U8 — degrades to a synthetic-id passthrough (sends nothing) without a
+  // delivery provider — see execute(). The boot guard (wiring-assertions.ts)
+  // fails boot when a pool is configured but this is false; app.ts always
+  // resolves a provider object (real in prod/staging, Noop only where the
+  // delivery-boot policy explicitly allows it — see invoice-delivery-boot).
+  isFullyWired(): boolean {
+    return Boolean(this.provider);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 
@@ -347,6 +361,13 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
   performsExternalIo = true;
 
   constructor(private readonly provider?: InvoiceDeliveryProvider) {}
+
+  // U8 — degrades to a synthetic-id passthrough (sends nothing) without a
+  // delivery provider — see execute(). Same guard rationale as
+  // SendEstimateExecutionHandler above.
+  isFullyWired(): boolean {
+    return Boolean(this.provider);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;

@@ -110,6 +110,13 @@ const bookingSchema = z
 
 interface ResolvedScheduling {
   timezone: string;
+  /**
+   * True when the timezone came from an explicit tenant choice. The seeders
+   * deliberately leave the zone unset until the tenant picks one, so an
+   * unchosen zone must GATE self-service booking rather than fall back to
+   * Eastern — a guessed clock books customers hours off.
+   */
+  timezoneChosen: boolean;
   weeklyHours: WeeklyBusinessHours | null;
   bufferMinutes: number | null;
   serviceAreaZips: string[] | null;
@@ -127,6 +134,7 @@ async function resolveTenantScheduling(
   if (!deps.settingsRepo) {
     return {
       timezone: DEFAULT_BOOKING_TIMEZONE,
+      timezoneChosen: true, // dev harness without a settings repo — not tenant data
       weeklyHours: null,
       bufferMinutes: null,
       serviceAreaZips: null,
@@ -136,10 +144,27 @@ async function resolveTenantScheduling(
   const config = schedulingConfigFromSettings(settings);
   return {
     timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
+    timezoneChosen: Boolean(config.timezone),
     weeklyHours: config.weeklyHours,
     bufferMinutes: config.bufferMinutes,
     serviceAreaZips: settings?.serviceAreaZips ?? null,
   };
+}
+
+/**
+ * Self-service booking is gated on a CHOSEN tenant timezone: availability and
+ * holds are computed/validated in the tenant zone, and substituting Eastern
+ * for an unset zone silently books non-Eastern tenants hours off (the exact
+ * guess the scheduling gate exists to prevent). 409 so clients surface a
+ * clear "not bookable yet" state rather than a server error.
+ */
+function requireChosenTimezone(res: Response, scheduling: ResolvedScheduling): boolean {
+  if (scheduling.timezoneChosen) return true;
+  res.status(409).json({
+    error: 'TIMEZONE_NOT_CONFIGURED',
+    message: 'Online booking is unavailable until the business sets its timezone',
+  });
+  return false;
 }
 
 /** 409 with the next open slots in a 7-day window — same shape as the portal. */
@@ -196,6 +221,7 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
 
       const q = availabilityQuerySchema.parse(req.query ?? {});
       const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
       const timezone = scheduling.timezone;
       const slots = await findBookableSlots(
         { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
@@ -267,6 +293,7 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       }
 
       const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
       const timezone = scheduling.timezone;
 
       // Re-validate the submitted window against the SAME business hours used to

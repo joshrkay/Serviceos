@@ -7,7 +7,7 @@
  * posting to Google. These tests exercise every null-returning path
  * plus the happy path.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   PgGoogleBusinessReplyResolver,
   parseReviewExternalId,
@@ -184,6 +184,113 @@ describe('P7-026 PgGoogleBusinessReplyResolver', () => {
 
     const result = await resolver.resolve(TENANT, REVIEW_ID);
     expect(result).toBeNull();
+  });
+});
+
+// ─── Review-monitoring self-serve — expired-token refresh on the reply path ─
+//
+// The execution handler calls resolver.resolve() right before PUTting the
+// reply; a token minted >1h before approval is dead. The resolver must
+// refresh an expired access token via the stored refresh token, persist the
+// rotation, and hand the handler a live token. When refresh fails it returns
+// null so the handler surfaces an explicit ok:false (visible, not silent).
+describe('PgGoogleBusinessReplyResolver — token refresh', () => {
+  const NOW = new Date('2026-08-05T12:00:00Z');
+  const CONFIG = {
+    clientId: 'cid',
+    clientSecret: 'csec',
+    redirectUri: 'https://api.example.com/cb',
+  };
+
+  function seededRepo(): InMemoryReviewRepository {
+    const repo = new InMemoryReviewRepository();
+    void repo.upsert(makeReview());
+    return repo;
+  }
+
+  it('refreshes an expired token, persists the rotation, and returns the fresh token', async () => {
+    const persist = vi.fn(
+      async (_tenantId: string, _accessToken: string, _expiresAt: Date) => {},
+    );
+    const tokenEndpoint = vi.fn(async () =>
+      new Response(JSON.stringify({ access_token: 'at-new', expires_in: 3600 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const resolver = new PgGoogleBusinessReplyResolver(
+      seededRepo(),
+      makeResolver({
+        [TENANT]: credRow(TENANT, {
+          accessToken: 'at-expired',
+          refreshToken: 'rt-1',
+          accessTokenExpiresAt: '2026-08-05T11:00:00Z', // an hour stale
+          providerData: { accountId: 'A', locationId: 'L' },
+        }),
+      }),
+      'enc-key-unused',
+      {
+        googleConfig: CONFIG,
+        credentialStore: { persistRotatedAccessToken: persist },
+        fetchFn: tokenEndpoint as unknown as typeof fetch,
+        now: () => NOW,
+      },
+    );
+
+    const result = await resolver.resolve(TENANT, REVIEW_ID);
+    expect(result?.accessToken).toBe('at-new');
+    expect(tokenEndpoint).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist.mock.calls[0][0]).toBe(TENANT);
+    expect(persist.mock.calls[0][1]).toBe('at-new');
+  });
+
+  it('returns null (visible failure at the handler) when refresh fails', async () => {
+    const resolver = new PgGoogleBusinessReplyResolver(
+      seededRepo(),
+      makeResolver({
+        [TENANT]: credRow(TENANT, {
+          accessToken: 'at-expired',
+          refreshToken: 'rt-revoked',
+          accessTokenExpiresAt: '2026-08-05T11:00:00Z',
+          providerData: { accountId: 'A', locationId: 'L' },
+        }),
+      }),
+      'enc-key-unused',
+      {
+        googleConfig: CONFIG,
+        credentialStore: { persistRotatedAccessToken: async () => {} },
+        fetchFn: (async () =>
+          new Response('{"error":"invalid_grant"}', { status: 400 })) as unknown as typeof fetch,
+        now: () => NOW,
+      },
+    );
+    expect(await resolver.resolve(TENANT, REVIEW_ID)).toBeNull();
+  });
+
+  it('uses the stored token as-is when it has not expired (no refresh call)', async () => {
+    const tokenEndpoint = vi.fn();
+    const resolver = new PgGoogleBusinessReplyResolver(
+      seededRepo(),
+      makeResolver({
+        [TENANT]: credRow(TENANT, {
+          accessToken: 'at-live',
+          refreshToken: 'rt-1',
+          accessTokenExpiresAt: '2026-08-05T13:00:00Z', // an hour of life left
+          providerData: { accountId: 'A', locationId: 'L' },
+        }),
+      }),
+      'enc-key-unused',
+      {
+        googleConfig: CONFIG,
+        credentialStore: { persistRotatedAccessToken: async () => {} },
+        fetchFn: tokenEndpoint as unknown as typeof fetch,
+        now: () => NOW,
+      },
+    );
+    const result = await resolver.resolve(TENANT, REVIEW_ID);
+    expect(result?.accessToken).toBe('at-live');
+    expect(tokenEndpoint).not.toHaveBeenCalled();
   });
 });
 

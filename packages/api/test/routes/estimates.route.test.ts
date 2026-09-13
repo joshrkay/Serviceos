@@ -10,6 +10,13 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
 import { createCustomer } from '../../src/customers/customer';
 import type { Express } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import { createEstimateRouter } from '../../src/routes/estimates';
+import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/estimate';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import type { TenantOwnership } from '../../src/shared/tenant-ownership';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const SAMPLE_LINE_ITEMS = [
   {
@@ -519,5 +526,149 @@ describe('POST /api/estimates/:id/transition', () => {
       .send({});
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+});
+
+/**
+ * #882 — a non-UUID `:id` used to flow straight into PgEstimateRepository's
+ * uuid comparison, so Postgres threw `invalid input syntax for type uuid` and
+ * the route answered a bare 500. This PgLike subclass throws the same error
+ * Postgres would (pattern: customers.route.test.ts, the #871 precedent); the
+ * `notFoundOnMalformedId` guard must answer the route's 404 envelope first.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class PgLikeEstimateRepository extends InMemoryEstimateRepository {
+  async findById(tenantId: string, id: string) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.findById(tenantId, id);
+  }
+
+  async update(tenantId: string, id: string, updates: Partial<Estimate>) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.update(tenantId, id, updates);
+  }
+}
+
+function buildPgLikeEstimatesApp(): Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER_ID,
+      sessionId: 'session-estimates-882',
+      tenantId: TEST_TENANT_ID,
+      role: 'owner',
+    };
+    next();
+  });
+  const ownership: TenantOwnership = {
+    async requireExists() {},
+    async requireExistsAndLoad() {
+      return undefined;
+    },
+  };
+  app.use(
+    '/api/estimates',
+    createEstimateRouter(
+      new PgLikeEstimateRepository(),
+      new InMemorySettingsRepository(),
+      new InMemoryAuditRepository(),
+      ownership,
+    ),
+  );
+  return app;
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)', () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildPgLikeEstimatesApp();
+  });
+
+  it('GET /api/estimates/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).get('/api/estimates/not-a-uuid');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+    expect(res.body.message).toBe('Estimate not found');
+  });
+
+  it('GET /api/estimates/not-a-uuid/history returns 404 NOT_FOUND', async () => {
+    const res = await request(app).get('/api/estimates/not-a-uuid/history');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('GET /api/estimates/not-a-uuid/revisions returns 404 NOT_FOUND', async () => {
+    const res = await request(app).get('/api/estimates/not-a-uuid/revisions');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('PUT /api/estimates/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).put('/api/estimates/not-a-uuid').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('PATCH /api/estimates/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).patch('/api/estimates/not-a-uuid').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/estimates/not-a-uuid/revise returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).post('/api/estimates/not-a-uuid/revise').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('DELETE /api/estimates/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).delete('/api/estimates/not-a-uuid');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/estimates/not-a-uuid/clone returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).post('/api/estimates/not-a-uuid/clone').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/estimates/not-a-uuid/save-as-template returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/estimates/not-a-uuid/save-as-template').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/estimates/not-a-uuid/convert-to-invoice returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/estimates/not-a-uuid/convert-to-invoice').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/estimates/not-a-uuid/transition returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app)
+      .post('/api/estimates/not-a-uuid/transition')
+      .send({ status: 'sent' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/estimates/not-a-uuid/send returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/estimates/not-a-uuid/send').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('a well-formed but unknown uuid still answers the ordinary 404', async () => {
+    const res = await request(app).get('/api/estimates/11111111-1111-1111-1111-111111111111');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
   });
 });

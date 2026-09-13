@@ -15,9 +15,12 @@
  *      tenant scoping ends at RLS, not just app-layer code).
  *
  * The GET /:tenantId surface (vertical packs + business hours) is
- * deliberately NOT covered here — its VerticalPackRegistry fan-out is
+ * mostly NOT covered here — its VerticalPackRegistry fan-out is
  * unit-tested separately and offers nothing on top of standard CRUD
- * against the schema.
+ * against the schema. The one exception (#880) is the raw-SQL
+ * tenant_integrations phoneE164 fallback: it only runs with a real pool,
+ * and its stub/magic-number suppression must be proven against the real
+ * provider_data JSONB shape, not a mocked pool.
  */
 import express from 'express';
 import request from 'supertest';
@@ -247,5 +250,53 @@ describe('public intake POST /:tenantId/leads — integration', () => {
     );
     expect(leadIdsUnderA).toContain(res.body.leadId);
     expect(leadIdsUnderB).not.toContain(res.body.leadId);
+  });
+
+  // #880 — GET /:tenantId falls back to tenant_integrations.provider_data
+  // ->>'phoneE164' when settings has no business phone. The dev-stub
+  // provisioning path writes {phoneE164: '+15005550006', stub: true}; if
+  // such a row reaches a deployed DB the magic test number used to be
+  // displayed to customers on intake/booking pages. Proven here against
+  // the real provider_data JSONB (mocked-pool tests are never the only
+  // proof a query works).
+  describe('GET /:tenantId — Twilio phoneE164 fallback (#880)', () => {
+    async function seedTwilioIntegration(
+      tenantId: string,
+      providerData: Record<string, unknown>,
+    ): Promise<void> {
+      await pool.query(
+        `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
+         VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
+        [tenantId, JSON.stringify(providerData)],
+      );
+    }
+
+    it('serves a real provisioned number from provider_data.phoneE164', async () => {
+      await seedTwilioIntegration(tenantA.tenantId, { phoneE164: '+15125550123' });
+
+      const res = await request(app).get(`/intake/${tenantA.tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBe('+15125550123');
+    });
+
+    it('suppresses a dev-stub row (magic number + stub marker) — honest empty state', async () => {
+      // The exact row the dev-stub provisioning branch writes.
+      await seedTwilioIntegration(tenantA.tenantId, {
+        phoneE164: '+15005550006',
+        stub: true,
+      });
+
+      const res = await request(app).get(`/intake/${tenantA.tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBeNull();
+    });
+
+    it('suppresses a magic test number even without the stub marker (rows predating it)', async () => {
+      await seedTwilioIntegration(tenantA.tenantId, { phoneE164: '+15005550006' });
+
+      const res = await request(app).get(`/intake/${tenantA.tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBeNull();
+    });
   });
 });

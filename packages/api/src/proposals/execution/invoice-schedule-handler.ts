@@ -57,6 +57,17 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
     private readonly estimateRepo?: EstimateRepository,
   ) {}
 
+  // U8 — degrades to a synthetic-id passthrough (schedules nothing) without
+  // the schedule/invoice/settings deps — see execute(). The boot guard
+  // (wiring-assertions.ts) fails boot when a pool is configured but this is
+  // false. estimateRepo is excluded: it only backs total derivation, and its
+  // absence fails loudly at runtime when the total cannot be resolved.
+  isFullyWired(): boolean {
+    return (
+      Boolean(this.scheduleRepo) && Boolean(this.invoiceRepo) && Boolean(this.settingsRepo)
+    );
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

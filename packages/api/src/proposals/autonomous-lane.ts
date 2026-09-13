@@ -36,7 +36,41 @@ export const AUTONOMOUS_LANE_PROPOSAL_TYPES: readonly ProposalType[] = [
   'create_booking',
 ];
 
-/** Hard floor for the per-tenant threshold — enforced in code, not just the DB CHECK. */
+/**
+ * Hard floor for the per-tenant threshold — enforced in code, not just the DB
+ * CHECK.
+ *
+ * ACCIDENTAL COUPLING (found during the followup-autoapprove-default audit,
+ * documented rather than fixed — see that investigation for why): this value
+ * is REQUIRED to stay `>= LEGACY_AUTO_APPROVE_THRESHOLD`
+ * (proposals/auto-approve.ts). Reasoning:
+ * `ai/voice-turn/create-voice-turn-processor.ts` (the live-call FSM) never
+ * threads `supervisorMode`/`supervisorPresent` into `createProposal` for its
+ * `create_booking` proposals — the ONLY place it ever sets
+ * `sourceTrustTier: 'autonomous'` is inside `...(autonomousLaneForCreate ?
+ * {...} : {})`, i.e. only once `evaluateAutonomousBookingLane` below has
+ * already confirmed `confidenceScore >= max(FLOOR, tenantThreshold)`. With no
+ * supervision signal threaded, `resolveAutoApproveThreshold` never sees
+ * `supervisorPresent === false`, so it never returns `null` — the
+ * `threshold === null` branch in `decideInitialStatus` that's SUPPOSED to
+ * consult this lane's own dedicated threshold never runs for this caller.
+ * Instead `decideInitialStatus` falls through to its generic
+ * `shouldAutoApprove(confidenceScore, LEGACY_AUTO_APPROVE_THRESHOLD)` check.
+ * That check is currently harmless ONLY because `LEGACY_AUTO_APPROVE_
+ * THRESHOLD === AUTONOMOUS_BOOKING_THRESHOLD_FLOOR` (0.9 === 0.9): eligibility
+ * already guarantees `confidenceScore >= FLOOR`, so the generic check is
+ * guaranteed to also pass. If `FLOOR` ever drops below `LEGACY_AUTO_APPROVE_
+ * THRESHOLD` (or `LEGACY_AUTO_APPROVE_THRESHOLD` is ever raised above
+ * `FLOOR`), a booking the lane deems eligible would silently fail the generic
+ * check and land in 'draft' instead of 'approved' — a silent regression
+ * toward MORE caution (a booking that should auto-approve doesn't), not a
+ * safety leak in the other direction, but still a real behavior change with
+ * no test today wired specifically to the create-voice-turn-processor.ts
+ * caller. Pinned as a standing invariant in
+ * test/proposals/autonomous-lane.test.ts; if you need to move either
+ * constant, update both together (or thread real supervision into that
+ * caller, which would make this whole coupling irrelevant).
+ */
 export const AUTONOMOUS_BOOKING_THRESHOLD_FLOOR = 0.9;
 /** Default per-tenant threshold when the column is unset. */
 export const AUTONOMOUS_BOOKING_THRESHOLD_DEFAULT = 0.95;

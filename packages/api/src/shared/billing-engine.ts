@@ -1,5 +1,6 @@
 // Shared billing engine for estimates and invoices
 // All money values are integer cents. Tax rate in basis points (bps).
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
 
@@ -21,6 +22,13 @@ export interface LineItem {
   description: string;
   category?: LineItemCategory;
   quantity: number;
+  /**
+   * B7.5 — descriptive unit of measure ('each', 'hour', …), carried from a
+   * catalog match or a spoken part. Nothing in this file reads it: totals are
+   * quantity × unitPriceCents regardless, so a unit can never move money.
+   * Optional — legacy rows and every non-voice path leave it absent.
+   */
+  unit?: CatalogUnitValue;
   unitPriceCents: number;
   totalCents: number;
   sortOrder: number;
@@ -77,6 +85,25 @@ export interface DocumentTotals {
 
 export function calculateLineItemTotal(quantity: number, unitPriceCents: number): number {
   return Math.round(quantity * unitPriceCents);
+}
+
+/**
+ * P0-2 — recompute every line's totalCents server-side from
+ * `quantity × unitPriceCents`, discarding whatever the client sent. The web
+ * write path round-trips money through float dollars (`rate = cents / 100`,
+ * then `round(qty * rate * 100)`), which diverges from the server formula by
+ * a cent on fractional quantities (e.g. 0.5 × 29¢: server 15, client 14) —
+ * and the REST create/update paths used to persist the client's number
+ * verbatim, so the wrong value flowed into subtotal → total → amount_due →
+ * the Stripe unit_amount. Normalizing at the domain layer makes L1
+ * (`line.total == round(qty × unit)`) hold no matter what the client
+ * computed. Idempotent on lines already built by `buildLineItem`.
+ */
+export function normalizeLineItemTotals(lineItems: LineItem[]): LineItem[] {
+  return lineItems.map((item) => ({
+    ...item,
+    totalCents: calculateLineItemTotal(item.quantity, item.unitPriceCents),
+  }));
 }
 
 /**

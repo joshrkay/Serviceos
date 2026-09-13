@@ -12,6 +12,16 @@ import { tryParseJson, MAX_TRANSCRIPT_CHARS } from './utils';
 
 const VALID_ROLES: TeamMemberRole[] = ['technician', 'dispatcher', 'owner'];
 
+/**
+ * B1.19 AC-4 — the PRD's clarification-loop example is literally this
+ * extractor: "me and my cousin Carlos" names Carlos but leaves his role
+ * ambiguous. Below this per-member confidence, the FSM should ask
+ * rather than silently guess. Mirrors MIN_EXTRACTION_CONFIDENCE
+ * (agents/onboarding/constants.ts) — kept local (not imported) because
+ * this task-layer module doesn't depend on the agent-layer FSM.
+ */
+const ROLE_CLARIFICATION_THRESHOLD = 0.7;
+
 const SYSTEM_PROMPT = `You extract team member information from a voice transcript of a business owner.
 
 Distinguish between:
@@ -73,11 +83,23 @@ export class TeamExtractor implements OnboardingExtractor<TeamMemberExtraction> 
     const data = this.buildExtraction(parsed);
     const confidence = assessConfidence(parsed ?? {});
 
+    // B1.19 AC-4 — a member the model named but couldn't confidently
+    // assign a role to ("my cousin Carlos" with no stated job) opens a
+    // targeted follow-up instead of silently guessing/defaulting. The
+    // overall extraction confidence_score can be high (the owner was
+    // clear about names) while still leaving one member's role unclear
+    // — so this checks PER-MEMBER, not just the top-level score.
+    const ambiguousMembers = data.members.filter((m) => m.confidence < ROLE_CLARIFICATION_THRESHOLD);
+    const needsClarification = ambiguousMembers.length > 0;
+    const clarificationQuestions = ambiguousMembers.map(
+      (m) => `What's ${m.name}'s role — technician, dispatcher, or owner?`,
+    );
+
     return {
       data,
       confidence,
-      needsClarification: false,
-      clarificationQuestions: undefined,
+      needsClarification,
+      clarificationQuestions: needsClarification ? clarificationQuestions : undefined,
     };
   }
 

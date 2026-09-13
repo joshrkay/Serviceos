@@ -310,8 +310,20 @@ async function main() {
   process.stdout.write('\n');
 }
 
-main().catch((err) => {
-  process.stderr.write(`\nSEED FAILED: ${err.message}\n`);
-  if (err.body) process.stderr.write(`${JSON.stringify(err.body, null, 2)}\n`);
-  process.exit(1);
-});
+// Exported so other runners (e.g. the e2e chromium-devauth setup project,
+// e2e/fixtures/dev-auth-seed.setup.ts) can seed programmatically against a
+// different SEED_BASE/SEED_TOKEN without duplicating the payload
+// construction above — set process.env.SEED_BASE (and optionally
+// SEED_TOKEN) before importing this module, since BASE/TOKEN are read once
+// at module-evaluation time.
+export { main as seedVerifyData };
+
+// Only auto-run when executed directly (`node verify-seed.mjs`), not when
+// imported as a module by another script.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    process.stderr.write(`\nSEED FAILED: ${err.message}\n`);
+    if (err.body) process.stderr.write(`${JSON.stringify(err.body, null, 2)}\n`);
+    process.exit(1);
+  });
+}

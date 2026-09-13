@@ -43,7 +43,15 @@ export interface FeasibilityInput {
   tenantId: string;
   /** Pre-loaded by the caller — never re-fetched inside the composer. Closes a TOCTOU window. */
   appointment: Appointment;
-  proposedTechnicianId: string;
+  /**
+   * uuid-or-absent (#935/#947 doctrine) — NOT `''`. An unassigned
+   * appointment (e.g. a reschedule of an appointment nobody has been
+   * dispatched to yet) has no technician calendar to check feasibility
+   * against; `checkFeasibility` skips every per-technician check when this
+   * is absent rather than let an empty string reach a `uuid`-typed repo
+   * query (see that function's own doc comment — #909/A11 live sweep).
+   */
+  proposedTechnicianId: string | undefined;
   proposedScheduledStart: Date;
   proposedScheduledEnd: Date;
 }

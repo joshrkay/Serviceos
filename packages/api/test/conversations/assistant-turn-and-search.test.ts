@@ -64,6 +64,32 @@ describe('Story 3.11 — recordAssistantTurn', () => {
     expect(await repo.findById(TENANT, id)).not.toBeNull();
   });
 
+  // #909 (2026-08-31, live sweep 2026-08-31T01-33) — routes/assistant.ts's
+  // `/chat` handler mints a real UUID BEFORE drafting on a conversation's
+  // first turn (rather than leaving `conversationId` undefined until this
+  // call resolves it), so a proposal drafted this same turn can be stamped
+  // with `sourceContext.conversationId` = the id the client will be told to
+  // use next. That only closes the loop if THIS call honors that reserved,
+  // well-formed, not-yet-existing id instead of discarding it for its own
+  // fresh mint — unlike the 'does-not-exist' case above (a garbage,
+  // non-UUID string, which still gets a repo-minted id: see this
+  // function's own doc comment for why the two are treated differently).
+  it('reuses a well-formed UUID conversationId that does not exist yet as the NEW conversation id (unlike a non-UUID string)', async () => {
+    const repo = new InMemoryConversationRepository();
+    const reserved = '5b9a6c9e-1c1a-4c1a-9c1a-1c1a1c1a1c1a';
+    const id = await recordAssistantTurn(repo, {
+      tenantId: TENANT,
+      userId: USER,
+      conversationId: reserved,
+      userText: 'Cancel the tune-up',
+      assistantText: 'Which appointment did you mean?',
+    });
+    expect(id).toBe(reserved);
+    const conv = await repo.findById(TENANT, reserved);
+    expect(conv).not.toBeNull();
+    expect(await repo.getMessages(TENANT, reserved)).toHaveLength(2);
+  });
+
   it('records the operator turn even when the agent reply is empty', async () => {
     const repo = new InMemoryConversationRepository();
     const id = await recordAssistantTurn(repo, {

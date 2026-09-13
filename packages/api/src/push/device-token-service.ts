@@ -41,7 +41,25 @@ export interface DeviceTokenRepository {
    * the devices route stores. Returns the number of rows deleted.
    */
   removeAllForUser(tenantId: string, userId: string): Promise<number>;
+  /**
+   * ANS-001 — delete tokens not re-registered in `olderThanDays` days. Expo
+   * tokens go stale silently (app uninstalled, token rotated), and pushing to
+   * a dead token is a wasted round trip on every E1 alert fan-out. Returns
+   * the delete count.
+   *
+   * Tenant-scoped by design: `device_tokens` has FORCE ROW LEVEL SECURITY,
+   * so there is no cross-tenant sweep to write — the caller drives this per
+   * tenant (see the day-guarded sweep riding the hold-reaper tick in app.ts).
+   */
+  pruneStale(tenantId: string, olderThanDays: number): Promise<number>;
 }
+
+/**
+ * A token not re-registered in this many days is treated as dead. The app
+ * re-registers on every sign-in, so 90 days without a refresh means the
+ * device is gone (uninstalled, wiped, token rotated).
+ */
+export const DEVICE_TOKEN_STALE_AFTER_DAYS = 90;
 
 // Expo issues tokens shaped `ExponentPushToken[...]` (legacy) or
 // `ExpoPushToken[...]`. Validating the shape keeps junk out of the send path.
@@ -119,5 +137,17 @@ export class InMemoryDeviceTokenRepository implements DeviceTokenRepository {
       }
     }
     return removed;
+  }
+
+  async pruneStale(tenantId: string, olderThanDays: number): Promise<number> {
+    const cutoff = Date.now() - olderThanDays * 24 * 60 * 60_000;
+    let deleted = 0;
+    for (const [k, t] of [...this.tokens]) {
+      if (t.tenantId !== tenantId) continue;
+      if (t.updatedAt.getTime() >= cutoff) continue;
+      this.tokens.delete(k);
+      deleted += 1;
+    }
+    return deleted;
   }
 }

@@ -184,3 +184,154 @@ describe('Operator money/CRM top-40 closed loop', () => {
     });
   }
 });
+
+// ── U2 (B7.10) — crew ops complete by voice ────────────────────────────────
+//
+// Corpus cases above run WITHOUT an entity resolver (fixture-level gating
+// contract). This extension wires one, the way production does, and proves
+// the crew loop closes: "add Jake to the 2pm tomorrow" resolves BOTH spoken
+// references (APPOINTMENT_REF_INTENTS + TECHNICIAN_REF_INTENTS) and drafts
+// ungated; ambiguity stays a bounded one-tap picker (P-43 — the resolver
+// caps candidates at 5, so a clarification can never overflow the picker);
+// an unresolvable reference keeps the honest gate.
+import type { EntityResolver, EntityResolverResult } from '../../src/ai/resolution/entity-resolver';
+
+describe('U2 — crew add/remove close the loop with the entity resolver wired', () => {
+  const APPT_ID = '55555555-5555-4555-8555-555555555555';
+  const TECH_ID = '66666666-6666-4666-8666-666666666666';
+
+  function crewClassifier(intentType: 'add_crew_member' | 'remove_crew_member'): unknown {
+    return {
+      intentType,
+      confidence: 0.9,
+      extractedEntities: {
+        appointmentReference: 'the 2pm tomorrow',
+        targetTechnicianName: 'Jake',
+      },
+    };
+  }
+
+  function resolver(
+    impl: (input: { kind: string }) => EntityResolverResult,
+  ): EntityResolver {
+    return { resolve: vi.fn(async (input: { kind: string }) => impl(input)) } as unknown as EntityResolver;
+  }
+
+  const bothResolve = () =>
+    resolver(({ kind }) =>
+      kind === 'appointment'
+        ? {
+            kind: 'resolved',
+            candidate: { id: APPT_ID, kind: 'appointment', label: '2026-08-02T19:00:00.000Z', score: 1 },
+          }
+        : kind === 'technician'
+          ? {
+              kind: 'resolved',
+              candidate: { id: TECH_ID, kind: 'technician', label: 'Jake Ruiz', score: 0.95 },
+            }
+          : { kind: 'not_found', reference: 'x' },
+    );
+
+  for (const intent of ['add_crew_member', 'remove_crew_member'] as const) {
+    it(`${intent}: unique appointment (tech+time) + unique tech name draft UNGATED with both verified ids`, async () => {
+      const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
+      const worker = createVoiceActionRouterWorker({
+        gateway: scriptedGateway([crewClassifier(intent)]),
+        proposalRepo,
+        entityResolver: bothResolve(),
+      });
+
+      await worker.handle(
+        msg({ tenantId: TENANT, userId: USER, transcript: 'Add Jake to the 2pm tomorrow' }),
+        silentLogger(),
+      );
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].proposalType).toBe(intent);
+      const payload = proposals[0].payload as Record<string, unknown>;
+      expect(payload.appointmentId).toBe(APPT_ID);
+      expect(payload.technicianId).toBe(TECH_ID);
+      expect(missingFieldsFor(proposals[0])).toEqual([]);
+      // Capture-class, no trust tier from this handler — a human still taps.
+      expect(proposals[0].status).toBe('draft');
+    });
+  }
+
+  it('two appointments in the same window → voice_clarification with a BOUNDED picker (P-43), never a guess', async () => {
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
+    const twoSameWindow = resolver(({ kind }) =>
+      kind === 'appointment'
+        ? {
+            kind: 'ambiguous',
+            candidates: [
+              {
+                id: 'appt-1', kind: 'appointment',
+                label: '2026-08-02T19:00:00.000Z', hint: 'Water heater · assigned to Maria', score: 1,
+              },
+              {
+                id: 'appt-2', kind: 'appointment',
+                label: '2026-08-02T19:00:00.000Z', hint: 'Furnace tune-up · assigned to Luis', score: 1,
+              },
+            ],
+          }
+        : {
+            kind: 'resolved',
+            candidate: { id: TECH_ID, kind: 'technician', label: 'Jake Ruiz', score: 0.95 },
+          },
+    );
+    const worker = createVoiceActionRouterWorker({
+      gateway: scriptedGateway([crewClassifier('add_crew_member')]),
+      proposalRepo,
+      entityResolver: twoSameWindow,
+    });
+
+    await worker.handle(
+      msg({ tenantId: TENANT, userId: USER, transcript: 'Add Jake to the 2pm tomorrow' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.reason).toBe('ambiguous_entity');
+    const candidates = payload.entityCandidates as Array<{ id: string }>;
+    expect(candidates).toHaveLength(2);
+    // P-43 — the picker is bounded by construction: the resolver never
+    // emits more than 5 candidates (beyond that it answers not_found and
+    // the draft gates instead — pinned against the REAL resolver in
+    // test/integration/crew-voice-execution.test.ts).
+    expect(candidates.length).toBeLessThanOrEqual(5);
+  });
+
+  it('tech name unresolvable → appointment id lands, technicianId stays honestly gated', async () => {
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
+    const noSuchTech = resolver(({ kind }) =>
+      kind === 'appointment'
+        ? {
+            kind: 'resolved',
+            candidate: { id: APPT_ID, kind: 'appointment', label: '2026-08-02T19:00:00.000Z', score: 1 },
+          }
+        : { kind: 'not_found', reference: 'Jake' },
+    );
+    const worker = createVoiceActionRouterWorker({
+      gateway: scriptedGateway([crewClassifier('add_crew_member')]),
+      proposalRepo,
+      entityResolver: noSuchTech,
+    });
+
+    await worker.handle(
+      msg({ tenantId: TENANT, userId: USER, transcript: 'Add Jake to the 2pm tomorrow' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('add_crew_member');
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.appointmentId).toBe(APPT_ID);
+    expect(payload.technicianId).toBeUndefined();
+    expect(missingFieldsFor(proposals[0])).toEqual(['technicianId']);
+  });
+});

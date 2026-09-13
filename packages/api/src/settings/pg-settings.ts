@@ -4,6 +4,7 @@ import {
   DEFAULT_ESCALATION_SETTINGS,
   EscalationSettings,
   SettingsRepository,
+  TenantIdentityUpsertFields,
   TenantSettings,
   normalizeReminderOffsets,
 } from './settings';
@@ -45,7 +46,11 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
     ownerPhone: (row.owner_phone as string) ?? undefined,
-    timezone: row.timezone as string,
+    // NULL ⇒ undefined ("never chosen"), never a substituted default. See
+    // migration 263 and TenantSettings.timezone.
+    ...(typeof row.timezone === 'string' && row.timezone.length > 0
+      ? { timezone: row.timezone }
+      : {}),
     estimatePrefix: row.estimate_prefix as string,
     invoicePrefix: row.invoice_prefix as string,
     nextEstimateNumber: row.next_estimate_number as number,
@@ -199,6 +204,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     digestEnabled: (row.digest_enabled as boolean | null) ?? false,
     digestTime: normalizeDigestTime(row.digest_time),
     digestChannel: (row.digest_channel as 'sms' | 'none' | null) ?? 'sms',
+    // FIX 10(i) (ANS-001) — migration 267 (renumbered from 197 on merge).
+    // NULL → undefined = the embedded placeholder script
+    // (LIFE_SAFETY_E1_SCRIPT) is still in effect.
+    e1ReviewedScript: (row.e1_reviewed_script as string | null) ?? undefined,
     // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
     // pre-migration row reads as enabled.
     weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
@@ -416,6 +425,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestEnabled: 'digest_enabled',
         digestTime: 'digest_time',
         digestChannel: 'digest_channel',
+        // FIX 10(i) (ANS-001) — migration 267 (renumbered from 197 on merge).
+        e1ReviewedScript: 'e1_reviewed_script',
         // Epic 12.6 — migration 204.
         weeklyFeedbackEnabled: 'weekly_feedback_enabled',
         // UB-D / D-015 — migration 231. Both NOT NULL with column defaults;
@@ -581,6 +592,95 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       );
       if (result.rows.length === 0) throw new Error('Settings not found');
       return result.rows[0].current_number as number;
+    });
+  }
+
+  /**
+   * B1.19 — single atomic upsert for the identity-shaped fields, shared
+   * by PUT /api/onboarding/identity (form wizard) and the conversational
+   * onboarding_tenant_settings / onboarding_schedule execution handlers.
+   * One INSERT ... ON CONFLICT statement (not a read-then-write) so two
+   * proposals for the same tenant approved back-to-back — one from the
+   * business-profile state, one from the schedule state — can't race
+   * each other into a lost update or a duplicate-key error.
+   *
+   * Every optional field COALESCEs to the existing column value when
+   * omitted, on both the INSERT branch (via a literal fallback matching
+   * the column's own DEFAULT) and the UPDATE branch (via
+   * `tenant_settings.<col>`). `timezone` and `owner_phone` keep their
+   * original special-cased semantics (see TenantIdentityUpsertFields):
+   * timezone never regresses to unset once chosen; owner_phone is
+   * written only when the caller passed the key at all (tri-state).
+   * `service_area_radius` is tri-state too (#874): null clears it.
+   */
+  async upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const writeOwnerPhone = Object.prototype.hasOwnProperty.call(fields, 'ownerPhone');
+      // #874 — service_area_radius is tri-state like owner_phone: omitted
+      // (undefined) keeps the stored value, null explicitly CLEARS it (an
+      // emptied radius field must stop the Settings row claiming a stale
+      // "~N mi radius"), a number sets it. COALESCE can't express "write
+      // NULL", hence the CASE below.
+      const writeServiceAreaRadius = fields.serviceAreaRadius !== undefined;
+      const result = await client.query(
+        `INSERT INTO tenant_settings (
+           id, tenant_id, business_name, service_area_text, service_area_radius,
+           business_hours, job_buffer_minutes, hourly_rate_cents,
+           timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix,
+           next_estimate_number, next_invoice_number, default_payment_term_days
+         )
+         VALUES (
+           gen_random_uuid(), $1,
+           COALESCE($2, ''),
+           $3,
+           $4,
+           COALESCE($5::jsonb, '{}'::jsonb),
+           COALESCE($6, 30),
+           $7,
+           -- NO fallback zone on first insert either — see
+           -- TenantIdentityUpsertFields.timezone / migration 263.
+           $8,
+           $9,
+           $11,
+           'EST-', 'INV-', 1001, 1001, 30
+         )
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           business_name        = COALESCE($2, tenant_settings.business_name),
+           service_area_text    = COALESCE($3, tenant_settings.service_area_text),
+           service_area_radius  = CASE
+             WHEN $12::boolean THEN $4
+             ELSE tenant_settings.service_area_radius
+           END,
+           business_hours       = COALESCE($5::jsonb, tenant_settings.business_hours),
+           job_buffer_minutes   = COALESCE($6, tenant_settings.job_buffer_minutes),
+           hourly_rate_cents    = COALESCE($7, tenant_settings.hourly_rate_cents),
+           timezone             = COALESCE($8, tenant_settings.timezone),
+           owner_phone          = CASE
+             WHEN $10::boolean THEN $9
+             ELSE tenant_settings.owner_phone
+           END,
+           ai_model             = COALESCE(tenant_settings.ai_model, $11),
+           updated_at           = now()
+         RETURNING *`,
+        [
+          tenantId,
+          fields.businessName ?? null,
+          fields.serviceAreaText ?? null,
+          fields.serviceAreaRadius ?? null,
+          fields.businessHours ? JSON.stringify(fields.businessHours) : null,
+          fields.jobBufferMinutes ?? null,
+          fields.hourlyRateCents ?? null,
+          fields.timezone ?? null,
+          writeOwnerPhone ? (fields.ownerPhone ?? null) : null,
+          writeOwnerPhone,
+          fields.bootstrapAiModel,
+          writeServiceAreaRadius,
+        ],
+      );
+      return mapRow(result.rows[0]);
     });
   }
 }

@@ -105,6 +105,15 @@ export class IssueInvoiceExecutionHandler implements ExecutionHandler {
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
   ) {}
 
+  // U8 — degrades to a synthetic-id passthrough (issues nothing) without the
+  // invoice repo — see execute(). The boot guard (wiring-assertions.ts) fails
+  // boot when a pool is configured but this is false, so that branch is
+  // unreachable in a real deployment. settingsRepo/auditRepo degrade
+  // non-silently (default terms; failure-soft audit).
+  isFullyWired(): boolean {
+    return Boolean(this.invoiceRepo);
+  }
+
   async execute(
     proposal: Proposal,
     context: ExecutionContext,

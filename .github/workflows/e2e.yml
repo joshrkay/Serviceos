@@ -74,6 +74,15 @@ jobs:
       # with a hermetic CLERK_WEBHOOK_SECRET via playwright.config.ts. The
       # sibling real-Clerk signup spec stays test.skip until the secrets below
       # land — it adds fidelity, it is not the only browser proof of Journey-1.
+      #
+      # D-2 — `npm run e2e` ALSO runs `chromium-devauth` (playwright.config.ts):
+      # a second API + vite pair on its own ports (VITE_AUTH_MODE=dev +
+      # DEV_AUTH_BYPASS=true — no Clerk cloud, no Postgres), seeded via
+      # e2e/fixtures/dev-auth-seed.setup.ts, that runs the auth-gated specs
+      # which used to self-skip here (no real Clerk key, no E2E_BASE_URL) — see
+      # e2e/README.md "Dev-auth mode". No workflow change was needed for that:
+      # the project is included by default whenever E2E_BASE_URL is unset (as
+      # here); set `E2E_DEV_AUTH: '0'` below to opt back out.
       - name: Run E2E tests
         run: npm run e2e
         env:

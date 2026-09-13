@@ -4767,6 +4767,20 @@ export const MIGRATIONS = {
   // ledger every other outbound send writes to, so DNC suppression and
   // delivery accounting stay uniform across transactional and conversational
   // sends.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): the runner has no ledger —
+  // getMigrationSQL() re-executes every migration on every boot — so an
+  // ADD CONSTRAINT without NOT VALID re-validates the ENTIRE table on every
+  // single deploy, against THIS migration's (now-stale, pre-269/270)
+  // vocabulary. Once a later migration (269, 270) legitimately widens the
+  // constraint further and the app starts writing those newer entity_type
+  // values, the NEXT deploy replays this migration first and rejects the
+  // rows a later statement in the very same corpus would have allowed —
+  // ATRewriteTable/SQLSTATE 23514, e.g. on 'portal_session'/'custom_message'
+  // rows. 092/125/164 got this right with NOT VALID; this one (and 269, 270
+  // below) regressed the pattern. NOT VALID only skips validating
+  // pre-existing rows at ADD-CONSTRAINT time — new/updated rows are still
+  // checked immediately, so enforcement for future writes is unchanged.
   '190_dispatch_entity_conversation_reply': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -4777,7 +4791,7 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest', 'conversation_reply'
-        ));
+        )) NOT VALID;
   `,
 
   // CRM two-way comms follow-up: an inbound text from an unknown number
@@ -6372,6 +6386,30 @@ export const MIGRATIONS = {
       WHERE contact_id IS NOT NULL;
   `,
 
+  /**
+   * Make "this tenant has not chosen a timezone" REPRESENTABLE.
+   *
+   * `timezone TEXT NOT NULL DEFAULT 'America/New_York'` (migration 013) is
+   * the true origin of the Phoenix mis-booking: a tenant that never submitted
+   * a zone at onboarding still reads back a perfectly valid
+   * `'America/New_York'`, so every consumer — including the new
+   * no-default gate in create-appointment-task.ts — sees a CHOSEN Eastern
+   * zone and books against it. A defaulted value is indistinguishable from a
+   * deliberate one, which is exactly why the appointment path could not
+   * detect its own misconfiguration.
+   *
+   * Dropping the default and the NOT NULL lets an unset zone read back as
+   * NULL, which the drafting handlers already gate on (voice_clarification /
+   * missingFields) instead of guessing. Existing rows are deliberately NOT
+   * rewritten: a stored 'America/New_York' may be a real Eastern tenant's
+   * genuine choice, and this migration has no way to tell the two apart.
+   * Identifying the affected tenants is an operator decision — see the
+   * diagnostic query in docs/ rather than a blind UPDATE here.
+   */
+  '263_tenant_settings_timezone_no_silent_default': `
+    ALTER TABLE tenant_settings ALTER COLUMN timezone DROP DEFAULT;
+    ALTER TABLE tenant_settings ALTER COLUMN timezone DROP NOT NULL;
+  `,
   // FAIL-VIS — indexes for the silent-failure monitor (workers/failure-rate-
   // monitor.ts). The monitor runs cross-tenant aggregates every 10 minutes and
   // MUST stay cheap; without these it would seq-scan ai_runs (~14k rows/day,
@@ -6393,6 +6431,243 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_proposals_silent_execution_failure
       ON proposals (updated_at)
       WHERE status = 'execution_failed' AND execution_error IS NULL;
+  `,
+
+  // D2-4a / P0-4 — per-refund idempotency ledger. The payments-row guard
+  // (`last_refund_stripe_id`) remembers only the LATEST refund id, so a
+  // failed-then-retried earlier refund event re-applied after a later refund
+  // was recorded (and two concurrent retries could both pass the read-based
+  // short-circuit). One row per Stripe refund; the (tenant_id,
+  // stripe_refund_id) unique index is the dedup arbiter, claimed in the SAME
+  // statement as the refunded_amount_cents increment (see
+  // PgPaymentRepository.recordRefundIdempotent). BIGINT matches the
+  // established money-column convention for post-core tables.
+  '264_create_payment_refunds': `
+    CREATE TABLE IF NOT EXISTS payment_refunds (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+      stripe_refund_id TEXT NOT NULL,
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_refunds_stripe_refund
+      ON payment_refunds (tenant_id, stripe_refund_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_refunds_payment
+      ON payment_refunds (tenant_id, payment_id);
+    -- Backfill claims for refunds recorded BEFORE this ledger existed: their
+    -- payments rows carry last_refund_stripe_id, and without a claim a late
+    -- redelivery of that same refund (e.g. charge.refund.updated after an
+    -- earlier charge.refunded) would count it a second time. Only the LATEST
+    -- refund id per payment was ever persisted, so that is all that can be
+    -- seeded; amount_cents is the cumulative refunded total at backfill time
+    -- (informational — the unique id is the dedup arbiter). Runs BEFORE the
+    -- RLS enablement below so the cross-tenant seed needs no policy bypass;
+    -- idempotent via ON CONFLICT for safe re-execution.
+    INSERT INTO payment_refunds (id, tenant_id, payment_id, stripe_refund_id, amount_cents)
+    SELECT gen_random_uuid(), p.tenant_id, p.id, p.last_refund_stripe_id,
+           GREATEST(p.refunded_amount_cents, 1)
+    FROM payments p
+    WHERE p.last_refund_stripe_id IS NOT NULL
+    ON CONFLICT (tenant_id, stripe_refund_id) DO NOTHING;
+    ALTER TABLE payment_refunds ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE payment_refunds FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_payment_refunds ON payment_refunds;
+    CREATE POLICY tenant_isolation_payment_refunds ON payment_refunds
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
+      WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+
+  // B7.5 — spoken parts with qty + unit. `unit` is DESCRIPTIVE ONLY (e.g.
+  // 'each' | 'hour' | 'sq ft' | 'per lb' | 'per gal', mirroring
+  // catalog/catalog-item.ts CatalogUnit) — price stays integer cents,
+  // quantity x unit_price_cents = total_cents is untouched, and no billing
+  // arithmetic reads this column. Nullable, no CHECK: the Zod
+  // `catalogUnitSchema` (packages/shared/src/contracts/money.ts) is the
+  // validation boundary, kept in lockstep with CatalogUnit by money.test.ts —
+  // a DB CHECK would make every future catalog-unit addition a migration.
+  // Additive no-op for existing rows on both line-item tables.
+  '265_line_items_unit': `
+    ALTER TABLE estimate_line_items ADD COLUMN IF NOT EXISTS unit TEXT;
+    ALTER TABLE invoice_line_items ADD COLUMN IF NOT EXISTS unit TEXT;
+  `,
+
+  // The approver's role at the moment of approval, so a config write's audit
+  // event names who actually authorized it.
+  //
+  // `executed_by` alone cannot answer this. The execution sweep runs detached
+  // from the approving request and attributes work to `created_by` (the
+  // DRAFTER) for every type but `adopt_entity_alias`, so a technician-drafted
+  // `update_brand_voice` approved by an owner audited as the technician, with
+  // the role defaulted to 'owner'. Both halves wrong, in opposite directions.
+  //
+  // Role AT APPROVAL, deliberately not looked up at execution time: the audit
+  // records the capacity in which the human authorized the write, which a
+  // later role change must not rewrite. Nullable — historical rows and the
+  // auto-approve lane have no approving human, and the handlers already treat
+  // an absent role as "caller didn't know".
+  '266_proposals_executed_by_role': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS executed_by_role TEXT;
+  `,
+
+  // FIX 10(i) (ANS-001) — per-tenant REVIEWED E1 life-safety script. The
+  // embedded LIFE_SAFETY_E1_SCRIPT (emergency-tier.ts) is an explicit
+  // placeholder pending qualified (trade + legal) review; once a tenant's
+  // script clears review, this column overrides the placeholder via the
+  // emergency_detected event's existing responseScript seam
+  // (runEmergencyScan in twilio-adapter.ts, E1 turns ONLY). NULL = the
+  // placeholder is still in effect. Length-capped like voice_greeting
+  // (migration 090) but generous — this is a multi-sentence spoken script.
+  // (Renumbered from 197 when merging origin/main, whose migration tail
+  // had advanced to 266.)
+  '267_tenant_settings_e1_reviewed_script': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS e1_reviewed_script TEXT;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewed_script_length,
+      ADD CONSTRAINT tenant_settings_e1_reviewed_script_length
+        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000);
+  `,
+
+  // ANS-001 — (tenant_id, session_id) alone collapsed DISTINCT follow-ups for
+  // one call into a single row. The E1 FSM emits revoke_pending_bookings
+  // BEFORE notify_tenant_emergency, so when both failed the unrevocable-booking
+  // task was inserted first and the "a life-safety call came in" alert task hit
+  // the conflict and was silently dropped — losing the only durable fallback
+  // the E1 alert has, in exactly the degraded-tenant case it exists for.
+  // `reason` joins the key: distinct problems on one call each get a task,
+  // while a retry of the SAME problem still dedups (migration 154's intent,
+  // which this supersedes). (Renumbered from 198 on the origin/main merge.)
+  '268_call_me_back_session_reason_idempotency': `
+    DROP INDEX IF EXISTS idx_cmb_session_unique;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_reason_unique
+      ON call_me_back_tasks (tenant_id, session_id, reason)
+      WHERE session_id IS NOT NULL;
+  `,
+
+  // 269 — portal-link send: the customer-portal "send link" flow
+  // (POST /api/portal-sessions/send → SendService.sendPortalLink) writes its
+  // dispatch rows with entity_type='portal_session'. Mirrors the prior
+  // widenings (092, 125, 164, 190) — its own migration so the constraint
+  // change stays independently reviewable/reversible. Reuses the same
+  // dispatch ledger every other outbound send writes to, so DNC suppression
+  // and delivery accounting stay uniform.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): see the comment on 190 above
+  // — without NOT VALID, every redeploy re-validates the whole table against
+  // THIS (pre-270) vocabulary, which rejects 'custom_message' rows the app
+  // legitimately writes once 270 has been live for a while.
+  '269_dispatch_entity_portal_session': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session'
+        )) NOT VALID;
+  `,
+  // Tradesperson wave 1 — free-form owner-approved customer message
+  // (send_customer_message proposal). New dispatch entity type so the
+  // message_dispatches audit trail can carry it.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): see the comment on 190 above.
+  // This is currently the LAST widening, so its list already matches
+  // DispatchEntityType in full — but leaving off NOT VALID here still means
+  // every redeploy re-scans the whole table for no benefit, and the next
+  // widening after this one would reintroduce the exact same failure mode.
+  '270_dispatch_entity_custom_message': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session', 'custom_message'
+        )) NOT VALID;
+  `,
+  // Tradesperson wave 1 — change orders are estimates pinned to an existing
+  // job and flagged so reporting can separate scope-adds from original bids.
+  '271_estimates_change_order_flag': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS is_change_order BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_estimates_change_order
+      ON estimates (tenant_id, job_id) WHERE is_change_order = TRUE;
+  `,
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan) — voice-captured
+  // materials/shopping list. An item is an operational row (like
+  // call_me_back_tasks), created via an approved add_material proposal;
+  // purchasing/PO automation is a non-goal.
+  '272_create_material_items': `
+    CREATE TABLE IF NOT EXISTS material_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID REFERENCES jobs(id),
+      description TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+      vendor TEXT,
+      -- 'cancelled' is unreachable today (no method sets it); kept for
+      -- forward-compat since a future task may add markCancelled, and
+      -- dropping a CHECK value later would cost its own migration.
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'purchased', 'cancelled')),
+      needed_by TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      purchased_by TEXT,
+      purchased_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE material_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE material_items FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_material_items ON material_items;
+    CREATE POLICY tenant_isolation_material_items ON material_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    -- Single covering index for the one real query shape (listPending: tenant +
+    -- pending + ORDER BY created_at). status = 'pending' is a SQL LITERAL, not a
+    -- bind param, so the planner can prove the predicate implies the index —
+    -- keep it a literal; parameterizing it later would make the index unusable.
+    -- No plain (tenant_id) index: nothing in this module queries by tenant_id
+    -- alone (markPurchased hits the id primary key).
+    CREATE INDEX IF NOT EXISTS idx_material_items_pending
+      ON material_items (tenant_id, created_at) WHERE status = 'pending';
+  `,
+  // A3 (2026-08-10) — index for listPending's ONE ordering, reversing #819's
+  // decision to ship without one. A NEW migration, not an edit to 272: 272
+  // shipped to main in PR #814, and the immutability guard's rule for a
+  // shipped migration is "add a new one with idempotent CREATE INDEX IF NOT
+  // EXISTS" (test/db/migration-immutability.test.ts).
+  //
+  // WHY THE DECISION FLIPPED. #819 declined this index on two premises, both
+  // of which turned out to be false: (1) "markPurchased continuously prunes
+  // the pending set" — markPurchased has NO production caller, so a tenant's
+  // pending set is strictly monotonic; and (2) a revisit trigger of "~2,000
+  // concurrently-pending rows for one tenant" that nothing observes (no
+  // materials route, no metric, no alert; lookup_events.result_count
+  // saturates at 6). Unbounded growth plus an unobservable trigger is not a
+  // plan. The write side is negligible either way — this table is written
+  // once per approved voice add_material proposal.
+  //
+  // WHY THE FULL FOUR-COLUMN KEY. listPending orders `needed_by ASC NULLS
+  // LAST, created_at ASC, id ASC` under a tenant_id equality and the
+  // status = 'pending' literal. (tenant_id, needed_by, created_at) leaves
+  // the trailing `id ASC` unsupplied, which the planner resolves with an
+  // Incremental Sort rather than a plain index scan; including `id` makes
+  // the whole sort index-supplied so the LIMIT bounds the work. A btree ASC
+  // index already stores NULLs last, which is exactly what NULLS LAST wants.
+  //
+  // 272's idx_material_items_pending is deliberately NOT dropped here even
+  // though nothing orders by created_at any more. The runner has no ledger —
+  // getMigrationSQL() re-executes every migration on every boot — so a
+  // CREATE in 272 plus a DROP in 273 would rebuild and destroy that index on
+  // every boot. Keeping a redundant index is much cheaper than that.
+  '273_material_items_urgency_index': `
+    CREATE INDEX IF NOT EXISTS idx_material_items_pending_urgency
+      ON material_items (tenant_id, needed_by, created_at, id)
+      WHERE status = 'pending';
   `,
 };
 

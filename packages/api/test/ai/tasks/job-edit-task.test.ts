@@ -308,6 +308,193 @@ describe('UpdateJobTaskHandler', () => {
     });
   });
 
+  // B7.7 — the drafting leg. `update_job` is in JOB_REF_INTENTS, so the
+  // router's entity resolver puts a jobId on `existingEntities` BEFORE this
+  // handler runs. It used to reach the handler only as a "Classifier hints"
+  // string inside the LLM prompt, which meant the gate could only lift when
+  // the model chose to echo a UUID back — a drafting leg that depended on the
+  // model repeating an id rather than on resolution.
+  describe('router-resolved jobId (existingEntities.jobId)', () => {
+    const RESOLVED = '00000000-0000-4000-8000-0000000000aa';
+    const HALLUCINATED = '00000000-0000-4000-8000-0000000000ff';
+
+    /** Drafting reply that names the job in free text ONLY — no id at all. */
+    function spokenGateway(): LLMGateway {
+      return mockGateway(
+        JSON.stringify({
+          jobReference: 'the Garcia job',
+          status: 'completed',
+          confidence_score: 0.92,
+        }),
+      );
+    }
+
+    it('lifts the gate from the RESOLVER id even though the model emitted no id at all', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      await jobRepo.create(makeJob({ id: RESOLVED, summary: 'AC repair' }));
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const handler = new UpdateJobTaskHandler(spokenGateway(), jobRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'the Garcia job', jobId: RESOLVED },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBe(RESOLVED);
+      expect(payload.status).toBe('completed');
+      const sc = result.proposal.sourceContext as Record<string, unknown>;
+      expect(sc).not.toHaveProperty('missingFields');
+      expect(sc.verifiedIds).toEqual({ jobId: RESOLVED });
+
+      // Nothing blocks approval — the gate genuinely lifted. With a
+      // supervisor on the wall this capture-class autonomous edit at 0.92
+      // clears decideInitialStatus outright, which a `missingFields` gate
+      // makes impossible (it forces 'draft' before any other rule runs).
+      expect(result.proposal.status).toBe('approved');
+
+      // The same handler with the id withheld is the contrast: gated, and
+      // approveProposal refuses it.
+      const gated = await new UpdateJobTaskHandler(spokenGateway(), jobRepo).handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'the Garcia job' },
+      });
+      expect(gated.proposal.status).toBe('draft');
+      await proposalRepo.create(gated.proposal);
+      await expect(
+        approveProposal(proposalRepo, tenantId, gated.proposal.id, userId, 'owner'),
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    // Rule 3 of docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-nothing.md:
+    // assert a value the test could not have handed to the code. The model's
+    // id is deliberately WRONG, so "payload carries the resolver's id" can
+    // only pass if resolution beat the model.
+    it('the RESOLVER id wins over a hallucinated jobId the model emitted', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      await jobRepo.create(makeJob({ id: RESOLVED, summary: 'AC repair' }));
+
+      const handler = new UpdateJobTaskHandler(
+        mockGateway(
+          JSON.stringify({
+            jobReference: 'the Garcia job',
+            jobId: HALLUCINATED,
+            status: 'completed',
+            confidence_score: 0.92,
+          }),
+        ),
+        jobRepo,
+      );
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'the Garcia job', jobId: RESOLVED },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBe(RESOLVED);
+      expect(payload.jobId).not.toBe(HALLUCINATED);
+      expect(result.proposal.sourceContext).toMatchObject({
+        verifiedIds: { jobId: RESOLVED },
+      });
+    });
+
+    it('a router id that the repo cannot confirm fails CLOSED — and takes the model id down with it', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      // The resolved id belongs to no row this tenant can see (deleted,
+      // cross-tenant, or a stale conversation anchor).
+      await jobRepo.create(makeJob({ id: HALLUCINATED, summary: 'AC repair' }));
+
+      const handler = new UpdateJobTaskHandler(
+        mockGateway(
+          JSON.stringify({
+            jobReference: 'the Garcia job',
+            jobId: HALLUCINATED, // a real row — but NOT what resolution said
+            status: 'completed',
+            confidence_score: 0.92,
+          }),
+        ),
+        jobRepo,
+      );
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'the Garcia job', jobId: RESOLVED },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
+      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('verifiedIds');
+    });
+
+    it('a non-UUID value in the resolved slot is ignored (never used as an id)', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      await jobRepo.create(makeJob({ id: RESOLVED, summary: 'AC repair' }));
+
+      const handler = new UpdateJobTaskHandler(spokenGateway(), jobRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'the Garcia job', jobId: 'the Garcia job' },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
+    });
+
+    it('an AMBIGUOUS reference (router resolved nothing) still gates and offers candidates', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      await jobRepo.create(makeJob({ id: 'job-a', jobNumber: 'JOB-0001' }));
+      await jobRepo.create(makeJob({ id: 'job-b', jobNumber: 'JOB-0001' }));
+
+      const handler = new UpdateJobTaskHandler(
+        mockGateway(
+          JSON.stringify({
+            jobReference: 'JOB-0001',
+            status: 'completed',
+            confidence_score: 0.9,
+          }),
+        ),
+        jobRepo,
+      );
+      // The router short-circuits an ambiguous reference to a clarification,
+      // so no jobId ever reaches existingEntities.
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'JOB-0001' },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
+    });
+
+    it('no jobRepo wired: a router-resolved id is still not trusted (nothing verifies it)', async () => {
+      const handler = new UpdateJobTaskHandler(spokenGateway());
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark the Garcia job complete',
+        existingEntities: { jobReference: 'the Garcia job', jobId: RESOLVED },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
+    });
+  });
+
   describe('contract validation (invalid status enum)', () => {
     it('rejects an invalid status enum value on the finished payload', () => {
       const parsed = updateJobPayloadSchema.safeParse({

@@ -13,6 +13,10 @@ import { SendEstimateTaskHandler } from '../../../src/ai/tasks/voice-extended-ta
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 import { sendEstimatePayloadSchema } from '../../../src/proposals/contracts/send-estimate';
+import {
+  SendEstimateExecutionHandler,
+  NoopEstimateDeliveryProvider,
+} from '../../../src/proposals/execution/voice-extended-handlers';
 
 function ctx(overrides: Partial<TaskContext>): TaskContext {
   return { tenantId: 't-1', userId: 'u-1', message: 'test transcript', ...overrides };
@@ -138,5 +142,57 @@ describe('SendEstimateTaskHandler — B2 candidatesForReference', () => {
     expect(missingFieldsFor(res.proposal)).toContain('estimateId');
     const sc = res.proposal.sourceContext as Record<string, unknown> | undefined;
     expect(sc?.entityCandidates).toBeUndefined();
+  });
+});
+
+// ── U1 — resolver-verified estimateId lifts the gate (resolve-then-gate) ───
+//
+// `send_estimate` is one of ESTIMATE_DOC_INTENTS: the router's entity
+// resolver resolves the spoken reference pre-draft and a UNIQUE verified
+// match rides existingEntities.estimateId. P-44: the lifted-gate case is
+// proven by the EXECUTED EFFECT (real handler dispatches the right
+// estimate), not just payload shape.
+describe('SendEstimateTaskHandler — U1 resolver-verified estimateId', () => {
+  const RESOLVED_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+  it('resolver seam lifts the gate; the drafted payload EXECUTES through the real handler (dispatch carries the resolved estimate)', async () => {
+    const res = await new SendEstimateTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Khan', estimateId: RESOLVED_ID, sendChannel: 'sms' } }),
+    );
+    expect(res.proposal.payload.estimateId).toBe(RESOLVED_ID);
+    expect(res.proposal.payload.estimateReference).toBe('Khan');
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    // Comms class — a fully-resolved draft STILL never auto-approves.
+    expect(res.proposal.status).toBe('draft');
+    expect(sendEstimatePayloadSchema.safeParse(res.proposal.payload).success).toBe(true);
+
+    const provider = new NoopEstimateDeliveryProvider();
+    const exec = await new SendEstimateExecutionHandler(provider).execute(res.proposal, {
+      tenantId: 't-1',
+      executedBy: 'u-1',
+    });
+    expect(exec.success).toBe(true);
+    expect(provider.lastDispatch).toMatchObject({
+      tenantId: 't-1',
+      estimateId: RESOLVED_ID,
+      channel: 'sms',
+    });
+  });
+
+  it('a non-UUID value in the estimateId seam never lifts the gate (shape check, no silent guess)', async () => {
+    const res = await new SendEstimateTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Khan', estimateId: 'the Khan estimate' } }),
+    );
+    expect(res.proposal.payload.estimateId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('estimateId');
+  });
+
+  it('no candidate search runs when the resolver already verified the id', async () => {
+    const findByTenant = vi.fn().mockResolvedValue([]);
+    const res = await new SendEstimateTaskHandler({ estimateRepo: { findByTenant } as never }).handle(
+      ctx({ existingEntities: { customerName: 'Khan', estimateId: RESOLVED_ID } }),
+    );
+    expect(findByTenant).not.toHaveBeenCalled();
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
   });
 });

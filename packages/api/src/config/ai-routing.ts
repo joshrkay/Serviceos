@@ -172,6 +172,11 @@ export const TASK_TYPES = [
   'extract_business_profile',
   'extract_categories',
   'extract_pricing',
+  // Epic 12.6 — weekly owner-advisor email (app.ts weekly-feedback worker).
+  'weekly_feedback_suggestions',
+  // B1.18 — spoken brand-voice instruction → structured config
+  // (ai/tasks/brand-voice-task.ts).
+  'update_brand_voice',
   // ── Complex: high-stakes structured generation — financial documents,
   //    multi-line estimates/invoices, and MMS-to-quote (vision-capable tier).
   'draft_estimate',
@@ -227,6 +232,17 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   extract_business_profile: 'standard',
   extract_categories: 'standard',
   extract_pricing: 'standard',
+  // Weekly background sweep, so latency is irrelevant and quality wins: the
+  // standard writing model (like suggest_reply), not lightweight. Not complex —
+  // it's two-sentence advisory prose over aggregated metrics, not financial
+  // drafting, and the call site pins its own temperature/maxTokens anyway.
+  weekly_feedback_suggestions: 'standard',
+  // Parses a spoken tone instruction into the brand-voice config that shapes
+  // every future outbound message — a wrong field poisons all of them, so no
+  // lightweight model. Standard rather than complex for the same reason as the
+  // extract_* tasks above: complex's temperature 0.5 is too high for strict
+  // structured extraction.
+  update_brand_voice: 'standard',
   // Complex
   draft_estimate: 'complex',
   update_estimate: 'complex',

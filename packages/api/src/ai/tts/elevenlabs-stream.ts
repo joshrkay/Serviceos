@@ -1,3 +1,4 @@
+import NodeWebSocket from 'ws';
 import type { TtsStreamChunk, TtsSynthesizeStreamInput } from './tts-provider';
 
 /**
@@ -111,8 +112,12 @@ export class ElevenLabsStreamConnection {
   ): AsyncIterator<TtsStreamChunk> {
     const url =
       `${baseUrl.replace(/^http/, 'ws')}/v1/text-to-speech/${voiceId}/stream-input` +
-      `?model_id=${modelId}&output_format=pcm_16000&xi-api-key=${apiKey}`;
-    const ws = new WebSocket(url);
+      `?model_id=${modelId}&output_format=pcm_16000`;
+    // Node 20 (the deployed image) has no global WebSocket by default.
+    // ws implements the WHATWG event/client subset used by these providers.
+    const WebSocketClient: typeof globalThis.WebSocket = globalThis.WebSocket ??
+      (NodeWebSocket as unknown as typeof globalThis.WebSocket);
+    const ws = new WebSocketClient(url);
     const inactivityMs = this.opts.inactivityTimeoutMs ?? ELEVENLABS_STREAM_INACTIVITY_MS;
     const queue: TtsStreamChunk[] = [];
     let done = false;
@@ -188,6 +193,7 @@ export class ElevenLabsStreamConnection {
       // characteristics with the REST synthesize() path.
       ws.send(JSON.stringify({
         text: ' ',
+        xi_api_key: apiKey,
         voice_settings: { stability: 0.5, similarity_boost: 0.75 },
       }));
       // Send the text payload + an empty terminator per ElevenLabs WS protocol.
@@ -208,7 +214,15 @@ export class ElevenLabsStreamConnection {
         const data = JSON.parse(String(msg.data)) as {
           audio?: string;
           isFinal?: boolean;
+          error?: unknown;
         };
+        if (data.error) {
+          // Do not echo provider payloads, which may contain credentials.
+          errorState = new Error('ElevenLabs rejected the speech request');
+          finish();
+          ws.close();
+          return;
+        }
         if (data.audio) {
           let pcm = Buffer.from(data.audio, 'base64');
           // First-frame format guard (see class doc): compressed audio here

@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { v4 as uuidv4 } from 'uuid';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   Payment,
@@ -264,6 +265,72 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
       );
       if (rows.length === 0) return null;
       return this.mapRowToPayment(rows[0]);
+    });
+  }
+
+  /**
+   * D2-4a / P0-4 — claim + increment in ONE statement. The `target` CTE
+   * takes a row lock (FOR UPDATE) so concurrent refund recordings on the
+   * same payment serialize; `claim` inserts the per-refund ledger row ONLY
+   * when the over-refund guard passes (so a rejected increment never strands
+   * a claim that would dedupe a legitimate retry), with ON CONFLICT DO
+   * NOTHING as the duplicate arbiter; the UPDATE applies only when a NEW
+   * claim row was inserted. Because everything is one statement, there is no
+   * window where the claim exists without the increment (or vice versa) —
+   * the crash-consistency both the read-based short-circuit and a
+   * two-statement transaction could not give.
+   *
+   * 0 rows back means: payment missing/cross-tenant, duplicate refund id, or
+   * over-refund. The diagnostic reads distinguish them.
+   */
+  async recordRefundIdempotent(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions & { stripeRefundId: string },
+  ): Promise<{ payment: Payment; duplicate: boolean } | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `WITH target AS (
+           SELECT id, amount_cents, refunded_amount_cents FROM payments
+           WHERE tenant_id = $2 AND id = $3
+           FOR UPDATE
+         ),
+         claim AS (
+           INSERT INTO payment_refunds (id, tenant_id, payment_id, stripe_refund_id, amount_cents)
+           SELECT $1, $2, target.id, $4, $5 FROM target
+           WHERE target.refunded_amount_cents + $5 <= target.amount_cents
+           ON CONFLICT (tenant_id, stripe_refund_id) DO NOTHING
+           RETURNING payment_id
+         )
+         UPDATE payments p
+         SET refunded_amount_cents = p.refunded_amount_cents + $5,
+             refunded_at = $6,
+             last_refund_stripe_id = $4,
+             updated_at = now()
+         FROM claim
+         WHERE p.tenant_id = $2 AND p.id = claim.payment_id
+         RETURNING p.*`,
+        [uuidv4(), tenantId, id, opts.stripeRefundId, opts.refundCents, opts.refundedAt],
+      );
+      if (rows.length > 0) {
+        return { payment: this.mapRowToPayment(rows[0]), duplicate: false };
+      }
+
+      // Diagnostic reads (error/duplicate path only; the happy path is one
+      // statement). A pre-existing claim for this refund id → duplicate.
+      const payment = await client.query(
+        `SELECT * FROM payments WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+      if (payment.rows.length === 0) return null;
+      const claim = await client.query(
+        `SELECT 1 FROM payment_refunds WHERE tenant_id = $1 AND stripe_refund_id = $2`,
+        [tenantId, opts.stripeRefundId],
+      );
+      if (claim.rows.length > 0) {
+        return { payment: this.mapRowToPayment(payment.rows[0]), duplicate: true };
+      }
+      return null; // over-refund — caller raises the ValidationError
     });
   }
 

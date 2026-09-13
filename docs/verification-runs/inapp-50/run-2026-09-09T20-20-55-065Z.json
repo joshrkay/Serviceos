@@ -1,0 +1,4586 @@
+{
+  "version": "inapp-50-run-v1",
+  "runId": "2026-09-09T20-20-55-065Z",
+  "mode": "hermetic",
+  "registerVersion": "inapp-50-v1",
+  "gitSha": "d6ff17772ecb22ba4acceb9188e0ba23d2629a4d",
+  "startedAt": "2026-09-09T20:20:55.065Z",
+  "finishedAt": "2026-09-09T20:20:55.473Z",
+  "batch": null,
+  "summary": {
+    "total": 50,
+    "PASS": 43,
+    "PARTIAL": 5,
+    "DEGRADED": 0,
+    "FAIL": 2,
+    "bySeverity": {
+      "critical": {
+        "PASS": 25,
+        "PARTIAL": 0,
+        "DEGRADED": 0,
+        "FAIL": 0
+      },
+      "core": {
+        "PASS": 16,
+        "PARTIAL": 5,
+        "DEGRADED": 0,
+        "FAIL": 1
+      },
+      "growth": {
+        "PASS": 2,
+        "PARTIAL": 0,
+        "DEGRADED": 0,
+        "FAIL": 1
+      }
+    },
+    "byCluster": {
+      "scheduling": {
+        "PASS": 10,
+        "PARTIAL": 0,
+        "DEGRADED": 0,
+        "FAIL": 0
+      },
+      "search": {
+        "PASS": 10,
+        "PARTIAL": 0,
+        "DEGRADED": 0,
+        "FAIL": 0
+      },
+      "confirmations": {
+        "PASS": 6,
+        "PARTIAL": 0,
+        "DEGRADED": 0,
+        "FAIL": 0
+      },
+      "estimates": {
+        "PASS": 5,
+        "PARTIAL": 1,
+        "DEGRADED": 0,
+        "FAIL": 1
+      },
+      "invoices": {
+        "PASS": 7,
+        "PARTIAL": 1,
+        "DEGRADED": 0,
+        "FAIL": 0
+      },
+      "customers": {
+        "PASS": 1,
+        "PARTIAL": 2,
+        "DEGRADED": 0,
+        "FAIL": 0
+      },
+      "jobs": {
+        "PASS": 1,
+        "PARTIAL": 0,
+        "DEGRADED": 0,
+        "FAIL": 1
+      },
+      "dispatch": {
+        "PASS": 3,
+        "PARTIAL": 1,
+        "DEGRADED": 0,
+        "FAIL": 0
+      }
+    },
+    "byRootCause": {
+      "intent": 0,
+      "slot_capture": 4,
+      "proposal_generation": 2,
+      "fallback": 1,
+      "infra": 0
+    },
+    "intentCaptureOnlyCritical": [],
+    "gate": {
+      "pass": false,
+      "reasons": [
+        "PASS 43/50",
+        "FAIL verdicts: est-06, job-02"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": 1,
+      "key": "book-01",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "7a4e0e6b-6572-4c7c-a5bd-fa8ac985eab0"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "7a4e0e6b-6572-4c7c-a5bd-fa8ac985eab0",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "customerId": "718f85f0-9a4b-45ff-bb2a-5986a606da0e",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "718f85f0-9a4b-45ff-bb2a-5986a606da0e"
+            },
+            "sessionId": "1c0e016b-0d93-488c-a0e7-a1c24e726132",
+            "conversationId": "1c0e016b-0d93-488c-a0e7-a1c24e726132"
+          }
+        }
+      ],
+      "durationMs": 64
+    },
+    {
+      "id": 2,
+      "key": "book-02",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Slot Carlos at Garcia Tuesday two o'clock for the install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "ef2228bb-3ca7-47fb-abce-fd7c65e1b398"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "ef2228bb-3ca7-47fb-abce-fd7c65e1b398",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday two o'clock",
+            "targetTechnicianName": "Carlos",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "technicianId": "21fecc9f-4707-4b23-9a43-0bc495c8ef5a",
+            "customerId": "a636c571-43b9-46af-bc5a-37e8963733bc",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday two o'clock",
+              "targetTechnicianName": "Carlos",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "a636c571-43b9-46af-bc5a-37e8963733bc",
+              "technicianId": "21fecc9f-4707-4b23-9a43-0bc495c8ef5a"
+            },
+            "sessionId": "1b47f108-04dd-45c4-90e5-802b3a9b5ed1",
+            "conversationId": "1b47f108-04dd-45c4-90e5-802b3a9b5ed1"
+          }
+        }
+      ],
+      "durationMs": 182
+    },
+    {
+      "id": 3,
+      "key": "book-03",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book Smith furnace maintenance Tuesday at two",
+          "stateBefore": "intent_capture",
+          "stateAfter": "entity_resolution",
+          "ttsText": "I found more than one record under that name. Could you give me the service address so I can pick the right one?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_ambiguous"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "clarification_asked",
+            "intent": "create_appointment",
+            "confidence": 0.93,
+            "resolution": "ambiguous"
+          }
+        },
+        {
+          "index": 2,
+          "text": "104 Cedar",
+          "stateBefore": "entity_resolution",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "confirmation_asked"
+          },
+          "clarificationFollowUp": true
+        },
+        {
+          "index": 3,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "28056827-62db-4aa2-a640-770dbf6a08f5"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "28056827-62db-4aa2-a640-770dbf6a08f5",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [
+            "scheduledStart",
+            "scheduledEnd"
+          ],
+          "payload": {
+            "customerName": "Smith",
+            "dateTimeDescription": "Tuesday at two",
+            "jobTitle": "Furnace maintenance",
+            "customerId": "e8a867e7-e65b-40a7-8bfe-651b0f396807",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Smith",
+              "dateTimeDescription": "Tuesday at two",
+              "jobTitle": "Furnace maintenance",
+              "customerId": "e8a867e7-e65b-40a7-8bfe-651b0f396807"
+            },
+            "sessionId": "35fa6142-ada2-4fd6-866c-3e626e266d9b",
+            "conversationId": "35fa6142-ada2-4fd6-866c-3e626e266d9b"
+          }
+        }
+      ],
+      "durationMs": 8
+    },
+    {
+      "id": 4,
+      "key": "book-04",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book a furnace tune-up for Elena Ruiz Thursday at 10 am",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.91,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.91,
+            "resolution": "not_found"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "b5db9224-3081-4cd7-9ded-5001d34c884b"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "b5db9224-3081-4cd7-9ded-5001d34c884b",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [
+            "customerId"
+          ],
+          "payload": {
+            "customerName": "Elena Ruiz",
+            "dateTimeDescription": "Thursday at 10 am",
+            "jobTitle": "Furnace tune-up",
+            "scheduledStart": "2026-09-10T17:00:00.000Z",
+            "scheduledEnd": "2026-09-10T18:00:00.000Z",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Elena Ruiz",
+              "dateTimeDescription": "Thursday at 10 am",
+              "jobTitle": "Furnace tune-up",
+              "scheduledStart": "2026-09-10T17:00:00.000Z",
+              "scheduledEnd": "2026-09-10T18:00:00.000Z"
+            },
+            "sessionId": "1cb47f33-09fc-4d2f-9681-108193b5dee8",
+            "conversationId": "1cb47f33-09fc-4d2f-9681-108193b5dee8"
+          }
+        }
+      ],
+      "durationMs": 5
+    },
+    {
+      "id": 5,
+      "key": "book-05",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book a service visit",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.95,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "It's for Khan, Tuesday at 2 pm, condenser install",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.intent_details_supplied",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 3,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "99d1250c-7992-489a-b3cd-b2d4faf23ffa"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "99d1250c-7992-489a-b3cd-b2d4faf23ffa",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Khan",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "Condenser install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "customerId": "ef017a8b-a5c2-486d-a704-a02c460a47c1",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Khan",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "Condenser install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "ef017a8b-a5c2-486d-a704-a02c460a47c1"
+            },
+            "sessionId": "01d9f8cc-a147-47e5-8885-181a5700d2be",
+            "conversationId": "01d9f8cc-a147-47e5-8885-181a5700d2be"
+          }
+        }
+      ],
+      "durationMs": 5
+    },
+    {
+      "id": 6,
+      "key": "resched-01",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "reschedule",
+      "intent": "reschedule_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:reschedule_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Move Garcia's Tuesday appointment to Thursday at 10 am",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to reschedule your appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "reschedule_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "reschedule_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "f0c45db2-de04-4d81-bf07-ca924c587402"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "reschedule_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "f0c45db2-de04-4d81-bf07-ca924c587402",
+          "proposalType": "reschedule_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "appointmentReference": "Tuesday appointment",
+            "newDateTimeDescription": "Thursday at 10 am",
+            "newScheduledStart": "2026-09-10T17:00:00.000Z",
+            "newScheduledEnd": "2026-09-10T18:00:00.000Z",
+            "appointmentId": "461084ec-b870-4436-a076-c102c9ab305f",
+            "intent": "reschedule_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "appointmentReference": "Tuesday appointment",
+              "newDateTimeDescription": "Thursday at 10 am",
+              "newScheduledStart": "2026-09-10T17:00:00.000Z",
+              "newScheduledEnd": "2026-09-10T18:00:00.000Z",
+              "appointmentId": "461084ec-b870-4436-a076-c102c9ab305f"
+            },
+            "sessionId": "d835ff8e-4733-4e73-955e-fd3d69cdda35",
+            "conversationId": "d835ff8e-4733-4e73-955e-fd3d69cdda35"
+          }
+        }
+      ],
+      "durationMs": 6
+    },
+    {
+      "id": 7,
+      "key": "cancel-01",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "cancel",
+      "intent": "cancel_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:cancel_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Cancel Garcia's Tuesday appointment, the customer asked",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to cancel your appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "cancel_appointment",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "cancel_appointment",
+            "confidence": 0.95,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "e503dfa1-1f3c-4460-b42b-5749b8797b90"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "cancel_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "e503dfa1-1f3c-4460-b42b-5749b8797b90",
+          "proposalType": "cancel_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "appointmentReference": "Tuesday appointment",
+            "cancellationReason": "customer asked",
+            "cancellationType": "customer_request",
+            "appointmentId": "4a2946e8-cc5e-4281-98ea-72095a24d420",
+            "reason": "Requested by caller via voice session",
+            "intent": "cancel_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "appointmentReference": "Tuesday appointment",
+              "cancellationReason": "customer asked",
+              "cancellationType": "customer_request",
+              "appointmentId": "4a2946e8-cc5e-4281-98ea-72095a24d420",
+              "reason": "Requested by caller via voice session"
+            },
+            "sessionId": "08a11055-d1c2-4bc4-9f3f-e200fbf4c203",
+            "conversationId": "08a11055-d1c2-4bc4-9f3f-e200fbf4c203"
+          }
+        }
+      ],
+      "durationMs": 4
+    },
+    {
+      "id": 8,
+      "key": "cancel-02",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "cancel",
+      "intent": "cancel_appointment",
+      "verdict": "PASS",
+      "reason": "not_found:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Cancel the Patel appointment",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "I couldn't find a matching appointment for the Patel appointment. Want to try a different name, or create it?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_not_found_operator"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "cancel_appointment",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "intent_detected",
+            "intent": "cancel_appointment",
+            "confidence": 0.93,
+            "resolution": "not_found"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 3
+    },
+    {
+      "id": 9,
+      "key": "confirm-01",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "confirm",
+      "intent": "confirm_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:confirm_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Confirm Garcia for Tuesday",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to confirm your appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "confirm_appointment",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "confirm_appointment",
+            "confidence": 0.93,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "aa89fffb-0d59-48c4-9e72-93a5bc8b2b81"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "confirm_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "aa89fffb-0d59-48c4-9e72-93a5bc8b2b81",
+          "proposalType": "confirm_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "appointmentReference": "Tuesday",
+            "appointmentId": "2633193e-3e55-4283-9db7-8165fd23543f",
+            "customerId": "b59b3024-961c-411d-97a2-2c1dbae20e1a",
+            "intent": "confirm_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "appointmentReference": "Tuesday",
+              "customerId": "b59b3024-961c-411d-97a2-2c1dbae20e1a",
+              "appointmentId": "2633193e-3e55-4283-9db7-8165fd23543f"
+            },
+            "sessionId": "21e8dea0-6286-4ad6-838a-36d15c38ed8b",
+            "conversationId": "21e8dea0-6286-4ad6-838a-36d15c38ed8b"
+          }
+        }
+      ],
+      "durationMs": 5
+    },
+    {
+      "id": 10,
+      "key": "delay-01",
+      "cluster": "scheduling",
+      "severity": "critical",
+      "op": "notify_delay",
+      "intent": "notify_delay",
+      "verdict": "PASS",
+      "reason": "proposal:notify_delay",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Text Garcia that I'm running twenty minutes late",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "notify_delay",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "notify_delay",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "aa14dbff-7d13-4f95-8897-f6e7e11a92fb"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "notify_delay"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "aa14dbff-7d13-4f95-8897-f6e7e11a92fb",
+          "proposalType": "notify_delay",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "delayMinutes": 20,
+            "appointmentId": "e858f591-736b-4465-bdb6-fb37466bd8cb",
+            "customerId": "57101d7a-f543-4524-895d-c509c0c2bf95",
+            "intent": "notify_delay",
+            "entities": {
+              "customerName": "Garcia",
+              "delayMinutes": 20,
+              "customerId": "57101d7a-f543-4524-895d-c509c0c2bf95",
+              "appointmentId": "e858f591-736b-4465-bdb6-fb37466bd8cb"
+            },
+            "sessionId": "da5421a3-d0bb-48f3-aef4-aaa919272af3",
+            "conversationId": "da5421a3-d0bb-48f3-aef4-aaa919272af3"
+          }
+        }
+      ],
+      "durationMs": 4
+    },
+    {
+      "id": 11,
+      "key": "reassign-01",
+      "cluster": "dispatch",
+      "severity": "critical",
+      "op": "reassign",
+      "intent": "reassign_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:reassign_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Hand Garcia's Tuesday visit to Carlos",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "reassign_appointment",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "reassign_appointment",
+            "confidence": 0.93,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "3baa6a48-59b4-42d9-bd85-99134785d8f7"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "reassign_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "3baa6a48-59b4-42d9-bd85-99134785d8f7",
+          "proposalType": "reassign_appointment",
+          "status": "ready_for_review",
+          "missingFields": [
+            "toTechnicianId"
+          ],
+          "payload": {
+            "customerName": "Garcia",
+            "appointmentReference": "Tuesday visit",
+            "targetTechnicianName": "Carlos",
+            "technicianId": "f6b659d3-ed58-487a-9501-aae25c4faa8b",
+            "appointmentId": "0fca375b-f724-465d-932a-ac565e7e485c",
+            "intent": "reassign_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "appointmentReference": "Tuesday visit",
+              "targetTechnicianName": "Carlos",
+              "technicianId": "f6b659d3-ed58-487a-9501-aae25c4faa8b",
+              "appointmentId": "0fca375b-f724-465d-932a-ac565e7e485c"
+            },
+            "sessionId": "8ea8545f-2a47-4ce1-b9d6-1d821a0c328f",
+            "conversationId": "8ea8545f-2a47-4ce1-b9d6-1d821a0c328f"
+          }
+        }
+      ],
+      "durationMs": 4
+    },
+    {
+      "id": 12,
+      "key": "dispatch-03",
+      "cluster": "dispatch",
+      "severity": "core",
+      "op": "en_route",
+      "intent": "en_route",
+      "verdict": "PARTIAL",
+      "reason": "spoken line did not match /on (your|my|the) way|heads.?up|notified|let .* know|told .* you/i: \"You're marked en route. Sent the customer an on-my-way text.\"",
+      "stage": "intent_detected",
+      "rootCause": {
+        "category": "fallback",
+        "detail": "spoken line did not match /on (your|my|the) way|heads.?up|notified|let .* know|told .* you/i: \"You're marked en route. Sent the customer an on-my-way text.\""
+      },
+      "intentCaptureOnly": true,
+      "failures": [
+        "spoken line did not match /on (your|my|the) way|heads.?up|notified|let .* know|told .* you/i: \"You're marked en route. Sent the customer an on-my-way text.\""
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "On my way to the Khan install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "You're marked en route. Sent the customer an on-my-way text.",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.en_route_executed"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "en_route_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "en_route",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "intent_detected",
+            "intent": "en_route",
+            "confidence": 0.95,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 6
+    },
+    {
+      "id": 13,
+      "key": "search-01",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup",
+      "intent": "lookup_day_overview",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "What's on my schedule today",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "You have nothing left today.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_my_day",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_my_day",
+            "confidence": 0.95,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 6
+    },
+    {
+      "id": 14,
+      "key": "search-02",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup",
+      "intent": "lookup_appointments",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "When is Garcia's next appointment",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "Garcia's next appointment is Tuesday, September 15 at 2 PM for Garcia HVAC install.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_appointments",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_appointments",
+            "confidence": 0.94,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 4
+    },
+    {
+      "id": 15,
+      "key": "search-03",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup",
+      "intent": "lookup_customer",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Pull up Khan's customer profile",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "I have Khan ending in 0101 on file.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_customer",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_customer",
+            "confidence": 0.95,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 6
+    },
+    {
+      "id": 16,
+      "key": "search-04",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup",
+      "intent": "lookup_jobs",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "What's the status of the Johnson water heater job",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "Johnson's most recent job is JOB-0002 — Johnson water heater replacement, currently just opened.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_jobs",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_jobs",
+            "confidence": 0.93,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 3
+    },
+    {
+      "id": 17,
+      "key": "search-05",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup_balance",
+      "intent": "lookup_balance",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "What does Khan owe us",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "Khan's account is paid in full — nothing currently owed.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_balance",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_balance",
+            "confidence": 0.94,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 3
+    },
+    {
+      "id": 18,
+      "key": "search-06",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup",
+      "intent": "lookup_invoices",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Which invoices are open for Johnson",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "Johnson has one open invoice — INV-0042 for $488.25, due October 9.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_invoices",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_invoices",
+            "confidence": 0.93,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 3
+    },
+    {
+      "id": 19,
+      "key": "search-07",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup",
+      "intent": "lookup_estimates",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Did Khan accept the estimate yet",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "Khan has one estimate — EST-0001 for $3526.25, sent.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_estimates",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_estimates",
+            "confidence": 0.92,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 2
+    },
+    {
+      "id": 20,
+      "key": "search-08",
+      "cluster": "search",
+      "severity": "critical",
+      "op": "lookup_balance",
+      "intent": "lookup_balance",
+      "verdict": "PASS",
+      "reason": "clarification_question:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "What's Smith's outstanding balance",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "More than one match for \"Smith\": Smith (+14805550104 · 104 QA Cedar Avenue, Phoenix); Smith (+14805550105 · 105 QA Cedar Avenue, Phoenix). Which one did you mean?",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_balance",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_balance",
+            "confidence": 0.94,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 2
+    },
+    {
+      "id": 21,
+      "key": "search-09",
+      "cluster": "search",
+      "severity": "core",
+      "op": "lookup_revenue",
+      "intent": "lookup_revenue",
+      "verdict": "PASS",
+      "reason": "lookup_answer:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "How much revenue did we do today",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "You haven't brought in any revenue yet this month, with $2571.46 still outstanding.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_revenue",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_revenue",
+            "confidence": 0.95,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 3
+    },
+    {
+      "id": 22,
+      "key": "search-10",
+      "cluster": "search",
+      "severity": "core",
+      "op": "lookup",
+      "intent": "lookup_customer",
+      "verdict": "PASS",
+      "reason": "not_found:answered",
+      "stage": "answered",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Pull up the Patel account",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "I couldn't find a customer matching \"Patel\". Try again with their full name.",
+          "sideEffectTypes": [
+            "tts_play"
+          ],
+          "auditEventTypes": [],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "lookup_executed",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "lookup_customer",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "answered",
+            "intent": "lookup_customer",
+            "confidence": 0.93,
+            "resolution": "skipped"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 2
+    },
+    {
+      "id": 23,
+      "key": "conf-01",
+      "cluster": "confirmations",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "uh yeah, go ahead",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "d5c9d3bf-cde4-4270-9202-5fbf8e30fc35"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "d5c9d3bf-cde4-4270-9202-5fbf8e30fc35",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "customerId": "ccfbff57-1f25-4506-88a2-4209a272b890",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "ccfbff57-1f25-4506-88a2-4209a272b890"
+            },
+            "sessionId": "502150d2-e547-470d-b3b0-50a384d5d49f",
+            "conversationId": "502150d2-e547-470d-b3b0-50a384d5d49f"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 24,
+      "key": "conf-02",
+      "cluster": "confirmations",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "ac1a29bc-4ca3-4b2e-b165-5cb1aedebd63"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        },
+        {
+          "index": 3,
+          "text": "yes",
+          "stateBefore": "closing",
+          "stateAfter": "closing",
+          "ttsText": "I don't have anything waiting on a yes from you just yet — what would you like to do?",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.closing.confirm_without_pending"
+          ],
+          "proposalIds": [
+            "ac1a29bc-4ca3-4b2e-b165-5cb1aedebd63"
+          ],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "guarded",
+            "fallbackReason": "guard",
+            "dedup": "duplicate_turn"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "ac1a29bc-4ca3-4b2e-b165-5cb1aedebd63",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "customerId": "b4180a4d-7d21-48fb-9c23-34fe26aa1c78",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "b4180a4d-7d21-48fb-9c23-34fe26aa1c78"
+            },
+            "sessionId": "3d972bf1-462b-45cc-9f52-721f3c0ad397",
+            "conversationId": "3d972bf1-462b-45cc-9f52-721f3c0ad397"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 25,
+      "key": "conf-03",
+      "cluster": "confirmations",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.turn_deduplicated"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "guarded",
+            "dedup": "duplicate_turn"
+          }
+        },
+        {
+          "index": 3,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "17003bc3-8ec4-4821-9667-61517f50e170"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "17003bc3-8ec4-4821-9667-61517f50e170",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "customerId": "e353c0ab-e614-497d-84cd-6edabab88ea4",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "e353c0ab-e614-497d-84cd-6edabab88ea4"
+            },
+            "sessionId": "5e939bbd-a0ed-43c9-bb14-d71cb77a6672",
+            "conversationId": "5e939bbd-a0ed-43c9-bb14-d71cb77a6672"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 26,
+      "key": "conf-04",
+      "cluster": "confirmations",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "no",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "intent_capture",
+          "ttsText": "My apologies — let me try again. What would you like to do?",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.correction"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "none"
+          }
+        },
+        {
+          "index": 3,
+          "text": "Book Garcia for Thursday at 10 am for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 4,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "806c71ab-0394-440c-9a56-af617da2cc5d"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "806c71ab-0394-440c-9a56-af617da2cc5d",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Thursday at 10 am",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-10T17:00:00.000Z",
+            "scheduledEnd": "2026-09-10T18:00:00.000Z",
+            "customerId": "a6b7801d-264f-4041-811d-68530f8e1cb1",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Thursday at 10 am",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-10T17:00:00.000Z",
+              "scheduledEnd": "2026-09-10T18:00:00.000Z",
+              "customerId": "a6b7801d-264f-4041-811d-68530f8e1cb1"
+            },
+            "sessionId": "e0f45fe7-fc61-458e-83ad-7457601c43d4",
+            "conversationId": "e0f45fe7-fc61-458e-83ad-7457601c43d4"
+          }
+        }
+      ],
+      "durationMs": 4
+    },
+    {
+      "id": 27,
+      "key": "noise-01",
+      "cluster": "confirmations",
+      "severity": "critical",
+      "op": "create_appointment",
+      "intent": "create_appointment",
+      "verdict": "PASS",
+      "reason": "proposal:create_appointment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "um... hello?",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "I didn't catch that — what would you like to do?",
+          "sideEffectTypes": [
+            "audit_log",
+            "emit_quality_event",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.noise_reprompt"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "guarded",
+            "fallbackReason": "reprompt",
+            "dedup": "noise"
+          }
+        },
+        {
+          "index": 2,
+          "text": "Book Garcia for Tuesday at 2 pm for the HVAC install",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to schedule an appointment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_appointment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_appointment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 3,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "8976f349-e33d-42ab-b90d-5bd076c81dc8"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_appointment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "8976f349-e33d-42ab-b90d-5bd076c81dc8",
+          "proposalType": "create_appointment",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "dateTimeDescription": "Tuesday at 2 pm",
+            "jobTitle": "HVAC install",
+            "scheduledStart": "2026-09-15T21:00:00.000Z",
+            "scheduledEnd": "2026-09-15T22:00:00.000Z",
+            "customerId": "d4312717-b312-437a-9fad-2c059f909866",
+            "intent": "create_appointment",
+            "entities": {
+              "customerName": "Garcia",
+              "dateTimeDescription": "Tuesday at 2 pm",
+              "jobTitle": "HVAC install",
+              "scheduledStart": "2026-09-15T21:00:00.000Z",
+              "scheduledEnd": "2026-09-15T22:00:00.000Z",
+              "customerId": "d4312717-b312-437a-9fad-2c059f909866"
+            },
+            "sessionId": "4f9ea223-247f-4dcc-88a5-9b1fafb3c3a7",
+            "conversationId": "4f9ea223-247f-4dcc-88a5-9b1fafb3c3a7"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 28,
+      "key": "noise-02",
+      "cluster": "confirmations",
+      "severity": "core",
+      "op": "confirm",
+      "intent": "confirm",
+      "verdict": "PASS",
+      "reason": "guard:guarded",
+      "stage": "guarded",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "yes",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_capture",
+          "ttsText": "I don't have anything waiting on a yes from you just yet — what would you like to do?",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.confirm_without_pending"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "guarded",
+            "fallbackReason": "guard"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 1
+    },
+    {
+      "id": 29,
+      "key": "est-01",
+      "cluster": "estimates",
+      "severity": "core",
+      "op": "create_estimate",
+      "intent": "draft_estimate",
+      "verdict": "PARTIAL",
+      "reason": "payload.lineItems is absent or empty",
+      "stage": "committed",
+      "rootCause": {
+        "category": "slot_capture",
+        "detail": "payload.lineItems is absent or empty"
+      },
+      "intentCaptureOnly": false,
+      "failures": [
+        "payload.lineItems is absent or empty"
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Quote Khan for a three-ton condenser replacement",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to put together an estimate. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "transition"
+          ],
+          "classifiedIntent": "draft_estimate",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "draft_estimate",
+            "confidence": 0.95,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "d800d0bc-b5bd-45d9-98d7-543b4b25afee"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "draft_estimate"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "d800d0bc-b5bd-45d9-98d7-543b4b25afee",
+          "proposalType": "draft_estimate",
+          "status": "ready_for_review",
+          "missingFields": [
+            "lineItems"
+          ],
+          "payload": {
+            "customerName": "Khan",
+            "jobReference": "three-ton condenser replacement",
+            "jobId": "ef26b66c-ae20-4098-bd0b-ae6237f97e1b",
+            "customerId": "6868d326-f52b-47bc-be6a-fb3d0e3bb505",
+            "intent": "draft_estimate",
+            "entities": {
+              "customerName": "Khan",
+              "jobReference": "three-ton condenser replacement",
+              "customerId": "6868d326-f52b-47bc-be6a-fb3d0e3bb505",
+              "jobId": "ef26b66c-ae20-4098-bd0b-ae6237f97e1b"
+            },
+            "sessionId": "e5bf8e9d-dbb2-4caf-8c2c-6f8117501db4",
+            "conversationId": "e5bf8e9d-dbb2-4caf-8c2c-6f8117501db4"
+          }
+        }
+      ],
+      "durationMs": 4
+    },
+    {
+      "id": 30,
+      "key": "est-02",
+      "cluster": "estimates",
+      "severity": "core",
+      "op": "create_estimate",
+      "intent": "draft_estimate",
+      "verdict": "PASS",
+      "reason": "proposal:draft_estimate",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Prepare an estimate for Johnson's water heater job",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to put together an estimate. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "draft_estimate",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "draft_estimate",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "84e7e34f-c1f1-4406-9911-d307a99346a6"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "draft_estimate"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "84e7e34f-c1f1-4406-9911-d307a99346a6",
+          "proposalType": "draft_estimate",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Johnson",
+            "jobReference": "water heater job",
+            "jobId": "c75edd32-a99b-4014-957c-83fd42751e34",
+            "customerId": "3bef44fb-ca09-49fe-ba18-02bb2758701c",
+            "lineItems": [
+              {
+                "description": "Water heater replacement",
+                "quantity": 1,
+                "unitPrice": 185000,
+                "catalogItemId": "6e9225a3-0478-4e23-a0cc-16f0785178d2",
+                "pricingSource": "catalog",
+                "needsPricing": false,
+                "category": "material",
+                "unit": "each"
+              }
+            ],
+            "intent": "draft_estimate",
+            "entities": {
+              "customerName": "Johnson",
+              "jobReference": "water heater job",
+              "lineItemDescriptions": [
+                "Water heater replacement"
+              ],
+              "customerId": "3bef44fb-ca09-49fe-ba18-02bb2758701c",
+              "jobId": "c75edd32-a99b-4014-957c-83fd42751e34"
+            },
+            "sessionId": "1a31523f-c216-45ae-b726-3326fcc0c775",
+            "conversationId": "1a31523f-c216-45ae-b726-3326fcc0c775"
+          }
+        }
+      ],
+      "durationMs": 4
+    },
+    {
+      "id": 31,
+      "key": "est-03",
+      "cluster": "estimates",
+      "severity": "core",
+      "op": "edit_estimate",
+      "intent": "update_estimate",
+      "verdict": "PASS",
+      "reason": "proposal:update_estimate",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Add duct sealing to Khan's estimate",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to update your estimate. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "update_estimate",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "update_estimate",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "66764e38-ec4c-40c2-9663-293c1526c1a1"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "update_estimate"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "66764e38-ec4c-40c2-9663-293c1526c1a1",
+          "proposalType": "update_estimate",
+          "status": "ready_for_review",
+          "missingFields": [
+            "editActions"
+          ],
+          "payload": {
+            "customerName": "Khan",
+            "jobReference": "Khan's estimate",
+            "estimateId": "7f377bc2-ac33-42ce-83c7-0318ddfcf2e8",
+            "customerId": "1abf8e04-28f7-40cb-8e4f-a793e4bbd3e9",
+            "intent": "update_estimate",
+            "entities": {
+              "customerName": "Khan",
+              "jobReference": "Khan's estimate",
+              "lineItemDescriptions": [
+                "Duct sealing"
+              ],
+              "customerId": "1abf8e04-28f7-40cb-8e4f-a793e4bbd3e9",
+              "estimateId": "7f377bc2-ac33-42ce-83c7-0318ddfcf2e8"
+            },
+            "sessionId": "9e2a8efb-8990-4099-9430-2de10980b134",
+            "conversationId": "9e2a8efb-8990-4099-9430-2de10980b134"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 32,
+      "key": "est-04",
+      "cluster": "estimates",
+      "severity": "core",
+      "op": "edit_estimate",
+      "intent": "update_estimate",
+      "verdict": "PASS",
+      "reason": "proposal:update_estimate",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Add a fifty dollar service call fee to EST-0001",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to update your estimate. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "update_estimate",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "update_estimate",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "8a720689-2f74-4e33-a571-106393f17983"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "update_estimate"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "8a720689-2f74-4e33-a571-106393f17983",
+          "proposalType": "update_estimate",
+          "status": "ready_for_review",
+          "missingFields": [
+            "editActions"
+          ],
+          "payload": {
+            "jobReference": "EST-0001",
+            "amount": 5000,
+            "estimateId": "4d049f94-69bf-469e-aeb5-b8b6c89bcd1f",
+            "intent": "update_estimate",
+            "entities": {
+              "jobReference": "EST-0001",
+              "amount": 5000,
+              "lineItemDescriptions": [
+                "Service call fee"
+              ],
+              "estimateId": "4d049f94-69bf-469e-aeb5-b8b6c89bcd1f"
+            },
+            "sessionId": "413ff3bc-8220-457a-85de-0a5ecb659443",
+            "conversationId": "413ff3bc-8220-457a-85de-0a5ecb659443"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 33,
+      "key": "est-05",
+      "cluster": "estimates",
+      "severity": "core",
+      "op": "send_estimate",
+      "intent": "send_estimate",
+      "verdict": "PASS",
+      "reason": "proposal:send_estimate",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Send EST-0042 to Garcia by email",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "send_estimate",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "send_estimate",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "deea947b-0933-4c0e-99ac-85b1ceddada7"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "send_estimate"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "deea947b-0933-4c0e-99ac-85b1ceddada7",
+          "proposalType": "send_estimate",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "jobReference": "EST-0042",
+            "sendChannel": "email",
+            "estimateId": "5ae2c6d3-542c-432d-be6c-4de368a42e03",
+            "channel": "email",
+            "customerId": "56049fa4-7f49-48bd-9a27-f0e21b24bc6a",
+            "intent": "send_estimate",
+            "entities": {
+              "customerName": "Garcia",
+              "jobReference": "EST-0042",
+              "sendChannel": "email",
+              "customerId": "56049fa4-7f49-48bd-9a27-f0e21b24bc6a",
+              "estimateId": "5ae2c6d3-542c-432d-be6c-4de368a42e03"
+            },
+            "sessionId": "637a97aa-3fe8-4959-a547-bdfd58be67a3",
+            "conversationId": "637a97aa-3fe8-4959-a547-bdfd58be67a3"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 34,
+      "key": "est-06",
+      "cluster": "estimates",
+      "severity": "growth",
+      "op": "send_estimate_nudge",
+      "intent": "send_estimate_nudge",
+      "verdict": "FAIL",
+      "reason": "voice-proposal contract violation",
+      "stage": "committed",
+      "rootCause": {
+        "category": "proposal_generation",
+        "detail": "voice-minted 'send_estimate_nudge' failed validateProposalPayload with no missingFields gate: : estimateId or estimateReference is required"
+      },
+      "intentCaptureOnly": false,
+      "failures": [
+        "voice-minted 'send_estimate_nudge' failed validateProposalPayload with no missingFields gate: : estimateId or estimateReference is required"
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Nudge Khan about the pending estimate",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "send_estimate_nudge",
+          "classifiedConfidence": 0.91,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "send_estimate_nudge",
+            "confidence": 0.91,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "6900d365-06b1-4bc4-8b22-e1890ac4a1f0"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "send_estimate_nudge"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "6900d365-06b1-4bc4-8b22-e1890ac4a1f0",
+          "proposalType": "send_estimate_nudge",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Khan",
+            "customerId": "b1c55654-3e75-4c57-9136-a88c6ee700c4",
+            "intent": "send_estimate_nudge",
+            "entities": {
+              "customerName": "Khan",
+              "customerId": "b1c55654-3e75-4c57-9136-a88c6ee700c4"
+            },
+            "sessionId": "1df97d67-5478-44cd-bacb-955c67b5f95b",
+            "conversationId": "1df97d67-5478-44cd-bacb-955c67b5f95b"
+          },
+          "contractViolation": "voice-minted 'send_estimate_nudge' failed validateProposalPayload with no missingFields gate: : estimateId or estimateReference is required"
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 35,
+      "key": "est-07",
+      "cluster": "estimates",
+      "severity": "growth",
+      "op": "change_order",
+      "intent": "create_change_order",
+      "verdict": "PASS",
+      "reason": "proposal:create_change_order",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Khan approved the extra duct work, add a change order to the Khan install job",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_change_order",
+          "classifiedConfidence": 0.9,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_change_order",
+            "confidence": 0.9,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "e41ac7f6-6841-4723-af84-a87c4bfdad4f"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_change_order"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "e41ac7f6-6841-4723-af84-a87c4bfdad4f",
+          "proposalType": "create_change_order",
+          "status": "ready_for_review",
+          "missingFields": [
+            "title",
+            "lineItems"
+          ],
+          "payload": {
+            "customerName": "Khan",
+            "jobReference": "Khan install",
+            "changeOrderDescription": "extra duct work",
+            "jobId": "8bba2176-2618-4697-975c-d8635d94d67e",
+            "intent": "create_change_order",
+            "entities": {
+              "customerName": "Khan",
+              "jobReference": "Khan install",
+              "changeOrderDescription": "extra duct work",
+              "jobId": "8bba2176-2618-4697-975c-d8635d94d67e"
+            },
+            "sessionId": "24c04858-05bf-474b-b098-4167d9f18fb5",
+            "conversationId": "24c04858-05bf-474b-b098-4167d9f18fb5"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 36,
+      "key": "inv-01",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "create_invoice",
+      "intent": "create_invoice",
+      "verdict": "PASS",
+      "reason": "proposal:draft_invoice",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Invoice Johnson four hundred fifty for the capacitor work",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_invoice",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_invoice",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "8a7b8ae2-515e-414e-8dd9-6a51987a4cb1"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "draft_invoice"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "8a7b8ae2-515e-414e-8dd9-6a51987a4cb1",
+          "proposalType": "draft_invoice",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Johnson",
+            "amount": 45000,
+            "customerId": "d912d1fd-5249-42d7-b130-6fa2ba8d01f1",
+            "lineItems": [
+              {
+                "description": "Capacitor work",
+                "quantity": 1,
+                "unitPrice": 45000,
+                "pricingSource": "uncatalogued",
+                "needsPricing": true
+              }
+            ],
+            "_meta": {
+              "overallConfidence": "low"
+            },
+            "intent": "create_invoice",
+            "entities": {
+              "customerName": "Johnson",
+              "amount": 45000,
+              "lineItemDescriptions": [
+                "Capacitor work"
+              ],
+              "customerId": "d912d1fd-5249-42d7-b130-6fa2ba8d01f1"
+            },
+            "sessionId": "273c2c1f-fb0e-45fc-82be-e2e3f541d379",
+            "conversationId": "273c2c1f-fb0e-45fc-82be-e2e3f541d379"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 37,
+      "key": "inv-02",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "create_invoice",
+      "intent": "create_invoice",
+      "verdict": "PASS",
+      "reason": "proposal:draft_invoice",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Bill Mrs Lee two eighty-five for the service visit",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "create_invoice",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_invoice",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "359ea8f9-649f-4761-8973-d23b1edcb8a2"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "draft_invoice"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "359ea8f9-649f-4761-8973-d23b1edcb8a2",
+          "proposalType": "draft_invoice",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Mrs Lee",
+            "amount": 28500,
+            "customerId": "9564674c-63d8-4549-be9a-a330b789b287",
+            "lineItems": [
+              {
+                "description": "Service visit",
+                "quantity": 1,
+                "unitPrice": 28500,
+                "pricingSource": "uncatalogued",
+                "needsPricing": true
+              }
+            ],
+            "_meta": {
+              "overallConfidence": "low"
+            },
+            "intent": "create_invoice",
+            "entities": {
+              "customerName": "Mrs Lee",
+              "amount": 28500,
+              "lineItemDescriptions": [
+                "Service visit"
+              ],
+              "customerId": "9564674c-63d8-4549-be9a-a330b789b287"
+            },
+            "sessionId": "0c7aaef5-7197-452c-b5b1-4f4e8e2622ca",
+            "conversationId": "0c7aaef5-7197-452c-b5b1-4f4e8e2622ca"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 38,
+      "key": "inv-03",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "edit_invoice",
+      "intent": "update_invoice",
+      "verdict": "PASS",
+      "reason": "proposal:update_invoice",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Add a twenty-five dollar trip fee to INV-0042",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "update_invoice",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "update_invoice",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "d1f7595a-ad2e-4793-90b0-3c96203faede"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "update_invoice"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "d1f7595a-ad2e-4793-90b0-3c96203faede",
+          "proposalType": "update_invoice",
+          "status": "ready_for_review",
+          "missingFields": [
+            "editActions"
+          ],
+          "payload": {
+            "jobReference": "INV-0042",
+            "amount": 2500,
+            "invoiceId": "e24b0bbd-000c-4c76-973f-98e4777052c7",
+            "intent": "update_invoice",
+            "entities": {
+              "jobReference": "INV-0042",
+              "amount": 2500,
+              "lineItemDescriptions": [
+                "Trip fee"
+              ],
+              "invoiceId": "e24b0bbd-000c-4c76-973f-98e4777052c7"
+            },
+            "sessionId": "46a180ad-939f-465a-b735-de47c8a9361e",
+            "conversationId": "46a180ad-939f-465a-b735-de47c8a9361e"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 39,
+      "key": "inv-04",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "send_invoice",
+      "intent": "send_invoice",
+      "verdict": "PASS",
+      "reason": "proposal:send_invoice",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Email invoice INV-0042 to Johnson",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to send your invoice. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "send_invoice",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "send_invoice",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "9073ae7e-3f63-452c-a8a0-c4f82fc5eeeb"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "send_invoice"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "9073ae7e-3f63-452c-a8a0-c4f82fc5eeeb",
+          "proposalType": "send_invoice",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Johnson",
+            "jobReference": "INV-0042",
+            "sendChannel": "email",
+            "invoiceId": "d4fd4723-5f74-4dd5-bdd8-f84443c5cde5",
+            "channel": "email",
+            "customerId": "8a8d8488-4801-4995-9252-932795368789",
+            "intent": "send_invoice",
+            "entities": {
+              "customerName": "Johnson",
+              "jobReference": "INV-0042",
+              "sendChannel": "email",
+              "customerId": "8a8d8488-4801-4995-9252-932795368789",
+              "invoiceId": "d4fd4723-5f74-4dd5-bdd8-f84443c5cde5"
+            },
+            "sessionId": "5bd67c90-d63c-409a-8fe7-44e9929d190b",
+            "conversationId": "5bd67c90-d63c-409a-8fe7-44e9929d190b"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 40,
+      "key": "inv-05",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "send_invoice",
+      "intent": "send_invoice",
+      "verdict": "PASS",
+      "reason": "proposal:send_invoice",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Text Smith the invoice link",
+          "stateBefore": "intent_capture",
+          "stateAfter": "entity_resolution",
+          "ttsText": "I found more than one record under that name. Could you give me the service address so I can pick the right one?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_ambiguous"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "transition"
+          ],
+          "classifiedIntent": "send_invoice",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "clarification_asked",
+            "intent": "send_invoice",
+            "confidence": 0.95,
+            "resolution": "ambiguous"
+          }
+        },
+        {
+          "index": 2,
+          "text": "104 Cedar",
+          "stateBefore": "entity_resolution",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to send your invoice. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "transition"
+          ],
+          "trace": {
+            "stage": "confirmation_asked"
+          },
+          "clarificationFollowUp": true
+        },
+        {
+          "index": 3,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "16ac12ec-4c30-45f0-9294-2e2bafbfd356"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "send_invoice"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "16ac12ec-4c30-45f0-9294-2e2bafbfd356",
+          "proposalType": "send_invoice",
+          "status": "ready_for_review",
+          "missingFields": [
+            "channel"
+          ],
+          "payload": {
+            "customerName": "Smith",
+            "customerId": "4fa19cab-bff2-47d2-9206-45ca6891d6e4",
+            "intent": "send_invoice",
+            "entities": {
+              "customerName": "Smith",
+              "customerId": "4fa19cab-bff2-47d2-9206-45ca6891d6e4"
+            },
+            "sessionId": "7e6afbb5-c5d2-4170-ae4c-7e2ce56d057e",
+            "conversationId": "7e6afbb5-c5d2-4170-ae4c-7e2ce56d057e"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 41,
+      "key": "inv-06",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "issue_invoice",
+      "intent": "issue_invoice",
+      "verdict": "PASS",
+      "reason": "proposal:issue_invoice",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Issue Garcia's invoice",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "issue_invoice",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "issue_invoice",
+            "confidence": 0.93,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "359f450e-dbb5-445f-9d16-f26558a188fc"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "issue_invoice"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "359f450e-dbb5-445f-9d16-f26558a188fc",
+          "proposalType": "issue_invoice",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "jobReference": "Garcia's invoice",
+            "invoiceId": "5aa96832-7dcf-4d2b-b0cf-6dbd2af77901",
+            "customerId": "f0e48624-ff6d-4121-9954-0ad98fd173fe",
+            "intent": "issue_invoice",
+            "entities": {
+              "customerName": "Garcia",
+              "jobReference": "Garcia's invoice",
+              "customerId": "f0e48624-ff6d-4121-9954-0ad98fd173fe",
+              "invoiceId": "5aa96832-7dcf-4d2b-b0cf-6dbd2af77901"
+            },
+            "sessionId": "36e4e905-cd08-4893-8573-5fda33962a02",
+            "conversationId": "36e4e905-cd08-4893-8573-5fda33962a02"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 42,
+      "key": "inv-07",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "record_payment",
+      "intent": "record_payment",
+      "verdict": "PASS",
+      "reason": "proposal:record_payment",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Record a four fifty cash payment on INV-0042",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to record a payment. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "record_payment",
+          "classifiedConfidence": 0.94,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "record_payment",
+            "confidence": 0.94,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "95ee55c3-8db8-4b91-b6ac-047184590bd4"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "record_payment"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "95ee55c3-8db8-4b91-b6ac-047184590bd4",
+          "proposalType": "record_payment",
+          "status": "ready_for_review",
+          "missingFields": [
+            "amountCents"
+          ],
+          "payload": {
+            "jobReference": "INV-0042",
+            "amount": 45000,
+            "paymentMethod": "cash",
+            "invoiceId": "22d990a5-bcce-4c56-973a-3b34bae07607",
+            "intent": "record_payment",
+            "entities": {
+              "jobReference": "INV-0042",
+              "amount": 45000,
+              "paymentMethod": "cash",
+              "invoiceId": "22d990a5-bcce-4c56-973a-3b34bae07607"
+            },
+            "sessionId": "4f9bcc5b-0c8c-440c-874a-8c0d0c4a3484",
+            "conversationId": "4f9bcc5b-0c8c-440c-874a-8c0d0c4a3484"
+          }
+        }
+      ],
+      "durationMs": 3
+    },
+    {
+      "id": 43,
+      "key": "inv-08",
+      "cluster": "invoices",
+      "severity": "core",
+      "op": "payment_reminder",
+      "intent": "send_payment_reminder",
+      "verdict": "PARTIAL",
+      "reason": "payload.invoiceId is absent",
+      "stage": "committed",
+      "rootCause": {
+        "category": "slot_capture",
+        "detail": "payload.invoiceId is absent"
+      },
+      "intentCaptureOnly": false,
+      "failures": [
+        "payload.invoiceId is absent"
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Send Johnson a reminder on the overdue invoice",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "send_payment_reminder",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "send_payment_reminder",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "2f9362b3-6899-4173-8ba9-d4a4b63a420e"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "send_payment_reminder"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "2f9362b3-6899-4173-8ba9-d4a4b63a420e",
+          "proposalType": "send_payment_reminder",
+          "status": "ready_for_review",
+          "missingFields": [
+            "invoiceId",
+            "stepKey",
+            "offsetDays",
+            "channel"
+          ],
+          "payload": {
+            "customerName": "Johnson",
+            "customerId": "0ac57d63-507a-44e1-b045-23ed3bfc6464",
+            "intent": "send_payment_reminder",
+            "entities": {
+              "customerName": "Johnson",
+              "customerId": "0ac57d63-507a-44e1-b045-23ed3bfc6464"
+            },
+            "sessionId": "b1075e59-42be-4787-b61c-e056f51d32c3",
+            "conversationId": "b1075e59-42be-4787-b61c-e056f51d32c3"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 44,
+      "key": "cust-01",
+      "cluster": "customers",
+      "severity": "core",
+      "op": "create_client",
+      "intent": "create_customer",
+      "verdict": "PASS",
+      "reason": "proposal:create_customer",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "New customer Elena Ruiz, phone 480-555-7711",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to add a new customer. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "transition"
+          ],
+          "classifiedIntent": "create_customer",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_customer",
+            "confidence": 0.95,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "9405744c-7496-4907-a20a-d15001dc3ae4"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_customer"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "9405744c-7496-4907-a20a-d15001dc3ae4",
+          "proposalType": "create_customer",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "displayName": "Elena Ruiz",
+            "phone": "480-555-7711",
+            "name": "Elena Ruiz",
+            "intent": "create_customer",
+            "entities": {
+              "displayName": "Elena Ruiz",
+              "phone": "480-555-7711"
+            },
+            "sessionId": "408ff597-983f-4e2a-ae36-185782fb08cb",
+            "conversationId": "408ff597-983f-4e2a-ae36-185782fb08cb"
+          }
+        }
+      ],
+      "durationMs": 5
+    },
+    {
+      "id": 45,
+      "key": "cust-02",
+      "cluster": "customers",
+      "severity": "core",
+      "op": "edit_client",
+      "intent": "update_customer",
+      "verdict": "PARTIAL",
+      "reason": "payload.email is absent",
+      "stage": "committed",
+      "rootCause": {
+        "category": "slot_capture",
+        "detail": "payload.email is absent"
+      },
+      "intentCaptureOnly": false,
+      "failures": [
+        "payload.email is absent"
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Update Khan's email to accounts@khan.test",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "update_customer",
+          "classifiedConfidence": 0.93,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "update_customer",
+            "confidence": 0.93,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "1272004c-491c-49fd-954a-2b135c031df5"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "update_customer"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "1272004c-491c-49fd-954a-2b135c031df5",
+          "proposalType": "update_customer",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Khan",
+            "updatedEmail": "accounts@khan.test",
+            "customerId": "98d92e6f-bc34-4de9-8603-710c513aba3f",
+            "intent": "update_customer",
+            "entities": {
+              "customerName": "Khan",
+              "updatedEmail": "accounts@khan.test",
+              "customerId": "98d92e6f-bc34-4de9-8603-710c513aba3f"
+            },
+            "sessionId": "19dda696-4e0b-4753-b517-bc66a22a01fe",
+            "conversationId": "19dda696-4e0b-4753-b517-bc66a22a01fe"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 46,
+      "key": "cust-03",
+      "cluster": "customers",
+      "severity": "core",
+      "op": "convert_lead",
+      "intent": "convert_lead",
+      "verdict": "PARTIAL",
+      "reason": "payload.leadId is absent",
+      "stage": "committed",
+      "rootCause": {
+        "category": "slot_capture",
+        "detail": "payload.leadId is absent"
+      },
+      "intentCaptureOnly": false,
+      "failures": [
+        "payload.leadId is absent"
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Convert the Greenfield lead into a customer",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "transition"
+          ],
+          "classifiedIntent": "convert_lead",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "convert_lead",
+            "confidence": 0.95,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "97f00e3a-4197-4afe-8496-783d19ef22a3"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "convert_lead"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "97f00e3a-4197-4afe-8496-783d19ef22a3",
+          "proposalType": "convert_lead",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "leadReference": "Greenfield",
+            "intent": "convert_lead",
+            "entities": {
+              "leadReference": "Greenfield"
+            },
+            "sessionId": "b4758d17-e0c6-49a0-962b-6064116703d1",
+            "conversationId": "b4758d17-e0c6-49a0-962b-6064116703d1"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 47,
+      "key": "job-01",
+      "cluster": "jobs",
+      "severity": "core",
+      "op": "create_job",
+      "intent": "create_job",
+      "verdict": "PASS",
+      "reason": "proposal:create_job",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Open a job for Khan, kitchen drain clog",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to open a new job. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "transition"
+          ],
+          "classifiedIntent": "create_job",
+          "classifiedConfidence": 0.95,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "create_job",
+            "confidence": 0.95,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "852cae5b-5f61-4fab-87e3-8d5d8a62cf91"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "create_job"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "852cae5b-5f61-4fab-87e3-8d5d8a62cf91",
+          "proposalType": "create_job",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Khan",
+            "jobTitle": "kitchen drain clog",
+            "title": "kitchen drain clog",
+            "customerId": "24fc3b95-3859-4702-91c5-2027e446e057",
+            "intent": "create_job",
+            "entities": {
+              "customerName": "Khan",
+              "jobTitle": "kitchen drain clog",
+              "customerId": "24fc3b95-3859-4702-91c5-2027e446e057"
+            },
+            "sessionId": "4f21b76e-6ed0-4714-ad34-f7b9f63a856c",
+            "conversationId": "4f21b76e-6ed0-4714-ad34-f7b9f63a856c"
+          }
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 48,
+      "key": "job-02",
+      "cluster": "jobs",
+      "severity": "core",
+      "op": "edit_job",
+      "intent": "update_job",
+      "verdict": "FAIL",
+      "reason": "voice-proposal contract violation",
+      "stage": "committed",
+      "rootCause": {
+        "category": "proposal_generation",
+        "detail": "voice-minted 'update_job' failed validateProposalPayload with no missingFields gate: : update_job requires at least one field to change: status, priority, title, or description"
+      },
+      "intentCaptureOnly": false,
+      "failures": [
+        "voice-minted 'update_job' failed validateProposalPayload with no missingFields gate: : update_job requires at least one field to change: status, priority, title, or description"
+      ],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Set Johnson's water heater job to in progress",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "update_job",
+          "classifiedConfidence": 0.92,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "update_job",
+            "confidence": 0.92,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "fef7fd79-e7f8-43ce-86c2-2d49f84b0c39"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "update_job"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "fef7fd79-e7f8-43ce-86c2-2d49f84b0c39",
+          "proposalType": "update_job",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Johnson",
+            "jobReference": "water heater job",
+            "jobId": "a383f26a-711f-49e8-8a6c-02bac1441f0b",
+            "intent": "update_job",
+            "entities": {
+              "customerName": "Johnson",
+              "jobReference": "water heater job",
+              "jobId": "a383f26a-711f-49e8-8a6c-02bac1441f0b"
+            },
+            "sessionId": "72bd3202-c61b-47e5-91fe-fa457996b28d",
+            "conversationId": "72bd3202-c61b-47e5-91fe-fa457996b28d"
+          },
+          "contractViolation": "voice-minted 'update_job' failed validateProposalPayload with no missingFields gate: : update_job requires at least one field to change: status, priority, title, or description"
+        }
+      ],
+      "durationMs": 2
+    },
+    {
+      "id": 49,
+      "key": "dispatch-01",
+      "cluster": "dispatch",
+      "severity": "critical",
+      "op": "emergency",
+      "intent": "emergency_dispatch",
+      "verdict": "PASS",
+      "reason": "escalation:escalated",
+      "stage": "escalated",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "No heat at the Hayes house, this is an emergency, page on-call now",
+          "stateBefore": "intent_capture",
+          "stateAfter": "escalating",
+          "ttsText": "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.",
+          "sideEffectTypes": [
+            "audit_log",
+            "tts_play",
+            "tts_play",
+            "notify_oncall"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.emergency_dispatch"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "escalation_triggered",
+            "transition"
+          ],
+          "classifiedIntent": "emergency_dispatch",
+          "classifiedConfidence": 0.97,
+          "trace": {
+            "stage": "escalated",
+            "intent": "emergency_dispatch",
+            "confidence": 0.97,
+            "resolution": "skipped",
+            "fallbackReason": "escalation"
+          }
+        }
+      ],
+      "proposals": [],
+      "durationMs": 3
+    },
+    {
+      "id": 50,
+      "key": "dispatch-02",
+      "cluster": "dispatch",
+      "severity": "growth",
+      "op": "add_crew",
+      "intent": "add_crew_member",
+      "verdict": "PASS",
+      "reason": "proposal:add_crew_member",
+      "stage": "committed",
+      "rootCause": null,
+      "intentCaptureOnly": false,
+      "failures": [],
+      "turns": [
+        {
+          "index": 1,
+          "text": "Add Carlos to the Garcia Tuesday job as a helper",
+          "stateBefore": "intent_capture",
+          "stateAfter": "intent_confirm",
+          "ttsText": "Just to confirm — you'd like to take care of that request. Is that right?",
+          "sideEffectTypes": [
+            "audit_log",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_capture.intent_classified",
+            "agent.calling.entity_resolution.entity_resolved"
+          ],
+          "proposalIds": [],
+          "busEventTypes": [
+            "intent_classified",
+            "cost_incurred",
+            "transition"
+          ],
+          "classifiedIntent": "add_crew_member",
+          "classifiedConfidence": 0.9,
+          "trace": {
+            "stage": "confirmation_asked",
+            "intent": "add_crew_member",
+            "confidence": 0.9,
+            "resolution": "resolved"
+          }
+        },
+        {
+          "index": 2,
+          "text": "yes",
+          "stateBefore": "intent_confirm",
+          "stateAfter": "closing",
+          "ttsText": "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+          "sideEffectTypes": [
+            "audit_log",
+            "create_proposal",
+            "audit_log",
+            "tts_play"
+          ],
+          "auditEventTypes": [
+            "agent.calling.intent_confirm.confirmed",
+            "agent.calling.proposal_draft.proposal_queued"
+          ],
+          "proposalIds": [
+            "80f9aa54-3716-4eef-8445-9249c3bfb79a"
+          ],
+          "busEventTypes": [
+            "proposal_created",
+            "transition"
+          ],
+          "trace": {
+            "stage": "committed",
+            "proposalType": "add_crew_member"
+          }
+        }
+      ],
+      "proposals": [
+        {
+          "id": "80f9aa54-3716-4eef-8445-9249c3bfb79a",
+          "proposalType": "add_crew_member",
+          "status": "ready_for_review",
+          "missingFields": [],
+          "payload": {
+            "customerName": "Garcia",
+            "appointmentReference": "Tuesday",
+            "targetTechnicianName": "Carlos",
+            "technicianId": "9896aadb-9126-40d4-a7e3-683e1b6d6713",
+            "appointmentId": "5901b8f9-c5b0-49e4-93ed-a2acb53f58f7",
+            "intent": "add_crew_member",
+            "entities": {
+              "customerName": "Garcia",
+              "appointmentReference": "Tuesday",
+              "targetTechnicianName": "Carlos",
+              "technicianId": "9896aadb-9126-40d4-a7e3-683e1b6d6713",
+              "appointmentId": "5901b8f9-c5b0-49e4-93ed-a2acb53f58f7"
+            },
+            "sessionId": "898e7721-7f81-48fb-a620-0bf64aaa9e8b",
+            "conversationId": "898e7721-7f81-48fb-a620-0bf64aaa9e8b"
+          }
+        }
+      ],
+      "durationMs": 4
+    }
+  ]
+}

@@ -29,6 +29,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
     approvedAt: row.approved_at ? new Date(row.approved_at as string) : undefined,
     executedAt: row.executed_at ? new Date(row.executed_at as string) : undefined,
     executedBy: (row.executed_by as string) ?? undefined,
+    executedByRole: (row.executed_by_role as string) ?? undefined,
     claimedBy: (row.claimed_by as string) ?? undefined,
     claimedAt: row.claimed_at ? new Date(row.claimed_at as string) : undefined,
     executionRetryCount:
@@ -398,6 +399,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -421,6 +423,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
       if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
       if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
@@ -428,6 +431,61 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
          WHERE tenant_id = $1 AND id = $2
+         RETURNING *`,
+        params
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  /**
+   * ANS-001 — conditional status write. ONE atomic statement: the `status =
+   * ANY($3)` precondition lives in the WHERE clause, so the row transitions
+   * only while it is still in an expected status. No SELECT ... FOR UPDATE
+   * pair is needed — a single UPDATE takes its own row lock, and a losing
+   * racer simply matches zero rows and gets null back.
+   *
+   * Same optional-column handling as `updateStatus` (rejection metadata et al)
+   * so the two write paths stamp identical rows.
+   */
+  async updateStatusIf(
+    tenantId: string,
+    id: string,
+    fromStatuses: ProposalStatus[],
+    to: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'executionError'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const setClauses = ['status = $4', 'updated_at = NOW()'];
+      const params: unknown[] = [tenantId, id, fromStatuses, to];
+      let p = 5;
+
+      if (updates?.rejectionReason !== undefined) { setClauses.push(`rejection_reason = $${p++}`); params.push(updates.rejectionReason); }
+      if (updates?.rejectionDetails !== undefined) { setClauses.push(`rejection_details = $${p++}`); params.push(updates.rejectionDetails); }
+      if (updates?.resultEntityId !== undefined)   { setClauses.push(`result_entity_id = $${p++}`); params.push(updates.resultEntityId); }
+      if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
+      if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
+      if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
+      if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+
+      const result = await client.query(
+        `UPDATE proposals SET ${setClauses.join(', ')}
+         WHERE tenant_id = $1 AND id = $2 AND status = ANY($3::text[])
          RETURNING *`,
         params
       );
@@ -464,6 +522,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         approvedAt: 'approved_at',
         executedAt: 'executed_at',
         executedBy: 'executed_by',
+        executedByRole: 'executed_by_role',
         undoneAt: 'undone_at',
         undoneBy: 'undone_by',
         // WS18 (D-018) — the live close flow retrofits an EXISTING drafted
@@ -537,21 +596,68 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   async resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+      executionError: string;
+    }>;
+  }> {
     return this.withCrossTenantSweep(async (client) => {
+      // RETURNING the moved-to-failed rows' identity (follow-up fix): this is
+      // the ONLY write for a HANDLER_NOT_FOUND-style stale timeout — the
+      // executor throws before any executeAudited call ever runs, so the
+      // caller (execution-worker.ts) needs enough per-row identity here to
+      // emit its own proposal.execution_timed_out audit event afterward.
+      //
+      // execution_error is COALESCE'd (PR #815 review, Important 2) to a
+      // synthesized timeout reason — NEVER a plain overwrite, so a real
+      // reason recorded earlier survives — because
+      // evaluateSilentExecutionFailures (workers/failure-rate-monitor.ts)
+      // and GET /api/proposals both read this column directly; the audit
+      // event above never reaches either surface. Wording must match
+      // staleExecutionTimeoutMessage() in proposal.ts exactly (can't share
+      // the JS string in SQL — keep the two in sync by hand).
+      //
+      // Follow-up: execution_error is also RETURNED. UPDATE ... RETURNING
+      // yields POST-update values, so this is exactly what the COALESCE
+      // resolved to — the real caught cause when execution-worker.ts
+      // recorded one on the still-'executing' row, else the synthesized
+      // wording — which the caller puts on the timeout audit event so it
+      // states WHY, not just that a timeout happened.
       const failed = await client.query(
         `UPDATE proposals
-         SET status = 'execution_failed', updated_at = NOW()
+         SET status = 'execution_failed',
+             execution_error = COALESCE(
+               execution_error,
+               'Execution timed out: claimed >' || $1::text || 'min across ' || execution_retry_count::text || ' retries, never completed'
+             ),
+             updated_at = NOW()
          WHERE status = 'executing'
            AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
-           AND execution_retry_count >= $2`,
+           AND execution_retry_count >= $2
+         RETURNING id, tenant_id, proposal_type, execution_retry_count, execution_error`,
         [staleMinutes, maxRetries]
       );
+      // `execution_error = NULL` is the RETRY half of the same concept the
+      // terminal write above COALESCEs. This is the "start a fresh attempt"
+      // boundary: the row goes back to 'approved' and will be claimed again,
+      // so the PREVIOUS attempt's reason must not ride along. Carrying it
+      // means a proposal that then executes successfully is still served by
+      // `GET /api/proposals/:id` with an error string on it — a state that
+      // was impossible while the column was only written at the terminal
+      // transition, and routine now that the sweep records the caught cause
+      // on the still-'executing' row.
       const reset = await client.query(
         `UPDATE proposals
          SET status = 'approved',
              claimed_by = NULL,
              claimed_at = NULL,
+             execution_error = NULL,
              execution_retry_count = execution_retry_count + 1,
              updated_at = NOW()
          WHERE status = 'executing'
@@ -559,7 +665,24 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
            AND execution_retry_count < $2`,
         [staleMinutes, maxRetries]
       );
-      return { resetToApproved: reset.rowCount ?? 0, movedToFailed: failed.rowCount ?? 0 };
+      // `execution_error` cannot be SQL NULL here: RETURNING yields the
+      // POST-update value and the statement above COALESCEs it to a
+      // non-null literal. There is therefore no "historical row holds NULL"
+      // case to defend against — the guard that used to be here was dead,
+      // and the test that exercised it asserted a state only a mocked Pool
+      // could produce.
+      const failedProposals = failed.rows.map((row) => ({
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        proposalType: row.proposal_type as ProposalType,
+        retryCount: Number(row.execution_retry_count),
+        executionError: row.execution_error as string,
+      }));
+      return {
+        resetToApproved: reset.rowCount ?? 0,
+        movedToFailed: failed.rowCount ?? 0,
+        failedProposals,
+      };
     });
   }
 }

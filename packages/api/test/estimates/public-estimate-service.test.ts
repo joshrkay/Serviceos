@@ -1167,3 +1167,82 @@ describe('PublicEstimateService — EE-4 line images', () => {
     expect((await svc.getByToken(dangling.viewToken!)).lineItems[0].imageUrl).toBeUndefined();
   });
 });
+
+/**
+ * B7.5 (PR review, FINDING B) — the descriptive unit reaches the customer.
+ *
+ * toView rebuilt each line by hand and omitted `unit`, so a customer looking
+ * at an approved quote saw a bare "240" with no way to tell whether the rate
+ * was per square foot, per hour, or per unit. The field is DESCRIPTIVE: these
+ * tests also pin that adding it changes no money on the view.
+ */
+describe('PublicEstimateService.toView — B7.5 descriptive unit', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  async function seedWithUnits() {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      lineItems: [
+        {
+          id: 'li-sqft',
+          description: 'Deck staining',
+          quantity: 240,
+          unit: 'sq ft',
+          unitPriceCents: 375,
+          totalCents: 90000,
+          sortOrder: 0,
+          taxable: true,
+        },
+        {
+          id: 'li-plain',
+          description: 'Prep labor',
+          quantity: 3,
+          unitPriceCents: 8500,
+          totalCents: 25500,
+          sortOrder: 1,
+          taxable: true,
+        },
+      ],
+      totals: {
+        subtotalCents: 115500,
+        taxableSubtotalCents: 115500,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxCents: 0,
+        totalCents: 115500,
+      },
+    });
+    await h.estimate.create(est);
+    return est;
+  }
+
+  it('carries the unit onto the public line-item DTO', async () => {
+    const est = await seedWithUnits();
+    const view = await h.service.getByToken(est.viewToken!);
+    const byId = new Map(view.lineItems.map((li) => [li.id, li]));
+    expect(byId.get('li-sqft')!.unit).toBe('sq ft');
+  });
+
+  it('a line with no unit reads back undefined, not null', async () => {
+    const est = await seedWithUnits();
+    const view = await h.service.getByToken(est.viewToken!);
+    const byId = new Map(view.lineItems.map((li) => [li.id, li]));
+    expect(byId.get('li-plain')!.unit).toBeUndefined();
+  });
+
+  it('the unit changes no money on the view — totals are unaffected', async () => {
+    const est = await seedWithUnits();
+    const view = await h.service.getByToken(est.viewToken!);
+    // Same integer cents as the seeded totals; nothing derived from `unit`.
+    expect(view.totalCents).toBe(115500);
+    expect(view.subtotalCents).toBe(115500);
+    expect(view.taxCents).toBe(0);
+    const sqft = view.lineItems.find((li) => li.id === 'li-sqft')!;
+    expect(sqft.unitPriceCents).toBe(375);
+    expect(sqft.totalCents).toBe(90000);
+    expect(sqft.quantity * sqft.unitPriceCents).toBe(sqft.totalCents);
+  });
+});

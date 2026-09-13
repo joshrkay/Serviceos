@@ -104,4 +104,18 @@ export class PgDeviceTokenRepository extends PgBaseRepository implements DeviceT
       return res.rowCount ?? 0;
     });
   }
+
+  async pruneStale(tenantId: string, olderThanDays: number): Promise<number> {
+    return this.withTenant(tenantId, async (client) => {
+      const res = await client.query(
+        // make_interval over string concatenation: explicit int typing, immune
+        // to a caller passing something non-numeric.
+        `DELETE FROM device_tokens
+          WHERE tenant_id = $1
+            AND updated_at < NOW() - make_interval(days => $2::int)`,
+        [tenantId, olderThanDays],
+      );
+      return res.rowCount ?? 0;
+    });
+  }
 }

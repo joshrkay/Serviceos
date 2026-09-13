@@ -27,6 +27,44 @@ export interface AppendTranscriptStore {
   ): void;
 }
 
+/** Stands in for a spoken money-approval challenge. See `callerTranscriptText`. */
+export const REDACTED_CHALLENGE_TEXT = '[redacted: voice-approval challenge]';
+
+/**
+ * Minimal slice of the voice session needed to decide whether the caller's
+ * utterance is a spoken approval challenge.
+ */
+export interface ChallengeAwareSession {
+  pendingVoiceApproval?: { stage?: string };
+}
+
+/**
+ * The text to store for a caller utterance — redacted when the session is
+ * awaiting a spoken money-approval challenge (#850).
+ *
+ * Money- and irreversible-class voice approvals require a spoken challenge
+ * (`ai/tasks/proposal-approval-task.ts`). It is a STATIC per-tenant secret
+ * spoken aloud on a recorded call, so without this every money approval writes
+ * another copy of it into the transcript — and into everything derived from
+ * one. Encryption at rest protects the store; it does nothing about a secret
+ * whose exposure grows with each use.
+ *
+ * Keyed on the dialogue STAGE, never on the shape of the utterance: matching
+ * on "looks like a code" would both leak (an owner who says "the code is
+ * 4821") and over-redact (a genuine "4821 Bridgewater Road"). Callers append
+ * the utterance BEFORE `handlePendingVoiceApproval` consumes the turn, so the
+ * stage still reflects the prompt the owner is answering.
+ *
+ * A placeholder is stored rather than nothing, so the trail still shows a turn
+ * occurred — a silently shorter transcript is its own reporting bug.
+ */
+export function callerTranscriptText(
+  session: ChallengeAwareSession | undefined,
+  spoken: string,
+): string {
+  return session?.pendingVoiceApproval?.stage === 'challenge' ? REDACTED_CHALLENGE_TEXT : spoken;
+}
+
 /**
  * Find the last `tts_play` side effect and append its text as an `agent`
  * transcript entry on `sessionId`.  No-op when no `tts_play` is present or

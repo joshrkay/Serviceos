@@ -19,6 +19,29 @@ const VOICE_QUALITY_VERDICTS_DIR = path.resolve(
   '../../.voice-quality-verdicts',
 );
 
+/**
+ * #869 acceptance condition, machine-checked.
+ *
+ * "No script ends with a refused lookup in its observation errors." A refusal
+ * means the script is running as the WRONG PERSONA — asking an owner question
+ * from a customer's line — which is exactly the leak #866 closed and the corpus
+ * used to assert. It cannot be left to review: the graders never read
+ * `observation.errors`, and the Layer 1 judge is a canned pass, so three scripts
+ * refused for a whole commit while the suite stayed 73/73 green.
+ *
+ * Deliberately ONLY `refused`. Other failed-lookup reasons are honest outcomes a
+ * script may legitimately pin — `unidentified_caller` (the caller matched a lead,
+ * not a customer) is one the corpus relies on today — and folding them in here
+ * would make this assertion mean "no lookup ever failed", which is a different,
+ * wrong claim.
+ *
+ * Accumulated across the per-script tests and asserted once at the end; the
+ * corpus lane is a single sequential fork (see vitest.voice-quality.config.ts),
+ * so declaration order is run order. Filtering the run to one script with `-t`
+ * naturally narrows what this sees — it is a full-corpus gate, as CI runs it.
+ */
+const refusedLookups: { scriptId: string; intent: string }[] = [];
+
 const scripts = (() => {
   try {
     return loadCorpus().filter((s) => !s.layer2Only);
@@ -74,6 +97,12 @@ describe('Voice Quality v1 (Layer 1) — corpus', () => {
 
       writeVerdictShard(verdict);
 
+      for (const err of result.observation.errors) {
+        if (err.message === 'refused') {
+          refusedLookups.push({ scriptId: script.id, intent: err.event });
+        }
+      }
+
       expect(result.errors).toEqual([]);
       expect(result.observation.scriptId).toBe(script.id);
       // Each scenario must actually PASS its rubric — a red scenario makes
@@ -108,4 +137,15 @@ describe('Voice Quality v1 (Layer 1) — corpus', () => {
       expect(tenantId).toMatch(/^vq_test_/);
     });
   }
+
+  it('#869 — no Layer 1 script ends with a REFUSED lookup', () => {
+    expect(
+      refusedLookups.map((r) => `${r.scriptId} \u2192 ${r.intent}`),
+      'A corpus script was REFUSED by the shared lookup dispatch, which means it ' +
+        'is asking as the wrong persona: an owner-grade question from a line the ' +
+        'harness resolved to no actor (or to a non-owner). Fix the SCRIPT, not the ' +
+        'dispatch \u2014 set `callerIsOwner: true` if the caller really is the owner ' +
+        'line, or change the question. See #869 decision 4.',
+    ).toEqual([]);
+  });
 });

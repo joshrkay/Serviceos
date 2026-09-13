@@ -47,7 +47,17 @@ const configSchema = z.object({
   STRIPE_API_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   WEB_URL: z.string().url().optional().default('http://localhost:5173'),
+  // DEPRECATED — legacy single-plan trial price, superseded by the
+  // explicit basic/enterprise plan selection below. Kept only for
+  // scripts/provision-tenant.ts and createTrialCheckoutSession's legacy
+  // (no planId) fallback branch; the HTTP onboarding route never uses it.
   STRIPE_PRICE_ID: z.string().optional(),
+  // Explicit plan allowlist for onboarding checkout (see billing/subscription.ts
+  // BILLING_PLAN_IDS). Each id maps to its own Stripe recurring monthly USD
+  // price, validated live against Stripe before every checkout — never
+  // trusted at face value from env alone.
+  STRIPE_BASIC_PRICE_ID: z.string().optional(),
+  STRIPE_ENTERPRISE_PRICE_ID: z.string().optional(),
   // TCPA/DNC express-consent enforcement for the outbound calling path.
   // 'off' (default) preserves prior behavior exactly (DNC opt-out check only);
   // 'warn' runs the per-customer consent gate and audits+logs a would-be block

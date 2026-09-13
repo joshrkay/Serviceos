@@ -11,6 +11,12 @@ const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 export interface JobFormProps {
   onCreated?: (jobId: string) => void;
   onCancel?: () => void;
+  /**
+   * #878: pre-select this customer (from /jobs/new?customerId=…). The full
+   * customer record is fetched so the picker shows a display name; on a
+   * stale/broken id the picker is simply left empty.
+   */
+  initialCustomerId?: string;
 }
 
 interface State {
@@ -46,7 +52,7 @@ const initial: State = {
   durationMin: '60',
 };
 
-export function JobForm({ onCreated, onCancel }: JobFormProps) {
+export function JobForm({ onCreated, onCancel, initialCustomerId }: JobFormProps) {
   const [form, setForm] = useState<State>(initial);
   const [locations, setLocations] = useState<ServiceLocationOption[]>([]);
   const [locationsLoading, setLocationsLoading] = useState(false);
@@ -54,6 +60,39 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const { technicians } = useTechnicianRoster();
   const timezone = useTenantTimezone();
+
+  // #878: hydrate the picker from ?customerId=. CustomerPicker renders
+  // displayName(value), which falls back to the raw UUID when only {id} is
+  // present — so the FULL option must be fetched, never seeded as {id} alone.
+  // On 404/error the picker stays empty (the param may be a stale deep link)
+  // and the form remains usable. A selection the user has already made is
+  // never overwritten.
+  useEffect(() => {
+    if (!initialCustomerId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/customers/${encodeURIComponent(initialCustomerId)}`);
+        if (!res.ok) return;
+        const c = (await res.json()) as CustomerOption | null;
+        if (cancelled || !c?.id) return;
+        const option: CustomerOption = {
+          id: c.id,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          companyName: c.companyName,
+        };
+        setForm((previous) =>
+          previous.customer ? previous : { ...previous, customer: option }
+        );
+      } catch {
+        // Leave the picker empty — the operator can still search manually.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialCustomerId]);
 
   useEffect(() => {
     let cancelled = false;

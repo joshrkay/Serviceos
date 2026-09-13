@@ -8,6 +8,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { assignTechnician } from '../../src/appointments/assignment';
 import { ConflictError } from '../../src/shared/errors';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 /**
  * TEST-02 — concurrent booking race, pinned against REAL Postgres.
@@ -43,6 +44,7 @@ describe('Postgres integration — technician double-booking race (TEST-02)', ()
   let tenant: { tenantId: string; userId: string };
   let appointmentRepo: PgAppointmentRepository;
   let assignmentRepo: PgAssignmentRepository;
+  let auditRepo: PgAuditRepository;
   let customerId: string;
   let locationId: string;
   const now = Date.now();
@@ -93,6 +95,7 @@ describe('Postgres integration — technician double-booking race (TEST-02)', ()
     pool = await getSharedTestDb();
     appointmentRepo = new PgAppointmentRepository(pool);
     assignmentRepo = new PgAssignmentRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     tenant = await createTestTenant(pool);
 
     const customerRepo = new PgCustomerRepository(pool);
@@ -154,12 +157,12 @@ describe('Postgres integration — technician double-booking race (TEST-02)', ()
       assignTechnician(
         { tenantId: tenant.tenantId, appointmentId: apptA, technicianId, technicianRole: 'technician', assignedBy: tenant.userId },
         assignmentRepo,
-        { appointmentRepo },
+        { appointmentRepo, auditRepo, actorRole: 'owner' },
       ),
       assignTechnician(
         { tenantId: tenant.tenantId, appointmentId: apptB, technicianId, technicianRole: 'technician', assignedBy: tenant.userId },
         assignmentRepo,
-        { appointmentRepo },
+        { appointmentRepo, auditRepo, actorRole: 'owner' },
       ),
     ]);
 
@@ -179,7 +182,120 @@ describe('Postgres integration — technician double-booking race (TEST-02)', ()
     // across both appointments.
     const assignments = await assignmentRepo.findByTechnician(tenant.tenantId, technicianId);
     expect(assignments).toHaveLength(1);
-    expect([apptA, apptB]).toContain(assignments[0].appointmentId);
+    const winnerApptId = assignments[0].appointmentId;
+    expect([apptA, apptB]).toContain(winnerApptId);
+
+    // The audit trail agrees too: exactly ONE `appointment.technician_assigned`
+    // event was recorded for the winning appointment — read back through
+    // PgAuditRepository, not inferred from the in-process return value.
+    const auditEvents = await auditRepo.findByEntity(tenant.tenantId, 'appointment', winnerApptId);
+    const assignedEvents = auditEvents.filter((e) => e.eventType === 'appointment.technician_assigned');
+    expect(assignedEvents).toHaveLength(1);
+    const loserApptId = winnerApptId === apptA ? apptB : apptA;
+    expect(await auditRepo.findByEntity(tenant.tenantId, 'appointment', loserApptId)).toEqual([]);
+  });
+
+  it('T1 — a neighbour tenant\'s technician is not the one being double-booked (the guard is tenant-scoped; another tenant, cross-tenant window overlap)', async () => {
+    const neighbourTenant = await createTestTenant(pool);
+    const neighbourCustomerRepo = new PgCustomerRepository(pool);
+    const neighbourLocationRepo = new PgLocationRepository(pool);
+    const neighbourJobRepo = new PgJobRepository(pool);
+
+    const neighbourCustomerId = crypto.randomUUID();
+    await neighbourCustomerRepo.create({
+      id: neighbourCustomerId,
+      tenantId: neighbourTenant.tenantId,
+      firstName: 'Neighbour',
+      lastName: 'Booker',
+      displayName: 'Neighbour Booker',
+      preferredChannel: 'sms',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: neighbourTenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const neighbourLocationId = crypto.randomUUID();
+    await neighbourLocationRepo.create({
+      id: neighbourLocationId,
+      tenantId: neighbourTenant.tenantId,
+      customerId: neighbourCustomerId,
+      street1: '1 Neighbour Ave',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      addressType: 'service',
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const neighbourTechnicianId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role) VALUES ($1, $2, $3, $4, 'technician')`,
+      [neighbourTechnicianId, neighbourTenant.tenantId, `clerk_${neighbourTechnicianId}`, `tech_${neighbourTechnicianId}@example.com`],
+    );
+
+    // This tenant's OWN technician is double-booking-raced on this SAME
+    // window in the test above; a neighbour tenant's technician landing on
+    // the IDENTICAL window must be entirely unaffected by that guard.
+    const start = now + 168 * 3600_000;
+    const end = start + 3600_000;
+
+    const ourTechnicianId = await makeTechnician();
+    const ourAppt = await makeAppointment(start, end);
+    await assignTechnician(
+      { tenantId: tenant.tenantId, appointmentId: ourAppt, technicianId: ourTechnicianId, technicianRole: 'technician', assignedBy: tenant.userId },
+      assignmentRepo,
+      { appointmentRepo },
+    );
+
+    const neighbourJobId = crypto.randomUUID();
+    await neighbourJobRepo.create({
+      id: neighbourJobId,
+      tenantId: neighbourTenant.tenantId,
+      customerId: neighbourCustomerId,
+      locationId: neighbourLocationId,
+      jobNumber: `JOB-NEIGHBOUR-${neighbourJobId.slice(0, 8)}`,
+      summary: 'Neighbour tenant fixture',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: neighbourTenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const neighbourApptId = crypto.randomUUID();
+    await appointmentRepo.create({
+      id: neighbourApptId,
+      tenantId: neighbourTenant.tenantId,
+      jobId: neighbourJobId,
+      scheduledStart: new Date(start),
+      scheduledEnd: new Date(end),
+      timezone: 'UTC',
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: neighbourTenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Same start/end, same-shaped technician id space — a tenant-unscoped
+    // guard (app pre-flight OR the DB EXCLUDE constraint) would reject this.
+    await expect(
+      assignTechnician(
+        { tenantId: neighbourTenant.tenantId, appointmentId: neighbourApptId, technicianId: neighbourTechnicianId, technicianRole: 'technician', assignedBy: neighbourTenant.userId },
+        assignmentRepo,
+        { appointmentRepo },
+      ),
+    ).resolves.toMatchObject({ appointmentId: neighbourApptId });
+
+    const neighbourAssignments = await assignmentRepo.findByTechnician(neighbourTenant.tenantId, neighbourTechnicianId);
+    expect(neighbourAssignments).toHaveLength(1);
+    // ...and OUR tenant's own assignment on the identical window is untouched.
+    const ourAssignments = await assignmentRepo.findByTechnician(tenant.tenantId, ourTechnicianId);
+    expect(ourAssignments).toHaveLength(1);
+    expect(ourAssignments[0].appointmentId).toBe(ourAppt);
   });
 
   it('two CONCURRENT assignTechnician calls for DIFFERENT technicians on the SAME slot both succeed (control — not an over-broad lock)', async () => {
@@ -240,5 +356,111 @@ describe('Postgres integration — technician double-booking race (TEST-02)', ()
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
     const assignments = await assignmentRepo.findByTechnician(tenant.tenantId, technicianId);
     expect(assignments).toHaveLength(2);
+  });
+
+  // A13 (2026-08-31 live sweep) — the coordinator's hypothesis was a
+  // ghost-assignment false positive: the double-booking check joining
+  // appointment_assignments to appointments WITHOUT excluding
+  // canceled/completed appointments. Read statically first (both layers):
+  //   - app layer: `detectOverlappingAppointments` (dispatch/validation.ts)
+  //     filters on `ACTIVE_STATUSES = ['scheduled','confirmed',
+  //     'in_progress']` before considering an overlap at all.
+  //   - DB layer: the `no_double_booking` EXCLUDE constraint (migration 131)
+  //     is scoped `WHERE (appointment_status NOT IN ('canceled','no_show'))`,
+  //     kept in sync by `trg_appointments_sync_to_assignments` (AFTER UPDATE
+  //     ON appointments, fires on any status change including the sweep
+  //     harness's plain `UPDATE appointments SET status = 'canceled'`).
+  // Both layers already filter correctly by inspection. These tests prove
+  // it empirically against real Postgres rather than trusting the reading:
+  // a canceled appointment's assignment must NOT block a new overlapping
+  // one for the same technician, at BOTH layers, while a genuinely ACTIVE
+  // overlapping assignment must still block (control — a guard that lets
+  // everything through would pass the first half trivially).
+  describe('a CANCELED appointment\'s assignment is not a ghost double-booking (A13)', () => {
+    it('assignTechnician (app-layer pre-flight): a canceled appointment at the SAME slot does not block a new assignment for the same technician', async () => {
+      const technicianId = await makeTechnician();
+      const start = now + 96 * 3600_000;
+      const end = start + 3600_000;
+
+      const canceledAppt = await makeAppointment(start, end);
+      await assignTechnician(
+        { tenantId: tenant.tenantId, appointmentId: canceledAppt, technicianId, technicianRole: 'technician', assignedBy: tenant.userId },
+        assignmentRepo,
+        { appointmentRepo },
+      );
+      // Plain UPDATE — the exact shape scripts/ai-catalog-sweep/run-sweep.mjs
+      // uses to quarantine prior-run appointment debris, and what fires
+      // `trg_appointments_sync_to_assignments` to propagate the status onto
+      // the assignment row's denormalized `appointment_status`.
+      await pool.query(`UPDATE appointments SET status = 'canceled', updated_at = now() WHERE id = $1`, [
+        canceledAppt,
+      ]);
+
+      const newAppt = await makeAppointment(start, end);
+      await expect(
+        assignTechnician(
+          { tenantId: tenant.tenantId, appointmentId: newAppt, technicianId, technicianRole: 'technician', assignedBy: tenant.userId },
+          assignmentRepo,
+          { appointmentRepo },
+        ),
+      ).resolves.toMatchObject({ appointmentId: newAppt });
+
+      const assignments = await assignmentRepo.findByTechnician(tenant.tenantId, technicianId);
+      expect(assignments.map((a) => a.appointmentId).sort()).toEqual(
+        [canceledAppt, newAppt].sort(),
+      );
+    });
+
+    it('DB EXCLUDE constraint (no_double_booking): a raw assignment INSERT on the overlapping slot succeeds once the conflicting appointment is canceled', async () => {
+      const technicianId = await makeTechnician();
+      const start = now + 120 * 3600_000;
+      const end = start + 3600_000;
+
+      const apptA = await makeAppointment(start, end);
+      const assignmentAId = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO appointment_assignments (id, tenant_id, appointment_id, technician_id, is_primary, assigned_by, assigned_at)
+         VALUES ($1, $2, $3, $4, true, $5, now())`,
+        [assignmentAId, tenant.tenantId, apptA, technicianId, tenant.userId],
+      );
+
+      const apptB = await makeAppointment(start, end);
+      const assignmentBId = crypto.randomUUID();
+
+      // Still SCHEDULED — the EXCLUDE constraint must reject this raw
+      // INSERT (control: proves the constraint is actually load-bearing
+      // here, not vacuously permissive).
+      await expect(
+        pool.query(
+          `INSERT INTO appointment_assignments (id, tenant_id, appointment_id, technician_id, is_primary, assigned_by, assigned_at)
+           VALUES ($1, $2, $3, $4, true, $5, now())`,
+          [assignmentBId, tenant.tenantId, apptB, technicianId, tenant.userId],
+        ),
+      ).rejects.toMatchObject({ code: '23P01', constraint: 'no_double_booking' });
+
+      // Now cancel apptA — the sync trigger propagates the status onto
+      // assignmentA's denormalized appointment_status, which takes it out
+      // of the EXCLUDE constraint's WHERE clause.
+      await pool.query(`UPDATE appointments SET status = 'canceled', updated_at = now() WHERE id = $1`, [
+        apptA,
+      ]);
+      const denorm = await pool.query(
+        `SELECT appointment_status FROM appointment_assignments WHERE id = $1`,
+        [assignmentAId],
+      );
+      expect(denorm.rows[0].appointment_status).toBe('canceled');
+
+      // The identical INSERT that just failed now succeeds.
+      await pool.query(
+        `INSERT INTO appointment_assignments (id, tenant_id, appointment_id, technician_id, is_primary, assigned_by, assigned_at)
+         VALUES ($1, $2, $3, $4, true, $5, now())`,
+        [assignmentBId, tenant.tenantId, apptB, technicianId, tenant.userId],
+      );
+      const rows = await pool.query(
+        `SELECT id FROM appointment_assignments WHERE tenant_id = $1 AND appointment_id = $2`,
+        [tenant.tenantId, apptB],
+      );
+      expect(rows.rows).toHaveLength(1);
+    });
   });
 });

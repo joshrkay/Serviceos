@@ -108,4 +108,68 @@ describe('resolveAndPlaceAppointmentHold', () => {
     );
     expect(result).toEqual({ ok: false, failed: 'unresolved_datetime' });
   });
+
+  /**
+   * The live-call close both WRITES a held appointment and SPEAKS the time
+   * back to the caller. It used to fall through to a product-default
+   * America/New_York when the tenant had no zone, so an America/Phoenix
+   * business held the wrong slot and confirmed the wrong hour out loud.
+   * There is no default any more: no zone, no hold.
+   */
+  it('refuses to hold when the tenant has no timezone rather than guessing US-Eastern', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const result = await resolveAndPlaceAppointmentHold(
+      { appointmentRepo: repo },
+      {
+        tenantId: 't1',
+        jobId: JOB_ID,
+        dateTimeDescription: 'next Tuesday at 2pm',
+        // no timezone — the "never chose one" state
+        now: new Date(),
+        createdBy: 'sys',
+      },
+    );
+    expect(result).toEqual({ ok: false, failed: 'timezone_unconfigured' });
+  });
+
+  it('refuses to hold on a timezone the runtime does not recognize', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const result = await resolveAndPlaceAppointmentHold(
+      { appointmentRepo: repo },
+      {
+        tenantId: 't1',
+        jobId: JOB_ID,
+        dateTimeDescription: 'next Tuesday at 2pm',
+        timezone: 'Foo/Bar',
+        now: new Date(),
+        createdBy: 'sys',
+      },
+    );
+    // Garbage takes the same chute as absent — resolveDateTime would
+    // otherwise silently fall back to the product default one layer down.
+    expect(result).toEqual({ ok: false, failed: 'timezone_unconfigured' });
+  });
+
+  it('still holds normally for a non-Eastern tenant that HAS a zone', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const result = await resolveAndPlaceAppointmentHold(
+      { appointmentRepo: repo },
+      {
+        tenantId: 't1',
+        jobId: JOB_ID,
+        dateTimeDescription: 'next Tuesday at 2pm',
+        timezone: 'America/Phoenix',
+        now: new Date('2026-07-27T12:00:00.000Z'),
+        createdBy: 'sys',
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // "next Tuesday" from Mon Jul 27 is Aug 4 (chrono skips to the following
+    // week, not tomorrow). 2pm Phoenix is UTC-7 in August as in January —
+    // Arizona has no DST — so this is 21:00Z. An Eastern default would have
+    // produced 18:00Z, and a DST-applying "fix" 20:00Z.
+    expect(result.scheduledStart).toBe('2026-08-04T21:00:00.000Z');
+    expect(result.timezone).toBe('America/Phoenix');
+  });
 });

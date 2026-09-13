@@ -82,14 +82,42 @@ export class PricingExtractor implements OnboardingExtractor<PricingExtraction> 
     const data = this.buildExtraction(parsed);
     const confidence = assessConfidence(parsed ?? {});
 
-    return {
-      data,
-      confidence,
-      needsClarification: data.prices.length === 0,
-      clarificationQuestions: data.prices.length === 0
-        ? ['What do you typically charge for your most common services?']
-        : undefined,
-    };
+    // B1.20 — "some prices" is NOT a complete pricing capture. The hourly
+    // labor rate is the one price the identity step hard-requires
+    // (onboarding/derive-status.ts `isIdentityDone` needs a non-null
+    // hourly_rate_cents; the form wizard makes owners type one), and an
+    // owner who quotes only a service-call fee or flat per-job prices
+    // produces a nonempty price list with no `hourly_rate` entry. Advancing
+    // on that used to leave the rate absent all the way to the DB column.
+    // Ask for it here — in the conversation, where the owner is already
+    // talking about money — rather than pushing it to a review card. The
+    // FSM caps this at MAX_CLARIFICATIONS_PER_STATE and then force-advances
+    // (agents/onboarding/transitions.ts), so a genuinely flat-rate business
+    // is not trapped: the tenant-settings proposal's `hourlyRateCents` gate
+    // is the backstop. Never a default — a guessed rate is a money defect.
+    const hasHourlyRate = data.prices.some((p) => p.priceType === 'hourly_rate');
+
+    if (data.prices.length === 0) {
+      return {
+        data,
+        confidence,
+        needsClarification: true,
+        clarificationQuestions: ['What do you typically charge for your most common services?'],
+      };
+    }
+
+    if (!hasHourlyRate) {
+      return {
+        data,
+        confidence,
+        needsClarification: true,
+        clarificationQuestions: [
+          'And what is your hourly labor rate? (If you bill flat-rate, what would you say your labor is worth per hour?)',
+        ],
+      };
+    }
+
+    return { data, confidence, needsClarification: false };
   }
 
   private buildExtraction(parsed: Record<string, unknown> | null): PricingExtraction {

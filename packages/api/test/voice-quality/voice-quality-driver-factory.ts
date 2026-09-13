@@ -15,14 +15,19 @@ import {
   defaultCassettesDir,
   type CassetteMode,
 } from '../../src/ai/voice-quality/cassette-gateway';
-import { TextModeDriver, type AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
+import {
+  TextModeDriver,
+  vqResolveMemberRole,
+  type AgentDriver,
+} from '../../src/ai/voice-quality/text-mode-driver';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
+import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryCatalogItemRepository } from '../../src/catalog/catalog-item';
-import { DefaultAvailabilityFinder } from '../../src/ai/tasks/availability-finder';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import {
   hashVoiceApprovalPin,
@@ -101,8 +106,29 @@ function classifyTokenUsage(script: VoiceQualityScript): { input: number; output
   return { input: 10, output: 10, total: 20 };
 }
 
+/**
+ * ⚠️ CRITERION 9 IS NOT INDEPENDENTLY ASSESSED IN THIS LANE.
+ *
+ * The intent below is taken FROM `turn.expected.intent` — the same field the
+ * disposition grader compares the observed intent against
+ * (src/ai/voice-quality/graders/disposition-structured.ts, `intentMatched`).
+ * The fixture's answer is fed in and then compared back to itself, so
+ * `rightIntentClassified` cannot fail in the mock-driven Layer 1 corpus. A
+ * green Layer 1 run is NOT evidence that intent classification works, and a
+ * prompt/taxonomy regression cannot be detected here.
+ *
+ * What Layer 1 DOES exercise is everything downstream of classification:
+ * parseClassifierJson, confidence thresholds, the turn FSM, task handlers,
+ * payload contracts and the other graders. That value is real — this note is
+ * only about criterion 9.
+ *
+ * Real assessment requires either a live model (voice-eval-live.yml — weekly
+ * cron, secret-gated, not PR-blocking) or mock intents sourced independently
+ * of `expected.intent`. See the fix options recorded alongside this note.
+ */
 function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): string {
   const turn = script.turns[turnIndex];
+  // NOTE: derived from expected.intent — see the tautology warning above.
   let intent = turn.expected.intent ?? 'unknown';
   if (OPERATOR_REQUEST_SCRIPTS.has(script.id)) intent = 'operator_request';
   if (script.id === 'cost-cap-drain') intent = 'lookup_account_summary';
@@ -110,8 +136,18 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   const slots = (turn.expected.slots ?? {}) as Record<string, unknown>;
   const entities: Record<string, unknown> = {};
   if (intent === 'create_customer') {
-    const name = displayNameFromCaller(turn.caller);
+    // Slots are the source of truth (same convention as proposalReference /
+    // lineItemDescriptions below): the utterance-regex fallback only matches
+    // "name is / I am / this is <Name>" phrasings, and an operator-style
+    // "Add a new customer, <Name>, <address>" sentence defeats it — which
+    // silently emitted a nameless classify response and made the handler
+    // decline to draft (needs_name) on a scenario that pins create_customer.
+    const name =
+      (typeof slots.name === 'string' ? slots.name : undefined) ??
+      displayNameFromCaller(turn.caller);
     if (name) entities.displayName = name;
+    const address = typeof slots.address === 'string' ? slots.address : undefined;
+    if (address) entities.address = address;
     if (script.callerId) entities.phone = script.callerId;
   }
   if (intent === 'cancel_appointment') {
@@ -207,6 +243,69 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   }
   if (intent === 'request_feedback') {
     if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
+  }
+  // Tradesperson wave 1 (2026-08-07 plan), final-verification corpus
+  // additions — record_refund / apply_credit / create_change_order /
+  // add_material extraction fields (see intent-classifier.ts's
+  // ExtractedEntities doc comments for the field-name rationale). This
+  // harness wires no `entityResolver` (see runner.ts's `makeRepoBundle` —
+  // no job/invoice fuzzy-match dep exists here), so `jobReference` free
+  // text is deliberately omitted from the mock's entities for these four:
+  // it would stay unresolved and land the proposal on `missingFields`
+  // instead of a clean happy-path draft. The corpus scripts therefore pin
+  // only the extractable-without-resolution fields in `expected.slots`.
+  if (intent === 'record_refund') {
+    if (typeof slots.amountCents === 'number') entities.amount = slots.amountCents;
+    entities.refundMethod = typeof slots.refundMethod === 'string' ? slots.refundMethod : 'cash';
+    if (typeof slots.refundReason === 'string') entities.refundReason = slots.refundReason;
+  }
+  if (intent === 'apply_credit') {
+    if (typeof slots.amountCents === 'number') entities.amount = slots.amountCents;
+    if (typeof slots.creditReason === 'string') entities.creditReason = slots.creditReason;
+  }
+  if (intent === 'create_change_order') {
+    if (typeof slots.amountCents === 'number') entities.amount = slots.amountCents;
+    entities.changeOrderDescription =
+      typeof slots.changeOrderDescription === 'string' ? slots.changeOrderDescription : 'the added work';
+  }
+  if (intent === 'add_material') {
+    entities.materialDescription =
+      typeof slots.description === 'string' ? slots.description : 'materials for the shopping list';
+    if (typeof slots.quantity === 'number') entities.materialQuantity = slots.quantity;
+  }
+  // create_service_agreement / send_customer_message are CUSTOMER_REF
+  // intents resolved via the caller's own verified identity (same
+  // mechanism update_customer/log_expense already rely on in this
+  // harness — a "known customer" callerId resolves `context.customerId`
+  // directly, no free-text customerName lookup needed).
+  if (intent === 'create_service_agreement') {
+    entities.serviceAgreementName =
+      typeof slots.name === 'string' ? slots.name : 'Annual maintenance plan';
+    entities.serviceAgreementCadence =
+      typeof slots.recurrenceRule === 'string' ? slots.recurrenceRule : 'monthly';
+    if (typeof slots.priceCents === 'number') entities.amount = slots.priceCents;
+    entities.serviceAgreementStartsOn =
+      typeof slots.startsOn === 'string' ? slots.startsOn : 'next month';
+  }
+  if (intent === 'send_customer_message') {
+    entities.customerMessageBody =
+      typeof slots.body === 'string' ? slots.body : 'Your part arrived — we can come by Thursday morning.';
+    entities.customerMessageChannel =
+      typeof slots.channel === 'string' ? slots.channel : 'sms';
+  }
+  // B8.10 — send_estimate_nudge's reference resolution reads
+  // customerName/jobReference off entitiesFrom(context) exactly like
+  // send_estimate/send_invoice. `slots.customerName` is NOT reused here for
+  // the extraction hint (unlike most other branches) because the disposition-
+  // structured grader (graders/disposition-structured.ts) diffs
+  // `expected.slots` against the drafted proposal's PAYLOAD — a short,
+  // whitespace-free string counts as a hard slot (`looksLikeEnum`), so a
+  // script pinning `customerName` there would spuriously require it on the
+  // payload, which SendEstimateNudgeTaskHandler resolves INTO `estimateId`
+  // and never carries verbatim. Mirrors `add_service_location`'s
+  // slots-optional-with-a-fixed-fallback convention just above.
+  if (intent === 'send_estimate_nudge') {
+    entities.customerName = typeof slots.customerReference === 'string' ? slots.customerReference : 'Khan';
   }
   return JSON.stringify({
     intentType: intent,
@@ -328,6 +427,22 @@ export class ScriptAwareMockGateway extends LLMGateway {
       };
     }
 
+    // Tradesperson wave 1 — SendCustomerMessageTaskHandler's OWN second
+    // gateway call (message-rewrite pass, `send-customer-message-task.ts`
+    // `rewrite()`), separate from the classify_intent call above. Without
+    // this branch it falls through to the generic mock below and the
+    // drafted body would be whatever placeholder that returns rather than
+    // a realistic customer-facing message.
+    if (request.taskType === 'send_customer_message') {
+      return {
+        content: 'Your part arrived — we can come by Thursday morning.',
+        model: request.model ?? 'mock-model',
+        provider: 'mock',
+        latencyMs: 1,
+        tokenUsage: { input: 10, output: 10, total: 20 },
+      };
+    }
+
     return this.inner.complete(request);
   }
 }
@@ -418,12 +533,33 @@ export function makeVoiceQualityDriverFactory(
             ...(escalationSettings ? { escalationSettings } : {}),
           } as unknown as TenantSettings)
         : null;
+    // Tooling fix (2026-08-09) — `SettingsRepository` grew
+    // `upsertIdentityFields` (PUT /api/onboarding/identity + the
+    // conversational onboarding execution handlers) after this hand-rolled
+    // stub was written, and the object literal below never got the new
+    // method. `ts-node`'s full typecheck rejects that (`error TS2741:
+    // Property 'upsertIdentityFields' is missing`) while vitest's esbuild
+    // transform does not typecheck at all, which is why it only ever
+    // surfaced when running a script directly via `ts-node` (e.g.
+    // scripts/seed-voice-quality-cassettes.ts).
+    //
+    // Review follow-up N5: the first fix threw from the new method. Safe,
+    // but `InMemorySettingsRepository` (src/settings/settings.ts) already
+    // implements it for real, so DELEGATION is strictly better — a future
+    // onboarding corpus script gets working behavior instead of a crash,
+    // and the next `SettingsRepository` method addition breaks `ts-node`
+    // again unless it is also delegated. The bespoke overrides above it stay
+    // because the corpus needs a settings row synthesized from SCRIPT
+    // FIXTURES (business hours, tenant tz, owner phone, escalation config),
+    // which no repository can invent.
+    const delegate = new InMemorySettingsRepository();
     const settingsRepo: SettingsRepository = {
       findByTenant: async (t: string) => (t === fctx.tenantId ? settingsRow : null),
       create: async (s: TenantSettings) => s,
       update: async () => settingsRow,
       incrementEstimateNumber: async () => 1,
       incrementInvoiceNumber: async () => 1,
+      upsertIdentityFields: (tenantId, fields) => delegate.upsertIdentityFields(tenantId, fields),
     };
     let now: (() => Date) | undefined;
     if (businessHours?.callMomentLocal) {
@@ -463,11 +599,42 @@ export function makeVoiceQualityDriverFactory(
       jobRepo: fctx.repos.jobRepo,
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
-      moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
       catalogRepo,
-      availabilityFinder: new DefaultAvailabilityFinder({
-        appointmentRepo: fctx.repos.appointmentRepo,
-      }),
+      // #869 — the shared lookup bundle, same shape the live phone's Gather
+      // adapter takes. Built from the repos the runner already seeded for this
+      // script's fixtures, plus the two the bundle needs and the RepoBundle
+      // does not own (agreements, money dashboard). Nothing here is a lookup
+      // switch: `answerPhoneLookup` → `executeLookupAnswer` owns dispatch.
+      lookups: {
+        answers: {
+          invoiceRepo: fctx.repos.invoiceRepo,
+          estimateRepo: fctx.repos.estimateRepo,
+          leadRepo: fctx.repos.leadRepo,
+          agreementRepo: new InMemoryAgreementRepository(),
+          moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
+          catalogRepo,
+          settingsRepo,
+          // Harness-owned actor → role seam (decision 3). No `users` fixtures
+          // exist (or are needed) — the owner-line flag is the corpus's
+          // identity vocabulary.
+          resolveMemberRole: vqResolveMemberRole,
+        },
+        shared: {
+          jobRepo: fctx.repos.jobRepo,
+          appointmentRepo: fctx.repos.appointmentRepo,
+          customerRepo: fctx.repos.customerRepo,
+          proposalRepo: fctx.repos.proposalRepo,
+          // No `availabilityFinder`: with an appointmentRepo wired the shared
+          // dispatch takes the business-hours-aware `lookupBookableAvailability`
+          // path (F2), exactly as the live phone does, and the finder would be
+          // dead wiring.
+        },
+        // Spoken dates render in the script's tenant zone, as they do on the
+        // phone. Failure-soft by contract in the adapter.
+        tenantTimezoneResolver: async (t: string) =>
+          (await settingsRepo.findByTenant(t))?.timezone,
+        ...(now ? { now } : {}),
+      },
       onCallRepo,
       dncRepo,
       settingsRepo,

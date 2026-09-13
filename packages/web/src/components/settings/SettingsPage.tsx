@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useClerk } from '@clerk/clerk-react';
+import type { LucideIcon } from 'lucide-react';
 import {
   ChevronRight, Building2, Users, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
@@ -29,6 +30,7 @@ import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
+import { GoogleBusinessSheet } from './GoogleBusinessSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
@@ -39,6 +41,107 @@ import {
   updateLanguageSettings,
 } from '../../api/settings';
 import { businessInitial } from '../../utils/business-initial';
+import {
+  isCustomerMissing,
+  parsePortalFailure,
+  type BillingPortalFailure,
+} from '../../utils/billing-error';
+import { ONBOARDING_RERUN_PATH } from '../../utils/onboarding-rerun';
+import { ConfirmDialog } from '../ui/confirm-dialog';
+import { ServiceAreaSheet, type ServiceAreaFields } from './ServiceAreaSheet';
+
+type SettingsRowBadge = { label: string; color: string };
+
+interface SettingsRowBase {
+  icon: LucideIcon;
+  label: string;
+  description: string;
+  badge?: SettingsRowBadge;
+}
+
+/**
+ * Discriminated row shape (#877) so rows that fire live actions are
+ * structurally — and therefore visually — distinct from rows that open
+ * an in-app panel:
+ * - `panel` (default): opens a sheet/page here — chevron affordance.
+ * - `external`: hands the operator off to another site — external-link
+ *   icon, gated behind a ConfirmDialog before anything fires.
+ * - `toggle`: flips live state — rendered as an explicit switch
+ *   (`role="switch"`), gated behind a ConfirmDialog; a plain click on
+ *   the row body never fires the action.
+ */
+type SettingsRow =
+  | (SettingsRowBase & { kind?: 'panel'; action: () => void })
+  | (SettingsRowBase & { kind: 'external'; action: () => void })
+  | (SettingsRowBase & { kind: 'toggle'; checked: boolean | null; onToggle: () => void });
+
+interface SettingsSection {
+  title: string;
+  items: SettingsRow[];
+}
+
+/**
+ * #1011 — Quick-settings switches that persist through `PUT /api/settings`.
+ * Keyed by the local state name, valued by the API field, so the persist
+ * helper builds `{ [field]: value }` from one table instead of a ternary that
+ * has to grow a branch per toggle.
+ */
+const SETTINGS_TOGGLE_FIELDS = {
+  aiAuto: 'autoApplyInternalUpdates',
+  reminders: 'autoSendAppointmentReminders',
+  // 9.6 — the daily digest switch (added by #1010), folded into the same table.
+  digestEnabled: 'digestEnabled',
+  thankYouSms: 'sendThankYouSms',
+  reviewRequest: 'sendReviewRequest',
+  weeklyFeedback: 'weeklyFeedbackEnabled',
+  autonomousClose: 'autonomousCloseEnabled',
+} as const;
+
+type SettingsToggleField = keyof typeof SETTINGS_TOGGLE_FIELDS;
+
+/** Integer cents → the dollars string the cap input edits. null renders empty. */
+function centsToDollarInput(cents: number | null): string {
+  if (cents === null) return '';
+  return String(cents / 100);
+}
+
+/**
+ * #1011 — the two per-tenant capabilities an owner may switch (rows 2.6, 2.7).
+ * Deliberately a closed list mirroring the API's `z.enum` allowlist: the write
+ * route refuses anything else, so an extra entry here would render a switch
+ * that can only ever 400.
+ */
+const OWNER_CAPABILITIES = [
+  {
+    key: 'dropped_call_recovery',
+    label: 'Text back callers who hang up',
+    description:
+      'If someone calls and hangs up before they reach anyone, send them a text so the lead is not lost.',
+  },
+  {
+    key: 'voice_vulnerability_triage',
+    label: 'Extra care for callers in distress',
+    description:
+      'Watch each call for signs a caller is distressed or at risk, and hand the call to a person sooner.',
+  },
+] as const;
+
+type OwnerCapabilityKey = (typeof OWNER_CAPABILITIES)[number]['key'];
+
+/** Mirrors the API response: the resolved value, who decided it, and whether it is ours to change. */
+interface CapabilityState {
+  enabled: boolean;
+  source: 'tenant' | 'platform' | 'default';
+  /**
+   * The server's own answer to "would a PUT be refused?" — true only for a
+   * platform row that is explicitly OFF. Do NOT re-derive this from `source`:
+   * a platform row that is ON is a RAMP, not a freeze, and the owner may still
+   * turn the capability off. `source === 'platform'` was the first predicate
+   * here and it disabled the switch on a ramped-ON capability while claiming it
+   * was turned off platform-wide.
+   */
+  platformFrozen?: boolean;
+}
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -49,14 +152,60 @@ export function SettingsPage() {
   // spanishMode derives from /api/settings/language (P11-002).
   const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
+  // 9.6 — digestEnabled/digestTime/digestChannel are already accepted by
+  // PUT /api/settings and mapped by PgSettingsRepository (RV-063); the gap
+  // was purely "no client control" (map #995 correction). Toggle-only for
+  // now — this page has no existing time/channel picker pattern to mirror,
+  // so digestTime/digestChannel stay server defaults until one exists.
+  const [digestEnabled, setDigestEnabledState] = useState(false);
+  // 8.3/8.11 — revenue-cluster settings: already accepted by PUT
+  // /api/settings and referenced by zero UI (map #995 correction). Pure UI
+  // over an already-accepted contract — the diff below is toggles + tests
+  // only, no change to what any of these four flags DO.
+  const [autoInvoiceOnCompletion, setAutoInvoiceOnCompletionState] = useState(false);
+  const [billLaborFromTimeEntries, setBillLaborFromTimeEntriesState] = useState(false);
+  const [batchInvoiceEnabled, setBatchInvoiceEnabledState] = useState(false);
+  const [milestoneBillingEnabled, setMilestoneBillingEnabledState] = useState(false);
   const [spanishMode, setSpanishMode] = useState(false);
+  // #1011 — five settings that `updateSettingsSchema` used to STRIP, so a
+  // PUT returned 200 and changed nothing. They had no control on any surface;
+  // these are it. Initial values mirror the column defaults so the switch is
+  // not lying about live state during the first paint (send_thank_you_sms and
+  // send_review_request are NOT NULL DEFAULT TRUE; weekly_feedback_enabled is
+  // opt-OUT; autonomous_close_enabled defaults FALSE).
+  const [thankYouSms, setThankYouSms] = useState(true);
+  const [reviewRequest, setReviewRequest] = useState(true);
+  const [weeklyFeedback, setWeeklyFeedback] = useState(true);
+  const [autonomousClose, setAutonomousClose] = useState(false);
+  // The cap is money: held as integer CENTS (the repo invariant) and edited as
+  // a dollars string so a half-typed value never round-trips through a float.
+  const [closeCapCents, setCloseCapCents] = useState<number | null>(null);
+  const [closeCapInput, setCloseCapInput] = useState('');
   const [businessName, setBusinessName] = useState<string | null>(null);
+  // #874 — live service-area data for the RESOURCES row (null until the
+  // settings document loads; the subtitle must never show made-up data).
+  const [serviceArea, setServiceArea] = useState<ServiceAreaFields | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
+  // #877 — live actions are confirm-gated: which voice transition is
+  // awaiting confirmation (null = no dialog), and in-flight markers so
+  // the dialogs can't be double-submitted or dismissed mid-request.
+  const [confirmVoiceAction, setConfirmVoiceAction] = useState<'pause' | 'go-live' | null>(null);
+  const [voicePending, setVoicePending] = useState(false);
+  const [confirmPortalOpen, setConfirmPortalOpen] = useState(false);
+  const [portalPending, setPortalPending] = useState(false);
+  // #873 — a failed portal-session POST renders a persistent, actionable
+  // alert (the server's reason, e.g. "saved Stripe customer no longer
+  // exists — contact support to re-link billing"), not a transient toast.
+  const [billingPortalError, setBillingPortalError] = useState<BillingPortalFailure | null>(null);
   // Surface a failure to load the main /api/settings document instead of
   // silently swallowing it (which left the page showing stale defaults with
   // no signal that the user's real preferences never loaded).
   const [settingsLoadError, setSettingsLoadError] = useState(false);
   const [settingsReloadNonce, setSettingsReloadNonce] = useState(0);
+  // #1011 — per-tenant capabilities (rows 2.6 / 2.7). `null` means the API said
+  // they are unconfigured (503, the in-memory boot) — the block is then hidden
+  // entirely rather than rendering switches that cannot persist.
+  const [capabilities, setCapabilities] = useState<Record<string, CapabilityState> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,15 +219,59 @@ export function SettingsPage() {
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
+          digestEnabled?: boolean;
+          autoInvoiceOnCompletion?: boolean;
+          billLaborFromTimeEntries?: boolean;
+          batchInvoiceEnabled?: boolean;
+          milestoneBillingEnabled?: boolean;
           businessName?: string;
           googleReviewUrl?: string | null;
           yelpReviewUrl?: string | null;
+          serviceAreaText?: string | null;
+          serviceAreaRadius?: number | null;
+          serviceAreaZips?: string[] | null;
+          sendThankYouSms?: boolean;
+          sendReviewRequest?: boolean;
+          weeklyFeedbackEnabled?: boolean;
+          autonomousCloseEnabled?: boolean;
+          autonomousCloseMaxCents?: number | null;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
         }
         if (typeof data.autoSendAppointmentReminders === 'boolean') {
           setReminders(data.autoSendAppointmentReminders);
+        }
+        if (typeof data.digestEnabled === 'boolean') {
+          setDigestEnabledState(data.digestEnabled);
+        }
+        if (typeof data.autoInvoiceOnCompletion === 'boolean') {
+          setAutoInvoiceOnCompletionState(data.autoInvoiceOnCompletion);
+        }
+        if (typeof data.billLaborFromTimeEntries === 'boolean') {
+          setBillLaborFromTimeEntriesState(data.billLaborFromTimeEntries);
+        }
+        if (typeof data.batchInvoiceEnabled === 'boolean') {
+          setBatchInvoiceEnabledState(data.batchInvoiceEnabled);
+        }
+        if (typeof data.milestoneBillingEnabled === 'boolean') {
+          setMilestoneBillingEnabledState(data.milestoneBillingEnabled);
+        }
+        // #1011 — hydrate the five owner toggles.
+        if (typeof data.sendThankYouSms === 'boolean') setThankYouSms(data.sendThankYouSms);
+        if (typeof data.sendReviewRequest === 'boolean') setReviewRequest(data.sendReviewRequest);
+        if (typeof data.weeklyFeedbackEnabled === 'boolean') {
+          setWeeklyFeedback(data.weeklyFeedbackEnabled);
+        }
+        if (typeof data.autonomousCloseEnabled === 'boolean') {
+          setAutonomousClose(data.autonomousCloseEnabled);
+        }
+        if (typeof data.autonomousCloseMaxCents === 'number') {
+          setCloseCapCents(data.autonomousCloseMaxCents);
+          setCloseCapInput(centsToDollarInput(data.autonomousCloseMaxCents));
+        } else if (data.autonomousCloseMaxCents === null) {
+          setCloseCapCents(null);
+          setCloseCapInput('');
         }
         if (typeof data.businessName === 'string' && data.businessName.trim()) {
           setBusinessName(data.businessName.trim());
@@ -89,6 +282,11 @@ export function SettingsPage() {
         if (typeof data.yelpReviewUrl === 'string') {
           setYelpReviewUrl(data.yelpReviewUrl);
         }
+        setServiceArea({
+          serviceAreaText: data.serviceAreaText ?? '',
+          serviceAreaRadius: typeof data.serviceAreaRadius === 'number' ? data.serviceAreaRadius : null,
+          serviceAreaZips: data.serviceAreaZips ?? [],
+        });
         setSettingsLoadError(false);
       } catch {
         if (cancelled) return;
@@ -124,6 +322,21 @@ export function SettingsPage() {
         /* language settings missing — default to English */
       }
     })();
+    // #1011 — capabilities load independently: a 503 (no database wired) must
+    // leave the rest of Settings fully usable.
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings/capabilities');
+        if (cancelled) return;
+        if (!res.ok) {
+          setCapabilities(null);
+          return;
+        }
+        setCapabilities((await res.json()) as Record<string, CapabilityState>);
+      } catch {
+        if (!cancelled) setCapabilities(null);
+      }
+    })();
     (async () => {
       try {
         const rows = await fetchIntegrations();
@@ -147,7 +360,7 @@ export function SettingsPage() {
     }
   }
 
-  async function persistToggle(field: 'aiAuto' | 'reminders' | 'spanishMode', value: boolean) {
+  async function persistToggle(field: SettingsToggleField | 'spanishMode', value: boolean) {
     if (field === 'spanishMode') {
       try {
         await updateLanguageSettings({ defaultLanguage: value ? 'es' : 'en' });
@@ -157,10 +370,7 @@ export function SettingsPage() {
       }
       return;
     }
-    const body =
-      field === 'aiAuto'
-        ? { autoApplyInternalUpdates: value }
-        : { autoSendAppointmentReminders: value };
+    const body = { [SETTINGS_TOGGLE_FIELDS[field]]: value };
     try {
       const res = await apiFetch('/api/settings', {
         method: 'PUT',
@@ -171,27 +381,173 @@ export function SettingsPage() {
     } catch {
       toast.error('Could not save preference');
       // revert on failure
-      if (field === 'aiAuto') setAiAuto(!value);
-      else setReminders(!value);
+      TOGGLE_SETTERS[field](!value);
     }
   }
 
+  // One setter per toggle so a failed PUT reverts the switch the operator
+  // actually flipped (a switch that stays ON after a failed save is the
+  // silent-200 defect #1011 exists to remove, moved into the client).
+  const TOGGLE_SETTERS: Record<SettingsToggleField, (v: boolean) => void> = {
+    aiAuto: setAiAuto,
+    reminders: setReminders,
+    digestEnabled: setDigestEnabledState,
+    thankYouSms: setThankYouSms,
+    reviewRequest: setReviewRequest,
+    weeklyFeedback: setWeeklyFeedback,
+    autonomousClose: setAutonomousClose,
+  };
+
+  function toggleSetting(field: SettingsToggleField, value: boolean) {
+    TOGGLE_SETTERS[field](value);
+    void persistToggle(field, value);
+  }
   function toggleAiAuto(value: boolean) {
-    setAiAuto(value);
-    void persistToggle('aiAuto', value);
+    toggleSetting('aiAuto', value);
   }
   function toggleReminders(value: boolean) {
-    setReminders(value);
-    void persistToggle('reminders', value);
+    toggleSetting('reminders', value);
   }
   function toggleSpanishMode(value: boolean) {
     setSpanishMode(value);
     void persistToggle('spanishMode', value);
   }
+  function toggleDigestEnabled(value: boolean) {
+    toggleSetting('digestEnabled', value);
+  }
+
+  /**
+   * 8.3/8.11 — shared persist path for the four revenue-cluster booleans.
+   * Each writes `{ [field]: value }` through the same PUT /api/settings
+   * every other quick-toggle uses; `setLocal` flips the optimistic UI state
+   * and reverts it on failure, mirroring persistToggle's contract.
+   *
+   * Kept distinct from `persistToggle` on purpose: these four live in the
+   * Payments & billing section and pass their own setter, rather than being
+   * keyed off the SETTINGS_TOGGLE_FIELDS table the Quick-settings switches use.
+   */
+  async function persistBillingToggle(
+    field: 'autoInvoiceOnCompletion' | 'billLaborFromTimeEntries' | 'batchInvoiceEnabled' | 'milestoneBillingEnabled',
+    value: boolean,
+    setLocal: (v: boolean) => void,
+  ) {
+    setLocal(value);
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [field]: value }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      setLocal(!value);
+    }
+  }
+  function toggleAutoInvoiceOnCompletion() {
+    void persistBillingToggle('autoInvoiceOnCompletion', !autoInvoiceOnCompletion, setAutoInvoiceOnCompletionState);
+  }
+  function toggleBillLaborFromTimeEntries() {
+    void persistBillingToggle('billLaborFromTimeEntries', !billLaborFromTimeEntries, setBillLaborFromTimeEntriesState);
+  }
+  function toggleBatchInvoiceEnabled() {
+    void persistBillingToggle('batchInvoiceEnabled', !batchInvoiceEnabled, setBatchInvoiceEnabledState);
+  }
+  function toggleMilestoneBillingEnabled() {
+    void persistBillingToggle('milestoneBillingEnabled', !milestoneBillingEnabled, setMilestoneBillingEnabledState);
+  }
+
+  /**
+   * #1011 — commit the close cap. Empty clears it (explicit `null`, which the
+   * API maps to a SQL NULL); anything else persists integer CENTS. Sent on its
+   * OWN — the server refuses a payload that enables the lane and nulls the cap
+   * in the same request, and this field never carries the enabled bit.
+   */
+  async function commitCloseCap() {
+    const raw = closeCapInput.trim();
+    let next: number | null;
+    if (raw === '') {
+      next = null;
+    } else {
+      const dollars = Number(raw);
+      if (!Number.isFinite(dollars) || dollars < 0) {
+        toast.error('Enter a dollar amount, or leave it empty for no cap');
+        setCloseCapInput(centsToDollarInput(closeCapCents));
+        return;
+      }
+      next = Math.round(dollars * 100);
+    }
+    if (next === closeCapCents) return;
+    const previous = closeCapCents;
+    setCloseCapCents(next);
+    setCloseCapInput(centsToDollarInput(next));
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autonomousCloseMaxCents: next }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      setCloseCapCents(previous);
+      setCloseCapInput(centsToDollarInput(previous));
+    }
+  }
+
+  /**
+   * #1011 — flip one per-tenant capability. Same shape as `persistToggle`:
+   * optimistic, reverted with a toast on failure. A platform-frozen capability
+   * is never sent — the server answers 409 and the switch is disabled, so this
+   * is belt-and-braces against a click landing on a stale render.
+   */
+  async function toggleCapability(key: OwnerCapabilityKey, value: boolean) {
+    const previous = capabilities?.[key];
+    if (!previous || previous.platformFrozen === true) return;
+
+    setCapabilities((prev) =>
+      prev
+        ? { ...prev, [key]: { enabled: value, source: 'tenant', platformFrozen: false } }
+        : prev,
+    );
+    try {
+      const res = await apiFetch(`/api/settings/capabilities/${key}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: value }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings/capabilities/${key} ${res.status}`);
+      // Trust the server's RESOLVED state over the optimistic one: the write is
+      // an override and the value that matters is what the gate will read.
+      const resolved = (await res.json()) as {
+        enabled?: boolean;
+        source?: CapabilityState['source'];
+        platformFrozen?: boolean;
+      };
+      if (typeof resolved.enabled === 'boolean') {
+        setCapabilities((prev) =>
+          prev
+            ? {
+                ...prev,
+                [key]: {
+                  enabled: resolved.enabled!,
+                  source: resolved.source ?? 'tenant',
+                  platformFrozen: resolved.platformFrozen ?? false,
+                },
+              }
+            : prev,
+        );
+      }
+    } catch {
+      toast.error('Could not save preference');
+      setCapabilities((prev) => (prev ? { ...prev, [key]: previous } : prev));
+    }
+  }
   const [qbOpen, setQbOpen] = useState(false);
   const [qbIntegration, setQbIntegration] = useState<AccountingIntegrationSummary | null>(null);
   const qbConnected = qbIntegration?.status === 'active';
   const [suppliersOpen, setSuppliersOpen] = useState(false);
+  const [serviceAreaOpen, setServiceAreaOpen] = useState(false);
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [technicianPhoneOpen, setTechnicianPhoneOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
@@ -206,6 +562,7 @@ export function SettingsPage() {
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
+  const [googleBusinessOpen, setGoogleBusinessOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
@@ -227,12 +584,26 @@ export function SettingsPage() {
     const stripeReturned = params.get('stripe_connect') === '1';
     const quickbooksConnected = params.get('quickbooks_connected') === '1';
     const quickbooksError = params.get('quickbooks_error');
+    // Google Business OAuth return (review monitoring): the API callback
+    // redirects to /settings?googlebusiness_connected=1 on success or
+    // ?googlebusiness_error=<reason> when Google rejects / user declines.
+    const googleBusinessConnected = params.get('googlebusiness_connected') === '1';
+    const googleBusinessError = params.get('googlebusiness_error');
 
     let needsUrlUpdate = false;
     if (isConnected || connectionError) {
       setCalendarSyncOpen(true);
       if (connectionError) {
         toast.error(`Calendar connection failed: ${connectionError}`);
+      }
+      needsUrlUpdate = true;
+    }
+    if (googleBusinessConnected || googleBusinessError) {
+      setGoogleBusinessOpen(true);
+      if (googleBusinessConnected) {
+        toast.success('Google Business connected');
+      } else if (googleBusinessError) {
+        toast.error(`Google Business connection failed: ${googleBusinessError}`);
       }
       needsUrlUpdate = true;
     }
@@ -257,6 +628,8 @@ export function SettingsPage() {
       params.delete('stripe_connect');
       params.delete('quickbooks_connected');
       params.delete('quickbooks_error');
+      params.delete('googlebusiness_connected');
+      params.delete('googlebusiness_error');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }
@@ -275,6 +648,7 @@ export function SettingsPage() {
    * manage card, plan, view invoices, etc. Returns to /settings on close.
    */
   async function openBillingPortal() {
+    setBillingPortalError(null);
     try {
       const returnUrl = `${window.location.origin}/settings`;
       const res = await apiFetch('/api/billing/portal-session', {
@@ -287,20 +661,75 @@ export function SettingsPage() {
         return;
       }
       if (!res.ok) {
-        let detail = '';
-        try {
-          const body = await res.json();
-          detail = typeof body?.message === 'string' ? body.message : '';
-        } catch {
-          /* non-JSON */
-        }
-        throw new Error(detail || `Portal failed (${res.status})`);
+        // #873 — surface the server's structured reason as a persistent
+        // alert instead of discarding it into a transient generic toast.
+        setBillingPortalError(await parsePortalFailure(res));
+        return;
       }
       const data = (await res.json()) as { url: string };
       window.location.assign(data.url);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Could not open billing portal';
-      toast.error(msg);
+    } catch {
+      setBillingPortalError({
+        message: 'Could not open the billing portal — check your connection and try again.',
+      });
+    }
+  }
+
+  /** Confirmed portal open (#877): runs the portal handoff behind its dialog. */
+  async function confirmOpenBillingPortal() {
+    setPortalPending(true);
+    try {
+      await openBillingPortal();
+    } finally {
+      setPortalPending(false);
+      setConfirmPortalOpen(false);
+    }
+  }
+
+  /**
+   * #877 — the switch never fires the POST directly; it only raises the
+   * matching ConfirmDialog. The POST happens in performVoiceToggle after
+   * an explicit confirm.
+   */
+  function requestVoiceToggle() {
+    if (voiceAgentLive === null || voicePending) return;
+    setConfirmVoiceAction(voiceAgentLive ? 'pause' : 'go-live');
+  }
+
+  async function performVoiceToggle() {
+    const action = confirmVoiceAction;
+    if (action === null) return;
+    setVoicePending(true);
+    try {
+      const path = action === 'pause' ? '/api/voice/pause' : '/api/voice/go-live';
+      const res = await apiFetch(path, { method: 'POST' });
+      if (!res.ok) {
+        let code = '';
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (typeof body?.error === 'string') code = body.error;
+        } catch {
+          /* non-JSON body */
+        }
+        // /go-live returns 402 BILLING_REQUIRED when the subscription
+        // doesn't cover voice — say so instead of a mystery failure.
+        if (res.status === 402 || code === 'BILLING_REQUIRED') {
+          toast.error(
+            'Turning on AI phone answering requires an active subscription — manage your plan under Rivet subscription.',
+          );
+        } else {
+          toast.error('Could not update AI phone answering');
+        }
+        return;
+      }
+      const body = (await res.json()) as { voiceAgentLive: boolean };
+      setVoiceAgentLive(body.voiceAgentLive);
+      toast.success(body.voiceAgentLive ? 'AI phone answering is on' : 'AI phone answering is off');
+    } catch {
+      toast.error('Could not update AI phone answering');
+    } finally {
+      setVoicePending(false);
+      setConfirmVoiceAction(null);
     }
   }
 
@@ -374,7 +803,26 @@ export function SettingsPage() {
     setTimeout(() => setBookingCopied(false), 2000);
   }
 
-  const SECTIONS = [
+  // #874 — the Service area row subtitle renders live tenant data (the
+  // old hardcoded "Austin & surrounding areas" string was never real and
+  // is what made a Phoenix tenant's settings claim Austin).
+  const serviceAreaSubtitle = (() => {
+    if (!serviceArea) return 'Where you work — travel range and ZIP codes';
+    const parts: string[] = [];
+    if (serviceArea.serviceAreaText) {
+      parts.push(serviceArea.serviceAreaText);
+      if (serviceArea.serviceAreaRadius) {
+        parts.push(`~${serviceArea.serviceAreaRadius} mi radius`);
+      }
+    }
+    if (serviceArea.serviceAreaZips.length > 0) {
+      const n = serviceArea.serviceAreaZips.length;
+      parts.push(`${n} ZIP ${n === 1 ? 'code' : 'codes'}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'Not set — add where you work';
+  })();
+
+  const SECTIONS: SettingsSection[] = [
     {
       title: 'Business',
       items: [
@@ -397,28 +845,23 @@ export function SettingsPage() {
       title: 'AI & Automation',
       items: [
         {
+          kind: 'toggle',
           icon: Phone,
           label: 'AI phone answering',
           description:
             voiceAgentLive === null
               ? 'Loading…'
               : voiceAgentLive
-                ? 'On — inbound calls use the AI assistant'
-                : 'Off — callers hear voicemail until you turn this on',
-          action: () => {
-            void (async () => {
-              if (voiceAgentLive === null) return;
-              const path = voiceAgentLive ? '/api/voice/pause' : '/api/voice/go-live';
-              const res = await apiFetch(path, { method: 'POST' });
-              if (!res.ok) {
-                toast.error('Could not update AI phone answering');
-                return;
-              }
-              const body = (await res.json()) as { voiceAgentLive: boolean };
-              setVoiceAgentLive(body.voiceAgentLive);
-              toast.success(body.voiceAgentLive ? 'AI phone answering is on' : 'AI phone answering is off');
-            })();
-          },
+                ? 'Inbound calls are answered by the AI assistant'
+                : 'Callers hear voicemail until you turn this on',
+          badge:
+            voiceAgentLive === null
+              ? undefined
+              : voiceAgentLive
+                ? { label: 'On', color: 'bg-green-100 text-green-700' }
+                : { label: 'Off', color: 'bg-slate-100 text-slate-600' },
+          checked: voiceAgentLive,
+          onToggle: requestVoiceToggle,
         },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: ScrollText, label: 'Standing instructions',         description: 'Rules the AI follows on every draft ("always add a trip fee")', action: () => setStandingInstructionsOpen(true) },
@@ -447,7 +890,42 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
-        { icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
+        // 8.3/8.11 — already-accepted PUT /api/settings booleans, no client
+        // control before this. UI + persistence only — none of these four
+        // change what the underlying automation does.
+        {
+          kind: 'toggle',
+          icon: FileText,
+          label: 'Auto-draft invoice on completion',
+          description: 'Draft an invoice for your approval when a job is marked complete',
+          checked: autoInvoiceOnCompletion,
+          onToggle: toggleAutoInvoiceOnCompletion,
+        },
+        {
+          kind: 'toggle',
+          icon: Clock,
+          label: 'Bill labor from time entries',
+          description: 'Recompute labor cost on auto-drafted invoices from logged time',
+          checked: billLaborFromTimeEntries,
+          onToggle: toggleBillLaborFromTimeEntries,
+        },
+        {
+          kind: 'toggle',
+          icon: FileText,
+          label: 'Daily batch invoicing',
+          description: 'Include eligible jobs in the daily batch-invoice sweep',
+          checked: batchInvoiceEnabled,
+          onToggle: toggleBatchInvoiceEnabled,
+        },
+        {
+          kind: 'toggle',
+          icon: FileText,
+          label: 'Milestone billing',
+          description: 'Automatically draft a numbered invoice at each completed billing milestone. No approval step: the plan was approved when the schedule was created.',
+          checked: milestoneBillingEnabled,
+          onToggle: toggleMilestoneBillingEnabled,
+        },
+        { kind: 'external', icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices in the Stripe billing portal', action: () => setConfirmPortalOpen(true) },
       ],
     },
     {
@@ -458,6 +936,12 @@ export function SettingsPage() {
           label: 'Calendar sync',
           description: 'Connect Google Calendar to your account',
           action: () => setCalendarSyncOpen(true),
+        },
+        {
+          icon: Star,
+          label: 'Google Business reviews',
+          description: 'Monitor reviews & draft replies for your approval',
+          action: () => setGoogleBusinessOpen(true),
         },
         {
           icon: Link,
@@ -499,9 +983,53 @@ export function SettingsPage() {
           </div>
         )}
 
-        {/* Onboarding re-run banner */}
+        {/* #873 — billing portal failure: persistent + actionable. When the
+            saved Stripe customer is GONE (details.reason from the API), a
+            retry can never succeed — render re-link guidance instead of a
+            futile "Try again". */}
+        {billingPortalError && (
+          <div
+            data-testid="billing-portal-error"
+            role="alert"
+            className="mb-5 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5"
+          >
+            {isCustomerMissing(billingPortalError) ? (
+              <div className="text-sm text-red-700" data-testid="billing-portal-relink">
+                <p>
+                  The saved Stripe billing record for this account no longer exists, so the
+                  billing portal can&rsquo;t open. The account owner needs to contact support to
+                  re-link billing — retrying won&rsquo;t help until then.
+                </p>
+                {billingPortalError.stripeCustomerId && (
+                  <p className="mt-1 text-xs text-red-600">
+                    Stale billing record:{' '}
+                    <code className="font-mono" data-testid="billing-portal-stale-id">
+                      {billingPortalError.stripeCustomerId}
+                    </code>
+                  </p>
+                )}
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-red-700">{billingPortalError.message}</p>
+                <button
+                  type="button"
+                  onClick={() => void openBillingPortal()}
+                  data-testid="billing-portal-retry"
+                  className="shrink-0 min-h-11 rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700"
+                >
+                  Try again
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Onboarding re-run banner — the rerun param tells OnboardingShell
+            this is an explicit re-run so its completion gate lets it
+            through (#875). */}
         <button
-          onClick={() => navigate('/onboarding')}
+          onClick={() => navigate(ONBOARDING_RERUN_PATH)}
           className="w-full flex items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3.5 mb-5 text-left hover:bg-indigo-100 transition-colors group"
         >
           <div className="flex size-9 items-center justify-center rounded-xl bg-indigo-600 shrink-0">
@@ -691,6 +1219,43 @@ export function SettingsPage() {
               description: 'Customer messages & AI phone calls in Español',
               value: spanishMode, onChange: toggleSpanishMode,
             },
+            {
+              label: 'Daily digest',
+              description: 'One text at the end of the day summarizing what happened',
+              value: digestEnabled, onChange: toggleDigestEnabled,
+            },
+            // #1011 — the post-job customer SMS pair. Both columns ship ON, and
+            // until now a tenant who asked to stop texting their customers got
+            // a 200 and kept texting them.
+            {
+              label: 'Thank-you text after every job',
+              description: 'Text the customer a thank-you about 2 hours after the job is marked done',
+              value: thankYouSms, onChange: (v: boolean) => toggleSetting('thankYouSms', v),
+            },
+            {
+              label: 'Review request after every job',
+              description: 'Ask the customer for a public review a day after the job is marked done',
+              value: reviewRequest, onChange: (v: boolean) => toggleSetting('reviewRequest', v),
+            },
+            {
+              label: 'Weekly summary email',
+              description: 'A weekly recap of your ratings and customer feedback, emailed to you',
+              value: weeklyFeedback, onChange: (v: boolean) => toggleSetting('weeklyFeedback', v),
+            },
+            // #1011 / D-019 — this column is NOT an autonomous-close switch any
+            // more. D-019 revoked system approval outright; all it decides today
+            // is whether a phone-confirmed quote is staged as ONE owner-approval
+            // chain (booking + estimate together) or as a separate estimate+send
+            // chain with the hold released. The copy must therefore describe the
+            // approval shape and must never imply anything happens unattended.
+            // TODO(#1011 §E.4): final label + column rename are Josh's product
+            // call — `autonomous_close_enabled` is now a misnomer for what it does.
+            {
+              label: 'One approval for phone-quoted work',
+              description:
+                'When a caller agrees to a quote on the phone, hold the slot and send you a single approval covering the booking and the estimate. Nothing is scheduled or sent until you approve it.',
+              value: autonomousClose, onChange: (v: boolean) => toggleSetting('autonomousClose', v),
+            },
           ].map(({ label, description, value, onChange }) => (
             <div key={label} className="flex items-start justify-between gap-3 px-4 py-3.5">
               <div>
@@ -705,7 +1270,80 @@ export function SettingsPage() {
               </button>
             </div>
           ))}
+          {/* #1011 — the spend bound on the row above. Money is integer cents
+              on the wire; this field edits dollars. Empty means no cap. */}
+          <div className="flex items-start justify-between gap-3 px-4 py-3.5">
+            <label htmlFor="autonomous-close-cap" className="block">
+              <span className="text-sm text-slate-800">Largest quote that can use that single approval</span>
+              <span className="block text-xs text-slate-400 mt-0.5">
+                Quotes above this still reach you — just as separate approvals. Leave empty for no limit.
+              </span>
+            </label>
+            <div className="flex shrink-0 items-center gap-1">
+              <span className="text-sm text-slate-400">$</span>
+              <input
+                id="autonomous-close-cap"
+                data-testid="autonomous-close-cap"
+                type="text"
+                inputMode="decimal"
+                value={closeCapInput}
+                onChange={(e) => setCloseCapInput(e.target.value)}
+                onBlur={() => void commitCloseCap()}
+                placeholder="No limit"
+                className="w-28 min-h-11 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+              />
+            </div>
+          </div>
         </div>
+
+        {/* #1011 — per-tenant capabilities (rows 2.6 / 2.7). Hidden entirely
+            when the API reports them unconfigured: a switch that cannot
+            persist is worse than no switch. */}
+        {capabilities && (
+          <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 mb-5">
+            <div className="px-4 py-3">
+              <p className="text-xs text-slate-400">Capabilities</p>
+            </div>
+            {OWNER_CAPABILITIES.map(({ key, label, description }) => {
+              const state = capabilities[key] ?? {
+                enabled: false,
+                source: 'default' as const,
+                platformFrozen: false,
+              };
+              // The SERVER's answer, not a re-derivation: a platform row that
+              // is ON is a ramp the owner may still switch off.
+              const frozen = state.platformFrozen === true;
+              return (
+                <div key={key} className="flex items-start justify-between gap-3 px-4 py-3.5">
+                  <div>
+                    <p className="text-sm text-slate-800">{label}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {description}
+                      {frozen && ' Currently turned off platform-wide, so this cannot be changed here.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={state.enabled}
+                    aria-label={label}
+                    disabled={frozen}
+                    onClick={() => void toggleCapability(key, !state.enabled)}
+                    className={`relative shrink-0 mt-0.5 inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                      state.enabled ? 'bg-blue-600' : 'bg-slate-200'
+                    } ${frozen ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span
+                      className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${
+                        state.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Reviews section */}
         <div className="mb-4">
@@ -778,25 +1416,63 @@ export function SettingsPage() {
           <div key={section.title} className="mb-4">
             <p className="text-xs text-slate-400 mb-2 px-1">{section.title.toUpperCase()}</p>
             <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-              {section.items.map(({ icon: Icon, label, description, action, badge }: any) => (
-                <button
-                  key={label}
-                  onClick={action}
-                  className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
-                >
-                  <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-slate-100">
-                    <Icon size={14} className="text-slate-500" />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800">{label}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">{description}</p>
-                  </div>
-                  {badge && (
-                    <span className={`shrink-0 text-xs rounded-full px-2 py-0.5 ${badge.color}`}>{badge.label}</span>
-                  )}
-                  <ChevronRight size={14} className="shrink-0 text-slate-300" />
-                </button>
-              ))}
+              {section.items.map((item) => {
+                const { icon: Icon, label, description, badge } = item;
+                const iconAndText = (
+                  <>
+                    <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-slate-100">
+                      <Icon size={14} className="text-slate-500" />
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-800">{label}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{description}</p>
+                    </div>
+                    {badge && (
+                      <span className={`shrink-0 text-xs rounded-full px-2 py-0.5 ${badge.color}`}>{badge.label}</span>
+                    )}
+                  </>
+                );
+                if (item.kind === 'toggle') {
+                  // Live-state row (#877): an explicit switch, not a
+                  // chevron row — the row body itself is inert.
+                  return (
+                    <div key={label} className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left">
+                      {iconAndText}
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={item.checked === true}
+                        aria-label={label}
+                        disabled={item.checked === null}
+                        onClick={item.onToggle}
+                        className="flex min-h-11 min-w-11 shrink-0 items-center justify-center disabled:opacity-40"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${item.checked ? 'bg-blue-600' : 'bg-slate-200'}`}
+                        >
+                          <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${item.checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                        </span>
+                      </button>
+                    </div>
+                  );
+                }
+                return (
+                  <button
+                    key={label}
+                    onClick={item.action}
+                    className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+                  >
+                    {iconAndText}
+                    {item.kind === 'external' ? (
+                      // Leaves the app (#877) — external-link, not chevron.
+                      <ExternalLink size={14} className="shrink-0 text-slate-300" />
+                    ) : (
+                      <ChevronRight size={14} className="shrink-0 text-slate-300" />
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         ))}
@@ -807,7 +1483,7 @@ export function SettingsPage() {
           <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
             <button
               onClick={() => setSuppliersOpen(true)}
-              className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+              className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
             >
               <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-100">
                 <Store size={14} className="text-amber-600" />
@@ -819,14 +1495,15 @@ export function SettingsPage() {
               <ChevronRight size={14} className="shrink-0 text-slate-300" />
             </button>
             <button
-              className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+              onClick={() => setServiceAreaOpen(true)}
+              className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
             >
               <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-slate-100">
                 <MapPin size={14} className="text-slate-500" />
               </span>
               <div className="flex-1 min-w-0">
                 <p className="text-sm text-slate-800">Service area</p>
-                <p className="text-xs text-slate-400 mt-0.5">Austin & surrounding areas · ~30 mi radius</p>
+                <p className="text-xs text-slate-400 mt-0.5">{serviceAreaSubtitle}</p>
               </div>
               <ChevronRight size={14} className="shrink-0 text-slate-300" />
             </button>
@@ -872,6 +1549,14 @@ export function SettingsPage() {
       {/* Suppliers sheet */}
       {suppliersOpen && (
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
+      )}
+
+      {/* Service area sheet (#874) */}
+      {serviceAreaOpen && (
+        <ServiceAreaSheet
+          onClose={() => setServiceAreaOpen(false)}
+          onSaved={(fields) => setServiceArea(fields)}
+        />
       )}
 
       {/* Business profile sheet */}
@@ -936,6 +1621,9 @@ export function SettingsPage() {
       )}
 
       {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
+      {googleBusinessOpen && (
+        <GoogleBusinessSheet onClose={() => setGoogleBusinessOpen(false)} />
+      )}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
       )}
@@ -962,6 +1650,35 @@ export function SettingsPage() {
       <DncListSheet
         open={dncListOpen}
         onOpenChange={setDncListOpen}
+      />
+
+      {/* #877 — confirm-gates for the two live-action rows. */}
+      <ConfirmDialog
+        open={confirmVoiceAction !== null}
+        title={
+          confirmVoiceAction === 'pause'
+            ? 'Turn off AI phone answering?'
+            : 'Turn on AI phone answering?'
+        }
+        description={
+          confirmVoiceAction === 'pause'
+            ? 'Callers will hear voicemail until you turn it back on.'
+            : 'The AI assistant will start answering your inbound calls right away.'
+        }
+        confirmLabel={confirmVoiceAction === 'pause' ? 'Turn off' : 'Turn on'}
+        tone={confirmVoiceAction === 'pause' ? 'danger' : 'default'}
+        busy={voicePending}
+        onConfirm={() => void performVoiceToggle()}
+        onCancel={() => setConfirmVoiceAction(null)}
+      />
+      <ConfirmDialog
+        open={confirmPortalOpen}
+        title="Open the Stripe billing portal?"
+        description="You'll leave Rivet to manage your card, plan, and invoices on Stripe, and return here when you close the portal."
+        confirmLabel="Open billing portal"
+        busy={portalPending}
+        onConfirm={() => void confirmOpenBillingPortal()}
+        onCancel={() => setConfirmPortalOpen(false)}
       />
     </div>
   );

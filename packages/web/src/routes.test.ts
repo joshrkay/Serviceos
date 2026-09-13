@@ -82,11 +82,83 @@ describe('router', () => {
     }
   });
 
+  // The supervisor wall's CompressedSessionStrip NavLinks each live-session
+  // mini-card to /sessions/:id — without this route those links dead-end on
+  // a blank page. It must resolve INSIDE the auth-wrapped Shell tree (the
+  // page reads the wall's ActiveSessionsProvider mounted by Shell).
+  it('registers the focused live-session route (sessions/:id) inside the authed Shell', () => {
+    const rootRoute = (router.routes as RouteObject[]).find(r => r.path === '/');
+    expect(rootRoute, 'expected the `/` ProtectedRoute').toBeDefined();
+    const shellRoute = rootRoute!.children?.find(r => r.path === '/');
+    expect(shellRoute, 'expected the Shell child route').toBeDefined();
+    const sessionRoute = shellRoute!.children?.find(r => r.path === 'sessions/:id');
+    expect(sessionRoute, 'sessions/:id must be a Shell child (auth-wrapped)').toBeDefined();
+    expect(typeof (sessionRoute as { lazy?: unknown }).lazy, 'sessions/:id should be lazy').toBe('function');
+    expect(isEager(sessionRoute!), 'sessions/:id should not be eagerly imported').toBe(false);
+  });
+
   it('the authenticated root route wires ErrorBoundary on the outer (ProtectedRoute) layer', () => {
     const topLevel = router.routes as RouteObject[];
     const rootRoute = topLevel.find((r) => r.path === '/');
     expect(rootRoute, 'expected a `/` top-level route').toBeDefined();
     expect(routeUsesErrorElement(rootRoute!)).toBe(true);
+  });
+
+  // The production bug this guards against: `/customers/new` had no route
+  // of its own, so the literal "new" segment fell through to `customers/:id`
+  // (CustomerDetail), which called GET /api/customers/new and got a 500
+  // (the id isn't a UUID). A real, lazy-loaded customers/new route — declared
+  // before customers/:id — fixes both the missing page and the false match.
+  it('registers customers/new as its own lazy route, before customers/:id', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const createRoute = allRoutes.find((r) => r.path === 'customers/new');
+    expect(createRoute, 'expected a customers/new route').toBeDefined();
+    expect(typeof (createRoute as { lazy?: unknown }).lazy, 'customers/new should be lazy').toBe('function');
+    expect(isEager(createRoute!), 'customers/new should not be eagerly imported').toBe(false);
+
+    const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
+    const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
+    const siblings = shellRoute!.children ?? [];
+    const newIdx = siblings.findIndex((r) => r.path === 'customers/new');
+    const detailIdx = siblings.findIndex((r) => r.path === 'customers/:id');
+    expect(newIdx, 'customers/new must be registered').toBeGreaterThanOrEqual(0);
+    expect(detailIdx, 'customers/:id must be registered').toBeGreaterThanOrEqual(0);
+    expect(newIdx).toBeLessThan(detailIdx);
+  });
+
+  // #881 routes "Create a new invoice" voice/quick-action phrases to
+  // /invoices/new — pin that the standalone create route exists and is
+  // declared before invoices/:id so the literal "new" segment can't fall
+  // through to the detail page (same class of bug as customers/new above).
+  it('registers invoices/new as its own route, before invoices/:id', () => {
+    const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
+    const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
+    const siblings = shellRoute!.children ?? [];
+    const newIdx = siblings.findIndex((r) => r.path === 'invoices/new');
+    const detailIdx = siblings.findIndex((r) => r.path === 'invoices/:id');
+    expect(newIdx, 'invoices/new must be registered').toBeGreaterThanOrEqual(0);
+    expect(detailIdx, 'invoices/:id must be registered').toBeGreaterThanOrEqual(0);
+    expect(newIdx).toBeLessThan(detailIdx);
+  });
+
+  // 1.11 — inviteTeamMember (users/invite-team-member.ts) redirects an
+  // accepted invitee to `${appBaseUrl}/accept-invitation?invitation_id=…`;
+  // without this route the invitee's browser 404s instead of reaching the
+  // app. Registered INSIDE ProtectedRoute (not as a public fullscreen flow
+  // like /onboarding) so a signed-out visit falls through to ProtectedRoute's
+  // existing unauthenticated handling (redirect to /login with a return
+  // path) rather than needing its own auth check.
+  it('registers accept-invitation inside the authed Shell (ProtectedRoute gates signed-out visitors)', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const route = allRoutes.find((r) => r.path === 'accept-invitation');
+    expect(route, 'expected an accept-invitation route').toBeDefined();
+    expect(typeof (route as { lazy?: unknown }).lazy, 'accept-invitation should be lazy').toBe('function');
+    expect(isEager(route!), 'accept-invitation should not be eagerly imported').toBe(false);
+
+    const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
+    const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
+    const isShellChild = shellRoute!.children?.some((r) => r.path === 'accept-invitation');
+    expect(isShellChild, 'accept-invitation must be a Shell child (auth-wrapped)').toBe(true);
   });
 });
 

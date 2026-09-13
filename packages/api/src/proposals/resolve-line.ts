@@ -57,6 +57,15 @@ interface CatalogCandidate {
    * untouched.
    */
   category?: string;
+  /**
+   * B7.5 — the candidate catalog item's unit of measure. Stamped onto the
+   * line on a catalog pick so a one-tap resolution lands the SAME unit a
+   * direct exact/high match would have (edit-action-grounding.ts /
+   * applyCatalogPricing). Absent on the synthetic `spoken:` candidate and
+   * on candidates recorded before this field existed — both leave the
+   * line's own unit untouched, exactly like `category`.
+   */
+  unit?: string;
 }
 
 export interface ResolveLineInput {
@@ -212,6 +221,12 @@ export async function resolveProposalLine(
     if (chosen.category !== undefined) {
       line.category = chosen.category;
     }
+    // B7.5 — same rule as category: stamp the picked catalog item's unit so
+    // a resolved line carries the unit it would have had on a direct match.
+    // Descriptive only; the totalCents recomputed below never reads it.
+    if (chosen.unit !== undefined) {
+      line.unit = chosen.unit;
+    }
   }
   line.needsPricing = false;
   if (priceField === 'unitPriceCents') {
@@ -344,6 +359,12 @@ async function resolveEditActionLine(
     lineItem.pricingSource = 'catalog';
     if (chosen.category !== undefined) {
       lineItem.category = chosen.category;
+    }
+    // B7.5 — same rule as category: a resolved edit line lands the picked
+    // catalog item's unit, matching what a direct exact/high match stamps
+    // in groundEditActionPricing. Descriptive only, never money.
+    if (chosen.unit !== undefined) {
+      lineItem.unit = chosen.unit;
     }
   }
   lineItem.needsPricing = false;

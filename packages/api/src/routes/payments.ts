@@ -11,6 +11,8 @@ import { AuditRepository } from '../audit/audit';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { PaymentReceiptNotifier } from '../invoices/payment';
 import { createLogger } from '../logging/logger';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 const logger = createLogger({
   service: 'payments-route',
@@ -26,6 +28,9 @@ export function createPaymentRouter(
   estimateRepo?: EstimateRepository,
   auditRepo?: AuditRepository,
   paymentReceiptNotifier?: PaymentReceiptNotifier,
+  /** P0-9 — kills a stale hosted payment link once a credit reprices/settles its invoice. */
+  paymentLinkProvider?: PaymentLinkProvider,
+  connectAccountResolver?: ConnectAccountResolver,
 ): Router {
   const router = Router();
 
@@ -59,6 +64,11 @@ export function createPaymentRouter(
         paymentReceiptNotifier,
         auditRepo,
         { actorRole: req.auth!.role },
+        undefined,
+        // P0-9 — recordPayment deactivates any link the credit made stale.
+        paymentLinkProvider
+          ? { provider: paymentLinkProvider, connectAccountResolver }
+          : undefined,
       );
       res.status(201).json(result);
     })

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createConversationSchema, createMessageSchema } from '../shared/contracts';
 import {
   createConversationWithAudit,
@@ -18,6 +19,12 @@ import { AuditRepository } from '../audit/audit';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { SettingsRepository } from '../settings/settings';
 import { SuggestReplyTask } from '../ai/tasks/suggest-reply-task';
+import {
+  buildSourceContext,
+  trimContext,
+  type RetrieveAdapter,
+  type RetrievedChunk,
+} from '../ai/orchestration/context-builder';
 import type { StandingInstructionRepository } from '../instructions/standing-instructions';
 import {
   selectInjectedStandingInstructions,
@@ -39,6 +46,14 @@ export interface ConversationRouterAiDeps {
    * repo error drafts without instructions.
    */
   standingInstructionRepo?: Pick<StandingInstructionRepository, 'listActive'>;
+  /**
+   * Phase 4a-2 — RAG retrieval adapter (first real consumer). Present only
+   * when app.ts booted with `RAG_RETRIEVAL_ENABLED === 'true'` AND an
+   * embedding provider; absent ⇒ the suggest-reply prompt stays
+   * byte-identical to the legacy draft path. Failure-soft: retrieval
+   * trouble never blocks a draft.
+   */
+  retrieveAdapter?: RetrieveAdapter;
 }
 
 /**
@@ -113,6 +128,7 @@ export function createConversationRouter(
     // Lazily creates a conversation when none exists, so gate on the write
     // permission (matches POST /), not the read-only conversations:view.
     requirePermission('conversations:create'),
+    notFoundOnMalformedId('Customer not found', 'customerId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const customerId = req.params.customerId;
@@ -213,6 +229,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:view'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await conversationRepo.findById(req.auth!.tenantId, req.params.id);
       if (!result) {
@@ -241,6 +258,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:create'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createMessageSchema.parse({
         ...req.body,
@@ -261,6 +279,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:view'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       // An empty message list is ambiguous: it can mean either an empty
@@ -285,6 +304,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:view'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!aiDeps?.gateway) {
         res.status(503).json({ error: 'UNAVAILABLE', message: 'AI suggestions are not configured' });
@@ -312,6 +332,28 @@ export function createConversationRouter(
         }
       }
 
+      // Phase 4a-2 — first real RAG consumer: grounded reference notes for
+      // the draft, resolved through the buildSourceContext seam (query-role
+      // allowlist, MAX_QUERY_CHARS, and eval-run logging all live in the
+      // builder/adapter, not here). Best-effort: any retrieval failure
+      // drafts without notes. trimContext enforces the token budget and
+      // evicts retrievedChunks first under pressure.
+      let retrievedChunks: RetrievedChunk[] | undefined;
+      if (aiDeps.retrieveAdapter) {
+        try {
+          const context = trimContext(
+            await buildSourceContext(tenantId, req.params.id, {}, {
+              // Reuse the thread fetched above rather than re-querying.
+              getConversationMessages: async () => messages,
+              retrieve: aiDeps.retrieveAdapter,
+            }),
+          );
+          retrievedChunks = context.retrievedChunks;
+        } catch {
+          retrievedChunks = undefined;
+        }
+      }
+
       const task = new SuggestReplyTask(aiDeps.gateway);
       const { draft } = await task.suggest({
         messages: messages
@@ -321,6 +363,7 @@ export function createConversationRouter(
         businessName: settings?.businessName,
         tenantId,
         ...(standingInstructions ? { standingInstructions } : {}),
+        ...(retrievedChunks && retrievedChunks.length > 0 ? { retrievedChunks } : {}),
       });
 
       res.status(200).json({ draft });
@@ -337,6 +380,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:manage'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!replyDeps) {
         res

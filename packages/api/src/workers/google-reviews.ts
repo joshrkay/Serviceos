@@ -27,18 +27,25 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 import { Logger } from '../logging/logger';
-import { decrypt } from '../integrations/crypto';
 import {
   CredentialResolver,
-  CredentialRow,
 } from '../integrations/credentials';
 import {
+  GoogleBusinessAuthError,
+  GoogleBusinessOAuthConfig,
   GoogleBusinessQuotaError,
   GoogleFetch,
   GoogleReviewPayload,
   listReviews,
   parseStarRating,
 } from '../reputation/google-business-client';
+import {
+  GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS,
+  GoogleBusinessCredentialStore,
+  callWithGoogleBusinessAuthRetry,
+  resolveGoogleBusinessLocation,
+  resolveGoogleBusinessTokens,
+} from '../reputation/google-business-integration';
 import {
   ReviewRepository,
   Review,
@@ -115,6 +122,16 @@ export interface GoogleReviewsWorkerDeps {
    * failure semantics.
    */
   proposalEmission?: GoogleReviewsProposalEmissionDeps;
+  /**
+   * Refresh-token handling (review-monitoring self-serve). Google
+   * access tokens expire after ~1h; when a listReviews call 401s the
+   * worker refreshes via the stored refresh token using this OAuth
+   * client config, persists the rotated token through
+   * `credentialStore`, and retries once. When either dep is absent a
+   * 401 skips straight to the visible-backoff branch below.
+   */
+  googleConfig?: GoogleBusinessOAuthConfig | null;
+  credentialStore?: GoogleBusinessCredentialStore | null;
 }
 
 export interface GoogleReviewsSweepResult {
@@ -132,23 +149,6 @@ export interface GoogleReviewsSweepResult {
    * see the known-limitation note on `GoogleReviewsProposalEmissionDeps`.
    */
   proposalEmissionFailed: number;
-}
-
-/**
- * `provider_data` shape on the `tenant_integrations` row.
- * Tokens are encrypted column-side on the same row; we decrypt
- * `credentials.accessToken` here using `TENANT_ENCRYPTION_KEY`.
- */
-interface GoogleBusinessProviderData {
-  accountId?: string;
-  locationId?: string;
-}
-
-interface GoogleBusinessCredentials {
-  accessToken?: string;
-  // Refresh token handling lives outside PR a: the assumption per the
-  // spec is the row already holds a current access token. PR b/c may
-  // wire in `getValidAccessToken`-style refresh.
 }
 
 export async function runGoogleReviewsSweep(
@@ -220,7 +220,7 @@ export async function runGoogleReviewsSweep(
         continue;
       }
 
-      const tokens = resolveAccessToken(credRow, encKey);
+      const tokens = resolveGoogleBusinessTokens(credRow, encKey);
       if (!tokens) {
         deps.logger.warn('Google reviews sweep: missing access token', {
           tenantId,
@@ -229,7 +229,7 @@ export async function runGoogleReviewsSweep(
         continue;
       }
 
-      const { accountId, locationId } = resolveLocation(credRow);
+      const { accountId, locationId } = resolveGoogleBusinessLocation(credRow);
       if (!accountId || !locationId) {
         deps.logger.warn('Google reviews sweep: missing accountId/locationId', {
           tenantId,
@@ -248,15 +248,28 @@ export async function runGoogleReviewsSweep(
       let tenantPersisted = 0;
       let stopPaginating = false;
 
+      // Mutable across pages: a mid-pagination 401 refresh rotates the
+      // token, and later pages must use the fresh one.
+      let currentAccessToken = tokens.accessToken;
+
       do {
         pages++;
-        const page = await listReviews(
-          tokens,
-          accountId,
-          locationId,
-          pageToken,
+        // Refresh-on-401, retry once (shared implementation with the
+        // reply resolver). A dead refresh grant or a post-refresh 401
+        // rethrows GoogleBusinessAuthError → visible-backoff branch in
+        // the catch below.
+        const page = await callWithGoogleBusinessAuthRetry({
+          tenantId,
+          tokens: { ...tokens, accessToken: currentAccessToken },
+          config: deps.googleConfig ?? null,
+          store: deps.credentialStore ?? null,
           fetchFn,
-        );
+          onRotated: (rotated) => {
+            currentAccessToken = rotated;
+          },
+          call: (accessToken) =>
+            listReviews(accessToken, accountId, locationId, pageToken, fetchFn),
+        });
 
         for (const payload of page.reviews) {
           tenantFetched++;
@@ -341,6 +354,37 @@ export async function runGoogleReviewsSweep(
       fetched += tenantFetched;
       persisted += tenantPersisted;
     } catch (err) {
+      if (err instanceof GoogleBusinessAuthError) {
+        // Credentials are irreparably broken this sweep (401 with no
+        // refresh path, refresh grant rejected, or a post-refresh 401).
+        // Record the failure into the EXISTING poll-state backoff so
+        // the degradation is visible — the status endpoint surfaces
+        // `backoffUntil`, and subsequent sweeps skip the tenant instead
+        // of hammering Google — rather than only a log line.
+        failed++;
+        await deps.pollStateRepo
+          .recordQuotaError(tenantId, GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS)
+          .catch((recordErr) => {
+            deps.logger.error(
+              'Google reviews sweep: failed to record auth-failure backoff',
+              {
+                tenantId,
+                error:
+                  recordErr instanceof Error
+                    ? recordErr.message
+                    : String(recordErr),
+              },
+            );
+          });
+        deps.logger.warn(
+          'Google reviews sweep: authorization failed and token refresh did not recover — backing off; operator must reconnect Google Business',
+          {
+            tenantId,
+            error: err.message,
+          },
+        );
+        continue;
+      }
       if (err instanceof GoogleBusinessQuotaError) {
         await deps.pollStateRepo
           .recordQuotaError(tenantId, err.retryAfterSeconds)
@@ -406,46 +450,6 @@ function summarizeReviewProposal(review: Review): string {
   return snippet
     ? `Respond to ${stars} review from ${reviewer}: "${snippet}${snippet.length === 60 ? '…' : ''}"`
     : `Respond to ${stars} review from ${reviewer}`;
-}
-
-/**
- * Pull the access token out of a credential row. Supports two shapes:
- *   1. Plaintext `accessToken` in `credentials` JSON (dev/test).
- *   2. `accessTokenEnc` encrypted with TENANT_ENCRYPTION_KEY (prod).
- * Returns null on missing key/cipher (caller treats as failed).
- */
-function resolveAccessToken(
-  credRow: CredentialRow,
-  encKey: string | undefined,
-): string | null {
-  const creds = (credRow.credentials ?? {}) as GoogleBusinessCredentials & {
-    accessTokenEnc?: string;
-  };
-  if (creds.accessToken) return creds.accessToken;
-  if (creds.accessTokenEnc && encKey) {
-    try {
-      return decrypt(creds.accessTokenEnc, encKey);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function resolveLocation(credRow: CredentialRow): GoogleBusinessProviderData {
-  // Provider data may be nested under `credentials.providerData` or
-  // hoisted as top-level credential keys. Accept both for
-  // forward-compat — onboarding lands in PR b/c.
-  const creds = (credRow.credentials ?? {}) as Record<string, unknown> & {
-    providerData?: GoogleBusinessProviderData;
-    accountId?: string;
-    locationId?: string;
-  };
-  if (creds.providerData) return creds.providerData;
-  return {
-    ...(creds.accountId !== undefined ? { accountId: creds.accountId } : {}),
-    ...(creds.locationId !== undefined ? { locationId: creds.locationId } : {}),
-  };
 }
 
 /**

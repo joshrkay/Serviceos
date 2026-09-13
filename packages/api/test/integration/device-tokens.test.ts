@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgDeviceTokenRepository } from '../../src/push/pg-device-token-repository';
+import { DEVICE_TOKEN_STALE_AFTER_DAYS } from '../../src/push/device-token-service';
 
 describe('Postgres integration — device tokens', () => {
   let pool: Pool;
@@ -105,5 +106,33 @@ describe('Postgres integration — device tokens', () => {
 
     const list = await repo.listByTenant(tenant.tenantId);
     expect(list.some((t) => t.expoPushToken === 'ExponentPushToken[rm]')).toBe(false);
+  });
+
+  it('pruneStale deletes only rows past the TTL, scoped to the tenant', async () => {
+    // ANS-001 — the 90-day TTL sweep (day-guarded on the hold-reaper tick in
+    // app.ts). Pins the real make_interval DELETE against real columns + RLS.
+    const stale = 'ExponentPushToken[int-stale]';
+    const fresh = 'ExponentPushToken[int-fresh]';
+    const otherTenants = 'ExponentPushToken[int-stale-b]';
+    await repo.register({ tenantId: tenant.tenantId, userId: tenant.userId, expoPushToken: stale, platform: 'ios' });
+    await repo.register({ tenantId: tenant.tenantId, userId: tenant.userId, expoPushToken: fresh, platform: 'ios' });
+    await repo.register({ tenantId: other.tenantId, userId: other.userId, expoPushToken: otherTenants, platform: 'ios' });
+    await pool.query(
+      `UPDATE device_tokens
+          SET updated_at = NOW() - INTERVAL '200 days'
+        WHERE expo_push_token = ANY($1::text[])`,
+      [[stale, otherTenants]],
+    );
+
+    const pruned = await repo.pruneStale(tenant.tenantId, DEVICE_TOKEN_STALE_AFTER_DAYS);
+
+    expect(pruned).toBe(1);
+    const remaining = (await repo.listByTenant(tenant.tenantId)).map((t) => t.expoPushToken);
+    expect(remaining).not.toContain(stale);
+    expect(remaining).toContain(fresh);
+    // Another tenant's equally-old row is untouched by a tenant-scoped sweep.
+    expect((await repo.listByTenant(other.tenantId)).map((t) => t.expoPushToken)).toContain(
+      otherTenants,
+    );
   });
 });

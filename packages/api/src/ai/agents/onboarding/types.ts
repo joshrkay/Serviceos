@@ -12,6 +12,7 @@ import type {
   PricingExtraction,
   TeamMemberExtraction,
   ScheduleExtraction,
+  ToolsExtraction,
   OnboardingExtraction,
 } from '../../tasks/onboarding/types';
 
@@ -27,6 +28,10 @@ export type OnboardingState =
   | 'pricing_capture'
   | 'team_capture'
   | 'schedule_capture'
+  // B1.19 AC-3 — sixth (final) capture state: what tools/software the
+  // owner currently runs the business with. Informational only; see
+  // ToolsExtraction's doc comment for why it never becomes a proposal.
+  | 'tools_capture'
   | 'review'
   | 'completed'
   | 'capped';
@@ -52,7 +57,8 @@ export type ExtractionResultPayload =
   | { state: 'category_capture'; data: ServiceCategoryExtraction; confidence: number; needsClarification: boolean; clarificationQuestions: string[] }
   | { state: 'pricing_capture'; data: PricingExtraction; confidence: number; needsClarification: boolean; clarificationQuestions: string[] }
   | { state: 'team_capture'; data: TeamMemberExtraction; confidence: number; needsClarification: boolean; clarificationQuestions: string[] }
-  | { state: 'schedule_capture'; data: ScheduleExtraction; confidence: number; needsClarification: boolean; clarificationQuestions: string[] };
+  | { state: 'schedule_capture'; data: ScheduleExtraction; confidence: number; needsClarification: boolean; clarificationQuestions: string[] }
+  | { state: 'tools_capture'; data: ToolsExtraction; confidence: number; needsClarification: boolean; clarificationQuestions: string[] };
 
 export type OnboardingEvent =
   /** A user utterance arrived. The orchestrator hands it to the FSM,

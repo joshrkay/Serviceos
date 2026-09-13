@@ -196,6 +196,83 @@ export function renderInvoiceEmail(ctx: InvoiceMessageContext): RenderedEmail {
   return { subject, text, html };
 }
 
+/**
+ * Customer-portal link delivery (mint+send path in routes/portal.ts). The
+ * URL embeds a bearer token, so the copy deliberately explains what the
+ * link is for and when it stops working — no amounts, no document numbers.
+ */
+export interface PortalLinkMessageContext {
+  customerName: string;
+  businessName: string;
+  portalUrl: string;
+  /** ISO timestamp the session expires; rendered as YYYY-MM-DD. */
+  expiresAtIso?: string;
+  customMessage?: string;
+  language?: Language;
+}
+
+export function renderPortalLinkSms(ctx: PortalLinkMessageContext): RenderedSms {
+  const lang = ctx.language ?? 'en';
+  const lines = [
+    tn('sms.portal.intro', lang, { name: ctx.customerName, business: ctx.businessName }),
+    tn('sms.portal.cta', lang, { url: ctx.portalUrl }),
+    ctx.expiresAtIso
+      ? tn('sms.portal.expires', lang, { date: ctx.expiresAtIso.slice(0, 10) })
+      : null,
+  ].filter((line): line is string => line !== null);
+  if (ctx.customMessage && ctx.customMessage.trim().length > 0) {
+    lines.splice(1, 0, ctx.customMessage.trim());
+  }
+  return { body: lines.join('\n') };
+}
+
+export function renderPortalLinkEmail(ctx: PortalLinkMessageContext): RenderedEmail {
+  const lang = ctx.language ?? 'en';
+  const subject = tn('email.portal.subject', lang, { business: ctx.businessName });
+  const heading = tn('email.portal.heading', lang);
+  const intro = tn('email.common.intro', lang, { name: ctx.customerName });
+  const body = tn('email.portal.body', lang, { business: ctx.businessName });
+  const ctaText = tn('email.portal.cta_text', lang, { url: ctx.portalUrl });
+  const buttonLabel = tn('email.portal.button', lang);
+  const expires = ctx.expiresAtIso
+    ? tn('email.portal.expires', lang, { date: ctx.expiresAtIso.slice(0, 10) })
+    : '';
+  const signature = tn('email.common.signature', lang, { business: ctx.businessName });
+  const note = ctx.customMessage?.trim();
+
+  const text = [
+    intro,
+    '',
+    body,
+    '',
+    note ? `${note}\n` : '',
+    ctaText,
+    expires,
+    '',
+    signature,
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+
+  const html = `
+<!doctype html>
+<html>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1f2937;">
+    <h2 style="margin: 0 0 16px 0; font-size: 20px;">${escapeHtml(heading)}</h2>
+    <p style="margin: 0 0 12px 0;">${escapeHtml(intro)}</p>
+    <p style="margin: 0 0 16px 0;">${escapeHtml(body)}</p>
+    ${note ? `<p style="margin: 0 0 16px 0; padding: 12px; background: #f3f4f6; border-radius: 6px;">${escapeHtml(note)}</p>` : ''}
+    <p style="margin: 0 0 24px 0;">
+      <a href="${escapeHtml(ctx.portalUrl)}" style="display: inline-block; padding: 12px 24px; background: #2563eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 500;">${escapeHtml(buttonLabel)}</a>
+    </p>
+    ${expires ? `<p style="margin: 0 0 24px 0; color: #6b7280;">${escapeHtml(expires)}</p>` : ''}
+    <p style="margin: 0; color: #6b7280; font-size: 13px;">${escapeHtml(ctx.businessName)}</p>
+  </body>
+</html>`.trim();
+
+  return { subject, text, html };
+}
+
 export interface AppointmentNoticeContext {
   customerName: string;
   businessName: string;

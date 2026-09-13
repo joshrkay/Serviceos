@@ -188,6 +188,8 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
       findByIdempotencyKey: async () => null,
       create: async () => ({ ...winner }),
       updateStatus: async () => {},
+      // Never reached for a processed winner — duplicate short-circuits first.
+      claimForRetry: async () => null,
     };
 
     const result = await handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_race', repo);
@@ -205,15 +207,22 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
       status: 'failed' as const,
       createdAt: new Date(),
     };
+    const claimed: string[] = [];
     const repo = {
       findByIdempotencyKey: async () => null,
       create: async () => ({ ...winner }),
       updateStatus: async () => {},
+      // P0-8: a retry-eligible row must now be CLAIMED before re-execution.
+      claimForRetry: async (id: string) => {
+        claimed.push(id);
+        return { ...winner, status: 'processing' as const };
+      },
     };
 
     const result = await handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_race2', repo);
     expect(result.event.id).toBe('winner-failed');
     expect(result.duplicate).toBe(false);
+    expect(claimed).toEqual(['winner-failed']);
   });
 
   it('validation — malformed signature format rejected', () => {
@@ -249,5 +258,30 @@ describe('Blocker 1 — createWebhookRouter durable-idempotency guard', () => {
     } finally {
       process.env.NODE_ENV = prev;
     }
+  });
+});
+
+describe('P0-8 — concurrent retries of one failed event execute once', () => {
+  it('two concurrent handleWebhookEvent calls on a failed row: one runs, one is a duplicate', async () => {
+    const { InMemoryWebhookRepository } = await import('../../src/webhooks/webhook-handler');
+    const repo = new InMemoryWebhookRepository();
+
+    // First delivery fails cleanly.
+    const first = await handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_retry_race', repo);
+    expect(first.duplicate).toBe(false);
+    await repo.updateStatus(first.event.id, 'failed', 'boom');
+
+    // Stripe retries twice, concurrently. classifyExisting alone would hand
+    // BOTH a duplicate:false; the claim CAS must let exactly one through.
+    const [a, b] = await Promise.all([
+      handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_retry_race', repo),
+      handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_retry_race', repo),
+    ]);
+
+    expect([a.duplicate, b.duplicate].filter((d) => d === false)).toHaveLength(1);
+    expect([a.duplicate, b.duplicate].filter((d) => d === true)).toHaveLength(1);
+    // The winner sees the claimed (processing) row.
+    const winner = a.duplicate ? b : a;
+    expect(winner.event.status).toBe('processing');
   });
 });

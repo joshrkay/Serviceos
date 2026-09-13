@@ -280,3 +280,123 @@ describe('U5 — ACH async lifecycle', () => {
     expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(0);
   });
 });
+
+describe('Codex P1 — credit-rejection compensation is a processing-only CAS', () => {
+  it('a settle landing mid-compensation keeps the completed row and audits the unapplied capture', async () => {
+    const { recordProcessingPayment } = await import('../../src/payments/payment-service');
+    const { createInvoice, issueInvoice } = await import('../../src/invoices/invoice');
+    const { ValidationError } = await import('../../src/shared/errors');
+
+    const inner = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-ACH-CAS',
+        lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, inner);
+
+    // The invoice credit is rejected AND — in the same window — the
+    // payment_intent.succeeded settle flips the freshly inserted row
+    // processing → completed before the compensation runs.
+    const racingInvoiceRepo = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'incrementAmountPaidAtomic') {
+          return async () => {
+            const row = await paymentRepo.findByProviderReference('tenant-1', 'pi_ach_cas_1');
+            if (row) await paymentRepo.settleProcessingPaymentAtomic('tenant-1', row.id);
+            return null; // credit rejected against live state
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    await expect(
+      recordProcessingPayment(
+        {
+          tenantId: 'tenant-1',
+          invoiceId: inv.id,
+          amountCents: 10000,
+          method: 'bank_transfer',
+          providerReference: 'pi_ach_cas_1',
+          processedBy: 'stripe_webhook',
+        },
+        racingInvoiceRepo,
+        paymentRepo,
+        undefined,
+        auditRepo,
+      ),
+    ).rejects.toThrow(ValidationError);
+
+    // The settled capture SURVIVES (the old unconditional write erased it)…
+    const row = await paymentRepo.findByProviderReference('tenant-1', 'pi_ach_cas_1');
+    expect(row!.status).toBe('completed');
+    expect(row!.reversalReason).toBeNull();
+    // …and the credit-less capture is on the audit trail for reconciliation.
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 0,
+      reason: 'settled_during_credit_rejection',
+    });
+  });
+
+  it('without a settle, the compensation still flips processing → failed', async () => {
+    const { recordProcessingPayment } = await import('../../src/payments/payment-service');
+    const { createInvoice, issueInvoice, transitionInvoiceStatus } = await import('../../src/invoices/invoice');
+
+    const inner = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-ACH-CAS2',
+        lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, inner);
+
+    // Void lands between the serial check and the credit (no settle racing).
+    const racingInvoiceRepo = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'incrementAmountPaidAtomic') {
+          return async () => {
+            await transitionInvoiceStatus('tenant-1', inv.id, 'void', inner);
+            return null;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    await expect(
+      recordProcessingPayment(
+        {
+          tenantId: 'tenant-1',
+          invoiceId: inv.id,
+          amountCents: 10000,
+          method: 'bank_transfer',
+          providerReference: 'pi_ach_cas_2',
+          processedBy: 'stripe_webhook',
+        },
+        racingInvoiceRepo,
+        paymentRepo,
+      ),
+    ).rejects.toThrow(/status 'void'/);
+
+    const row = await paymentRepo.findByProviderReference('tenant-1', 'pi_ach_cas_2');
+    expect(row!.status).toBe('failed');
+    expect(row!.reversalReason).toBe('credit_rejected');
+  });
+});

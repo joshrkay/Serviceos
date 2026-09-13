@@ -11,7 +11,7 @@ import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
 import { buildInboxPayload } from '../proposals/inbox';
-import { undoExpiresAt } from '../proposals/lifecycle';
+import { undoExpiresAt, undoRemainingMs } from '../proposals/lifecycle';
 import { listProposals, getProposalDetail } from '../proposals/routes';
 import {
   approveProposal,
@@ -333,9 +333,15 @@ export function createProposalsRouter(
       // round-trip latency already spent. Both fields are additive — every
       // existing proposal field is preserved.
       const undoAt = undoExpiresAt(result);
+      const remainingMs = undoRemainingMs(result);
       res.json({
         ...result,
         ...(undoAt ? { undoExpiresAt: undoAt.toISOString() } : {}),
+        // Review N11 — the same window as a DURATION, so the client anchors
+        // the countdown to its own clock at receipt instead of differencing a
+        // server instant against `Date.now()`. Skew comes straight out of a
+        // 5-second budget; transit time does not.
+        ...(remainingMs !== undefined ? { undoRemainingMs: remainingMs } : {}),
       });
     })
   );

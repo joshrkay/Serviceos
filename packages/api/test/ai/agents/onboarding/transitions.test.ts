@@ -150,7 +150,7 @@ describe('onboarding FSM — transition', () => {
       }
     });
 
-    it('completing schedule_capture advances to review (not the next extraction state)', () => {
+    it('completing schedule_capture advances to tools_capture (not review)', () => {
       const scheduleResult: ExtractionResultPayload = {
         state: 'schedule_capture',
         data: {
@@ -162,7 +162,27 @@ describe('onboarding FSM — transition', () => {
       };
       const result = transition('schedule_capture', { kind: 'extraction_result', result: scheduleResult }, ctx({ turnCount: 5 }));
 
+      expect(result.nextState).toBe('tools_capture');
+      const assistant = result.sideEffects.find((e) => e.kind === 'emit_assistant_message');
+      if (assistant && assistant.kind === 'emit_assistant_message') {
+        expect(assistant.text).toBe(STATE_OPENING_PROMPT.tools_capture);
+      }
+    });
+
+    it('completing tools_capture (B1.19 AC-3 — sixth capture state) advances to review', () => {
+      const toolsResult: ExtractionResultPayload = {
+        state: 'tools_capture',
+        data: {
+          tools: [{ name: 'QuickBooks', confidence: 0.9, sourceText: 'we use QuickBooks' }],
+        },
+        confidence: 1.0,
+        needsClarification: false,
+        clarificationQuestions: [],
+      };
+      const result = transition('tools_capture', { kind: 'extraction_result', result: toolsResult }, ctx({ turnCount: 6 }));
+
       expect(result.nextState).toBe('review');
+      expect(result.updatedContext.extractions.tools).toEqual(toolsResult.data);
       const assistant = result.sideEffects.find((e) => e.kind === 'emit_assistant_message');
       if (assistant && assistant.kind === 'emit_assistant_message') {
         expect(assistant.text).toBe(REVIEW_PROMPT);

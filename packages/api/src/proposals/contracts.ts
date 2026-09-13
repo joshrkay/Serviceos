@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { appointmentTypeSchema, jobStatusSchema, jobPrioritySchema } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  jobStatusSchema,
+  jobPrioritySchema,
+  catalogUnitSchema,
+} from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -17,7 +22,15 @@ import { sendPaymentReminderPayloadSchema } from './contracts/send-payment-remin
 import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
 import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
 import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
+import { recordRefundPayloadSchema } from './contracts/record-refund';
+import { applyCreditPayloadSchema } from './contracts/apply-credit';
+import { sendCustomerMessagePayloadSchema } from './contracts/send-customer-message';
+import { createChangeOrderPayloadSchema } from './contracts/create-change-order';
+import { createServiceAgreementPayloadSchema } from './contracts/create-service-agreement';
+import { addMaterialPayloadSchema } from './contracts/add-material';
+import { addCatalogItemPayloadSchema } from './contracts/add-catalog-item';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
+import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -204,6 +217,28 @@ export const updateJobPayloadSchema = z
     { message: 'update_job requires at least one field to change: status, priority, title, or description' },
   );
 
+// Round 4b (#909-adjacent, sweep row A33) — `create_appointment.jobId` is
+// this proposal type's ONE chain-mapped field (proposals/chain.ts
+// `ENTITY_KIND_TO_PAYLOAD_PATH`: `{ jobId: 'jobId' }`). A chained booking
+// transiently carries a `$ref:chain[N].jobId` placeholder token in that
+// field (`applyChainMetadata`, stamped AFTER this schema runs at DRAFT
+// time — voice-action-router.ts calls it once the task handler has already
+// returned) until its parent create_job/create_customer step executes.
+// `editProposal` (proposals/actions.ts) re-validates the FULL merged
+// payload against this schema on every edit, including an edit that
+// touches a field OTHER than jobId, so a plain `.uuid()` would fail closed
+// on any edit to a still-pending chained appointment
+// (`edit-interpreter.ts`'s `chainRefFieldsTouchedByDelta` documents this as
+// the existing, accepted behavior for uuid-typed chain fields — accepting
+// the token format here avoids extending that failure mode now that it's
+// being tightened explicitly). The token's shape is duplicated (not
+// imported) from `proposals/chain.ts`'s `CHAIN_REF_TOKEN_PREFIX` /
+// `buildChainRefToken` to keep the payload-contract layer from depending on
+// the proposal-chaining module for one regex; the two are cross-referenced
+// so they can't drift silently.
+const CHAIN_REF_TOKEN_RE = /^\$ref:chain\[\d+\]\.[a-zA-Z]+$/;
+const jobIdOrChainRef = z.union([z.string().uuid(), z.string().regex(CHAIN_REF_TOKEN_RE)]);
+
 export const createAppointmentPayloadSchema = z
   .object({
     // Optional-with-a-refine (see the `jobId || customerId` rule at the bottom
@@ -218,13 +253,40 @@ export const createAppointmentPayloadSchema = z
     // enforcing it at the voice emit site would have rejected exactly the
     // booking SCH-02 exists to serve. Strictly widening: every payload that
     // validated before still validates.
-    jobId: z.string().uuid().optional(),
+    //
+    // Round 4b — `jobIdOrChainRef` (UUID or a `$ref:chain[...]` token, see
+    // above) replaces a bare `z.string().uuid()`. This is the field the live
+    // sweep defect (row A33) hit: `schedule_inspection` names an EXISTING
+    // job ("for the QA Sweep Furnace Inspection job") and is a
+    // JOB_REF_INTENTS member (entity-resolution.ts) — the reference is
+    // supposed to resolve to a real jobId before drafting. When it doesn't,
+    // `create-appointment-task.ts` now drops the unresolved text out of this
+    // field (never lets it become the id) and gates the proposal via
+    // `missingFields: ['jobId']` instead — this schema tightening is the
+    // backstop that makes any OTHER producer of a malformed jobId
+    // (including a future one, or a manual POST /api/proposals) fail
+    // validation instead of persisting a payload that dies at execution
+    // with Postgres's `invalid input syntax for type uuid`.
+    jobId: jobIdOrChainRef.optional(),
     // RV-081 — revisit linkage. When present, this appointment is a REVISIT
     // booked against an EXISTING job (no new job is created): the execution
     // handler validates the job exists in-tenant and attaches the
     // appointment to it, overriding `jobId`. Audit metadata marks the
     // appointment as a revisit.
     linkedJobId: z.string().uuid().optional(),
+    /**
+     * The `service_locations` row the auto-opened job should be sited at.
+     *
+     * `jobs.location_id` is NOT NULL, so a customer with no location cannot
+     * have a job — and therefore cannot be booked. When the drafting handler
+     * detects that (`detectServiceLocationGap`) it gates the proposal with
+     * `missingFields: ['locationId']`; the operator fills THIS field to clear
+     * the gate, and `CreateAppointmentExecutionHandler` sites the new job on
+     * it. Optional and additive: a customer who already has a primary
+     * location never needs it, and the executor's existing lookup is unchanged
+     * when it is absent.
+     */
+    locationId: z.string().uuid().optional(),
     scheduledStart: z.string().min(1),
     scheduledEnd: z.string().min(1),
     technicianId: z.string().uuid().optional(),
@@ -236,14 +298,28 @@ export const createAppointmentPayloadSchema = z
     arrivalWindowStart: z.string().optional(),
     arrivalWindowEnd: z.string().optional(),
     // Carried from the voice path for the dispatcher review card; not all
-    // are persisted directly on the appointment.
-    customerId: z.string().optional(),
+    // are persisted directly on the appointment. Round 4b — tightened from
+    // a bare `z.string()` to `.uuid()`: this field is never a chain-ref
+    // target (chain.ts's `ENTITY_KIND_TO_PAYLOAD_PATH` only maps
+    // `create_appointment` ↔ `jobId`, deliberately NOT `customerId` — "booking
+    // a brand-new customer therefore requires an intermediate create_job
+    // segment"), so unlike `jobId` above it never needs the chain-ref union.
+    customerId: z.string().uuid().optional(),
     customerName: z.string().optional(),
     summary: z.string().optional(),
     // Declared (not merely tolerated by strip-mode) because the `jobId ||
     // customerId` refine below and the SCH-02 executor fallback both read it:
     // it is the NAME of the job the handler opens when no jobId resolved.
     jobTitle: z.string().optional(),
+    // Round 4b — mirrors `updateJobPayloadSchema.jobReference`: the free-text
+    // job reference the drafting model heard ("the QA Sweep Furnace
+    // Inspection job") when it could not be resolved to a real jobId.
+    // Carried for the review card AND as the entity resolver's input —
+    // `ai/resolution/gated-reference-resolution.ts`'s
+    // `GATED_REFERENCE_SOURCES.jobId.payloadFields` reads this exact field
+    // to lift a `missingFields: ['jobId']` gate post-draft. Never trusted as
+    // an id itself.
+    jobReference: z.string().min(1).optional(),
     // Typed visit kind (estimate/repair/install/maintenance/diagnostic),
     // emitted enum-validated by the appointment task. Optional: inbound-caller
     // DRAFTs built at classify time carry none, and legacy payloads predate it.
@@ -294,6 +370,12 @@ const lineItemSchema = z
   .object({
     description: z.string().min(1),
     quantity: z.number(),
+    // B7.5 — descriptive unit of measure for a spoken part ("three
+    // capacitors", "two hours of labor"). Declared explicitly for the same
+    // reason imageFileId is: assertValidProposalPayload would otherwise strip
+    // it and the unit would vanish on the AI path only. Never used in money
+    // math — price stays in the unitPrice/unitPriceCents fields below.
+    unit: catalogUnitSchema.optional(),
     unitPrice: z.number().optional(),
     unitPriceCents: z.number().int().min(0).nullable().optional(),
     category: z.string().optional(),
@@ -782,7 +864,15 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   apply_late_fee: applyLateFeePayloadSchema,
   create_standing_instruction: createStandingInstructionPayloadSchema,
   update_catalog_item: updateCatalogItemPayloadSchema,
+  record_refund: recordRefundPayloadSchema,
+  apply_credit: applyCreditPayloadSchema,
+  send_customer_message: sendCustomerMessagePayloadSchema,
+  create_change_order: createChangeOrderPayloadSchema,
+  create_service_agreement: createServiceAgreementPayloadSchema,
+  add_material: addMaterialPayloadSchema,
+  add_catalog_item: addCatalogItemPayloadSchema,
   adopt_entity_alias: adoptEntityAliasPayloadSchema,
+  update_brand_voice: updateBrandVoicePayloadSchema,
 };
 
 export function validateProposalPayload(

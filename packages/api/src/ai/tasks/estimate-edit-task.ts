@@ -23,6 +23,29 @@ function isUuid(value: unknown): value is string {
 }
 
 /**
+ * B7.6 — the estimate id the router's entity resolver already resolved from
+ * the SPOKEN reference, if any.
+ *
+ * `update_estimate` is in ESTIMATE_DOC_INTENTS (ai/agents/customer-calling/
+ * entity-resolution.ts), so the router plans a `kind: 'estimate'` lookup for
+ * the spoken jobReference and threads the result onto
+ * `existingEntities.estimateId` (workers/voice-action-router.ts). Nothing here
+ * read that seam, so a free-text reference could never lift the gate no matter
+ * how well it resolved — and PgEntityResolver.resolveEstimate could not
+ * resolve a spoken reference at all until the customer → jobs → estimates
+ * traversal landed alongside this. Both halves are required; either alone
+ * leaves B7.6 dead.
+ *
+ * Shape check only — the caller VERIFIES this against the repo before trusting
+ * it, exactly as `resolvedEstimateIdFrom` / SendEstimateNudgeTaskHandler do
+ * (ai/tasks/voice-extended-tasks.ts:193).
+ */
+function routerResolvedEstimateId(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.estimateId;
+  return isUuid(id) ? id : undefined;
+}
+
+/**
  * EstimateEditTaskHandler — produces `update_estimate` proposals from
  * voice transcripts like:
  *   "Add a site visit for $150 to estimate EST-0001"
@@ -219,7 +242,11 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // RV-042 acceptance-void marker + VOX-50 catalog markers MERGE into a
     // single `_meta` — overwriting the whole object would clobber whichever
     // path ran, so both contribute. Acceptance marker stays first.
-    const { target, candidates } = await this.resolveTargetEstimate(context.tenantId, payload);
+    const { target, candidates, verifiedRouterId } = await this.resolveTargetEstimate(
+      context.tenantId,
+      payload,
+      routerResolvedEstimateId(context),
+    );
     const accepted = target?.status === 'accepted';
     // B3 — `anyAmbiguousWithCandidates` also surfaces markers here (so the
     // review UI shows why a line needs a pick), but deliberately does NOT
@@ -265,6 +292,7 @@ export class EstimateEditTaskHandler implements TaskHandler {
     const { missingFields: estimateIdMissingFields, verifiedIds } = this.resolveEstimateIdGate(
       payload,
       target,
+      verifiedRouterId,
     );
 
     // B3 — the estimateId gate (B2) and the editAction catalog gates
@@ -344,9 +372,26 @@ export class EstimateEditTaskHandler implements TaskHandler {
   private async resolveTargetEstimate(
     tenantId: string,
     payload: Record<string, unknown>,
-  ): Promise<{ target: Estimate | null; candidates: EntityCandidate[] }> {
+    routerEstimateId?: string,
+  ): Promise<{
+    target: Estimate | null;
+    candidates: EntityCandidate[];
+    verifiedRouterId?: string;
+  }> {
     if (!this.estimateRepo) return { target: null, candidates: [] };
     try {
+      // B7.6 — the router's resolver ran against the OPERATOR'S OWN WORDS
+      // ("the Garcia estimate") through tenant-scoped SQL; the payload below
+      // is whatever the drafting LLM chose to emit. When both are present the
+      // resolved one wins, which is also the precedence
+      // SendEstimateNudgeTaskHandler.handle uses (router-verified id first,
+      // reference search only on a miss). Still verified, never trusted on
+      // shape: a miss falls THROUGH to the payload-driven paths below rather
+      // than gating outright, so this can never resolve less than before.
+      if (routerEstimateId) {
+        const target = await this.estimateRepo.findById(tenantId, routerEstimateId);
+        if (target) return { target, candidates: [], verifiedRouterId: target.id };
+      }
       if (typeof payload.estimateId === 'string' && payload.estimateId.length > 0) {
         const target = await this.estimateRepo.findById(tenantId, payload.estimateId);
         return { target, candidates: [] };
@@ -412,9 +457,12 @@ export class EstimateEditTaskHandler implements TaskHandler {
    * closed: nothing trusted is stamped and the proposal is gated.
    *
    * A free-text reference resolved unambiguously by resolveTargetEstimate's
-   * search still stamps payload.estimateId for review-card context, but per
-   * the rule above never lifts the gate (dropUnverifiedIds strips a
-   * search-resolved id since it isn't literally in the operator's text).
+   * ILIKE search still stamps payload.estimateId for review-card context, but
+   * per the rule above never lifts the gate (dropUnverifiedIds strips a
+   * search-resolved id since it isn't literally in the operator's text). That
+   * limit is about the SEARCH, not about free text as such — see the
+   * `verifiedRouterId` branch below, where a reference the router's entity
+   * resolver resolved AND findById confirmed does lift it and is allowlisted.
    * voice-action-router.ts has no such guard, but the two surfaces must
    * gate identically or the same transcript would behave differently
    * depending on which one drafted it.
@@ -427,7 +475,30 @@ export class EstimateEditTaskHandler implements TaskHandler {
   private resolveEstimateIdGate(
     payload: Record<string, unknown>,
     target: Estimate | null,
+    verifiedRouterId?: string,
   ): { missingFields: string[]; verifiedIds?: Record<string, string> } {
+    // B7.6 — the ONE case where a free-text reference lifts the gate. This is
+    // not the search-resolved id the paragraph above refuses: it is an id the
+    // router's entity resolver derived from the operator's words via
+    // tenant-scoped SQL and that `resolveTargetEstimate` then CONFIRMED with
+    // findById. Both properties matter — resolution alone would be an
+    // unverified id, verification alone would be trusting LLM output — and
+    // together they are exactly the standard SendEstimateNudgeTaskHandler's
+    // AC-1 `liftGate` already meets, so the two spoken estimate surfaces gate
+    // identically. `verifiedIds` rides the B4 allowlist for the same reason it
+    // does there: repo-confirmed, never copied from LLM or classifier text, so
+    // assistant.ts's dropUnverifiedIds must not strip it.
+    //
+    // Nothing here weakens the failure cases. A reference that resolves to
+    // NOTHING, or ambiguously, never reaches this method with an id at all:
+    // `resolveVoiceEntityReferences` folds `ambiguous` into a clarification
+    // and `not_found` into a pendingReference, so `existingEntities.estimateId`
+    // is simply absent and the fall-through below still gates.
+    if (verifiedRouterId) {
+      payload.estimateId = verifiedRouterId;
+      return { missingFields: [], verifiedIds: { estimateId: verifiedRouterId } };
+    }
+
     const uuidCandidate = isUuid(payload.estimateId)
       ? (payload.estimateId as string)
       : isUuid(payload.estimateReference)

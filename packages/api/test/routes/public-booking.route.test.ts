@@ -301,4 +301,48 @@ describe('public-booking route', () => {
       expect(res.status).toBe(201);
     });
   });
+
+  describe('Codex P1 — self-service booking gates on a CHOSEN timezone', () => {
+    it('an unset tenant timezone makes availability and booking 409 instead of guessing Eastern', async () => {
+      // A tenant in the post-fix seeded state: a settings row that exists but
+      // whose zone was never chosen (createSettings/ensureTenantSettings and
+      // the onboarding seeders all leave it unset now).
+      const zoneless = await tenantRepo.create({
+        ownerId: 'owner-2',
+        ownerEmail: 'owner2@example.com',
+        name: 'Zoneless Plumbing',
+      });
+      await settingsRepo.create({
+        id: 'settings-zoneless',
+        tenantId: zoneless.id,
+        businessName: 'Zoneless Plumbing',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        activeVerticalPacks: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const tenantId = zoneless.id;
+  
+      const avail = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(2), durationMin: 60 });
+      expect(avail.status).toBe(409);
+      expect(avail.body.error).toBe('TIMEZONE_NOT_CONFIGURED');
+  
+      const book = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(
+          validBooking(
+            new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+            new Date(Date.now() + 25 * 3600 * 1000).toISOString(),
+          ),
+        );
+      expect(book.status).toBe(409);
+      expect(book.body.error).toBe('TIMEZONE_NOT_CONFIGURED');
+    });
+  });
 });

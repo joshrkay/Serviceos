@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
+  DEVICE_TOKEN_STALE_AFTER_DAYS,
   InMemoryDeviceTokenRepository,
   isExpoPushToken,
   validateRegisterInput,
@@ -76,5 +77,33 @@ describe('device-token-service', () => {
     const t2 = await repo.listByTenant('t2');
     expect(t2).toHaveLength(1); // owned by the new tenant
     expect(t2[0].platform).toBe('android');
+  });
+
+  it('pruneStale deletes only tokens older than the TTL, scoped to the tenant', async () => {
+    // ANS-001 — the 90-day TTL sweep (app.ts hold-reaper tick) must drop only
+    // THIS tenant's stale rows: same-age rows under another tenant survive a
+    // tenant-scoped sweep (FORCE RLS means there is no cross-tenant DELETE).
+    vi.useFakeTimers();
+    try {
+      const dayMs = 24 * 60 * 60_000;
+      const now = Date.now();
+      vi.setSystemTime(now - (DEVICE_TOKEN_STALE_AFTER_DAYS + 1) * dayMs);
+      const repo = new InMemoryDeviceTokenRepository();
+      await repo.register({ tenantId: 't1', userId: 'u1', expoPushToken: 'ExponentPushToken[stale]', platform: 'ios' });
+      await repo.register({ tenantId: 't2', userId: 'u3', expoPushToken: 'ExponentPushToken[other]', platform: 'ios' });
+      vi.setSystemTime(now);
+      await repo.register({ tenantId: 't1', userId: 'u1', expoPushToken: 'ExponentPushToken[fresh]', platform: 'ios' });
+
+      const pruned = await repo.pruneStale('t1', DEVICE_TOKEN_STALE_AFTER_DAYS);
+
+      expect(pruned).toBe(1);
+      expect((await repo.listByTenant('t1')).map((r) => r.expoPushToken)).toEqual([
+        'ExponentPushToken[fresh]',
+      ]);
+      // Same age, different tenant — must survive a t1 sweep.
+      expect(await repo.listByTenant('t2')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

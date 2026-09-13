@@ -7,6 +7,7 @@ import {
   type Mode,
   type ResolveThresholdInput,
 } from './auto-approve';
+import { redactPii } from '../reputation/pii-redact';
 import { payloadHeadlineCents } from './payload-money';
 import { getSupervisorCreationHook } from './supervisor/hook';
 import { payloadWithSupervisorMarker } from './supervisor/marker';
@@ -26,7 +27,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice' | 'record_refund' | 'apply_credit' | 'send_customer_message' | 'create_change_order' | 'create_service_agreement' | 'add_material' | 'add_catalog_item';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -74,6 +75,14 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_standing_instruction',
   'update_catalog_item',
   'adopt_entity_alias',
+  'update_brand_voice',
+  'record_refund',
+  'apply_credit',
+  'send_customer_message',
+  'create_change_order',
+  'create_service_agreement',
+  'add_material',
+  'add_catalog_item',
 ];
 
 /**
@@ -148,6 +157,12 @@ export interface Proposal {
   approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  /**
+   * Role the approver held when they approved. Stamped at approval because
+   * the execution sweep runs detached from that request and cannot recover
+   * it. Absent on auto-approved and historical proposals.
+   */
+  executedByRole?: string;
   /** QA-2026-06-05: why execution failed — persisted so failed proposals are debuggable. */
   executionError?: string;
   claimedBy?: string;
@@ -296,6 +311,19 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // call the caller back (e.g. an after-hours booking). It carries no
     // money and mutates nothing until the operator acts.
     case 'callback':
+    // A change order mints a NEW draft estimate against an existing job —
+    // no money moves, sending is a later comms-class step, so capture-class
+    // like draft_estimate. The jobId is REQUIRED (that's what makes it a
+    // change order and not a fresh bid).
+    case 'create_change_order':
+    // Task 7 (2026-08-07 tradesperson plan) — signing a customer up to a
+    // recurring plan writes an agreement row — no money moves at creation
+    // (the agreement's own sweep invoices later, and those invoices ride
+    // the normal review path), so capture-class.
+    case 'create_service_agreement':
+    // Task 9 (2026-08-07 tradesperson plan) — Adds a row to the shopping
+    // list — no money, reversible, capture.
+    case 'add_material':
     case 'draft_estimate':
     case 'update_estimate':
     case 'draft_invoice':
@@ -345,6 +373,14 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // class, but the correction loop creates it with no trust tier, so it
     // always lands for human review — never auto-executed (D-004).
     case 'update_catalog_item':
+    // Task 12 (2026-08-07 tradesperson plan) — adding a NEW price-book entry
+    // is the create-side mirror of update_catalog_item above: a config
+    // change that only shapes FUTURE drafts (which are themselves
+    // reviewed) — no money moves at creation, no customer is contacted,
+    // and it's reversible (archive the item). Capture-class, same posture
+    // as update_catalog_item; the drafting task omits sourceTrustTier, so
+    // it always lands for human review — never auto-executed (D-004).
+    case 'add_catalog_item':
       return 'capture';
     // Delay notices and feedback requests are outbound customer-facing
     // messages — comms-class so they never auto-approve regardless of
@@ -397,6 +433,13 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // provides a second gate at the tool layer.
     case 'record_payment':
       return 'money';
+    // Tradesperson wave 1, Task 3 — recording a refund reverses collected
+    // money — money-class, never auto-approves at any trust tier (D3).
+    // This records a MANUAL refund (cash/check/external); Stripe-initiated
+    // refunds are a separate, deliberate non-goal here (see the 2026-08-07
+    // tradesperson plan and RecordRefundExecutionHandler's doc comment).
+    case 'record_refund':
+      return 'money';
     // A dunning payment reminder is an outbound customer-facing message
     // (the overdue-invoice sweep raises one per due cadence step). Comms-
     // class so it never auto-approves regardless of trust tier — the owner
@@ -410,10 +453,33 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // before any fee is charged.
     case 'apply_late_fee':
       return 'money';
+    // Tradesperson wave 1, Task 4 — Applying a credit reduces an issued
+    // invoice's amount due — it moves money (down, but money nonetheless),
+    // so money-class: never auto-approves. The handler floors at zero: a
+    // credit may never exceed the outstanding amount (over-crediting is a
+    // refund — use record_refund).
+    case 'apply_credit':
+      return 'money';
+    // Tradesperson wave 1, Task 5 — A free-form outbound customer message is
+    // the definition of comms-class: never auto-approves at any trust
+    // tier — the owner reads the exact text before a customer sees it. The
+    // AI drafts; a human sends.
+    case 'send_customer_message':
+      return 'comms';
     // Tenant learning changes future resolver behavior. It is reversible, but
     // never eligible for trust-tier graduation or one-tap capture batching:
     // only an explicit owner approval may activate it.
     case 'adopt_entity_alias':
+    // B1.18 — brand voice is the tenant's locked outbound identity; every
+    // future customer message is composed through it. A wrong extraction
+    // poisons every outbound message until corrected, so this is deliberately
+    // NOT 'capture' (capture is auto-approvable at high confidence under an
+    // autonomous tier). 'manual' makes "never auto-approves" STRUCTURAL —
+    // decideInitialStatus's only auto-approve branch requires
+    // sourceTrustTier === 'autonomous' AND action class === 'capture', so a
+    // manual-class type can never reach it at any trust tier or confidence
+    // (see b1.18-design.md and the AC-1 unit test).
+    case 'update_brand_voice':
       return 'manual';
   }
 }
@@ -487,6 +553,16 @@ export function decideInitialStatus(input: {
    * branch (it lives inside the `autonomous + capture` arm).
    */
   autonomousLane?: { eligible: true; threshold: number };
+  /**
+   * I1 (post-C1 review, followup-autoapprove-default) — best-effort surface
+   * label (e.g. 'S1' / 'S2' / a channel string) for
+   * `resolveAutoApproveThreshold`'s missing-supervision-signal warning
+   * throttle key. Purely diagnostic — never read by any approval decision.
+   * `createProposal` derives it from `sourceContext.surface`/`channel` when
+   * present; direct callers of `decideInitialStatus` may omit it (the
+   * throttle just falls back to proposalType-only keying).
+   */
+  warningSurface?: string;
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -520,6 +596,12 @@ export function decideInitialStatus(input: {
       supervisorMode: input.supervisorMode,
       supervisorPresent: input.supervisorPresent,
       tenantOverride: input.tenantThresholdOverride,
+      // I1 — diagnostic-only key for the missing-supervision-signal
+      // warning's throttle; never affects the resolved threshold.
+      warningContext: {
+        proposalType: input.proposalType,
+        ...(input.warningSurface ? { surface: input.warningSurface } : {}),
+      },
     });
 
     if (threshold === null) {
@@ -549,6 +631,268 @@ export function decideInitialStatus(input: {
   }
 
   return 'draft';
+}
+
+/**
+ * PR #815 review, Important 2 — the FALLBACK reason recorded in
+ * `execution_error` when `resetStaleExecuting` terminalizes a stale-claimed
+ * proposal that exhausted `maxRetries`. A true statement of what happened,
+ * and critically the only thing written to the column both
+ * `evaluateSilentExecutionFailures` (workers/failure-rate-monitor.ts) and
+ * `GET /api/proposals` read. Exported so pg-proposal.ts's SQL literal (which
+ * can't share this JS string directly) is written to produce identical
+ * wording — keep the two in sync by hand if this changes.
+ *
+ * Follow-up: this is now genuinely a FALLBACK. When the execution sweep
+ * caught the underlying throw it records that cause on the row while it is
+ * still 'executing' (workers/execution-worker.ts, via
+ * `redactedExecutionErrorCause` below), and the terminal write COALESCEs
+ * rather than overwrites — so this wording only survives on rows where no
+ * cause was ever captured (a crashed worker, a claim that outlived the
+ * process).
+ */
+export function staleExecutionTimeoutMessage(staleMinutes: number, retryCount: number): string {
+  return `Execution timed out: claimed >${staleMinutes}min across ${retryCount} retries, never completed`;
+}
+
+/**
+ * Upper bound on anything written to `proposals.execution_error`. The column
+ * is TEXT (no DB-side limit) and the value is echoed by `GET /api/proposals`
+ * and copied into an audit row, so an unbounded stack-sized message would
+ * bloat both.
+ */
+export const MAX_EXECUTION_ERROR_LENGTH = 500;
+
+const CAUSE_REDACTED = '[redacted]';
+
+/**
+ * Hard bound on how much of `err.message` is ever handed to a regex.
+ *
+ * This bound was introduced because the PII email pattern in `pii-redact.ts`
+ * backtracked QUADRATICALLY — 158ms / 645ms / 2597ms for 8KB / 16KB / 32KB of
+ * `('a.'×n/2) + '@' + ('b'×n)`, a clean 4× per doubling. That defect is now
+ * FIXED AT THE SOURCE: the email rule is a linear scanner, and every other
+ * pattern in that module was measured linear. So this slice is no longer what
+ * stands between `runExecutionSweep` and a stalled event loop.
+ *
+ * It stays anyway, for the reasons that do not depend on that defect:
+ *   - `err.message` is attacker-INFLUENCED (a driver error echoing a bound
+ *     JSONB payload, an HTTP client echoing a response body) and can be
+ *     megabytes. Even linear work over megabytes, per proposal, per sweep, is
+ *     work worth not doing for a value that is about to be cut to 500 chars.
+ *   - It bounds what the SECRET rules below see too, and those are local to
+ *     this file rather than covered by `pii-redact.ts`'s tests.
+ *
+ * Bounding the INPUT (rather than moving the truncation earlier in the
+ * pipeline) keeps the scrub-then-truncate ORDER intact — that order is what
+ * stops a secret being sliced in half by the length cap and then missed. The
+ * multiple leaves generous headroom above the 500-char output cap so a
+ * secret sitting just past it is still masked before the slice.
+ */
+const MAX_CAUSE_SCAN_LENGTH = MAX_EXECUTION_ERROR_LENGTH * 8;
+
+/**
+ * Iteration cap for the scrub loop.
+ *
+ * A second pass is genuinely NEEDED, not merely defensive: `redactPii` is not
+ * idempotent, and two emails abutting inside one word-character run take two
+ * passes (`x@y.io4155552671foo@bar.com` — see that module's header). The loop
+ * also covers (a) a rule whose output happens to feed another rule, and (b)
+ * the length cap re-scrubbing anything its slice exposed.
+ *
+ * 3 is enough HERE, which is a property of this call site's options rather
+ * than of `redactPii`. `requireSeparatedPhones: true` means a bare digit run
+ * is not a phone, so the one shape that does not converge in bounded passes
+ * (an n-digit run needs n/10) never fires. Measured over 200,000 generated
+ * causes under exactly these options, the worst case was 2 productive passes.
+ * The reputation call sites, which use the default options over unbounded
+ * review text, need `redactPiiRepeatedly`'s own cap for that reason.
+ *
+ * Passes after the first run over a <=500-char string, so they are free.
+ */
+const MAX_CAUSE_SCRUB_PASSES = 3;
+
+/** C0 control characters that `\s` does NOT match (tab/LF/CR are excluded). */
+// eslint-disable-next-line no-control-regex
+const CAUSE_CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+/**
+ * Keyword half of the `key=value` secret rule.
+ *
+ * The optional leading segment is what makes `client_secret`, `auth_token`,
+ * `signing_secret`, `webhook_secret` and `x-api-key` match: the previous
+ * version anchored the keyword with `\b`, and `\b` does not exist between
+ * `t` and `_`, so every one of those shapes passed through untouched. The
+ * segment is length-bounded rather than `[A-Za-z0-9_]*` so the prefix cannot
+ * itself become a backtracking source. Keyword list harvested from
+ * `logging/redact.ts`'s SECRET_KEY_PATTERNS — that list already existed and
+ * was strictly stronger than the copy this replaces.
+ */
+const SECRET_KEY_PATTERN =
+  '(?:[A-Za-z0-9]{1,24}[_-])?(?:api[_-]?key|apikey|private[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|pwd|passphrase|credential|authorization|auth)';
+
+/**
+ * Ordered SECRET scrub passes, run before the PII pass (`redactPii`) so a
+ * credential that happens to contain an email-like or phone-like run is
+ * removed whole rather than partially.
+ *
+ * Every replacement is a FIXED POINT: re-running the chain over its own
+ * output yields the same string. That is load-bearing — a cause is recorded
+ * once here and can be re-read and re-recorded by a later retry — and it is
+ * verified by a generated-corpus property test rather than by one
+ * hand-picked string (the hand-picked string that shipped happened to be a
+ * fixed point while the chain was still leaking).
+ */
+const CAUSE_SECRET_SCRUBS: Array<[RegExp, string]> = [
+  // Secret-ish `key=value` / `key: value` / `"key":"value"`, including inside
+  // a URL query string (the value stops at `&`, so non-secret params stay
+  // readable). The value may carry an auth SCHEME (`Authorization: Basic
+  // dXNlcj…`) — consumed here so the credential goes with the key rather
+  // than the scheme name being masked and the credential surviving.
+  // `(?!\[redacted\])` is what makes the rule a fixed point: without it the
+  // second pass re-matches its own `[redacted]` output and appends a `]`.
+  [
+    new RegExp(
+      String.raw`\b(${SECRET_KEY_PATTERN})"?\s*[=:]\s*"?(?!\[redacted\])(?:(?:bearer|basic|digest)\s+)?[^\s"'&,;)\]}]+"?`,
+      'gi',
+    ),
+    `$1=${CAUSE_REDACTED}`,
+  ],
+  // A bare auth scheme with no key= in front of it. The replacement's `[` is
+  // outside the token character class, so a second pass finds nothing left.
+  [/\b(bearer|basic|digest)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${CAUSE_REDACTED}`],
+  // Credentials embedded in a connection string: `postgres://user:pw@host`,
+  // `redis://:pw@host`. `[^/\s:@]` cannot cross a `/`, so an ordinary
+  // `https://host/path?x=1` never matches.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]*:[^/\s@]*@/gi, `$1${CAUSE_REDACTED}@`],
+  // Bare JWTs (three base64url segments; the `eyJ` header anchor keeps this
+  // specific enough not to eat dotted identifiers).
+  [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/g, CAUSE_REDACTED],
+  // Provider key literals that travel without a key= prefix: Stripe
+  // (`sk_live_`, `whsec_`), OpenAI/Anthropic (`sk-proj-`, `sk-ant-api03-`),
+  // GitHub (`ghp_`), Slack (`xoxb-`, `xapp-`).
+  [/\b(?:sk|pk|rk|whsec|gh[pousr]|xox[abprs]|xapp)[_-][A-Za-z0-9_-]{8,}/gi, CAUSE_REDACTED],
+  // AWS access key id. Fixed-width and uppercase-only, so no `\b` games.
+  [/\bAKIA[0-9A-Z]{16}\b/g, CAUSE_REDACTED],
+];
+
+/**
+ * Message text for a caught throw, walking up to two `cause` levels.
+ *
+ * undici throws `TypeError: fetch failed` and puts the real reason
+ * (`getaddrinfo ENOTFOUND …`, `ECONNREFUSED`) on `.cause` — the single most
+ * common Node failure mode, and without this it persisted as a message with
+ * no diagnostic content whatsoever.
+ */
+function causeChainMessage(err: unknown): string {
+  if (typeof err === 'string') return err;
+  if (!(err instanceof Error)) return '';
+  const parts: string[] = [];
+  let node: unknown = err;
+  for (let depth = 0; depth <= 2 && node instanceof Error; depth++) {
+    if (node.message) parts.push(node.message);
+    node = (node as { cause?: unknown }).cause;
+  }
+  if (typeof node === 'string' && node) parts.push(node);
+  return parts.join(': ');
+}
+
+/**
+ * Truncate to `MAX_EXECUTION_ERROR_LENGTH` without slicing a placeholder in
+ * half. `Authorization=[redac…` would otherwise re-match the key=value rule
+ * on a later pass (its `[redacted]` lookahead no longer sees a whole
+ * placeholder) and the function would stop being a fixed point.
+ */
+const CAUSE_PLACEHOLDERS = [CAUSE_REDACTED, '[email]', '[phone]', '[address]', '[name]'];
+function boundCauseLength(text: string): string {
+  if (text.length <= MAX_EXECUTION_ERROR_LENGTH) return text;
+  let end = MAX_EXECUTION_ERROR_LENGTH - 1;
+  const lastOpen = text.lastIndexOf('[', end - 1);
+  if (lastOpen !== -1) {
+    const tail = text.slice(lastOpen, end);
+    if (!tail.includes(']') && CAUSE_PLACEHOLDERS.some((p) => p.startsWith(tail))) {
+      end = lastOpen;
+    }
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+function scrubCauseOnce(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of CAUSE_SECRET_SCRUBS) {
+    out = out.replace(pattern, replacement);
+  }
+  // Customer PII via the codebase's ONE free-text redactor
+  // (reputation/pii-redact.ts), whose contract is documented and separately
+  // tested, and which orders the international phone rule BEFORE the US one
+  // (so `+442071234567` masks whole rather than leaving `+44`). Note that
+  // contract is placeholder-INERTNESS, not idempotence: one pass can leave
+  // PII a further pass removes, which is why the caller below loops.
+  // Addresses and last names stay on: a street-address or FirstName-LastName
+  // heuristic over machine-generated diagnostics is all false positives.
+  // `requireSeparatedPhones` keeps integer cents, epoch millis and int4
+  // bounds readable — see that option's doc comment.
+  return redactPii(out, {
+    redactAddresses: false,
+    redactLastNames: false,
+    requireSeparatedPhones: true,
+  });
+}
+
+/**
+ * Build the string recorded in `proposals.execution_error` from a CAUGHT
+ * throw (workers/execution-worker.ts's per-proposal catch).
+ *
+ * Handlers that fail politely return `result.error`, a string the handler
+ * author wrote. A THROW is not that: its message can be a driver error
+ * echoing a bound parameter, an HTTP client error echoing a URL with a token
+ * in the query string, or a provider error quoting the customer contact it
+ * failed to reach. `execution_error` is read back by `GET /api/proposals` and
+ * copied into the `proposal.execution_timed_out` audit row, so the cause is
+ * bounded and scrubbed here — at the single place that builds it — rather
+ * than at each surface that renders it.
+ *
+ * The PII half delegates to `reputation/pii-redact.ts` — this codebase's
+ * free-text redactor, which is documented DETERMINISTIC with INERT
+ * placeholders and has its own test file. This function previously carried a
+ * copy of its regexes; the copy drifted (it ordered the US phone rule before
+ * the international one, and its email rule's trailing `\b` made an email
+ * followed by a digit unmatchable) and there is no reason for two contracts.
+ * Only the SECRET rules — which pii-redact has no business knowing about —
+ * stay local.
+ *
+ * `redactPii` is NOT idempotent (see its module header: abutting emails, long
+ * digit runs), which is exactly why the scrub below runs in a capped LOOP
+ * rather than once. The reputation draft composers do the same thing with
+ * `redactPiiRepeatedly`; this loop stays separate because its body also runs
+ * the local secret rules and the length cap, neither of which belongs in
+ * pii-redact.ts.
+ *
+ * Deliberately NOT `redactSecrets` (logging/redact.ts) either: that walks an
+ * OBJECT masking by KEY name, and there are no keys here. Its keyword LIST
+ * is harvested above, though — it is the same threat model.
+ */
+export function redactedExecutionErrorCause(err: unknown): string {
+  const raw = causeChainMessage(err);
+  // Bound BEFORE any regex touches it (see MAX_CAUSE_SCAN_LENGTH), then make
+  // one cause one audit-row line. The control-character strip is in the same
+  // pass because `\s` does not match NUL — and a NUL byte makes the Postgres
+  // write throw, losing the cause silently.
+  let out = raw
+    .slice(0, MAX_CAUSE_SCAN_LENGTH)
+    .replace(CAUSE_CONTROL_CHARS_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // `String(someObject)` yields '[object Object]', which is not a cause.
+  if (out.length === 0 || out === 'undefined' || out === 'null' || out === '[object Object]') {
+    return 'unknown execution failure';
+  }
+  for (let pass = 0; pass < MAX_CAUSE_SCRUB_PASSES; pass++) {
+    const next = boundCauseLength(scrubCauseOnce(out));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 export interface ProposalRepository {
@@ -699,6 +1043,38 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
+        | 'executionError'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null>;
+  /**
+   * ANS-001 — CONDITIONAL status write. Moves the proposal to `status` ONLY
+   * while its current status is still one of `fromStatuses`, in a single
+   * atomic statement. Use this instead of a read→`updateStatus` pair whenever
+   * the write must not clobber a concurrent transition (the E1 booking
+   * revocation races the execution worker: a proposal can go
+   * approved→executing→executed between the read and the write).
+   *
+   * Returns the updated proposal, or null when the precondition missed (the
+   * row moved on, or it isn't this tenant's).
+   */
+  updateStatusIf(
+    tenantId: string,
+    id: string,
+    fromStatuses: ProposalStatus[],
+    to: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -723,10 +1099,46 @@ export interface ProposalRepository {
    */
   findReadyForExecution(windowMs: number): Promise<Proposal[]>;
   claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null>;
+  /**
+   * Follow-up (stale-timeout audit gap): a proposal that maxes out
+   * maxRetries is written straight to the terminal 'execution_failed'
+   * status here, bypassing executeAudited — the only place that would
+   * otherwise emit the WS11 execution-outcome audit event. Implementations
+   * ALSO stamp `execution_error` with `staleExecutionTimeoutMessage(...)`
+   * (COALESCE'd — never clobbering a real reason recorded earlier), because
+   * `evaluateSilentExecutionFailures` (workers/failure-rate-monitor.ts) and
+   * GET /api/proposals both read that column directly; an audit event alone
+   * never reaches either surface. `failedProposals` gives the caller
+   * (execution-worker.ts) enough identity per row to ALSO emit its own
+   * `proposal.execution_timed_out` audit event.
+   *
+   * Follow-up: each entry also carries the row's POST-write `executionError`
+   * — the real caught cause when the sweep recorded one, otherwise the
+   * synthesized timeout wording — so the audit event can state WHY rather
+   * than only that a timeout happened. REQUIRED, not optional: the same
+   * statement that selects these rows COALESCEs the column to a non-null
+   * literal, so there is no reachable state in which a returned entry lacks
+   * a reason. (The type used to say "optional because a historical row can
+   * hold NULL"; that was wrong — RETURNING yields the post-update value.)
+   *
+   * Implementations ALSO clear `execution_error` on the reset-to-approved
+   * branch: that is the "start a fresh attempt" boundary, and a reason from
+   * the previous attempt must not survive into a retry that succeeds.
+   */
   resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }>;
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+      executionError: string;
+    }>;
+  }>;
 }
 
 export function validateProposalInput(input: CreateProposalInput): string[] {
@@ -816,6 +1228,16 @@ export function createProposal(input: CreateProposalInput): Proposal {
     // passed. The supervisor hook below still runs and can only
     // downgrade — a policy block/force_review beats the lane.
     autonomousLane: input.autonomousLane,
+    // I1 (post-C1 review) — best-effort surface label for the missing-
+    // supervision-signal warning's throttle key, diagnostic only. Prefers
+    // the RIVET P4 `surface` stamp ('S1'/'S2'/...) when present, else the
+    // `channel` string (e.g. 'telephony'/'inapp'); undefined for callers
+    // (chat) that set neither.
+    ...(typeof input.sourceContext?.surface === 'string'
+      ? { warningSurface: input.sourceContext.surface }
+      : typeof input.sourceContext?.channel === 'string'
+        ? { warningSurface: input.sourceContext.channel }
+        : {}),
   });
   // Supervisor verdict application:
   //   'block'        → 'draft' (decideInitialStatus result discarded);
@@ -1152,6 +1574,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -1171,12 +1594,42 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (updates.executionError !== undefined) proposal.executionError = updates.executionError;
       if (updates.executedAt !== undefined) proposal.executedAt = updates.executedAt;
       if (updates.executedBy !== undefined) proposal.executedBy = updates.executedBy;
+      if (updates.executedByRole !== undefined) proposal.executedByRole = updates.executedByRole;
       if (updates.undoneAt !== undefined) proposal.undoneAt = updates.undoneAt;
       if (updates.undoneBy !== undefined) proposal.undoneBy = updates.undoneBy;
     }
 
     this.proposals.set(id, proposal);
     return { ...proposal };
+  }
+
+  async updateStatusIf(
+    tenantId: string,
+    id: string,
+    fromStatuses: ProposalStatus[],
+    to: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'executionError'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null> {
+    // Same precondition the pg impl folds into its WHERE clause: the row must
+    // exist, belong to this tenant, and still sit in one of `fromStatuses`.
+    // Single-threaded here, so the check + write are trivially atomic.
+    const proposal = this.proposals.get(id);
+    if (!proposal || proposal.tenantId !== tenantId) return null;
+    if (!fromStatuses.includes(proposal.status)) return null;
+    return this.updateStatus(tenantId, id, to, updates);
   }
 
   async update(
@@ -1218,10 +1671,27 @@ export class InMemoryProposalRepository implements ProposalRepository {
   async resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+      executionError: string;
+    }>;
+  }> {
     const now = Date.now();
     let resetToApproved = 0;
     let movedToFailed = 0;
+    const failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+      executionError: string;
+    }> = [];
     for (const [id, proposal] of this.proposals.entries()) {
       if (proposal.status !== 'executing' || !proposal.claimedAt) continue;
       const ageMinutes = (now - proposal.claimedAt.getTime()) / 60000;
@@ -1229,17 +1699,39 @@ export class InMemoryProposalRepository implements ProposalRepository {
       const retries = proposal.executionRetryCount ?? 0;
       if (retries >= maxRetries) {
         proposal.status = 'execution_failed';
+        // COALESCE-equivalent: never clobber a real reason already recorded.
+        if (proposal.executionError === undefined) {
+          proposal.executionError = staleExecutionTimeoutMessage(staleMinutes, retries);
+        }
         movedToFailed++;
+        failedProposals.push({
+          id: proposal.id,
+          tenantId: proposal.tenantId,
+          proposalType: proposal.proposalType,
+          retryCount: retries,
+          // POST-COALESCE value: the real caught cause when one was recorded
+          // while the row was still 'executing', else the synthesized wording
+          // just assigned above — which is why this is never undefined.
+          // Mirrors the Pg RETURNING clause, which cannot be SQL NULL for the
+          // same reason.
+          executionError: proposal.executionError,
+        });
       } else {
         proposal.status = 'approved';
         proposal.executionRetryCount = retries + 1;
         proposal.claimedAt = undefined;
         proposal.claimedBy = undefined;
+        // Follow-up review J4 — the "start a fresh attempt" boundary. The
+        // previous attempt's reason must not ride into the retry: a proposal
+        // that then succeeds would otherwise be served by
+        // `GET /api/proposals/:id` still carrying an error string. Mirrors
+        // `execution_error = NULL` on the Pg reset UPDATE.
+        proposal.executionError = undefined;
         resetToApproved++;
       }
       proposal.updatedAt = new Date();
       this.proposals.set(id, proposal);
     }
-    return { resetToApproved, movedToFailed };
+    return { resetToApproved, movedToFailed, failedProposals };
   }
 }

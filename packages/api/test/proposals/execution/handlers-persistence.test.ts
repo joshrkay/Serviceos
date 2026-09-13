@@ -517,6 +517,33 @@ describe('normalizeDraftLineItems', () => {
     expect(lineItems[1].imageFileId).toBeUndefined();
   });
 
+  it('B7.5 — forwards the catalog-grounded unit (the other parity choke point)', () => {
+    const { lineItems } = normalizeDraftLineItems([
+      {
+        description: '45-Microfarad Capacitor',
+        quantity: 3,
+        unitPriceCents: 4250,
+        pricingSource: 'catalog',
+        unit: 'each',
+      },
+      { description: 'Labor', quantity: 1, unitPriceCents: 5000 },
+    ]);
+    expect(lineItems[0].unit).toBe('each');
+    expect(lineItems[1].unit).toBeUndefined();
+    // Descriptive only — the derived total is untouched by the unit.
+    expect(lineItems[0].totalCents).toBe(12750);
+  });
+
+  it('B7.5 — drops a unit that is not in the catalog vocabulary (last gate before a TEXT column)', () => {
+    const { lineItems, malformed } = normalizeDraftLineItems([
+      { description: 'Pipe', quantity: 10, unitPriceCents: 500, unit: 'feet' },
+      { description: 'Fittings', quantity: 2, unitPriceCents: 900, unit: 42 },
+    ]);
+    expect(malformed).toEqual([]);
+    expect(lineItems[0].unit).toBeUndefined();
+    expect(lineItems[1].unit).toBeUndefined();
+  });
+
   it('reports malformed lines (missing description / quantity / price) without producing NaN', () => {
     const { lineItems, malformed } = normalizeDraftLineItems([
       { quantity: 1, unitPriceCents: 100 }, // no description

@@ -159,6 +159,20 @@ describe('POST /api/onboarding/phone/claim', () => {
     expect(res.body.error).toBe('INVALID_PHONE_NUMBER');
   });
 
+  it('rejects a Twilio magic test number with 400 (#880 — E.164-shaped but never dialable)', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15005550006' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('INVALID_PHONE_NUMBER');
+    expect(res.body.message).toMatch(/test number/i);
+    // No provisioning job was enqueued for the fake number.
+    expect(await queue.receive()).toBeNull();
+  });
+
   it('409s when provisioning is past the claimable state', async () => {
     const { app } = buildApp({ pool: fakePool('partial_readiness'), queue: new InMemoryQueue() });
     const res = await request(app)
@@ -189,5 +203,45 @@ describe('POST /api/onboarding/phone/claim', () => {
     expect(res.status).toBe(403);
     // No provisioning job enqueued for a forbidden caller.
     expect(await queue.receive()).toBeNull();
+  });
+});
+
+describe('POST /api/onboarding/pack — no guessed timezone on the auto-created settings row', () => {
+  it('a /pack call before /identity seeds settings with timezone UNSET', async () => {
+    const settingsRepo = new InMemorySettingsRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: USER_ID,
+        sessionId: 'session-test-1',
+        tenantId: TENANT_ID,
+        role: 'owner' as NonNullable<AuthenticatedRequest['auth']>['role'],
+      };
+      next();
+    });
+    app.use(
+      '/api/onboarding',
+      createOnboardingRouter({
+        settingsRepo,
+        packActivationRepo: new InMemoryPackActivationRepository(),
+        auditRepo: new InMemoryAuditRepository(),
+        // Minimal pool stub: /pack 503s without one; the catalog/template
+        // seeding SQL tolerates empty result sets.
+        pool: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as unknown as Pool,
+      }),
+    );
+
+    const res = await request(app)
+      .post('/api/onboarding/pack')
+      .send({ packId: 'hvac' });
+    expect(res.status).toBeLessThan(300);
+
+    // The auto-created first row must not claim Eastern time — a seeded zone
+    // is indistinguishable from a chosen one, and the scheduling gate keys
+    // off the absence (same invariant as createSettings/ensureTenantSettings).
+    const seeded = await settingsRepo.findByTenant(TENANT_ID);
+    expect(seeded).not.toBeNull();
+    expect(seeded!.timezone).toBeUndefined();
   });
 });

@@ -153,26 +153,142 @@ describe('the two Development fabrications must never reproduce', () => {
   });
 });
 
-// ─── Three failures, three experiences ───────────────────────────────────────
+// ─── A02 (2026-08-29 live sweep) — the third fabrication ────────────────────
+//
+// "Draft an estimate for {customer}: two lines…" reached this same generic
+// fallback (taskType inferred as 'assistant.estimate') and came back with a
+// whole fabricated proposal card — id "estimate-001", an invalid UUID that
+// 404'd on `POST /api/proposals/:id/approve`. Unlike the two cases above,
+// this one carried a `proposal` object, which the OLD layer 3
+// (`parsed.proposal ? null : detectFabricatedActionClaim(...)`) treated as
+// proof the reply was honest. It wasn't: nothing on this path ever calls
+// `proposalRepo.create`.
+//
+// Two things must now both be true: (1) the exact A02 utterance never even
+// reaches this fallback — a real `draft_estimate` intent routes to
+// `EstimateTaskHandler` and persists a real, DB-backed proposal; (2) even if
+// SOMETHING did reach this fallback with a self-invented proposal riding
+// along, it can never leave the route.
 
-describe('the three no-proposal outcomes are distinguishable', () => {
-  it('UNMAPPED CAPABILITY: a confident write intent with no handler refuses deterministically and never reaches the LLM', async () => {
+describe('A02 — "Draft an estimate for {customer}: two lines…" must route to the real handler, not fabricate one', () => {
+  it('the exact A02 sweep utterance routes to EstimateTaskHandler and persists a real, DB-backed draft_estimate proposal — no classify_intent LLM call needed', async () => {
     const proposalRepo = new InMemoryProposalRepository();
-    // add_crew_member is a real, supported taxonomy intent with NO entry in
-    // either chat dispatch map. The second scripted response is a fabrication
-    // the fallback LLM would happily have returned — it must never be asked.
+    // Only ONE scripted response: the deterministic draft_estimate phrase
+    // match (intent-classifier.ts's matchDraftEstimatePhrase) short-circuits
+    // classify_intent entirely — see the #910-style pin in
+    // test/ai/orchestration/intent-classifier.test.ts. This one response is
+    // EstimateTaskHandler's OWN drafting LLM call.
     const gateway = scriptedGateway([
-      classifierReply('add_crew_member', 0.95),
-      llmReply("I've added Dave to the crew."),
+      JSON.stringify({
+        lineItems: [
+          { description: 'Water heater replacement', quantity: 1, unitPrice: 220000 },
+          { description: 'Permit fee', quantity: 1, unitPrice: 15000 },
+        ],
+        notes: 'Water heater replacement plus permit fee.',
+        confidence_score: 0.9,
+      }),
     ]);
     const app = buildApp(gateway, proposalRepo);
 
     const res = await request(app)
       .post('/api/assistant/chat')
-      .send({ messages: [{ role: 'user', content: 'Put Dave on the crew for the Miller work.' }] });
+      .send({
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars, plus a permit fee for 150 dollars',
+          },
+        ],
+      });
 
     expect(res.status).toBe(200);
-    expect(res.body.taskType).toBe('assistant.unhandled.add_crew_member');
+    // A REAL handler ran — never the generic fallback.
+    expect(res.body.taskType).toBe('assistant.draft_estimate');
+    expect(res.body.model).toBe('intent-classifier');
+    expect(res.body.message.proposal).toBeTruthy();
+    // And it is genuinely persisted — not a JSON card the model invented.
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('draft_estimate');
+    expect(persisted[0].id).toBe(res.body.message.proposal.id);
+    // The id round-trips to a real row — unlike production's "estimate-001",
+    // which 404'd because it was never written anywhere.
+    expect(await proposalRepo.findById(TEST_TENANT, res.body.message.proposal.id)).toBeTruthy();
+  });
+
+  it('negative pin: the generic fallback can NEVER carry a proposal id — even when the model fabricates one exactly like production did', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    // A phrasing the deterministic draft_estimate matcher does NOT recognize
+    // (no imperative "draft/create/write/prepare/generate ... estimate for
+    // X:" shape), so classify_intent genuinely runs and — as production's
+    // classifier did for A02 — comes back unknown. The fallback LLM then
+    // does exactly what the live one did: answers in prose AND hands back a
+    // full proposal object, id "estimate-001" included.
+    const gateway = scriptedGateway([
+      classifierReply('unknown', 0.3),
+      llmReply(
+        'Here is a draft estimate for the water heater replacement: $2,350.00 total.',
+        {
+          id: 'estimate-001',
+          title: 'Estimate for Water Heater Replacement',
+          summary: '$2,350.00 total',
+          explanation: 'Water heater replacement plus permit fee.',
+          confidence: 'High',
+          type: 'Estimate',
+          status: 'Pending',
+        },
+      ),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: 'What do you think about the water heater situation?' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // The fabricated card never reaches the operator...
+    expect(res.body.message.proposal ?? null).toBeNull();
+    // ...and nothing was ever written for it to reference.
+    expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
+    // Honest failure, not a silent downgrade of a lie into a "success".
+    expect(res.body.taskType).toBe('assistant.not_understood');
+    expect(res.body.message.content).toMatch(/haven't scheduled, logged, or changed anything/i);
+  });
+});
+
+// ─── Three failures, three experiences ───────────────────────────────────────
+
+describe('the three no-proposal outcomes are distinguishable', () => {
+  it('UNMAPPED CAPABILITY: a confident write intent with no handler refuses deterministically and never reaches the LLM', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    // update_brand_voice is a real, supported taxonomy intent with NO entry
+    // in either chat dispatch map — DELIBERATELY, per handler-registry.ts's
+    // module doc (it stays surface-specific by design). Was `add_crew_member`
+    // until Task 15 (2026-08-07 tradesperson plan) wired that intent onto the
+    // shared registry for this surface too, which turned this into a false
+    // negative — the canonical "unmapped" example must be one of the four
+    // intents that STAY unmapped on purpose (emergency_dispatch /
+    // update_brand_voice / respond_to_review / create_standing_instruction),
+    // not an incidental gap that closes over time. The second scripted
+    // response is a fabrication the fallback LLM would happily have
+    // returned — it must never be asked.
+    const gateway = scriptedGateway([
+      classifierReply('update_brand_voice', 0.95),
+      llmReply("I've updated the brand voice."),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'From now on sound more casual and friendly.' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.unhandled.update_brand_voice');
     expect(res.body.message.content).not.toMatch(SUCCESS_LANGUAGE);
     expect(res.body.message.proposal ?? null).toBeNull();
     expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
@@ -185,7 +301,11 @@ describe('the three no-proposal outcomes are distinguishable', () => {
   });
 
   it('NOT UNDERSTOOD and UNMAPPED CAPABILITY are not the same reply', async () => {
-    const unmapped = scriptedGateway([classifierReply('convert_lead', 0.9), llmReply('x')]);
+    // respond_to_review stays surface-specific by design (same rationale as
+    // update_brand_voice above) — was `convert_lead` until Task 15 wired
+    // that intent onto this surface's shared registry, which would have
+    // made this a false negative too.
+    const unmapped = scriptedGateway([classifierReply('respond_to_review', 0.9), llmReply('x')]);
     const unknown = scriptedGateway([
       classifierReply('unknown', 0.3),
       llmReply('I have booked that for you.'),
@@ -193,12 +313,12 @@ describe('the three no-proposal outcomes are distinguishable', () => {
 
     const a = await request(buildApp(unmapped, new InMemoryProposalRepository()))
       .post('/api/assistant/chat')
-      .send({ messages: [{ role: 'user', content: 'Turn that lead into a customer.' }] });
+      .send({ messages: [{ role: 'user', content: 'Reply to that 1-star review.' }] });
     const b = await request(buildApp(unknown, new InMemoryProposalRepository()))
       .post('/api/assistant/chat')
       .send({ messages: [{ role: 'user', content: 'Sort that one out for me.' }] });
 
-    expect(a.body.taskType).toBe('assistant.unhandled.convert_lead');
+    expect(a.body.taskType).toBe('assistant.unhandled.respond_to_review');
     expect(b.body.taskType).toBe('assistant.not_understood');
     expect(a.body.message.content).not.toBe(b.body.message.content);
     expect(a.body.message.content).not.toMatch(SUCCESS_LANGUAGE);

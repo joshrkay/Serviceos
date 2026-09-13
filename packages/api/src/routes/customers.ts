@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createCustomerSchema } from '../shared/contracts';
+import { uuidSchema } from '../shared/validation';
 import { asyncRoute } from '../middleware/async-route';
 import {
   createCustomer,
@@ -77,6 +78,20 @@ export function createCustomerRouter(
 ): Router {
   const router = Router();
 
+  // `customers.id` is a Postgres `uuid` column (customers/pg-customer.ts —
+  // every lookup/update is `WHERE tenant_id = $1 AND id = $N`). A malformed
+  // `:id` (e.g. the literal "new", from a client resolving `/customers/new`
+  // as a detail route) would otherwise reach that comparison unguarded and
+  // Postgres would raise "invalid input syntax for type uuid", which
+  // asyncRoute turns into a bare 500. Treat a malformed id the same as
+  // "not found" — every handler below already 404s a well-formed id that
+  // doesn't match a row, so this just widens that same response.
+  const rejectMalformedId = (res: Response, id: string): boolean => {
+    if (uuidSchema.safeParse(id).success) return false;
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+    return true;
+  };
+
   // Shared by the nested CRM sub-resource routes (contacts, tags, custom
   // fields): confirm the parent customer exists within the tenant so a
   // cross-tenant or bogus customerId 404s before any child write.
@@ -84,6 +99,7 @@ export function createCustomerRouter(
     req: AuthenticatedRequest,
     res: Response
   ): Promise<boolean> => {
+    if (rejectMalformedId(res, req.params.id)) return false;
     const customer = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
     if (!customer) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
@@ -181,6 +197,7 @@ export function createCustomerRouter(
     requireTenant,
     requirePermission('customers:view'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      if (rejectMalformedId(res, req.params.id)) return;
       const result = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
@@ -196,6 +213,7 @@ export function createCustomerRouter(
     requireTenant,
     requirePermission('customers:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      if (rejectMalformedId(res, req.params.id)) return;
       const result = await updateCustomer(
         req.auth!.tenantId,
         req.params.id,
@@ -219,6 +237,7 @@ export function createCustomerRouter(
     requireTenant,
     requirePermission('customers:delete'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      if (rejectMalformedId(res, req.params.id)) return;
       const result = await archiveCustomer(
         req.auth!.tenantId,
         req.params.id,
@@ -246,6 +265,7 @@ export function createCustomerRouter(
       requireTenant,
       requirePermission('customers:update'),
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (rejectMalformedId(res, req.params.id)) return;
         const losingId = (req.body?.losingId ?? '') as string;
         if (typeof losingId !== 'string' || losingId.trim() === '') {
           res.status(400).json({
@@ -280,6 +300,7 @@ export function createCustomerRouter(
       requireTenant,
       requirePermission('customers:view'),
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (rejectMalformedId(res, req.params.id)) return;
         const customer = await getCustomer(
           req.auth!.tenantId,
           req.params.id,

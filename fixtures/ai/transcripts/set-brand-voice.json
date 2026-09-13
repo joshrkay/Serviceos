@@ -1,0 +1,11 @@
+{
+  "id": "transcript-brand-voice-001",
+  "type": "voice_memo",
+  "duration_seconds": 6,
+  "service_type": "hvac",
+  "transcript": "Owner: Set my brand voice: friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'.",
+  "expected_entities": {
+    "brand_voice_instruction": "friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'",
+    "intent_note": "Owner captures the tenant's brand voice by speaking — update_brand_voice, manual action class, never auto-approves. Distinct from create_standing_instruction (a persistent business RULE, not the AI's own voice)."
+  }
+}

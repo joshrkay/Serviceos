@@ -23,6 +23,20 @@ export function deriveCallOutcome(input: DeriveOutcomeInput): CallOutcome {
     return 'escalated_to_human';
   }
 
+  // ANS-001 (NIT) — an E1 life-safety close is a real resolution (the caller
+  // was directed to 911/the utility and the tenant was alerted for
+  // follow-up), not an infra failure. Without this, 'life_safety_e1' fell
+  // through every branch below to the generic 'failed' bucket, burying every
+  // life-safety call in analytics as an infra regression. Mirrors the
+  // abuse_detected special-case above; CallOutcome has no dedicated
+  // life-safety value, and 'escalated_to_human' already reads correctly in
+  // the interactions UI (OutcomeBadge) and is excluded from the
+  // dropped-call-recovery outcome set (RECOVERY_OUTCOMES), which an E1 close
+  // must never trigger.
+  if (endedReason === 'life_safety_e1') {
+    return 'escalated_to_human';
+  }
+
   // Transport-layer failures emitted by the mediastream adapter
   // (ws_error / ws_closed-before-stop / slow_consumer / queue_overflow).
   // Stamping these as 'failed' keeps voice_sessions.outcome analytics

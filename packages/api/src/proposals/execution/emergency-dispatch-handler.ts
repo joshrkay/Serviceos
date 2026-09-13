@@ -157,6 +157,20 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
   ) {}
 
+  // U8 — degrades to a synthetic-id passthrough (no job, no page) when
+  // NEITHER jobRepo nor smsSender is wired — see execute(). Life-safety
+  // handler, so the probe is strict: full wiring means the urgent job CAN
+  // land (jobRepo + locationRepo) AND the owner page CAN go out (smsSender).
+  // Partial wiring is audited at runtime but still reported degraded here so
+  // a pool-configured boot surfaces it instead of shipping a dispatcher that
+  // can only half act. appointmentRepo (the tentative hold) stays optional —
+  // a missing hold never blocks the page.
+  isFullyWired(): boolean {
+    return (
+      Boolean(this.jobRepo) && Boolean(this.locationRepo) && Boolean(this.smsSender)
+    );
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const fields = extractEmergencyFields(proposal.payload);
 

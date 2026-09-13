@@ -21,6 +21,12 @@ import { formatCurrencyAmount } from '../../utils/currency';
 interface LineItem {
   description: string;
   quantity: number;
+  /**
+   * B7.5 — descriptive unit of measure shown beside the quantity so the
+   * customer can tell what the rate they're paying measures. Never used
+   * in any money calculation on this page.
+   */
+  unit?: string;
   unitPriceCents: number;
   totalCents: number;
 }
@@ -597,7 +603,21 @@ export function InvoicePaymentPage() {
             {visItems.map((item, i) => (
               <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
                 <p className="text-sm text-slate-800">{item.description}</p>
-                <p className="text-sm text-slate-500 text-right">{item.quantity}</p>
+                {/* B7.5 — the descriptive unit sits UNDER the quantity as a
+                    block child of the SAME fixed 40px track, not a new
+                    column, so it can only add height, never width: it
+                    wraps (break-words) inside the existing Qty cell. */}
+                <p className="text-sm text-slate-500 text-right">
+                  {item.quantity}
+                  {item.unit && (
+                    <span
+                      data-testid={`line-item-unit-${i}`}
+                      className="block min-w-0 break-words text-[10px] leading-tight text-slate-400"
+                    >
+                      {item.unit}
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-slate-500 text-right">${formatMoney(item.unitPriceCents)}</p>
                 <p className="text-sm text-slate-800 text-right">${formatMoney(item.totalCents)}</p>
               </div>

@@ -17,6 +17,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { estimateApprovedProps } from '../analytics/estimate-event-props';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 /**
  * Service layer for the unauthenticated customer-facing estimate
@@ -59,6 +60,14 @@ export interface PublicEstimateView {
     id: string;
     description: string;
     quantity: number;
+    /**
+     * B7.5 — descriptive unit of measure ('each' | 'hour' | 'sq ft' | ...)
+     * so the customer can tell what the quantity and rate measure ("2 hour"
+     * vs "2 each"). Absent on legacy lines and any path that states no unit.
+     * DESCRIPTIVE ONLY: no total on this view is derived from it — the money
+     * stays quantity × unitPriceCents in integer cents.
+     */
+    unit?: CatalogUnitValue;
     unitPriceCents: number;
     totalCents: number;
     /** Whether this line is taxed — lets the client preview tax exactly. */
@@ -675,6 +684,10 @@ export class PublicEstimateService {
         id: li.id,
         description: li.description,
         quantity: li.quantity,
+        // B7.5 — carry the descriptive unit to the customer-facing view.
+        // `?? undefined` because a persisted row with no unit arrives as
+        // null from the row mapper, and the DTO field is optional.
+        unit: li.unit ?? undefined,
         unitPriceCents: li.unitPriceCents,
         totalCents: li.totalCents,
         taxable: li.taxable,

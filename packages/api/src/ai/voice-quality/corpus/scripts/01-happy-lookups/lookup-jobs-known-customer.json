@@ -11,7 +11,7 @@
     },
     "customers": [
       {
-        "id": "cust_01_jobs_dana",
+        "id": "00000000-0000-4000-8000-000001030001",
         "tenantId": "t_01_lookup_jobs",
         "firstName": "Dana",
         "lastName": "Nguyen",
@@ -31,10 +31,10 @@
     ],
     "jobs": [
       {
-        "id": "job_01_jobs_1",
+        "id": "00000000-0000-4000-8000-000001030002",
         "tenantId": "t_01_lookup_jobs",
-        "customerId": "cust_01_jobs_dana",
-        "locationId": "loc_01_jobs_1",
+        "customerId": "00000000-0000-4000-8000-000001030001",
+        "locationId": "00000000-0000-4000-8000-000001030004",
         "jobNumber": "JOB-2001",
         "summary": "Furnace replacement",
         "problemDescription": "Old furnace not heating second floor",
@@ -46,10 +46,10 @@
         "updatedAt": "2026-04-25T08:00:00.000Z"
       },
       {
-        "id": "job_01_jobs_2",
+        "id": "00000000-0000-4000-8000-000001030003",
         "tenantId": "t_01_lookup_jobs",
-        "customerId": "cust_01_jobs_dana",
-        "locationId": "loc_01_jobs_1",
+        "customerId": "00000000-0000-4000-8000-000001030001",
+        "locationId": "00000000-0000-4000-8000-000001030004",
         "jobNumber": "JOB-2002",
         "summary": "Annual maintenance",
         "problemDescription": "Yearly service check",

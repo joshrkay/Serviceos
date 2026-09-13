@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { resolveSurface } from '../surface';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
@@ -33,6 +32,15 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly feasibilityDeps?: FeasibilityDependencies,
     private readonly transactionalComms?: TransactionalCommsService,
   ) {}
+
+  // U8 — degrades to an echo passthrough (moves nothing) without the
+  // appointment repo — see the final return in execute(). The boot guard
+  // (wiring-assertions.ts) fails boot when a pool is configured but this is
+  // false, so that branch is unreachable in a real deployment. (The S1
+  // caller path additionally fails closed at runtime without the repo.)
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -169,8 +177,12 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       let trailingWarnings: FeasibilityIssue[] = [];
       if (this.feasibilityDeps) {
         // Determine the proposed technician — for in-lane reschedule, that's the current primary.
-        // Look it up via assignmentRepo if available; otherwise fall back to '' (composer skips overlap).
-        let proposedTechnicianId = '';
+        // Look it up via assignmentRepo if available; otherwise leave it
+        // absent (uuid-or-absent — #935/#947 doctrine; #909/A11 live sweep:
+        // `checkFeasibility` skips every per-technician check when this is
+        // undefined, rather than a `''` sentinel reaching a `uuid`-typed
+        // repo query as `invalid input syntax for type uuid: ""`).
+        let proposedTechnicianId: string | undefined;
         if (this.assignmentRepo) {
           const currentAssignments = await this.assignmentRepo.findByAppointment(context.tenantId, appointmentId);
           const primary = currentAssignments.find((a) => a.isPrimary);

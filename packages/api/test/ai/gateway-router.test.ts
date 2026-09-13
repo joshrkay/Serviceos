@@ -174,4 +174,17 @@ describe('P2-028 — taskTierMapping reconciliation (follow-up #2)', () => {
     expect(getTaskTier('assistant.chain')).toBe('standard');
     expect(getTaskTier('assistant.query.unpaid_invoices')).toBe('standard');
   });
+
+  it('maps the previously-unmapped live call sites explicitly — no silent standard fallthrough', () => {
+    // These two reached the gateway from real call sites (app.ts weekly-feedback
+    // worker; ai/tasks/brand-voice-task.ts) without a TASK_TYPES entry, silently
+    // riding the `|| 'standard'` default meant for the dynamic assistant.*
+    // namespace. Pin membership + an explicit own-key tier so the next live
+    // taskType that skips TASK_TYPES fails here instead of drifting.
+    for (const t of ['weekly_feedback_suggestions', 'update_brand_voice']) {
+      expect(TASK_TYPES).toContain(t);
+      expect(Object.prototype.hasOwnProperty.call(mapping, t)).toBe(true);
+      expect(getTaskTier(t)).toBe('standard');
+    }
+  });
 });

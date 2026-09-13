@@ -26,6 +26,27 @@ describe('BusinessIdentityInputSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  // #874 — the radius is tri-state: null is a valid, explicit "clear it"
+  // (the Service-area editor's emptied field), while out-of-range numbers
+  // stay rejected.
+  it('accepts an explicit null serviceAreaRadius (clear) but still bounds numbers', () => {
+    const base = {
+      businessName: 'Acme HVAC',
+      businessHours: {},
+      jobBufferMinutes: 30,
+      hourlyRateCents: 12500,
+    };
+    expect(
+      BusinessIdentityInputSchema.safeParse({ ...base, serviceAreaRadius: null }).success,
+    ).toBe(true);
+    expect(
+      BusinessIdentityInputSchema.safeParse({ ...base, serviceAreaRadius: 0 }).success,
+    ).toBe(false);
+    expect(
+      BusinessIdentityInputSchema.safeParse({ ...base, serviceAreaRadius: 501 }).success,
+    ).toBe(false);
+  });
+
   it('rejects empty business name', () => {
     const result = BusinessIdentityInputSchema.safeParse({
       businessName: '',

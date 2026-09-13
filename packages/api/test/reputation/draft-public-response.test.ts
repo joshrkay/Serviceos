@@ -172,3 +172,60 @@ describe('P7-026 draft-public-response', () => {
     }
   });
 });
+
+/**
+ * Review R1 — ABUTTING emails survive a SINGLE `redactPii` pass.
+ *
+ * `redactPii` replaces one email span with `[email]`, and the next match may
+ * not start before the end of that span. When two addresses abut inside one
+ * unbroken word-character run (`x@y.io4155552671foo@bar.com`, the shape a
+ * concatenated contact column or a pasted signature block produces), the
+ * residual `4155552671foo@bar.com` begins mid-run — `\b` cannot fire there —
+ * so the second address has no legal start position and passes through RAW.
+ * The phone pass does not rescue it either: `4155552671` is followed by `f`,
+ * so its trailing `\b` fails.
+ *
+ *   in   : Reach me at x@y.io4155552671foo@bar.com
+ *   pass1: Reach me at [email]4155552671foo@bar.com   <- raw foo@bar.com
+ *   pass2: Reach me at [email][email]
+ *
+ * This is pre-existing behaviour of one pass and is NOT a regression from the
+ * scanner rewrite (the scanner is byte-identical to the regex it replaced).
+ * What makes it a live PII incident is that these four call sites applied the
+ * redactor exactly ONCE, while `redactedExecutionErrorCause` already loops to
+ * a fixed point. The INPUT case below is the severe one: the whole point of
+ * the input redaction is that the provider's context never holds raw personal
+ * data, and a customer's real address was reaching the provider.
+ */
+describe('P7-026 draft-public-response — abutting PII survives a single redaction pass', () => {
+  it('does not ship a raw abutting email to the LLM provider (INPUT redaction)', async () => {
+    const { gateway, calls } = makeMockGateway('Thanks!');
+    const review = makeReview({
+      commentText: 'Great work! Reach me at x@y.io4155552671foo@bar.com anytime',
+    });
+    await draftPublicResponse(
+      { review, classification: 'praise', brandVoice: NEUTRAL_BRAND_VOICE },
+      { llmGateway: gateway },
+    );
+    const userMessage = calls[0].messages.find((m) => m.role === 'user');
+    expect(userMessage).toBeDefined();
+    expect(userMessage!.content).not.toContain('x@y.io');
+    expect(userMessage!.content).not.toContain('foo@bar.com');
+  });
+
+  it('does not return a raw abutting email in the draft (OUTPUT redaction)', async () => {
+    const { gateway } = makeMockGateway(
+      'Thanks! Reach me at x@y.io4155552671foo@bar.com or call.',
+    );
+    const out = await draftPublicResponse(
+      {
+        review: makeReview(),
+        classification: 'praise',
+        brandVoice: NEUTRAL_BRAND_VOICE,
+      },
+      { llmGateway: gateway },
+    );
+    expect(out).not.toContain('x@y.io');
+    expect(out).not.toContain('foo@bar.com');
+  });
+});

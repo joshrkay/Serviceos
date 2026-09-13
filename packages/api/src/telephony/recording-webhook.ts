@@ -17,7 +17,9 @@
  *   4. Presigns an S3 PUT for `<bucket>/<tenant_id>/<call_sid>.mp3` and
  *      uploads the bytes via `fetch(url, { method: 'PUT' })`.
  *   5. Inserts a `voice_recordings` row through `recordInboundCall`,
- *      which is idempotent on `(tenant_id, call_sid)`.
+ *      which is idempotent on `(tenant_id, call_sid, recording_url)` —
+ *      per-recording identity, so the voicemail leg's row for the same
+ *      call (delivered to /voicemail-status) never collides with this one.
  *
  * Logging discipline
  * ──────────────────
@@ -30,7 +32,12 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
 import type { Pool } from 'pg';
-import { requireTwilioSignature } from './twilio-signature';
+import {
+  requireTwilioSignature,
+  sessionBelongsToAnotherTenant,
+  actingTenantMismatchesCredential,
+  type TwilioAuthTokenGetter,
+} from './twilio-signature';
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
@@ -54,11 +61,12 @@ export interface RecordingWebhookDeps {
   twilioAccountSid?: string;
   twilioAuthToken?: string;
   /**
-   * Auth token getter used by the signature middleware. Receives the
-   * AccountSid from the Twilio webhook body so per-tenant subaccount
-   * tokens can be looked up; legacy callers may ignore it.
+   * Credential resolver used by the signature middleware. #1072: it receives
+   * the callback's `Called`/`To` as well as the AccountSid, so a callback
+   * naming a number is verified with the credential of the tenant that owns
+   * that number; legacy callers may ignore the argument.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   /** Optional public base URL used to reconstruct the signed URL. */
   publicBaseUrl?: string;
   /**
@@ -94,8 +102,11 @@ export function buildRecordingStorageKey(tenantId: string, callSid: string): str
  * scrub Authorization headers, but if a downstream wraps the URL or
  * curl-formats a request we'd rather see `<redacted>` than the token
  * in our logs.
+ *
+ * Exported for the voicemail-status route (U9), which runs the same
+ * authenticated-fetch → S3 → insert pipeline for voicemail recordings.
  */
-function scrubAuthToken(err: unknown, authToken: string | undefined): string {
+export function scrubAuthToken(err: unknown, authToken: string | undefined): string {
   const raw = err instanceof Error ? err.message : String(err);
   if (!authToken) return raw;
   // Replace both the raw token and any base64-encoded basic credential
@@ -108,6 +119,10 @@ function scrubAuthToken(err: unknown, authToken: string | undefined): string {
  * Fetch the recording payload from Twilio. The `.mp3` suffix asks Twilio
  * to transcode the WAV master into MP3 on the fly — our S3 key uses
  * `.mp3` to match.
+ *
+ * Exported (along with `uploadToS3`) for the voicemail-status route (U9),
+ * which reuses the exact authenticated-RecordingUrl-fetch + presigned-PUT
+ * pipeline for voicemail recordings.
  */
 // Media transfers get a generous but bounded window — without a signal a
 // stalled Twilio CDN / S3 endpoint hangs the webhook handler while Twilio
@@ -117,7 +132,7 @@ const MEDIA_TRANSFER_TIMEOUT_MS = 30_000;
 // MP3 is ~14MB; 50MB covers any real call while bounding a rogue payload).
 const MAX_RECORDING_BYTES = 50 * 1024 * 1024;
 
-async function fetchRecordingBytes(
+export async function fetchRecordingBytes(
   recordingUrl: string,
   accountSid: string,
   authToken: string,
@@ -146,7 +161,7 @@ async function fetchRecordingBytes(
   return Buffer.from(arrayBuf);
 }
 
-async function uploadToS3(
+export async function uploadToS3(
   url: string,
   bytes: Buffer,
   contentType: string,
@@ -246,6 +261,22 @@ export function createRecordingRouter(
     // no less safe than trusting any signed field — but the in-process
     // session is preferred when available.
     const session = deps.store.findByCallSid(callSid);
+
+    // #1072 — the comment above is right that the in-process session cannot be
+    // forged, but that answers WHICH tenant, not WHO may ask: the CallSid that
+    // selects the session is the caller's to choose. A tenant signing with its
+    // own DID and own token, naming the victim's live CallSid, would otherwise
+    // get its own RecordingUrl attached to the victim's call — the victim's
+    // storage key, the victim's rows. Refuse before any of that.
+    if (sessionBelongsToAnotherTenant(req, session)) {
+      logger.warn('recording: session belongs to another tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     let tenantId: string | undefined = session?.tenantId;
     if (!tenantId && deps.resolveTenantIdFallback) {
       const to = body.Called ?? body.To ?? '';
@@ -259,6 +290,19 @@ export function createRecordingRouter(
         });
       }
     }
+    // #1072 — the fallback resolved this tenant from the payload's `Called`,
+    // while the credential was checked against `To`; a payload carrying both,
+    // pointing at two tenants, would otherwise verify as one and write as the
+    // other. Refuse before the storage key and the rows.
+    if (actingTenantMismatchesCredential(req, tenantId)) {
+      logger.warn('recording: resolved tenant is not the credential\'s tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (!tenantId) {
       logger.warn('recording: no tenant resolvable for CallSid — refusing to insert', {
         callSid,

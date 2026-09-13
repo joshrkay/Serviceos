@@ -187,6 +187,27 @@ describe('RV-143 / UC-5a — emergency page worker (one ladder step)', () => {
     expect(sends).toHaveLength(0);
   });
 
+  it('FIX 6 (ANS-001) — an E1 life-safety close cancels an in-flight E2 ladder step: no page, no continuation, no exhaustion task', async () => {
+    // The E2 hazard ("basement is flooding") armed the ladder; an E1
+    // ("I smell gas") then closed the call with terminalReason
+    // 'life_safety_e1'. The production resolved-check must treat that as
+    // resolved so the ladder never fires "transfer unanswered — call back
+    // NOW" pages (or the emergency_unanswered task) that contradict the E1
+    // alert the tenant just received.
+    const callMeBackRepo = new InMemoryCallMeBackRepository();
+    const isResolved = createEmergencyPageResolvedCheck({
+      store: { peek: () => ({ terminalReason: 'life_safety_e1' }) },
+    });
+    const { worker, sends, sent } = makeWorker({ isResolved, callMeBackRepo });
+
+    // Final attempt is the strongest case: even the exhaustion tail is skipped.
+    await worker.handle(makeMessage(payload(3)), logger);
+
+    expect(sent).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+    expect(await callMeBackRepo.listPending('t1')).toHaveLength(0);
+  });
+
   it('an isResolved failure is indeterminate → keeps paging (bias toward paging)', async () => {
     const { worker, sent } = makeWorker({
       isResolved: vi.fn(async () => {
@@ -336,6 +357,39 @@ describe('createEmergencyPageResolvedCheck', () => {
       },
     });
     expect(await check('t1', 's1')).toBe(false);
+  });
+
+  it("recognizes an E1 life-safety close as resolved on both paths (FIX 6 — ANS-001)", async () => {
+    const live = createEmergencyPageResolvedCheck({
+      store: { peek: () => ({ terminalReason: 'life_safety_e1' }) },
+    });
+    expect(await live('t1', 's1')).toBe(true);
+
+    const repo = new InMemoryVoiceSessionRepository();
+    await repo.create({
+      id: 's2',
+      tenantId: 't1',
+      channel: 'voice_inbound',
+      state: 'escalating',
+    });
+    await repo.markEnded('t1', 's2', {
+      endedAt: new Date(),
+      endedReason: 'life_safety_e1',
+      outcome: 'escalated_to_human',
+      state: 'terminated',
+      channel: 'voice_inbound',
+    });
+    const persisted = createEmergencyPageResolvedCheck({
+      store: { peek: () => undefined },
+      voiceSessionRepo: repo,
+    });
+    expect(await persisted('t1', 's2')).toBe(true);
+
+    // Any other close reason still pages.
+    const other = createEmergencyPageResolvedCheck({
+      store: { peek: () => ({ terminalReason: 'caller_hangup' }) },
+    });
+    expect(await other('t1', 's1')).toBe(false);
   });
 });
 

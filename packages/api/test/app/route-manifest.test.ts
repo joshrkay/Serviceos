@@ -186,6 +186,10 @@ describe('createApp route manifest', () => {
     '/api/public/booking',
     '/api/public-payments',
     '/api/calendar-integrations',
+    // Deliberate (2026-08-06): Google Business OAuth callback must be
+    // reachable without a Clerk session, exactly like calendar-integrations
+    // above it; the router internally auth-gates every non-callback endpoint.
+    '/api/googlebusiness-integrations',
     '/api/integrations',
     '/api/telephony',
     '/api/telephony',

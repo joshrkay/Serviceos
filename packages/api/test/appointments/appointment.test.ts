@@ -4,8 +4,12 @@ import {
   updateAppointment,
   listByJob,
   listByDateRange,
+  listAppointmentsWithMeta,
   validateAppointmentInput,
   InMemoryAppointmentRepository,
+  Appointment,
+  AppointmentRepository,
+  AppointmentStatus,
 } from '../../src/appointments/appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 
@@ -544,5 +548,74 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     const events = await auditRepo.findByEntity('tenant-1', 'appointment', first.id);
     const created = events.filter((e) => e.eventType === 'appointment.created');
     expect(created).toHaveLength(1);
+  });
+});
+
+/**
+ * PR #815 review, Important 1 — `listAppointmentsWithMeta` is the ONLY entry
+ * point both technicianId callers use (routes/appointments.ts:263,
+ * dispatch/routes.ts:245). When a repository lacks `listWithMeta`, this
+ * function's fallback branch pulls a date-range slice and applies jobId +
+ * status filters in memory — but silently DROPPED technicianId, which is the
+ * original bug this PR exists to fix, one frame above where it was actually
+ * closed. A repository without `listWithMeta` has no assignments concept
+ * this helper could consult either, so the honest behavior mirrors
+ * InMemoryAppointmentRepository's own fix: throw rather than silently return
+ * the whole tenant.
+ */
+describe('listAppointmentsWithMeta — fallback path (repository without listWithMeta)', () => {
+  function makeAppt(id: string, overrides: Partial<Appointment> = {}): Appointment {
+    return {
+      id,
+      tenantId: 'tenant-1',
+      jobId: overrides.jobId ?? 'job-1',
+      scheduledStart: overrides.scheduledStart ?? new Date('2026-05-10T15:00:00Z'),
+      scheduledEnd: overrides.scheduledEnd ?? new Date('2026-05-10T16:00:00Z'),
+      timezone: 'UTC',
+      status: (overrides.status ?? 'scheduled') as AppointmentStatus,
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    };
+  }
+
+  /** A minimal AppointmentRepository with NO `listWithMeta` — forces the fallback branch. */
+  function makeFallbackRepo(appointments: Appointment[]): AppointmentRepository {
+    return {
+      create: async (a) => a,
+      findById: async (tid, id) => appointments.find((a) => a.tenantId === tid && a.id === id) ?? null,
+      findByJob: async (tid, jobId) =>
+        appointments.filter((a) => a.tenantId === tid && a.jobId === jobId),
+      findByDateRange: async (tid, start, end) =>
+        appointments.filter(
+          (a) => a.tenantId === tid && a.scheduledStart >= start && a.scheduledStart <= end,
+        ),
+      findExpiredHolds: async () => [],
+      update: async () => null,
+      // listWithMeta intentionally absent.
+    };
+  }
+
+  it('throws rather than silently returning every appointment when technicianId is requested', async () => {
+    const repo = makeFallbackRepo([makeAppt('a1'), makeAppt('a2')]);
+
+    await expect(
+      listAppointmentsWithMeta('tenant-1', repo, { technicianId: 'tech-1' }),
+    ).rejects.toThrow(/technicianId/i);
+  });
+
+  it('still filters by jobId and status when technicianId is not requested (unchanged behavior)', async () => {
+    const repo = makeFallbackRepo([
+      makeAppt('a1', { jobId: 'job-a', status: 'scheduled' }),
+      makeAppt('a2', { jobId: 'job-a', status: 'completed' }),
+      makeAppt('a3', { jobId: 'job-b', status: 'scheduled' }),
+    ]);
+
+    const result = await listAppointmentsWithMeta('tenant-1', repo, {
+      jobId: 'job-a',
+      status: 'scheduled',
+    });
+    expect(result.data.map((a) => a.id)).toEqual(['a1']);
   });
 });

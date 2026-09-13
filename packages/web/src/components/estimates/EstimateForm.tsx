@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
@@ -16,6 +17,17 @@ import { Button, Field, Input, Select, Textarea } from '../../components/ui';
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
   onCancel?: () => void;
+  /**
+   * #876: pre-select this job (from /estimates/new?jobId=…). The existing
+   * enrichment effect then fetches the job's customer + location for display.
+   */
+  initialJobId?: string;
+  /**
+   * #876: scope the job dropdown to this customer's jobs (from
+   * /estimates/new?customerId=…) and show an honest empty state when the
+   * customer has none — estimates scope by job, so a job must exist first.
+   */
+  initialCustomerId?: string;
 }
 
 interface ApiJob {
@@ -57,25 +69,41 @@ interface State {
   items: LineItemDraft[];
 }
 
-const AI_SUGGESTIONS: Record<string, { description: string; qty: string; price: string }[]> = {
-  HVAC: [
-    { description: 'Labor – 2 hrs at $95/hr', qty: '2', price: '95.00' },
-    { description: 'Service call fee', qty: '1', price: '85.00' },
-    { description: 'R-410A refrigerant (1 lb)', qty: '1', price: '85.00' },
-  ],
-  default: [
-    { description: 'Labor – 2 hrs', qty: '2', price: '95.00' },
-    { description: 'Service call fee', qty: '1', price: '85.00' },
-  ],
-};
+// Line item returned by POST /api/estimates/suggest (estimate task contract,
+// packages/api/src/ai/tasks/estimate-task.ts — same shape NewEstimateFlow
+// consumes). `unitPrice` is INTEGER CENTS; `category` is a free string.
+interface SuggestedLineItem {
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  category?: string;
+}
+
+const DRAFT_CATEGORIES: ReadonlyArray<NonNullable<LineItemDraft['category']>> = [
+  'labor',
+  'material',
+  'equipment',
+  'other',
+];
+
+/** Map the suggest contract's free-string category onto the editor's union. */
+function toDraftCategory(category?: string): LineItemDraft['category'] {
+  const normalized = category?.toLowerCase();
+  return DRAFT_CATEGORIES.find((c) => c === normalized);
+}
 
 function makeId() {
   return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
-export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
+export function EstimateForm({
+  onCreated,
+  onCancel,
+  initialJobId,
+  initialCustomerId,
+}: EstimateFormProps) {
   const [form, setForm] = useState<State>(() => ({
-    jobId: '',
+    jobId: initialJobId ?? '',
     validUntil: '',
     customerMessage: '',
     internalNotes: '',
@@ -89,8 +117,47 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [activeContract, setActiveContract] = useState<ApiAgreement | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiUsed, setAiUsed] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
-  const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
+  // #876: a ?customerId= deep link narrows the dropdown to that customer's
+  // jobs (the endpoint already supports the filter — no API change).
+  const { data: jobs, isLoading: jobsLoading } = useListQuery<ApiJob>('/api/jobs', {
+    filters: initialCustomerId ? { customerId: initialCustomerId } : {},
+  });
+
+  // #876 review — the scoped dropdown alone never said WHO it was scoped
+  // to; fetch the customer's name so the deep link shows "For: <name>"
+  // (mirrors JobForm's full-fetch of ?customerId=). On 404/error the
+  // affordance simply doesn't render — the param may be a stale link.
+  const [scopedCustomerName, setScopedCustomerName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!initialCustomerId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/customers/${encodeURIComponent(initialCustomerId)}`);
+        if (!res.ok) return;
+        const c = (await res.json()) as {
+          id?: string;
+          displayName?: string;
+          firstName?: string;
+          lastName?: string;
+          companyName?: string;
+        } | null;
+        if (cancelled || !c?.id) return;
+        const human = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+        const name =
+          c.displayName ||
+          (human && c.companyName ? `${human} (${c.companyName})` : human || c.companyName);
+        if (name) setScopedCustomerName(name);
+      } catch {
+        // Leave the affordance off — the scoped dropdown still works.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialCustomerId]);
 
   // When the user picks a job, fetch the enriched job detail (customer + location)
   // and look up any active maintenance agreement for that customer.
@@ -114,6 +181,16 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     return () => { cancelled = true; };
   }, [form.jobId]);
 
+  // #876 review — a ?jobId= deep link can point at a job beyond the first
+  // page of /api/jobs, which left the required Select rendering blank. The
+  // enrichment effect above already fetches the job by id (mirroring
+  // JobForm's full-fetch of its deep-linked entity), so inject it as an
+  // option when the listed page doesn't contain it.
+  const selectableJobs =
+    selectedJob && form.jobId === selectedJob.id && !jobs.some((j) => j.id === selectedJob.id)
+      ? [selectedJob, ...jobs]
+      : jobs;
+
   const serviceAddress = selectedJob?.location
     ? [selectedJob.location.street1, selectedJob.location.city, selectedJob.location.state, selectedJob.location.postalCode]
         .filter(Boolean).join(', ')
@@ -126,24 +203,66 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   function handleJobChange(jobId: string) {
     setForm(p => ({ ...p, jobId }));
     setAiUsed(false);
+    setAiError(null);
   }
 
-  function handleAiSuggest() {
+  // POST to the real /api/estimates/suggest endpoint (same authenticated
+  // client + request/response contract as NewEstimateFlow.suggestEstimate).
+  // The server invokes EstimateTaskHandler with catalog-grounded pricing and
+  // persists the proposal as a forced DRAFT — previewing a suggestion never
+  // writes a real estimate. On ANY failure we surface a visible error; there
+  // is no canned fallback list (fail closed, no invented prices).
+  async function handleAiSuggest() {
+    const description = [selectedJob?.summary, form.customerMessage, form.internalNotes]
+      .map(s => s?.trim())
+      .filter(Boolean)
+      .join('\n');
+    if (!description) {
+      setAiError('Select a job or add a customer message / internal notes so AI has context to suggest from.');
+      return;
+    }
     setAiLoading(true);
-    setTimeout(() => {
-      const suggestions = AI_SUGGESTIONS.HVAC;
-      const newItems = suggestions.map(s => ({
+    setAiError(null);
+    try {
+      const res = await apiFetch('/api/estimates/suggest', {
+        method: 'POST',
+        body: JSON.stringify({
+          description,
+          // The suggest schema accepts jobId for grounding (ownership-checked
+          // server-side); the selected job is this form's context.
+          ...(form.jobId.trim() ? { jobId: form.jobId.trim() } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as { message?: string })?.message ?? `AI suggestion failed (${res.status})`);
+      }
+      const data = await res.json() as { lineItems?: SuggestedLineItem[] };
+      const suggested: LineItemDraft[] = (data.lineItems ?? []).map(li => ({
         id: makeId(),
-        description: s.description,
-        quantity: s.qty,
-        unitPriceDollars: s.price,
+        description: li.description,
+        quantity: String(li.quantity),
+        // unitPrice is INTEGER CENTS (estimate task contract) — the editor
+        // holds a dollars string and re-converts to cents on submit.
+        unitPriceDollars: (li.unitPrice / 100).toFixed(2),
         taxable: false,
-        category: 'labor' as const,
+        category: toDraftCategory(li.category),
       }));
-      setForm(p => ({ ...p, items: [...p.items, ...newItems] }));
-      setAiLoading(false);
+      if (suggested.length === 0) {
+        throw new Error('AI returned no line items. Add more detail and try again, or build the estimate manually.');
+      }
+      setForm(p => {
+        // Drop untouched blank rows (the fresh form's sole empty draft) so
+        // suggestions aren't trailed by a row that fails submit validation.
+        const kept = p.items.filter(it => it.description.trim() !== '');
+        return { ...p, items: [...kept, ...suggested] };
+      });
       setAiUsed(true);
-    }, 1200);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'AI suggestion failed. Try again or build the estimate manually.');
+    } finally {
+      setAiLoading(false);
+    }
   }
 
   const handleSubmit = useCallback(
@@ -263,6 +382,16 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* #876 review — say WHO the scoped deep link is for, next to the
+            filtered job dropdown. */}
+        {initialCustomerId && scopedCustomerName && (
+          <p
+            data-testid="scoped-customer"
+            className="md:col-span-2 -mb-1 text-xs text-muted-foreground"
+          >
+            For: <span className="font-medium text-foreground">{scopedCustomerName}</span>
+          </p>
+        )}
         {/* Job picker */}
         <Field label="Job *" className="md:col-span-2">
           <Select
@@ -271,13 +400,30 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             required
           >
             <option value="">— select a job —</option>
-            {jobs.map(j => (
+            {selectableJobs.map(j => (
               <option key={j.id} value={j.id}>
                 {j.jobNumber} — {j.summary}
               </option>
             ))}
           </Select>
         </Field>
+
+        {/* #876: a customer-scoped deep link with zero jobs used to render a
+            silent empty dropdown — say so, and offer the next step. */}
+        {initialCustomerId && !jobsLoading && jobs.length === 0 && (
+          <div
+            data-testid="no-jobs-empty-state"
+            className="md:col-span-2 rounded-lg border border-border bg-secondary px-3 py-2.5 text-sm text-muted-foreground"
+          >
+            This customer has no jobs yet — an estimate needs a job to scope to.{' '}
+            <Link
+              to={`/jobs/new?customerId=${encodeURIComponent(initialCustomerId)}`}
+              className="inline-flex min-h-11 items-center text-primary underline"
+            >
+              Create a job for this customer
+            </Link>
+          </div>
+        )}
 
         {/* Customer & service location (auto-populated) */}
         {selectedJob && (
@@ -334,6 +480,14 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             {aiLoading ? 'Generating...' : aiUsed ? 'Suggestions added' : 'AI Suggestions'}
           </Button>
         </div>
+        {aiError && (
+          <div
+            role="alert"
+            className="mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {aiError}
+          </div>
+        )}
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}

@@ -151,4 +151,48 @@ describe('ReassignAppointmentTaskHandler (U1 technician resolution)', () => {
     expect(missingFieldsFor(res.proposal)).toEqual(['appointmentId']);
     expect(res.proposal.payload.toTechnicianId).toBe(TECH_ID);
   });
+
+  // B5.3 AC-2 — the defect fix: a resolver-verified appointmentId (the id
+  // the router's entity resolver threads onto existingEntities.appointmentId
+  // — the SAME seam RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler
+  // read via resolvedAppointmentIdFrom) used to be ignored, so the proposal
+  // ALWAYS carried 'appointmentId' in missingFields even when the router had
+  // already fully disambiguated "the Johnson job". With BOTH the appointment
+  // and the technician resolved, the gate must clear entirely.
+  const APPOINTMENT_ID = '44444444-4444-4444-4444-444444444444';
+
+  it('AC-2: resolver-verified appointmentId + resolved technicianId -> payload carries both ids, missingFields empty', async () => {
+    const res = await new ReassignAppointmentTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          appointmentReference: 'the Johnson job',
+          appointmentId: APPOINTMENT_ID,
+          targetTechnicianName: 'Carlos',
+          technicianId: TECH_ID,
+        },
+      }),
+    );
+    expect(res.proposal.payload.appointmentId).toBe(APPOINTMENT_ID);
+    expect(res.proposal.payload.toTechnicianId).toBe(TECH_ID);
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    // Cleared gate -> decideInitialStatus is free to consider auto-approval;
+    // it is not forced to 'draft' by a non-empty missingFields list.
+    expect((res.proposal.payload as Record<string, unknown>).missingFields).toBeUndefined();
+  });
+
+  it('AC-2: a non-UUID existingEntities.appointmentId (unverified) is ignored, falls back to the reference gate', async () => {
+    const res = await new ReassignAppointmentTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          appointmentReference: 'the Johnson job',
+          appointmentId: 'not-a-uuid',
+          targetTechnicianName: 'Carlos',
+          technicianId: TECH_ID,
+        },
+      }),
+    );
+    expect(res.proposal.payload.appointmentId).toBeUndefined();
+    expect(res.proposal.payload.appointmentReference).toBe('the Johnson job');
+    expect(missingFieldsFor(res.proposal)).toEqual(['appointmentId']);
+  });
 });

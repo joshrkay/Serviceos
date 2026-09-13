@@ -332,7 +332,7 @@ export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
                   className="flex min-h-11 w-full items-center justify-between gap-3 text-left"
                 >
                   <span className="text-sm text-slate-800">
-                    Autonomous booking (no supervisor)
+                    Confirm appointments on the call
                   </span>
                   <span
                     aria-hidden="true"
@@ -348,9 +348,10 @@ export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
                   </span>
                 </button>
                 <p className="text-xs text-slate-500">
-                  When on, high-confidence bookings from the AI receptionist confirm
-                  instantly with no one watching. You get an SMS with one-tap UNDO for
-                  every one.
+                  When on, Rivet can confirm a high-confidence appointment while the
+                  customer is still on the phone (held slot + 5-second undo window).
+                  You always get an SMS with one-tap UNDO. Money and invoices still
+                  need your approval — this only covers booking capture.
                 </p>
                 {autonomousEnabled && (
                   <label htmlFor="autonomous-booking-threshold" className="block">
