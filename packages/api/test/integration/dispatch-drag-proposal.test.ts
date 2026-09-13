@@ -15,15 +15,13 @@
  *      times are byte-identical before and after.
  *   2. T1 — a second tenant's board is untouched: the proposal is invisible
  *      under tenant B's id, and tenant B's own appointment is unaffected.
- *
- * Gap surfaced, NOT invented around (§12.4d — a doc-comment is not a
- * wiring): `createSchedulingProposal` never emits a `proposal.created` audit
- * event (confirmed by reading routes/proposals.ts and create-scheduling.ts —
- * neither calls `auditRepo.create`/`logProposalEvent`; `PgProposalRepository
- * .create` is a bare INSERT). The audit-readback assertion this row asks for
- * is captured below as a skipped, documented RED — see the lane report for
- * the raw failing output. Wiring the audit call is product code
- * (out of scope for this TEST-ONLY lane).
+ *   3. Issue #1040 — the drag emits a real `proposal.created` audit event,
+ *      read back through `PgAuditRepository.findByEntity` (previously an
+ *      `it.skip` documenting that no product-code audit call existed).
+ *   4. 4.9 / issue #1001 — that audit row names the skill-constraint outcome
+ *      explicitly (`skillConstraints: 'none_configured'`) instead of letting
+ *      an empty skill list read silently as "always feasible", and each
+ *      tenant's record is its own.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
@@ -60,6 +58,13 @@ describe('Postgres integration — dispatch drag → proposal (row 4.2)', () => 
   let techA: string;
   let appointmentId: string;
   let appointmentBefore: { status: string; updatedAt: string; scheduledStart: string; scheduledEnd: string };
+  // Tenant B drags on its OWN board in the T1 audit leg below, so it needs
+  // its own appointment id + version — divergent data, not an empty tenant.
+  let appointmentBId: string;
+  let appointmentBBefore: { updatedAt: string };
+  // Carried between the audit legs so the skill-constraint assertion reads
+  // back the SAME row the drag wrote.
+  let auditProposalId: string;
 
   async function seedTenantFixture(tenantId: string, userId: string, label: string) {
     const jobRepo = new PgJobRepositoryImpl(pool);
@@ -183,7 +188,8 @@ describe('Postgres integration — dispatch drag → proposal (row 4.2)', () => 
     // Tenant B gets its own fixture too, so T1 can assert its board/appointments
     // stay untouched by tenant A's drag — not merely "empty because nothing
     // was ever seeded".
-    await seedTenantFixture(tenantB.tenantId, tenantB.userId, 'B');
+    const fixtureB = await seedTenantFixture(tenantB.tenantId, tenantB.userId, 'B');
+    appointmentBId = fixtureB.apptId;
 
     feasibilityDeps = {
       assignmentRepo,
@@ -203,6 +209,9 @@ describe('Postgres integration — dispatch drag → proposal (row 4.2)', () => 
       scheduledStart: before!.scheduledStart.toISOString(),
       scheduledEnd: before!.scheduledEnd.toISOString(),
     };
+
+    const beforeB = await appointmentRepo.findById(tenantB.tenantId, appointmentBId);
+    appointmentBBefore = { updatedAt: beforeB!.updatedAt.toISOString() };
   });
 
   afterAll(async () => {
@@ -271,15 +280,14 @@ describe('Postgres integration — dispatch drag → proposal (row 4.2)', () => 
     expect(tenantBProposals).toHaveLength(0);
   });
 
-  // §12.4d honesty — this is the RED half of the TDD cycle for the row's
-  // audit-readback requirement. Skipped so the suite stays green: neither
-  // routes/proposals.ts's bare POST / handler nor create-scheduling.ts calls
-  // auditRepo.create/logProposalEvent on the created path (confirmed by
-  // reading both files — PgProposalRepository.create is a bare INSERT with
-  // no audit side effect). Un-skip once that wiring lands; until then this
-  // documents exactly what's missing rather than asserting around it. Raw
-  // RED output from running this unskipped is in the lane report.
-  it.skip('[BLOCKED — no product-code audit call exists yet] emits a proposal.created audit event, readable via PgAuditRepository.findByEntity', async () => {
+  // Issue #1040 — un-skipped. This was the RED half of the TDD cycle for the
+  // row's audit-readback requirement: neither routes/proposals.ts's bare
+  // POST / handler nor create-scheduling.ts called auditRepo.create /
+  // logProposalEvent on the created path (PgProposalRepository.create is a
+  // bare INSERT with no audit side effect), so "all mutations emit audit
+  // events" was violated for the drag→proposal path. The wiring now lives in
+  // create-scheduling.ts; this asserts the real row at real Postgres.
+  it('emits a proposal.created audit event, readable via PgAuditRepository.findByEntity', async () => {
     const app = appFor(tenantA.tenantId, tenantA.userId);
     const newStart = new Date(NOW.getTime() + 9 * 60 * 60 * 1000).toISOString();
     const newEnd = new Date(NOW.getTime() + 10 * 60 * 60 * 1000).toISOString();
@@ -293,8 +301,68 @@ describe('Postgres integration — dispatch drag → proposal (row 4.2)', () => 
         summary: 'Reschedule for audit check',
       });
     expect(res.status).toBe(200);
+    auditProposalId = res.body.id;
 
     const events = await auditRepo.findByEntity(tenantA.tenantId, 'proposal', res.body.id);
     expect(events.some((e) => e.eventType === 'proposal.created')).toBe(true);
+
+    // The event carries the drag's provenance: the dragging user as actor,
+    // and enough metadata to reconstruct what was proposed.
+    const created = events.find((e) => e.eventType === 'proposal.created')!;
+    expect(created.actorId).toBe(tenantA.userId);
+    expect(created.actorRole).toBe('dispatcher');
+    expect(created.entityType).toBe('proposal');
+    expect(created.correlationId).toBeTruthy();
+    expect(created.metadata).toMatchObject({
+      proposalType: 'reschedule_appointment',
+      status: 'draft',
+      source: 'dispatch',
+      appointmentId,
+      proposedScheduledStart: newStart,
+      proposedScheduledEnd: newEnd,
+    });
+  });
+
+  // 4.9 / issue #1001 — "the whole file is nine lines returning [], and it is
+  // wired into checkFeasibility, so an empty skill list reads as 'always
+  // feasible'". The fix makes that silence explicit AND audited: the
+  // feasibility outcome names `skillConstraints: 'none_configured'` and the
+  // drag's proposal.created audit row persists it, so a dispatcher reading
+  // the trail can tell "no skill constraints were configured" apart from
+  // "skills were checked and matched".
+  it('persists the explicit skill-constraint outcome (none_configured) on the audit row — 4.9 / #1001', async () => {
+    const events = await auditRepo.findByEntity(tenantA.tenantId, 'proposal', auditProposalId);
+    const created = events.find((e) => e.eventType === 'proposal.created')!;
+    expect(created).toBeDefined();
+    expect((created.metadata as Record<string, unknown>).skillConstraints).toBe('none_configured');
+  });
+
+  it("T1 — tenant B's own drag writes its OWN skill-constraint record; neither tenant can read the other's", async () => {
+    const app = appFor(tenantB.tenantId, tenantB.userId);
+    const newStart = new Date(NOW.getTime() + 11 * 60 * 60 * 1000).toISOString();
+    const newEnd = new Date(NOW.getTime() + 12 * 60 * 60 * 1000).toISOString();
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointmentBBefore.updatedAt)
+      .send({
+        proposalType: 'reschedule_appointment',
+        payload: { appointmentId: appointmentBId, newScheduledStart: newStart, newScheduledEnd: newEnd },
+        summary: 'Tenant B reschedule',
+      });
+    expect(res.status).toBe(200);
+
+    // Tenant B's own audit row exists, names tenant B's appointment, and
+    // carries its own skill-constraint outcome.
+    const bEvents = await auditRepo.findByEntity(tenantB.tenantId, 'proposal', res.body.id);
+    const bCreated = bEvents.find((e) => e.eventType === 'proposal.created')!;
+    expect(bCreated).toBeDefined();
+    expect(bCreated.actorId).toBe(tenantB.userId);
+    expect((bCreated.metadata as Record<string, unknown>).appointmentId).toBe(appointmentBId);
+    expect((bCreated.metadata as Record<string, unknown>).skillConstraints).toBe('none_configured');
+
+    // Neither tenant can read the other's audit trail.
+    expect(await auditRepo.findByEntity(tenantB.tenantId, 'proposal', auditProposalId)).toHaveLength(0);
+    expect(await auditRepo.findByEntity(tenantA.tenantId, 'proposal', res.body.id)).toHaveLength(0);
   });
 });
