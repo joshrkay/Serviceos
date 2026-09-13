@@ -37,10 +37,22 @@ import { writeFileSync, readdirSync, readFileSync, existsSync, unlinkSync } from
 import { join, resolve } from 'node:path';
 import { Client } from 'pg';
 import { checkDatabaseUrlSafety, exitIfUnsafe, redact } from './safety';
+// Static import (not dynamic `import()`) — same fix as global-teardown.ts's
+// report-builder import and global-setup.ts's ephemeral-DB bootstrap: a
+// dynamic import() of a raw .ts path routes through Node's native ESM
+// loader's CJS-interop path (loadCJSModule) rather than Playwright's
+// registered require-hook transform, so the target file's own `import`/
+// `export` syntax throws ("Cannot use import statement outside a module" /
+// "Unexpected token 'export'") when this module is loaded from inside a
+// Playwright process (global-setup calling setupTestDb() in-process). A
+// static import IS transpiled by Playwright's loader up front. schema.ts is
+// always a real, required dependency here (unlike the optional
+// @testcontainers/postgresql peer dep below, which has a genuine reason to
+// stay dynamic), so there is no lazy-load tradeoff being given up.
+import { getMigrationSQL } from '../../packages/api/src/db/schema';
 
 const FIXTURES_DIR = resolve(process.cwd(), 'e2e', 'fixtures');
 const STATE_FILE = join(FIXTURES_DIR, '.test-db-state.json');
-const SCHEMA_TS_PATH = resolve(process.cwd(), 'packages', 'api', 'src', 'db', 'schema.ts');
 const LOOSE_MIGRATIONS_DIR = resolve(process.cwd(), 'packages', 'api', 'src', 'db', 'migrations');
 
 export interface TestDbState {
@@ -131,8 +143,6 @@ async function startTestcontainer(): Promise<TestDbState> {
 }
 
 async function applyMigrations(connectionString: string): Promise<void> {
-  // Late-import to keep dry-run zero-cost.
-  const { getMigrationSQL } = await import(SCHEMA_TS_PATH);
   const client = new Client({
     connectionString,
     ssl: shouldUseSsl(connectionString) ? { rejectUnauthorized: false } : undefined,
