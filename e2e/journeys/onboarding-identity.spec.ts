@@ -430,7 +430,20 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
    * don't interfere rather than merely that an untouched neighbour is
    * invisible (that's T1, asserted separately below).
    */
-  async function driveTenantToAiCheckViaApi(
+  /**
+   * T2 control, phase 1 — gets a tenant to the real onboarding gate's
+   * `billing` step over the API (identity + pack; the phone dev-stub
+   * already ran on signup). Deliberately does NOT fire the trial webhook —
+   * see fireTrialWebhook() below. Split into phases (rather than one
+   * function that also fires the webhook) so the test can hold the
+   * neighbour here and release its webhook at the SAME instant as the
+   * tenant-under-test's own, rather than merely starting the two journeys
+   * without any real rendezvous (a second Codex review on this PR correctly
+   * caught that the first fix still let the neighbour's fast, UI-free API
+   * path race ahead and finish before the browser tenant had even picked a
+   * pack).
+   */
+  async function driveTenantToBillingViaApi(
     request: import('@playwright/test').APIRequestContext,
     tenant: { authHeaders: Record<string, string>; tenantId: string },
     businessName: string,
@@ -445,7 +458,7 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
     expect(packRes.ok(), `POST pack (${businessName}) -> ${packRes.status()}`).toBeTruthy();
 
     // Phone stub provisioning runs on signup already; poll status until it
-    // (and pack) land so the webhook below finds a tenant ready for billing.
+    // (and pack) land so this tenant is ready for the webhook below.
     await expect
       .poll(
         async () => {
@@ -458,7 +471,17 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
         { message: `${businessName} reaches billing`, timeout: 30_000 },
       )
       .toBe('billing');
+  }
 
+  /** T2 control, phase 2 — fires the self-signed trial webhook. Called for
+   * both tenants back-to-back (not awaited between the two calls) so the
+   * requests are genuinely concurrent, not merely started-without-awaiting
+   * somewhere earlier in the test. */
+  async function fireTrialWebhook(
+    request: import('@playwright/test').APIRequestContext,
+    tenant: { tenantId: string },
+    businessName: string,
+  ): Promise<void> {
     const trialEnd = Math.floor(Date.now() / 1000) + 14 * 24 * 3600;
     const webhookBody = JSON.stringify({
       id: `evt_e2e_${randomUUID()}`,
@@ -481,7 +504,14 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       data: webhookBody,
     });
     expect(whRes.status(), `${businessName} signed trial webhook -> ${await whRes.text()}`).toBe(200);
+  }
 
+  /** T2 control, phase 3 — polls until ai_check is done. */
+  async function pollAiCheckDone(
+    request: import('@playwright/test').APIRequestContext,
+    tenant: { authHeaders: Record<string, string> },
+    businessName: string,
+  ): Promise<void> {
     await expect
       .poll(
         async () => {
@@ -510,27 +540,23 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       const pageErrors: string[] = [];
       page.on('pageerror', (err) => pageErrors.push(err.message));
 
-      // ── Neighbour tenant, seeded FIRST and driven to ITS OWN passed
-      //    ai_check (plumbing pack — deliberately different from the
-      //    tenant under test's HVAC) entirely over the API. Started here but
-      //    NOT awaited yet — the promise runs IN THE BACKGROUND alongside
-      //    the tenant-under-test's UI journey below, so the two tenants'
-      //    verify_ai jobs actually land on the in-process queue's poll loop
-      //    around the same time (a Codex review on this PR correctly
-      //    flagged that fully awaiting this first, before the tenant under
-      //    test even bootstraps, made "concurrently" a claim the code
-      //    didn't back up). Awaited once this tenant has fired its own
-      //    trial webhook below, so both are genuinely in flight together.
+      // ── Neighbour tenant, seeded FIRST and driven (over the API, plumbing
+      //    pack — deliberately different from the tenant under test's HVAC)
+      //    up to but NOT THROUGH billing — it's held there deliberately.
+      //    Two Codex reviews on this PR sharpened this: the first pass fully
+      //    awaited the neighbour's entire journey before the tenant under
+      //    test even bootstrapped (no overlap at all); starting it without
+      //    awaiting immediately still let the neighbour's fast, UI-free API
+      //    path race ahead and finish before the browser tenant reached
+      //    billing (no REAL rendezvous). Fixed properly below: both
+      //    tenants' trial webhooks fire back-to-back at the same point in
+      //    the test, once BOTH are sitting at the gate, so their verify_ai
+      //    jobs are genuinely concurrent on the same queue poll loop.
       //    Fable's rung-5 ask: a neighbour's OWN completed ai_check must
       //    not change this tenant's answer — stronger than an untouched
       //    neighbour (T1, asserted separately below). ──────────────────────
       const neighbour = await bootstrapOwner(page, 'aicheckneighbour');
-      const neighbourDrivePromise = driveTenantToAiCheckViaApi(
-        page.request,
-        neighbour,
-        'Neighbour Plumbing Co',
-        'plumbing',
-      );
+      await driveTenantToBillingViaApi(page.request, neighbour, 'Neighbour Plumbing Co', 'plumbing');
 
       // ── The tenant under test. Identity via the real PUT route directly —
       //    1.2's own browser-form proof is the spec above; re-driving the
@@ -577,6 +603,27 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
         await page.getByRole('button', { name: /continue to billing/i }).click();
       }
 
+      // Runtime proof the phone leg actually took the dev-stub path, rather
+      // than trusting the pre-flight env check alone (Codex correctly noted
+      // that check can't see a packages/api/.env or an already-running,
+      // reused server — packages/api/package.json's `dev` script loads
+      // `.env` via --env-file-if-exists, invisible to this test process).
+      // isTwilioTestNumber() is the SAME predicate provision-twilio.ts's
+      // real (non-stub) path uses to refuse ever persisting one — if this
+      // is ever anything else, a real number was purchased and the test
+      // must fail loudly, not silently pass.
+      const phoneStatusRes = await page.request.get(`${API_URL}/api/onboarding/status`, {
+        headers: owner.authHeaders,
+      });
+      const phoneStatusBody = (await phoneStatusRes.json()) as {
+        steps?: { id: string; metadata?: { phoneNumber?: string } }[];
+      };
+      const phoneNumber = phoneStatusBody.steps?.find((s) => s.id === 'phone')?.metadata?.phoneNumber;
+      expect(
+        phoneNumber,
+        'phone leg used the deterministic dev-stub number, not a real Twilio purchase',
+      ).toBe('+15005550006');
+
       // ── Billing — reached at the real surface; cleared by a self-signed
       //    Stripe-shaped webhook rather than a real Checkout redirect. ──────
       await expect(
@@ -587,35 +634,22 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
         fullPage: true,
       });
 
-      const trialEnd = Math.floor(Date.now() / 1000) + 14 * 24 * 3600;
-      const webhookBody = JSON.stringify({
-        id: `evt_e2e_${randomUUID()}`,
-        type: 'customer.subscription.created',
-        data: {
-          object: {
-            id: `sub_e2e_${randomUUID()}`,
-            customer: `cus_e2e_${randomUUID()}`,
-            status: 'trialing',
-            trial_end: trialEnd,
-            metadata: { tenant_id: owner.tenantId },
-          },
-        },
-      });
-      const whRes = await page.request.post(`${API_URL}/webhooks/stripe`, {
-        headers: {
-          'content-type': 'application/json',
-          'stripe-signature': stripeSignature(webhookBody, STRIPE_WEBHOOK_SECRET!),
-        },
-        data: webhookBody,
-      });
-      expect(whRes.status(), `signed trial webhook -> ${await whRes.text()}`).toBe(200);
-
-      // Both tenants' trial webhooks have now fired close together, so both
-      // verify_ai jobs are in flight on the same in-process queue poll loop
-      // at the same time — awaiting the neighbour's promise HERE (not
-      // before this tenant even started) is what makes "concurrently" true
-      // rather than merely asserted.
-      await neighbourDrivePromise;
+      // ── The rendezvous. Both tenants are now sitting at the real
+      //    billing gate (owner via the browser above, neighbour via the API
+      //    above) — fire BOTH trial webhooks together with Promise.all, not
+      //    one after the other, so the two verify_ai jobs are enqueued at
+      //    the same instant and genuinely race on the same in-process
+      //    queue poll loop. This is the actual concurrency claim; starting-
+      //    without-awaiting earlier in the test was not (fixed per Codex's
+      //    second review pass on this PR). ─────────────────────────────────
+      await Promise.all([
+        fireTrialWebhook(page.request, owner, 'AI Check Journey HVAC'),
+        fireTrialWebhook(page.request, neighbour, 'Neighbour Plumbing Co'),
+      ]);
+      await Promise.all([
+        pollAiCheckDone(page.request, owner, 'AI Check Journey HVAC'),
+        pollAiCheckDone(page.request, neighbour, 'Neighbour Plumbing Co'),
+      ]);
 
       pollDbSnapshotHere(
         '1.8-tenants-subscription-status',
@@ -668,6 +702,21 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
           `WHERE tenant_id = '${owner.tenantId}' AND event_type = 'tenant.ai_verified';`,
       );
 
+      // Runtime proof the ai_check leg actually used the hermetic
+      // MockLLMProvider, not a real key reaching this process some other
+      // way (Codex's same class of concern as the phone check above).
+      // MockLLMProvider.buildResponse() always stamps `provider: this.name`
+      // = 'mock' (packages/api/src/ai/providers/mock.ts) — a real provider
+      // configured via createLLMGateway() would report something else
+      // ('openai', etc.) here, so this is a real, not assumed, distinguisher.
+      const ownerProvider = queryOne(
+        `SELECT metadata->>'provider' FROM audit_events ` +
+          `WHERE tenant_id = '${owner.tenantId}' AND event_type = 'tenant.ai_verified';`,
+      );
+      expect(String(ownerProvider).trim(), 'ai_check used the hermetic mock provider, not a real one').toBe(
+        'mock',
+      );
+
       // ── T2 — the neighbour, driven to its OWN passed ai_check on a
       //    DIFFERENT pack before and during this tenant's journey, has
       //    exactly its own audit row (not 0 — it genuinely completed — and
@@ -685,6 +734,14 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
         `SELECT count(*) FROM audit_events WHERE tenant_id = '${neighbour.tenantId}' AND event_type = 'tenant.ai_verified';`,
       );
       expect(String(neighbourAudit).trim(), 'neighbour has exactly its OWN ai_verified row').toBe('1');
+      const neighbourProvider = queryOne(
+        `SELECT metadata->>'provider' FROM audit_events ` +
+          `WHERE tenant_id = '${neighbour.tenantId}' AND event_type = 'tenant.ai_verified';`,
+      );
+      expect(
+        String(neighbourProvider).trim(),
+        'neighbour ai_check also used the hermetic mock provider',
+      ).toBe('mock');
 
       const neighbourStatusRes = await page.request.get(`${API_URL}/api/onboarding/status`, {
         headers: neighbour.authHeaders,
