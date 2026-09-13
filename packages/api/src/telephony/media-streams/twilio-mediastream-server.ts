@@ -23,6 +23,7 @@ import type { Socket } from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
 import twilio from 'twilio';
 import { createLogger } from '../../logging/logger';
+import type { TwilioAuthTokenGetter } from '../twilio-signature';
 import { instrument } from '../../monitoring/instrumentation';
 import {
   TwilioMediaStreamAdapter,
@@ -44,10 +45,11 @@ export interface MediaStreamServerDeps extends MediaStreamAdapterDeps {
    * server can be constructed before the env var is set (matches the
    * pattern used by `requireTwilioSignature`).
    *
-   * Call-scoped paths resolve AccountSid from the session created by the
-   * already-authenticated inbound webhook, before accepting the upgrade.
+   * Call-scoped paths resolve AccountSid — and, since #1072, the tenant — from
+   * the session created by the already-authenticated inbound webhook, before
+   * accepting the upgrade, so the credential checked is that tenant's own.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   /**
    * Public base URL we expect Twilio to have signed against
    * (e.g. https://api.example.com). Validation covers the equivalent WS
@@ -134,6 +136,14 @@ export function attachMediaStreamServer(
     }
 
     let authenticatedCall: { callSid: string; accountSid: string } | undefined;
+    /**
+     * #1072 — the tenant this upgrade's call already belongs to, read off the
+     * in-process session the (credential-bound) /voice webhook created. Passing
+     * it to the resolver means the upgrade is verified with THAT tenant's
+     * credential rather than with whichever tenant owns the presented
+     * AccountSid.
+     */
+    let sessionTenantId: string | undefined;
     if (callScoped) {
       const callSid = pathOnly.slice(MEDIA_STREAM_PATH.length + 1).replace(/\/$/, '');
       const session = /^[A-Za-z0-9_-]{1,80}$/.test(callSid) ? deps.store.findByCallSid(callSid) : undefined;
@@ -142,6 +152,7 @@ export function attachMediaStreamServer(
         return;
       }
       authenticatedCall = { callSid, accountSid: session.twilioAccountSid };
+      sessionTenantId = session.tenantId;
     }
 
     // 2. Signature verification. Twilio signs the WS upgrade URL the
@@ -154,9 +165,32 @@ export function attachMediaStreamServer(
       // interface; production wiring never sets this flag.
       logger.warn('mediastream upgrade: authTestMode=true → signature validation BYPASSED');
     } else {
-      const authToken = await Promise.resolve(deps.authTokenGetter(
-        authenticatedCall ? { accountSid: authenticatedCall.accountSid } : {},
+      const resolved = await Promise.resolve(deps.authTokenGetter(
+        authenticatedCall
+          ? {
+              accountSid: authenticatedCall.accountSid,
+              ...(sessionTenantId ? { tenantId: sessionTenantId } : {}),
+            }
+          : {},
       ));
+      // #1072 — the resolver may refuse outright (the presented AccountSid is
+      // not the session tenant's subaccount) or report that the deployment
+      // cannot produce the credential at all.
+      if (typeof resolved === 'object' && resolved.outcome !== 'verify') {
+        if (resolved.outcome === 'refuse') {
+          logger.warn('mediastream upgrade rejected: credential not owned by the call\'s tenant', {
+            reason: resolved.reason,
+          });
+          rejectUpgrade(socket, 403);
+          return;
+        }
+        logger.error('mediastream upgrade rejected: credential misconfigured', {
+          reason: resolved.reason,
+        });
+        rejectUpgrade(socket, 500);
+        return;
+      }
+      const authToken = typeof resolved === 'object' ? resolved.authToken : resolved;
       if (!authToken) {
         logger.error('mediastream upgrade rejected: no auth token configured');
         rejectUpgrade(socket, 500);

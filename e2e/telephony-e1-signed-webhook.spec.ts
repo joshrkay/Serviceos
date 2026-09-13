@@ -1,4 +1,11 @@
 /**
+ * #1072: lane B pinned the cross-tenant auth hole below two ways — the
+ * then-current behaviour as a passing characterization, and the required
+ * refusal as a Playwright `test.fail()` that breaks the run the day the
+ * refusal lands. It landed (the credential is now bound to the tenant that
+ * owns the dialled number), so both are ordinary passing tests at the bottom
+ * of this file.
+ *
  * #1014 row 2.5, phone-surface leg (lane B) — hermetic reachability on the
  * phone surface, per the definition research ticket #1004 recorded verbatim
  * on map #995:
@@ -369,42 +376,34 @@ test.describe('#1014 row 2.5 — E1 reachable on the phone surface via a self-si
   });
 
   /**
-   * ─── SECURITY GAP FOUND, NOT FIXED ────────────────────────────────────
+   * ─── THE CROSS-TENANT BINDING (#1072 — FIXED) ─────────────────────────
    *
-   * `/api/telephony/voice` resolves the signing credential and the tenant
-   * from two INDEPENDENT body fields, and never checks that they agree:
+   * `/api/telephony/*` used to resolve the signing credential and the tenant
+   * from two INDEPENDENT body fields and never check they agreed:
    *
    *   - `resolveTwilioAuthTokenForSubaccount` (packages/api/src/app.ts:3756)
-   *     picks the auth token by the body's `AccountSid`;
-   *   - `resolveTenantIdByPhoneNumber` (app.ts:3791) picks the tenant by the
+   *     picked the auth token by the body's `AccountSid`;
+   *   - `resolveTenantIdByPhoneNumber` (app.ts:3791) picked the tenant by the
    *     body's `To`.
    *
-   * So `requireTwilioSignature` verifies "is this signed by SOME tenant",
-   * never "is this signed by THE tenant that owns the dialled number". A
-   * tenant that legitimately holds its own Twilio credential can therefore
-   * drive inbound calls into ANY other tenant by sending its OWN `AccountSid`
-   * and a valid signature from its OWN token, with `To` set to the victim's
-   * DID — which is public information, being their business phone number.
+   * So `requireTwilioSignature` verified "is this signed by SOME tenant",
+   * never "is this signed by THE tenant that owns the dialled number", and a
+   * tenant that legitimately held its own Twilio credential could drive
+   * inbound calls into ANY other tenant by sending its OWN `AccountSid` and a
+   * valid signature from its OWN token with `To` set to the victim's DID —
+   * public information, being their business phone number.
    *
-   * That creates voice sessions, leads and customers under the victim tenant,
-   * consumes their trial minutes, and writes into their audit trail. The
-   * signature check is the only auth on this surface.
-   *
-   * The test above is the ordinary bad-signature case and does NOT cover
-   * this: declaring B's `AccountSid` while signing with A's token makes the
-   * middleware verify an A-signed payload with B's token, so its 403 is
-   * guaranteed by construction and proves nothing about the boundary.
-   * (Codex review caught exactly this, PR #1054.)
-   *
-   * NOT FIXED HERE: lane B is test-only and explicitly forbidden from
-   * changing auth code. Pinned both ways, as with the Spanish E1 gap — the
-   * current behaviour as a passing characterization, and the required
-   * refusal as an `it.fails` that breaks loudly the day it is fixed.
+   * The credential is now resolved from the dialled number first
+   * (packages/api/src/telephony/twilio-webhook-credential.ts), and a payload
+   * whose `AccountSid` is not the owning tenant's subaccount is refused before
+   * any handler runs. The two tests below were the `.fails`-pinned pair on
+   * `cloud/capture-8-2-b`; they are ordinary passing tests now.
    */
-  test('SECURITY GAP (surfaced on #1014, NOT fixed here): a tenant can forge an inbound call into another tenant', async ({
+  test('a tenant-owned signature does NOT authorise a call to another tenant\'s DID', async ({
     request,
   }) => {
     const callSid = `CA-forged-${crypto.randomUUID().slice(0, 8)}`;
+    const beforeB = (await emergencyRows(tenantB)).rows.length;
 
     // Tenant A uses ONLY credentials it legitimately owns: its own
     // AccountSid, its own auth token. The one hostile field is `To`.
@@ -415,52 +414,49 @@ test.describe('#1014 row 2.5 — E1 reachable on the phone surface via a self-si
       A_TOKEN,
     );
 
-    // Today: accepted, and answered with tenant B's real greeting.
-    expect(forged.status()).toBe(200);
-    expect(await forged.text()).toContain('<Say');
+    expect(forged.status()).toBe(403);
 
-    // …and the session is persisted under the VICTIM tenant.
+    // Nothing is persisted under the victim: no session for the forged call,
+    // and tenant B's emergency audit trail does not move.
     const session = await pool.query<{ tenant_id: string }>(
       `SELECT tenant_id FROM voice_sessions WHERE call_sid = $1`,
       [callSid],
     );
-    expect(session.rows).toHaveLength(1);
-    expect(session.rows[0]!.tenant_id).toBe(tenantB);
-    expect(session.rows[0]!.tenant_id).not.toBe(tenantA);
+    expect(session.rows).toHaveLength(0);
+    expect((await emergencyRows(tenantB)).rows).toHaveLength(beforeB);
   });
 
-  /**
-   * DESIRED behaviour — NOT met today. `.fails` for the same reason as the
-   * Spanish E1 case: this lane may not fix auth, and a red CI would not be
-   * this lane's to cause. The day the credential and the tenant are checked
-   * against each other, this starts failing and is the signal to delete it,
-   * promote the assertions into the test above, and re-grade.
-   */
-  test(
-    'SECURITY DESIRED (currently FAILS, see the GAP above): a tenant-owned signature must not authorise a call to another tenant\'s DID',
-    async ({ request }) => {
-      // Playwright's `test.fail()` — its documented way to acknowledge that
-      // functionality is broken until it is fixed. The test still RUNS, and
-      // Playwright fails the run if it ever starts passing.
-      test.fail();
-      const callSid = `CA-forged-desired-${crypto.randomUUID().slice(0, 8)}`;
+  test('the same binding holds on /gather — a forged mid-call callback into another tenant is refused', async ({
+    request,
+  }) => {
+    // A LIVE session under tenant B first, so the forged callback names a real
+    // sid and the credential binding is the only thing standing in its way.
+    const callSid = `CA-forged-gather-${crypto.randomUUID().slice(0, 8)}`;
+    const voice = await signedPost(
+      request,
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: B_SUBACCOUNT, From: CALLER, To: B_DID },
+      B_TOKEN,
+    );
+    expect(voice.status()).toBe(200);
+    const sid = sessionIdFromTwiml(await voice.text());
+    const beforeB = (await emergencyRows(tenantB)).rows.length;
 
-      const forged = await signedPost(
-        request,
-        '/api/telephony/voice',
-        { CallSid: callSid, AccountSid: A_SUBACCOUNT, From: CALLER, To: B_DID },
-        A_TOKEN,
-      );
+    const forged = await signedPost(
+      request,
+      `/api/telephony/gather?sid=${sid}`,
+      {
+        CallSid: callSid,
+        AccountSid: A_SUBACCOUNT,
+        From: CALLER,
+        To: B_DID,
+        SpeechResult: EN_GAS,
+        Confidence: '0.95',
+      },
+      A_TOKEN,
+    );
 
-      // The credential belongs to tenant A; the dialled number belongs to
-      // tenant B. The route must refuse rather than route it into B.
-      expect(forged.status()).toBe(403);
-
-      const session = await pool.query(
-        `SELECT tenant_id FROM voice_sessions WHERE call_sid = $1`,
-        [callSid],
-      );
-      expect(session.rows).toHaveLength(0);
-    },
-  );
+    expect(forged.status()).toBe(403);
+    expect((await emergencyRows(tenantB)).rows).toHaveLength(beforeB);
+  });
 });
