@@ -15,7 +15,7 @@ Fable's.
 | 7.7 | `e2e/journeys/estimate-stale-revision-approve-7-7.spec.ts` | public `/e/:token` open → owner revises mid-session → stale accept refused (409 + banner) → reload → current accept | T1 (same scenario, both tenants) |
 | 7.8 | `e2e/journeys/estimate-concurrent-approval-race-7-8.spec.ts` | two `POST /public/estimates/:token/approve` at the same instant on one job; winner's public page | T2 (both tenants race concurrently) |
 | 7.9 | `e2e/journeys/estimate-deposit-gate-7-9.spec.ts` | real `PUT /api/settings` deposit rule → public page gate + capped amount → `after_approval` accept → signed `checkout.session.completed` (deposit_for_job_id) | T3 (fixed/before vs percentage/after) |
-| 7.10 | `e2e/journeys/estimate-nudge-sweep-7-10.spec.ts` | the PRODUCTION `runEstimateReminderSweep` (app.ts:6448-6465 interval body) against the webServer's own Postgres, digest-toggle.spec.ts pattern; two concurrent sweeps race one estimate | T4 fan-out (eligible vs not-yet-due tenant) |
+| 7.10 | `e2e/journeys/estimate-nudge-sweep-7-10.spec.ts` | the PRODUCTION `runEstimateReminderSweep` (app.ts:6448-6465 interval body) against the webServer's own Postgres, digest-toggle.spec.ts pattern; two concurrent sweeps race one estimate | T4 fan-out (silent tenant A nudged; tenant B skipped because its customer had opened the quote in the real public page — `firstViewedAt`) |
 | 7.12 | `e2e/journeys/negotiation-sms-guardrail-7-12.spec.ts` | real signed `POST /webhooks/twilio/sms/:tenantId` discount ask → `callback` proposal in `draft` + `negotiation_guardrail.sms_routed`; owner browser `/inbox`; tenant B opts in via the real Discount-policy sheet | T1·T3 |
 
 Shared bootstrap: `e2e/fixtures/estimate-quote-lane.ts` — owner via the real
@@ -202,6 +202,39 @@ Row dumps:
 Screenshots: `7.9-before-approval-gate.png`, `7.9-after-approval-accepted-tenantB.png`,
 `7.9-deposit-paid-tenantB.png`.
 
+### 7.10 — `estimate-nudge-sweep-7-10.spec.ts`
+
+Run 1: both sends failed "Cannot send SMS — … customer has no primary phone"
+(worker default channel `sms`, estimates sent by email → `channel: 'email'`),
+and the T4 premise was wrong (an injected `now` of +4d makes a seconds-old
+send look 4 days old too — tenant B is now skipped because its customer
+OPENED the quote in the real public page, `firstViewedAt`). Run 2: a fresh
+customer's GET 404'd for the whole 2s #1133 window under three lanes' load
+(poll widened to 10s, lag reported). Run 3: `duplicate key value violates
+unique constraint "idx_dispatches_idempotency"` — SendService keys every
+dispatch on the WALL-CLOCK minute (send-service.ts:575-583), so a nudge in
+the same minute as the owner's send collides by design; the spec now lets
+the minute roll over first. Run 4:
+
+```
+{"message":"Estimate-reminder sweep completed","service":"estimate-reminder-worker-e2e","tenants":2,"reminders":1,"failed":0}
+   ← first sweep over BOTH tenants: A (silent) nudged, B (viewed) skipped
+{"level":"warn","message":"Estimate-reminder sweep: estimate failed", … "estimateId":"6cd2bf41-…","error":"Estimate nudge already in flight for estimate 6cd2bf41-… (reminder #1) — a concurrent attempt already claimed this occurrence."}
+{"message":"Estimate-reminder sweep completed", … "tenants":1,"reminders":0,"failed":1}
+{"message":"Estimate-reminder sweep completed", … "tenants":1,"reminders":1,"failed":0}
+   ← the two CONCURRENT sweeps on estimate C: exactly one send, the other refused by the claim-before-send gate
+✓  1 [chromium] › e2e/journeys/estimate-nudge-sweep-7-10.spec.ts:114:7 › … the real sweep nudges exactly one eligible estimate per tenant, records the audit + reminder bookkeeping, two concurrent sweep calls do not double-send, and a second (untouched) tenant proves T4 fanout (1.5m)
+✘  2 [chromium] › e2e/journeys/estimate-nudge-sweep-7-10.spec.ts:281:7 › … the real setInterval-driven automatic trigger cannot be observed inside a bounded hermetic run — pinned, not faked (2.9s)   ← test.fail(): expected failure (POST /api/workers/estimate-reminder/run → 404)
+  2 passed (6.1m)
+EXIT=0
+```
+
+Asserted at real Postgres (row dumps added for the second pass): tenant A
+`reminder_count=1`, `last_reminder_at` set, exactly one
+`estimate.reminder_sent` audit row; tenant B `reminder_count=0`, no audit
+row; estimate C `reminder_count=1` after the race with exactly one
+in-memory delivery.
+
 <!-- RUNS -->
 
 ## What is NOT proven (pinned, not faked)
@@ -234,6 +267,18 @@ Screenshots: `7.9-before-approval-gate.png`, `7.9-after-approval-accepted-tenant
   Parked with #1000/#1002 (live Stripe). **New finding for Fable:** a Stripe
   failure on the public deposit route surfaces as an unmapped 500 rather
   than a mapped, customer-readable error.
+- **7.10 compressed calendar vs wall-clock idempotency.** `SendService`'s
+  second idempotency layer keys every dispatch on the WALL-CLOCK minute
+  (`estimate:<id>:<channel>:<floor(Date.now()/60000)>`,
+  notifications/send-service.ts:575-583, `idx_dispatches_idempotency`), not
+  on the sweep's injected `now`; a nudge in the same minute as the owner's
+  send collides with that send's dispatch row by design (run 3: "duplicate
+  key value violates unique constraint idx_dispatches_idempotency"). The
+  spec waits for the minute to roll over between a send and the sweep that
+  re-sends it — it waits for the product's guarantee, it does not bypass
+  it. Also: the worker's default channel is `sms`; the estimates here were
+  sent by email, so the sweep runs with `channel: 'email'` (run 2 failed
+  "Cannot send SMS — … no primary phone" on email-only customers).
 - **7.10 wall-clock trigger.** The sweep only fires from a hardcoded hourly
   `setInterval` (app.ts:6467, no env override unlike
   `OVERDUE_SWEEP_INTERVAL_MS`); the spec calls the identical production

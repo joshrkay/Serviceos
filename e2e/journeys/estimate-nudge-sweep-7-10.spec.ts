@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Pool } from 'pg';
 import { hasViteClerkKey } from '../helpers/clerk-key';
-import { bootstrapOwner, seedJob, queryAsTenant } from '../fixtures/estimate-quote-lane';
+import { bootstrapOwner, seedJob, queryAsTenant, logRows } from '../fixtures/estimate-quote-lane';
 import { PgEstimateRepository } from '../../packages/api/src/estimates/pg-estimate';
 import { PgAuditRepository } from '../../packages/api/src/audit/pg-audit';
 import { PgSettingsRepository } from '../../packages/api/src/settings/pg-settings';
@@ -21,6 +21,23 @@ const SCREENSHOT_DIR = join(process.cwd(), 'docs/audit/lane-reports/8-7-quote-r5
 mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * SendService's second idempotency layer keys every dispatch on the WALL-CLOCK
+ * minute — `estimate:<id>:<channel>:<floor(Date.now()/60000)>`
+ * (notifications/send-service.ts:575-583, `idx_dispatches_idempotency`) — not
+ * on the sweep's injected `now`. A nudge in the same minute as the owner's own
+ * send therefore collides with that send's dispatch row by design (run 3:
+ * "duplicate key value violates unique constraint idx_dispatches_idempotency").
+ * A real reminder is days later; this test compresses the calendar via `now`,
+ * so it must still let the wall-clock minute roll over between a send and the
+ * sweep that re-sends it. Never touches the product's guarantee — it waits
+ * for it.
+ */
+async function waitForNextMinuteBoundary(): Promise<void> {
+  const ms = 60_000 - (Date.now() % 60_000) + 250;
+  await new Promise((r) => setTimeout(r, ms));
+}
 
 /**
  * §8.7 row 7.10 — rung-5 reachability: "unviewed quotes chased
@@ -75,6 +92,10 @@ async function buildSweepDeps(pool: Pool, tenantIds: string[]) {
     logger: createLogger({ service: 'estimate-reminder-worker-e2e', environment: 'test' }),
     auditRepo,
     delivery,
+    // The estimates below were sent by email; the nudge re-sends on the same
+    // channel. (The worker's default is 'sms', which for an email-only
+    // customer fails with "Cannot send SMS — … no primary phone" — run 1.)
+    channel: 'email' as const,
   };
 }
 
@@ -92,8 +113,9 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
 
   test('the real sweep nudges exactly one eligible estimate per tenant, records the audit + reminder bookkeeping, two concurrent sweep calls do not double-send, and a second (untouched) tenant proves T4 fanout', async ({
     request,
+    page,
   }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(240_000); // two wall-clock-minute boundary waits (≤60s each)
     const pool = new Pool({ connectionString: process.env.DATABASE_URL });
     try {
       // ── Tenant A: one estimate sent "4 days ago" (past the 3-day
@@ -121,8 +143,12 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
       );
       expect(sendRes.ok()).toBeTruthy();
 
-      // ── Tenant B (T4): a FRESH estimate sent "just now" — outside the
-      //    reminder window, so the SAME sweep call must skip it entirely ───
+      // ── Tenant B (T4): its estimate is ALSO past the window under the
+      //    injected clock, but its customer has already OPENED it (a real
+      //    view through the public page → `firstViewedAt`), so the SAME
+      //    sweep call must skip it — "chase the silent ones", not everyone.
+      //    (Run 1's "sent just now ⇒ not due" premise was wrong: `now`
+      //    = +4d makes a seconds-old send look 4 days old too.) ────────────
       const tenantB = await bootstrapOwner(request, 'b', 'Bexar Plumbing 7.10');
       const jobB = await seedJob(request, tenantB, 'TooSoon');
       const estResB = await request.post(`${process.env.E2E_API_URL ?? 'http://localhost:3000'}/api/estimates`, {
@@ -136,16 +162,39 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         }),
       });
       const estimateB = (await estResB.json()) as { id: string };
-      await request.post(
+      const sendBRes = await request.post(
         `${process.env.E2E_API_URL ?? 'http://localhost:3000'}/api/estimates/${estimateB.id}/send`,
         {
           headers: { 'content-type': 'application/json', ...tenantB.authHeaders },
           data: JSON.stringify({ channel: 'email' }),
         },
       );
+      expect(sendBRes.ok()).toBeTruthy();
+      const sentB = (await sendBRes.json()) as { viewToken: string };
+      // B's customer opens the quote in a real browser — the public page
+      // records the view (POST /public/estimates/:token/view → firstViewedAt),
+      // which is exactly what the worker's `viewedCurrent` gate keys on.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto(`/e/${sentB.viewToken}`);
+      await expect(page.getByText('Bexar Plumbing 7.10', { exact: true })).toBeVisible();
+      // #1133 — the view write commits on res.finish; poll it before the sweep.
+      let viewedRow: Record<string, unknown>[] = [];
+      for (let i = 0; i < 20 && (viewedRow.length === 0 || !viewedRow[0]!.first_viewed_at); i++) {
+        viewedRow = await queryAsTenant(
+          tenantB.tenantId,
+          `SELECT first_viewed_at FROM estimates WHERE id = $1`,
+          [estimateB.id],
+        );
+        if (!viewedRow[0]?.first_viewed_at) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(viewedRow[0]?.first_viewed_at, 'B was viewed by its customer').toBeTruthy();
+
+      // Let the wall-clock minute roll over after the owner's own sends (see
+      // waitForNextMinuteBoundary) before the sweep re-sends A's estimate.
+      await waitForNextMinuteBoundary();
 
       // ── Run the REAL production sweep once, "now" = +4 days, across BOTH
-      //    tenants in one pass (T4 fanout: A is eligible, B is not) ─────────
+      //    tenants in one pass (T4 fanout: A is eligible, B was viewed) ─────
       const fourDaysLater = () => new Date(Date.now() + 4 * DAY_MS);
       const deps = await buildSweepDeps(pool, [tenantA.tenantId, tenantB.tenantId]);
       const result = await runEstimateReminderSweep({ ...deps, now: fourDaysLater });
@@ -161,6 +210,12 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         `SELECT reminder_count, last_reminder_at FROM estimates WHERE id = $1`,
         [estimate.id],
       );
+      logRows('7.10 first sweep result (tenants/reminders/failed) + in-memory deliveries', {
+        result,
+        sentEmails: deps.delivery.sentEmails.map((m) => ({ to: m.to, subject: (m as { subject?: string }).subject })),
+        sentSms: deps.delivery.sentSms.length,
+      });
+      logRows('7.10 tenant A estimates row after the sweep (reminder_count / last_reminder_at)', rowA);
       expect(Number(rowA[0]!.reminder_count)).toBe(1);
       expect(rowA[0]!.last_reminder_at).toBeTruthy();
 
@@ -169,6 +224,7 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'estimate' AND entity_id = $2 AND event_type = 'estimate.reminder_sent'`,
         [tenantA.tenantId, estimate.id],
       );
+      logRows('7.10 tenant A audit_events estimate.reminder_sent', auditA);
       expect(auditA).toHaveLength(1);
 
       // Tenant B's fresh estimate is untouched — T4: the sweep reached BOTH
@@ -178,6 +234,7 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         `SELECT reminder_count FROM estimates WHERE id = $1`,
         [estimateB.id],
       );
+      logRows('7.10 T4 tenant B estimates row (viewed by its customer → never nudged)', rowB);
       expect(Number(rowB[0]!.reminder_count ?? 0)).toBe(0);
 
       // ── Concurrent nudges: two sweep calls racing the SAME estimate must
@@ -205,6 +262,8 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         },
       );
 
+      // Same wall-clock-minute rule for estimate C's own send just above.
+      await waitForNextMinuteBoundary();
       const raceDeps = await buildSweepDeps(pool, [tenantA.tenantId]);
       const [r1, r2] = await Promise.all([
         runEstimateReminderSweep({ ...raceDeps, now: fourDaysLater }),
@@ -218,6 +277,8 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         `SELECT reminder_count FROM estimates WHERE id = $1`,
         [estimateC.id],
       );
+      logRows('7.10 two CONCURRENT sweeps on estimate C — per-call results (exactly one send)', { r1, r2 });
+      logRows('7.10 estimate C row after the race (reminder_count advanced once)', rowC);
       expect(Number(rowC[0]!.reminder_count)).toBe(1);
       const sendCountC = raceDeps.delivery.sentSms.length + raceDeps.delivery.sentEmails.length;
       expect(sendCountC, 'two concurrent sweeps must produce exactly one send for the racing estimate').toBe(1);

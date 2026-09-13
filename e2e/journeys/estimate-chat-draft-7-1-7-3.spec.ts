@@ -153,7 +153,9 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
     // #1133 — poll for the row (the create transaction commits on
     // res.finish, after the response is flushed).
     let estimateRow: Record<string, unknown> | undefined;
-    for (let i = 0; i < 20 && !estimateRow; i++) {
+    // #1133 — up to 10s: under three lanes' load a fresh row has 404'd for
+    // >2s (7.10 run 2, seven consecutive misses); a read retry, never a re-write.
+    for (let i = 0; i < 100 && !estimateRow; i++) {
       const rows = await queryAsTenant(
         tenantA.tenantId,
         `SELECT e.id, e.tenant_id, e.status
@@ -211,7 +213,7 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
     await expect(page.getByText(/Approved/i).first()).toBeVisible({ timeout: 20_000 });
 
     let estimateRow2: Record<string, unknown> | undefined;
-    for (let i = 0; i < 20 && !estimateRow2; i++) {
+    for (let i = 0; i < 100 && !estimateRow2; i++) {
       const rows = await queryAsTenant(
         tenantA.tenantId,
         `SELECT e.id FROM estimates e

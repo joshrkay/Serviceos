@@ -589,12 +589,23 @@ export async function drawSignature(page: Page): Promise<void> {
  * response is flushed). */
 export async function pollForRow<T>(
   fn: () => Promise<T | null | undefined>,
-  timeoutMs = 2_000,
+  // 2s is the #1133 note's expectation; with three lanes' stacks on one Mac
+  // a just-created customer's GET 404'd for the whole 2s window (7.10 run
+  // 2: seven consecutive 404s). Allow 10s and REPORT anything over 2s so
+  // the observed commit lag lands in the PR body as evidence, not silence.
+  timeoutMs = 10_000,
 ): Promise<T> {
   const start = Date.now();
   for (;;) {
     const v = await fn();
-    if (v) return v;
+    if (v) {
+      const took = Date.now() - start;
+      if (took > 2_000) {
+        // eslint-disable-next-line no-console
+        console.log(`[8.7 #1133] read-after-write lag: row readable after ${took}ms (> the 2s the workaround assumes)`);
+      }
+      return v;
+    }
     if (Date.now() - start > timeoutMs) {
       throw new Error(`pollForRow timed out after ${timeoutMs}ms (#1133 workaround)`);
     }

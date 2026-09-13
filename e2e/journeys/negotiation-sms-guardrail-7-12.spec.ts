@@ -250,7 +250,8 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       // ── Durable proof, tenant A (V1, unconfigured): exactly one capture-
       //    class 'callback' proposal in 'draft', one sms_routed audit row ───
       let proposalsA: Record<string, unknown>[] = [];
-      for (let i = 0; i < 20 && proposalsA.length === 0; i++) {
+      // #1133 — up to ~9s (see fixture pollForRow note): a read retry only.
+      for (let i = 0; i < 60 && proposalsA.length === 0; i++) {
         proposalsA = await queryAsTenant(
           tenantA.tenantId,
           `SELECT id, proposal_type, status, source_context, summary
@@ -283,7 +284,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       // ── Durable proof, tenant B (V2, opted-in): the SAME shape, but the
       //    evaluation ran (discountAuditMetadata carries a real decision) ───
       let proposalsB: Record<string, unknown>[] = [];
-      for (let i = 0; i < 20 && proposalsB.length === 0; i++) {
+      for (let i = 0; i < 60 && proposalsB.length === 0; i++) {
         proposalsB = await queryAsTenant(
           tenantB.tenantId,
           `SELECT id, proposal_type, status, source_context, summary
