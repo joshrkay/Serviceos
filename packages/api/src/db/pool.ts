@@ -2,6 +2,46 @@ import { Pool, PoolConfig } from 'pg';
 
 const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
 
+/**
+ * #1090 — keep a server-side connection kill off `uncaughtException`.
+ *
+ * `pool.on('error')` below only covers clients that are IDLE IN THE POOL:
+ * pg-pool attaches its `idleListener` on release and REMOVES it again on
+ * checkout (`pg-pool/index.js` `_acquireClient`: `client.removeListener(
+ * 'error', idleListener)`). So for the whole time a repository/worker holds a
+ * client, the client has no `'error'` listener at all.
+ *
+ * That matters because a connection the SERVER kills does not surface as a
+ * rejected query promise. `pg/lib/client.js` `_handleErrorMessage` routes a
+ * backend ErrorResponse to the active query — but a transaction sitting idle
+ * (awaiting a slow upstream, or between two statements) has no active query,
+ * so it falls through to `_handleErrorEvent`, which does
+ * `this.emit('error', err)`. The socket close that follows emits a second one
+ * ("Connection terminated unexpectedly"). With no listener, Node re-throws
+ * both as `uncaughtException` — and index.ts treats that as FATAL and drains
+ * the process. No `try/catch` around the caller's `await` can ever see it,
+ * because the error is never delivered to a promise.
+ *
+ * Production hits this whenever Postgres terminates a held connection:
+ * `idle_in_transaction_session_timeout` (middleware/tenant-context.ts sets it
+ * LOCAL on every request transaction, and managed providers set it
+ * server-side), an admin terminate, a failover, or a network reset.
+ *
+ * The guard attaches ONE permanent listener per client, on `'connect'` (which
+ * pg-pool emits once per newly created client), so the event always has a
+ * handler whichever side of a checkout it arrives on. It changes nothing else:
+ * pg still marks the client unqueryable, still rejects any in-flight query,
+ * and still discards the client on release (`_release` removes a client whose
+ * `_queryable` is false), so callers keep seeing ordinary, catchable errors.
+ */
+function guardClientErrors(pool: Pool, label: string): void {
+  pool.on('connect', (client) => {
+    client.on('error', (err: Error) => {
+      process.stderr.write(`pg ${label} client connection error: ${err.message}\n`);
+    });
+  });
+}
+
 export function createPool(): Pool {
   const databaseUrl = process.env.DATABASE_URL;
 
@@ -37,6 +77,9 @@ export function createPool(): Pool {
   pool.on('error', (err) => {
     process.stderr.write(`pg pool background error: ${err.message}\n`);
   });
+  // …and the same for clients that are CHECKED OUT, which the handler above
+  // does not cover (#1090 — see guardClientErrors).
+  guardClientErrors(pool, 'pool');
 
   return pool;
 }
@@ -68,5 +111,9 @@ export function createDirectPool(): Pool | null {
   pool.on('error', (err) => {
     process.stderr.write(`pg direct pool background error: ${err.message}\n`);
   });
+  // The direct pool is exactly where a held connection lives longest (session
+  // advisory locks across a whole sweep, LISTEN/NOTIFY), so it needs the
+  // checked-out guard at least as much as the main pool (#1090).
+  guardClientErrors(pool, 'direct pool');
   return pool;
 }

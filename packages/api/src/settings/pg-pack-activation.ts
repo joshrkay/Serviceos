@@ -69,11 +69,20 @@ export class PgPackActivationRepository
     });
   }
 
+  /**
+   * #1095 — tenant-scoped. This ran under `withClient` with `WHERE id = $N`
+   * alone: no tenant predicate and no `app.current_tenant_id` GUC, so neither
+   * SQL nor RLS scoped the write and any id from any tenant was accepted. Now
+   * `withTenantTransaction` (which sets the GUC and, under RLS_RUNTIME_ROLE,
+   * the least-privilege role) plus an explicit `AND tenant_id = $N`; a row
+   * belonging to another tenant matches nothing and returns null.
+   */
   async update(
+    tenantId: string,
     id: string,
     updates: Partial<TenantPackActivation>
   ): Promise<TenantPackActivation | null> {
-    return this.withClient(async (client) => {
+    return this.withTenantTransaction(tenantId, async (client) => {
       const setClauses: string[] = [];
       const values: unknown[] = [];
       let paramIndex = 1;
@@ -95,18 +104,21 @@ export class PgPackActivationRepository
       }
 
       if (setClauses.length === 0) {
+        // Read-back branch — scoped too, or it would return another tenant's
+        // row through an otherwise no-op call.
         const existing = await client.query(
-          `SELECT * FROM pack_activations WHERE id = $1`,
-          [id]
+          `SELECT * FROM pack_activations WHERE id = $1 AND tenant_id = $2`,
+          [id, tenantId]
         );
         return existing.rows.length > 0 ? rowToActivation(existing.rows[0]) : null;
       }
 
       values.push(id);
+      values.push(tenantId);
 
       const result = await client.query(
         `UPDATE pack_activations SET ${setClauses.join(', ')}
-         WHERE id = $${paramIndex}
+         WHERE id = $${paramIndex} AND tenant_id = $${paramIndex + 1}
          RETURNING *`,
         values
       );
