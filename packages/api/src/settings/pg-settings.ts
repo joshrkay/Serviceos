@@ -683,4 +683,59 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       return mapRow(result.rows[0]);
     });
   }
+
+  async ensureActiveVerticalPack(
+    tenantId: string,
+    packId: string,
+    bootstrapAiModel: string,
+  ): Promise<TenantSettings> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // ONE statement: insert the row, or append the pack to the stored
+      // list on conflict. See SettingsRepository.ensureActiveVerticalPack —
+      // it must neither raise 23505 (which would abort the caller's shared
+      // request transaction) nor read-modify-write the mirror (which drops
+      // a concurrent different-pack activation's entry).
+      //
+      // `jsonb_set` on COALESCE(…, '{}') keeps every other terminology key;
+      // the CASE makes the append idempotent, so re-activating a pack does
+      // not repeat it in the list.
+      const result = await client.query(
+        `INSERT INTO tenant_settings (
+           id, tenant_id, business_name, estimate_prefix, invoice_prefix,
+           next_estimate_number, next_invoice_number, default_payment_term_days,
+           terminology_preferences, ai_model
+         )
+         VALUES (
+           gen_random_uuid(), $1, '', 'EST-', 'INV-', 1001, 1001, 30,
+           jsonb_build_object('_activeVerticalPacks', jsonb_build_array($2::text)),
+           $3
+         )
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           terminology_preferences = jsonb_set(
+             COALESCE(tenant_settings.terminology_preferences, '{}'::jsonb),
+             '{_activeVerticalPacks}',
+             CASE
+               WHEN COALESCE(
+                      tenant_settings.terminology_preferences->'_activeVerticalPacks',
+                      '[]'::jsonb
+                    ) @> jsonb_build_array($2::text)
+                 THEN COALESCE(
+                        tenant_settings.terminology_preferences->'_activeVerticalPacks',
+                        '[]'::jsonb
+                      )
+               ELSE COALESCE(
+                      tenant_settings.terminology_preferences->'_activeVerticalPacks',
+                      '[]'::jsonb
+                    ) || jsonb_build_array($2::text)
+             END
+           ),
+           -- Never overwrite a tenant's chosen model; only fill a null one.
+           ai_model   = COALESCE(tenant_settings.ai_model, $3),
+           updated_at = now()
+         RETURNING *`,
+        [tenantId, packId, bootstrapAiModel],
+      );
+      return mapRow(result.rows[0]);
+    });
+  }
 }
