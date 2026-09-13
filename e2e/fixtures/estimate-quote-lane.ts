@@ -15,8 +15,6 @@
 import { Page, APIRequestContext, expect } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 import { Client } from 'pg';
-import { installClerkStub } from '../helpers/clerk-stub';
-import { blockExternalHosts } from '../helpers/api-mocks/shell';
 
 /** Copied verbatim from e2e/journeys/digest-toggle.spec.ts — skip the
  * welcome/what's-new walkthrough overlays so they never intercept a click. */
