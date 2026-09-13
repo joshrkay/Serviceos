@@ -381,38 +381,54 @@ describe('Postgres integration — daily digest SEND (9.6)', () => {
   // file's job is the SEND/audit gap, not the enumerator, which is proven
   // elsewhere and cited, not duplicated).
 
-  it.fails(
-    'DESIRED (row 9.6): a digest send writes an audit row via PgAuditRepository, read back by entity — it does not',
-    async () => {
-      const tenantId = await seedTenant({
-        timezone: 'America/Chicago',
-        digestTime: '18:00',
-        enabled: true,
-        channel: 'sms',
-      });
-      const ownerId = await ownerIdOf(tenantId);
-      const { customerId, locationId } = await seedCustomerAndLocation(tenantId, ownerId);
-      await seedJobCompletedNow(tenantId, customerId, locationId, ownerId);
+  it('a digest send writes NO audit row via PgAuditRepository — the row\'s real gap, pinned directly rather than via it.fails', async () => {
+    // NOT it.fails: an expected-failing test here would also report as
+    // "expected failure" if the SEND itself regressed (sweep throws, no
+    // dispatch written, digest lookup null) — the setup/precondition
+    // failure would satisfy it.fails just as well as the intended gap,
+    // silently stopping this test from proving anything (xhawk-ai review,
+    // PR #1111). Asserting the send preconditions as ordinary expectations
+    // first means a send regression fails this test LOUDLY; asserting the
+    // current absence of an audit row directly (not inverted) means a
+    // future fix that adds the write forces this test to be updated rather
+    // than quietly starting to fail for the wrong reason.
+    const tenantId = await seedTenant({
+      timezone: 'America/Chicago',
+      digestTime: '18:00',
+      enabled: true,
+      channel: 'sms',
+    });
+    const ownerId = await ownerIdOf(tenantId);
+    const { customerId, locationId } = await seedCustomerAndLocation(tenantId, ownerId);
+    await seedJobCompletedNow(tenantId, customerId, locationId, ownerId);
 
-      await runDailyDigestSweep({
-        settingsRepo,
-        digestRepo,
-        computeDeps: realComputeDeps(),
-        listTenantIds: async () => [tenantId],
-        delivery: new InMemoryDeliveryProvider(),
-        dispatchRepo,
-        publicBaseUrl: 'https://app.example.com',
-        logger,
-        now: () => DUE_NOW,
-      });
+    const result = await runDailyDigestSweep({
+      settingsRepo,
+      digestRepo,
+      computeDeps: realComputeDeps(),
+      listTenantIds: async () => [tenantId],
+      delivery: new InMemoryDeliveryProvider(),
+      dispatchRepo,
+      publicBaseUrl: 'https://app.example.com',
+      logger,
+      now: () => DUE_NOW,
+    });
 
-      const digest = await digestRepo.findByTenantAndDate(tenantId, LOCAL_DATE);
-      // `DailyDigestWorkerDeps` has no `auditRepo` field — the sweep never
-      // calls `auditRepo.create` for the send. This is what SHOULD exist
-      // (mirroring `notification.thank_you_sms.sent`), asserted here so a
-      // future fix flips this test green instead of being invented now.
-      const events = await auditRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
-      expect(events.length).toBeGreaterThan(0);
-    },
-  );
+    // Preconditions: the send actually happened. If any of these regress,
+    // THIS assertion fails — not the audit assertion below.
+    expect(result.sent).toBe(1);
+    const digest = await digestRepo.findByTenantAndDate(tenantId, LOCAL_DATE);
+    expect(digest).not.toBeNull();
+    const dispatches = await dispatchRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
+    expect(dispatches).toHaveLength(1);
+
+    // The gap: `DailyDigestWorkerDeps` has no `auditRepo` field — the sweep
+    // never calls `auditRepo.create` for the send (mirroring
+    // `notification.thank_you_sms.sent` in thank-you-sms-worker.ts, which
+    // the digest has no equivalent of). Asserted directly, current-state:
+    // empty. A future fix that adds the write should make this specific
+    // assertion fail, prompting the test to be updated to expect the row.
+    const events = await auditRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
+    expect(events).toHaveLength(0);
+  });
 });

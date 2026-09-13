@@ -60,18 +60,29 @@ RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
   --reporter=verbose test/integration/daily-digest-send-9-6.test.ts
 
  ✓ an enabled sms-channel tenant with real activity today gets exactly ONE
-   digest send, read back from message_dispatches                    156ms
+   digest send, read back from message_dispatches                    139ms
  ✓ digestChannel 'none' is a documented skip — the digest stores but
-   sends nothing                                                      43ms
+   sends nothing                                                      39ms
  ✓ a tenant with the digest disabled gets no row and no send at all    20ms
  ✓ T3 — two tenants in different timezones are BOTH due at one instant
-   and each gets its OWN send, with no cross-tenant leakage            97ms
- ✓ DESIRED (row 9.6): a digest send writes an audit row via
-   PgAuditRepository, read back by entity — it does not (expected fail) 61ms
+   and each gets its OWN send, with no cross-tenant leakage           107ms
+ ✓ a digest send writes NO audit row via PgAuditRepository — the row's
+   real gap, pinned directly rather than via it.fails                  44ms
 
  Test Files  1 passed (1)
-      Tests  4 passed | 1 expected fail (5)
+      Tests  5 passed (5)
 ```
+
+**Post-open review fix (xhawk-ai, PR #1111):** the audit-gap test originally
+used `it.fails`. Valid finding — `it.fails` also reports "expected failure"
+if the SEND itself regressed (sweep throws, no dispatch, digest lookup null),
+silently stopping the test from proving anything once a send regression
+landed. Rewritten as an ordinary test: send preconditions (`result.sent`,
+digest exists, exactly one dispatch) are asserted normally so a send
+regression fails loudly and separately, and the audit gap is asserted
+directly as current-state (`events` empty) rather than inverted — a future
+fix that adds the write will make that specific assertion fail, forcing the
+test to be updated instead of it flipping green silently.
 
 ### Evidence class & tenant grade
 
@@ -106,12 +117,13 @@ fixed" reflection *inside* the digest's own content — never written to record
 that a send happened. Contrast `thank-you-sms-worker.ts`, which calls
 `deps.auditRepo.create(...)` with `notification.thank_you_sms.sent` /
 `.suppressed` immediately after its send (`thank-you-sms-worker.ts:391-407`).
-The digest has no equivalent. Pinned as `it.fails` (no product code written —
-TEST-ONLY lane):
+The digest has no equivalent. Pinned as a direct, current-state assertion
+(no product code written — TEST-ONLY lane; see the post-open review fix
+below for why not `it.fails`):
 
 ```
-it.fails('DESIRED (row 9.6): a digest send writes an audit row via
-  PgAuditRepository, read back by entity — it does not', …)
+const events = await auditRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
+expect(events).toHaveLength(0);
 ```
 
 ### Kept-container dumps (plain `pgvector/pgvector:pg16`, `EXTERNAL_TEST_DB_URL`)
