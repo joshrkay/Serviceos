@@ -88,6 +88,17 @@ async function draftTieredEstimateViaOwnerUi(
   await page.goto(`/estimates/new?jobId=${job.jobId}`);
   await expect(page.getByLabel('description-0')).toBeVisible({ timeout: 20_000 });
 
+  // The Job picker is a controlled `<select value={form.jobId} required>`
+  // (EstimateForm.tsx:397-400). Until its <option> for the deep-linked job
+  // is rendered (jobs page + enrichment fetch), the DOM value is '' and the
+  // browser's native `required` check blocks submit silently (focus jumps
+  // to the select, no handler, no POST — exactly what runs 5/6 recorded).
+  // Wait for the option, pick it explicitly, and assert the value.
+  const jobSelect = page.getByLabel(/^Job \*/);
+  await expect(jobSelect.locator(`option[value="${job.jobId}"]`)).toHaveCount(1, { timeout: 20_000 });
+  await jobSelect.selectOption(job.jobId);
+  await expect(jobSelect).toHaveValue(job.jobId);
+
   await fillRow(page, 0, { description: BASIC.description, price: BASIC.price, group: TIER_GROUP, defaultSelected: true });
   await page.getByRole('button', { name: /\+ Add row/i }).click();
   await fillRow(page, 1, { description: PREMIUM.description, price: PREMIUM.price, group: TIER_GROUP });
@@ -110,6 +121,7 @@ async function draftTieredEstimateViaOwnerUi(
     (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/estimates',
     { timeout: 20_000 },
   );
+  await expect(jobSelect).toHaveValue(job.jobId); // still selected after the row edits
   await page.getByRole('button', { name: /^Create estimate$/ }).click();
   const createdRes = await created;
   expect(createdRes.status(), `POST /api/estimates -> ${createdRes.status()} ${await createdRes.text()}`).toBe(201);

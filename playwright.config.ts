@@ -427,7 +427,10 @@ export default defineConfig<DevAuthFixtures>({
           command: 'cd packages/api && npm run dev',
           url: `${apiURL}/health`,
           reuseExistingServer: !isCI,
-          timeout: 120_000,
+          // §8.7 lane Q (#995) — additive: a cold ts-node boot of the api
+          // exceeds 120s when several lanes' stacks share one Mac (observed:
+          // no "[startup]" line within the window). Unset ⇒ 120s as before.
+          timeout: Number(process.env.E2E_WEBSERVER_TIMEOUT_MS) || 120_000,
           stdout: 'pipe',
           stderr: 'pipe',
           env: apiWebServerEnv,
@@ -438,7 +441,7 @@ export default defineConfig<DevAuthFixtures>({
             : 'cd packages/web && npm run dev',
           url: baseURL,
           reuseExistingServer: !isCI,
-          timeout: 120_000,
+          timeout: Number(process.env.E2E_WEBSERVER_TIMEOUT_MS) || 120_000,
           stdout: 'pipe',
           stderr: 'pipe',
           env: webServerEnv,

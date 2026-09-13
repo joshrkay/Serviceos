@@ -32,7 +32,7 @@ merged §8.3/§8.4 phone lanes document.
 ```
 DBU=$(TESTCONTAINERS_RYUK_DISABLED=true npx tsx e2e/fixtures/setup-test-db.ts | grep -oE 'postgres://[^ ]+' | tail -1)
 PORT=38520 E2E_API_URL=http://localhost:38520 PUBLIC_API_URL=http://localhost:38520 \
-E2E_WEB_PORT=38521 VITE_API_URL=http://localhost:38520 E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0 \
+E2E_WEB_PORT=38521 VITE_API_URL=http://localhost:38520 E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0 E2E_WEBSERVER_TIMEOUT_MS=300000 \
 CLERK_DEV_HMAC_TOKENS=true DB_SSL=false DATABASE_URL=$DBU E2E_USE_TEST_DB=true \
 VITE_CLERK_PUBLISHABLE_KEY=pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA== \
 STRIPE_SECRET_KEY=sk_test_e2e_stub_placeholder STRIPE_WEBHOOK_SECRET=whsec_e2e_stub_secret_1234567890 \
@@ -46,6 +46,11 @@ second lane-Q session was booting its own api on 38510 in this same worktree
 dedicated-port rule exists precisely so two Playwright stacks never adopt
 each other's servers.
 
+`E2E_WEBSERVER_TIMEOUT_MS` is also new (additive, unset ⇒ the old 120s): with
+three lanes' ts-node apis cold-booting on one Mac, the api's compile alone
+overran Playwright's 120s webServer window (the log stops at ".env not
+found" with no `[startup]` line) — a harness limit, not a product one.
+
 `E2E_WEB_PORT` is new in `playwright.config.ts` (additive, unset ⇒ unchanged):
 the legacy `chromium` pair's vite always bound 5173 and `reuseExistingServer`
 adopted a sibling lane's vite — whose `/api` + `/public` proxy points at THAT
@@ -57,6 +62,67 @@ PRODUCTION `createHermeticMockLLMGateway()` (factory.ts:470) — that is what
 7.1/7.3 draft against, not a test double.
 
 ## Runs (raw output appended per spec below)
+
+### 7.7 — `estimate-stale-revision-approve-7-7.spec.ts`
+
+Run 1 (09:20Z, before `logRows`): the first two attempts on this Mac were
+infrastructure, not the spec — (1) webServer "exited early" (a sibling lane
+held the fixed devauth port; fixed with `E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0`),
+(2) `locator.click` timeout on a disabled "Accept estimate" (the sheet needs
+a signature; `drawSignature` added, as in 7.6). Then:
+
+```
+✓  1 [chromium] › e2e/journeys/estimate-stale-revision-approve-7-7.spec.ts:93:7 › stale-version approve is refused; current version is accepted (7.7) — real Postgres › a revision mid-session refuses the stale approve (409/banner, status stays sent); the current version then accepts; T1 isolation on a second tenant running the same scenario (9.3s)
+  1 passed (1.3m)
+EXIT=0
+```
+
+Screenshots: `8-7-quote-r5/7.7-{a,b}-before-revise.png`,
+`7.7-{a,b}-stale-refused.png`, `7.7-{a,b}-current-accepted.png`.
+
+### 7.4 + 7.5 — `estimate-tiers-addons-7-4-7-5.spec.ts`
+
+Runs 1–6 were all harness, none of them the product: EADDRINUSE from the
+previous run's lingering api (runner now waits for the pair to free), the
+"What's new in Rivet" walkthrough dialog intercepting the first click
+(`signInOwnerBrowser` seeds the walkthrough-seen keys), a vite that never
+came up on the shared 38511 (pair moved to 38520/38521), and — the real
+find — the owner form's `<select value={form.jobId} required>` blocking
+submit via native validation until its `<option>` renders (focus jumped to
+the select, no handler, no POST; the fixed assistant bar covering the
+submit at 390×844 was a second, independent cause). Run 7:
+
+```
+✓  1 [chromium] › e2e/journeys/estimate-tiers-addons-7-4-7-5.spec.ts:163:7 › good/better/best tiers with add-ons (7.4) + headline-over-default-selection (7.5) — real Postgres › owner drafts 3 tiers + an add-on through the real form; the public page headline equals the default tier before any click; the customer picks Premium+Warranty; all rows + the accepted selection survive; a neighbour tenant is untouched (T2) (12.6s)
+  1 passed (1.9m)
+EXIT=0
+```
+
+Row dumps (from the run's stdout, `[8.7 row-dump]`):
+
+```
+7.4 estimate_line_items after owner-form draft (tenant A)
+  Basic Package     group_key=Service Tier is_optional=true is_default_selected=true  unit_price_cents=20000
+  Premium Package   group_key=Service Tier is_optional=true is_default_selected=false unit_price_cents=35000
+  Deluxe Package    group_key=Service Tier is_optional=true is_default_selected=false unit_price_cents=50000
+  Extended Warranty group_key=null         is_optional=true is_default_selected=false unit_price_cents=4500
+
+7.4/7.5 owner GET /api/estimates/:id after accept
+  status=accepted  estimateNumber=EST-0001  version=1
+  lineItems: 4 (all four rows still present)
+  totals: { subtotalCents: 39500, discountCents: 0, taxCents: 0, totalCents: 39500 }   ← Premium 35000 + Warranty 4500, NOT the 109500 sum of all four
+  acceptedSelection: [c64bf615… (Premium Package), 1eb78ddc… (Extended Warranty)]
+  acceptedByName="Tier Picker Customer" acceptedByIp="::1" acceptedSignatureData="data:image/png;base64,…" (real canvas PNG)
+7.4 estimate_line_items after accept — all four rows survive: 4 rows
+7.4/7.5 T2 tenant B estimate untouched: status=sent
+```
+
+First-render headline on the public page: `$200.00` visible, `$1,095.00`
+absent (7.5 first half); after Premium + Warranty: `$395.00`.
+
+Screenshots: `7.4-7.5-owner-draft-tiers.png`, `7.4-7.5-owner-draft-tiers-tenantB.png`,
+`7.5-headline-before-selection.png`, `7.5-accepted-non-default-selection.png`,
+`7.4-owner-detail-accepted-rows.png`.
 
 <!-- RUNS -->
 
