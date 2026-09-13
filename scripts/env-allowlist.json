@@ -43,6 +43,7 @@
     { "name": "DISPATCH_FANOUT_ENABLED", "reason": "Opt-in Redis fan-out (app.ts:4955 requires the literal 'true'); unset = in-process dispatch, the current behaviour." },
     { "name": "DRAIN_TIMEOUT_MS", "reason": "Shutdown drain window. app.ts defaults to 25000ms." },
     { "name": "SHUTDOWN_FORCE_EXIT_MS", "reason": "Force-exit backstop. index.ts:13 defaults to 30000ms." },
+    { "name": "SWEEP_DRAIN_TIMEOUT_MS", "reason": "Window shutdown waits for an in-flight sweep before pool.end (#1090). app.ts:2266 defaults to 5000ms, well inside DRAIN_TIMEOUT_MS/SHUTDOWN_FORCE_EXIT_MS above; unset = that default." },
     { "name": "ELEVENLABS_VOICE_ID", "reason": "tts-provider.ts:210 constructs ElevenLabsTtsProvider without a voice id when unset, using the provider account's default voice." },
     { "name": "FINANCING_ENABLED", "reason": "Opt-in flag (config.ts:387). Unset AND no WISETACK_API_KEY = financing off; if either is set, config validation then REQUIRES WISETACK_WEBHOOK_SECRET, so this cannot half-enable." },
     { "name": "GIT_SHA", "reason": "Sentry release tag (app.ts:751); falls back to RAILWAY_GIT_COMMIT_SHA, then undefined. Build metadata, not configuration." },

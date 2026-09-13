@@ -1,0 +1,16 @@
+              tenant_id               | entity_type  |              entity_id               | channel | status | provider  |       idempotency_key        
+--------------------------------------+--------------+--------------------------------------+---------+--------+-----------+------------------------------
+ c3e35fb2-8e62-49ea-8a32-5b426ede6c31 | daily_digest | 5bca973c-e27a-47f7-b21b-6b66c196dd2a | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ dfb8787d-2e4c-481f-80d3-cde065fb4d38 | daily_digest | ed0af6df-677d-46ce-8237-70061cf6ef69 | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 9050b9d7-691d-47eb-9641-e7808a5634fa | daily_digest | 2054d224-d958-4993-8efa-4203a1aaf489 | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 8b6feba3-91e7-454c-b371-47ef18918a28 | daily_digest | 0f3fe5d5-a6f4-4b6b-a3bd-678d81ea031a | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ bead8180-beb7-4f32-912f-8350649b34c4 | daily_digest | 0b483643-90de-42ed-9e63-e0e818e66181 | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 570ecc83-1fff-4fca-9fa9-677717c0322b | daily_digest | 0c9f10b6-8ed8-4d4f-977f-168c47097c1e | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 4fa46a3c-c673-484c-8c4a-90077860a3d7 | daily_digest | 0992131c-bbe7-4907-ab28-236111e3e15d | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 9bbea85e-26ca-4e6c-be01-ec0f5b02f16d | daily_digest | a3d960b0-d59a-4cd7-b279-0127d4e93678 | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 1186aab4-88b3-44b5-a0ea-0a1bf7114129 | daily_digest | 1463bb43-ecbd-4a7a-9a4d-516b7c9b4d33 | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ e2858909-a986-4a65-8713-90f8f1324c33 | daily_digest | 512174b0-55be-4e2a-b94c-5b345a991426 | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ a857fa51-45a4-49cf-b0b3-f1ee658aa879 | daily_digest | fd6b73f1-9a44-4a6c-a648-b64024b5a00a | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+ 8eb022e7-f8a9-4103-8af1-866e4e10d94a | daily_digest | 7d1f1eaf-fb20-4d26-800b-b33dab2f128e | sms     | sent   | in-memory | daily_digest:2026-06-11:1of1
+(12 rows)
+
