@@ -49,7 +49,7 @@ SELECT provider_data->>'phoneE164'               AS phone_e164,
   FROM tenant_integrations
  WHERE provider = 'twilio'
    AND provider_data->>'phoneE164' IS NOT NULL
-   AND coalesce(provider_data->>'stub', 'false') <> 'true'
+   AND provider_data->>'phoneE164' NOT LIKE '+1500555____'
  GROUP BY 1
 HAVING count(*) > 1
  ORDER BY claim_count DESC, phone_e164;
@@ -86,7 +86,7 @@ below are reproduced in the migration's own header comment.
     ON tenant_integrations (provider, (provider_data->>'phoneE164'))
     WHERE provider = 'twilio'
       AND provider_data->>'phoneE164' IS NOT NULL
-      AND coalesce(provider_data->>'stub', 'false') <> 'true';
+      AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
 `,
 ```
 
@@ -117,34 +117,47 @@ CREATE UNIQUE INDEX CONCURRENTLY uq_tenant_integrations_twilio_phone_e164
   ON tenant_integrations (provider, (provider_data->>'phoneE164'))
   WHERE provider = 'twilio'
     AND provider_data->>'phoneE164' IS NOT NULL
-    AND coalesce(provider_data->>'stub', 'false') <> 'true';
+    AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
 ```
 
-### 3b. Deviation from the specified predicate — the `stub` carve-out
+### 3b. Deviation from the specified predicate — the test-exchange carve-out
 
 The predicate I was given was `WHERE provider = 'twilio' AND
-provider_data->>'phoneE164' IS NOT NULL`. I added a third clause. The reason:
+provider_data->>'phoneE164' IS NOT NULL`. There is a third clause. Why:
 
-`workers/provision-twilio.ts:29` defines
+`workers/provision-twilio.ts:29` defines `STUB_DEV_PHONE_E164 =
+'+15005550006'` and assigns **that same number to every tenant** provisioned
+without real Twilio credentials. It is a Twilio *magic test number* — not
+dialable, never routes a real inbound call — so uniqueness over it protects
+nothing, while without a carve-out the **second dev/CI tenant onward would
+fail to provision**.
 
-```ts
-const STUB_DEV_PHONE_E164 = '+15005550006';
-```
+**The carve-out keys on the EXCHANGE, not the `stub: true` marker** those
+rows also carry, matching `isTwilioTestNumber`
+(`telephony/phone-policy.ts`): 500-555 is not an assignable NANP block, so
+"there is no legitimate tenant line to false-positive on".
 
-and assigns **that same number to every tenant** provisioned without real
-Twilio credentials, tagging the row `stub: true`
-(`provision-twilio.ts:147`). It is a Twilio *magic test number* — not
-dialable, and it never routes a real inbound call, so it is not part of this
-defect. Under the literal predicate, the **second dev/CI tenant onward would
-fail to provision**, breaking local onboarding and the test suite.
+The first version of this migration keyed on the marker. Josh's verification
+gate on PR #1120 is what showed that to be wrong, in both directions:
 
-Real DIDs are never tagged `stub` (the worker refuses to persist a magic
-number as a real line — `provision-twilio.ts:342`, #880), so the carve-out
-cannot be used to smuggle a real duplicate past the index. A test pins this
-both ways (§5, "still allows every dev tenant to share the Twilio magic stub
-number").
+1. **Rows hold the magic number with NO marker.** His pre-flight against a
+   real container returned `+15005550006 × 4`. `public-intake.test.ts` names
+   the shape outright — "rows predating it" — so production plausibly holds
+   several, and a marker-keyed index would **fail at CREATE INDEX and block
+   the deploy**, which is the exact failure this migration is supposed to
+   avoid.
+2. **The marker was also a loophole the other way.** `stub: true` set on a
+   REAL dialable number would have exempted it from the constraint entirely.
+   Pinned now by "a number outside that exchange is still constrained, marker
+   or not".
 
----
+`LIKE` rather than a regex is deliberate: `\d` and `\+` inside the migration's
+JS template literal are swallowed as JS escapes before Postgres ever sees
+them.
+
+**The pre-flight in §2 and the index predicate must stay character-for-character
+identical.** If they drift the pre-flight stops predicting whether the index
+can be built, which is its only job. Both carry a comment saying so.
 
 ## 4. The provisioning path surfaces the violation cleanly
 
@@ -388,6 +401,53 @@ first.** It returns the same rows the index build would choke on.
 
 ---
 
+### 6.6 The predicate change, proven on a container (§3b)
+
+Four legacy magic-number rows seeded with **no** `stub` key — the shape Josh's
+gate found in the wild:
+
+```
+INSERT 0 4      -- accepted WITH the index already in place
+```
+
+The two pre-flights over that identical data:
+
+```
+--- OLD, stub-marker predicate (what Josh saw — would block the deploy): ---
+  phone_e164  | claim_count
+--------------+-------------
+ +15005550001 |           2
+ +15005550006 |           6
+(2 rows)
+
+--- NEW, test-exchange predicate: ---
+ phone_e164 | claim_count
+------------+-------------
+(0 rows)
+```
+
+Real DIDs are still constrained:
+
+```
+INSERT 0 1
+ERROR:  duplicate key value violates unique constraint "uq_tenant_integrations_twilio_phone_e164"
+DETAIL:  Key (provider, (provider_data ->> 'phoneE164'::text))=(twilio, +14155550123) already exists.
+```
+
+Index as built (`!~~` is Postgres's NOT LIKE):
+
+```
+CREATE UNIQUE INDEX uq_tenant_integrations_twilio_phone_e164 ON public.tenant_integrations USING btree (provider, ((provider_data ->> 'phoneE164'::text))) WHERE ((provider = 'twilio'::text) AND ((provider_data ->> 'phoneE164'::text) IS NOT NULL) AND ((provider_data ->> 'phoneE164'::text) !~~ '+1500555____'::text))
+```
+
+The other half of §3b — that a `stub: true` marker no longer exempts a real
+number — is proven by the integration test "a number outside that exchange is
+still constrained, marker or not", not by this dump. An attempt to show it
+here returned `UPDATE 0`, because the row it would have marked never existed
+(its INSERT had already been refused).
+
+---
+
 ## 7. Other checks run
 
 ```
@@ -475,7 +535,7 @@ $ npx tsc --project tsconfig.build.json --noEmit
 
 $ RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts
  Test Files  263 passed (263)
-      Tests  1545 passed | 8 expected fail | 1 skipped (1554)   # after §4a
+      Tests  1548 passed | 8 expected fail | 1 skipped (1557)   # after §4a + §3b
 
 $ npx vitest run
  Test Files  1195 passed | 5 skipped (1200)

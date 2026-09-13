@@ -6703,10 +6703,14 @@ export const MIGRATIONS = {
   //     FROM tenant_integrations
   //    WHERE provider = 'twilio'
   //      AND provider_data->>'phoneE164' IS NOT NULL
-  //      AND coalesce(provider_data->>'stub', 'false') <> 'true'
+  //      AND provider_data->>'phoneE164' NOT LIKE '+1500555____'
   //    GROUP BY 1
   //   HAVING count(*) > 1
   //    ORDER BY claim_count DESC, phone_e164;
+  //
+  // The WHERE clause must stay character-for-character identical to the
+  // index's below: if the two drift, the pre-flight stops predicting whether
+  // the index can be built, which is the only job it has.
   //
   // Zero rows → this migration applies cleanly. Any rows → reconcile them
   // first (decide which tenant keeps the DID; the loser's phoneE164 must be
@@ -6728,21 +6732,34 @@ export const MIGRATIONS = {
   //     ON tenant_integrations (provider, (provider_data->>'phoneE164'))
   //     WHERE provider = 'twilio'
   //       AND provider_data->>'phoneE164' IS NOT NULL
-  //       AND coalesce(provider_data->>'stub', 'false') <> 'true';
+  //       AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
   //
-  // ── Why the `stub` carve-out ───────────────────────────────────────────
+  // ── Why the test-exchange carve-out ────────────────────────────────────
   // workers/provision-twilio.ts assigns the SAME Twilio magic test number
   // (+15005550006, STUB_DEV_PHONE_E164) to EVERY tenant provisioned without
-  // real Twilio credentials, tagging the row `stub: true`. Those numbers are
-  // not dialable and never route a real inbound call, so they are not part of
-  // the defect — but without this predicate the second dev/CI tenant onward
-  // would fail to provision. Real DIDs are never tagged `stub`.
+  // real Twilio credentials. Those numbers are not dialable and never route a
+  // real inbound call, so uniqueness over them protects nothing — and without
+  // a carve-out the second dev/CI tenant onward would fail to provision.
+  //
+  // The carve-out is the EXCHANGE, not the `stub: true` marker those rows
+  // also carry, matching isTwilioTestNumber (telephony/phone-policy.ts):
+  // 500-555 is not an assignable NANP block, so "there is no legitimate
+  // tenant line to false-positive on". Two reasons the marker is the wrong
+  // key, both found on PR #1120:
+  //   1. Rows hold the magic number WITHOUT the marker — the marker postdates
+  //      them (public-intake.test.ts calls them "rows predating it"), and a
+  //      pre-flight against a real database returned four of them. Keying on
+  //      the marker would fail CREATE INDEX on those rows and block a deploy.
+  //   2. Keying on the marker is a loophole in the other direction: `stub:
+  //      true` on a REAL dialable number would exempt it from the constraint.
+  // LIKE rather than a regex deliberately — `\d` and `\+` inside this
+  // template literal would be swallowed as JS escapes before Postgres saw them.
   '274_tenant_integrations_unique_twilio_did': `
     CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_integrations_twilio_phone_e164
       ON tenant_integrations (provider, (provider_data->>'phoneE164'))
       WHERE provider = 'twilio'
         AND provider_data->>'phoneE164' IS NOT NULL
-        AND coalesce(provider_data->>'stub', 'false') <> 'true';
+        AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
   `,
 };
 

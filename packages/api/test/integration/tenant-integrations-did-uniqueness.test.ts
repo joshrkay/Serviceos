@@ -133,6 +133,51 @@ describe('Postgres integration — one tenant per DID (#1061)', () => {
     expect(rows[0].n).toBeGreaterThanOrEqual(1);
   });
 
+  /**
+   * Josh's verification gate on PR #1120 ran the pre-flight against a
+   * container and got `+15005550006 × 4` — magic-test-number rows carrying NO
+   * `stub: true` marker. `public-intake.test.ts` names that shape outright
+   * ("rows predating it"), so production may hold several, and under a
+   * stub-marker-only predicate the CREATE INDEX would fail and block a deploy.
+   *
+   * The exchange, not the marker, is what makes a number un-routable:
+   * `isTwilioTestNumber` (telephony/phone-policy.ts) treats all of
+   * `+1500555xxxx` as test-only because 500-555 is not an assignable NANP
+   * block — "there is no legitimate tenant line to false-positive on". So
+   * uniqueness over those numbers protects nothing, and the index matches
+   * that predicate instead.
+   */
+  it('allows legacy magic-number rows with NO stub marker to coexist', async () => {
+    const legacy = { phoneE164: '+15005550006' }; // no `stub` key at all
+    const t1 = await createTestTenant(pool);
+    const t2 = await createTestTenant(pool);
+
+    await expect(insertTwilioIntegration(pool, t1.tenantId, legacy)).resolves.toBeUndefined();
+    await expect(insertTwilioIntegration(pool, t2.tenantId, legacy)).resolves.toBeUndefined();
+  });
+
+  it('covers the whole +1500555xxxx test exchange, not just the one stub number', async () => {
+    const other = { phoneE164: '+15005550001' };
+    const t1 = await createTestTenant(pool);
+    const t2 = await createTestTenant(pool);
+
+    await expect(insertTwilioIntegration(pool, t1.tenantId, other)).resolves.toBeUndefined();
+    await expect(insertTwilioIntegration(pool, t2.tenantId, other)).resolves.toBeUndefined();
+  });
+
+  it('a number outside that exchange is still constrained, marker or not', async () => {
+    // The carve-out must not become a way to smuggle a real duplicate past
+    // the index by setting `stub: true` on a dialable number.
+    const real = { phoneE164: '+15125559904', stub: true };
+    const t1 = await createTestTenant(pool);
+    const t2 = await createTestTenant(pool);
+
+    await insertTwilioIntegration(pool, t1.tenantId, real);
+    await expect(insertTwilioIntegration(pool, t2.tenantId, real)).rejects.toMatchObject({
+      code: '23505',
+    });
+  });
+
   it('still allows every dev tenant to share the Twilio magic stub number', async () => {
     // workers/provision-twilio.ts assigns the SAME magic test number
     // (+15005550006, tagged `stub: true`) to every tenant provisioned without
