@@ -431,40 +431,34 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
   test('T1 — an owner cannot PATCH another tenant\'s user (the last-owner guard\'s endpoint is itself tenant-scoped)', async ({
     page,
   }) => {
-    // ── CONFIRMED SECURITY DEFECT, NOT a test-harness artifact ──────────────
-    // `PgUserRepository.update` (packages/api/src/users/pg-user.ts:299-335)
-    // runs `UPDATE users SET ... WHERE id = $N AND deleted_at IS NULL` with
-    // NO `tenant_id` predicate — unlike every sibling method in the SAME
-    // file (`findById`, `findByMobileNumber` — whose own doc-comment reads
-    // "Defense-in-depth: the WHERE clause filters on tenant_id explicitly
-    // in addition to RLS... even if this runs in a context where RLS were
-    // ever misconfigured" — and `demoteOwnerIfAnotherExists`, all of which
-    // DO include `AND tenant_id = $N`). This is the repository backing
-    // `PATCH /api/users/:id` (routes/users.ts, gated only by
-    // `requirePermission('users:edit_role')`), so today ANY owner in ANY
-    // tenant can change the role (or name/canFieldServe) of ANY user id in
-    // ANY OTHER tenant — up to and including demoting another tenant's
-    // sole owner, a direct tenant-isolation break on a role-mutation
-    // endpoint. `packages/api/src/db/rls-runtime-role.ts` documents that
-    // Postgres RLS is the intended second layer (`RLS_RUNTIME_ROLE=true` is
-    // a hard prod/staging requirement) and would likely mask this in a
-    // correctly configured deployment, but the explicit predicate is
-    // supposed to hold as defense-in-depth regardless — this test proves
-    // it currently does NOT, empirically: this run performed the
-    // cross-tenant PATCH against real Postgres and confirmed via a direct
-    // DB read that tenant B's owner's `role` column was actually changed
-    // to `dispatcher` by tenant A's request.
+    // ── REGRESSION GUARD for the #1092 cross-tenant privilege escalation ───
+    // This leg was written here as a pinned RED (`test.fail(true, …)`) when
+    // the owner-surfaces lane discovered, empirically at real Postgres, that
+    // `PgUserRepository.update` ran
+    // `UPDATE users SET … WHERE id = $N AND deleted_at IS NULL` with NO
+    // `tenant_id` predicate — unlike every sibling method in the same file
+    // (`findById`, `findByMobileNumber` — whose own doc comment promises
+    // "Defense-in-depth: the WHERE clause filters on tenant_id explicitly in
+    // addition to RLS" — `demoteOwnerIfAnotherExists`, and the rest). It backs
+    // `PATCH /api/users/:id`, gated only by
+    // `requirePermission('users:edit_role')`, so ANY owner could change the
+    // role (or name / canFieldServe) of ANY user in ANY other tenant, sole
+    // owners included: this very request returned 200 and demoted tenant B's
+    // owner.
     //
-    // Product code is out of scope for this lane (no changes under
-    // packages/api/src) — reported here instead of invented around, per
-    // CLAUDE.md's own convention for a real, confirmed defect: "a real
-    // defect gets a failing test marked test.fail() and a report line."
-    // Recommended fix (one line, matching every sibling method): add
-    // `AND tenant_id = $N` to the UPDATE's WHERE clause.
-    test.fail(
-      true,
-      'CONFIRMED SECURITY DEFECT: PgUserRepository.update has no tenant_id predicate — see the comment above this test.',
-    );
+    // Fixed in #1092 / PR #1093 by adding `AND tenant_id = $N` to that WHERE,
+    // so the pin is gone and the leg now stands as an ordinary passing
+    // regression test — the cross-tenant PATCH must 404 and leave tenant B's
+    // row untouched, checked through the API and by reading the row straight
+    // out of Postgres.
+    //
+    // The predicate, not RLS, is what this proves. `RLS_RUNTIME_ROLE=true` is
+    // a hard prod/staging boot requirement (SEC-01,
+    // packages/api/src/shared/config.ts) and would have masked the defect in a
+    // correctly configured deployment — but this hermetic harness runs with the
+    // flag OFF, exactly like local dev, which is why the hole was reachable
+    // here and why the app-layer predicate has to hold on its own. See
+    // docs/audit/lane-reports/1092-users-update-tenant-predicate.md.
     // ── Tenant A ──────────────────────────────────────────────────────────
     const ownerASub = `user_e2e_ownera2_${randomUUID().replace(/-/g, '')}`;
     const ownerAEmail = `ownera2-${Date.now()}@serviceos-hermetic.test`;

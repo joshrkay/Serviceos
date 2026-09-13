@@ -227,6 +227,7 @@ import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { recordApiError } from './analytics/posthog';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
+import { createInflightSweeps } from './workers/inflight-sweeps';
 import { createStorageProvider } from './files/storage-provider';
 import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
@@ -369,6 +370,7 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
+import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
@@ -2258,7 +2260,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // parallel track.
     moneyReconciliation: 590026,
   } as const;
-  const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
+  // #1090 — every leader-gated sweep run is registered here so `runShutdown`
+  // can wait for the tick that is ALREADY RUNNING before it closes the pool.
+  // Clearing the intervals only stops the next one.
+  const inflightSweeps = createInflightSweeps();
+  const SWEEP_DRAIN_TIMEOUT_MS = Number(process.env.SWEEP_DRAIN_TIMEOUT_MS) || 5_000;
+  const runAsLeader = (lockKey: number, work: () => Promise<void>): Promise<void> =>
+    inflightSweeps.track(runLeaderTick(lockKey, work));
+  const runLeaderTick = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
     if (!pool) {
       // In-memory dev: no coordination needed (sweeps no-op with no tenants).
@@ -3741,51 +3750,46 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   });
   const realtimeHealthCircuit = new RealtimeHealthCircuit();
 
-  // Per-tenant Twilio token + tenant-id resolvers, keyed off
-  // tenant_integrations. Falls back to the legacy single-account env
-  // vars when no row matches — preserves the in-production single-tenant
-  // flow while unblocking inbound calls on provisioned subaccounts.
-  // Reads the table outside withTenantTransaction (FORCE RLS) using a
-  // dedicated transaction with set_config('app.current_tenant_id', ...).
-  // Both helpers issue cross-tenant lookups against tenant_integrations
-  // (we don't know the tenant yet — that's what we're looking up).
-  // Migration 074 added a permissive read policy gated on
-  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
-  // transaction; SET LOCAL drops on COMMIT and the connection returns
-  // to the pool clean.
+  // Per-tenant Twilio credential + tenant-id resolvers, keyed off
+  // tenant_integrations. Both issue cross-tenant lookups (an inbound webhook
+  // arrives with no tenant context — finding the tenant is the point), which
+  // migration 074's permissive read policy gates on app.system_lookup = 'true',
+  // set LOCAL inside a short transaction so it drops on COMMIT and the
+  // connection returns to the pool clean.
+  //
+  // #1072 — the credential resolver is keyed on the DIALLED NUMBER, not on the
+  // payload's AccountSid: the token that may sign for a number is the one
+  // belonging to the tenant that owns it. See
+  // telephony/twilio-webhook-credential.ts for the full resolution order and
+  // the refusal cases.
+  const resolveTwilioWebhookCredential = createTwilioWebhookCredentialResolver(
+    pool ? { pool } : {},
+  );
+
+  /**
+   * Plain `AccountSid → token` view of the same resolver, for the two callers
+   * that are NOT inbound-webhook verification and must not be bound to a
+   * dialled number:
+   *   - the outbound REST client (`createTwilioCallRedirector`), which needs a
+   *     token to CALL Twilio with, not one to check a signature against;
+   *   - the outbound call-bridge callbacks, whose `To` is the CUSTOMER's
+   *     number, so binding on it would refuse a legitimate callback the moment
+   *     a tenant dials a number another tenant happens to own.
+   * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
+   * when we hold one, deployment token otherwise.
+   */
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
-    const encKey = process.env.TENANT_ENCRYPTION_KEY;
-    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
-    try {
-      const { decrypt } = await import('./integrations/crypto');
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ auth_token_primary_enc: string | null }>(
-          `SELECT auth_token_primary_enc FROM tenant_integrations
-           WHERE provider = 'twilio' AND subaccount_sid = $1
-           LIMIT 1`,
-          [accountSid],
-        );
-        await client.query('COMMIT');
-        const enc = result.rows[0]?.auth_token_primary_enc;
-        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
-      } catch (err) {
-        // Roll back before release: the outer catch swallows the error to a
-        // fallback, so without this the connection would silently return to
-        // the pool with the transaction (and system_lookup GUC) still open.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_AUTH_TOKEN;
+    const decision = await resolveTwilioWebhookCredential(
+      accountSid ? { accountSid } : {},
+    );
+    if (typeof decision === 'object') {
+      return decision.outcome === 'verify'
+        ? decision.authToken
+        : process.env.TWILIO_AUTH_TOKEN;
     }
+    return decision ?? process.env.TWILIO_AUTH_TOKEN;
   };
 
   const resolveTenantIdByPhoneNumber = async (
@@ -3807,7 +3811,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
       } catch (err) {
-        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        // Same dirty-connection guard as the credential resolver's lookups.
         await client.query('ROLLBACK').catch(() => {});
         throw err;
       } finally {
@@ -3825,11 +3829,42 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the env-var seam in dev (with a loud WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
+  // GETs (no Clerk session) are accepted, and BEFORE the telephony router
+  // below because that router's signature middleware runs for EVERY
+  // /api/telephony/* request, matched route or not: mounting whisper after it
+  // would subject this route to the router's dialled-number binding no matter
+  // what credential view were passed here.
+  //
+  // #1072 — whisper deliberately keeps the AccountSid-only view. This is the
+  // OUTBOUND dispatcher leg of an escalation, so its `To` is the DISPATCHER's
+  // number, not the tenant's inbound DID (and Twilio sends the standard call
+  // params as QUERY parameters on a GET, so the binding would see it). If that
+  // dispatcher number is also some other tenant's DID — two businesses under
+  // one owner, a sister branch, an answering service that is itself a tenant —
+  // binding on `To` picks THAT tenant, finds the originating subaccount
+  // foreign, and refuses, killing the whisper on an escalation; an error on
+  // this URL risks dropping the call entirely (see whisper-route.ts's header).
+  // Found by Codex review on PR #1082. The signature check still gates the
+  // route — whisper TwiML carries PII (caller name, phone, intent).
+  //
+  // The middleware is scoped to the whisper path rather than the router mount
+  // so a POST to /voice does not pay a second, weaker signature check on its
+  // way past.
+  app.use(
+    '/api/telephony/whisper',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+  );
+  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
-      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
@@ -4007,20 +4042,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       callMeBackRepo,
       businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
-  );
-
-  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
-  // signed GETs (no Clerk session) are accepted. Path is under
-  // /api/telephony so it's co-located with the main telephony webhook.
-  // Twilio signature verification is enforced to prevent unauthenticated
-  // access to whisper TwiML (which contains PII: caller name, phone, intent).
-  app.use(
-    '/api/telephony',
-    requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
-    whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
   // Owner→customer click-to-call. The authed POST /api/calls is wired only when
@@ -4431,7 +4452,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             handlePendingDialogueSilence: (session, tenantId) =>
               twilioAdapter.handlePendingDialogueSilence(session, tenantId),
             // Resolve the account bound by the verified inbound webhook.
-            authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+            authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
             // Section 7 (CRITICAL): wire the gather adapter's shared Map so
             // Dial TwiML built inside handleEscalateWithContext is visible to
@@ -7126,6 +7147,24 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // fan-out, quota, and the refactored cache) after the cache flush and
       // BEFORE the pg pool drains, in the same shutdown slot as the cache.
       await shutdownRedisClients();
+      // #1090 — the sweep tick that was ALREADY RUNNING when the intervals
+      // were cleared is still awaiting its compose/send round-trip. Give it a
+      // bounded window to finish BEFORE the pool closes: otherwise pool.end()
+      // below pulls the pool out from under it and every remaining repository
+      // call throws "Cannot use a pool after calling end on the pool" — once
+      // per tenant/row, and, worse, after a recovery SMS may already have gone
+      // out but before it was stamped `sent` (the next boot re-sends it).
+      // Bounded so a sweep wedged on a hung upstream can't hold the process
+      // past index.ts's force-exit backstop; we proceed either way.
+      {
+        const { drained, remaining } = await inflightSweeps.drain(SWEEP_DRAIN_TIMEOUT_MS);
+        if (!drained) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[app] ${remaining} sweep(s) still in flight after ${SWEEP_DRAIN_TIMEOUT_MS}ms — closing the pool anyway`,
+          );
+        }
+      }
       if (pool) {
         await Promise.race([
           pool.end(),

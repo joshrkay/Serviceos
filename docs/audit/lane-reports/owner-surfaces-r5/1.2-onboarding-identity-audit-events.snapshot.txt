@@ -1,5 +1,5 @@
               tenant_id               |     event_type      |   entity_type   |              entity_id               
 --------------------------------------+---------------------+-----------------+--------------------------------------
- 8a07eea1-837c-4be7-b348-0a9345069312 | tenant.identity_set | tenant_settings | 8a07eea1-837c-4be7-b348-0a9345069312
+ 9f3feaa2-3320-4e3c-98ce-d027c98a1542 | tenant.identity_set | tenant_settings | 9f3feaa2-3320-4e3c-98ce-d027c98a1542
 (1 row)
 
