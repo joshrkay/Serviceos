@@ -271,25 +271,41 @@ async function queryAsTenant(
 }
 
 /**
- * The signature canvas (EstimateApprovalPage.tsx's SignatureCanvas) binds
- * only onMouseDown/onMouseMove/onMouseUp — no pointer events — so it must be
- * driven with real `mousedown`/`mousemove`/`mouseup` DOM events, not
- * `page.mouse.*`'s OS-level virtual-input trajectory. `page.mouse` proved
- * flaky in review (a real bug report, not a planted one): its stroke can
- * land while the approval sheet's own slide-up transition is still running,
- * or simply miss the canvas's attached listeners in headless Chromium.
- * Dispatching the events directly on the element — same technique the
- * component itself listens for, just skipping the OS input layer — is
- * deterministic instead of retried.
+ * Correction (Codex P1, PR #1087): an earlier version of this helper drove
+ * the canvas with `canvas.dispatchEvent('mousedown'/'mousemove'/'mouseup')`
+ * directly. That was flagged, correctly — `dispatchEvent` invokes the
+ * element's handlers straight from JS, skipping Playwright/Chromium's real
+ * actionability and hit-testing pipeline, so the test could stay green even
+ * if the canvas were covered, off-viewport, or otherwise unreachable by an
+ * actual customer. That's exactly the kind of gap rung 5 exists to rule
+ * out, so it's fixed for real here rather than re-argued: `page.mouse` is
+ * used again (genuine, hit-tested synthetic input, dispatched through
+ * Chromium the same way a real cursor would be), and the flakiness Josh
+ * reproduced against `page.mouse` earlier is fixed at its actual root
+ * cause instead of worked around. That flakiness was never about missing
+ * listeners — SignatureCanvas's onMouseDown/onMouseMove/onMouseUp handlers
+ * fire fine on real mouse events — it was stale coordinates: the approval
+ * sheet slides in via a 0.3s CSS `animation` (`sheetUp`, EstimateApprovalPage.tsx),
+ * not a `transition`, so there is no `transitionend` to await, and reading
+ * the canvas's bounding box before that animation settles can capture a
+ * position it has since moved away from. Polling the box until it stops
+ * changing — rather than guessing a fixed delay — removes that race
+ * without touching product code.
  */
 async function drawSignature(page: Page): Promise<void> {
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
-  // Let the sheet's own CSS transition (sheetUp, 0.3s) finish before the
-  // canvas's bounding box is read — a stroke computed mid-transition can
-  // target coordinates the canvas hasn't settled into yet.
-  await page.waitForTimeout(350);
-  const box = await canvas.boundingBox();
+
+  let box = await canvas.boundingBox();
+  for (let i = 0; i < 40 && box; i++) {
+    await page.waitForTimeout(50);
+    const next = await canvas.boundingBox();
+    if (next && box.x === next.x && box.y === next.y && box.width === next.width) {
+      box = next;
+      break;
+    }
+    box = next;
+  }
   expect(box).not.toBeNull();
   const points = [
     { x: box!.x + box!.width * 0.2, y: box!.y + box!.height * 0.5 },
@@ -297,32 +313,12 @@ async function drawSignature(page: Page): Promise<void> {
     { x: box!.x + box!.width * 0.5, y: box!.y + box!.height * 0.65 },
     { x: box!.x + box!.width * 0.65, y: box!.y + box!.height * 0.4 },
   ];
-  await canvas.dispatchEvent('mousedown', {
-    clientX: points[0].x,
-    clientY: points[0].y,
-    bubbles: true,
-    cancelable: true,
-    button: 0,
-    buttons: 1,
-  });
+  await page.mouse.move(points[0].x, points[0].y);
+  await page.mouse.down();
   for (const p of points.slice(1)) {
-    await canvas.dispatchEvent('mousemove', {
-      clientX: p.x,
-      clientY: p.y,
-      bubbles: true,
-      cancelable: true,
-      button: 0,
-      buttons: 1,
-    });
+    await page.mouse.move(p.x, p.y, { steps: 5 });
   }
-  await canvas.dispatchEvent('mouseup', {
-    clientX: points[points.length - 1].x,
-    clientY: points[points.length - 1].y,
-    bubbles: true,
-    cancelable: true,
-    button: 0,
-    buttons: 0,
-  });
+  await page.mouse.up();
   await expect(page.getByRole('button', { name: /^Clear$/i })).toBeVisible({ timeout: 5_000 });
 }
 

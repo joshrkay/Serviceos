@@ -145,7 +145,11 @@ describe('P8-012 attachMediaStreamServer', () => {
     const sig = twilio.getExpectedTwilioSignature('subaccount-token', `https://api.example.com${path}`, {});
     const res = await sendUpgrade(port, path, sig, `127.0.0.1:${port}`);
     expect(res.statusCode).toBe(101);
-    expect(authTokenGetter).toHaveBeenCalledWith({ accountSid });
+    // #1072 — the upgrade also hands the resolver the tenant the call already
+    // belongs to (read off the in-process session the credential-bound /voice
+    // webhook created), so the credential checked is that tenant's own rather
+    // than whichever tenant owns the presented AccountSid.
+    expect(authTokenGetter).toHaveBeenCalledWith({ accountSid, tenantId: 'tenant-subaccount' });
   });
 
   it.each(['master-token', 'other-subaccount-token', ''])('rejects a scoped call signed with %s', async token => {

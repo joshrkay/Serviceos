@@ -256,17 +256,37 @@ test.describe('onboarding identity (1.2) — real Postgres', () => {
       businessName?: string;
       hourlyRateCents?: number;
       serviceAreaRadius?: number;
+      timezone?: string;
+      businessHours?: Record<string, { open: string; close: string } | null>;
+      jobBufferMinutes?: number;
     };
     expect(settingsBBody.businessName).toBe('Tenant B Untouched HVAC');
     expect(settingsBBody.hourlyRateCents).toBe(9900);
     expect(settingsBBody.serviceAreaRadius).toBe(99);
+    // ── Codex review: the T2 claim is that B's ENTIRE divergent
+    //    configuration survived A's onboarding untouched, not just these
+    //    three fields — a regression clobbering B's timezone, hours, or
+    //    buffer would otherwise stay green. ─────────────────────────────────
+    expect(settingsBBody.timezone, 'B\'s timezone must remain its divergent America/Denver').toBe('America/Denver');
+    expect(settingsBBody.jobBufferMinutes, 'B\'s job buffer must be untouched').toBe(30);
+    expect(settingsBBody.businessHours?.mon, 'B\'s business hours must be untouched').toEqual({
+      open: '08:00',
+      close: '17:00',
+    });
+    expect(settingsBBody.businessHours?.sat ?? null, 'B\'s business hours (sat) must be untouched').toBeNull();
+    expect(settingsBBody.businessHours?.sun ?? null, 'B\'s business hours (sun) must be untouched').toBeNull();
 
     // ── Browser reachability: reload and confirm the onboarding gate has
-    //    moved past the identity step (the form is gone / a next step
-    //    renders) — a full-page reload re-derives status from Postgres,
-    //    not client-side state. ──────────────────────────────────────────────
+    //    moved past the identity step onto a CONCRETE next step (not just
+    //    "the identity form is gone", which a loading spinner or an error
+    //    screen would also satisfy) — a full-page reload re-derives status
+    //    from Postgres, not client-side state. `OnboardingShell` derives the
+    //    active step from `/api/onboarding/status`'s polled `currentStep`;
+    //    after identity that's `pack`, rendering `PackStep`'s "Pick your
+    //    trade" heading. ─────────────────────────────────────────────────────
     await page.reload();
     await expect(page.getByLabel('Business name')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Pick your trade' })).toBeVisible({ timeout: 15_000 });
     await page.screenshot({
       path: 'docs/audit/lane-reports/owner-surfaces-r5/1.2-onboarding-identity-after-reload.png',
       fullPage: true,
