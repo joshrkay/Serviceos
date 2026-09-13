@@ -252,11 +252,23 @@ the minute roll over first. Run 4:
 EXIT=0
 ```
 
-Asserted at real Postgres (row dumps added for the second pass): tenant A
-`reminder_count=1`, `last_reminder_at` set, exactly one
-`estimate.reminder_sent` audit row; tenant B `reminder_count=0`, no audit
-row; estimate C `reminder_count=1` after the race with exactly one
-in-memory delivery.
+Row dumps (from the second pass, which carries `logRows`):
+
+```
+7.10 first sweep result + in-memory deliveries
+  result: { tenants: 2, reminders: 1, failed: 0 }
+  sentEmails: [ { to: "nudgeme-d9254f67@example.test", subject: "Estimate EST-0001 from Acme HVAC 7.10" } ]   sentSms: 0
+7.10 tenant A estimates row after the sweep
+  [ { reminder_count: 1, last_reminder_at: "2026-09-17T18:15:00.268Z" } ]      ← the sweep's injected clock (+4d)
+7.10 tenant A audit_events estimate.reminder_sent
+  [ { event_type: "estimate.reminder_sent" } ]                                  ← exactly one
+7.10 T4 tenant B estimates row (viewed by its customer → never nudged)
+  [ { reminder_count: 0 } ]
+7.10 two CONCURRENT sweeps on estimate C — per-call results
+  r1: { tenants: 1, reminders: 1, failed: 0 }   r2: { tenants: 1, reminders: 0, failed: 1 }   ← exactly one send; the loser refused by the claim gate
+7.10 estimate C row after the race
+  [ { reminder_count: 1 } ]                                                     ← cadence advanced once
+```
 
 ### 7.1 + 7.3 — `estimate-chat-draft-7-1-7-3.spec.ts`
 
@@ -360,9 +372,24 @@ Screenshots: `7.12-tenantB-discount-policy-configured.png`,
    (first attempt of this pass: the pin hit a #1133 404 "Estimate not found: token" and "unexpectedly passed" — it now polls the public token first)
 ```
 
-<!-- PASS2 -->
+```
+7.10  ✓ …:114:7 › the real sweep nudges exactly one eligible estimate per tenant, records the audit + reminder bookkeeping, two concurrent sweep calls do not double-send, and a second (untouched) tenant proves T4 fanout (2.0m)
+      ✘ …:291:7 › the real setInterval-driven automatic trigger cannot be observed … — pinned, not faked (405ms)   [test.fail(): expected — POST /api/workers/estimate-reminder/run → 404]
+      2 passed (3.2m)  EXIT=0
+```
 
-<!-- RUNS -->
+```
+7.1/3 ✓ …:103:7 › a dictated draft_estimate persists a real estimate + audit event through the owner Assistant chat; a mixed-pricing draft shows per-line badges and the DB CHECK refuses a bogus pricing_source; a neighbour tenant never sees any of it (T2) (18.9s)
+      ✘ …:308:7 › the "customer photo" leg has NO owner-facing transmission path — pinned, not faked (331ms)   [test.fail(): expected]
+      2 passed (1.4m)  EXIT=0
+```
+
+```
+7.12  ✓ …:215:7 › a discount-asking SMS always produces a capture-class owner callback + audit row, never a price to the customer, under two divergent tenant configs (T1·T3) (17.8s)   1 passed (1.3m)  EXIT=0
+```
+
+All seven specs: green twice, each in its own Playwright process under the
+shared test lock, on the 38610/38611 pair against the 32808 testcontainer.
 
 ## What is NOT proven (pinned, not faked)
 
