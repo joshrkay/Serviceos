@@ -194,12 +194,14 @@ test.describe('job-photo-attach (5.2) — real Postgres, real technician screen'
   const canRun =
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
-    process.env.E2E_USE_TEST_DB === 'true';
+    process.env.E2E_USE_TEST_DB === 'true' &&
+    !!process.env.DATABASE_URL;
   test.skip(
     !canRun,
     'Requires the local webServer pair against a real Postgres: leave E2E_BASE_URL unset, ' +
       'set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok), and E2E_USE_TEST_DB=true with DATABASE_URL ' +
-      'pointing at the test container.',
+      'exported from `npx tsx e2e/fixtures/setup-test-db.ts` (this spec\'s own `Pool` and the API ' +
+      'webServer both need DATABASE_URL directly — E2E_USE_TEST_DB alone is not enough).',
   );
 
   let pool: Pool;
