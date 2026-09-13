@@ -115,7 +115,6 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       headers: init.headers as Record<string, string>,
       body: String(init.body ?? ''),
     });
-    if (url.includes('/v1/accounts/')) {
     const method = (init.method ?? '').toUpperCase();
 
     if (method === 'GET' && /^https:\/\/api\.stripe\.com\/v1\/accounts\/[^/?]+$/.test(url)) {
@@ -136,7 +135,6 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         }),
       };
     }
-    if (url.includes('/v1/terminal/locations')) {
     if (method === 'POST' && url === 'https://api.stripe.com/v1/terminal/locations') {
       return {
         ok: true,
@@ -145,7 +143,6 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         json: async () => ({ id: CREATED_LOCATION_ID }),
       };
     }
-    if (url.includes('/v1/terminal/connection_tokens')) {
     if (method === 'POST' && url === 'https://api.stripe.com/v1/terminal/connection_tokens') {
       return {
         ok: true,
