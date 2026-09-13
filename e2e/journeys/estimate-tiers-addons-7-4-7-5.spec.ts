@@ -9,6 +9,7 @@ import {
   bootstrapOwner,
   seedJob,
   queryAsTenant,
+  drawSignature,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -221,7 +222,12 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
 
     await page.getByRole('button', { name: /Accept this estimate/i }).click();
     await page.getByPlaceholder('Your full name').fill('Tier Picker Customer');
-    await page.getByRole('button', { name: /^Accept estimate$/ }).click();
+    // The submit button stays disabled until a signature is drawn (matches
+    // e2e/journeys/public-estimate-approve-sign.spec.ts's 7.6 flow).
+    await drawSignature(page);
+    const submitTier = page.getByRole('button', { name: /^Accept estimate$/ });
+    await expect(submitTier).toBeEnabled();
+    await submitTier.click();
     await expect(page.getByRole('heading', { name: /Estimate accepted!/i })).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: join(SCREENSHOT_DIR, '7.5-accepted-non-default-selection.png') });
 

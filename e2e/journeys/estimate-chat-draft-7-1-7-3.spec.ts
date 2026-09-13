@@ -1,9 +1,13 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { installClerkStub } from '../helpers/clerk-stub';
+import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import {
   API_URL,
+  WELCOME_SEEN_KEY,
+  WHATS_NEW_SEEN_KEY,
   bootstrapOwner,
   seedJob,
   seedCatalogItem,
@@ -11,6 +15,28 @@ import {
   queryRaw,
   type Tenant,
 } from '../fixtures/estimate-quote-lane';
+
+/**
+ * Sign the REAL browser in as this bootstrapped owner — the same recipe
+ * e2e/journeys/digest-toggle.spec.ts and dispatch-board.spec.ts use
+ * (installClerkStub + the two walkthrough-seen localStorage keys so no
+ * overlay intercepts a click + blockExternalHosts), before the first goto.
+ */
+async function signInBrowser(page: Page, baseURL: string, tenant: Tenant): Promise<void> {
+  await installClerkStub(page, { signedIn: true, sub: tenant.sub, token: tenant.jwt });
+  await page.addInitScript(
+    ({ welcomeKey, whatsNewKey }) => {
+      try {
+        localStorage.setItem(welcomeKey, '1');
+        localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
+      } catch {
+        /* storage unavailable — overlays may show; the assertions still hold */
+      }
+    },
+    { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
+  );
+  await blockExternalHosts(page, baseURL);
+}
 
 /**
  * #995 §8.7 Quote — rung-5 reachability, rows 7.1 and 7.3.
@@ -129,7 +155,8 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
         tenantA.tenantId,
         `SELECT e.id, e.tenant_id, e.status
            FROM estimates e
-           JOIN customers c ON c.id = e.customer_id
+           JOIN jobs j ON j.id = e.job_id
+           JOIN customers c ON c.id = j.customer_id
           WHERE e.tenant_id = $1 AND c.first_name = 'Sarah'
           ORDER BY e.created_at DESC LIMIT 1`,
         [tenantA.tenantId],
@@ -185,7 +212,8 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
       const rows = await queryAsTenant(
         tenantA.tenantId,
         `SELECT e.id FROM estimates e
-           JOIN customers c ON c.id = e.customer_id
+           JOIN jobs j ON j.id = e.job_id
+           JOIN customers c ON c.id = j.customer_id
           WHERE e.tenant_id = $1 AND c.first_name = 'Priya'
           ORDER BY e.created_at DESC LIMIT 1`,
         [tenantA.tenantId],

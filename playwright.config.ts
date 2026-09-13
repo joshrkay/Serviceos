@@ -12,7 +12,12 @@ import type { DevAuthFixtures } from './e2e/helpers/dev-auth';
  */
 
 const isCI = !!process.env.CI;
-const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
+// §8.7 lane Q (#995) — additive: a dedicated web port for the legacy
+// `chromium` pair so parallel lanes on one machine never adopt each other's
+// vite dev server through `reuseExistingServer` (an orphaned foreign vite on
+// 5173 proxies `/api` to the WRONG api port). Unset ⇒ byte-identical to before.
+const legacyWebPort = process.env.E2E_WEB_PORT;
+const baseURL = process.env.E2E_BASE_URL ?? `http://localhost:${legacyWebPort ?? '5173'}`;
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
 
@@ -428,7 +433,9 @@ export default defineConfig<DevAuthFixtures>({
           env: apiWebServerEnv,
         },
         {
-          command: 'cd packages/web && npm run dev',
+          command: legacyWebPort
+            ? `cd packages/web && npm run dev -- --port ${legacyWebPort} --host localhost --strictPort`
+            : 'cd packages/web && npm run dev',
           url: baseURL,
           reuseExistingServer: !isCI,
           timeout: 120_000,

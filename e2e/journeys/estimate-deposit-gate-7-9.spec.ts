@@ -10,6 +10,7 @@ import {
   seedJob,
   queryAsTenant,
   stripeSignature,
+  drawSignature,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -175,7 +176,12 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
     await expect(page.getByTestId('estimate-pay-deposit-cta')).toHaveCount(0);
     await page.getByRole('button', { name: /Accept this estimate/i }).click();
     await page.getByPlaceholder('Your full name').fill('Deferred Deposit Customer');
-    await page.getByRole('button', { name: /^Accept estimate$/ }).click();
+    // The submit button stays disabled until a signature is drawn (matches
+    // e2e/journeys/public-estimate-approve-sign.spec.ts's 7.6 flow).
+    await drawSignature(page);
+    const submitDeposit = page.getByRole('button', { name: /^Accept estimate$/ });
+    await expect(submitDeposit).toBeEnabled();
+    await submitDeposit.click();
     await expect(page.getByRole('heading', { name: /Estimate accepted!/i })).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: join(SCREENSHOT_DIR, '7.9-after-approval-accepted-tenantB.png') });
 

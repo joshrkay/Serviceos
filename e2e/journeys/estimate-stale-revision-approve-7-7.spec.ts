@@ -9,6 +9,7 @@ import {
   bootstrapOwner,
   seedJob,
   queryAsTenant,
+  drawSignature,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -67,7 +68,13 @@ async function createAndSendEstimate(
 async function acceptViaPublicPage(page: Page, name: string): Promise<void> {
   await page.getByRole('button', { name: /Accept this estimate/i }).click();
   await page.getByPlaceholder('Your full name').fill(name);
-  await page.getByRole('button', { name: /^Accept estimate$/ }).click();
+  // The submit button stays disabled until a signature is drawn (matches
+  // e2e/journeys/public-estimate-approve-sign.spec.ts's 7.6 flow) — without
+  // this the click times out waiting for an element that never enables.
+  await drawSignature(page);
+  const submit = page.getByRole('button', { name: /^Accept estimate$/ });
+  await expect(submit).toBeEnabled();
+  await submit.click();
 }
 
 test.describe('stale-version approve is refused; current version is accepted (7.7) — real Postgres', () => {

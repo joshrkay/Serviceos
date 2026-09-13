@@ -300,6 +300,25 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       // (the discount-decision metadata call) that tenant A's unconfigured
       // path never takes.
       expect(auditB.length).toBeGreaterThan(auditA.length);
+      // …and that extra row carries the REAL evaluated decision
+      // (`discountAuditMetadata`, discount-proposal-content.ts) against the
+      // REAL quoted total ($225 sent above) — the SMS-surface analog of the
+      // ALLOW/REJECT decision negotiation-guardrail.test.ts proves at the
+      // service layer. Whichever non-CLARIFY branch a "$20 off $225" ask
+      // lands in under a 10% cap, it is a decision, never a concession: the
+      // proposal above is still 'draft' and the estimate total is unchanged.
+      const decisionRows = auditB.filter(
+        (r) => typeof (r.metadata as { decisionKind?: unknown } | null)?.decisionKind === 'string',
+      );
+      expect(decisionRows).toHaveLength(1);
+      const decision = decisionRows[0]!.metadata as { decisionKind: string; quotedCents: number };
+      expect(['ALLOW', 'NEEDS_APPROVAL', 'REJECT_WITH_COUNTER']).toContain(decision.decisionKind);
+      expect(decision.quotedCents).toBe(seedB.totalCentsBefore);
+      // Tenant A (unconfigured, V1) never evaluated anything — no row of
+      // its carries a decision at all.
+      expect(
+        auditA.filter((r) => (r.metadata as { decisionKind?: unknown } | null)?.decisionKind !== undefined),
+      ).toHaveLength(0);
 
       const estB = await request.get(`${API_URL}/api/estimates/${seedB.estimateId}`, {
         headers: tenantB.authHeaders,
