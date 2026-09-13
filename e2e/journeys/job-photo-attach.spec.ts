@@ -195,13 +195,19 @@ test.describe('job-photo-attach (5.2) — real Postgres, real technician screen'
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
     process.env.E2E_USE_TEST_DB === 'true' &&
-    !!process.env.DATABASE_URL;
+    !!process.env.DATABASE_URL &&
+    process.env.CLERK_DEV_HMAC_TOKENS === 'true';
   test.skip(
     !canRun,
     'Requires the local webServer pair against a real Postgres: leave E2E_BASE_URL unset, ' +
-      'set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok), and E2E_USE_TEST_DB=true with DATABASE_URL ' +
+      'set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok), E2E_USE_TEST_DB=true with DATABASE_URL ' +
       'exported from `npx tsx e2e/fixtures/setup-test-db.ts` (this spec\'s own `Pool` and the API ' +
-      'webServer both need DATABASE_URL directly — E2E_USE_TEST_DB alone is not enough).',
+      'webServer both need DATABASE_URL directly — E2E_USE_TEST_DB alone is not enough), and ' +
+      'CLERK_DEV_HMAC_TOKENS=true — without it, the technician\'s HMAC-signed bearer token isn\'t a ' +
+      'valid RS256 token AND isn\'t decoded by the HMAC dev path either, so DEV_AUTH_BYPASS\'s ' +
+      'unsigned-JWT fallback (which never checks signatures) blindly decodes its payload as if it ' +
+      'were its own token shape and auto-bootstraps the technician sub as the OWNER of a brand-new, ' +
+      'unrelated tenant instead of cleanly failing — a confusing wrong-tenant failure, not a skip.',
   );
 
   let pool: Pool;

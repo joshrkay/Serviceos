@@ -61,10 +61,13 @@
  * Requires: real, disposable Postgres (DATABASE_URL, migrated, plus
  * E2E_USE_TEST_DB=true so a BYO container gets truncated at end-of-run —
  * job-photo-attach.spec.ts's identical gate) + TENANT_ENCRYPTION_KEY.
- * AI_PROVIDER_API_KEY must be UNSET (this row's whole finding rests on the
- * hermetic no-key mock gateway — a real key would issue a live, paid
- * classification call instead). TWILIO_MEDIA_STREAMS_ENABLED must not be
- * 'true' (this spec assumes the Gather telephony path). Deliberately NOT
+ * AI_PROVIDER_API_KEY must be UNSET, in this shell AND in packages/api/.env
+ * if present (this row's whole finding rests on the hermetic no-key mock
+ * gateway — a real key would issue a live, paid classification call
+ * instead). The effective media-streams setting (TWILIO_MEDIA_STREAMS_ENABLED,
+ * or its ElevenLabs/Deepgram auto-enable — see resolveMediaStreamsEnabled)
+ * must resolve to off (this spec assumes the Gather telephony path).
+ * Deliberately NOT
  * `chromium-devauth` (forces InMemory repos + TELEPHONY_ENABLED=false). No
  * browser — the caller here is Twilio, not a person at a screen; the
  * `request` fixture is the whole point.
@@ -77,18 +80,22 @@
  *   TWILIO_DEFAULT_TENANT_ID=<uuid> \
  *   TENANT_ENCRYPTION_KEY=<64 hex chars> \
  *   PUBLIC_API_URL=http://localhost:3000 \
+ *   TWILIO_MEDIA_STREAMS_ENABLED=false \
  *   npx playwright test --project=chromium e2e/journeys/log-time-by-voice.spec.ts \
  *     --reporter=line --retries=0
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { Pool } from 'pg';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import twilio from 'twilio';
 import { encrypt } from '../../packages/api/src/integrations/crypto';
 import { PgInvoiceRepository } from '../../packages/api/src/invoices/pg-invoice';
 import { PgTimeEntryRepository } from '../../packages/api/src/time-tracking/pg-time-entry';
 import { PgExpenseRepository } from '../../packages/api/src/expenses/pg-expense';
 import { getJobProfit } from '../../packages/api/src/jobs/job-profit';
+import { resolveMediaStreamsEnabled } from '../../packages/api/src/shared/config';
 
 const stripTrailingSlash = (url: string): string => url.replace(/\/+$/, '');
 const API_URL = stripTrailingSlash(process.env.E2E_API_URL ?? 'http://localhost:3000');
@@ -131,13 +138,31 @@ const dbReady = !!process.env.DATABASE_URL && process.env.E2E_USE_TEST_DB === 't
 // would hit a REAL, paid LLM instead, silently spending money and making
 // this spec's zero-result assertions fail for a confusing reason. Fail
 // closed with a clear message instead. (Codex review, PR #1114.)
-const noLiveLlmKey = !process.env.AI_PROVIDER_API_KEY;
+//
+// The API webServer boots via `node --env-file-if-exists=.env` (packages/api/
+// package.json's `dev` script) — a SEPARATE source from this Playwright
+// process's own env, so checking only `process.env.AI_PROVIDER_API_KEY` here
+// misses a key set in packages/api/.env (Codex review, round 2, PR #1114).
+// This spec cannot force-clear that file's effect on the API child process
+// (that would mean editing the shared webServer config other specs rely on),
+// so it detects it and fails closed instead of silently producing a
+// live-model result.
+function apiEnvFileHasLiveLlmKey(): boolean {
+  const envPath = path.resolve(__dirname, '../../packages/api/.env');
+  if (!fs.existsSync(envPath)) return false;
+  const text = fs.readFileSync(envPath, 'utf8');
+  return /^\s*AI_PROVIDER_API_KEY\s*=\s*\S+/m.test(text);
+}
+const noLiveLlmKey = !process.env.AI_PROVIDER_API_KEY && !apiEnvFileHasLiveLlmKey();
 // This spec's TwiML parsing (sessionIdFromTwiml below) assumes the Gather
-// telephony path (`<Gather action="...?sid=...">`); TWILIO_MEDIA_STREAMS_ENABLED=true
-// makes /voice return `<Connect><Stream>` with the session id in a
-// <Parameter> instead, which this spec cannot parse. Fail closed with a
-// clear message rather than a confusing parse failure. (Codex review, PR #1114.)
-const gatherPathActive = process.env.TWILIO_MEDIA_STREAMS_ENABLED !== 'true';
+// telephony path (`<Gather action="...?sid=...">`). The real app doesn't
+// just check `TWILIO_MEDIA_STREAMS_ENABLED === 'true'` — when that var is
+// unset, `resolveMediaStreamsEnabled` (packages/api/src/shared/config.ts)
+// AUTO-ENABLES streaming when the full ElevenLabs/Deepgram stack is already
+// configured. A naive `!== 'true'` check misses that auto-enable branch
+// (Codex review, round 2, PR #1114), so this imports and calls the real
+// resolver rather than re-deriving its logic (and risking drift from it).
+const gatherPathActive = !resolveMediaStreamsEnabled(process.env);
 
 let pool: Pool;
 
@@ -161,15 +186,18 @@ test.describe('#1018 row 5.3 — "log my hours by talking" on the phone surface,
   );
   test.skip(
     !noLiveLlmKey,
-    'AI_PROVIDER_API_KEY is set — this spec\'s whole premise is the hermetic no-key mock gateway ' +
-      '(see header comment); running with a real key would issue a live, paid classification call ' +
-      'instead of hitting the documented stop point. Unset it for this run.',
+    'AI_PROVIDER_API_KEY is set (either in this shell or in packages/api/.env) — this spec\'s whole ' +
+      'premise is the hermetic no-key mock gateway (see header comment); running with a real key ' +
+      'would issue a live, paid classification call instead of hitting the documented stop point. ' +
+      'Unset it (and remove it from packages/api/.env if present) for this run.',
   );
   test.skip(
     !gatherPathActive,
-    'TWILIO_MEDIA_STREAMS_ENABLED=true — this spec assumes the Gather telephony path ' +
-      '(`<Gather action="...?sid=...">`); Media Streams returns the session id in a <Parameter> ' +
-      'instead, which sessionIdFromTwiml cannot parse. Set it to false (or unset) for this run.',
+    'resolveMediaStreamsEnabled(process.env) resolves to true (either TWILIO_MEDIA_STREAMS_ENABLED=' +
+      '\'true\', or it\'s unset/auto with the full ElevenLabs/Deepgram stack configured) — this spec ' +
+      'assumes the Gather telephony path (`<Gather action="...?sid=...">`); Media Streams returns ' +
+      'the session id in a <Parameter> instead, which sessionIdFromTwiml cannot parse. Set ' +
+      'TWILIO_MEDIA_STREAMS_ENABLED=false for this run.',
   );
 
   async function provisionTenant(opts: {

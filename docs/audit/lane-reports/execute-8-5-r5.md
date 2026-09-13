@@ -147,6 +147,13 @@ GREEN: reverted to `.toBe('before')` — `1 passed (1.1m)`.
 - Continued past the day-view 403 via direct URL navigation rather than stopping the whole row at
   that point, since the capability under test (photo attach) is not what's broken — judged this as
   the more useful signal than a shorter, less complete run.
+- xhawk-ai review (round 1) found `canRun` didn't require `DATABASE_URL` itself — fixed. Codex
+  review (round 2) found `canRun` didn't require `CLERK_DEV_HMAC_TOKENS=true` either: without it,
+  the technician's HMAC-signed bearer token is neither valid RS256 nor decoded by the HMAC dev
+  path, so `DEV_AUTH_BYPASS`'s unsigned-JWT fallback (which never checks signatures) blindly
+  decodes the token's payload and auto-bootstraps the technician sub as the owner of a brand-new,
+  unrelated tenant — a confusing wrong-tenant failure instead of a clean skip. Fixed; re-ran
+  against real Postgres afterward — still `1 passed`.
 
 ---
 
@@ -160,11 +167,18 @@ GREEN: reverted to `.toBe('before')` — `1 passed (1.1m)`.
 
 ```bash
 DATABASE_URL=postgres://test:test@localhost:<port>/serviceos_e2e_test \
+E2E_USE_TEST_DB=true \
 TWILIO_ACCOUNT_SID=AC00000000000000000000000000000001 TWILIO_AUTH_TOKEN=<any> \
 TWILIO_FROM_NUMBER=+15125550000 TWILIO_DEFAULT_TENANT_ID=<uuid> \
 TENANT_ENCRYPTION_KEY=<64 hex chars> PUBLIC_API_URL=http://localhost:3000 \
+TWILIO_MEDIA_STREAMS_ENABLED=false \
 npx playwright test --project=chromium e2e/journeys/log-time-by-voice.spec.ts --reporter=line --retries=0
 ```
+
+(`E2E_USE_TEST_DB=true` and `TWILIO_MEDIA_STREAMS_ENABLED=false` were added after a second Codex
+review round found the run guard didn't require the disposable-DB flag, and that the Gather-path
+gate missed `resolveMediaStreamsEnabled`'s ElevenLabs/Deepgram auto-enable branch — see "Judgment
+calls" below.)
 
 ### Reached / not-reached
 
@@ -262,6 +276,19 @@ GREEN: reverted to the honest `.toHaveLength(0)` — `3 passed (1.1m)`.
   spec that copies this provisioning pattern.
 - No browser used — matches `telephony-e1-signed-webhook.spec.ts`'s own reasoning: the caller here
   is Twilio, not a person at a screen.
+- Codex review (round 1) found three run-guard gaps, all fixed: `dbReady` didn't require
+  `E2E_USE_TEST_DB=true` (a persistent DATABASE_URL would get real, uncleaned rows — this is what
+  actually activates `global-teardown.ts`'s BYO truncate path, confirmed in the re-run log);
+  nothing guarded against `AI_PROVIDER_API_KEY` being set (would silently hit a live, paid LLM);
+  nothing guarded against `TWILIO_MEDIA_STREAMS_ENABLED=true` (breaks `sessionIdFromTwiml`'s
+  parsing). Codex review (round 2), after those fixes, found the first two guards were still
+  incomplete: the live-LLM-key check only inspected this Playwright process's own env, missing a
+  key set in `packages/api/.env` (the API webServer boots via `node --env-file-if-exists=.env`,
+  a separate source) — fixed by reading that file directly and failing closed if present; and the
+  Media Streams check only tested `!== 'true'`, missing `resolveMediaStreamsEnabled`'s unset/auto
+  branch (auto-enables when the full ElevenLabs/Deepgram stack is configured) — fixed by importing
+  and calling the real resolver instead of re-deriving its logic. Re-ran against real Postgres
+  after each round — still `3 passed`.
 
 ---
 
