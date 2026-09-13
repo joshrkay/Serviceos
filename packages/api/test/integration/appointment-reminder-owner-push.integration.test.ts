@@ -34,6 +34,8 @@ import {
 import { OwnerNotificationService } from '../../src/notifications/owner-notification-service';
 import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
 import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { listAllTenantIds } from '../../src/tenants/list-tenant-ids';
 import { createLogger } from '../../src/logging/logger';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -46,7 +48,9 @@ describe('Postgres integration — appointment-reminder owner push (U4)', () => 
   let settingsRepo: PgSettingsRepository;
   let dispatchRepo: PgDispatchRepository;
   let deviceTokenRepo: PgDeviceTokenRepository;
+  let auditRepo: PgAuditRepository;
   let transactionalComms: TransactionalCommsService;
+  let delivery: InMemoryDeliveryProvider;
   let provider: InMemoryPushDeliveryProvider;
   let tenant: { tenantId: string; userId: string };
   let now: Date;
@@ -61,8 +65,10 @@ describe('Postgres integration — appointment-reminder owner push (U4)', () => 
     settingsRepo = new PgSettingsRepository(pool);
     dispatchRepo = new PgDispatchRepository(pool);
     deviceTokenRepo = new PgDeviceTokenRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    delivery = new InMemoryDeliveryProvider();
     transactionalComms = new TransactionalCommsService({
-      delivery: new InMemoryDeliveryProvider(),
+      delivery,
       dispatchRepo,
       dncRepo: new PgDncRepository(pool),
       appointmentRepo,
@@ -80,6 +86,12 @@ describe('Postgres integration — appointment-reminder owner push (U4)', () => 
   });
 
   beforeEach(async () => {
+    // `delivery` is a single instance shared across every test in this file
+    // (built once in beforeAll, alongside `transactionalComms`), and the
+    // fixture customer phone number is a fixed constant — without a reset,
+    // a later test's `delivery.sentSms.find(...)` can match a STALE send
+    // left over from an earlier test's tenant instead of its own.
+    delivery.reset();
     tenant = await createTestTenant(pool);
     now = new Date('2026-06-01T12:00:00Z');
     const start = new Date(now.getTime() + APPOINTMENT_REMINDER_LEAD_MS);
@@ -138,6 +150,9 @@ describe('Postgres integration — appointment-reminder owner push (U4)', () => 
         createdBy: tenant.userId,
       },
       appointmentRepo,
+      undefined,
+      auditRepo,
+      'owner',
     );
     apptId = appt.id;
 
@@ -195,5 +210,132 @@ describe('Postgres integration — appointment-reminder owner push (U4)', () => 
     await sweep();
     await sweep();
     expect(provider.sent).toHaveLength(1);
+  });
+
+  it('appointment.created is readable back through PgAuditRepository.findByEntity', async () => {
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'appointment', apptId);
+    expect(events.some((e) => e.eventType === 'appointment.created')).toBe(true);
+  });
+
+  /** A second, independent tenant with its own timezone/customer/appointment due at `dueAt`. */
+  async function seedSecondTenant(opts: {
+    timezone: string;
+    dueAt: Date;
+  }): Promise<{ tenantId: string; userId: string; apptId: string; phone: string; customerId: string }> {
+    const second = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone)
+       VALUES ($1, $2, $3, $4)`,
+      [uuidv4(), second.tenantId, 'Second Tenant Co', opts.timezone],
+    );
+    const secondCustomerId = uuidv4();
+    const phone = `+1555${second.tenantId.replace(/-/g, '').slice(0, 7)}`;
+    await customerRepo.create({
+      id: secondCustomerId,
+      tenantId: second.tenantId,
+      firstName: 'Jamie',
+      lastName: 'Nguyen',
+      displayName: 'Jamie Nguyen',
+      primaryPhone: phone,
+      preferredChannel: 'sms',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: second.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const locationId = uuidv4();
+    await pool.query(
+      `INSERT INTO service_locations (id, tenant_id, customer_id, street1, city, state, postal_code, country)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [locationId, second.tenantId, secondCustomerId, '2 Second St', 'Phoenix', 'AZ', '85001', 'US'],
+    );
+    const jobId = uuidv4();
+    await jobRepo.create({
+      id: jobId,
+      tenantId: second.tenantId,
+      customerId: secondCustomerId,
+      locationId,
+      jobNumber: `JOB-${jobId.slice(0, 8)}`,
+      summary: 'Second-tenant tune-up',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: second.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const secondAppt = await createAppointment(
+      {
+        tenantId: second.tenantId,
+        jobId,
+        scheduledStart: opts.dueAt,
+        scheduledEnd: new Date(opts.dueAt.getTime() + 60 * 60 * 1000),
+        timezone: opts.timezone,
+        createdBy: second.userId,
+      },
+      appointmentRepo,
+    );
+    return { tenantId: second.tenantId, userId: second.userId, apptId: secondAppt.id, phone, customerId: secondCustomerId };
+  }
+
+  it('T1 — fans out to a second tenant on the REAL enumerator without crossing either tenant\'s push or dispatch rows', async () => {
+    const otherTenant = await seedSecondTenant({
+      timezone: 'America/Chicago',
+      dueAt: new Date(now.getTime() + APPOINTMENT_REMINDER_LEAD_MS),
+    });
+
+    const realIds = await listAllTenantIds(pool);
+    expect(realIds).toEqual(expect.arrayContaining([tenant.tenantId, otherTenant.tenantId]));
+
+    await runAppointmentReminderSweep({
+      appointmentRepo,
+      transactionalComms,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      dispatchRepo,
+      listTenantIds: () => listAllTenantIds(pool),
+      logger,
+      now: () => now,
+    });
+
+    // Each tenant's own appointment got its own dispatch row — neither tenant's
+    // key leaks into the other's.
+    const firstRows = await dispatchRepo.findByEntity(tenant.tenantId, 'appointment_reminder', apptId);
+    const otherRows = await dispatchRepo.findByEntity(otherTenant.tenantId, 'appointment_reminder', otherTenant.apptId);
+    expect(firstRows.some((r) => r.idempotencyKey === ownerReminderDispatchKey(apptId))).toBe(true);
+    expect(otherRows.some((r) => r.idempotencyKey === ownerReminderDispatchKey(otherTenant.apptId))).toBe(true);
+    // cross-tenant leak check: the FIRST tenant's dispatch row is not readable
+    // under the OTHER tenant's id, and vice versa — another tenant never sees it.
+    expect(await dispatchRepo.findByEntity(otherTenant.tenantId, 'appointment_reminder', apptId)).toEqual([]);
+    expect(await dispatchRepo.findByEntity(tenant.tenantId, 'appointment_reminder', otherTenant.apptId)).toEqual([]);
+  });
+
+  it('T3 — two tenants in two timezones, both due at the SAME instant, each gets exactly its own reminder', async () => {
+    const phoenix = await seedSecondTenant({
+      timezone: 'America/Phoenix',
+      dueAt: new Date(now.getTime() + APPOINTMENT_REMINDER_LEAD_MS),
+    });
+
+    await runAppointmentReminderSweep({
+      appointmentRepo,
+      transactionalComms,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      dispatchRepo,
+      listTenantIds: async () => [tenant.tenantId, phoenix.tenantId],
+      logger,
+      now: () => now,
+    });
+
+    // Both tenants' customers were reminded in the SAME sweep pass.
+    const chicagoSms = delivery.sentSms.find((m) => m.to === '+15125550100');
+    const phoenixSms = delivery.sentSms.find((m) => m.to === phoenix.phone);
+    expect(chicagoSms).toBeDefined();
+    expect(phoenixSms).toBeDefined();
+    // …and each carries ITS OWN tenant scope — not the other tenant's.
+    expect(chicagoSms?.tenantId).toBe(tenant.tenantId);
+    expect(phoenixSms?.tenantId).toBe(phoenix.tenantId);
   });
 });

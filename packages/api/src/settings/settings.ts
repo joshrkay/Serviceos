@@ -711,8 +711,14 @@ export interface UpdateSettingsInput {
   autonomousBookingThreshold?: number;
   /** D-018 — opt into the autonomous close lane (column default false). */
   autonomousCloseEnabled?: boolean;
-  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
-  autonomousCloseMaxCents?: number;
+  /**
+   * D-018 — cap (integer cents) on the auto-closeable quote total.
+   * #1011: widened to accept `null` so the owner-facing PUT can CLEAR the cap
+   * (the column is a nullable BIGINT, db/schema.ts:6083), matching the shape
+   * `depositRequiredAboveCents` already has. `null` is an explicit clear;
+   * `undefined` still means "untouched".
+   */
+  autonomousCloseMaxCents?: number | null;
 }
 
 /**

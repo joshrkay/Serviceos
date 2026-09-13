@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, UNSAFE_DataRouterStateContex
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
-  Wrench, Mail,
+  Wrench, Mail, Newspaper,
 } from 'lucide-react';
 import { useUser, useClerk } from '@clerk/clerk-react';
 import { Toaster, toast } from 'sonner';
@@ -103,6 +103,10 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/estimates',     label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
+        // 9.6 — the end-of-day digest (digestEnabled toggle in Settings) had
+        // no discovery path anywhere in the app; owner-facing only (not
+        // shown in 'tech' — mirrors the office/billing-surface split).
+        { to: '/digest',        label: 'Digest',       icon: Newspaper     },
         { to: '/settings',      label: 'Settings',     icon: Settings, requires: 'settings:view' },
       ];
   }

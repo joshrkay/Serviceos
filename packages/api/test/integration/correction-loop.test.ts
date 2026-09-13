@@ -271,4 +271,68 @@ describe('Postgres integration — correction loop (migration 180)', () => {
     const other = await createTestTenant(pool);
     expect(await lessonRepo.findBySourceProposal(other.tenantId, sourceProposalId)).toHaveLength(0);
   });
+
+  // §8.1/§8.9 row 9.9 — a SECOND undo of an already-reverted lesson must be
+  // a no-op: undoCorrectionLesson's `if (lesson.status === 'reverted') return
+  // lesson;` guard (apply-undo.ts) should short-circuit before touching the
+  // catalog price again or writing a second audit row.
+  it('a second undo of an already-reverted lesson is a no-op', async () => {
+    const labor = createCatalogItem({
+      tenantId: tenant.tenantId,
+      name: 'Second-Undo Labor',
+      category: 'Labor',
+      unit: 'hour',
+      unitPriceCents: 9000,
+    });
+    await catalogRepo.create(labor);
+
+    const drafts = extractCorrectionLessons({
+      deltas: [{ type: 'price_changed', lineItemId: 'li-1', oldValue: 9000, newValue: 10500 }],
+      lineItems: [{ id: 'li-1', category: 'labor' }],
+      config: { laborRateCents: 9000, skuPriceCents: {}, bannedPhrases: [], templateWeights: {} },
+    });
+    const ports = makePorts(catalogRepo, labor.id);
+    const [lesson] = await recordCorrectionLessons(
+      {
+        tenantId: tenant.tenantId,
+        sourceProposalId: crypto.randomUUID(),
+        ownerId: tenant.userId,
+        localDate: '2026-06-15',
+        drafts,
+      },
+      { repository: lessonRepo, ports, auditRepo },
+    );
+
+    // First undo: reverts the lesson and cascades the catalog price back.
+    const firstUndo = await undoCorrectionLesson(
+      { tenantId: tenant.tenantId, lessonId: lesson.id, ownerId: tenant.userId },
+      { repository: lessonRepo, ports, auditRepo },
+    );
+    expect(firstUndo!.status).toBe('reverted');
+    const afterFirst = await catalogRepo.findById(tenant.tenantId, labor.id);
+    expect(afterFirst!.unitPriceCents).toBe(9000);
+
+    // Simulate an operator manually re-raising the price after the undo —
+    // if the second undo were NOT a no-op it would stomp this value back
+    // down to 9000 via revertLessonConfig running a second time.
+    await catalogRepo.update(tenant.tenantId, labor.id, { unitPriceCents: 9999 });
+
+    // Second undo of the SAME lesson.
+    const secondUndo = await undoCorrectionLesson(
+      { tenantId: tenant.tenantId, lessonId: lesson.id, ownerId: tenant.userId },
+      { repository: lessonRepo, ports, auditRepo },
+    );
+    expect(secondUndo!.status).toBe('reverted');
+
+    // Prior value unchanged — the second undo did NOT re-run
+    // revertLessonConfig, so the manually-set 9999 survives untouched.
+    const afterSecond = await catalogRepo.findById(tenant.tenantId, labor.id);
+    expect(afterSecond!.unitPriceCents).toBe(9999);
+
+    // Exactly ONE correction_lesson.reverted audit row — the second call
+    // did not write a duplicate.
+    const audits = await auditRepo.findByEntity(tenant.tenantId, 'correction_lesson', lesson.id);
+    const revertedAudits = audits.filter((a) => a.eventType === 'correction_lesson.reverted');
+    expect(revertedAudits).toHaveLength(1);
+  });
 });

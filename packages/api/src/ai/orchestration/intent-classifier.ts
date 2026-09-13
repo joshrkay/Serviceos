@@ -1070,6 +1070,18 @@ export interface ClassifyContext {
    */
   planPromptSection?: string;
   /**
+   * 2.12 — B2B/property-manager account context, produced by
+   * `buildAccountContextPromptSection(ctx)` in
+   * `packages/api/src/ai/agents/customer-calling/b2b-account-context.ts` from
+   * the session's `b2bAccountContext` (assembled once, on caller
+   * identification, by the twilio adapter). When supplied, tells the model
+   * this call is a business/property-management account so it prioritizes
+   * and (for a managed sub-account) names the parent portfolio. Optional —
+   * a residential or unmatched caller never sets `b2bAccountContext`, so the
+   * session omits this field and the prompt is byte-identical to today.
+   */
+  b2bAccountPromptSection?: string;
+  /**
    * True when the inbound caller has already been resolved to an
    * existing customer (e.g. by caller-ID). Suppresses the deterministic
    * "sign up" → create_customer override: an established customer who
@@ -2715,6 +2727,17 @@ async function classifyIntentRaw(
     systemMessages.push({
       role: 'system',
       content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
+    });
+  }
+  // 2.12 — B2B/property-manager account context (see ClassifyContext doc
+  // comment). Same treatment as vertical/plan above: a separate, clearly
+  // labeled system message — never merged into the untrusted transcript slot
+  // the caller's own words occupy below (R14/R19: trusted context lives in
+  // the system role; caller speech is data, never instruction).
+  if (context.b2bAccountPromptSection && context.b2bAccountPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Caller account context (use to prioritize and inform tone; do not change the JSON output schema):\n${context.b2bAccountPromptSection}`,
     });
   }
   // RV-071 — owner-approval intents are documented to the model ONLY on a

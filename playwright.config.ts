@@ -206,6 +206,7 @@ export default defineConfig<DevAuthFixtures>({
               'review-response-approval-mobile.spec.ts',
               'job-scheduling-mobile.spec.ts',
               'settings-mobile.spec.ts',
+              'technician-day-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

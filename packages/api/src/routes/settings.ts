@@ -9,6 +9,7 @@ import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { resolveCanonicalUser, type UserRepository } from '../users/user';
 import { z } from 'zod';
 import {
   getSettings,
@@ -141,12 +142,113 @@ interface SettingsRouterDependencies {
   verticalPackRegistry: VerticalPackRegistry;
 }
 
+// ── #1011 — owner-settable per-tenant capabilities ─────────────────────────
+//
+// EXACTLY TWO keys, as a hard allowlist. This is not tidiness — it is the
+// whole authorization hop. A tenant override WINS over the platform flag
+// (flags/pg-tenant-feature-flags.ts:145-147), so a route that wrote any
+// caller-supplied key would turn `settings:update` into the power to disable
+// platform safety gates: `supervisor_agent=false` short-circuits the D-011/U3
+// default-ON trust mechanism (proposals/supervisor/service.ts:256-275), and
+// `voice_realtime=false` reconfigures the voice stack (routes/telephony.ts).
+// Both capabilities below are per-tenant opt-INS that default OFF and cost the
+// tenant nothing to leave off, which is why they are safe to hand over.
+const OWNER_CAPABILITIES = ['dropped_call_recovery', 'voice_vulnerability_triage'] as const;
+
+type OwnerCapability = (typeof OWNER_CAPABILITIES)[number];
+
+const capabilityKeySchema = z.enum(OWNER_CAPABILITIES);
+
+const capabilityUpdateSchema = z.object({
+  enabled: z.boolean(),
+});
+
+/**
+ * The slice of `PgTenantFeatureFlagRepository` this router needs. Declared as a
+ * port so the routes layer keeps zero DB-layer imports and the in-memory boot
+ * can simply not pass one.
+ */
+export interface TenantCapabilityFlagRepository {
+  /** Resolved value through the production path (override → platform → false). */
+  isEnabledForTenant(tenantId: string, flagKey: string): Promise<boolean>;
+  /** The tenant's own override, or null when it has none. */
+  getTenantOverride(tenantId: string, flagKey: string): Promise<boolean | null>;
+  setTenantFlag(
+    tenantId: string,
+    flagKey: string,
+    enabled: boolean,
+    updatedBy?: string,
+  ): Promise<void>;
+}
+
+/** Platform-flag reads, for the D5 write-boundary floor. */
+export interface PlatformFlagReader {
+  get(name: string): Promise<{ name: string; enabled: boolean } | null>;
+}
+
+export interface SettingsCapabilityDependencies {
+  tenantFlags: TenantCapabilityFlagRepository;
+  platformFlags: PlatformFlagReader;
+  /**
+   * Needed only to map the acting principal to a `users.id`. `req.auth.userId`
+   * is the CLERK SUBJECT (`payload.sub` — auth/clerk.ts:460), e.g.
+   * `user_2abc…`, or `dev_owner` under DEV_AUTH_BYPASS
+   * (auth/dev-auth-bypass.ts:207/239/246) — but
+   * `tenant_feature_flags.updated_by` is a UUID column (migration 159).
+   * Writing the subject straight in is a 500 at the database.
+   */
+  userRepo: Pick<UserRepository, 'findByTenant'>;
+}
+
+type CapabilitySource = 'tenant' | 'platform' | 'default';
+
+/**
+ * #1011 — the D5 write-boundary rule, as ONE predicate.
+ *
+ * A platform flag row only freezes a capability when it is explicitly OFF: a
+ * row that is ON is a RAMP, and the owner may still turn the capability off for
+ * their own tenant. `source === 'platform'` is NOT the same question — it only
+ * says where the current value came from — and a client that re-derived the
+ * rule from `source` alone disabled the switch on a platform row that was on,
+ * telling the owner it was "turned off platform-wide" while the server would
+ * happily have accepted the write.
+ *
+ * So the PUT's 409 and the GET's `platformFrozen` both read this, and the
+ * client is told the answer rather than recomputing it.
+ */
+function isPlatformFrozen(platformFlag: { enabled: boolean } | null): boolean {
+  return platformFlag !== null && platformFlag.enabled === false;
+}
+
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
   deps?: SettingsRouterDependencies,
   auditRepo?: AuditRepository,
+  capabilityDeps?: SettingsCapabilityDependencies,
 ): Router {
   const router = Router();
+
+  /**
+   * Resolve one capability for the response: its live value through the
+   * production resolver, plus WHO decided it. `source` is not cosmetic — an
+   * owner looking at an OFF switch needs to know whether that is their own
+   * choice (theirs to change) or a platform freeze (not theirs, and the PUT
+   * will 409).
+   */
+  async function readCapability(
+    capDeps: SettingsCapabilityDependencies,
+    tenantId: string,
+    key: OwnerCapability,
+  ): Promise<{ enabled: boolean; source: CapabilitySource; platformFrozen: boolean }> {
+    const [enabled, override, platform] = await Promise.all([
+      capDeps.tenantFlags.isEnabledForTenant(tenantId, key),
+      capDeps.tenantFlags.getTenantOverride(tenantId, key),
+      capDeps.platformFlags.get(key),
+    ]);
+    const source: CapabilitySource =
+      override !== null ? 'tenant' : platform ? 'platform' : 'default';
+    return { enabled, source, platformFrozen: isPlatformFrozen(platform) };
+  }
 
   router.get(
     '/',
@@ -495,6 +597,162 @@ export function createSettingsRouter(
         }
 
         res.status(204).end();
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // ── #1011 — per-tenant capabilities (rows 2.6, 2.7) ─────────────────────
+  //
+  // `setTenantFlag` shipped with ZERO route call sites: the per-tenant writer
+  // existed and nothing could reach it, so `dropped_call_recovery` and
+  // `voice_vulnerability_triage` were switchable only by a platform admin
+  // ramping `tenantIds` on `PUT /api/admin/feature-flags/:name`. These two
+  // routes are the owner half of that, and nothing else — the admin endpoint
+  // is unchanged, `_resolve` is unchanged, and neither capability's behaviour
+  // is touched.
+  //
+  // Mounted INSIDE the existing `/api/settings` router on purpose (D12): a new
+  // top-level mount would need its own D-022/D-024 exposure review and would
+  // sit the owner surface next to `/api/admin/*`, blurring the authority split
+  // the admin endpoint keeps.
+
+  router.get(
+    '/capabilities',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!capabilityDeps) {
+          // In-memory boot has no tenant_feature_flags table. Say so rather
+          // than returning a shape that reads as "everything is off".
+          res.status(503).json({
+            error: 'CAPABILITIES_NOT_CONFIGURED',
+            message: 'Per-tenant capabilities require a database connection',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const entries = await Promise.all(
+          OWNER_CAPABILITIES.map(
+            async (key) =>
+              [key, await readCapability(capabilityDeps, tenantId, key)] as const,
+          ),
+        );
+        res.json(Object.fromEntries(entries));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.put(
+    '/capabilities/:key',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!capabilityDeps) {
+          res.status(503).json({
+            error: 'CAPABILITIES_NOT_CONFIGURED',
+            message: 'Per-tenant capabilities require a database connection',
+          });
+          return;
+        }
+
+        // The allowlist is checked BEFORE anything else touches the request:
+        // an unlisted key must never reach a write, an audit row, or a
+        // platform lookup.
+        const key = capabilityKeySchema.safeParse(req.params.key);
+        if (!key.success) {
+          res.status(400).json({
+            error: 'UNKNOWN_CAPABILITY',
+            message: `Not an owner-settable capability. Allowed: ${OWNER_CAPABILITIES.join(', ')}`,
+          });
+          return;
+        }
+
+        const { enabled } = capabilityUpdateSchema.parse(req.body ?? {});
+
+        // The tenant is taken from the authenticated session, never from the
+        // body or query — a `tenantId` sent by the caller is ignored.
+        const tenantId = req.auth!.tenantId;
+
+        // D5 — the platform floor, enforced at the WRITE boundary only. A
+        // tenant override short-circuits `_resolve` before the platform flag is
+        // ever consulted, so without this an operator's incident kill switch
+        // (`enabled: false`) could be re-armed by any owner and the freeze
+        // would not hold. Deliberately NOT a change to `_resolve`: read-side
+        // composition is out of scope on this ticket, and whether a tenant may
+        // self-grant past a platform ramp at all is an owner decision (§E.3).
+        const platformFlag = await capabilityDeps.platformFlags.get(key.data);
+        if (isPlatformFrozen(platformFlag)) {
+          res.status(409).json({
+            error: 'PLATFORM_DISABLED',
+            message:
+              'This capability is currently disabled platform-wide and cannot be changed here',
+          });
+          return;
+        }
+
+        // `req.auth.userId` is the Clerk SUBJECT, and `updated_by` is a UUID
+        // column — passing the subject straight through is a 500 at the
+        // database (caught by the #1011 artifact gate, which drove the real
+        // route against real Postgres; the integration test had been feeding a
+        // UUID subject that production never produces).
+        //
+        // `resolveCanonicalUser` is the established dual-check
+        // (`clerkUserId === raw || id === raw`, users/user.ts) already used by
+        // the en-route voice and in-app surfaces, so a canonical id keeps
+        // working too.
+        //
+        // No users row for the subject degrades ATTRIBUTION, not the write:
+        // `updated_by` is nullable, and refusing an owner's toggle because we
+        // cannot name them would be a worse failure than an unattributed row.
+        const actor = await resolveCanonicalUser(
+          capabilityDeps.userRepo,
+          tenantId,
+          req.auth!.userId,
+        );
+
+        await capabilityDeps.tenantFlags.setTenantFlag(
+          tenantId,
+          key.data,
+          enabled,
+          actor?.id,
+        );
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'feature_flag.tenant_updated',
+              entityType: 'feature_flag',
+              entityId: key.data,
+              // `scope: 'tenant'` mirrors the `scope: 'platform'` tagging at
+              // routes/feature-flags.ts:110-131 so the two authorities stay
+              // distinguishable in one operator history view.
+              metadata: {
+                scope: 'tenant',
+                flagKey: key.data,
+                value: { enabled },
+                environment: process.env.NODE_ENV ?? 'development',
+              },
+            }),
+          );
+        }
+
+        // Echo the RESOLVED state, not the requested one — the write is an
+        // override and the reader is `isEnabledForTenant`.
+        const resolved = await readCapability(capabilityDeps, tenantId, key.data);
+        res.json({ key: key.data, ...resolved });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

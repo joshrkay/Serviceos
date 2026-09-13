@@ -1,0 +1,15 @@
+=== SNAPSHOT 2026-09-12T18:41:10.164Z ===
+-- tenant_settings (weekly_feedback_enabled, non-default only) --
+ 0bb19816-9505-47dd-aa13-5eea0e617685 | Capabilities E2E HVAC (b) | t
+ 73d7a656-e16f-49e8-bb9d-e112ba258e1f | Capabilities E2E HVAC (a) | t
+ ab224771-fa74-464a-b970-0a4cc28fabc3 | Weekly Feedback E2E HVAC  | f
+
+-- tenant_feature_flags --
+ 73d7a656-e16f-49e8-bb9d-e112ba258e1f | dropped_call_recovery      | t       | 32d099d9-753e-4322-b594-f024c3df0fc2
+ 73d7a656-e16f-49e8-bb9d-e112ba258e1f | voice_vulnerability_triage | t       | 32d099d9-753e-4322-b594-f024c3df0fc2
+
+-- audit_events (capability/settings related) --
+ 73d7a656-e16f-49e8-bb9d-e112ba258e1f | feature_flag.tenant_updated | feature_flag    | dropped_call_recovery                | 2026-09-12 18:41:06.849+00
+ 73d7a656-e16f-49e8-bb9d-e112ba258e1f | feature_flag.tenant_updated | feature_flag    | voice_vulnerability_triage           | 2026-09-12 18:41:06.935+00
+ ab224771-fa74-464a-b970-0a4cc28fabc3 | settings.tenant.updated     | tenant_settings | 020d20ad-7839-4237-a7cb-f4e4f027e7f1 | 2026-09-12 18:41:09.478+00
+

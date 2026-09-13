@@ -136,12 +136,26 @@ describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
     expect(screen.getAllByText('Interactions').length).toBeGreaterThan(0);
   });
 
-  it('keeps the supervisor sidebar to the curated set (10 Figma items + Messages)', () => {
+  // 9.6 — digestEnabled/digestTime/digestChannel were already fully wired
+  // server-side (PUT /api/settings, PgSettingsRepository) and /digest was
+  // already routed, but with zero discovery path: no nav entry anywhere.
+  it('9.6 — includes a Digest nav entry in supervisor mode', () => {
+    mockMe(buildMe({ current_mode: 'supervisor' }));
+    renderShell();
+    expect(screen.getAllByText('Digest').length).toBeGreaterThan(0);
+    const digestLink = Array.from(document.querySelectorAll('aside nav a')).find(
+      (a) => a.textContent?.includes('Digest'),
+    );
+    expect(digestLink?.getAttribute('href')).toBe('/digest');
+  });
+
+  it('keeps the supervisor sidebar to the curated set (10 Figma items + Messages + Digest)', () => {
     mockMe(buildMe({ current_mode: 'supervisor' }));
     renderShell();
     const sidebarLinks = document.querySelectorAll('aside nav a');
-    // 10 Figma items + the Messages (unified comms inbox) entry.
-    expect(sidebarLinks.length).toBe(11);
+    // 10 Figma items + Messages (unified comms inbox) + Digest (9.6 — the
+    // only owner-facing discovery path for the end-of-day digest).
+    expect(sidebarLinks.length).toBe(12);
     expect(screen.getAllByText('Messages').length).toBeGreaterThan(0);
     // Dispatch, Inbox, and Money intentionally live off the sidebar.
     expect(screen.queryByText('Dispatch')).toBeNull();

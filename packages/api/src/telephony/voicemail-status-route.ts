@@ -53,7 +53,12 @@ import { createLead } from '../leads/lead-service';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
-import { requireTwilioSignature } from './twilio-signature';
+import {
+  requireTwilioSignature,
+  sessionBelongsToAnotherTenant,
+  actingTenantMismatchesCredential,
+  type TwilioAuthTokenGetter,
+} from './twilio-signature';
 import {
   fetchRecordingBytes,
   uploadToS3,
@@ -148,11 +153,13 @@ export interface VoicemailStatusRouterDeps {
   leadRepo?: LeadRepository;
   auditRepo?: AuditRepository;
   /**
-   * Twilio auth-token lookup for signature verification. Required — this is a
+   * Twilio credential lookup for signature verification. Required — this is a
    * public, unauthenticated Twilio callback, so the X-Twilio-Signature is the
-   * only thing proving the request actually came from Twilio.
+   * only thing proving the request actually came from Twilio. #1072: the
+   * resolver is handed the callback's dialled number so the signature is
+   * checked against the credential of the tenant that owns it.
    */
-  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
+  authTokenGetter: TwilioAuthTokenGetter;
   publicBaseUrl?: string;
   /**
    * U9 — replay guard for the lead leg. When wired, the first delivery of
@@ -235,6 +242,20 @@ export function createVoicemailStatusRouter(
     }
 
     const session = deps.store.findByCallSid(callSid);
+
+    // #1072 — the CallSid that selects the session is the caller's to choose,
+    // so a valid signature on the caller's OWN number must not let it act
+    // inside another tenant's call. Refuse before the lead leg, which would
+    // otherwise mint a lead under the victim from attacker-supplied content.
+    if (sessionBelongsToAnotherTenant(req, session)) {
+      logger.warn('voicemail-status: session belongs to another tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     let tenantId: string | undefined = session?.tenantId;
     if (!tenantId && deps.resolveTenantIdFallback && to) {
       try {
@@ -253,6 +274,19 @@ export function createVoicemailStatusRouter(
         });
       }
     }
+    // #1072 — the fallback resolved this tenant from the payload's `Called`,
+    // while the credential was checked against `To`; a payload carrying both,
+    // pointing at two tenants, would otherwise verify as one and mint a lead
+    // as the other. Refuse before the lead leg.
+    if (actingTenantMismatchesCredential(req, tenantId)) {
+      logger.warn('voicemail-status: resolved tenant is not the credential\'s tenant — refusing', {
+        callSid,
+        recordingSid,
+      });
+      res.status(403).end();
+      return;
+    }
+
     if (!tenantId) {
       logger.warn('voicemail-status: missing tenant', {
         callSid,
