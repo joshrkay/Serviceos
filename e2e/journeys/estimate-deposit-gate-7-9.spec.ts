@@ -186,6 +186,12 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
     await submitDeposit.click();
     await expect(page.getByRole('heading', { name: /Estimate accepted!/i })).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: join(SCREENSHOT_DIR, '7.9-after-approval-accepted-tenantB.png') });
+    // after_approval: the success screen now prompts for the (10% of $500)
+    // deposit — `depositPayable` flipped true on accept (SuccessScreen,
+    // EstimateApprovalPage.tsx `success-deposit-prompt`).
+    await expect(page.getByTestId('success-deposit-prompt')).toContainText(/\$50\.00 deposit/, {
+      timeout: 10_000,
+    });
 
     // Deposit is now LOCKED onto the job (10% of $500 = $50), unpaid.
     const jobBRow1 = await queryAsTenant(
@@ -232,9 +238,13 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
     expect(Number(jobBRow2[0]!.deposit_paid_cents)).toBe(5_000);
     expect(jobBRow2[0]!.deposit_status).toBe('paid');
 
-    // Reload the public page — the durable "Paid" state, not optimistic.
+    // Reload the public page — the durable "Paid" state, not optimistic. An
+    // ACCEPTED estimate renders the SuccessScreen, whose paid marker is
+    // `success-deposit-paid` (the pre-accept page's `estimate-deposit-notice`
+    // is not on this screen — run 1 waited on the wrong testid).
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('estimate-deposit-notice')).toContainText(/Paid/i, { timeout: 10_000 });
+    await expect(page.getByTestId('success-deposit-paid')).toContainText(/Deposit paid/i, { timeout: 10_000 });
+    await expect(page.getByTestId('success-deposit-prompt')).toHaveCount(0);
     await page.screenshot({ path: join(SCREENSHOT_DIR, '7.9-deposit-paid-tenantB.png') });
 
     // ── Tenant A is completely untouched by tenant B's settlement ──────────
@@ -265,23 +275,37 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
 
     test.fail(
       true,
-      'packages/api/src/estimates/public-estimate-service.ts:756-758 ' +
-        "(getOrCreateDepositCheckoutUrl) throws ValidationError('Payment processing is not " +
-        'configured\') whenever stripeConfig.apiKey is unset, with NO Mock-provider fallback ' +
-        '(unlike the invoice payment-link path, packages/api/src/routes/public-invoices.ts). ' +
-        'Without a real Stripe key, job.depositRequiredCents is never written for a ' +
-        'before_approval tenant via the real checkout route, and the deposit-crediting webhook ' +
-        'branch itself refuses to credit when that column is still 0 ' +
-        '(packages/api/src/webhooks/routes.ts:1409-1414). Parked with #1000/#1002 (live Stripe/device).',
+      'packages/api/src/estimates/public-estimate-service.ts (getOrCreateDepositCheckoutUrl): ' +
+        "with NO STRIPE_SECRET_KEY it throws ValidationError('Payment processing is not configured') " +
+        '(:756-758, → 400) — no Mock-provider fallback, unlike the invoice pay-link path; with the ' +
+        'hermetic placeholder key the preamble mandates for money rows it POSTs to the REAL ' +
+        'https://api.stripe.com/v1/payment_links (:872-882), Stripe rejects the key, and the plain ' +
+        "`throw new Error(`Stripe API error (${res.status})`)` (:883-886) is unmapped → a raw 500 to the " +
+        'customer\'s "Pay deposit" tap. Either way job.depositRequiredCents is only persisted AFTER a ' +
+        'successful mint (:906-913), so it stays 0, the deposit webhook refuses to credit ' +
+        '(webhooks/routes.ts:1409-1414) and approve stays 409. Parked with #1000/#1002 (live Stripe); ' +
+        'the unmapped 500 is a separate finding for Fable.',
     );
 
-    // The REAL route a "Pay deposit" tap calls — this is the actual seam,
-    // not a description of it: it 400s with the exact ValidationError
-    // message above, so a before_approval deposit can never be paid in
-    // this hermetic sandbox.
+    // The REAL route a "Pay deposit" tap calls — the actual seam, not a
+    // description of it. Observed here: 500 (placeholder key → real Stripe
+    // call rejected → unmapped Error). Expected once a real key / mapped
+    // error exists: 200 with a url (or a clean 4xx). Both current outcomes
+    // are recorded in the run log.
     const checkoutRes = await request.post(
       `${API_URL}/public/estimates/${target.viewToken}/deposit-checkout`,
     );
-    expect(checkoutRes.status(), 'expected to still be 400 once #1000/#1002 unblock this').not.toBe(400);
+    const checkoutBody = await checkoutRes.text();
+    logRows(`7.9 pin — POST /deposit-checkout (before_approval) response ${checkoutRes.status()}`, checkoutBody);
+    const jobRow = await queryAsTenant(
+      tenantA.tenantId,
+      `SELECT deposit_required_cents, deposit_paid_cents, deposit_status, deposit_stripe_payment_link_url FROM jobs WHERE id = $1`,
+      [jobA.jobId],
+    );
+    logRows('7.9 pin — jobs row after the failed mint (required stays 0 → webhook cannot credit)', jobRow);
+    expect(
+      [400, 500],
+      `deposit-checkout must mint a link (200) — got ${checkoutRes.status()}: ${checkoutBody}`,
+    ).not.toContain(checkoutRes.status());
   });
 });

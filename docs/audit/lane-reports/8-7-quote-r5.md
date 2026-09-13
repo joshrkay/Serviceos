@@ -31,8 +31,8 @@ merged §8.3/§8.4 phone lanes document.
 
 ```
 DBU=$(TESTCONTAINERS_RYUK_DISABLED=true npx tsx e2e/fixtures/setup-test-db.ts | grep -oE 'postgres://[^ ]+' | tail -1)
-PORT=38520 E2E_API_URL=http://localhost:38520 PUBLIC_API_URL=http://localhost:38520 \
-E2E_WEB_PORT=38521 VITE_API_URL=http://localhost:38520 E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0 E2E_WEBSERVER_TIMEOUT_MS=300000 \
+PORT=38610 E2E_API_URL=http://localhost:38610 PUBLIC_API_URL=http://localhost:38610 \
+E2E_WEB_PORT=38611 VITE_API_URL=http://localhost:38610 E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0 E2E_WEBSERVER_TIMEOUT_MS=300000 \
 CLERK_DEV_HMAC_TOKENS=true DB_SSL=false DATABASE_URL=$DBU E2E_USE_TEST_DB=true \
 VITE_CLERK_PUBLISHABLE_KEY=pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA== \
 STRIPE_SECRET_KEY=sk_test_e2e_stub_placeholder STRIPE_WEBHOOK_SECRET=whsec_e2e_stub_secret_1234567890 \
@@ -40,11 +40,15 @@ TENANT_ENCRYPTION_KEY=<64 hex> \
 npx playwright test <spec> --project=chromium --retries=0 --workers=1
 ```
 
-The lane was assigned api port 38510; it ran on **38520/38521** because a
-second lane-Q session was booting its own api on 38510 in this same worktree
-(a vite that never came up on 38511 timed the third tiers run out), and the
+The lane was assigned api port 38510; it ran on **38610/38611** because a
+second lane-Q session in this same worktree booted stacks on 38510 (a vite
+that never came up on 38511 timed the third tiers run out) and later on
+38520 (`FATAL EADDRINUSE :::38520` mid-way through 7.9 run 3: my requests
+were answered by a peer api on a different database while my direct reads
+went to mine — 0 rows — and the pin test got "socket hang up"). The
 dedicated-port rule exists precisely so two Playwright stacks never adopt
-each other's servers.
+each other's servers; the pair moved twice for that reason, never for the
+specs.
 
 `E2E_WEBSERVER_TIMEOUT_MS` is also new (additive, unset ⇒ the old 120s): with
 three lanes' ts-node apis cold-booting on one Mac, the api's compile alone
@@ -124,6 +128,80 @@ Screenshots: `7.4-7.5-owner-draft-tiers.png`, `7.4-7.5-owner-draft-tiers-tenantB
 `7.5-headline-before-selection.png`, `7.5-accepted-non-default-selection.png`,
 `7.4-owner-detail-accepted-rows.png`.
 
+### 7.8 — `estimate-concurrent-approval-race-7-8.spec.ts`
+
+Run 1 was the api's cold ts-node boot overrunning the 120s webServer window
+(no `[startup]` line; `E2E_WEBSERVER_TIMEOUT_MS` added). Run 2:
+
+```
+✓  1 [chromium] › e2e/journeys/estimate-concurrent-approval-race-7-8.spec.ts:117:7 › concurrent estimate-approval race, exactly one wins (7.8) — real Postgres › two estimates on one job approved at the same instant settle to exactly one accepted, the loser gets a clean 409; T2 on a second, independent tenant racing the same instant (5.9s)
+  1 passed (2.4m)
+EXIT=0
+```
+
+Row dumps:
+
+```
+7.8 TenantA loser response (409)
+  { "error": "CONFLICT", "message": "Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current." }
+7.8 TenantB loser response (409)   ← the two tenants raced at the same instant
+  { "error": "CONFLICT", "message": "Another estimate on this job has already been accepted. …" }
+7.8 tenant A estimates on the raced job
+  9dfa6822… status=sent
+  8896a115… status=accepted            ← exactly one
+7.8 tenant A audit_events public_estimate.approved (winner)
+  [ { event_type: public_estimate.approved } ]   ← exactly one
+7.8 tenant B estimates on ITS raced job (T2)
+  56da933f… status=sent
+  06a40fe7… status=accepted
+```
+
+Cross-tenant: `GET /api/estimates/<A's winner>` under tenant B → 404.
+Screenshot: `7.8-winner-accepted-public-view.png` ("Estimate accepted!" on the
+winner's token).
+
+### 7.9 — `estimate-deposit-gate-7-9.spec.ts`
+
+Run 1 reached the very last assertion of the main test and waited on the
+wrong testid (an ACCEPTED estimate renders `SuccessScreen`, whose paid
+marker is `success-deposit-paid`, not the pre-accept `estimate-deposit-notice`)
+— and its pin reported "Expected to fail, but passed": with
+`STRIPE_SECRET_KEY` set the route does NOT 400, it 500s (below). Runs 2–3
+were killed from outside (worker SIGKILL; then a foreign api on 38520 —
+pair moved). Run 4:
+
+```
+✓  1 [chromium] › e2e/journeys/estimate-deposit-gate-7-9.spec.ts:116:7 › deposit-before-approval gate + fixed-amount cap (7.9) — real Postgres › before_approval blocks Approve and shows the CAPPED deposit; after_approval (T3, divergent config) accepts immediately and settles via a signed webhook (33.7s)
+✘  2 [chromium] › e2e/journeys/estimate-deposit-gate-7-9.spec.ts:263:7 › … the real deposit-checkout route genuinely refuses (no live Stripe key, no mock fallback) — pinned, not faked (6.7s)   ← test.fail(): expected failure
+  2 passed (2.2m)
+EXIT=0
+```
+
+Row dumps:
+
+```
+7.9 tenant A approve-without-deposit response (409)
+  { "error": "CONFLICT", "message": "Deposit must be paid before this estimate can be approved" }
+  (public page: estimate-deposit-notice shows "$99.00" — the $200 fixed rule CAPPED at the $99 total —
+   estimate-pay-deposit-cta visible, no "Accept this estimate" button; estimate stays sent)
+7.9 tenant B jobs row after after_approval accept        (T3: percentage 10% / after_approval)
+  [ { deposit_required_cents: 5000, deposit_paid_cents: 0, deposit_status: "pending" } ]
+  (success screen: success-deposit-prompt "Pay your $50.00 deposit to confirm scheduling")
+7.9 tenant B jobs row after signed checkout.session.completed (metadata.deposit_for_job_id)
+  [ { deposit_required_cents: 5000, deposit_paid_cents: 5000, deposit_status: "paid" } ]
+  api: "Deposit credited via Stripe checkout"; reload → success-deposit-paid "Deposit paid — thank you!"
+7.9 tenant A jobs row untouched by B settlement
+  [ { deposit_paid_cents: 0 } ]
+
+7.9 pin — POST /public/estimates/:token/deposit-checkout (before_approval, placeholder key) response 500
+  {"error":"INTERNAL_ERROR","message":"An unexpected error occurred"}
+7.9 pin — jobs row after the failed mint (required stays 0 → webhook cannot credit)
+  [ { deposit_required_cents: 0, deposit_paid_cents: 0, deposit_status: "not_required", deposit_stripe_payment_link_url: null } ]
+```
+
+Screenshots: `7.9-before-approval-gate.png`, `7.9-after-approval-accepted-tenantB.png`,
+`7.9-deposit-paid-tenantB.png`.
+
 <!-- RUNS -->
 
 ## What is NOT proven (pinned, not faked)
@@ -142,12 +220,20 @@ Screenshots: `7.4-7.5-owner-draft-tiers.png`, `7.4-7.5-owner-draft-tiers-tenantB
   "AI-estimated") are proven on two cards; the same-document mixture stays
   with `test/integration/estimates.test.ts` (T1).
 - **7.9 paying a `before_approval` deposit.** `getOrCreateDepositCheckoutUrl`
-  (public-estimate-service.ts:756-758) throws `ValidationError('Payment
-  processing is not configured')` without a real Stripe key — no
-  Mock-provider fallback, unlike the invoice pay-link path — and the deposit
-  webhook branch refuses to credit while `job.depositRequiredCents` is 0
-  (webhooks/routes.ts:1409-1414). The pin test drives the REAL
-  `/deposit-checkout` route and records the 400. Parked with #1000/#1002.
+  has no hermetic path: with NO `STRIPE_SECRET_KEY` it throws
+  `ValidationError('Payment processing is not configured')`
+  (public-estimate-service.ts:756-758 → 400) — no Mock-provider fallback,
+  unlike the invoice pay-link path; with the placeholder key the money-row
+  invocation sets, it POSTs to the REAL `https://api.stripe.com/v1/payment_links`
+  (:872-882), Stripe rejects the key, and the plain
+  `throw new Error(\`Stripe API error (…)\`)` (:883-886) is unmapped — the
+  customer's "Pay deposit" tap gets a **raw 500** (observed, run 1; the pin
+  test records status + body). `depositRequiredCents` is only persisted
+  after a successful mint (:906-913), so it stays 0, the deposit webhook
+  refuses to credit (webhooks/routes.ts:1409-1414) and approve stays 409.
+  Parked with #1000/#1002 (live Stripe). **New finding for Fable:** a Stripe
+  failure on the public deposit route surfaces as an unmapped 500 rather
+  than a mapped, customer-readable error.
 - **7.10 wall-clock trigger.** The sweep only fires from a hardcoded hourly
   `setInterval` (app.ts:6467, no env override unlike
   `OVERDUE_SWEEP_INTERVAL_MS`); the spec calls the identical production
