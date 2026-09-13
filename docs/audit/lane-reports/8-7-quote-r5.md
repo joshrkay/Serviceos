@@ -27,6 +27,17 @@ the Twilio DID/subaccount row has no product UI (a background worker
 provisions it against a real Twilio account), the same justification the
 merged §8.3/§8.4 phone lanes document.
 
+Tenant-isolation method: cross-tenant INVISIBILITY is proven through the
+real API (the other owner's `GET` → 404), and every direct Postgres read
+is scoped by `tenant_id = $n` exactly as the repositories scope. A direct
+read "as" the other tenant (`SET LOCAL app.current_tenant_id`) proves
+nothing under this harness — its connection is the testcontainer superuser,
+which bypasses RLS even under `FORCE ROW LEVEL SECURITY`
+(schema.ts:545-548); the `SET ROLE rls_app_runtime` path only runs with
+`RLS_RUNTIME_ROLE=true`, i.e. the vitest-integration recipe. (7.1/7.3
+run 3 read tenant A's estimate "as" tenant B that way; the probe was
+moved to the API and the 7.12 cross-reads re-scoped.)
+
 ## Invocation (every spec, its own Playwright process, under the test lock)
 
 ```
@@ -235,6 +246,45 @@ Asserted at real Postgres (row dumps added for the second pass): tenant A
 row; estimate C `reminder_count=1` after the race with exactly one
 in-memory delivery.
 
+### 7.1 + 7.3 — `estimate-chat-draft-7-1-7-3.spec.ts`
+
+Run 1: the second real chat turn had not completed inside a 20s wait (the
+first took 14s under three lanes' load) — waits raised to 90s. Run 2: the
+spec tried to one-tap-approve the UNCATALOGUED draft and timed out on a
+`disabled` Approve — the product refusing, correctly (7.2's cap on the real
+surface); the spec now asserts that refusal. Run 3: the T2 cross-read was a
+superuser SQL read "as" tenant B (see the isolation note above) — moved to
+the real API. Run 4:
+
+```
+✓  1 [chromium] › e2e/journeys/estimate-chat-draft-7-1-7-3.spec.ts:103:7 › §8.7 rows 7.1 + 7.3 … › a dictated draft_estimate persists a real estimate + audit event through the owner Assistant chat; a mixed-pricing draft shows per-line badges and the DB CHECK refuses a bogus pricing_source; a neighbour tenant never sees any of it (T2) (1.1m)
+✘  2 [chromium] › e2e/journeys/estimate-chat-draft-7-1-7-3.spec.ts:308:7 › … the "customer photo" leg has NO owner-facing transmission path — pinned, not faked (2.5s)   ← test.fail(): expected failure (the literal photo-turn body yields no proposal)
+  2 passed (3.0m)
+EXIT=0
+```
+
+Row dumps:
+
+```
+7.1 drafted estimates row (chat → hermetic gateway → EstimateTaskHandler → Approve → execute)
+  { id: a5a67e33-…, tenant_id: 1d01ed55-…, status: "draft" }
+7.1/7.3 estimate_line_items (catalog-grounded line)
+  [ { description: "Service estimate for Sarah Customer", unit_price_cents: 15000, pricing_source: "catalog" } ]
+     ← the seeded catalog item's price won; the badge on the card read "From catalog"
+7.1 audit_events estimate.created for the drafted estimate
+  [ { event_type: "estimate.created" } ]
+7.3 uncatalogued draft — proposals row (line pricingSource, capped confidence, NOT approved)
+  { id: 34746dfd-…, status: "ready_for_review", confidence_score: "0.5",
+    line_description: "Service estimate for Priya Vendor", line_pricing_source: "uncatalogued", overall_confidence: "low" }
+     ← card: "AI-estimated" badge + "\"Service estimate for Priya Vendor\" is not in the tenant catalog — the price is AI-estimated and needs review"; Approve disabled
+7.3 raw UPDATE estimate_line_items SET pricing_source = 'bogus' — Postgres refusal
+  { code: "23514", message: "new row for relation \"estimate_line_items\" violates check constraint \"estimate_line_items_pricing_source_check\"" }
+7.1/7.3 T2 — tenant B GET /api/estimates/<A's id> → 404; GET /api/estimates → []
+```
+
+Screenshots: `7.1-drafted-proposal-catalog.png`, `7.1-approved-proposal-catalog.png`,
+`7.3-uncatalogued-badge.png`.
+
 <!-- RUNS -->
 
 ## What is NOT proven (pinned, not faked)
@@ -296,12 +346,16 @@ in-memory delivery.
 ## Report-only rows
 
 - **7.2 (3/3).** Grounding is exercised by every 7.1/7.3 draft here (the
-  catalog line lands `pricing_source='catalog'` at 15000¢, the uncatalogued
-  one `'uncatalogued'`), but the confidence cap has no surface to reach: it
-  is a pure function inside `catalog-resolver.ts` whose only observable is
-  the drafted proposal's `_meta.overallConfidence`, and the hermetic mock
-  fixes `confidence_score` at 0.82 — the cap's own 84/84 unit proof (#1012)
-  is the ceiling until a scripted low-confidence draft exists.
+  catalog line lands `pricing_source='catalog'` at 15000¢ — the catalog
+  price won over the mock's own figure). The cap was then OBSERVED on the
+  real surface, unplanned: the uncatalogued "Priya Vendor" draft rendered
+  the "AI-estimated" badge, the per-line marker "… is not in the tenant
+  catalog — the price is AI-estimated and needs review", and its **Approve
+  button disabled** — run 2 of the 7.1/7.3 spec tried to one-tap-approve it
+  and timed out on `disabled`; the spec now asserts that refusal plus the
+  proposal row's `confidence_score < 0.9`. That is reachability evidence for
+  the cap; whether it lifts 7.2 is Fable's call (the cap's arithmetic is
+  still only the 84/84 unit proof, #1012).
 - **7.11 (3).** `getSupervisorReviewGate()` still reaches 2 of 93 origins
   (E10.18, parked on O-9). Nothing in the assistant-chat draft path above
   passes through a supervisor review before the owner-facing card renders;

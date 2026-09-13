@@ -363,7 +363,17 @@ export function logRows(label: string, rows: unknown): void {
   console.log(`[8.7 row-dump] ${label}\n${JSON.stringify(rows, null, 2)}`);
 }
 
-/** RLS-scoped read against real Postgres, mirroring e2e/qa-matrix/helpers/rw-db.ts. */
+/**
+ * Tenant-scoped read against real Postgres, mirroring e2e/qa-matrix/helpers/rw-db.ts.
+ *
+ * NOT an RLS probe under this harness: the Playwright recipe connects as the
+ * testcontainer's superuser (`test`), and superusers bypass RLS even under
+ * FORCE ROW LEVEL SECURITY (schema.ts:545-548); the app's `SET ROLE
+ * rls_app_runtime` path only runs with RLS_RUNTIME_ROLE=true (the vitest-
+ * integration recipe). So always scope the SQL itself by `tenant_id = $n`,
+ * and prove cross-tenant INVISIBILITY through the real API (a 404 for the
+ * other tenant's owner), never by reading "as" the other tenant here.
+ */
 export async function queryAsTenant(
   tenantId: string,
   sql: string,

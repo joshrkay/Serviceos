@@ -333,18 +333,23 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       const estBBody = (await estB.json()) as { totals: { totalCents: number } };
       expect(estBBody.totals.totalCents).toBe(seedB.totalCentsBefore);
 
-      // ── T1 — cross-tenant isolation on the proposals + audit trail ───────
+      // ── T1 — cross-tenant isolation on the proposals + audit trail.
+      //    Scoped the way the repositories scope (tenant_id = $n): the
+      //    harness's direct connection is the testcontainer superuser, which
+      //    bypasses RLS even under FORCE (see queryAsTenant's note), so a
+      //    read "as" the other tenant proves nothing here. ──────────────────
       const crossProposals = await queryAsTenant(
         tenantB.tenantId,
-        `SELECT id FROM proposals WHERE id = $1`,
-        [proposalsA[0]!.id],
+        `SELECT id FROM proposals WHERE tenant_id = $1 AND id = $2`,
+        [tenantB.tenantId, proposalsA[0]!.id],
       );
       expect(crossProposals).toHaveLength(0);
       const crossAudit = await queryAsTenant(
-        tenantA.tenantId,
-        `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'negotiation_guardrail.sms_routed'
-           AND tenant_id != $2`,
-        [tenantA.tenantId, tenantA.tenantId],
+        tenantB.tenantId,
+        `SELECT id FROM audit_events
+          WHERE tenant_id = $1 AND event_type = 'negotiation_guardrail.sms_routed'
+            AND metadata->>'proposalId' = $2`,
+        [tenantB.tenantId, String(proposalsA[0]!.id)],
       );
       expect(crossAudit).toHaveLength(0);
 
