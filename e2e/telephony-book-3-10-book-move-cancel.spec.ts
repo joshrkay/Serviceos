@@ -46,6 +46,8 @@ import {
   provisionTenant,
   signedPost,
   sessionIdFromTwiml,
+  phoneLaneDbReady,
+  phoneLaneNoLiveLlmKey,
   type ProvisionedTenant,
 } from './fixtures/twilio-phone-lane';
 
@@ -65,7 +67,8 @@ const MOVE_UTTERANCE = "Move Tuesday's Garcia appointment to Thursday at 2 PM";
 const CANCEL_UTTERANCE = "Cancel Tuesday's Garcia appointment";
 
 const enc = process.env.TENANT_ENCRYPTION_KEY;
-const dbReady = !!process.env.DATABASE_URL;
+const dbReady = phoneLaneDbReady();
+const noLiveLlmKey = phoneLaneNoLiveLlmKey();
 
 let pool: Pool;
 let tenantA: ProvisionedTenant;
@@ -76,7 +79,14 @@ test.describe.configure({ mode: 'serial' });
 test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner line (phone surface)', () => {
   test.skip(
     !dbReady || !enc,
-    'Needs a real Postgres (DATABASE_URL, migrated) and TENANT_ENCRYPTION_KEY.',
+    'Needs a real, disposable Postgres (DATABASE_URL, migrated, E2E_USE_TEST_DB=true so it gets ' +
+      'truncated at end-of-run) and TENANT_ENCRYPTION_KEY so the tenant Twilio credential can be ' +
+      'stored the way a provisioned tenant stores it.',
+  );
+  test.skip(
+    !noLiveLlmKey,
+    'AI_PROVIDER_API_KEY is set — BOOK\'s premise is the hermetic no-key mock gateway (see header ' +
+      'comment), and a real key could let MOVE/CANCEL actually classify. Unset it for this run.',
   );
 
   test.beforeAll(async () => {

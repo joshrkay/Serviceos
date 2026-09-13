@@ -17,6 +17,26 @@ export const stripTrailingSlash = (url: string): string => url.replace(/\/+$/, '
 export const API_URL = stripTrailingSlash(process.env.E2E_API_URL ?? 'http://localhost:3000');
 export const SIGNING_BASE = stripTrailingSlash(process.env.PUBLIC_API_URL ?? API_URL);
 
+// E2E_USE_TEST_DB=true is required (not just DATABASE_URL) so that, when
+// DATABASE_URL points at a pre-existing (BYO) container, e2e/global-setup.ts
+// writes the state file that makes e2e/global-teardown.ts run the BYO
+// truncate path at end-of-run (teardown-test-db.ts) — without it, a
+// developer who exports DATABASE_URL against a persistent (non-test)
+// database would have provisionTenant() insert real tenants/users/customers
+// with no cleanup. Matches job-photo-attach.spec.ts / log-time-by-voice
+// .spec.ts's identical gate. (Codex review, PR #1117.)
+export const phoneLaneDbReady = (): boolean =>
+  !!process.env.DATABASE_URL && process.env.E2E_USE_TEST_DB === 'true';
+
+// The hermetic no-key mock gateway is the premise of every "stop point"
+// finding in this lane's specs (see each spec's header comment) — if
+// AI_PROVIDER_API_KEY is inherited from the operator's shell into
+// apiWebServerEnv, classification/confirmation would hit a REAL, paid LLM
+// instead, silently spending money and making the zero-result/stop-point
+// assertions fail for a confusing reason. Fail closed instead. (Codex
+// review, PR #1117.)
+export const phoneLaneNoLiveLlmKey = (): boolean => !process.env.AI_PROVIDER_API_KEY;
+
 export interface ProvisionedTenant {
   tenantId: string;
   userId: string;

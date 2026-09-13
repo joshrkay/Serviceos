@@ -48,6 +48,7 @@ import {
   signedPost,
   sessionIdFromTwiml,
   devAuthBearerToken,
+  phoneLaneDbReady,
   API_URL,
   type ProvisionedTenant,
 } from './fixtures/twilio-phone-lane';
@@ -68,7 +69,7 @@ const SHARED_NAME = `${SHARED_NAME_FIRST} ${SHARED_NAME_LAST}`;
 const BOOKING_UTTERANCE = `Open a job for ${SHARED_NAME}, leaking faucet repair`;
 
 const enc = process.env.TENANT_ENCRYPTION_KEY;
-const dbReady = !!process.env.DATABASE_URL;
+const dbReady = phoneLaneDbReady();
 
 let pool: Pool;
 let tenantA: ProvisionedTenant;
@@ -79,7 +80,9 @@ test.describe.configure({ mode: 'serial' });
 test.describe('#1015 row 3.7 — the AI asks instead of guessing when two customers share a name (phone surface)', () => {
   test.skip(
     !dbReady || !enc,
-    'Needs a real Postgres (DATABASE_URL, migrated) and TENANT_ENCRYPTION_KEY.',
+    'Needs a real, disposable Postgres (DATABASE_URL, migrated, E2E_USE_TEST_DB=true so it gets ' +
+      'truncated at end-of-run) and TENANT_ENCRYPTION_KEY so the tenant Twilio credential can be ' +
+      'stored the way a provisioned tenant stores it.',
   );
 
   test.beforeAll(async ({ request }) => {
