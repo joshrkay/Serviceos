@@ -147,12 +147,17 @@ export function createProposalsRouter(
         {
           tenantId: req.auth!.tenantId,
           actorId: req.auth!.userId,
+          // Issue #1040 — the dragging user's identity AND role land on the
+          // proposal.created audit row, matching every other audited
+          // proposal transition in this router.
+          actorRole: req.auth!.role,
+          ...(req.header('x-correlation-id') ? { correlationId: req.header('x-correlation-id')! } : {}),
           proposalType,
           payload: body.payload,
           summary: body.summary,
           expectedVersion,
         },
-        proposalRepo, appointmentRepo, feasibilityDeps,
+        proposalRepo, appointmentRepo, feasibilityDeps, auditRepo,
       );
 
       switch (result.kind) {
