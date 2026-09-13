@@ -351,17 +351,32 @@ test.describe('onboarding identity (1.2) — real Postgres', () => {
 test.describe('onboarding AI check (1.8) — reachable through the real onboarding journey, real Postgres', () => {
   const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
   const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+  // This journey is hermetic ONLY when the phone and AI-check legs fall
+  // back to their dev stubs (packages/api/src/workers/provision-twilio.ts
+  // dev-stub, app.ts's hermetic MockLLMProvider) — both fall back purely on
+  // these vars being ABSENT. If a runner's shell already exports real
+  // provider credentials, playwright.config.ts's webServerEnv forwards them
+  // to the API server unchanged, and this test would silently exercise the
+  // real Twilio provisioning path (purchasing a number) and the real LLM
+  // instead of the documented stubs. Refuse to run rather than risk that.
+  const hasLiveProviderCreds =
+    !!process.env.TWILIO_ACCOUNT_SID ||
+    !!process.env.TWILIO_AUTH_TOKEN ||
+    !!process.env.AI_PROVIDER_API_KEY;
   const canRun =
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
     process.env.E2E_USE_TEST_DB === 'true' &&
     !!STRIPE_WEBHOOK_SECRET &&
-    !!STRIPE_SECRET_KEY;
+    !!STRIPE_SECRET_KEY &&
+    !hasLiveProviderCreds;
   test.skip(
     !canRun,
     'Requires the local webServer pair against a real Postgres (E2E_USE_TEST_DB=true) PLUS ' +
       'STRIPE_SECRET_KEY (any non-empty value — never dialed, only gates billingService on) and ' +
-      'STRIPE_WEBHOOK_SECRET (signs the self-signed trial webhook) set before `npx playwright test`.',
+      'STRIPE_WEBHOOK_SECRET (signs the self-signed trial webhook) set before `npx playwright test` ' +
+      '— AND none of TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / AI_PROVIDER_API_KEY set, or the phone ' +
+      'and AI-check legs stop being hermetic stubs and start dialing real providers.',
   );
 
   /** Same recipe as createWebhookSignature in packages/api/src/webhooks/webhook-handler.ts. */
@@ -497,13 +512,20 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
 
       // ── Neighbour tenant, seeded FIRST and driven to ITS OWN passed
       //    ai_check (plumbing pack — deliberately different from the
-      //    tenant under test's HVAC) entirely over the API, before the
-      //    tenant-under-test's UI journey even starts. Fable's rung-5 ask:
-      //    a neighbour's OWN completed ai_check must not change this
-      //    tenant's answer — stronger than an untouched neighbour (T1,
-      //    asserted separately below). ─────────────────────────────────────
+      //    tenant under test's HVAC) entirely over the API. Started here but
+      //    NOT awaited yet — the promise runs IN THE BACKGROUND alongside
+      //    the tenant-under-test's UI journey below, so the two tenants'
+      //    verify_ai jobs actually land on the in-process queue's poll loop
+      //    around the same time (a Codex review on this PR correctly
+      //    flagged that fully awaiting this first, before the tenant under
+      //    test even bootstraps, made "concurrently" a claim the code
+      //    didn't back up). Awaited once this tenant has fired its own
+      //    trial webhook below, so both are genuinely in flight together.
+      //    Fable's rung-5 ask: a neighbour's OWN completed ai_check must
+      //    not change this tenant's answer — stronger than an untouched
+      //    neighbour (T1, asserted separately below). ──────────────────────
       const neighbour = await bootstrapOwner(page, 'aicheckneighbour');
-      await driveTenantToAiCheckViaApi(
+      const neighbourDrivePromise = driveTenantToAiCheckViaApi(
         page.request,
         neighbour,
         'Neighbour Plumbing Co',
@@ -587,6 +609,13 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
         data: webhookBody,
       });
       expect(whRes.status(), `signed trial webhook -> ${await whRes.text()}`).toBe(200);
+
+      // Both tenants' trial webhooks have now fired close together, so both
+      // verify_ai jobs are in flight on the same in-process queue poll loop
+      // at the same time — awaiting the neighbour's promise HERE (not
+      // before this tenant even started) is what makes "concurrently" true
+      // rather than merely asserted.
+      await neighbourDrivePromise;
 
       pollDbSnapshotHere(
         '1.8-tenants-subscription-status',
