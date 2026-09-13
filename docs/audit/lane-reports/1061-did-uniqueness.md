@@ -414,6 +414,41 @@ database, so any two files reusing a DID literal now collide.** A new test that
 provisions a number must pick an unused one. Items 1–3 were all found this way;
 none of them was visible from the four files the brief named.
 
+### 7b. Re-verified after merging current `main`
+
+The branch was cut from a local `main` that was 462 commits behind
+`origin/main`, so the numbers above were measured against a stale tree — not a
+safe basis for a migration. `origin/main` has since been merged in (a merge
+commit; no rebase or force-push).
+
+Two things were re-checked and one more collision surfaced, which is the same
+lesson again:
+
+- **Migration number.** `origin/main`'s tail is still
+  `273_material_items_urgency_index`, so `274` is unclaimed and the key-order
+  guard passes. `test/db/` (18 files, 95 tests) green, immutability snapshot
+  included.
+- **A fifth DID collision.** This file's own sibling DID `+15125550200`
+  collides with `DID_B` in `voice-inbound-appointment.test.ts`. Since this
+  branch is the newcomer, its literals moved rather than that file's — both
+  now come from the `+1512555990x` block, which nothing else in `test/`,
+  `src/` or `e2e/` uses.
+
+Full suites on the merged tree:
+
+```
+$ npx tsc --project tsconfig.build.json --noEmit
+(exit 0)
+
+$ RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts
+ Test Files  263 passed (263)
+      Tests  1542 passed | 8 expected fail | 1 skipped (1551)
+
+$ npx vitest run
+ Test Files  1195 passed | 5 skipped (1200)
+      Tests  14976 passed | 10 expected fail | 12 skipped | 38 todo (15036)
+```
+
 ---
 
 ## 8. Production rollout note

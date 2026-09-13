@@ -31,8 +31,17 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool, DatabaseError } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 
-/** The shared DID both tenants claim. */
-const SHARED_DID = '+15125550199';
+/**
+ * The shared DID both tenants claim, and its non-colliding sibling below.
+ *
+ * Both come from the `+1512555990x` block, which no other test or source file
+ * uses. That matters now: migration 274 makes a twilio DID unique ACROSS
+ * tenants and the integration suite shares one database, so any two files
+ * reusing a literal collide. `+15125550200` was this file's original sibling
+ * DID and collides with `voice-inbound-appointment.test.ts`'s `DID_B`.
+ */
+const SHARED_DID = '+15125559902';
+const OTHER_DID = '+15125559903';
 
 /**
  * Insert a twilio integration row under the tenant's own RLS context, the way
@@ -105,7 +114,7 @@ describe('Postgres integration — one tenant per DID (#1061)', () => {
     // UNIQUE (tenant_id, provider) would then mask the assertion.
     const t = await createTestTenant(pool);
     await expect(
-      insertTwilioIntegration(pool, t.tenantId, { phoneE164: '+15125550200' }),
+      insertTwilioIntegration(pool, t.tenantId, { phoneE164: OTHER_DID }),
     ).resolves.toBeUndefined();
   });
 
