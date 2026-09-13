@@ -5,6 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { DATABASE_URL_AT_WEBSERVER_BOOT } from '../../playwright.config';
 
 /**
  * 1.2 — onboarding identity, real Postgres, driven through the actual
@@ -376,8 +377,14 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
     // clear reason. Per #1025's "container first, then Playwright" fix, a
     // DATABASE_URL must always be provided explicitly (setup-test-db.ts
     // prints one) — require it here rather than let the misconfigured case
-    // hang.
-    !!process.env.DATABASE_URL &&
+    // hang. Checking `process.env.DATABASE_URL` here would NOT catch this:
+    // by the time this spec file's module body runs, global-setup has
+    // already executed (and, in its in-process bootstrap mode, may have
+    // backfilled DATABASE_URL into THIS process after the webServer was
+    // already spawned without it) — that read would describe global-setup's
+    // environment, not what the API server actually booted with. Check the
+    // config-load-time snapshot instead (xhawk-ai review on PR #1127).
+    !!DATABASE_URL_AT_WEBSERVER_BOOT &&
     !!STRIPE_WEBHOOK_SECRET &&
     !!STRIPE_SECRET_KEY &&
     !hasLiveProviderCreds;
