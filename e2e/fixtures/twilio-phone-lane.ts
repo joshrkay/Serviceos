@@ -23,6 +23,8 @@ export interface ProvisionedTenant {
   did: string;
   subaccountSid: string;
   authToken: string;
+  /** #1017 §8.4 — the business_name actually written to tenant_settings. */
+  businessName: string;
 }
 
 /**
@@ -38,14 +40,28 @@ export interface ProvisionedTenant {
 export async function provisionTenant(
   pool: Pool,
   encKey: string,
-  opts: { did: string; subaccountSid: string; authToken: string; ownerPhone?: string },
+  opts: {
+    did: string;
+    subaccountSid: string;
+    authToken: string;
+    ownerPhone?: string;
+    /**
+     * #1017 §8.4 — override the tenant's `business_name` (default kept as
+     * 'Book 8.3 Phone Shop' so every pre-existing §8.3 phone-lane spec is
+     * byte-identical). The SMS legs pass a DISTINCT name per tenant so a
+     * brand-voice/business-name assertion can tell tenant A's rows from
+     * tenant B's.
+     */
+    businessName?: string;
+  },
 ): Promise<ProvisionedTenant> {
   const tenantId = crypto.randomUUID();
   const userId = crypto.randomUUID();
+  const businessName = opts.businessName ?? 'Book 8.3 Phone Shop';
   await pool.query(
     `INSERT INTO tenants (id, owner_id, owner_email, name, subscription_status)
      VALUES ($1, $2, $3, $4, 'active')`,
-    [tenantId, userId, `owner+${tenantId.slice(0, 8)}@example.com`, 'Book 8.3 Phone Shop'],
+    [tenantId, userId, `owner+${tenantId.slice(0, 8)}@example.com`, businessName],
   );
   await pool.query(
     `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, first_name, last_name)
@@ -56,10 +72,12 @@ export async function provisionTenant(
     `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region, voice_agent_live_at${
       opts.ownerPhone ? ', owner_phone' : ''
     })
-     VALUES ($1, $2, 'Book 8.3 Phone Shop', 'America/Chicago', 'TX', NOW()${
-       opts.ownerPhone ? ', $3' : ''
+     VALUES ($1, $2, $3, 'America/Chicago', 'TX', NOW()${
+       opts.ownerPhone ? ', $4' : ''
      })`,
-    opts.ownerPhone ? [crypto.randomUUID(), tenantId, opts.ownerPhone] : [crypto.randomUUID(), tenantId],
+    opts.ownerPhone
+      ? [crypto.randomUUID(), tenantId, businessName, opts.ownerPhone]
+      : [crypto.randomUUID(), tenantId, businessName],
   );
   const client = await pool.connect();
   try {
@@ -83,7 +101,14 @@ export async function provisionTenant(
   } finally {
     client.release();
   }
-  return { tenantId, userId, did: opts.did, subaccountSid: opts.subaccountSid, authToken: opts.authToken };
+  return {
+    tenantId,
+    userId,
+    did: opts.did,
+    subaccountSid: opts.subaccountSid,
+    authToken: opts.authToken,
+    businessName,
+  };
 }
 
 /** A Twilio-shaped, self-signed webhook POST — see the pattern spec's header. */

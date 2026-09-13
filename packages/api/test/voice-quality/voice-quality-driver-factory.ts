@@ -560,6 +560,8 @@ export function makeVoiceQualityDriverFactory(
       incrementEstimateNumber: async () => 1,
       incrementInvoiceNumber: async () => 1,
       upsertIdentityFields: (tenantId, fields) => delegate.upsertIdentityFields(tenantId, fields),
+      ensureActiveVerticalPack: (tenantId, packId, bootstrapAiModel) =>
+        delegate.ensureActiveVerticalPack(tenantId, packId, bootstrapAiModel),
     };
     let now: (() => Date) | undefined;
     if (businessHours?.callMomentLocal) {

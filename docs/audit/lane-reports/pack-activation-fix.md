@@ -2,7 +2,8 @@
 
 Branch: `fix/pack-activation-scope-and-race` (off `origin/main` @ `2a68465`)
 Commits: RED tests (`142df7f`) → fixes (`5b2b112`) → report (`020a270`) →
-round 2, after review: RED (`37040f5`) → fix (`c11a2f1`) → this update
+round 2, after review: RED (`37040f5`) → fix (`c11a2f1`) →
+round 3, after review: RED (`761d2a7`) → fix (`d13bb40`) → this update
 Constraints honoured: no RLS policy changes, no migrations, no route or
 permission changes.
 
@@ -14,6 +15,14 @@ could still take the same 23505 from another first-row writer. Round 2 is
 the fix for that; §"Defect 1, part 2" below has the mechanism and the RED.
 It also subsumes what round 1 had listed under "not done" as the cross-pack
 residual.
+
+**Round 3 (review response).** Codex then found two defects in round 2's
+recovery, both real and both reproduced before fixing: on the HTTP path the
+23505 aborts the shared request transaction, so the catch cannot recover and
+the route still 500s; and the read-merge-write is a lost update that drops a
+concurrent different-pack activation from the mirror. The settings write is
+now ONE atomic upsert-and-merge statement, which removes both failure modes
+at the root rather than recovering from one of them. §"Defect 1, part 3".
 
 ---
 
@@ -184,6 +193,13 @@ behind it, still propagates. Same insert-then-reconcile idiom as
 `packages/api/src/ai/skills/find-or-create-lead.ts:146`. No change to
 `PgSettingsRepository`'s contract, so no other caller is affected.
 
+> **Superseded by round 3.** This recovery is sound only where each
+> repository call owns its transaction (the executor path). Codex showed it
+> cannot work inside the shared request transaction, and that the merge it
+> performs is a lost update. The catch is gone; the write is now one atomic
+> statement. Kept here because the mechanism it documents — the lock's grain
+> not matching the row's — is still why the defect existed.
+
 ### RED → GREEN
 
 Third test in
@@ -238,6 +254,127 @@ present.
 | `npx vitest run test/settings test/proposals test/verticals test/audit test/onboarding test/shared/pack-config-loader.test.ts test/routes/pack-activation-mirror-sync.route.test.ts` | `Test Files 159 passed (159) / Tests 2287 passed (2287)` |
 | integration: the 9 other files touching pack activation | `Test Files 9 passed (9) / Tests 47 passed (47)` |
 | `onboarding-pack-seed-concurrency.test.ts`, 5 consecutive runs | `Tests 2 passed (2)` ×5 |
+
+---
+
+## Defect 1, part 3 (#1083, round 3) — round 2's recovery was unsound on the HTTP path, and lost updates
+
+### Mechanism
+
+Two findings from Codex, both verified before fixing.
+
+**P1 — a caught 23505 cannot be recovered from inside the request
+transaction.** On `POST /api/onboarding/pack` the route passes
+`currentTenantContext()?.client` as `lockClient`
+(`packages/api/src/routes/onboarding.ts:355`), and every repository reuses
+that same client (`PgBaseRepository.withTenantTransaction` →
+`tenantContextStore`, set up at
+`packages/api/src/middleware/tenant-context.ts:259`). One transaction, so
+the failed INSERT aborts *all* of it: round 2's `catch` runs, but its
+re-read fails with `25P02 current transaction is aborted, commands ignored
+until end of transaction block`, and the route still 500s. Round 2 only
+ever fixed the executor path, where each repository call opens its own
+transaction. The repo documents this exact hazard on
+`TransactionScope.savepoint` (`packages/api/src/db/tenant-transaction.ts`).
+
+**P2 — read-merge-write is a lost update.** The guard is keyed by (tenant,
+pack); the row is keyed by tenant. Two activations for DIFFERENT packs are
+therefore never serialized against each other, and each writes back a list
+computed from its own earlier read — so the later write drops the earlier
+one's pack from `_activeVerticalPacks`. Both `pack_activations` rows stay
+active, so the authoritative table and the mirror consumed by the Templates
+page (`LiveTemplatesSection`) and public intake (`routes/public-intake.ts`)
+silently disagree.
+
+### The change
+
+`SettingsRepository.ensureActiveVerticalPack(tenantId, packId,
+bootstrapAiModel)` — new, and the whole read/create/update/catch block in
+`activatePackWithSeed` collapses to one call of it. Postgres implementation
+(`packages/api/src/settings/pg-settings.ts`) is a single statement: INSERT
+the row, or `ON CONFLICT (tenant_id) DO UPDATE` appending the pack to the
+stored list with `jsonb_set` over `COALESCE(terminology_preferences,'{}')`.
+
+- No exception, so nothing can abort the caller's transaction → P1 gone,
+  for the HTTP path and the executor path alike.
+- No read-modify-write: the merge is evaluated against the row version the
+  statement locks, so a concurrent different-pack activation is merged, not
+  overwritten → P2 gone.
+- The append is guarded by `@>`, so re-activating a pack does not repeat it.
+- Other terminology keys are preserved; `ai_model` is only backfilled when
+  null, never overwritten.
+
+The in-memory repository mirrors the semantics; the two test doubles that
+implement `SettingsRepository`
+(`test/voice-quality/voice-quality-driver-factory.ts`,
+`test/voice/voice-smoke.synthetic.test.ts`) delegate or stub it. The
+now-dead `isUniqueViolation` helper and the `uuid` import were removed with
+the block they served.
+
+### RED → GREEN
+
+New file `packages/api/test/integration/onboarding-pack-settings-upsert.test.ts`.
+Both tests force the interleaving through **real lock contention** — a
+second session holds an uncommitted write to the tenant's settings row, the
+code under test blocks on it in Postgres, and only then does the blocker
+commit (`waitUntilBlocked` polls `pg_blocking_pids` until the waiter exists,
+so nothing rides on a sleep landing in the right place). The round-2 tests
+in `onboarding-pack-seed-lock-scope.test.ts` were rewritten the same way:
+they had hooked `settingsRepo.findByTenant`, which this fix removes, so a
+hook-based probe would have silently stopped proving anything.
+
+RED (round-2 code):
+
+```
+ × P1 — inside the request-scoped transaction, another writer creating tenant_settings does not poison the caller 52ms
+   → expected error: current transaction is aborted, co… { …(15) } to be undefined
++ Received:
+error {
+  "message": "current transaction is aborted, commands ignored until end of transaction block",
+  "code": "25P02",
+ × P2 — a concurrent activation of a DIFFERENT pack is merged into the mirror, not overwritten 64ms
+   → expected [ 'hvac' ] to deeply equal [ 'hvac', 'plumbing' ]
+- Expected
++ Received
+  [
+    "hvac",
+-   "plumbing",
+  ]
+ ✓ re-activating a pack already in the mirror does not duplicate it 45ms
+```
+
+GREEN, with every other pack file alongside:
+
+```
+ ✓ P1 — inside the request-scoped transaction, another writer creating tenant_settings does not poison the caller 67ms
+ ✓ P2 — a concurrent activation of a DIFFERENT pack is merged into the mirror, not overwritten 58ms
+ ✓ re-activating a pack already in the mirror does not duplicate it 42ms
+ ✓ the loser of the (tenant, pack) lock writes NOTHING to tenant_settings — the whole settings write is behind the guard 40ms
+ ✓ the loser reports PACK_ACTIVATION_IN_PROGRESS, never a raw 23505, when the winner creates the tenant_settings row first 19ms
+ ✓ the WINNER of the pack lock survives the sibling handler creating the tenant_settings row under it, and merges rather than clobbers 74ms
+ ✓ onboarding-pack × 5 (incl. T1 and T3)
+ ✓ onboarding-pack-seed-concurrency × 2 (incl. T1)
+ ✓ pack-activation-tenant-scoped-update × 3
+
+ Test Files  5 passed (5)
+      Tests  16 passed (16)
+```
+
+### Re-validation after round 3
+
+| run | result |
+|---|---|
+| `npx tsc --project tsconfig.build.json --noEmit` | exit 0, no output |
+| `npx vitest run test/settings test/proposals test/verticals test/audit test/onboarding test/invariants test/shared/pack-config-loader.test.ts test/routes/pack-activation-mirror-sync.route.test.ts test/packs` | `Test Files 168 passed (168) / Tests 2403 passed \| 4 expected fail (2407)` |
+| integration: the 9 other files touching pack activation (incl. mirror-sync and public-intake) | `Test Files 9 passed (9) / Tests 51 passed (51)` |
+| `onboarding-pack-seed-concurrency.test.ts`, 5 consecutive runs | `Tests 2 passed (2)` ×5 |
+
+Run on the branch **after Josh merged `main` in** (`537d28a`, base
+`92a1653`), so these numbers are against the merged head, not the original
+branch point. The merge also brought
+`test/invariants/i16-telephony-acting-tenant-guarded.structural.test.ts`
+from main — the tenant-predicate structural guard — and the now
+tenant-predicated `pg-pack-activation.ts` passes it.
 
 ---
 
