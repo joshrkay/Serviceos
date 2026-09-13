@@ -166,6 +166,39 @@ export function withTenantTransaction(pool: Pool) {
       client.release();
     };
 
+    // #1090 — Postgres can terminate this backend mid-request: the
+    // `idle_in_transaction_session_timeout` set below (a handler awaiting a
+    // slow upstream leaves the transaction idle), an admin terminate, a
+    // failover. `pg` delivers that as an 'error' EVENT on the client, never as
+    // a rejected query — see db/pool.ts `guardClientErrors` — so nothing on
+    // the handler's await path learns about it. Left unhandled that is a
+    // SILENT FALSE SUCCESS: Postgres has already rolled the transaction back,
+    // `cleanup`'s COMMIT below can only fail (and is swallowed), and a handler
+    // that did its last write, awaited, and then responded 200 without another
+    // query reports success over writes that no longer exist.
+    //
+    // So record it and answer the request ourselves while we still can. A
+    // handler that later tries to respond hits `res.headersSent`, which
+    // asyncRoute already guards. If the response has already started (a
+    // streamed body — a window of microseconds, since a finished response has
+    // already run `cleanup` and removed this listener) there is nothing left
+    // to correct, so we log and let `cleanup` skip the doomed COMMIT.
+    let connectionLost: Error | undefined;
+    const onConnectionLost = (err: Error): void => {
+      if (connectionLost) return;
+      connectionLost = err;
+      process.stderr.write(
+        `request transaction connection lost — transaction rolled back by the server: ${err.message}\n`,
+      );
+      if (!res.headersSent && !res.writableEnded) {
+        res.status(500).json({
+          error: 'INTERNAL_ERROR',
+          message: 'Database connection was terminated; the request was rolled back',
+        });
+      }
+    };
+    client.on('error', onConnectionLost);
+
     try {
       await client.query('BEGIN');
       // Parameterized so a malicious tenantId can't break out of the SQL
@@ -184,7 +217,12 @@ export function withTenantTransaction(pool: Pool) {
       } catch {
         /* ignore */
       }
+      client.off('error', onConnectionLost);
       releaseOnce();
+      // `onConnectionLost` may already have answered this request (the
+      // connection died during BEGIN/SET); handing the same request to the
+      // error pipeline again would only destroy a response the caller has.
+      if (res.headersSent) return;
       next(err);
       return;
     }
@@ -202,6 +240,15 @@ export function withTenantTransaction(pool: Pool) {
       if (cleanedUp || released) return;
       cleanedUp = true;
       let committed = false;
+      if (connectionLost) {
+        // #1090 — the server already ended this transaction (rolling it back)
+        // and the client is unqueryable, so COMMIT and ROLLBACK can only
+        // fail. Skip straight to release; `committed` stays false, so the
+        // after-commit hooks below correctly never fire.
+        client.off('error', onConnectionLost);
+        releaseOnce();
+        return;
+      }
       try {
         await client.query(commit ? 'COMMIT' : 'ROLLBACK');
         committed = commit;
@@ -217,6 +264,7 @@ export function withTenantTransaction(pool: Pool) {
           }
         }
       } finally {
+        client.off('error', onConnectionLost);
         releaseOnce();
       }
       // Run after-commit hooks ONLY once the writes are durable. A rolled-back

@@ -154,6 +154,35 @@ passed RED as well as GREEN, so it is kept as a regression pin).
 
 No changes to telephony auth, money, pricing, RLS or migrations.
 
+### Follow-on from review: the killed request transaction must not report success
+
+A review finding on the PR (xhawk-ai, High/Correctness, anchored on the new
+`pool.ts` guard) pointed at what the guard leaves behind, and it is right —
+verified before fixing, with the RED below.
+
+`withTenantTransaction` commits on `res.finish` and, when the COMMIT fails,
+falls back to ROLLBACK and swallows both (`middleware/tenant-context.ts`
+cleanup). That is correct for a constraint violation the handler already turned
+into a >=400. It is wrong when Postgres terminated the backend: the handler can
+do its last write, await a slow upstream past
+`idle_in_transaction_session_timeout`, then send a **200** with no further query
+— the caller reads success while Postgres has already rolled the writes back,
+nothing is logged, and the after-commit hooks silently never run. Before the
+pool guard this hid behind the process crash; now that a killed connection is
+survivable, the silent false success is what is left, so it belongs here.
+
+| File | Change |
+| --- | --- |
+| `packages/api/src/middleware/tenant-context.ts:169-200, 213-232, 245-258` | A scoped `client.on('error')` records the loss, logs it (it was entirely silent), and — while nothing has been sent yet — answers the request 500 instead of letting the handler's 2xx go out over discarded writes. `cleanup` then skips the COMMIT/ROLLBACK that can only fail, leaves `committed` false so after-commit hooks never fire, and removes the listener on every exit path (a pooled client would otherwise accumulate one per request). |
+| `packages/api/test/middleware/tenant-context.test.ts` | The mock `PoolClient` is now an `EventEmitter`, which the real one is — the old mock had only `query`/`release`, so it could not have observed this class of failure at all (the CLAUDE.md rule about mocked-DB tests, in miniature). Plus a unit case pinning the skipped COMMIT, the un-fired hooks, and the removed listener. |
+
+Not taken from the suggestion: destroying a response whose headers are already
+committed. That window is microseconds wide (a finished response has already
+run `cleanup` and dropped the listener, so it only covers a partially streamed
+body), and tearing down an in-flight response changes the request lifecycle for
+every `/api` route — a call for the repo owner, not a drive-by in this PR. That
+case now logs.
+
 ---
 
 ## Tests
@@ -364,6 +393,46 @@ taking the process down.
 
 ---
 
+### RED/GREEN for the review follow-on
+
+`packages/api/test/integration/request-transaction-connection-lost.test.ts`
+drives the REAL middleware (mounted as app.ts mounts it) in front of a route
+shaped exactly like the finding — write, wait past a 400ms
+`DB_REQUEST_IDLE_TX_TIMEOUT_MS`, respond 200 without another query — against
+real Postgres.
+
+RED confirmed the finding precisely: the write WAS rolled back (`count = 0`)
+and the after-commit hook did NOT run, yet the caller got a 200 —
+
+```
+pg pool client connection error: terminating connection due to idle-in-transaction timeout
+pg pool client connection error: Connection terminated unexpectedly
+ × … > fails the request rather than returning 2xx over rolled-back writes 2306ms
+   → expected 200 to be greater than or equal to 500
+
+AssertionError: expected 200 to be greater than or equal to 500
+ ❯ test/integration/request-transaction-connection-lost.test.ts:163:26
+```
+
+GREEN — the loss is now logged and the request fails instead of lying:
+
+```
+pg pool client connection error: terminating connection due to idle-in-transaction timeout
+request transaction connection lost — transaction rolled back by the server: terminating connection due to idle-in-transaction timeout
+ ✓ … > fails the request rather than returning 2xx over rolled-back writes 708ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+```
+
+```
+$ cd packages/api && npx vitest run test/middleware/tenant-context.test.ts --reporter=verbose
+ Test Files  1 passed (1)
+      Tests  24 passed (24)
+```
+
+---
+
 ## Not done
 
 - **The "which request holds the transaction idle for 60s" question is answered
@@ -385,6 +454,11 @@ taking the process down.
 - **The app.ts shutdown wiring is not itself covered by an automated test** —
   the registry is unit-tested and the wiring is exercised by the 4-minute boot,
   but there is no test that boots `createApp()` and asserts the drain ordering.
+- **A response whose headers are already out is not corrected**, only logged
+  (the review follow-on above). The window is microseconds — a finished
+  response has already run `cleanup` — so it covers only a partially streamed
+  body, and destroying an in-flight response is a request-lifecycle decision
+  for the repo owner rather than a drive-by in this PR.
 - **No test pins `pg-pool`'s internals.** The GREEN tests assert the observable
   behavior (no escape to the process); if a future `pg` release changes when
   `idleListener` is attached, these tests still hold, but the explanatory
