@@ -1,0 +1,5 @@
+              tenant_id               |     event_type     |   entity_type   |              entity_id               
+--------------------------------------+--------------------+-----------------+--------------------------------------
+ abe80cff-298a-4330-9ded-6a432188efbf | tenant.ai_verified | tenant_settings | abe80cff-298a-4330-9ded-6a432188efbf
+(1 row)
+

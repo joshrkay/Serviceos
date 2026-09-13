@@ -1,0 +1,5 @@
+                  id                  | subscription_status |              stripe_customer_id              
+--------------------------------------+---------------------+----------------------------------------------
+ abe80cff-298a-4330-9ded-6a432188efbf | trialing            | cus_e2e_cffac59d-d977-48b1-ade3-762b12b41762
+(1 row)
+
