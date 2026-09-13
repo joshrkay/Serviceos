@@ -22,10 +22,15 @@ Shared bootstrap: `e2e/fixtures/estimate-quote-lane.ts` — owner via the real
 Clerk `user.created` webhook + HMAC session, every customer/location/job/
 estimate/send through the real authenticated API. No SQL writes to reach a
 product state; no platform-admin routes; no `E2E_DEV_AUTH=1`; project
-`chromium` only. The one direct insert is `tenant_integrations` (7.12) —
-the Twilio DID/subaccount row has no product UI (a background worker
-provisions it against a real Twilio account), the same justification the
-merged §8.3/§8.4 phone lanes document.
+`chromium` only. The one direct write is an UPDATE of two columns on `tenant_integrations`
+(7.12): the product's own dev provisioning worker
+(workers/provision-twilio.ts:148-166) already gives every new tenant a stub
+twilio row (DID `+15005550006`, `stub: true`) but, having no Twilio
+account, leaves `subaccount_sid` / `auth_token_primary_enc` empty — and the
+signed-webhook route verifies against exactly those two. The spec fills
+them on the product's row (run 1's INSERT collided with the product's own
+row on `tenant_integrations_tenant_id_provider_key`), the same
+justification the merged §8.3/§8.4 phone lanes document, narrowed.
 
 Tenant-isolation method: cross-tenant INVISIBILITY is proven through the
 real API (the other owner's `GET` → 404), and every direct Postgres read
@@ -284,6 +289,47 @@ Row dumps:
 
 Screenshots: `7.1-drafted-proposal-catalog.png`, `7.1-approved-proposal-catalog.png`,
 `7.3-uncatalogued-badge.png`.
+
+### 7.12 — `negotiation-sms-guardrail-7-12.spec.ts`
+
+Run 1: INSERT collided with the product's own dev stub twilio row (now an
+UPDATE of its two credential columns). Run 2: the quote was sent by email
+to a phone-only customer (`Cannot send email — … no email on file`; now
+SMS). Run 3: the Discount-policy sheet's Save resolved to three buttons
+(scoped to the dialog). Run 4:
+
+```
+✓  1 [chromium] › e2e/journeys/negotiation-sms-guardrail-7-12.spec.ts:215:7 › negotiation guardrail — SMS discount ask never concedes (7.12) — real Postgres › a discount-asking SMS always produces a capture-class owner callback + audit row, never a price to the customer, under two divergent tenant configs (T1·T3) (12.7s)
+  1 passed (2.2m)
+EXIT=0
+```
+
+Row dumps:
+
+```
+7.12 tenant A proposals (callback)            ← A left at the DEFAULT discountMaxBps (unset ⇒ 0): V1 path
+  [ { id: 7b187353-…, proposal_type: "callback", status: "draft",
+      source_context: { source: "sms", fromPhone: "+15125559001", messageSid: "SMb02040e3…" },
+      summary: "Discount request from the customer — AI didn't negotiate; call back" } ]
+7.12 tenant A audit_events negotiation_guardrail.sms_routed
+  [ { metadata: { askType: "discount", proposalId: "7b187353-…" } } ]          ← ONE row, no decision (never evaluated)
+7.12 tenant B proposals (callback)            ← B opted in through the real Discount-policy sheet (10% cap): V2 path
+  [ { id: 5c2e1e77-…, proposal_type: "callback", status: "draft",
+      source_context: { source: "sms", fromPhone: "+15125559002", messageSid: "SMd4dc9ad9…" },
+      summary: "Discount request from the customer — AI didn't negotiate; call back" } ]
+7.12 tenant B audit_events negotiation_guardrail.sms_routed (T3: carries decisionKind)
+  [ { metadata: { quotedCents: 22500, decisionKind: "NEEDS_APPROVAL", requestedDiscountBps: null, requestedTargetCents: 20500 } },
+    { metadata: { askType: "discount", proposalId: "5c2e1e77-…" } } ]        ← TWO rows: the REAL evaluated decision on the REAL $225 quote
+```
+
+No concession either way: both estimates' `totals.totalCents` unchanged
+(22500), both proposals `draft`, the only customer reply is the holding line
+(in-memory delivery). Cross-tenant: B's scope holds neither A's proposal
+nor an audit row naming it. Owner browser: tenant A's `/inbox` shows
+"Discount request from the customer — AI didn't negotiate; call back".
+
+Screenshots: `7.12-tenantB-discount-policy-configured.png`,
+`7.12-tenantA-inbox-callback.png`.
 
 <!-- RUNS -->
 

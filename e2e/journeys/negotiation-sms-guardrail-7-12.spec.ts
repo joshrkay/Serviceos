@@ -54,13 +54,14 @@ const CUSTOMER_PHONE_B = '+15125559002';
  * divergent configurations, not just the unconfigured default.
  *
  * Owner bootstrap: real Clerk `user.created` webhook (bootstrapOwner). The
- * Twilio DID/subaccount/auth-token row has no reachable product UI (it is
- * provisioned by a background worker against a real Twilio account, which
- * this hermetic sandbox does not have) — inserted directly for the EXISTING,
- * Clerk-bootstrapped tenant, the same justification
- * e2e/fixtures/twilio-phone-lane.ts's `provisionTenant` documents for the
- * technician-user row, and the established pattern the merged §8.3/§8.4
- * phone/SMS lanes use for this exact column set.
+ * tenant's phone identity is the PRODUCT's own: in dev the onboarding
+ * provisioning worker writes a stub `tenant_integrations` twilio row (DID
+ * +15005550006, no Twilio credentials — see provisionTwilioIntegration
+ * below). The only direct write here fills that row's two credential
+ * columns (subaccount_sid, auth_token_primary_enc), which only a real
+ * Twilio account could otherwise supply and which the signed-webhook route
+ * requires — the same justification the merged §8.3/§8.4 phone/SMS lanes
+ * document for this column set, narrowed to an UPDATE of the product's row.
  */
 
 interface TwilioIntegration {
@@ -69,6 +70,21 @@ interface TwilioIntegration {
   did: string;
 }
 
+/**
+ * The product ALREADY provisions this tenant's phone identity in dev: the
+ * onboarding provisioning worker (workers/provision-twilio.ts:148-166),
+ * finding no Twilio credentials, writes a deterministic STUB
+ * `tenant_integrations` row — status 'full_readiness', provider_data
+ * { phoneE164: '+15005550006' (Twilio's magic test number), stub: true } —
+ * with NO subaccount_sid and NO auth token, because those only ever come
+ * from a real Twilio account. The signed-webhook route needs exactly those
+ * two columns (webhooks/routes.ts recordTwilio: signature verified against
+ * auth_token_primary_enc, AccountSid matched against subaccount_sid), so
+ * this fills ONLY those two on the product's own row — an UPDATE, not an
+ * insert (run 1's INSERT hit tenant_integrations_tenant_id_provider_key).
+ * The worker writes the stub asynchronously after onboarding, so poll for
+ * it first (#1133-style read retry).
+ */
 async function provisionTwilioIntegration(
   pool: Pool,
   tenantId: string,
@@ -76,25 +92,33 @@ async function provisionTwilioIntegration(
 ): Promise<TwilioIntegration> {
   const subaccountSid = `AC${randomUUID().replace(/-/g, '').slice(0, 32)}`;
   const authToken = randomUUID().replace(/-/g, '');
-  const did = `+1512555${Math.floor(1000 + Math.random() * 8999)}`;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL app.current_tenant_id = '${tenantId}'`);
-    await client.query(
-      `INSERT INTO tenant_integrations
-         (tenant_id, provider, status, provider_data, subaccount_sid, auth_token_primary_enc)
-       VALUES ($1, 'twilio', 'full_readiness', $2::jsonb, $3, $4)`,
-      [tenantId, JSON.stringify({ phoneE164: did }), subaccountSid, encrypt(authToken, encKey)],
-    );
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    throw err;
-  } finally {
-    client.release();
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL app.current_tenant_id = '${tenantId}'`);
+      const res = await client.query<{ provider_data: { phoneE164?: string } | null }>(
+        `UPDATE tenant_integrations
+            SET subaccount_sid = $2, auth_token_primary_enc = $3, updated_at = NOW()
+          WHERE tenant_id = $1 AND provider = 'twilio'
+          RETURNING provider_data`,
+        [tenantId, subaccountSid, encrypt(authToken, encKey)],
+      );
+      await client.query('COMMIT');
+      const did = res.rows[0]?.provider_data?.phoneE164;
+      if (res.rowCount && did) return { subaccountSid, authToken, did };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`no product-provisioned twilio stub row for tenant ${tenantId} within 15s`);
+    }
+    await new Promise((r) => setTimeout(r, 250));
   }
-  return { subaccountSid, authToken, did };
 }
 
 async function signedSmsPost(
@@ -170,7 +194,9 @@ async function seedCustomerJobEstimate(
   const job = (await jobRes.json()) as { id: string };
   const jobRef: JobRef = { customerId: customer.id, locationId: location.id, jobId: job.id };
 
-  const sent = await createAndSendSimpleEstimate(request, tenant, jobRef, 22_500);
+  // The negotiating customer is phone-only (SMS surface); send the quote by
+  // SMS — an email send 400s "customer has no email on file" (run 2).
+  const sent = await createAndSendSimpleEstimate(request, tenant, jobRef, 22_500, 'sms');
   return { job: jobRef, estimateId: sent.estimateId, totalCentsBefore: 22_500 };
 }
 
@@ -212,10 +238,13 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       await signInOwnerBrowser(page, baseURL!, tenantB);
       await page.goto('/settings');
       await page.getByText('Discount policy', { exact: true }).click();
-      const maxInput = page.getByLabel('Maximum discount the AI may propose');
+      // Scope to the sheet (role="dialog", labelled "Discount policy") — the
+      // settings page has three "Save" buttons (run 3: strict-mode violation).
+      const sheet = page.getByRole('dialog', { name: /Discount policy/i });
+      const maxInput = sheet.getByLabel('Maximum discount the AI may propose');
       await expect(maxInput).toBeVisible({ timeout: 15_000 });
       await maxInput.fill('10');
-      await page.getByRole('button', { name: /^Save$/i }).click();
+      await sheet.getByRole('button', { name: /^Save$/i }).click();
       await expect(page.getByText('Discount policy saved', { exact: false })).toBeVisible({ timeout: 10_000 });
       await page.screenshot({ path: join(SCREENSHOT_DIR, '7.12-tenantB-discount-policy-configured.png') });
 

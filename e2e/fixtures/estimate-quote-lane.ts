@@ -251,10 +251,11 @@ export async function sendEstimate(
   request: APIRequestContext,
   tenant: Tenant,
   estimateId: string,
+  channel: 'email' | 'sms' = 'email',
 ): Promise<SentEstimate> {
   const sendRes = await request.post(`${API_URL}/api/estimates/${estimateId}/send`, {
     headers: { 'content-type': 'application/json', ...tenant.authHeaders },
-    data: JSON.stringify({ channel: 'email' }),
+    data: JSON.stringify({ channel }),
   });
   expect(sendRes.ok(), `send estimate -> ${sendRes.status()} ${await sendRes.text()}`).toBeTruthy();
   const sent = (await sendRes.json()) as { viewToken: string };
@@ -267,6 +268,7 @@ export async function createAndSendSimpleEstimate(
   tenant: Tenant,
   job: JobRef,
   priceCents = 9_900,
+  channel: 'email' | 'sms' = 'email',
 ): Promise<SentEstimate> {
   const { estimateId } = await createEstimate(request, tenant, job, [
     {
@@ -279,7 +281,7 @@ export async function createAndSendSimpleEstimate(
       taxable: false,
     },
   ]);
-  return sendEstimate(request, tenant, estimateId);
+  return sendEstimate(request, tenant, estimateId, channel);
 }
 
 /**
