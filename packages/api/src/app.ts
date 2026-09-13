@@ -4269,6 +4269,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 ...budget,
               }),
             triageEvents: triageEventsRepo,
+            // Row 2.6 — the triage outcome's audit row, through the same
+            // repository this path already uses for the patch action below.
+            auditRepo,
             onPatchOwner: async ({ session, tenantId, decision }) => {
               const patchCallerPhone = twilioAdapter.getCallerPhone(session.id);
               const result = await patchOwnerThrough(
@@ -6079,6 +6082,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             auditRepo,
           },
           listTenantIds: () => listAllTenantIds(pool),
+          // #1113 — the send/suppress/fail outcome's audit row. Distinct
+          // from the READ-only `auditRepo` inside `computeDeps` above,
+          // which only feeds the WS22 "N fixed" reflection.
+          auditRepo,
           // Narrative through the brand-voice composer ONLY when a real LLM
           // provider is configured — the mock gateway's canned JSON must not
           // become an owner-facing narrative. Composer failures fall back to
@@ -6586,6 +6593,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           // lands in the review_poll_state backoff (visible in Settings).
           googleConfig: googleBusinessOAuthConfig ?? null,
           credentialStore: googleBusinessIntegrationRepo,
+          // Row 9.4 — audit the sweep's durable writes (review ingest,
+          // quota/auth backoff stamps).
+          auditRepo,
           ...(googleReviewsProposalEmission
             ? { proposalEmission: googleReviewsProposalEmission }
             : {}),
