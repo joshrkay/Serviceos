@@ -16,6 +16,10 @@
  *   6. On 429 (`GoogleBusinessQuotaError`) record the quota error so
  *      the next sweep skips the tenant until the exponential window
  *      lifts.
+ *   7. Audit each durable write (row 9.4): `review.ingested` per fresh
+ *      insert, `review.sweep_backoff` per quota/auth backoff stamp. See
+ *      `auditRepo` on the deps below for why the cursor advance is not
+ *      audited.
  *
  * One tenant's failure NEVER stops the loop — try/catch per tenant.
  * When `pool` is unset (dev with no DB) the sweep no-ops cleanly,
@@ -62,6 +66,10 @@ import {
   BuildReviewResponseProposalDeps,
   buildReviewResponseProposal,
 } from '../reputation/build-proposal';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+
+/** Actor recorded on this sweep's audit rows — no human is in the loop. */
+const GOOGLE_REVIEWS_ACTOR = 'system:google-reviews-worker';
 
 /** Hard cap on pages walked per tenant per tick — defense against runaway pagination. */
 const MAX_PAGES_PER_TENANT = 20;
@@ -132,6 +140,26 @@ export interface GoogleReviewsWorkerDeps {
    */
   googleConfig?: GoogleBusinessOAuthConfig | null;
   credentialStore?: GoogleBusinessCredentialStore | null;
+  /**
+   * Row 9.4 — `audit_events` for this sweep's two durable writes:
+   *
+   *   - `review.ingested` on the `review` entity, once per FRESH insert
+   *     (it rides the upsert's own `inserted` flag, so a re-sweep audits
+   *     nothing, exactly as it persists nothing);
+   *   - `review.sweep_backoff` on the `review_poll_state` entity when a
+   *     429 or an unrecoverable 401 stamps the backoff window. That stamp
+   *     is a state change the owner FEELS — reviews silently stop
+   *     arriving — and it was log-only.
+   *
+   * The cursor advance is deliberately NOT audited: it is a watermark
+   * derived from the rows above, carrying no information the ingest rows
+   * don't already carry.
+   *
+   * Optional, like every other seam on this worker, so the unit suite's
+   * in-memory harness compiles unchanged; app.ts passes the real
+   * `PgAuditRepository`.
+   */
+  auditRepo?: AuditRepository;
 }
 
 export interface GoogleReviewsSweepResult {
@@ -287,6 +315,23 @@ export async function runGoogleReviewsSweep(
             await deps.reviewRepo.upsert(review);
           if (inserted) {
             tenantPersisted++;
+            // Row 9.4 — the ingest's audit row. Rides `inserted` for the
+            // same reason the proposal bridge below does: it is the
+            // natural once-only signal, so a re-sweep is silent.
+            await auditSweepEvent(deps, {
+              tenantId: persistedReview.tenantId,
+              eventType: 'review.ingested',
+              entityType: 'review',
+              entityId: persistedReview.id,
+              metadata: {
+                source: 'google_business',
+                externalReviewId: persistedReview.externalReviewId,
+                rating: persistedReview.rating,
+                locationId: persistedReview.locationId,
+                reviewerDisplayName: persistedReview.reviewerDisplayName,
+                hasComment: Boolean(persistedReview.commentText),
+              },
+            });
             // Ingestion → proposal bridge. Only fires on a FRESH insert
             // so re-runs of the sweep don't double-emit. When emission
             // deps aren't wired we silently skip (the startup-time
@@ -383,6 +428,17 @@ export async function runGoogleReviewsSweep(
             error: err.message,
           },
         );
+        await auditSweepEvent(deps, {
+          tenantId,
+          eventType: 'review.sweep_backoff',
+          entityType: 'review_poll_state',
+          entityId: tenantId,
+          metadata: {
+            reason: 'auth_failed',
+            retryAfterSeconds: GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS,
+            error: err.message,
+          },
+        });
         continue;
       }
       if (err instanceof GoogleBusinessQuotaError) {
@@ -404,6 +460,16 @@ export async function runGoogleReviewsSweep(
         deps.logger.warn('Google reviews sweep: 429 quota error', {
           tenantId,
           retryAfterSeconds: err.retryAfterSeconds,
+        });
+        await auditSweepEvent(deps, {
+          tenantId,
+          eventType: 'review.sweep_backoff',
+          entityType: 'review_poll_state',
+          entityId: tenantId,
+          metadata: {
+            reason: 'quota_429',
+            retryAfterSeconds: err.retryAfterSeconds,
+          },
         });
         continue;
       }
@@ -435,6 +501,48 @@ export async function runGoogleReviewsSweep(
     proposalsEmitted,
     proposalEmissionFailed,
   };
+}
+
+/**
+ * Row 9.4 — one guarded audit write for the sweep.
+ *
+ * DELIBERATELY SWALLOWED, like every other per-tenant effect in this
+ * worker: the sweep's contract is "one tenant's failure NEVER stops the
+ * loop", and the surrounding try/catch would otherwise turn an audit
+ * outage into a skipped tenant (or, on the backoff branches, into an
+ * unstamped backoff that hammers Google on the next tick). The proposal
+ * bridge above swallows for exactly the same reason.
+ */
+async function auditSweepEvent(
+  deps: GoogleReviewsWorkerDeps,
+  input: {
+    tenantId: string;
+    eventType: string;
+    entityType: string;
+    entityId: string;
+    metadata: Record<string, unknown>;
+  },
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  try {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: GOOGLE_REVIEWS_ACTOR,
+        actorRole: 'system',
+        eventType: input.eventType,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        metadata: input.metadata,
+      }),
+    );
+  } catch (err) {
+    deps.logger.warn('Google reviews sweep: audit write failed', {
+      tenantId: input.tenantId,
+      eventType: input.eventType,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
