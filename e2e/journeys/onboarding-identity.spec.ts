@@ -5,6 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { DATABASE_URL_AT_WEBSERVER_BOOT } from '../../playwright.config';
 
 /**
  * 1.2 — onboarding identity, real Postgres, driven through the actual
@@ -367,16 +368,36 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
     process.env.E2E_USE_TEST_DB === 'true' &&
+    // apiWebServerEnv is captured BEFORE e2e/global-setup.ts's in-process
+    // testcontainer bootstrap runs, so E2E_USE_TEST_DB=true alone (without a
+    // pre-provisioned DATABASE_URL passed in) boots the API with in-memory
+    // repositories: pool stays null, the verify_ai worker never registers
+    // (app.ts's `if (pool && llmGateway)` guard), and this test times out
+    // waiting on a job nothing will ever process instead of skipping with a
+    // clear reason. Per #1025's "container first, then Playwright" fix, a
+    // DATABASE_URL must always be provided explicitly (setup-test-db.ts
+    // prints one) — require it here rather than let the misconfigured case
+    // hang. Checking `process.env.DATABASE_URL` here would NOT catch this:
+    // by the time this spec file's module body runs, global-setup has
+    // already executed (and, in its in-process bootstrap mode, may have
+    // backfilled DATABASE_URL into THIS process after the webServer was
+    // already spawned without it) — that read would describe global-setup's
+    // environment, not what the API server actually booted with. Check the
+    // config-load-time snapshot instead (xhawk-ai review on PR #1127).
+    !!DATABASE_URL_AT_WEBSERVER_BOOT &&
     !!STRIPE_WEBHOOK_SECRET &&
     !!STRIPE_SECRET_KEY &&
     !hasLiveProviderCreds;
   test.skip(
     !canRun,
-    'Requires the local webServer pair against a real Postgres (E2E_USE_TEST_DB=true) PLUS ' +
-      'STRIPE_SECRET_KEY (any non-empty value — never dialed, only gates billingService on) and ' +
-      'STRIPE_WEBHOOK_SECRET (signs the self-signed trial webhook) set before `npx playwright test` ' +
-      '— AND none of TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / AI_PROVIDER_API_KEY set, or the phone ' +
-      'and AI-check legs stop being hermetic stubs and start dialing real providers.',
+    'Requires the local webServer pair against a real Postgres: E2E_USE_TEST_DB=true PLUS an ' +
+      'explicit DATABASE_URL (e.g. from `npx tsx e2e/fixtures/setup-test-db.ts`) — E2E_USE_TEST_DB ' +
+      'alone boots the API in-memory, since apiWebServerEnv is captured before global-setup\'s ' +
+      'in-process bootstrap runs — PLUS STRIPE_SECRET_KEY (any non-empty value — never dialed, ' +
+      'only gates billingService on) and STRIPE_WEBHOOK_SECRET (signs the self-signed trial ' +
+      'webhook) set before `npx playwright test` — AND none of TWILIO_ACCOUNT_SID / ' +
+      'TWILIO_AUTH_TOKEN / AI_PROVIDER_API_KEY set, or the phone and AI-check legs stop being ' +
+      'hermetic stubs and start dialing real providers.',
   );
 
   /** Same recipe as createWebhookSignature in packages/api/src/webhooks/webhook-handler.ts. */
@@ -422,15 +443,6 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
   }
 
   /**
-   * T2 control — drives a tenant through identity -> pack -> phone ->
-   * billing(signed webhook) -> ai_check ENTIRELY over the API (no browser;
-   * the UI leg is what the main test proves) so a second, independently-
-   * configured tenant can reach its OWN passed ai_check state, concurrent
-   * with the tenant under test, on a DIFFERENT pack — proving the two
-   * don't interfere rather than merely that an untouched neighbour is
-   * invisible (that's T1, asserted separately below).
-   */
-  /**
    * T2 control, phase 1 — gets a tenant to the real onboarding gate's
    * `billing` step over the API (identity + pack; the phone dev-stub
    * already ran on signup). Deliberately does NOT fire the trial webhook —
@@ -474,9 +486,21 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
   }
 
   /** T2 control, phase 2 — fires the self-signed trial webhook. Called for
-   * both tenants back-to-back (not awaited between the two calls) so the
-   * requests are genuinely concurrent, not merely started-without-awaiting
-   * somewhere earlier in the test. */
+   * both tenants via Promise.all so the two HTTP requests are genuinely
+   * submitted together, not merely started-without-awaiting somewhere
+   * earlier in the test. NOTE (Codex, third review pass): this synchronizes
+   * the two webhook SUBMISSIONS, not the two verify_ai WORKER EXECUTIONS —
+   * app.ts's queue poll tick can still claim and finish one job before the
+   * other tenant's webhook has even committed its enqueue, since polling is
+   * on a 250ms tick with no rendezvous of its own. Proving literal
+   * worker-thread overlap would mean instrumenting the queue's internal
+   * claim/delete step, which is asserting on implementation internals
+   * rather than product behavior. What this DOES prove, and what the test
+   * name below is now worded to claim: two independently-configured
+   * tenants, one submitted right after the other with no ordering
+   * dependency between them, each reach their own correct, isolated final
+   * state — the actual property #1016's T2 grading is checking for
+   * elsewhere in this same file (e.g. 1.2's T2, T3 in onboarding-pack.test.ts). */
   async function fireTrialWebhook(
     request: import('@playwright/test').APIRequestContext,
     tenant: { tenantId: string },
@@ -529,8 +553,8 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
   test(
     'identity -> pack -> phone (Twilio stub) -> billing (signed trial webhook) -> AI check ' +
       'passes at real Postgres with its tenant.ai_verified audit row; a neighbour tenant on a ' +
-      'DIFFERENT pack completing its own AI check concurrently does not change this tenant\'s ' +
-      'answer (T2)',
+      'DIFFERENT pack, whose trial webhook is submitted together with this one via Promise.all, ' +
+      'reaches its own correct AI-check state without changing this tenant\'s answer (T2)',
     async ({ page, baseURL }, testInfo) => {
       // Default 30s is too short for a full identity->pack->phone(stub
       // provisioning)->billing->ai_check(worker) walk TWICE (neighbour +
@@ -543,18 +567,22 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       // ── Neighbour tenant, seeded FIRST and driven (over the API, plumbing
       //    pack — deliberately different from the tenant under test's HVAC)
       //    up to but NOT THROUGH billing — it's held there deliberately.
-      //    Two Codex reviews on this PR sharpened this: the first pass fully
-      //    awaited the neighbour's entire journey before the tenant under
-      //    test even bootstrapped (no overlap at all); starting it without
+      //    Three Codex review passes on this PR sharpened this: fully
+      //    awaiting the neighbour's entire journey before the tenant under
+      //    test even bootstrapped had no overlap at all; starting it without
       //    awaiting immediately still let the neighbour's fast, UI-free API
       //    path race ahead and finish before the browser tenant reached
-      //    billing (no REAL rendezvous). Fixed properly below: both
-      //    tenants' trial webhooks fire back-to-back at the same point in
-      //    the test, once BOTH are sitting at the gate, so their verify_ai
-      //    jobs are genuinely concurrent on the same queue poll loop.
-      //    Fable's rung-5 ask: a neighbour's OWN completed ai_check must
-      //    not change this tenant's answer — stronger than an untouched
-      //    neighbour (T1, asserted separately below). ──────────────────────
+      //    billing (no rendezvous); firing both webhooks via Promise.all
+      //    (below) synchronizes the two HTTP submissions but still can't
+      //    prove the two verify_ai jobs' WORKER EXECUTIONS overlapped down
+      //    to the queue's own 250ms poll tick — see fireTrialWebhook()'s
+      //    doc comment for why that bar isn't chased further here. What
+      //    this run DOES prove: two independently-configured tenants,
+      //    submitted together with no ordering dependency, each reach their
+      //    own correct, isolated final state — Fable's rung-5 ask (a
+      //    neighbour's OWN completed ai_check must not change this tenant's
+      //    answer), stronger than an untouched neighbour (T1, asserted
+      //    separately below). ──────────────────────────────────────────────
       const neighbour = await bootstrapOwner(page, 'aicheckneighbour');
       await driveTenantToBillingViaApi(page.request, neighbour, 'Neighbour Plumbing Co', 'plumbing');
 
@@ -783,8 +811,8 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       expect(catalogOverlap, 'the two tenants\' catalogs share no line items — each got its own pack').toEqual([]);
 
       // Re-read THIS tenant's own audit count once more, after the
-      // neighbour's concurrent completion above — still exactly 1, proving
-      // the neighbour's own passed check did not change this tenant's own
+      // neighbour's own completion above — still exactly 1, proving the
+      // neighbour's own passed check did not change this tenant's own
       // answer (T2, per Fable's ask).
       expect(
         String(queryOne(auditCountSql) ?? '').trim(),
