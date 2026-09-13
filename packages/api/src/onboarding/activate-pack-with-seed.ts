@@ -77,6 +77,13 @@ export interface ActivatePackWithSeedInput {
   lockPool?: Pool;
 }
 
+/** Postgres unique_violation — see the `settingsRepo.create` catch below. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505'
+  );
+}
+
 export type ActivatePackWithSeedResult =
   | { status: 'locked' }
   | { status: 'activated'; seedResult: SeedPackDefaultsResult | null };
@@ -148,26 +155,56 @@ export async function activatePackWithSeed(
     if (existing) {
       await settingsRepo.update(tenantId, { activeVerticalPacks: newPacks });
     } else {
-      // Auto-create minimal settings row if the tenant hasn't set identity yet.
-      await settingsRepo.create({
-        id: uuidv4(),
-        tenantId,
-        businessName: '', // Will remain empty until identity is set.
-        // No guessed timezone — the zone stays unset until the tenant
-        // chooses one, matching createSettings/ensureTenantSettings, so
-        // the scheduling gate never mistakes a seeded value for a choice.
-        estimatePrefix: 'EST-',
-        invoicePrefix: 'INV-',
-        nextEstimateNumber: 1001,
-        nextInvoiceNumber: 1001,
-        defaultPaymentTermDays: 30,
-        activeVerticalPacks: newPacks,
-        // Seed the platform default AI model so the onboarding "AI check"
-        // finds aiConfigPresent=true. Same value ensureTenantSettings uses.
-        aiModel: resolveBootstrapAiModel(),
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
+      try {
+        // Auto-create minimal settings row if the tenant hasn't set identity yet.
+        await settingsRepo.create({
+          id: uuidv4(),
+          tenantId,
+          businessName: '', // Will remain empty until identity is set.
+          // No guessed timezone — the zone stays unset until the tenant
+          // chooses one, matching createSettings/ensureTenantSettings, so
+          // the scheduling gate never mistakes a seeded value for a choice.
+          estimatePrefix: 'EST-',
+          invoicePrefix: 'INV-',
+          nextEstimateNumber: 1001,
+          nextInvoiceNumber: 1001,
+          defaultPaymentTermDays: 30,
+          activeVerticalPacks: newPacks,
+          // Seed the platform default AI model so the onboarding "AI check"
+          // finds aiConfigPresent=true. Same value ensureTenantSettings uses.
+          aiModel: resolveBootstrapAiModel(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } catch (err) {
+        // #1083, xhawk-ai review on PR #1106 — the pack lock is keyed by
+        // (tenant, pack) but `tenant_settings` is keyed by TENANT, so the
+        // lock alone cannot serialize this INSERT against every other
+        // first-row writer. Two reach it: the sibling
+        // `onboarding_tenant_settings` handler, which calls
+        // `upsertIdentityFields` BEFORE it tries the pack lock
+        // (proposals/execution/onboarding-handlers.ts:197), and a
+        // concurrent activation of a DIFFERENT pack, which holds a
+        // different key. Either can create the row between the read above
+        // and this INSERT, and the 23505 would surface to the caller as a
+        // 500 — the very symptom #1083 is about, just on the winner's side.
+        //
+        // A unique violation here therefore means "somebody else created
+        // the row", which is not an error for us: re-read and merge this
+        // pack into whatever they wrote. Re-reading rather than reusing
+        // `newPacks` is what keeps a concurrent different-pack activation
+        // from clobbering the other's entry in `_activeVerticalPacks`. Same
+        // insert-then-reconcile idiom as ai/skills/find-or-create-lead.ts.
+        if (!isUniqueViolation(err)) throw err;
+        const concurrent = await settingsRepo.findByTenant(tenantId);
+        // No row after a unique violation on tenant_id means the conflict
+        // was something else entirely — surface it rather than swallow it.
+        if (!concurrent) throw err;
+        const mergedPacks = Array.from(
+          new Set([...(concurrent.activeVerticalPacks ?? []), packId]),
+        );
+        await settingsRepo.update(tenantId, { activeVerticalPacks: mergedPacks });
+      }
     }
 
     try {
