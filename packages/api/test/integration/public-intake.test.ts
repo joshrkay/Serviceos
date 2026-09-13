@@ -272,11 +272,15 @@ describe('public intake POST /:tenantId/leads — integration', () => {
     }
 
     it('serves a real provisioned number from provider_data.phoneE164', async () => {
-      await seedTwilioIntegration(tenantA.tenantId, { phoneE164: '+15125550123' });
+      // A DID no other integration file uses: #1061's migration 274 makes a
+      // twilio number unique across tenants, and the integration suite shares
+      // one database, so this previously collided with the number
+      // provision-twilio-vapi.test.ts provisions.
+      await seedTwilioIntegration(tenantA.tenantId, { phoneE164: '+15125559801' });
 
       const res = await request(app).get(`/intake/${tenantA.tenantId}`);
       expect(res.status).toBe(200);
-      expect(res.body.businessPhone).toBe('+15125550123');
+      expect(res.body.businessPhone).toBe('+15125559801');
     });
 
     it('suppresses a dev-stub row (magic number + stub marker) — honest empty state', async () => {

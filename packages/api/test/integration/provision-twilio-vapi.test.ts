@@ -45,14 +45,23 @@ function buildMessage(payload: ProvisionTwilioPayload): QueueMessage<ProvisionTw
   };
 }
 
-/** The five Twilio HTTP responses for a full provision through "attach". */
-function stubTwilioFetch(): void {
+/**
+ * The five Twilio HTTP responses for a full provision through "attach".
+ *
+ * The purchased number is a parameter, and each test below passes a DISTINCT
+ * one. #1061's migration 274 makes a DID unique across tenants, and these
+ * tests share one database — three tenants provisioned onto one hardcoded
+ * number now collide on `uq_tenant_integrations_twilio_phone_e164`. In
+ * production each tenant buys its own number, so the shared literal was
+ * always a fixture artefact rather than a behaviour under test.
+ */
+function stubTwilioFetch(purchasedNumber: string): void {
   const fn = vi.fn();
   const bodies: unknown[] = [
     { sid: 'ACsub', auth_token: 'subtoken' }, // create subaccount
     { sid: 'MG123' }, // messaging service
     { incoming_phone_numbers: [] }, // list owned (none yet)
-    { sid: 'PN555', phone_number: '+15125550123' }, // purchase preferred
+    { sid: 'PN555', phone_number: purchasedNumber }, // purchase preferred
     {}, // attach to messaging service
   ];
   for (const body of bodies) {
@@ -128,7 +137,7 @@ describe('Postgres integration — provision-twilio Vapi assistant (voice agent)
   it('creates + links the assistant and persists vapi_assistant_id (real columns)', async () => {
     const { tenantId } = await createTestTenant(pool);
     await seedSettings(pool, tenantId);
-    stubTwilioFetch();
+    stubTwilioFetch('+15125550123');
     const vapi = makeVapiMock();
     const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
 
@@ -171,12 +180,12 @@ describe('Postgres integration — provision-twilio Vapi assistant (voice agent)
     setEnv('VAPI_WEBHOOK_SECRET', 'GLOBAL-shared-secret-do-not-use');
     const { tenantId } = await createTestTenant(pool);
     await seedSettings(pool, tenantId);
-    stubTwilioFetch();
+    stubTwilioFetch('+15125550124');
     const vapi = makeVapiMock();
     const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
 
     await worker.handle(
-      buildMessage({ tenantId, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      buildMessage({ tenantId, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550124' }),
       logger,
     );
 
@@ -201,12 +210,12 @@ describe('Postgres integration — provision-twilio Vapi assistant (voice agent)
       `UPDATE tenant_settings SET vapi_assistant_id = 'asst_existing' WHERE tenant_id = $1`,
       [tenantId],
     );
-    stubTwilioFetch();
+    stubTwilioFetch('+15125550125');
     const vapi = makeVapiMock();
     const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
 
     await worker.handle(
-      buildMessage({ tenantId, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      buildMessage({ tenantId, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550125' }),
       logger,
     );
 

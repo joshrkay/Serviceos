@@ -10,6 +10,7 @@ import {
   purchasePhoneNumber,
   attachNumberToMessagingService,
   listSubaccountPhoneNumbers,
+  releasePhoneNumber,
 } from '../integrations/twilio/provisioning';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { isTwilioDeploymentEnv } from '../integrations/credentials';
@@ -27,6 +28,22 @@ const STATUS_ACTIVE = 'full_readiness';
 // (https://www.twilio.com/docs/iam/test-credentials) — never a real, dialable
 // line. Never used in production: the production path throws without real creds.
 const STUB_DEV_PHONE_E164 = '+15005550006';
+
+/**
+ * #1061 — true when `err` is the DID-uniqueness violation from migration 274
+ * (`uq_tenant_integrations_twilio_phone_e164`), i.e. another tenant already
+ * holds this number.
+ *
+ * Matched on BOTH the SQLSTATE and the constraint name: `tenant_integrations`
+ * also carries 070's `UNIQUE (tenant_id, provider)`, which raises the same
+ * 23505 for an entirely different (and retryable) reason, so the code alone
+ * would misclassify it.
+ */
+export function isDidAlreadyClaimed(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; constraint?: string };
+  return e.code === '23505' && e.constraint === 'uq_tenant_integrations_twilio_phone_e164';
+}
 
 // tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
 // app.current_tenant_id. Background workers run outside withTenantTransaction,
@@ -358,14 +375,88 @@ export function createProvisionTwilioWorker(deps: {
             );
             return;
           }
-          await tenantQuery(
-            pool,
-            tenantId,
-            `UPDATE tenant_integrations
-             SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
-             WHERE tenant_id = $2 AND provider = 'twilio'`,
-            [JSON.stringify({ phoneNumberSid, phoneE164 }), tenantId]
-          );
+          // #1061 — this is the write the DID-uniqueness index guards
+          // (uq_tenant_integrations_twilio_phone_e164, migration 274). A
+          // 23505 here means another tenant already holds this DID, which
+          // would otherwise have made inbound routing and credential
+          // selection a LIMIT 1 coin-flip between the two.
+          //
+          // Handled exactly like the unavailable-preferred-number and magic
+          // test-number cases above: record an operator-actionable failure
+          // and STOP. Retrying cannot help — the number belongs to someone
+          // else until a human reassigns it — and the raw Postgres text
+          // ("duplicate key value violates unique constraint ...") is not
+          // something an operator can act on.
+          try {
+            await tenantQuery(
+              pool,
+              tenantId,
+              `UPDATE tenant_integrations
+               SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
+               WHERE tenant_id = $2 AND provider = 'twilio'`,
+              [JSON.stringify({ phoneNumberSid, phoneE164 }), tenantId]
+            );
+          } catch (err) {
+            if (!isDidAlreadyClaimed(err)) throw err;
+            logger.error('Twilio DID already claimed by another tenant', {
+              tenantId,
+              phoneE164,
+              phoneNumberSid,
+            });
+
+            // The number was purchased (or recovered) into THIS tenant's
+            // subaccount moments ago, and the write that would have recorded
+            // its SID is the one that just failed — so nothing in the DB knows
+            // it exists. Hand it back, or two things go wrong: the tenant pays
+            // for a line it can never use, and the next run takes the
+            // `!phoneNumberSid` branch above, where listSubaccountPhoneNumbers
+            // returns this very number and walks into the same conflict. That
+            // would make the "provision this tenant on a different number"
+            // advice below impossible to act on. (PR #1120 review.)
+            let released = false;
+            let releaseError: string | null = null;
+            try {
+              await releasePhoneNumber(subaccountSid, authToken, phoneNumberSid!);
+              released = true;
+            } catch (releaseErr) {
+              releaseError =
+                releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+              logger.error('Failed to release the conflicting Twilio number', {
+                tenantId,
+                phoneNumberSid,
+                error: releaseError,
+              });
+            }
+
+            const conflict =
+              `Phone number ${phoneE164} is already assigned to another tenant — ` +
+              'a DID can serve only one tenant (inbound routing resolves the tenant ' +
+              'from the number).';
+            const msg = released
+              ? `${conflict} The number just purchased for this tenant has been released, ` +
+                'so nothing is being billed for it. Release the number from the other ' +
+                'tenant, or provision this tenant on a different number, then re-run ' +
+                'provisioning.'
+              : `${conflict} Releasing the number just purchased for this tenant FAILED ` +
+                `(${releaseError}) — release ${phoneNumberSid} from subaccount ` +
+                `${subaccountSid} by hand, or the next provisioning run will recover it ` +
+                'and hit this same conflict.';
+
+            await tenantQuery(
+              pool,
+              tenantId,
+              `UPDATE tenant_integrations
+               SET status = 'failed', last_error = $1, updated_at = NOW()
+               WHERE tenant_id = $2 AND provider = 'twilio'`,
+              [msg, tenantId]
+            );
+
+            // A successful release is terminal — retrying cannot un-claim the
+            // DID. A failed one is not: throw so the queue comes back and
+            // re-attempts the cleanup rather than stranding a paid orphan.
+            if (!released) throw new Error(msg);
+            return;
+          }
         }
 
         // Step 4 — attach number to messaging service. Skip when a previous
