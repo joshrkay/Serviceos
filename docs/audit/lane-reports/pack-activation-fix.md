@@ -1,9 +1,19 @@
 # Lane report — pack activation: guard scope (#1083) and tenant-scoped updates (#1095)
 
 Branch: `fix/pack-activation-scope-and-race` (off `origin/main` @ `2a68465`)
-Commits: RED tests (`142df7f`) → fixes (`5b2b112`) → this report
+Commits: RED tests (`142df7f`) → fixes (`5b2b112`) → report (`020a270`) →
+round 2, after review: RED (`37040f5`) → fix (`c11a2f1`) → this update
 Constraints honoured: no RLS policy changes, no migrations, no route or
 permission changes.
+
+**Round 2 (review response).** xhawk-ai's Medium correctness finding on PR
+#1106 was right and is fixed: moving the settings write behind the pack
+lock covered the *loser* of the lock, but the lock is keyed by (tenant,
+pack) while `tenant_settings` is keyed by tenant, so the lock's **winner**
+could still take the same 23505 from another first-row writer. Round 2 is
+the fix for that; §"Defect 1, part 2" below has the mechanism and the RED.
+It also subsumes what round 1 had listed under "not done" as the cross-pack
+residual.
 
 ---
 
@@ -135,6 +145,99 @@ GREEN (after the fix), both new files:
  Test Files  2 passed (2)
       Tests  5 passed (5)
 ```
+
+---
+
+## Defect 1, part 2 (#1083, round 2) — the lock's WINNER could still take the same 23505
+
+### Mechanism
+
+Round 1 put the settings write behind the guard, which fixes the loser. It
+does not fix the winner, because **the guard key and the contended row have
+different grains**: the lock is `pack:{tenantId}:{packId}`, the row is
+`tenant_settings` keyed by `tenant_id` alone. Two writers reach that row
+without ever holding this pack's key:
+
+1. **The sibling handler.**
+   `OnboardingTenantSettingsExecutionHandler.execute` calls
+   `settingsRepo.upsertIdentityFields`
+   (`packages/api/src/proposals/execution/onboarding-handlers.ts:197`) —
+   which `INSERT … ON CONFLICT (tenant_id) DO UPDATE`s the row — **before**
+   it reaches its `activatePackWithSeed` loop and the pack lock (`:239`).
+   So for the *same* pack, the sibling pair from #1083: the
+   service-category handler wins the lock, reads "no settings row", the
+   tenant-settings handler's upsert commits, and the winner's plain
+   `INSERT` dies at `tenant_settings_tenant_id_key`.
+2. **A different-pack activation**, which holds a different key entirely.
+
+Both paths produce the exact CI symptom of #1083 on the winner's side.
+
+### The change
+
+`activate-pack-with-seed.ts` — the first-row `settingsRepo.create` is now
+wrapped: a unique violation (`23505`) means "somebody else created the row",
+so re-read, merge this pack into whatever they wrote, and `update`.
+Re-reading rather than reusing the pre-INSERT union is what keeps a
+concurrent different-pack activation from clobbering the other's entry in
+`_activeVerticalPacks`. Any other unique violation, or one with no row
+behind it, still propagates. Same insert-then-reconcile idiom as
+`packages/api/src/ai/skills/find-or-create-lead.ts:146`. No change to
+`PgSettingsRepository`'s contract, so no other caller is affected.
+
+### RED → GREEN
+
+Third test in
+`packages/api/test/integration/onboarding-pack-seed-lock-scope.test.ts`,
+deterministic: nobody holds the lock (this handler is the winner) and the
+sibling's **real** call — `PgSettingsRepository.upsertIdentityFields` — is
+driven into the window between the winner's read and its INSERT.
+
+RED:
+
+```
+ ✓ … the loser of the (tenant, pack) lock writes NOTHING to tenant_settings … 55ms
+ ✓ … the loser reports PACK_ACTIVATION_IN_PROGRESS, never a raw 23505 … 14ms
+ × … the WINNER of the pack lock survives the sibling handler creating the tenant_settings row under it, and merges rather than clobbers 25ms
+   → expected 'duplicate key value violates unique c…' to be undefined
+
+AssertionError: expected 'duplicate key value violates unique c…' to be undefined
+- Expected:
+undefined
++ Received:
+"duplicate key value violates unique constraint \"tenant_settings_tenant_id_key\""
+ ❯ test/integration/onboarding-pack-seed-lock-scope.test.ts:246:26
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+```
+
+GREEN, with #1095's file alongside it:
+
+```
+ ✓ … the loser of the (tenant, pack) lock writes NOTHING to tenant_settings … 38ms
+ ✓ … the loser reports PACK_ACTIVATION_IN_PROGRESS, never a raw 23505 … 13ms
+ ✓ … the WINNER of the pack lock survives the sibling handler creating the tenant_settings row under it, and merges rather than clobbers 64ms
+ ✓ … tenant A cannot update tenant B's activation row, and B still can 40ms
+ ✓ … an empty update under the wrong tenant returns null rather than reading the row back 9ms
+ ✓ … deactivatePack and the reactivation path still work in-tenant, with their audit rows 28ms
+
+ Test Files  2 passed (2)
+      Tests  6 passed (6)
+```
+
+The winner's settings row is asserted to keep **both** writers' work: the
+sibling's `business_name` ('Sibling Co') and this activation's pack
+(`_activeVerticalPacks: ['hvac']`), with the pack row and seeded catalog
+present.
+
+### Re-validation after round 2
+
+| run | result |
+|---|---|
+| `npx tsc --project tsconfig.build.json --noEmit` | exit 0, no output |
+| `npx vitest run test/settings test/proposals test/verticals test/audit test/onboarding test/shared/pack-config-loader.test.ts test/routes/pack-activation-mirror-sync.route.test.ts` | `Test Files 159 passed (159) / Tests 2287 passed (2287)` |
+| integration: the 9 other files touching pack activation | `Test Files 9 passed (9) / Tests 47 passed (47)` |
+| `onboarding-pack-seed-concurrency.test.ts`, 5 consecutive runs | `Tests 2 passed (2)` ×5 |
 
 ---
 
@@ -333,20 +436,14 @@ Reading the dump against the two fixes:
 
 ## Not done
 
-1. **Residual, same class as #1083: two concurrent activations for the same
-   tenant but DIFFERENT packs.** The guard key is per (tenant, pack), while
-   `tenant_settings` is per tenant. Two proposals activating, say, `hvac`
-   and `plumbing` for one brand-new tenant take different lock keys, so both
-   can still reach the `settingsRepo.create` INSERT and the loser can still
-   see a 23505. This fix closes the same-pack case (the one #1083 reports
-   and the one the sibling handlers actually produce, since
-   `onboarding_tenant_settings` loops its packs sequentially). Closing the
-   cross-pack case needs a deliberate choice I did not make unilaterally:
-   either widen the lock to per-tenant for the settings section (costs
-   cross-pack concurrency) or make the first-ever settings INSERT
-   idempotent (`ON CONFLICT (tenant_id) DO NOTHING` plus a re-read, which
-   changes `PgSettingsRepository.create`'s contract for every caller).
-   Worth its own issue.
+1. ~~**Residual: two concurrent activations for the same tenant but
+   DIFFERENT packs**, which take different lock keys and can still race the
+   `settingsRepo.create` INSERT.~~ **Closed in round 2** (`c11a2f1`) —
+   xhawk-ai's review showed the same gap also fires for the *same* pack via
+   the sibling's pre-lock `upsertIdentityFields`, so it was not a
+   deferrable residual. The insert-then-reconcile fix covers both shapes
+   without changing `PgSettingsRepository.create`'s contract. See "Defect 1,
+   part 2" above.
 2. **The T1 workaround in
    `test/integration/onboarding-pack-seed-concurrency.test.ts:167`–`:183`**
    (pre-seeding `tenant_settings` to dodge this very race) is now
