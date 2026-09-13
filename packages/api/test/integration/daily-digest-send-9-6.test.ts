@@ -23,16 +23,18 @@
  * SMS"), not a hermetic-environment limitation — so it is asserted directly
  * as the honest, intentional outcome: a digest row with zero dispatch rows.
  *
- * The gap this file surfaces rather than papers over: nothing in the digest
- * send path ever calls `PgAuditRepository.create` for the send itself.
- * `daily-digest-worker.ts`'s `DailyDigestWorkerDeps` has no `auditRepo`
+ * The gap this file surfaced (#1113) is CLOSED here: nothing in the digest
+ * send path used to call `PgAuditRepository.create` for the send itself.
+ * `daily-digest-worker.ts`'s `DailyDigestWorkerDeps` had no `auditRepo`
  * field at all — the `auditRepo` inside `DigestComputeDeps` is read-only,
  * consulted by `computeDigestPayload` to compute the WS22 "N fixed"
  * reflection INSIDE the digest content, never written to record that a send
- * happened. Contrast `thank-you-sms-worker.ts`, which calls
- * `deps.auditRepo.create(...)` with `notification.thank_you_sms.sent` right
- * after its send. The digest has no equivalent — pinned below as `it.fails`
- * per this lane's TEST-ONLY mandate (no product code).
+ * happened, while `thank-you-sms-worker.ts` writes
+ * `notification.thank_you_sms.sent` right after its send. The worker now
+ * takes its own `auditRepo` and writes
+ * `notification.daily_digest.sent` / `.suppressed` / `.failed` on the
+ * `daily_digest` entity — asserted below on the send, the documented
+ * `channel: 'none'` suppression, and across two tenants in one sweep.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
@@ -349,6 +351,7 @@ describe('Postgres integration — daily digest SEND (9.6)', () => {
       publicBaseUrl: 'https://app.example.com',
       logger,
       now: () => DUE_NOW,
+      auditRepo,
     });
 
     expect(result.sent).toBe(2);
@@ -367,6 +370,26 @@ describe('Postgres integration — daily digest SEND (9.6)', () => {
     const phoenixDispatches = await dispatchRepo.findByEntity(phoenix, 'daily_digest', phoenixDigest!.id);
     expect(chicagoDispatches).toHaveLength(1);
     expect(phoenixDispatches).toHaveLength(1);
+
+    // #1113 T1 — each send is audited under its OWN tenant, carrying its own
+    // tenant-local send time, and neither tenant's context reads the other's.
+    const chicagoEvents = await auditRepo.findByEntity(chicago, 'daily_digest', chicagoDigest!.id);
+    const phoenixEvents = await auditRepo.findByEntity(phoenix, 'daily_digest', phoenixDigest!.id);
+    expect(chicagoEvents).toHaveLength(1);
+    expect(phoenixEvents).toHaveLength(1);
+    expect(chicagoEvents[0].eventType).toBe('notification.daily_digest.sent');
+    expect(phoenixEvents[0].eventType).toBe('notification.daily_digest.sent');
+    expect((chicagoEvents[0].metadata as Record<string, unknown>).tenantLocalTime).toBe('18:05');
+    expect((phoenixEvents[0].metadata as Record<string, unknown>).tenantLocalTime).toBe('16:05');
+    expect((chicagoEvents[0].metadata as Record<string, unknown>).dispatchId).toBe(
+      chicagoDispatches[0].id,
+    );
+    expect(
+      await auditRepo.findByEntity(phoenix, 'daily_digest', chicagoDigest!.id),
+    ).toHaveLength(0);
+    expect(
+      await auditRepo.findByEntity(chicago, 'daily_digest', phoenixDigest!.id),
+    ).toHaveLength(0);
   });
 
   // The real, production tenant selector (`listAllTenantIds(pool)`, not the
@@ -381,17 +404,11 @@ describe('Postgres integration — daily digest SEND (9.6)', () => {
   // file's job is the SEND/audit gap, not the enumerator, which is proven
   // elsewhere and cited, not duplicated).
 
-  it('a digest send writes NO audit row via PgAuditRepository — the row\'s real gap, pinned directly rather than via it.fails', async () => {
-    // NOT it.fails: an expected-failing test here would also report as
-    // "expected failure" if the SEND itself regressed (sweep throws, no
-    // dispatch written, digest lookup null) — the setup/precondition
-    // failure would satisfy it.fails just as well as the intended gap,
-    // silently stopping this test from proving anything (xhawk-ai review,
-    // PR #1111). Asserting the send preconditions as ordinary expectations
-    // first means a send regression fails this test LOUDLY; asserting the
-    // current absence of an audit row directly (not inverted) means a
-    // future fix that adds the write forces this test to be updated rather
-    // than quietly starting to fail for the wrong reason.
+  it('#1113 — a digest send writes notification.daily_digest.sent through PgAuditRepository', async () => {
+    // The precondition assertions come first on purpose (xhawk-ai review,
+    // PR #1111): a send regression (sweep throws, no dispatch written,
+    // digest lookup null) must fail THIS test loudly rather than be
+    // mistaken for the audit assertion failing.
     const tenantId = await seedTenant({
       timezone: 'America/Chicago',
       digestTime: '18:00',
@@ -412,6 +429,7 @@ describe('Postgres integration — daily digest SEND (9.6)', () => {
       publicBaseUrl: 'https://app.example.com',
       logger,
       now: () => DUE_NOW,
+      auditRepo,
     });
 
     // Preconditions: the send actually happened. If any of these regress,
@@ -422,13 +440,74 @@ describe('Postgres integration — daily digest SEND (9.6)', () => {
     const dispatches = await dispatchRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
     expect(dispatches).toHaveLength(1);
 
-    // The gap: `DailyDigestWorkerDeps` has no `auditRepo` field — the sweep
-    // never calls `auditRepo.create` for the send (mirroring
-    // `notification.thank_you_sms.sent` in thank-you-sms-worker.ts, which
-    // the digest has no equivalent of). Asserted directly, current-state:
-    // empty. A future fix that adds the write should make this specific
-    // assertion fail, prompting the test to be updated to expect the row.
+    // #1113 — the send is audited with the shape the ticket specifies and
+    // the shape `notification.thank_you_sms.sent` already uses.
     const events = await auditRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
-    expect(events).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId,
+      eventType: 'notification.daily_digest.sent',
+      entityType: 'daily_digest',
+      entityId: digest!.id,
+      actorRole: 'system',
+    });
+    expect(events[0].metadata).toMatchObject({
+      channel: 'sms',
+      digestDate: LOCAL_DATE,
+      dispatchId: dispatches[0].id,
+    });
+    expect(typeof (events[0].metadata as Record<string, unknown>).tenantLocalTime).toBe('string');
   });
+
+  it("#1113 — digestChannel 'none' is audited as a suppression, not silence", async () => {
+    // Josh's open question on #1113 ("is the suppressed case audited or
+    // deliberately silent?") is answered the way the sibling worker answers
+    // it: `thank-you-sms-worker.ts` audits `.suppressed` with a reason, so a
+    // digest that was generated and deliberately not sent leaves the same
+    // kind of trace. Flip this to `toHaveLength(0)` if the decision goes the
+    // other way — the emitter is one guarded call.
+    const tenantId = await seedTenant({
+      timezone: 'America/Chicago',
+      digestTime: '18:00',
+      enabled: true,
+      channel: 'none',
+    });
+    const ownerId = await ownerIdOf(tenantId);
+    const { customerId, locationId } = await seedCustomerAndLocation(tenantId, ownerId);
+    await seedJobCompletedNow(tenantId, customerId, locationId, ownerId);
+
+    const result = await runDailyDigestSweep({
+      settingsRepo,
+      digestRepo,
+      computeDeps: realComputeDeps(),
+      listTenantIds: async () => [tenantId],
+      delivery: new InMemoryDeliveryProvider(),
+      dispatchRepo,
+      publicBaseUrl: 'https://app.example.com',
+      logger,
+      now: () => DUE_NOW,
+      auditRepo,
+    });
+
+    expect(result.generated).toBe(1);
+    expect(result.sent).toBe(0);
+    const digest = await digestRepo.findByTenantAndDate(tenantId, LOCAL_DATE);
+    expect(digest).not.toBeNull();
+    expect(await dispatchRepo.findByEntity(tenantId, 'daily_digest', digest!.id)).toHaveLength(0);
+
+    const events = await auditRepo.findByEntity(tenantId, 'daily_digest', digest!.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'notification.daily_digest.suppressed',
+      entityType: 'daily_digest',
+      entityId: digest!.id,
+      actorRole: 'system',
+    });
+    expect(events[0].metadata).toMatchObject({
+      channel: 'none',
+      digestDate: LOCAL_DATE,
+      reason: 'channel_none',
+    });
+  });
+
 });
