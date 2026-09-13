@@ -227,6 +227,7 @@ import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { recordApiError } from './analytics/posthog';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
+import { createInflightSweeps } from './workers/inflight-sweeps';
 import { createStorageProvider } from './files/storage-provider';
 import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
@@ -2258,7 +2259,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // parallel track.
     moneyReconciliation: 590026,
   } as const;
-  const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
+  // #1090 — every leader-gated sweep run is registered here so `runShutdown`
+  // can wait for the tick that is ALREADY RUNNING before it closes the pool.
+  // Clearing the intervals only stops the next one.
+  const inflightSweeps = createInflightSweeps();
+  const SWEEP_DRAIN_TIMEOUT_MS = Number(process.env.SWEEP_DRAIN_TIMEOUT_MS) || 5_000;
+  const runAsLeader = (lockKey: number, work: () => Promise<void>): Promise<void> =>
+    inflightSweeps.track(runLeaderTick(lockKey, work));
+  const runLeaderTick = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
     if (!pool) {
       // In-memory dev: no coordination needed (sweeps no-op with no tenants).
@@ -7126,6 +7134,24 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // fan-out, quota, and the refactored cache) after the cache flush and
       // BEFORE the pg pool drains, in the same shutdown slot as the cache.
       await shutdownRedisClients();
+      // #1090 — the sweep tick that was ALREADY RUNNING when the intervals
+      // were cleared is still awaiting its compose/send round-trip. Give it a
+      // bounded window to finish BEFORE the pool closes: otherwise pool.end()
+      // below pulls the pool out from under it and every remaining repository
+      // call throws "Cannot use a pool after calling end on the pool" — once
+      // per tenant/row, and, worse, after a recovery SMS may already have gone
+      // out but before it was stamped `sent` (the next boot re-sends it).
+      // Bounded so a sweep wedged on a hung upstream can't hold the process
+      // past index.ts's force-exit backstop; we proceed either way.
+      {
+        const { drained, remaining } = await inflightSweeps.drain(SWEEP_DRAIN_TIMEOUT_MS);
+        if (!drained) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[app] ${remaining} sweep(s) still in flight after ${SWEEP_DRAIN_TIMEOUT_MS}ms — closing the pool anyway`,
+          );
+        }
+      }
       if (pool) {
         await Promise.race([
           pool.end(),
