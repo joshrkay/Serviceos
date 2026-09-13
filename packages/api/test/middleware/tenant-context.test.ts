@@ -674,8 +674,14 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     // 'error' event on a checked-out client, with no query in flight.
     client.emit('error', new Error('terminating connection due to idle-in-transaction timeout'));
 
-    // The handler never answered, so the middleware must answer for it rather
-    // than let a 2xx go out over writes the server already rolled back.
+    // The answer is deferred by one turn so the route's OWN error — when pg
+    // rejected an in-flight query alongside this event — reaches the error
+    // pipeline first and stays the single writer.
+    expect((res as any).status).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+
+    // Nothing else answered, so the middleware answers rather than let a 2xx
+    // go out over writes the server already rolled back.
     expect((res as any).status).toHaveBeenCalledWith(500);
 
     (res as unknown as EventEmitter).emit('finish');
