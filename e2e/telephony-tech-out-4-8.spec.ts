@@ -57,9 +57,24 @@ import {
   createScheduledJobViaApi,
   getAppointmentIdForJob,
   laterTodaySlots,
+  pickSafeSecondaryTimezone,
   API_URL,
   type ProvisionedTenant,
 } from './fixtures/twilio-sms-lane';
+
+// Tenant A always uses plain UTC (always in the curated `VALID_TIMEZONES`
+// list `tenantLocalDate` — sms/tech-status/handler.ts — actually honors,
+// and its "local time" IS the real UTC clock: safe from the US-zone
+// clustering issue below, only close to ITS OWN midnight for a much
+// narrower, unrelated window). Tenant B's zone is picked HERE, once, from
+// whichever curated zone is currently farthest from ITS OWN midnight — see
+// `pickSafeSecondaryTimezone`'s own comment for why a FIXED second zone
+// (e.g. always America/Los_Angeles) is unsafe: every curated zone is a US
+// (+Hawaii) zone, so there is a real multi-hour UTC window where the WHOLE
+// list is simultaneously in the evening/night and no fixed choice works at
+// every real run time.
+const A_TIMEZONE = 'UTC';
+const B_TIMEZONE = pickSafeSecondaryTimezone();
 
 const RUN = crypto.randomInt(1000, 9999);
 const A_DID = `+1512${RUN}481`;
@@ -114,14 +129,14 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
       authToken: B_TOKEN,
       businessName: B_BUSINESS_NAME,
     });
-    // T3 — tenant B reads a DIFFERENT per-tenant config value than tenant
-    // A's default ('America/Chicago', from provisionTenant): the tenant-
-    // local "today" window (tenantLocalDate, sms/tech-status/handler.ts) is
-    // computed from tenant_settings.timezone, so this exercises the
-    // capability's own per-tenant CONFIG read, not just per-tenant data.
-    await pool.query(`UPDATE tenant_settings SET timezone = 'America/Los_Angeles' WHERE tenant_id = $1`, [
-      tenantB.tenantId,
-    ]);
+    // T3 — tenant A and tenant B read DIFFERENT per-tenant config values
+    // (provisionTenant's own default is 'America/Chicago' for every
+    // tenant, so both are overridden here): the tenant-local "today"
+    // window (tenantLocalDate, sms/tech-status/handler.ts) is computed
+    // from tenant_settings.timezone, so this exercises the capability's
+    // own per-tenant CONFIG read, not just per-tenant data.
+    await pool.query(`UPDATE tenant_settings SET timezone = $1 WHERE tenant_id = $2`, [A_TIMEZONE, tenantA.tenantId]);
+    await pool.query(`UPDATE tenant_settings SET timezone = $1 WHERE tenant_id = $2`, [B_TIMEZONE, tenantB.tenantId]);
 
     ownerTokenA = devAuthBearerToken(tenantA.userId);
     ownerTokenB = devAuthBearerToken(tenantB.userId);
@@ -141,10 +156,10 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
 
     // Tenant A: two customers, two locations, two appointments TODAY
     // assigned to Carlos — all through the real, authenticated API. Slots
-    // computed in tenant A's OWN timezone (America/Chicago), 2h apart
-    // (comfortably more than the 60-min duration so the same technician's
-    // two appointments never double-book).
-    const [slotA1, slotA2] = laterTodaySlots('America/Chicago', 2, 120);
+    // computed in tenant A's OWN timezone (UTC), 2h apart (comfortably
+    // more than the 60-min duration so the same technician's two
+    // appointments never double-book).
+    const [slotA1, slotA2] = laterTodaySlots(A_TIMEZONE, 2, 120);
     const custA1 = await createCustomerViaApi(request, ownerTokenA, {
       firstName: 'Jamie',
       lastName: 'Rivera',
@@ -157,7 +172,7 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
       summary: 'Leaky faucet',
       technicianId: carlosId,
       scheduledStart: slotA1!,
-      timezone: 'America/Chicago',
+      timezone: A_TIMEZONE,
     });
     apptA1 = await getAppointmentIdForJob(request, ownerTokenA, jobA1.id);
 
@@ -173,13 +188,13 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
       summary: 'Water heater inspection',
       technicianId: carlosId,
       scheduledStart: slotA2!,
-      timezone: 'America/Chicago',
+      timezone: A_TIMEZONE,
     });
     apptA2 = await getAppointmentIdForJob(request, ownerTokenA, jobA2.id);
 
     // Tenant B: one customer/location/appointment for its own technician,
-    // slot computed in tenant B's OWN timezone (America/Los_Angeles).
-    const [slotB1] = laterTodaySlots('America/Los_Angeles', 1, 120);
+    // slot computed in tenant B's OWN (dynamically-picked-safe) timezone.
+    const [slotB1] = laterTodaySlots(B_TIMEZONE, 1, 120);
     const custB1 = await createCustomerViaApi(request, ownerTokenB, {
       firstName: 'Robin',
       lastName: 'Nguyen',
@@ -192,7 +207,7 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
       summary: 'Water heater replacement',
       technicianId: techBId,
       scheduledStart: slotB1!,
-      timezone: 'America/Los_Angeles',
+      timezone: B_TIMEZONE,
     });
     apptB1 = await getAppointmentIdForJob(request, ownerTokenB, jobB1.id);
   });

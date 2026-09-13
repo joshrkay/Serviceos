@@ -77,6 +77,53 @@ TWILIO_AUTH_TOKEN=deployment-fallback-token TWILIO_FROM_NUMBER=+15125550000
 TWILIO_DEFAULT_TENANT_ID=00000000-0000-4000-8000-000000000001
 ```
 
+## Fixes applied after Fable's gate on PR #1130 (2026-09-13 06:05Z)
+
+Fable's re-runs at 06:04–06:05Z caught two real problems this lane's own
+3-green-runs streak (an hour earlier) had missed:
+
+1. **Row 4.8's T2/T3 test was genuinely wall-clock-dependent, not just an
+   environment fluke.** `laterTodaySlots('America/Los_Angeles', 1, 120)` at
+   23:04 Pacific left only ~51 real minutes of tenant-local day, but the
+   scale-down branch's `Math.max(scale, 0.5)` floor forced a 60-minute gap
+   anyway — the exact bug: the floor can force a slot PAST `latestMs` when
+   the true safe scale is below 0.5. Fixed two ways: (a) the floor is gone
+   (`Math.max(scale, 0)`, `e2e/fixtures/twilio-sms-lane.ts`); (b) tenant A
+   now uses plain `'UTC'` (always in the curated `VALID_TIMEZONES` list
+   `tenantLocalDate` — sms/tech-status/handler.ts — actually honors, and
+   immune to the specific failure mode below) and tenant B's zone is picked
+   by a new `pickSafeSecondaryTimezone()` — at RUN TIME, from that same
+   curated list, choosing whichever zone's CURRENT local time is closest to
+   ITS OWN noon. A single fixed second zone can't work at every real run
+   time: every curated zone is a US(+Hawaii) zone, so there's a genuine
+   multi-hour UTC stretch (~04:00–10:30, confirmed by simulating
+   `pickSafeSecondaryTimezone`'s ranking across a full 24h cycle) where the
+   ENTIRE curated list is simultaneously in the evening/night. `pickSafe
+   SecondaryTimezone` always gets the best available headroom instead of
+   gambling on one. Row 4.5 doesn't need a T3 claim, so both its tenants
+   were simplified to plain `'UTC'` too, sidestepping the whole class of
+   bug rather than needing the same dynamic pick.
+2. **`POST /api/jobs` → 404 "Location not found" 9ms after that location's
+   own 201** — a real product race, filed by Fable as **#1133**
+   (`withTenantTransaction`, packages/api/src/middleware/tenant-context.ts,
+   commits on the response's `finish` event, AFTER the body is flushed, via
+   a fire-and-forget `void cleanup(commit)` the request pipeline never
+   awaits — the SAME shape I'd mis-attributed to a port collision on this
+   lane's FIRST pass, then wrongly ruled out). Not fixed here (out of scope
+   for a TEST-ONLY lane) — worked around exactly as instructed: each of
+   `createCustomerViaApi` / `createLocationViaApi` / `createScheduledJobViaApi`
+   now polls the just-created row's own `GET /:id` until it 200s (bounded to
+   2s) before returning it to the caller, who immediately uses it in the
+   next, dependent call; `getAppointmentIdForJob` polls its own read for a
+   non-empty result the same way, since the appointment row is written
+   inside the job's own request transaction. Each call site is commented
+   `// #1133 workaround`.
+
+Re-verified after both fixes: 3 consecutive green runs each (row 4.8: 5/5,
+row 4.5: 4/4) against a freshly-provisioned container, plus one further
+dump-only run per spec to capture the row dumps below post-fix. See this
+branch's latest commit for the exact head.
+
 ---
 
 ## Row 4.8 — tech "OUT" SMS → unavailable block + reschedule proposal(s) + audit, idempotent, anti-spoofed
@@ -96,23 +143,27 @@ npx playwright test e2e/telephony-tech-out-4-8.spec.ts --project=chromium --retr
 ✓ an OUT from an UNREGISTERED number is not actioned — unverified_mobile audit, nothing changes
 ✓ T2/T3: tenant B (different data AND a different per-tenant timezone) gets its own OUT block/proposal/audit, and tenant A's rows are unchanged
 
-5 passed (14.9s)   [also: 16.4s, 21.3s, 31.5s on other runs]
+5 passed (14.9s)   [also: 16.4s, 21.3s, 31.5s pre-fix; 16.7s, 16.6s, 15.6s, 15.1s post-fix]
 ```
 
-**Row dumps** (from an un-truncated run against the kept container, `docker
-exec <id> psql -U test -d serviceos_e2e_test -c "<SELECT>"`):
+**Row dumps** (post-fix re-run, from an un-truncated run against a kept
+container, `docker exec <id> psql -U test -d serviceos_e2e_test -c
+"<SELECT>"`; tenant A = `77d3f145-...578413`, `UTC`; tenant B =
+`e5913222-...c23832`, `Pacific/Honolulu` — this run's live pick from
+`pickSafeSecondaryTimezone()`, confirmed via `SELECT ts.tenant_id, t.name,
+ts.timezone FROM tenant_settings ts JOIN tenants t ON t.id=ts.tenant_id`):
 
 `tech_unavailable_blocks` — one row per tenant, tenant-local midnight→+24h
-(tenant B's window, `2026-09-12 07:00Z`–`2026-09-13 07:00Z`, is midnight→
-midnight in `America/Los_Angeles`; tenant A's, `2026-09-13 05:00Z`–
-`2026-09-14 05:00Z`, is midnight→midnight in `America/Chicago` — proving the
+(tenant A's window, `2026-09-13 00:00Z`–`2026-09-14 00:00Z`, is exactly
+UTC midnight→midnight; tenant B's, `2026-09-12 10:00Z`–`2026-09-13 10:00Z`,
+is midnight→midnight in `Pacific/Honolulu` (UTC-10) — proving the
 per-tenant `timezone` CONFIG value is actually read, not just per-tenant
 data — the T3 grade):
 ```
               tenant_id               |            technician_id             |       start_time       |        end_time        | reason
 --------------------------------------+--------------------------------------+------------------------+------------------------+--------
- a2d04a1a-670f-4a4c-af74-7e53a428486b | 7361e374-c158-465d-bfd5-a130a42016da | 2026-09-13 05:00:00+00 | 2026-09-14 05:00:00+00 | out
- f2a91f63-eb41-4bdb-9e40-e89c6742b02f | df7e61b7-709b-4789-b013-c39b12e2f425 | 2026-09-12 07:00:00+00 | 2026-09-13 07:00:00+00 | out
+ 77d3f145-cdc3-42e3-93a2-e3f823578413 | 6ce167c2-75c4-4db7-b745-7f9dafdb7c9a | 2026-09-13 00:00:00+00 | 2026-09-14 00:00:00+00 | out
+ e5913222-ed61-4621-98c1-13cf12c23832 | 10d8e9d9-0e3e-4d08-9e42-4dbe801c9dbc | 2026-09-12 10:00:00+00 | 2026-09-13 10:00:00+00 | out
 (2 rows)
 ```
 
@@ -122,9 +173,9 @@ non-empty `sourceContext.draftSms`:
 ```
               tenant_id               |     proposal_type      |      status      |           target_entity_id           |                                 draft_sms
 --------------------------------------+------------------------+------------------+--------------------------------------+----------------------------------------------------------------------------
- a2d04a1a-670f-4a4c-af74-7e53a428486b | reschedule_appointment | ready_for_review | 49b8eb7b-535e-4608-952a-6021825f71c8 | {"ok":true,"mock":true,"taskType":"brand_voice_v1","note":"hermetic-mock"}
- a2d04a1a-670f-4a4c-af74-7e53a428486b | reschedule_appointment | ready_for_review | e23c5bf4-094c-4117-bfbe-4ad1131a9ccb | {"ok":true,"mock":true,"taskType":"brand_voice_v1","note":"hermetic-mock"}
- f2a91f63-eb41-4bdb-9e40-e89c6742b02f | reschedule_appointment | ready_for_review | b2ecb293-0ed6-4485-8abb-6ab7ae76f315 | {"ok":true,"mock":true,"taskType":"brand_voice_v1","note":"hermetic-mock"}
+ 77d3f145-cdc3-42e3-93a2-e3f823578413 | reschedule_appointment | ready_for_review | f1337351-a402-448b-9f68-daaa33bb2c45 | {"ok":true,"mock":true,"taskType":"brand_voice_v1","note":"hermetic-mock"}
+ 77d3f145-cdc3-42e3-93a2-e3f823578413 | reschedule_appointment | ready_for_review | 9a206ccb-576e-4e79-8590-2a9f5ade233c | {"ok":true,"mock":true,"taskType":"brand_voice_v1","note":"hermetic-mock"}
+ e5913222-ed61-4621-98c1-13cf12c23832 | reschedule_appointment | ready_for_review | 055eb897-5b08-4286-816d-fdb68c60655e | {"ok":true,"mock":true,"taskType":"brand_voice_v1","note":"hermetic-mock"}
 (3 rows)
 ```
 (That `draft_sms` value is the KNOWN GAP below, in its own words.)
@@ -134,10 +185,10 @@ each with the right actor and metadata:
 ```
               tenant_id               |               actor_id               |          event_type           | metadata (abridged)
 --------------------------------------+--------------------------------------+-------------------------------+---------------------------------------------------------------
- a2d04a1a-670f-4a4c-af74-7e53a428486b | 7361e374-...16da (Carlos)             | tech_status.recorded          | status=out, proposalCount=2, unavailableBlockId=68b1122f-...
- a2d04a1a-670f-4a4c-af74-7e53a428486b | 7361e374-...16da (Carlos)             | tech_status.duplicate         | status=out (2nd OUT, same tenant-local day)
- a2d04a1a-670f-4a4c-af74-7e53a428486b | unknown                               | tech_status.unverified_mobile | reason=unknown_mobile, fromE164=+1555911499...
- f2a91f63-eb41-4bdb-9e40-e89c6742b02f | df7e61b7-...f425 (tenant B tech)      | tech_status.recorded          | status=out, proposalCount=1
+ 77d3f145-cdc3-42e3-93a2-e3f823578413 | 6ce167c2-...c9a (Carlos)              | tech_status.recorded          | status=out, proposalCount=2, unavailableBlockId=a6af2f9e-...
+ 77d3f145-cdc3-42e3-93a2-e3f823578413 | 6ce167c2-...c9a (Carlos)              | tech_status.duplicate         | status=out (2nd OUT, same tenant-local day)
+ 77d3f145-cdc3-42e3-93a2-e3f823578413 | unknown                               | tech_status.unverified_mobile | reason=unknown_mobile, fromE164=+15553182999
+ e5913222-ed61-4621-98c1-13cf12c23832 | 10d8e9d9-...dbc (tenant B tech)       | tech_status.recorded          | status=out, proposalCount=1
 (4 rows)
 ```
 
@@ -149,9 +200,11 @@ plus the feature's own `tech_status.*` audit trail (asserted directly).
 **Tenant grade:** T2 (tenant B: different technician mobile, different
 customer/appointment, different business name — proposal, block, and audit
 are all tenant B's own, tenant A's rows counted unchanged before/after) AND
-T3 (tenant B's `tenant_settings.timezone` is `America/Los_Angeles` vs
-tenant A's `America/Chicago` — a genuinely different per-tenant CONFIG
-value the capability reads to compute "today", proven by the two
+T3 (tenant B's `tenant_settings.timezone` is a DIFFERENT value from tenant
+A's `'UTC'` — dynamically `pickSafeSecondaryTimezone()`-picked each run, so
+the exact value varies by when the suite runs; `Pacific/Honolulu` in the
+run dumped above — a genuinely different per-tenant CONFIG value the
+capability reads to compute "today", proven by the two
 `tech_unavailable_blocks` windows above landing on different UTC ranges
 that are each exactly midnight→midnight in their OWN zone).
 
@@ -203,7 +256,7 @@ npx playwright test e2e/telephony-omw-keyword-4-5.spec.ts --project=chromium --r
 ✓ an OMW from an UNREGISTERED number does nothing — unverified_mobile audit, no en-route audit or dispatch row for anyone
 ✓ T2: tenant B's own tech texting OMW fires its OWN audited act + dispatch row, and never touches tenant A's rows
 
-4 passed (13.8s)   [also: 16.5s, 19.5s on other runs]
+4 passed (13.8s)   [also: 16.5s, 19.5s pre-fix; 16.8s, 16.3s, 16.5s post-fix]
 ```
 
 **Row dumps:**

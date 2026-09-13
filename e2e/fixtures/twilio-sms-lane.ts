@@ -40,28 +40,93 @@ export type { ProvisionedTenant } from './twilio-phone-lane';
  * (packages/api/src/shared/timezone.ts) the product itself uses to walk
  * "tenant-local today" (`createRescheduleProposalsFromTechOut`,
  * `tenantLocalDate` in sms/tech-status/handler.ts) — NOT a fixed
- * hours-from-now offset. A fixed UTC offset can silently cross the
- * tenant's own local midnight depending purely on what wall-clock time the
- * suite happens to run at (observed directly in this lane's RED trail: a
- * +2h offset landed the appointment on TOMORROW in America/Los_Angeles
- * when the suite ran at 05:36 UTC — see the lane report). This instead
- * anchors to the tenant's actual local-day boundaries and scales the gap
- * down (never below `gapMin`/2) only in the rare case where the tenant's
- * local day is nearly over, so every slot always lands inside
- * `[now, tenant-local midnight + 24h)` — the exact window the reschedule
- * walk reads — regardless of real run time.
+ * hours-from-now offset, which can silently cross the tenant's own local
+ * midnight depending purely on what wall-clock time the suite happens to
+ * run at.
+ *
+ * The scale-down branch below is deliberately UNFLOORED (previous version
+ * clamped to a minimum 0.5, which is exactly what let a slot still land
+ * PAST `latestMs` when the true safe scale was below 0.5 — Fable caught
+ * this live: `laterTodaySlots('America/Los_Angeles', 1, 120)` at 23:04
+ * Pacific had only ~51 real minutes of tenant-local day left, the floor
+ * forced a 60-minute gap anyway, and the slot landed on TOMORROW). Callers
+ * are additionally steered onto a timezone whose CURRENT local time is far
+ * from ITS OWN midnight (see `pickSafeSecondaryTimezone` below and each
+ * spec's tenant setup) so this clamp is a backstop, not the only guard.
  */
 export function laterTodaySlots(tz: string, count: number, gapMin = 90): Date[] {
   const now = new Date();
   const dayStart = tzMidnight(localDateKey(now, tz), tz);
   const dayEnd = addCalendarDays(dayStart, 1, tz);
-  const marginMs = 5 * 60 * 1000;
+  const marginMs = 10 * 60 * 1000;
   const latestMs = dayEnd.getTime() - marginMs;
   const gapMs = gapMin * 60 * 1000;
   const desiredLastMs = now.getTime() + gapMs * count;
-  const scale = desiredLastMs > latestMs ? Math.max((latestMs - now.getTime()) / (gapMs * count), 0.5) : 1;
+  const scale = desiredLastMs > latestMs ? Math.max((latestMs - now.getTime()) / (gapMs * count), 0) : 1;
   const effectiveGapMs = gapMs * scale;
   return Array.from({ length: count }, (_, i) => new Date(now.getTime() + effectiveGapMs * (i + 1)));
+}
+
+/**
+ * The curated timezone allow-list `tenantLocalDate`
+ * (packages/api/src/sms/tech-status/handler.ts) actually honors —
+ * `isValidTimezone` (packages/api/src/shared/timezone.ts), NOT the wider
+ * `isRuntimeTimezone` used elsewhere. An Intl-valid but non-curated zone
+ * would silently fall back to UTC in the handler and quietly defeat a T3
+ * claim, so row 4.8's second tenant MUST come from this exact list.
+ */
+const CURATED_NON_UTC_TIMEZONES = [
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Phoenix',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'America/Detroit',
+  'America/Indiana/Indianapolis',
+  'America/Boise',
+] as const;
+
+function currentLocalHour(tz: string, at: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  }).formatToParts(at);
+  // Some ICU builds render midnight as "24" with hour12:false; normalize.
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24;
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+  return hour + minute / 60;
+}
+
+function hoursFromLocalNoon(localHour: number): number {
+  const diff = Math.abs(localHour - 12);
+  return Math.min(diff, 24 - diff);
+}
+
+/**
+ * Row 4.8's T3 grade needs a SECOND `tenant_settings.timezone` value that
+ * is (a) genuinely different from tenant A's and (b) one the product will
+ * actually honor (curated list, see above). A FIXED second zone is exactly
+ * what caused the bug above: every curated zone is a US (+ Hawaii) zone, so
+ * there is a real multi-hour stretch of UTC time (observed directly: UTC
+ * ~04:00–10:30) where the ENTIRE curated list is simultaneously in the
+ * evening/night — no fixed choice is safe at all real run times. This picks
+ * whichever curated zone's CURRENT local time is closest to ITS OWN noon —
+ * i.e. currently farthest from ITS OWN midnight — so the SAME appointment
+ * math always gets the most headroom available, regardless of when the
+ * suite runs. Tenant A separately uses plain `'UTC'` (see each spec) —
+ * always in the curated list, always genuinely different from whatever
+ * this picks (never 'UTC' itself), and its own "local time" IS the actual
+ * UTC clock, which is safe from local-midnight-clustering entirely and
+ * only close to ITS OWN midnight for a much narrower, unrelated window.
+ */
+export function pickSafeSecondaryTimezone(at: Date = new Date()): string {
+  return [...CURATED_NON_UTC_TIMEZONES].sort(
+    (a, b) => hoursFromLocalNoon(currentLocalHour(a, at)) - hoursFromLocalNoon(currentLocalHour(b, at)),
+  )[0]!;
 }
 
 /** `/webhooks/twilio/sms/:tenantId` — see webhooks/routes.ts:2845. */
@@ -115,6 +180,40 @@ export async function insertTechnician(
   return { id };
 }
 
+/**
+ * #1133 workaround (filed by Fable, not fixed here — TEST-ONLY lane):
+ * `withTenantTransaction` (packages/api/src/middleware/tenant-context.ts)
+ * commits each request's own DB transaction on the Express response's
+ * `finish` event — AFTER the response body is already flushed to the
+ * client — via a fire-and-forget `void cleanup(commit)` the request
+ * pipeline never awaits. A request that immediately references something a
+ * PRIOR request just created (a location referencing a customer, a job
+ * referencing that location) can race that still-in-flight COMMIT and see
+ * the parent as not-yet-existing (observed directly: `POST /api/jobs` 404
+ * "Location not found" 9ms after that location's own 201). This polls the
+ * just-created row's own GET /:id until it 200s (bounded to 2s) BEFORE
+ * returning it to the caller, who uses it in the next, dependent call —
+ * exactly the workaround shape requested, not a retry-the-write.
+ */
+async function waitUntilReadable(
+  request: APIRequestContext,
+  ownerToken: string,
+  path: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 2000;
+  const intervalMs = opts.intervalMs ?? 100;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await request.get(`${API_URL}${path}`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    if (res.status() === 200) return;
+    if (Date.now() >= deadline) return; // let the dependent call surface the real (or now-resolved) error
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 /** `POST /api/customers` as the owner (dev-auth-bypass bearer). */
 export async function createCustomerViaApi(
   request: APIRequestContext,
@@ -132,7 +231,9 @@ export async function createCustomerViaApi(
     },
   });
   expect(res.status(), `POST /api/customers failed: ${await res.text()}`).toBe(201);
-  return res.json();
+  const customer = (await res.json()) as { id: string };
+  await waitUntilReadable(request, ownerToken, `/api/customers/${customer.id}`); // #1133 workaround
+  return customer;
 }
 
 /** `POST /api/locations` as the owner. */
@@ -153,7 +254,9 @@ export async function createLocationViaApi(
     },
   });
   expect(res.status(), `POST /api/locations failed: ${await res.text()}`).toBe(201);
-  return res.json();
+  const location = (await res.json()) as { id: string };
+  await waitUntilReadable(request, ownerToken, `/api/locations/${location.id}`); // #1133 workaround
+  return location;
 }
 
 /**
@@ -189,20 +292,38 @@ export async function createScheduledJobViaApi(
     },
   });
   expect(res.status(), `POST /api/jobs failed: ${await res.text()}`).toBe(201);
-  return res.json();
+  const job = (await res.json()) as { id: string };
+  await waitUntilReadable(request, ownerToken, `/api/jobs/${job.id}`); // #1133 workaround
+  return job;
 }
 
-/** `GET /api/appointments?jobId=` (legacy bare-array contract) as the owner. */
+/**
+ * `GET /api/appointments?jobId=` (legacy bare-array contract) as the owner.
+ * This route does not 404 on an unknown/uncommitted job — it just returns
+ * an empty array (`listByJob` has no existence check) — so this polls for a
+ * NON-EMPTY result (bounded to 2s), the same #1133 workaround shape as
+ * `waitUntilReadable` above: the appointment row is written inside the
+ * job's own request transaction, so a read immediately after can race the
+ * same deferred COMMIT.
+ */
 export async function getAppointmentIdForJob(
   request: APIRequestContext,
   ownerToken: string,
   jobId: string,
 ): Promise<string> {
-  const res = await request.get(`${API_URL}/api/appointments?jobId=${jobId}`, {
-    headers: { authorization: `Bearer ${ownerToken}` },
-  });
-  expect(res.status(), `GET /api/appointments?jobId= failed: ${await res.text()}`).toBe(200);
-  const appointments = (await res.json()) as Array<{ id: string }>;
+  const timeoutMs = 2000;
+  const intervalMs = 100;
+  const deadline = Date.now() + timeoutMs;
+  let appointments: Array<{ id: string }> = [];
+  for (;;) {
+    const res = await request.get(`${API_URL}/api/appointments?jobId=${jobId}`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(res.status(), `GET /api/appointments?jobId= failed: ${await res.text()}`).toBe(200);
+    appointments = (await res.json()) as Array<{ id: string }>;
+    if (appointments.length > 0 || Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
   expect(appointments.length, `no appointment synced for job ${jobId}`).toBeGreaterThan(0);
   return appointments[0]!.id;
 }

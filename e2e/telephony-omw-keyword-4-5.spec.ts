@@ -46,6 +46,16 @@ import {
   type ProvisionedTenant,
 } from './fixtures/twilio-sms-lane';
 
+// Row 4.5 only needs T2 (different tenant, different data) — no per-tenant
+// timezone claim — so both tenants use plain UTC: always in the curated
+// `VALID_TIMEZONES` list `resolveTodayBoundary`
+// (packages/api/src/dispatch/en-route-voice.ts) actually honors, and its
+// "local time" IS the real UTC clock — safe from the US(+Hawaii)-zone
+// clustering issue documented on `pickSafeSecondaryTimezone`
+// (twilio-sms-lane.ts), which row 4.8's T3 claim has to contend with but
+// this row does not.
+const TENANT_TIMEZONE = 'UTC';
+
 const RUN = crypto.randomInt(1000, 9999);
 const A_DID = `+1512${RUN}451`;
 const B_DID = `+1512${RUN}452`;
@@ -105,6 +115,16 @@ test.describe('#1017 row 4.5 (SMS-keyword leg) — "on my way" reaches an audite
       authToken: B_TOKEN,
       businessName: B_BUSINESS_NAME,
     });
+    // provisionTenant's own default is 'America/Chicago' for every tenant;
+    // override both to the shared, always-safe TENANT_TIMEZONE above.
+    await pool.query(`UPDATE tenant_settings SET timezone = $1 WHERE tenant_id = $2`, [
+      TENANT_TIMEZONE,
+      tenantA.tenantId,
+    ]);
+    await pool.query(`UPDATE tenant_settings SET timezone = $1 WHERE tenant_id = $2`, [
+      TENANT_TIMEZONE,
+      tenantB.tenantId,
+    ]);
 
     ownerTokenA = devAuthBearerToken(tenantA.userId);
     ownerTokenB = devAuthBearerToken(tenantB.userId);
@@ -140,8 +160,8 @@ test.describe('#1017 row 4.5 (SMS-keyword leg) — "on my way" reaches an audite
       locationId: locTerry.id,
       summary: 'Leaky faucet',
       technicianId: terryId,
-      scheduledStart: laterTodaySlots('America/Chicago', 1, 60)[0]!,
-      timezone: 'America/Chicago',
+      scheduledStart: laterTodaySlots(TENANT_TIMEZONE, 1, 60)[0]!,
+      timezone: TENANT_TIMEZONE,
     });
     apptTerry = await getAppointmentIdForJob(request, ownerTokenA, jobTerry.id);
 
@@ -157,8 +177,8 @@ test.describe('#1017 row 4.5 (SMS-keyword leg) — "on my way" reaches an audite
       locationId: locRobin.id,
       summary: 'Water heater inspection',
       technicianId: robinId,
-      scheduledStart: laterTodaySlots('America/Chicago', 1, 60)[0]!,
-      timezone: 'America/Chicago',
+      scheduledStart: laterTodaySlots(TENANT_TIMEZONE, 1, 60)[0]!,
+      timezone: TENANT_TIMEZONE,
     });
     apptRobin = await getAppointmentIdForJob(request, ownerTokenA, jobRobin.id);
 
@@ -174,8 +194,8 @@ test.describe('#1017 row 4.5 (SMS-keyword leg) — "on my way" reaches an audite
       locationId: locB.id,
       summary: 'Water heater replacement',
       technicianId: techBId,
-      scheduledStart: laterTodaySlots('America/Chicago', 1, 60)[0]!,
-      timezone: 'America/Chicago',
+      scheduledStart: laterTodaySlots(TENANT_TIMEZONE, 1, 60)[0]!,
+      timezone: TENANT_TIMEZONE,
     });
     apptB = await getAppointmentIdForJob(request, ownerTokenB, jobB.id);
   });
