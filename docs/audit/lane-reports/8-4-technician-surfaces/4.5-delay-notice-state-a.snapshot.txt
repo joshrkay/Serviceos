@@ -1,0 +1,5 @@
+                idempotency_key                |              tenant_id               |            appointment_id            | status | channel 
+-----------------------------------------------+--------------------------------------+--------------------------------------+--------+---------
+ ee31d4ba-fc94-405a-9207-9d4bf6aabd46:en_route | 708fe011-b99a-4c0d-8d41-0057e56c167f | ee31d4ba-fc94-405a-9207-9d4bf6aabd46 | failed | sms
+(1 row)
+
