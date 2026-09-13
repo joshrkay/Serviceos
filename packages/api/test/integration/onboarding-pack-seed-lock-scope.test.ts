@@ -193,4 +193,79 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
     // enough to race anyone.
     expect(interleaved).toBe(false);
   });
+
+  it('the WINNER of the pack lock survives the sibling handler creating the tenant_settings row under it, and merges rather than clobbers', async () => {
+    // xhawk-ai review on PR #1106 — moving the settings write behind the pack
+    // lock is not sufficient on its own. `tenant_settings` is keyed by TENANT
+    // while the guard is keyed by (tenant, pack), and
+    // `OnboardingTenantSettingsExecutionHandler` calls
+    // `settingsRepo.upsertIdentityFields` BEFORE it ever tries the pack lock
+    // (onboarding-handlers.ts:197). So the sibling can create the row while
+    // this handler — the lock's WINNER — is between its own read and its own
+    // INSERT, and the winner then dies at tenant_settings_tenant_id_key. Same
+    // 23505, same sibling pair, same pack as #1083; the loser side is covered
+    // above. A first-ever activation of a DIFFERENT pack has the same shape
+    // (different lock key, same per-tenant row).
+    const { settingsRepo, packActivationRepo, auditRepo, packSeedDeps } = buildDeps();
+    // Nobody holds the pack lock here: this handler wins it.
+
+    let interleaved = false;
+    const realFindByTenant = settingsRepo.findByTenant.bind(settingsRepo);
+    settingsRepo.findByTenant = async (tenantId: string) => {
+      const found = await realFindByTenant(tenantId);
+      if (!interleaved) {
+        interleaved = true;
+        // The sibling's REAL first write — the same call
+        // OnboardingTenantSettingsExecutionHandler makes before taking the
+        // lock — lands in the window.
+        await new PgSettingsRepository(pool).upsertIdentityFields(tenantId, {
+          businessName: 'Sibling Co',
+          timezone: 'America/Phoenix',
+          jobBufferMinutes: 30,
+        });
+      }
+      return found;
+    };
+
+    const handler = new OnboardingServiceCategoryExecutionHandler(
+      settingsRepo,
+      packActivationRepo,
+      auditRepo,
+      packSeedDeps,
+      pool,
+    );
+    const result = await handler.execute(serviceCategoryProposal(tenant.tenantId), {
+      tenantId: tenant.tenantId,
+      executedBy: tenant.userId,
+      executedByRole: 'owner',
+    });
+
+    expect(interleaved).toBe(true); // the race window really was exercised
+    // Asserted before `success` so a regression prints the raw Postgres
+    // message (the 23505) rather than a bare `false`.
+    expect(result.error).toBeUndefined();
+    expect(result.success).toBe(true);
+
+    // Exactly one settings row, and the merge kept BOTH writers' work: the
+    // sibling's identity fields and this activation's pack.
+    const settingsRows = await pool.query(
+      `SELECT business_name, terminology_preferences FROM tenant_settings WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(settingsRows.rows).toHaveLength(1);
+    expect(settingsRows.rows[0].business_name).toBe('Sibling Co');
+    expect(settingsRows.rows[0].terminology_preferences?._activeVerticalPacks).toEqual(['hvac']);
+
+    // And the activation itself completed: pack row, seeded catalog, audit.
+    const packRows = await pool.query(
+      `SELECT pack_id, status FROM pack_activations WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(packRows.rows).toEqual([{ pack_id: 'hvac', status: 'active' }]);
+    const catalogRows = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM catalog_items WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(catalogRows.rows[0].n).toBeGreaterThan(0);
+  });
 });
