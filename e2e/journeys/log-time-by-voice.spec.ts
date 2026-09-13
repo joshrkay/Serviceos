@@ -58,14 +58,20 @@
  * ("if it yields a proposal that needs approval, approve it") — it never
  * yields one, so that step is documented as unreached, not skipped silently.
  *
- * Requires: real Postgres (DATABASE_URL, migrated) + TENANT_ENCRYPTION_KEY,
- * exactly as telephony-e1-signed-webhook.spec.ts. Deliberately NOT
+ * Requires: real, disposable Postgres (DATABASE_URL, migrated, plus
+ * E2E_USE_TEST_DB=true so a BYO container gets truncated at end-of-run —
+ * job-photo-attach.spec.ts's identical gate) + TENANT_ENCRYPTION_KEY.
+ * AI_PROVIDER_API_KEY must be UNSET (this row's whole finding rests on the
+ * hermetic no-key mock gateway — a real key would issue a live, paid
+ * classification call instead). TWILIO_MEDIA_STREAMS_ENABLED must not be
+ * 'true' (this spec assumes the Gather telephony path). Deliberately NOT
  * `chromium-devauth` (forces InMemory repos + TELEPHONY_ENABLED=false). No
  * browser — the caller here is Twilio, not a person at a screen; the
  * `request` fixture is the whole point.
  *
  * HOW TO RUN:
  *   DATABASE_URL=postgres://test:test@localhost:<port>/serviceos_e2e_test \
+ *   E2E_USE_TEST_DB=true \
  *   TWILIO_ACCOUNT_SID=AC00000000000000000000000000000001 \
  *   TWILIO_AUTH_TOKEN=<any> TWILIO_FROM_NUMBER=+15125550000 \
  *   TWILIO_DEFAULT_TENANT_ID=<uuid> \
@@ -110,7 +116,28 @@ const B_TECH_MOBILE = `+1512${RUN}302`;
 const UTTERANCE = 'log two hours on the Garcia job';
 
 const enc = process.env.TENANT_ENCRYPTION_KEY;
-const dbReady = !!process.env.DATABASE_URL;
+// E2E_USE_TEST_DB=true is required (not just DATABASE_URL) so that, when
+// DATABASE_URL points at a pre-existing (BYO) container, e2e/global-setup.ts
+// writes the state file that makes e2e/global-teardown.ts run the BYO
+// truncate path at end-of-run (teardown-test-db.ts) — without it, a
+// developer who exports DATABASE_URL against a persistent dev database
+// would have this spec's provisionTenant() insert real rows with no
+// cleanup. Matches job-photo-attach.spec.ts's identical gate. (Codex review,
+// PR #1114.)
+const dbReady = !!process.env.DATABASE_URL && process.env.E2E_USE_TEST_DB === 'true';
+// The hermetic no-key mock gateway is the premise of this row's entire
+// "stop point" finding (see the header comment) — if AI_PROVIDER_API_KEY is
+// inherited from the operator's shell into apiWebServerEnv, classification
+// would hit a REAL, paid LLM instead, silently spending money and making
+// this spec's zero-result assertions fail for a confusing reason. Fail
+// closed with a clear message instead. (Codex review, PR #1114.)
+const noLiveLlmKey = !process.env.AI_PROVIDER_API_KEY;
+// This spec's TwiML parsing (sessionIdFromTwiml below) assumes the Gather
+// telephony path (`<Gather action="...?sid=...">`); TWILIO_MEDIA_STREAMS_ENABLED=true
+// makes /voice return `<Connect><Stream>` with the session id in a
+// <Parameter> instead, which this spec cannot parse. Fail closed with a
+// clear message rather than a confusing parse failure. (Codex review, PR #1114.)
+const gatherPathActive = process.env.TWILIO_MEDIA_STREAMS_ENABLED !== 'true';
 
 let pool: Pool;
 
@@ -128,8 +155,21 @@ test.describe.configure({ mode: 'serial' });
 test.describe('#1018 row 5.3 — "log my hours by talking" on the phone surface, real Postgres', () => {
   test.skip(
     !dbReady || !enc,
-    'Needs a real Postgres (DATABASE_URL, migrated) and TENANT_ENCRYPTION_KEY ' +
-      'so the tenant Twilio credential can be stored the way a provisioned tenant stores it.',
+    'Needs a real, disposable Postgres (DATABASE_URL, migrated, E2E_USE_TEST_DB=true so it gets ' +
+      'truncated at end-of-run) and TENANT_ENCRYPTION_KEY so the tenant Twilio credential can be ' +
+      'stored the way a provisioned tenant stores it.',
+  );
+  test.skip(
+    !noLiveLlmKey,
+    'AI_PROVIDER_API_KEY is set — this spec\'s whole premise is the hermetic no-key mock gateway ' +
+      '(see header comment); running with a real key would issue a live, paid classification call ' +
+      'instead of hitting the documented stop point. Unset it for this run.',
+  );
+  test.skip(
+    !gatherPathActive,
+    'TWILIO_MEDIA_STREAMS_ENABLED=true — this spec assumes the Gather telephony path ' +
+      '(`<Gather action="...?sid=...">`); Media Streams returns the session id in a <Parameter> ' +
+      'instead, which sessionIdFromTwiml cannot parse. Set it to false (or unset) for this run.',
   );
 
   async function provisionTenant(opts: {
