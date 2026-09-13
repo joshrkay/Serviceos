@@ -116,6 +116,10 @@ export async function bootstrapOwner(
     type: 'user.created',
     data: { id: ownerSub, email_addresses: [{ email_address: ownerEmail }] },
   });
+  // The tenant bootstrap is the heaviest call in any spec (tenant + owner +
+  // settings + the provisioning worker's stub twilio row); with three lanes'
+  // stacks on one Mac it has exceeded the harness's 10s per-request ceiling
+  // right after api boot (7.7 pass 2). A longer wait, never a retry-the-write.
   const webhookRes = await request.post(`${API_URL}/webhooks/clerk`, {
     headers: {
       'content-type': 'application/json',
@@ -124,6 +128,7 @@ export async function bootstrapOwner(
       'svix-signature': signSvix(rawBody, svixId, svixTimestamp),
     },
     data: rawBody,
+    timeout: 60_000,
   });
   expect(webhookRes.status(), `webhook rejected: ${await webhookRes.text()}`).toBe(200);
 

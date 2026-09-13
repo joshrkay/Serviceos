@@ -66,6 +66,13 @@ dedicated-port rule exists precisely so two Playwright stacks never adopt
 each other's servers; the pair moved twice for that reason, never for the
 specs.
 
+The harness's per-request ceiling is `use.actionTimeout: 10_000`
+(playwright.config.ts:207). The tenant bootstrap (`POST /webhooks/clerk`:
+tenant + owner + settings + the provisioning worker's stub twilio row) is
+the heaviest call in any spec and exceeded it once right after api boot
+(7.7 second pass, first attempt) — the fixture gives that one call 60s; a
+longer wait, never a retry of a write.
+
 `E2E_WEBSERVER_TIMEOUT_MS` is also new (additive, unset ⇒ the old 120s): with
 three lanes' ts-node apis cold-booting on one Mac, the api's compile alone
 overran Playwright's 120s webServer window (the log stops at ".env not
@@ -331,6 +338,30 @@ nor an audit row naming it. Owner browser: tenant A's `/inbox` shows
 Screenshots: `7.12-tenantB-discount-policy-configured.png`,
 `7.12-tenantA-inbox-callback.png`.
 
+## Second passes (clock-safe, race-safe: every spec green twice)
+
+```
+7.7   ✓ …:94:7 › a revision mid-session refuses the stale approve (409/banner, status stays sent); the current version then accepts; T1 … (11.0s)   1 passed (45.9s)  EXIT=0
+   (first attempt of this pass: the tenant-bootstrap webhook stalled past the harness's 10s actionTimeout right after api boot — fixture gives that call 60s)
+```
+
+```
+7.4/5 ✓ …:163:7 › owner drafts 3 tiers + an add-on through the real form; the public page headline equals the default tier before any click; the customer picks Premium+Warranty; all rows + the accepted selection survive; a neighbour tenant is untouched (T2) (12.6s)   1 passed (2.0m)  EXIT=0
+```
+
+```
+7.8   ✓ …:117:7 › two estimates on one job approved at the same instant settle to exactly one accepted, the loser gets a clean 409; T2 on a second, independent tenant racing the same instant (16.0s)   1 passed (1.8m)  EXIT=0
+```
+
+```
+7.9   ✓ …:116:7 › before_approval blocks Approve and shows the CAPPED deposit; after_approval (T3, divergent config) accepts immediately and settles via a signed webhook (6.8s)
+      ✘ …:263:7 › the real deposit-checkout route genuinely refuses … — pinned, not faked (1.0s)   [test.fail(): expected — response 500 INTERNAL_ERROR, jobs row required 0]
+      2 passed (1.0m)  EXIT=0
+   (first attempt of this pass: the pin hit a #1133 404 "Estimate not found: token" and "unexpectedly passed" — it now polls the public token first)
+```
+
+<!-- PASS2 -->
+
 <!-- RUNS -->
 
 ## What is NOT proven (pinned, not faked)
@@ -362,7 +393,12 @@ Screenshots: `7.12-tenantB-discount-policy-configured.png`,
   refuses to credit (webhooks/routes.ts:1409-1414) and approve stays 409.
   Parked with #1000/#1002 (live Stripe). **New finding for Fable:** a Stripe
   failure on the public deposit route surfaces as an unmapped 500 rather
-  than a mapped, customer-readable error.
+  than a mapped, customer-readable error. (The pin's second pass first hit
+  a 404 "Estimate not found: token" — the send's view-token write had not
+  committed yet, #1133 — which is neither refusal and made the expected
+  failure "unexpectedly pass"; the pin now polls the public GET until the
+  token resolves and asserts the minted-link end-state, `status === 200`,
+  which is what stays red until a real key exists.)
 - **7.10 compressed calendar vs wall-clock idempotency.** `SendService`'s
   second idempotency layer keys every dispatch on the WALL-CLOCK minute
   (`estimate:<id>:<channel>:<floor(Date.now()/60000)>`,
@@ -389,17 +425,45 @@ Screenshots: `7.12-tenantB-discount-policy-configured.png`,
   proposal stays `draft`, the sent estimate's `total_cents` is unchanged,
   and only tenant B (opted in) carries a `decisionKind` on its audit row.
 
+## Findings for Fable (no product touched)
+
+1. **Unmapped 500 on the public deposit route** when Stripe rejects the
+   key (public-estimate-service.ts:883-886) — the customer's "Pay deposit"
+   tap gets `{"error":"INTERNAL_ERROR"}`; with no key it is a clean 400.
+2. **SendService's dispatch idempotency is wall-clock-minute keyed**
+   (send-service.ts:575-583, `idx_dispatches_idempotency`): a reminder in
+   the same minute as the original send collides — invisible in production
+   (days apart), exactly what an injected clock hits.
+3. **7.2 observed on the real surface** (finding, not a rung claim): the
+   uncatalogued draft's card shows "Low confidence", the "AI-estimated"
+   badge, the per-line marker, "Needs: lineItems", and a disabled Approve;
+   the proposal row carries `confidence_score` 0.5.
+4. **Direct-SQL cross-tenant reads prove nothing under this harness** — the
+   Playwright recipe connects as the testcontainer superuser (bypasses RLS
+   even under FORCE, schema.ts:545-548); `SET ROLE rls_app_runtime` only
+   runs with `RLS_RUNTIME_ROLE=true`. Cross-tenant invisibility is proven
+   via the real API (404) in every spec here.
+5. **The owner form's `<select required>` blocks submit silently** until
+   its `<option>` renders (EstimateForm.tsx:397-400) — a test-timing fact,
+   but also what a real owner sees if they tap Create before the jobs list
+   loads: nothing happens, no message.
+6. **No open §8.7 ticket** — #1012 is closed; the PR is commented on #995
+   and #1012.
+
 ## Report-only rows
 
 - **7.2 (3/3).** Grounding is exercised by every 7.1/7.3 draft here (the
   catalog line lands `pricing_source='catalog'` at 15000¢ — the catalog
   price won over the mock's own figure). The cap was then OBSERVED on the
   real surface, unplanned: the uncatalogued "Priya Vendor" draft rendered
-  the "AI-estimated" badge, the per-line marker "… is not in the tenant
-  catalog — the price is AI-estimated and needs review", and its **Approve
-  button disabled** — run 2 of the 7.1/7.3 spec tried to one-tap-approve it
-  and timed out on `disabled`; the spec now asserts that refusal plus the
-  proposal row's `confidence_score < 0.9`. That is reachability evidence for
+  "Low confidence", the "AI-estimated" badge, the per-line marker "… is not
+  in the tenant catalog — the price is AI-estimated and needs review", a
+  "Needs: lineItems — Tap Edit to fill before approval" chip, and its
+  **Approve button disabled** (`7.3-uncatalogued-badge.png`) — run 2 of the
+  7.1/7.3 spec tried to one-tap-approve it and timed out on `disabled`; the
+  spec now asserts that refusal plus the proposal row's
+  `confidence_score` 0.5 (< the 0.9 floor) and `_meta.overallConfidence`
+  "low". That is reachability evidence for
   the cap; whether it lifts 7.2 is Fable's call (the cap's arithmetic is
   still only the 84/84 unit proof, #1012).
 - **7.11 (3).** `getSupervisorReviewGate()` still reaches 2 of 93 origins

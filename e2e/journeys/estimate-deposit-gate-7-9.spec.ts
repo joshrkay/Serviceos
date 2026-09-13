@@ -292,6 +292,16 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
     // call rejected → unmapped Error). Expected once a real key / mapped
     // error exists: 200 with a url (or a clean 4xx). Both current outcomes
     // are recorded in the run log.
+    // #1133 — the send's view-token write commits on res.finish; a checkout
+    // POST fired before it is readable gets a 404 "Estimate not found: token"
+    // (7.9 second pass, first attempt — which made this pin "unexpectedly
+    // pass" because 404 is neither of the two refusals). Poll the public GET
+    // until the token resolves, then hit the real route.
+    for (let i = 0; i < 100; i++) {
+      const probe = await request.get(`${API_URL}/public/estimates/${target.viewToken}`);
+      if (probe.ok()) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
     const checkoutRes = await request.post(
       `${API_URL}/public/estimates/${target.viewToken}/deposit-checkout`,
     );
@@ -303,9 +313,9 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
       [jobA.jobId],
     );
     logRows('7.9 pin — jobs row after the failed mint (required stays 0 → webhook cannot credit)', jobRow);
-    expect(
-      [400, 500],
-      `deposit-checkout must mint a link (200) — got ${checkoutRes.status()}: ${checkoutBody}`,
-    ).not.toContain(checkoutRes.status());
+    // The end-state a real "Pay deposit" tap needs: a minted link (200). Today
+    // it is 500 (placeholder key) / 400 (no key) — this is the assertion
+    // test.fail() expects to keep failing until #1000/#1002 unblock it.
+    expect(checkoutRes.status(), `deposit-checkout must mint a link — got ${checkoutRes.status()}: ${checkoutBody}`).toBe(200);
   });
 });
