@@ -1,0 +1,5 @@
+                  id                  |    fsm_state     | turn_count | turns |         clarification_count_by_state          
+--------------------------------------+------------------+------------+-------+-----------------------------------------------
+ 0f35dfe2-3712-4fc1-8642-e398287cccb5 | category_capture |          4 |     8 | {"profile_capture": 2, "category_capture": 1}
+(1 row)
+
