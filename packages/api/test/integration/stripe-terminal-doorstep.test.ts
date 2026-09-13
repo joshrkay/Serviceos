@@ -388,6 +388,17 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
         auditRepo,
         webhookRepo,
         stripeWebhookSecret: STRIPE_SECRET,
+        // #1102 — the webhook router resolves the tenant's own connected
+        // account to bind settlements to it, wired exactly as app.ts:1108-1124
+        // wires production (the same resolver shape the terminal router above
+        // already takes) over the same real StripeConnectService.
+        connectAccountResolver: {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return { accountId: view.accountId, chargesEnabled: view.chargesEnabled };
+          },
+        },
       }),
     );
   });
@@ -692,16 +703,15 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     const cross = await postSignedStripe(
       terminalSucceededEvent(crossEventId, paymentIntentId, noConnect.tenantId, invoiceId),
     );
-    // 500 is TODAY'S behaviour, pinned as an observation, not endorsed: the
-    // handler throws 'Invoice not found', so the delivery is not ACKed and
-    // Stripe retries an event that can never succeed. The same shape is
-    // already pinned for the online path at invoice-webhook-paid.test.ts:320.
-    // Raised by xhawk-ai on PR #1097, and it has a point — a 200-with-skipped
-    // would be kinder to the retry queue — but changing it is a money-surface
-    // webhook change this test-only lane is barred from making, so the row's
-    // real invariant is asserted independently of the status code below:
-    // whatever the response, NOTHING is credited to either tenant.
-    expect(cross.status).toBe(500);
+    // #1102 — this used to be a 500 ('Invoice not found' thrown deep in the
+    // settlement path, so Stripe retried an event that could never succeed).
+    // The account-binding seam now refuses it up front: the delivery names
+    // tenant A, who has no connected account, while `event.account` is tenant
+    // B's — a 4xx-class refusal, never a 500. The row's real invariant is
+    // unchanged and still asserted below: NOTHING is credited to either
+    // tenant.
+    expect(cross.status).toBe(403);
+    expect(cross.body).toEqual({ error: 'Forbidden', reason: 'stripe_account_mismatch' });
 
     const untouched = await invoiceRepo.findById(connected.tenantId, invoiceId);
     expect(untouched?.status).toBe('open');
@@ -727,7 +737,12 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     ).toEqual([]);
   });
 
-  // ───────────── PRODUCT DEFECT — pinned, not fixed here ─────────────
+  // ───────────── PRODUCT DEFECT — raised here, FIXED in #1102 ─────────────
+  //
+  // WAS `it.fails` (the assertions below are what the product SHOULD do, so
+  // this went green by itself the day the handler validated the account).
+  // Flipped to a plain `it` by the #1102 fix lane; the history below is kept
+  // because it is the clearest statement of the attack this now closes.
   //
   // Raised by Codex on PR #1097 and verified against source. The leg above is
   // the WEAK cross-tenant case: it pairs one tenant's id with another's
@@ -750,13 +765,12 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
   // marks the neighbour's invoice PAID while the money sits in the attacker's
   // Stripe balance. The victim below never even enabled Connect.
   //
-  // `it.fails` per the repo convention (cf. i3-voice-approval-challenge-lock,
-  // #1051): the assertions are what the product SHOULD do, so this goes green
-  // by itself the day the handler validates the account. Not fixed in this
-  // lane — `webhooks/routes.ts` is money code and out of its scope. Surfaced
-  // on the PR and in docs/audit/lane-reports/execute-8-5-terminal.md.
-  it.fails(
-    'PRODUCT DEFECT: a connected account can settle ANOTHER tenant\'s invoice — event.account is never validated',
+  // Closed by #1102: `assertEventAccountBelongsToTenant` now compares
+  // `event.account` against the named tenant's own
+  // `tenants.stripe_connect_account_id` before any settlement branch touches
+  // an invoice, and refuses (403 + audit) when they do not match.
+  it(
+    'a connected account can NO LONGER settle another tenant\'s invoice — event.account is validated (#1102)',
     async () => {
       // The victim is the tenant that never enabled Connect at all.
       const victimInvoiceId = await seedOpenInvoice(noConnect);
@@ -774,16 +788,40 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
       );
       expect((event as { account: string }).account).toBe(CONNECT_ACCOUNT_ID);
 
-      await postSignedStripe(event);
+      const res = await postSignedStripe(event);
 
-      // WHAT SHOULD HAPPEN — the event is refused or skipped and nothing moves.
-      // WHAT HAPPENS TODAY — the invoice is 'paid' and a payments row exists.
+      // The event is refused, 4xx-class — never a 500.
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_account_mismatch' });
+
+      // …and nothing moves.
       const victimInvoice = await invoiceRepo.findById(noConnect.tenantId, victimInvoiceId);
       expect(victimInvoice?.status).toBe('open');
       expect(victimInvoice?.amountPaidCents).toBe(0);
       expect(
         await paymentRepo.findByInvoice(noConnect.tenantId, victimInvoiceId),
       ).toHaveLength(0);
+
+      // An audit row on the VICTIM's tenant says why it was refused.
+      const audit = await pool.query<{ event_type: string; metadata: Record<string, unknown> }>(
+        `SELECT event_type, metadata FROM audit_events
+          WHERE tenant_id = $1 AND correlation_id = $2`,
+        [noConnect.tenantId, eventId],
+      );
+      expect(audit.rows).toHaveLength(1);
+      expect(audit.rows[0].event_type).toBe('webhook.auth_failed');
+      expect(audit.rows[0].metadata.reason).toBe('stripe_account_mismatch');
+      expect(audit.rows[0].metadata.eventAccount).toBe(CONNECT_ACCOUNT_ID);
+      expect(audit.rows[0].metadata.tenantConnectAccountId).toBeNull();
+
+      // The webhook_events row must NOT read as settled.
+      const wh = await pool.query<{ status: string; processed_at: Date | null }>(
+        `SELECT status, processed_at FROM webhook_events
+          WHERE source = 'stripe' AND idempotency_key = $1`,
+        [eventId],
+      );
+      expect(wh.rows[0].status).toBe('failed');
+      expect(wh.rows[0].processed_at).toBeNull();
     },
   );
 });
