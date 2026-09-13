@@ -35,10 +35,17 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { StripeConnectService } from '../../src/billing/stripe-connect';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const STRIPE_SECRET = 'whsec_test_w1_2_integration';
 const AMOUNT_CENTS = 50_000;
+/**
+ * #1102 — the tenant's OWN connected account. A connected-origin event is only
+ * this tenant's to settle when `event.account` matches this value; the column
+ * is seeded for real in beforeAll, exactly as `account.updated` would write it.
+ */
+const CONNECT_ACCOUNT_ID = 'acct_connect_w1_2_integration';
 
 describe('Postgres integration — W1-2 invoice webhook → paid', () => {
   let pool: Pool;
@@ -144,11 +151,15 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
   // destination with a top-level `account: acct_…`. The settlement branch keys
   // off data.object.metadata, so a connected-origin event must credit the real
   // Postgres ledger identically to a platform one.
-  function connectPaymentIntentEvent(eventId: string, invoiceId: string): Record<string, unknown> {
+  function connectPaymentIntentEvent(
+    eventId: string,
+    invoiceId: string,
+    account: string = CONNECT_ACCOUNT_ID,
+  ): Record<string, unknown> {
     return {
       id: eventId,
       type: 'payment_intent.succeeded',
-      account: 'acct_connect_w1_2_integration',
+      account,
       data: {
         object: {
           id: `pi_${eventId}`,
@@ -178,6 +189,24 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
     auditRepo = new PgAuditRepository(pool);
     tenant = await createTestTenant(pool);
     otherTenant = await createTestTenant(pool);
+
+    // #1102 — this tenant finishes Connect for real, so a connected-origin
+    // delivery on THIS account is genuinely its own money. The same columns
+    // StripeConnectService.applyAccountUpdated writes from `account.updated`.
+    await pool.query(
+      `UPDATE tenants
+          SET stripe_connect_account_id = $2,
+              stripe_connect_charges_enabled = TRUE,
+              stripe_connect_payouts_enabled = TRUE,
+              stripe_connect_status = 'active'
+        WHERE id = $1`,
+      [tenant.tenantId, CONNECT_ACCOUNT_ID],
+    );
+    const connectService = new StripeConnectService({
+      pool,
+      config: { apiKey: 'sk_test_w1_2_never_dialled' },
+    });
+
     app = express();
     app.use('/webhooks/stripe', express.raw({ type: '*/*' }));
     app.use(
@@ -188,6 +217,14 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
         auditRepo,
         webhookRepo,
         stripeWebhookSecret: STRIPE_SECRET,
+        // Wired exactly as app.ts:1108-1124 wires production.
+        connectAccountResolver: {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return { accountId: view.accountId, chargesEnabled: view.chargesEnabled };
+          },
+        },
       }),
     );
   });
@@ -295,6 +332,32 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
     const settled = await invoiceRepo.findById(tenant.tenantId, invoiceId);
     expect(settled?.amountPaidCents).toBe(AMOUNT_CENTS);
     expect(await paymentRepo.findByInvoice(tenant.tenantId, invoiceId)).toHaveLength(1);
+  });
+
+  // #1102 — the same U6 Connect direct charge, but the money landed in SOMEONE
+  // ELSE's account. Stripe signs it either way; only the account binding
+  // separates a real direct charge from a neighbour claiming this invoice.
+  it('a connected-origin event on an account this tenant does not own credits nothing (#1102)', async () => {
+    const invoiceId = await seedOpenInvoice();
+    const eventId = `evt_${randomUUID()}`;
+
+    const res = await postSigned(
+      connectPaymentIntentEvent(eventId, invoiceId, 'acct_somebody_elses_account'),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_account_mismatch' });
+
+    const untouched = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    expect(untouched?.status).toBe('open');
+    expect(untouched?.amountPaidCents).toBe(0);
+    expect(untouched?.amountDueCents).toBe(AMOUNT_CENTS);
+    expect(await paymentRepo.findByInvoice(tenant.tenantId, invoiceId)).toHaveLength(0);
+    // The invoice timeline stays clean — no payment.recorded, no status change.
+    expect(await auditRepo.findByEntity(tenant.tenantId, 'invoice', invoiceId)).toEqual([]);
+
+    const row = await webhookRepo.findByIdempotencyKey('stripe', eventId);
+    expect(row?.status).toBe('failed');
+    expect(row?.processedAt ?? null).toBeNull();
   });
 
   it("an event naming a neighbour tenant credits nothing; each tenant's own event credits only its own invoice", async () => {
