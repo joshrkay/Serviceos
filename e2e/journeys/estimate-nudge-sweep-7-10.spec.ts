@@ -227,7 +227,10 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
   });
 
   // ── Honest gap: the real, wall-clock-triggered automatic firing ───────────
-  test('the real setInterval-driven automatic trigger cannot be observed inside a bounded hermetic run — pinned, not faked', async () => {
+  test('the real setInterval-driven automatic trigger cannot be observed inside a bounded hermetic run — pinned, not faked', async ({
+    request,
+  }) => {
+    test.setTimeout(60_000);
     test.fail(
       true,
       'packages/api/src/app.ts:6448-6465: registerInterval(setInterval(() => ' +
@@ -240,5 +243,16 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
         'function, registered at that line, run against real Postgres with real owner-created ' +
         'data, the real cooldown/claim-before-send mechanics, and T4 fan-out.',
     );
+
+    // The observation expected to keep failing: the running API exposes NO
+    // on-demand trigger for this sweep (only the hourly timer). An owner
+    // asking the real server to run it now gets a 404 — there is nothing
+    // on the persona's surface, or any surface, that can fire it early.
+    const tenant = await bootstrapOwner(request, 'pin', 'Acme HVAC 7.10 Pin');
+    const probe = await request.post(
+      `${process.env.E2E_API_URL ?? 'http://localhost:3000'}/api/workers/estimate-reminder/run`,
+      { headers: tenant.authHeaders },
+    );
+    expect(probe.status(), 'no on-demand estimate-reminder trigger exists (404) — only app.ts:6455\'s hourly setInterval').not.toBe(404);
   });
 });

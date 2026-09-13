@@ -15,11 +15,38 @@
 import { Page, APIRequestContext, expect } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 import { Client } from 'pg';
+import { installClerkStub } from '../helpers/clerk-stub';
+import { blockExternalHosts } from '../helpers/api-mocks/shell';
 
 /** Copied verbatim from e2e/journeys/digest-toggle.spec.ts — skip the
  * welcome/what's-new walkthrough overlays so they never intercept a click. */
 export const WELCOME_SEEN_KEY = 'walkthrough.welcome.v1';
 export const WHATS_NEW_SEEN_KEY = 'walkthrough.whatsnew.lastSeen';
+
+/**
+ * Sign the REAL browser in as a bootstrapped owner — the recipe
+ * e2e/journeys/digest-toggle.spec.ts and dispatch-board.spec.ts use:
+ * installClerkStub as the SAME sub/jwt the API calls used, the two
+ * walkthrough-seen localStorage keys (otherwise the "What's new in Rivet"
+ * dialog — data-testid="modal", fixed inset-0 z-50 — intercepts the first
+ * click on any authenticated page), and blockExternalHosts. Call BEFORE the
+ * first page.goto().
+ */
+export async function signInOwnerBrowser(page: Page, baseURL: string, tenant: Tenant): Promise<void> {
+  await installClerkStub(page, { signedIn: true, sub: tenant.sub, token: tenant.jwt });
+  await page.addInitScript(
+    ({ welcomeKey, whatsNewKey }) => {
+      try {
+        localStorage.setItem(welcomeKey, '1');
+        localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
+      } catch {
+        /* storage unavailable — overlays may show; the assertions still hold */
+      }
+    },
+    { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
+  );
+  await blockExternalHosts(page, baseURL);
+}
 
 export const API_URL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 
@@ -144,6 +171,12 @@ export async function seedJob(
   });
   expect(customerRes.ok(), `create customer -> ${customerRes.status()}`).toBeTruthy();
   const customer = (await customerRes.json()) as { id: string };
+  // #1133 workaround — the create transaction commits on res.finish, after
+  // the response is flushed; poll the row by id before the dependent create.
+  await pollForRow(async () => {
+    const r = await request.get(`${API_URL}/api/customers/${customer.id}`, { headers: tenant.authHeaders });
+    return r.ok() ? customer : null;
+  });
 
   const locationRes = await request.post(`${API_URL}/api/locations`, {
     headers: { 'content-type': 'application/json', ...tenant.authHeaders },
@@ -158,6 +191,12 @@ export async function seedJob(
   });
   expect(locationRes.ok(), `create location -> ${locationRes.status()}`).toBeTruthy();
   const location = (await locationRes.json()) as { id: string };
+  // #1133 workaround (same race — POST /api/jobs has 404'd "Location not
+  // found" 9ms after the location's own 201 on sibling lanes).
+  await pollForRow(async () => {
+    const r = await request.get(`${API_URL}/api/locations/${location.id}`, { headers: tenant.authHeaders });
+    return r.ok() ? location : null;
+  });
 
   const jobRes = await request.post(`${API_URL}/api/jobs`, {
     headers: { 'content-type': 'application/json', ...tenant.authHeaders },
@@ -311,6 +350,17 @@ export async function createTieredEstimateWithAddOn(
     },
   ]);
   return { estimateId, tierIds: { basic: basicId, premium: premiumId, elite: eliteId }, addOnId };
+}
+
+/**
+ * §12.4d evidence — print a read-back verbatim into the Playwright stdout so
+ * the PR body / lane report can quote the actual rows the acceptance names
+ * (the globalTeardown TRUNCATEs the test DB after every run, so the rows
+ * cannot be dumped afterwards). Pure logging; asserts nothing.
+ */
+export function logRows(label: string, rows: unknown): void {
+  // eslint-disable-next-line no-console
+  console.log(`[8.7 row-dump] ${label}\n${JSON.stringify(rows, null, 2)}`);
 }
 
 /** RLS-scoped read against real Postgres, mirroring e2e/qa-matrix/helpers/rw-db.ts. */

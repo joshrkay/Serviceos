@@ -2,7 +2,6 @@ import { Page, APIRequestContext } from '@playwright/test';
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { installClerkStub } from '../helpers/clerk-stub';
 import { hasViteClerkKey } from '../helpers/clerk-key';
 import {
   API_URL,
@@ -10,6 +9,8 @@ import {
   seedJob,
   queryAsTenant,
   drawSignature,
+  logRows,
+  signInOwnerBrowser,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -49,14 +50,6 @@ const SUM_ALL_CENTS = (200 + 350 + 500 + 45) * 100;
 const DEFAULT_HEADLINE_CENTS = 200 * 100;
 const ACCEPTED_CENTS = (350 + 45) * 100;
 
-async function signInBrowser(page: Page, tenant: Tenant): Promise<void> {
-  await installClerkStub(page, {
-    signedIn: true,
-    sub: tenant.sub,
-    token: tenant.jwt,
-  });
-}
-
 /** Fill row `index` of the LineItemEditor (aria-label pattern from
  * packages/web/src/components/forms/LineItemEditor.tsx). */
 async function fillRow(
@@ -89,6 +82,9 @@ async function draftTieredEstimateViaOwnerUi(
   job: JobRef,
   screenshotName: string,
 ): Promise<string> {
+  // Owner form at a desktop viewport: at 390×844 the fixed assistant bar +
+  // bottom nav overlay the scrolled-into-view submit button.
+  await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`/estimates/new?jobId=${job.jobId}`);
   await expect(page.getByLabel('description-0')).toBeVisible({ timeout: 20_000 });
 
@@ -103,14 +99,38 @@ async function draftTieredEstimateViaOwnerUi(
   await expect(page.getByTestId('line-items-total')).toHaveText(/1,095\.00|1095\.00/);
   await page.screenshot({ path: join(SCREENSHOT_DIR, screenshotName) });
 
+  // Wait for the REAL POST /api/estimates the form fires — at phone width
+  // the fixed "Ask Rivet AI anything…" bar + bottom nav sit over the
+  // submit button after scroll-into-view, so a bare click can land on the
+  // bar and never submit (observed: page still on the form, no POST in the
+  // api log). The owner-form legs run at a desktop viewport (set by the
+  // caller); this additionally asserts the request actually went out and
+  // was accepted, and that the SPA really left /estimates/new.
+  const created = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/estimates',
+    { timeout: 20_000 },
+  );
   await page.getByRole('button', { name: /^Create estimate$/ }).click();
-  await expect(page).toHaveURL(/\/estimates/, { timeout: 20_000 });
+  const createdRes = await created;
+  expect(createdRes.status(), `POST /api/estimates -> ${createdRes.status()} ${await createdRes.text()}`).toBe(201);
+  await expect(page).not.toHaveURL(/\/estimates\/new/, { timeout: 20_000 });
 
-  const listRes = await request.get(`${API_URL}/api/estimates?jobId=${job.jobId}`, {
-    headers: tenant.authHeaders,
-  });
-  expect(listRes.ok()).toBeTruthy();
-  const rows = (await listRes.json()) as Array<{ id: string }>;
+  // #1133 workaround — the form's POST /api/estimates commits on res.finish,
+  // AFTER the response is flushed and the SPA has already navigated to
+  // /estimates; a list GET fired the instant the URL changed can miss the
+  // row (observed: Received length 0). Poll the job's own list (≤2s) before
+  // asserting — a read retry, never a re-write.
+  let rows: Array<{ id: string }> = [];
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    const listRes = await request.get(`${API_URL}/api/estimates?jobId=${job.jobId}`, {
+      headers: tenant.authHeaders,
+    });
+    expect(listRes.ok()).toBeTruthy();
+    rows = (await listRes.json()) as Array<{ id: string }>;
+    if (rows.length > 0 || Date.now() > deadline) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
   expect(rows, 'the owner-drafted tiered estimate must persist').toHaveLength(1);
   return rows[0].id;
 }
@@ -131,6 +151,7 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
   test('owner drafts 3 tiers + an add-on through the real form; the public page headline equals the default tier before any click; the customer picks Premium+Warranty; all rows + the accepted selection survive; a neighbour tenant is untouched (T2)', async ({
     page,
     request,
+    baseURL,
   }) => {
     test.setTimeout(180_000);
     const pageErrors: string[] = [];
@@ -145,7 +166,7 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
     const jobB = await seedJob(request, tenantB, 'Sasha');
 
     // ── Owner (A) drafts through the real good-better-best UI ──────────────
-    await signInBrowser(page, tenantA);
+    await signInOwnerBrowser(page, baseURL!, tenantA);
     const estimateIdA = await draftTieredEstimateViaOwnerUi(
       page,
       request,
@@ -155,7 +176,7 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
     );
 
     // ── Owner (B) drafts an independent tiered estimate, T2 ─────────────────
-    await signInBrowser(page, tenantB);
+    await signInOwnerBrowser(page, baseURL!, tenantB);
     const estimateIdB = await draftTieredEstimateViaOwnerUi(
       page,
       request,
@@ -177,6 +198,7 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
          FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order`,
       [estimateIdA],
     );
+    logRows('7.4 estimate_line_items after owner-form draft (tenant A)', linesA);
     expect(linesA).toHaveLength(4);
     expect(linesA.map((l) => l.description)).toEqual([
       BASIC.description, PREMIUM.description, DELUXE.description, ADDON.description,
@@ -202,6 +224,8 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
     const sentB = (await sendB.json()) as { viewToken: string };
 
     // ── T2 on the public surface too: B's token never shows A's content ────
+    // Customer legs at the phone viewport the 7.6 spec uses.
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`/e/${sentB.viewToken}`);
     await expect(page.getByText('Bexar Plumbing 7.4-7.5', { exact: true })).toBeVisible();
     await expect(page.getByText('Acme HVAC 7.4-7.5', { exact: true })).toHaveCount(0);
@@ -241,6 +265,7 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
       totals: { totalCents: number };
       lineItems: Array<{ id: string; description: string }>;
     };
+    logRows('7.4/7.5 owner GET /api/estimates/:id after accept (status, totals, acceptedSelection, lineItems)', estimateRow);
     expect(estimateRow.status).toBe('accepted');
     expect(estimateRow.totals.totalCents).toBe(ACCEPTED_CENTS);
     expect(estimateRow.totals.totalCents).toBeLessThan(SUM_ALL_CENTS);
@@ -257,11 +282,13 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
       `SELECT description FROM estimate_line_items WHERE estimate_id = $1`,
       [estimateIdA],
     );
+    logRows('7.4 estimate_line_items after accept — all four rows survive', linesAfter);
     expect(linesAfter).toHaveLength(4);
 
     // ── Owner UI, post-acceptance: the detail page shows only the billed
     //    (accepted) rows and the SAME recomputed total (D-7 single source) ──
-    await signInBrowser(page, tenantA);
+    await signInOwnerBrowser(page, baseURL!, tenantA);
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`/estimates/${estimateIdA}`);
     await expect(page.getByText(`$${(ACCEPTED_CENTS / 100).toFixed(2)}`).first()).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText(BASIC.description)).toHaveCount(0);
@@ -273,6 +300,7 @@ test.describe('good/better/best tiers with add-ons (7.4) + headline-over-default
       headers: tenantB.authHeaders,
     });
     const bBody = (await bAfter.json()) as { status: string };
+    logRows('7.4/7.5 T2 tenant B estimate untouched', bBody);
     expect(bBody.status).toBe('sent');
 
     expect(pageErrors, 'no uncaught page errors during the tier-authoring journey').toEqual([]);

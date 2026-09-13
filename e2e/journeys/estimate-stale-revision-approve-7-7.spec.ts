@@ -10,6 +10,7 @@ import {
   seedJob,
   queryAsTenant,
   drawSignature,
+  logRows,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -130,6 +131,7 @@ test.describe('stale-version approve is refused; current version is accepted (7.
         headers: tenant.authHeaders,
       });
       const staleEstimate = (await staleRow.json()) as { status: string; acceptedAt?: string };
+      logRows(`7.7 ${label} after stale accept — GET /api/estimates/:id`, staleEstimate);
       expect(staleEstimate.status).toBe('sent');
       expect(staleEstimate.acceptedAt).toBeUndefined();
 
@@ -140,12 +142,14 @@ test.describe('stale-version approve is refused; current version is accepted (7.
         `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'estimate' AND entity_id = $2 AND event_type = 'estimate.revised'`,
         [tenant.tenantId, target.estimateId],
       );
+      logRows(`7.7 ${label} audit_events estimate.revised`, revisedAudit);
       expect(revisedAudit).toHaveLength(1);
       const phantomApproved = await queryAsTenant(
         tenant.tenantId,
         `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'estimate' AND entity_id = $2 AND event_type = 'public_estimate.approved'`,
         [tenant.tenantId, target.estimateId],
       );
+      logRows(`7.7 ${label} audit_events public_estimate.approved after the REFUSED accept`, phantomApproved);
       expect(phantomApproved, 'a refused stale accept must never leave an approved audit row').toHaveLength(0);
 
       // Reload — the customer now sees the current version and CAN accept.
@@ -158,6 +162,7 @@ test.describe('stale-version approve is refused; current version is accepted (7.
         headers: tenant.authHeaders,
       });
       const acceptedEstimate = (await acceptedRow.json()) as { status: string };
+      logRows(`7.7 ${label} after current-version accept — GET /api/estimates/:id`, acceptedEstimate);
       expect(acceptedEstimate.status).toBe('accepted');
 
       const approvedAudit = await queryAsTenant(
@@ -165,6 +170,7 @@ test.describe('stale-version approve is refused; current version is accepted (7.
         `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'estimate' AND entity_id = $2 AND event_type = 'public_estimate.approved'`,
         [tenant.tenantId, target.estimateId],
       );
+      logRows(`7.7 ${label} audit_events public_estimate.approved`, approvedAudit);
       expect(approvedAudit).toHaveLength(1);
 
       return { tenant, target };

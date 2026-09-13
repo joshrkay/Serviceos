@@ -9,6 +9,7 @@ import {
   bootstrapOwner,
   seedJob,
   queryAsTenant,
+  logRows,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -94,6 +95,7 @@ async function raceApprovals(
   expect(winner.ok(), `winner should be 200 -> got ${winner.status()}`).toBeTruthy();
   expect(loser.status(), 'loser must be a clean 409 conflict, never a 500').toBe(409);
   const loserBody = (await loser.json()) as { message?: string; error?: string };
+  logRows(`7.8 ${label} loser response (${loser.status()})`, loserBody);
   expect(loserBody.error).toBe('CONFLICT');
   expect(loserBody.message ?? '').toMatch(/already.*accepted/i);
 
@@ -138,6 +140,7 @@ test.describe('concurrent estimate-approval race, exactly one wins (7.8) — rea
       `SELECT id, status FROM estimates WHERE tenant_id = $1 AND job_id = $2`,
       [tenantA.tenantId, jobA.jobId],
     );
+    logRows('7.8 tenant A estimates on the raced job', onJobA);
     expect(onJobA.filter((e) => e.status === 'accepted')).toHaveLength(1);
     expect(onJobA.filter((e) => e.status === 'accepted')[0]!.id).toBe(winnerA);
 
@@ -146,6 +149,7 @@ test.describe('concurrent estimate-approval race, exactly one wins (7.8) — rea
       `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'estimate' AND entity_id = $2 AND event_type = 'public_estimate.approved'`,
       [tenantA.tenantId, winnerA],
     );
+    logRows('7.8 tenant A audit_events public_estimate.approved (winner)', approvedAuditA);
     expect(approvedAuditA, 'exactly one approved audit row on the winner').toHaveLength(1);
 
     // ── Durable read-back, tenant B: same shape, completely independent ────
@@ -154,6 +158,7 @@ test.describe('concurrent estimate-approval race, exactly one wins (7.8) — rea
       `SELECT id, status FROM estimates WHERE tenant_id = $1 AND job_id = $2`,
       [tenantB.tenantId, jobB.jobId],
     );
+    logRows('7.8 tenant B estimates on ITS raced job (T2)', onJobB);
     expect(onJobB.filter((e) => e.status === 'accepted')).toHaveLength(1);
     expect(onJobB.filter((e) => e.status === 'accepted')[0]!.id).toBe(winnerB);
 

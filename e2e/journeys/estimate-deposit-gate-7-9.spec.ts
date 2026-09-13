@@ -10,6 +10,7 @@ import {
   seedJob,
   queryAsTenant,
   stripeSignature,
+  logRows,
   drawSignature,
   type Tenant,
   type JobRef,
@@ -160,6 +161,7 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
       headers: { 'content-type': 'application/json' },
       data: JSON.stringify({ acceptedByName: 'Deposit Skipper' }),
     });
+    logRows(`7.9 tenant A approve-without-deposit response (${blockedApprove.status()})`, await blockedApprove.json());
     expect(blockedApprove.status()).toBe(409);
     const blockedBody = (await blockedApprove.json()) as { message?: string };
     expect(blockedBody.message ?? '').toMatch(/deposit must be paid/i);
@@ -191,6 +193,7 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
       `SELECT deposit_required_cents, deposit_paid_cents, deposit_status FROM jobs WHERE id = $1`,
       [jobB.jobId],
     );
+    logRows('7.9 tenant B jobs row after after_approval accept', jobBRow1);
     expect(Number(jobBRow1[0]!.deposit_required_cents)).toBe(5_000);
     expect(jobBRow1[0]!.deposit_status).toBe('pending');
 
@@ -225,6 +228,7 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
       `SELECT deposit_required_cents, deposit_paid_cents, deposit_status FROM jobs WHERE id = $1`,
       [jobB.jobId],
     );
+    logRows('7.9 tenant B jobs row after signed checkout.session.completed', jobBRow2);
     expect(Number(jobBRow2[0]!.deposit_paid_cents)).toBe(5_000);
     expect(jobBRow2[0]!.deposit_status).toBe('paid');
 
@@ -239,6 +243,7 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
       `SELECT deposit_paid_cents FROM jobs WHERE id = $1`,
       [jobA.jobId],
     );
+    logRows('7.9 tenant A jobs row untouched by B settlement', jobARow);
     expect(Number(jobARow[0]?.deposit_paid_cents ?? 0)).toBe(0);
 
     expect(pageErrors, 'no uncaught page errors during the deposit-gate journey').toEqual([]);

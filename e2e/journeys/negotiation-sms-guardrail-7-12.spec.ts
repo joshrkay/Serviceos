@@ -4,7 +4,6 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Pool } from 'pg';
 import twilio from 'twilio';
-import { installClerkStub } from '../helpers/clerk-stub';
 import { hasViteClerkKey } from '../helpers/clerk-key';
 import { encrypt } from '../../packages/api/src/integrations/crypto';
 import {
@@ -13,6 +12,8 @@ import {
   seedJob,
   createAndSendSimpleEstimate,
   queryAsTenant,
+  logRows,
+  signInOwnerBrowser,
   type Tenant,
   type JobRef,
 } from '../fixtures/estimate-quote-lane';
@@ -188,6 +189,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
   test('a discount-asking SMS always produces a capture-class owner callback + audit row, never a price to the customer, under two divergent tenant configs (T1·T3)', async ({
     page,
     request,
+    baseURL,
   }) => {
     test.setTimeout(150_000);
     const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -207,7 +209,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       const integrationB = await provisionTwilioIntegration(pool, tenantB.tenantId, encKey);
       const seedB = await seedCustomerJobEstimate(request, tenantB, CUSTOMER_PHONE_B);
 
-      await installClerkStub(page, { signedIn: true, sub: tenantB.sub, token: tenantB.jwt });
+      await signInOwnerBrowser(page, baseURL!, tenantB);
       await page.goto('/settings');
       await page.getByText('Discount policy', { exact: true }).click();
       const maxInput = page.getByLabel('Maximum discount the AI may propose');
@@ -257,6 +259,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
         );
         if (proposalsA.length === 0) await new Promise((r) => setTimeout(r, 150));
       }
+      logRows('7.12 tenant A proposals (callback)', proposalsA);
       expect(proposalsA, '#1133-style poll for the async-dispatched callback proposal').toHaveLength(1);
       expect(proposalsA[0]!.status).toBe('draft');
       expect((proposalsA[0]!.source_context as { source?: string } | null)?.source).toBe('sms');
@@ -267,6 +270,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
         `SELECT metadata FROM audit_events WHERE tenant_id = $1 AND event_type = 'negotiation_guardrail.sms_routed'`,
         [tenantA.tenantId],
       );
+      logRows('7.12 tenant A audit_events negotiation_guardrail.sms_routed', auditA);
       expect(auditA.length).toBeGreaterThanOrEqual(1);
 
       // No concession: the ORIGINAL estimate total is byte-identical.
@@ -288,6 +292,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
         );
         if (proposalsB.length === 0) await new Promise((r) => setTimeout(r, 150));
       }
+      logRows('7.12 tenant B proposals (callback)', proposalsB);
       expect(proposalsB).toHaveLength(1);
       expect(proposalsB[0]!.status).toBe('draft');
 
@@ -299,6 +304,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
       // T3 — tenant B's config difference produces an ADDITIONAL audit row
       // (the discount-decision metadata call) that tenant A's unconfigured
       // path never takes.
+      logRows('7.12 tenant B audit_events negotiation_guardrail.sms_routed (T3: carries decisionKind)', auditB);
       expect(auditB.length).toBeGreaterThan(auditA.length);
       // …and that extra row carries the REAL evaluated decision
       // (`discountAuditMetadata`, discount-proposal-content.ts) against the
@@ -343,7 +349,7 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
 
       // ── Real owner browser: tenant A opens the Inbox and SEES the
       //    callback proposal it must now decide on. ───────────────────────
-      await installClerkStub(page, { signedIn: true, sub: tenantA.sub, token: tenantA.jwt });
+      await signInOwnerBrowser(page, baseURL!, tenantA);
       await page.goto('/inbox');
       await expect(page.getByText(/AI didn't negotiate; call back/i).first()).toBeVisible({
         timeout: 20_000,

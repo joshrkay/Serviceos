@@ -102,6 +102,7 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
   test('a dictated draft_estimate persists a real estimate + audit event through the owner Assistant chat; a mixed-pricing draft shows per-line badges and the DB CHECK refuses a bogus pricing_source; a neighbour tenant never sees any of it (T2)', async ({
     page,
     request,
+    baseURL,
   }) => {
     test.setTimeout(180_000);
     const pageErrors: string[] = [];
@@ -109,6 +110,8 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
 
     // ── Tenant A: the tenant under test ──────────────────────────────────
     const tenantA = await bootstrapOwner(request, 'a', 'Copper Line HVAC 7.1');
+    // The owner's REAL browser session — signed in as this exact owner.
+    await signInBrowser(page, baseURL!, tenantA);
     // "Sarah Customer" — seedJob's default lastName is 'Customer', matching
     // the hermetic mock's extractName() picking up "for Sarah Customer:"
     // from the dictated message (ai/providers/mock.ts extractName()).
@@ -265,7 +268,10 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
   });
 
   // ── 7.1 — product gap, pinned rather than faked ─────────────────────────
-  test('the "customer photo" leg has NO owner-facing transmission path — pinned, not faked', async () => {
+  test('the "customer photo" leg has NO owner-facing transmission path — pinned, not faked', async ({
+    request,
+  }) => {
+    test.setTimeout(60_000);
     // AssistantPage.tsx's `send()` accepts `opts.attachments` and renders
     // them in the LOCAL chat-bubble state (AssistantPage.tsx:919
     // `attachments: opts?.attachments`), but `sendToConversationAPI`
@@ -287,5 +293,26 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
         'input mode captures an attachment in local UI state but never transmits it to ' +
         'POST /api/assistant/chat — no owner-facing draft-from-photo path exists to reach.',
     );
+
+    const tenant = await bootstrapOwner(request, 'pin', 'Copper Line HVAC 7.1 Pin');
+    await seedJob(request, tenant, 'Photo');
+
+    // The REAL wire request a photo turn produces — byte-for-byte what
+    // `sendToConversationAPI` sends when `send(input || "Here's the photo — can
+    // you identify the issue?", { attachments })` fires (AssistantPage.tsx:1052):
+    // the attachment is absent from the body by construction.
+    const res = await request.post(`${API_URL}/api/assistant/chat`, {
+      headers: { 'content-type': 'application/json', ...tenant.authHeaders },
+      data: JSON.stringify({
+        messages: [{ role: 'user', content: "Here's the photo — can you identify the issue?" }],
+      }),
+    });
+    expect(res.ok(), `assistant/chat -> ${res.status()} ${await res.text()}`).toBeTruthy();
+    const body = (await res.json()) as { message?: { proposal?: unknown } };
+
+    // What the row needs — a drafted proposal from the photo — is what the
+    // real route cannot produce from the real client's request. This is the
+    // observation that is expected to keep failing until the gap is closed.
+    expect(body.message?.proposal, 'a customer photo should yield a drafted proposal').toBeTruthy();
   });
 });
