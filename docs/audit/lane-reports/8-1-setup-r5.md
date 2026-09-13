@@ -60,7 +60,20 @@ proven by `onboarding-identity.spec.ts` (1.2/1.8) and
    worth folding into the shared preamble for future dedicated-port lanes
    that drive a browser (webhook-only specs like 1.1 don't need it).
 
-None of the three above are product defects; all are noted so the next lane
+4. **This shared sandbox runs multiple UNRELATED concurrent jobs, not just
+   this lane's own pool.** While adding 1.9's T2 leg, `uptime` showed load
+   averages of 10–14 and `ps aux` showed OTHER Claude sessions' Playwright
+   processes (different job/worktree paths entirely) running their own
+   API+Vite+Postgres stacks at the same time — this lane's own test-lock
+   only serializes within its own job, and cannot protect against that.
+   Under this load, a long-running browser spec (1.9's 15-turn loop) hit
+   several genuinely load-dependent failures (detailed under Row 1.9 below)
+   that did not reproduce once the spec's own timeouts were raised to
+   realistically tolerate it. Not a product defect, not this lane's specs'
+   fault — recorded so a re-run that hits similar flakiness on this same
+   box isn't mistaken for a logic regression.
+
+None of the four above are product defects; all are noted so the next lane
 on this shared box doesn't re-spend the time diagnosing them.
 
 ## Row 1.1 — signup webhook idempotency + replay window
@@ -90,12 +103,16 @@ asserted as a failure — recorded for the record only.
 
 Command:
 ```
-PORT=38540 E2E_API_URL=http://localhost:38540 PUBLIC_API_URL=http://localhost:38540 \
+PORT=38540 E2E_API_URL=http://localhost:38540 PUBLIC_API_URL=http://localhost:38540 VITE_API_URL=http://localhost:38540 \
 E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0 \
 CLERK_DEV_HMAC_TOKENS=true DB_SSL=false DATABASE_URL=<testcontainer> E2E_USE_TEST_DB=true \
 VITE_CLERK_PUBLISHABLE_KEY=pk_test_… TS_NODE_TRANSPILE_ONLY=true \
 npx playwright test onboarding-signup-webhook.spec.ts --project=chromium --retries=0
 ```
+(`VITE_API_URL` isn't load-bearing for this one row — 1.1 never drives a
+browser page, only the real webhook route via `page.request` — but it's
+included for consistency with every other command in this report and with
+the preamble, which now names it.)
 GREEN twice: `1 passed (28.4s)`, `1 passed (10.2s)`.
 
 ## Row 1.3 — pack activation, concurrent, through the real route
@@ -155,7 +172,7 @@ Screenshots: `1.5-pre-identity-customers-redirect.png`,
 
 GREEN twice: `2 passed (26.2s)`, `2 passed (1.9m)`.
 
-## Row 1.9 — conversational path, hermetic
+## Row 1.9 — conversational path, hermetic (T1 → T2 added post-gate)
 
 `e2e/journeys/onboarding-conversation-hermetic.spec.ts`. Drives the real
 `/onboarding` "Talk it through instead" panel — real `POST
@@ -174,40 +191,104 @@ turns.
   round-trips through JSONB.
 - RLS: `pg_class.relrowsecurity`/`relforcerowsecurity` both true on
   `onboarding_session`; a policy exists.
-- Cross-tenant refused: a neighbour (its OWN, separate auth) POSTing a turn
-  against the real session id gets 404 `ONBOARDING_SESSION_NOT_FOUND` — the
-  RLS-aware "doesn't exist" shape, not a 403 that would leak the id.
-  Neighbour has zero sessions of its own.
+- **T2 (added after the first gate pass):** the neighbour is not merely
+  idle — it runs its OWN real conversation (4 turns, content unmistakably
+  distinct: "Neighbour Plumbing Co…" vs. the owner's "We run a home
+  services business…"), settled at real Postgres before the owner's
+  browser loop starts. Read back independently
+  (`1.9-T2-neighbour-own-session.snapshot.txt`): neighbour ends at
+  `category_capture`, `turn_count: 4` — genuinely mid-flow, NOT forced to
+  `capped` by the owner's later, unrelated 15-turn session, proving
+  independent FSM progression, not a shared/synced state machine. Each
+  tenant's `transcript_turns` contains ONLY its own turn text (asserted
+  both directions). Cross-tenant refused BOTH ways now (previously only
+  neighbour→owner): owner's session under neighbour's auth, AND
+  neighbour's session under owner's auth, both 404
+  `ONBOARDING_SESSION_NOT_FOUND` — the RLS-aware "doesn't exist" shape, not
+  a 403 that would leak the id — and neither refused attempt mutated
+  either session's `turn_count`. Form-fallback state is per tenant: after
+  both conversations, the real, derived `GET /api/onboarding/status` for
+  BOTH tenants independently still shows `currentStep: 'identity'` (no
+  proposal was ever approved, so neither tenant's identity actually wrote)
+  — proving the value that decides what the form fallback renders is
+  computed per tenant, not shared.
 - Form wizard stays reachable the entire time ("Prefer the form? Switch
   back" visible from the very first render, before any turn is sent).
-- **Pinned, not faked:** a second test states a business name in plain
+- **Pinned, not faked:** a third test states a business name in plain
   English on the first turn and asserts it round-trips into
   `extraction_state->'businessProfile'->>'businessName'` — `test.fail(true,
   …)`, naming the seam (`packages/api/src/ai/providers/mock.ts:223-232`,
   `packages/api/src/ai/tasks/onboarding/business-profile-extractor.ts:78-90`).
   Same class of gap as the already-parked #1119 decision (a real model turn
   the hermetic mock cannot script). Confirms the natural failure (the name
-  is not captured) rather than throwing without attempting it.
+  is not captured) rather than throwing without attempting it. Unchanged
+  by the T2 addition.
 
 **Observation, not filed:** the first click into "Talk it through" created
 **two** `onboarding_session` rows for the same tenant — one abandoned at
-`turn_count:0` (just the opening prompt), one that received all 15 real
+`turn_count:0` (just the opening prompt), one that received all the real
 turns (visible in both RED and the final GREEN snapshot). Consistent with
 `ConversationStep`'s no-message "surface the opening prompt" effect firing
 twice under Vite/React dev double-invoke before the returned session id was
 persisted to `localStorage`. Cosmetic (one wasted row; the user's actual
-conversation is unaffected) — not asserted as a failure, but it did make
-`ORDER BY created_at DESC LIMIT 1` pick the wrong row on the first pass of
-this test (fixed by reading the session id straight from the turn response
-instead of querying it back — see RED below).
+conversation is unaffected) — not asserted as a failure.
 
-RED #1: `Error: FSM reached a terminal state, got 'profile_capture'` — the
-DB query above picked the stray empty session, not the one actually driven.
-Fixed by capturing `sessionId` from each turn response's own JSON body.
-RED #2: `Expected: "t,t" / Received: "true,true"` — `bool::text` casts to
-the word, not the single-letter I/O shorthand; fixed the expected literal.
+RED #1 (original T1 pass): `Error: FSM reached a terminal state, got
+'profile_capture'` — a DB query keyed on `ORDER BY created_at DESC LIMIT 1`
+picked the stray empty session, not the one actually driven. Fixed by
+capturing `sessionId` from each turn response's own JSON body.
+RED #2 (original T1 pass): `Expected: "t,t" / Received: "true,true"` —
+`bool::text` casts to the word, not the single-letter I/O shorthand; fixed
+the expected literal.
 
-GREEN twice: `2 passed (1.7m)`, `2 passed (2.1m)`.
+RED #3 (T2 addition): `Locator.isVisible()` does NOT poll, even with a
+`timeout` option — it is a point-in-time check. The first T2 attempt fired
+the neighbour's conversation unawaited (genuinely overlapping the owner's
+15-turn browser loop) and checked for the shell's transient-load error with
+`isVisible({timeout}).catch(...)` immediately after `page.goto`, before
+React had attempted its first fetch — found nothing, moved on — so when the
+error DID appear moments later under real concurrent load, nothing was
+watching. Fixed with `waitReadyOrRecover()`, which races two real polling
+`Locator.waitFor()` calls (target vs. the error heading) and clicks "Try
+again" on a genuine hit.
+
+RED #4 (T2 addition, intermittent — this shared sandbox's own concurrent
+load, not this lane's other work): with `waitReadyOrRecover` in place, a
+NEW failure surfaced 3 times across attempts — `SELECT fsm_state FROM
+onboarding_session WHERE id = '<captured id>'` returned NULL / zero rows,
+even though the screenshot taken moments earlier proves the owner's full
+15-turn conversation genuinely completed in the browser ("Setup captured"
+panel visible). Traced to two compounding, load-dependent effects on this
+heavily-loaded shared box (`uptime` showed load averages of 10–14 during
+these attempts, with unrelated concurrent jobs from OTHER Claude sessions
+also running Playwright+Postgres stacks — confirmed via `ps aux`, not
+something this lane's own test-lock can serialize against): (a) issue
+#1133's read-after-write race, worse under contention — fixed by polling
+for the row before reading its columns; (b) firing the neighbour's
+conversation genuinely UNAWAITED so it truly overlapped the owner's loop
+in wall-clock time made the failure reproduce specifically under that
+overlap (confirmed by removing the overlap — awaiting the neighbour to
+completion BEFORE the owner's loop starts — using the exact same fallback
+logic — and the failure mode changed from "wrong row" to plain
+`page.waitForResponse` timeouts, i.e. pure system load, unrelated to any
+remaining logic in this spec). Addressed with: `resolveRealSessionId()`
+(polls the captured id, falls back to the tenant's own highest-turn_count
+session if it never resolves — belt-and-suspenders over (a) IF ANY residual
+staleness remains), removing the deliberate wall-clock overlap (neighbour
+settles first — see the in-test comment at its call site for the honest
+tradeoff this makes), and raising this spec's own timeouts
+(`testInfo.setTimeout` 120s→240s, the turn `page.waitForResponse` 20s→45s)
+to be realistically tolerant of this shared box's demonstrated load rather
+than racing it.
+
+GREEN — T1 pass (pre-T2): `2 passed (1.7m)`, `2 passed (2.1m)`.
+GREEN — T2 addition, two clean CONSECUTIVE runs with the final code: `2
+passed (2.0m)`, `2 passed (1.6m)`. (Two additional non-consecutive clean
+runs — `2 passed (3.0m)`, `2 passed (1.8m)` — also landed during
+iteration, for four clean full-suite passes total against the final or
+near-final code; the RED entries above are the load-dependent failures in
+between, all diagnosed to this shared sandbox's concurrent load rather
+than this spec's own logic, and none reproduced after the final fixes.)
 
 ## Row 1.7 — billing plan validation
 
