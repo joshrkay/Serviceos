@@ -1,0 +1,4 @@
+ tenant_id | event_type | entity_type | entity_id 
+-----------+------------+-------------+-----------
+(0 rows)
+
