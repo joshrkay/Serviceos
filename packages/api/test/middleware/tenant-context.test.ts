@@ -51,7 +51,11 @@ function makeMockPool(opts: { maxClients?: number } = {}) {
   let releaseCount = 0;
 
   const makeClient = (id: number): PoolClient => {
-    const c: any = {
+    // A real PoolClient is an EventEmitter, and the middleware listens for
+    // 'error' on it (#1090 — a backend Postgres kills mid-request is delivered
+    // as an event, never as a rejected query). Mock it as one so this harness
+    // keeps matching the contract it stands in for.
+    const c: any = Object.assign(new EventEmitter(), {
       _id: id,
       _gucTenant: undefined,
       _released: false,
@@ -99,7 +103,7 @@ function makeMockPool(opts: { maxClients?: number } = {}) {
         c._released = true;
         releaseCount += 1;
       }) as unknown as PoolClient['release'],
-    };
+    });
     return c as PoolClient;
   };
 
@@ -637,6 +641,57 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     const sqls = calls.map((c) => c.sql);
     expect(sqls).toContain('COMMIT');
     expect(sqls).not.toContain('ROLLBACK');
+  });
+
+  it('#1090 — a client that errors mid-request skips COMMIT, skips after-commit hooks, and drops its listener', async () => {
+    const { pool, calls, clients, getReleaseCount } = makeMockPool();
+
+    const res = new EventEmitter() as unknown as express.Response & EventEmitter;
+    (res as any).statusCode = 200;
+    (res as any).locals = {};
+    (res as any).headersSent = false;
+    (res as any).writableEnded = false;
+    (res as any).status = vi.fn(() => res);
+    (res as any).json = vi.fn(() => res);
+
+    const req = {
+      auth: { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' },
+    } as unknown as AuthenticatedRequest;
+
+    const next = vi.fn();
+    await withTenantTransaction(pool)(req, res as unknown as express.Response, next);
+
+    // What runAfterCommit() parks on res.locals from inside the request scope.
+    let hookRan = false;
+    (res as any).locals.afterCommitHooks = [
+      () => {
+        hookRan = true;
+      },
+    ];
+
+    const client = clients[0] as unknown as EventEmitter;
+    // Exactly what Postgres killing this backend looks like to `pg`: an
+    // 'error' event on a checked-out client, with no query in flight.
+    client.emit('error', new Error('terminating connection due to idle-in-transaction timeout'));
+
+    // The handler never answered, so the middleware must answer for it rather
+    // than let a 2xx go out over writes the server already rolled back.
+    expect((res as any).status).toHaveBeenCalledWith(500);
+
+    (res as unknown as EventEmitter).emit('finish');
+    await new Promise((r) => setImmediate(r));
+
+    const sqls = calls.map((c) => c.sql);
+    // COMMIT and ROLLBACK can only fail on a dead connection; the server
+    // already rolled back. Neither is attempted, and the client is released.
+    expect(sqls).not.toContain('COMMIT');
+    expect(sqls.filter((s) => s === 'ROLLBACK')).toHaveLength(0);
+    expect(getReleaseCount()).toBe(1);
+    // After-commit hooks must not fire for a transaction that never committed.
+    expect(hookRan).toBe(false);
+    // The listener must come off the POOLED client — otherwise every request
+    // through this connection adds one and they accumulate for its lifetime.
+    expect(client.listenerCount('error')).toBe(0);
   });
 
   it('forceCommit escape hatch — commits despite a >=400 status', async () => {
