@@ -26,9 +26,12 @@
  * Both tests force the interleaving through REAL lock contention: a second
  * session holds an uncommitted write to the tenant's settings row, the code
  * under test blocks on it in Postgres, and only then does the blocker commit.
- * Nothing here depends on a sleep landing in the right place — `waitUntilBlocked`
- * polls until Postgres reports the waiter, and every assertion is on the
- * committed end state.
+ * Nothing here depends on a sleep landing in the right place —
+ * `waitUntilBlockedBy` polls until Postgres reports a waiter blocked by THIS
+ * test's blocker pid (xhawk-ai review on #1121: an unscoped probe would accept
+ * any blocked backend in the shared test database and could release the
+ * blocker before the code under test even reached its write), and every
+ * assertion is on the committed end state.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { Pool, PoolClient } from 'pg';
@@ -85,19 +88,26 @@ describe('Postgres integration — the tenant_settings write in activatePackWith
    * returns as soon as the state holds and throws instead of proceeding on a
    * state that never arrived.
    */
-  async function waitUntilBlocked(): Promise<void> {
+  async function waitUntilBlockedBy(blockerPid: number): Promise<void> {
     for (let attempt = 0; attempt < 400; attempt++) {
       const res = await pool.query<{ n: number }>(
         `SELECT COUNT(*)::int AS n
            FROM pg_stat_activity
           WHERE datname = current_database()
             AND state = 'active'
-            AND cardinality(pg_blocking_pids(pid)) > 0`,
+            AND $1 = ANY(pg_blocking_pids(pid))`,
+        [blockerPid],
       );
       if (res.rows[0].n > 0) return;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     throw new Error('timed out waiting for the settings write to block on the other session');
+  }
+
+  /** The blocker's own backend pid, so the wait above can key on it. */
+  async function backendPid(client: PoolClient): Promise<number> {
+    const res = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    return res.rows[0].pid;
   }
 
   it('P1 — inside the request-scoped transaction, another writer creating tenant_settings does not poison the caller', async () => {
@@ -112,6 +122,7 @@ describe('Postgres integration — the tenant_settings write in activatePackWith
        VALUES (gen_random_uuid(), $1, 'Sibling Co', 'EST-', 'INV-', 1001, 1001, 30)`,
       [tenant.tenantId],
     );
+    const blockerPid = await backendPid(blocker);
 
     // Stand up exactly what the HTTP route gives activatePackWithSeed: one
     // BEGIN'd, tenant-scoped client, published on the AsyncLocalStorage the
@@ -146,7 +157,7 @@ describe('Postgres integration — the tenant_settings write in activatePackWith
       // Once it is queued behind the blocker's uncommitted row, let the
       // blocker win. The settings write then completes against a row that
       // appeared after this request started.
-      await waitUntilBlocked();
+      await waitUntilBlockedBy(blockerPid);
       await blocker.query('COMMIT');
       blocker.release();
       blockerDone = true;
@@ -216,13 +227,14 @@ describe('Postgres integration — the tenant_settings write in activatePackWith
        VALUES (gen_random_uuid(), $1, 'plumbing', 'active')`,
       [tenant.tenantId],
     );
+    const blockerPid = await backendPid(blocker);
 
     const activation = activatePackWithSeed(
       { tenantId: tenant.tenantId, packId: 'hvac', actorId: tenant.userId, lockPool: pool },
       deps,
     );
 
-    await waitUntilBlocked();
+    await waitUntilBlockedBy(blockerPid);
     await blocker.query('COMMIT');
     blocker.release();
 

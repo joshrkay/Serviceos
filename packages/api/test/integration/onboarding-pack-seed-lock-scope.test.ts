@@ -86,19 +86,26 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
    * under test has reached its settings write and is queued behind the
    * blocker's uncommitted row. A condition wait, not a guessed delay.
    */
-  async function waitUntilBlocked(): Promise<void> {
+  async function waitUntilBlockedBy(blockerPid: number): Promise<void> {
     for (let attempt = 0; attempt < 400; attempt++) {
       const res = await pool.query<{ n: number }>(
         `SELECT COUNT(*)::int AS n
            FROM pg_stat_activity
           WHERE datname = current_database()
             AND state = 'active'
-            AND cardinality(pg_blocking_pids(pid)) > 0`,
+            AND $1 = ANY(pg_blocking_pids(pid))`,
+        [blockerPid],
       );
       if (res.rows[0].n > 0) return;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     throw new Error('timed out waiting for the settings write to block on the other session');
+  }
+
+  /** The blocker's own backend pid, so the wait above can key on it. */
+  async function backendPid(client: PoolClient): Promise<number> {
+    const res = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    return res.rows[0].pid;
   }
 
   function buildDeps() {
@@ -242,6 +249,7 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
        VALUES (gen_random_uuid(), $1, 'Sibling Co', 'EST-', 'INV-', 1001, 1001, 30)`,
       [tenant.tenantId],
     );
+    const blockerPid = await backendPid(blocker);
 
     const handler = new OnboardingServiceCategoryExecutionHandler(
       settingsRepo,
@@ -257,7 +265,7 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
     });
 
     // Let the sibling win once the winner is queued behind it.
-    await waitUntilBlocked();
+    await waitUntilBlockedBy(blockerPid);
     await blocker.query('COMMIT');
     blocker.release();
 
