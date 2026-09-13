@@ -92,7 +92,7 @@ describe('buildVerticalPromptResolver', () => {
 
   it('returns undefined when the tenant has only deactivated packs', async () => {
     const activation = await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
-    await packActivationRepo.update(activation.id, { status: 'deactivated' });
+    await packActivationRepo.update(TENANT, activation.id, { status: 'deactivated' });
     const resolve = buildVerticalPromptResolver({ packActivationRepo, canonicalPackRegistry });
     expect(await resolve(TENANT)).toBeUndefined();
   });
@@ -300,9 +300,9 @@ describe('buildVerticalPromptResolver', () => {
     // return the older one; explicit sort by activatedAt should return
     // the newer (PACK_ID).
     const older = await activatePack({ tenantId: TENANT, packId: PACK_OLDER }, packActivationRepo);
-    await packActivationRepo.update(older.id, { activatedAt: new Date('2026-01-01T00:00:00Z') });
+    await packActivationRepo.update(TENANT, older.id, { activatedAt: new Date('2026-01-01T00:00:00Z') });
     const newer = await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
-    await packActivationRepo.update(newer.id, { activatedAt: new Date('2026-04-01T00:00:00Z') });
+    await packActivationRepo.update(TENANT, newer.id, { activatedAt: new Date('2026-04-01T00:00:00Z') });
 
     const resolve = buildVerticalPromptResolver({ packActivationRepo, canonicalPackRegistry });
     const section = await resolve(TENANT);
