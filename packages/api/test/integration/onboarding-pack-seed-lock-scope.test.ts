@@ -81,6 +81,26 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
     return client;
   }
 
+  /**
+   * Block until Postgres reports a backend waiting on a lock — i.e. the code
+   * under test has reached its settings write and is queued behind the
+   * blocker's uncommitted row. A condition wait, not a guessed delay.
+   */
+  async function waitUntilBlocked(): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const res = await pool.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND state = 'active'
+            AND cardinality(pg_blocking_pids(pid)) > 0`,
+      );
+      if (res.rows[0].n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error('timed out waiting for the settings write to block on the other session');
+  }
+
   function buildDeps() {
     const settingsRepo = new PgSettingsRepository(pool);
     const packActivationRepo = new PgPackActivationRepository(pool);
@@ -153,25 +173,15 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
     const { settingsRepo, packActivationRepo, auditRepo, packSeedDeps } = buildDeps();
     holder = await holdPackLock(tenant.tenantId, 'hvac');
 
-    // Reproduce CI's interleaving deterministically: the winner's
-    // tenant_settings INSERT commits between the loser's "does a settings row
-    // exist?" read and its own INSERT. That is exactly the window the CI
-    // failure hit — with the settings write behind the lock, this hook can
-    // never fire, because the loser returns at the guard before reading.
-    let interleaved = false;
-    const realFindByTenant = settingsRepo.findByTenant.bind(settingsRepo);
-    settingsRepo.findByTenant = async (tenantId: string) => {
-      const found = await realFindByTenant(tenantId);
-      if (!interleaved) {
-        interleaved = true;
-        await holder!.query(
-          `INSERT INTO tenant_settings (id, tenant_id, business_name, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
-           VALUES (gen_random_uuid(), $1, 'Winner Co', 'EST-', 'INV-', 1001, 1001, 30)`,
-          [tenantId],
-        );
-      }
-      return found;
-    };
+    // Another writer has already created the settings row — the state the
+    // CI failure reached when the sibling's INSERT landed first. The loser
+    // must report the guard's outcome and touch nothing, rather than walking
+    // into that row with a write of its own.
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
+       VALUES (gen_random_uuid(), $1, 'Winner Co', 'EST-', 'INV-', 1001, 1001, 30)`,
+      [tenant.tenantId],
+    );
 
     const handler = new OnboardingServiceCategoryExecutionHandler(
       settingsRepo,
@@ -189,9 +199,21 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
     expect(result.success).toBe(false);
     expect(result.error).not.toMatch(/duplicate key value/);
     expect(result.error).toMatch(/PACK_ACTIVATION_IN_PROGRESS/);
-    // The guard fired before the settings read — the loser never got far
-    // enough to race anyone.
-    expect(interleaved).toBe(false);
+
+    // The guard fired before any settings work: the existing row is exactly
+    // as the other writer left it, with no pack added to the mirror.
+    const settingsRows = await pool.query(
+      `SELECT business_name, terminology_preferences FROM tenant_settings WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(settingsRows.rows).toHaveLength(1);
+    expect(settingsRows.rows[0].business_name).toBe('Winner Co');
+    expect(settingsRows.rows[0].terminology_preferences?._activeVerticalPacks).toBeUndefined();
+    const packRows = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pack_activations WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(packRows.rows[0].n).toBe(0);
   });
 
   it('the WINNER of the pack lock survives the sibling handler creating the tenant_settings row under it, and merges rather than clobbers', async () => {
@@ -209,23 +231,17 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
     const { settingsRepo, packActivationRepo, auditRepo, packSeedDeps } = buildDeps();
     // Nobody holds the pack lock here: this handler wins it.
 
-    let interleaved = false;
-    const realFindByTenant = settingsRepo.findByTenant.bind(settingsRepo);
-    settingsRepo.findByTenant = async (tenantId: string) => {
-      const found = await realFindByTenant(tenantId);
-      if (!interleaved) {
-        interleaved = true;
-        // The sibling's REAL first write — the same call
-        // OnboardingTenantSettingsExecutionHandler makes before taking the
-        // lock — lands in the window.
-        await new PgSettingsRepository(pool).upsertIdentityFields(tenantId, {
-          businessName: 'Sibling Co',
-          timezone: 'America/Phoenix',
-          jobBufferMinutes: 30,
-        });
-      }
-      return found;
-    };
+    // The sibling's first write, held open on its own session so the winner
+    // collides with it in Postgres rather than reading past it. Real lock
+    // contention, so this stays honest whichever way the settings write is
+    // implemented.
+    const blocker = await pool.connect();
+    await blocker.query('BEGIN');
+    await blocker.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
+       VALUES (gen_random_uuid(), $1, 'Sibling Co', 'EST-', 'INV-', 1001, 1001, 30)`,
+      [tenant.tenantId],
+    );
 
     const handler = new OnboardingServiceCategoryExecutionHandler(
       settingsRepo,
@@ -234,13 +250,19 @@ describe('Postgres integration — the pack-seed guard holds across the tenant_s
       packSeedDeps,
       pool,
     );
-    const result = await handler.execute(serviceCategoryProposal(tenant.tenantId), {
+    const execution = handler.execute(serviceCategoryProposal(tenant.tenantId), {
       tenantId: tenant.tenantId,
       executedBy: tenant.userId,
       executedByRole: 'owner',
     });
 
-    expect(interleaved).toBe(true); // the race window really was exercised
+    // Let the sibling win once the winner is queued behind it.
+    await waitUntilBlocked();
+    await blocker.query('COMMIT');
+    blocker.release();
+
+    const result = await execution;
+
     // Asserted before `success` so a regression prints the raw Postgres
     // message (the 23505) rather than a bare `false`.
     expect(result.error).toBeUndefined();

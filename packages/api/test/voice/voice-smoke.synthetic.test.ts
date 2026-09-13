@@ -195,6 +195,7 @@ describe('voice smoke (synthetic) — §11 H2 Layer A', () => {
       update: async () => settingsRow,
       incrementEstimateNumber: async () => 1,
       incrementInvoiceNumber: async () => 1,
+      ensureActiveVerticalPack: async () => settingsRow,
     };
 
     const driver = new TextModeDriver({
