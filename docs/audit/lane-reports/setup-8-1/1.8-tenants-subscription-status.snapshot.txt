@@ -1,5 +1,5 @@
                   id                  | subscription_status |              stripe_customer_id              
 --------------------------------------+---------------------+----------------------------------------------
- deef727f-b071-4eeb-8b3a-93aa8f290e09 | trialing            | cus_e2e_8cf01204-429a-4287-a0ee-2249ade69ca1
+ feaa455a-2765-4652-9870-8956dd094ba5 | trialing            | cus_e2e_f46778c3-58c3-4826-b178-8a071bdf6c95
 (1 row)
 
