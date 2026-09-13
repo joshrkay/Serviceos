@@ -1,5 +1,5 @@
               tenant_id               |     event_type     |   entity_type   |              entity_id               
 --------------------------------------+--------------------+-----------------+--------------------------------------
- 6586e42c-b39a-4c84-9198-e5e7ce3fa38f | tenant.ai_verified | tenant_settings | 6586e42c-b39a-4c84-9198-e5e7ce3fa38f
+ deef727f-b071-4eeb-8b3a-93aa8f290e09 | tenant.ai_verified | tenant_settings | deef727f-b071-4eeb-8b3a-93aa8f290e09
 (1 row)
 
