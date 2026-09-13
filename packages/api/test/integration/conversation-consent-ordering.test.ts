@@ -26,14 +26,15 @@
  *     satisfies tenant A's gate for a call from that same number (RLS +
  *     app-level tenant scoping on `consent_events`).
  *
- * Audit leg: production has no `audit_events` row for the *grant* of implicit
- * recording consent — only the caller-initiated revocation
- * (`recording_consent.revoked`, twilio-adapter.ts:1849) is audited. The
- * consent_events row IS the append-only audit trail for the grant
- * (consent-events.ts's own docstring: "Rows are never updated or deleted —
- * the ledger IS the audit trail"). Adding an audit_events emission on the
- * grant path would be a product-code change, out of scope for this
- * test-only lane (see PR body, "not done / judgment calls").
+ * Audit leg (row 2.2, closed here): the *grant* of implicit recording consent
+ * now emits `recording_consent.granted` through the SAME `auditRepo` the
+ * adapter already carries for the caller-initiated revocation
+ * (`recording_consent.revoked`, twilio-adapter.ts). The `consent_events` row
+ * remains the append-only ledger; the audit row is the operator-visible trail
+ * that sits alongside every other mutation in this system, so the grant and
+ * the revocation are finally symmetric. Asserted below at real Postgres on
+ * all three legs: granted once when the disclosure played, never on the
+ * fail-closed path, and never across tenants.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
@@ -45,6 +46,7 @@ import {
 } from '../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type {
   StreamingSession,
   StreamingTranscriptionProvider,
@@ -164,6 +166,33 @@ async function waitForConsentRow(
   }
 }
 
+/**
+ * Same bounded poll for the `recording_consent.granted` audit row — the
+ * commit is reached through the same fire-and-forget
+ * `void this.deps.commitRecordingConsent(...)` call, so the audit write
+ * settles on the same schedule as the consent row above.
+ *
+ * Filtered by eventType on purpose: the session bootstrap this file drives
+ * already writes OTHER `voice_session` audit rows (inbound-call events), so
+ * an unfiltered count would be asserting somebody else's rows.
+ */
+async function waitForGrantAudit(
+  auditRepo: PgAuditRepository,
+  tenantId: string,
+  sessionId: string,
+  timeoutMs = 2000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = (await auditRepo.findByEntity(tenantId, 'voice_session', sessionId)).filter(
+      (e) => e.eventType === 'recording_consent.granted',
+    );
+    if (rows.length > 0) return rows;
+    if (Date.now() > deadline) return rows; // let the assertion report the (empty) mismatch
+    await sleep(10);
+  }
+}
+
 const startFrame = (callSid: string, streamSid: string) => ({
   event: 'start' as const,
   streamSid,
@@ -175,12 +204,14 @@ const mediaFrame = { event: 'media' as const, media: { payload: 'AAAA' } };
 describe('Postgres integration — recording-consent ledger ordering (RV-130)', () => {
   let pool: Pool;
   let consentRepo: PgConsentEventRepository;
+  let auditRepo: PgAuditRepository;
   let tenantA: TestTenant;
   let tenantB: TestTenant;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     consentRepo = new PgConsentEventRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
   });
@@ -210,6 +241,10 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
       gateway: { complete: vi.fn() } as never,
       pool,
       consentEvents: consentRepo,
+      // Row 2.2 — the SAME audit repository app.ts hands this adapter
+      // (app.ts wires `auditRepo` onto the TwilioGatherAdapter deps), so the
+      // grant's audit row is written by production wiring, not a test shim.
+      auditRepo,
       businessName: 'Test Co',
     });
     await twilioAdapter.handleInboundForStream({ callSid, from: phone, tenantId });
@@ -229,13 +264,16 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
       },
       ws,
     );
-    return { ws, session, mediaAdapter };
+    // The store is the adapter's own; the session id is what both the
+    // consent commit and the audit row key off.
+    const sessionId = store.findByCallSid(callSid)!.id;
+    return { ws, session, mediaAdapter, sessionId };
   }
 
   it('writes the consent_events row at the disclosure-PLAYED point — strictly before any caller audio is captured', async () => {
     const phone = '+15125550111';
     const callSid = 'CA-int-consent-ok';
-    const { ws, session, mediaAdapter } = await establishCall(
+    const { ws, session, mediaAdapter, sessionId } = await establishCall(
       tenantA.tenantId,
       callSid,
       phone,
@@ -277,12 +315,33 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
     // The row is not re-committed by the mark ACK / capture-open step.
     const rowsAfterCapture = await consentRepo.listByPhone(tenantA.tenantId, phone);
     expect(rowsAfterCapture).toHaveLength(1);
+
+    // Row 2.2 audit leg — the grant is audited exactly once, through the
+    // production `auditRepo`, with the same shape its sibling
+    // `recording_consent.revoked` uses (entityType voice_session, the
+    // session id as both entity and correlation, a system actor).
+    const auditRows = await waitForGrantAudit(auditRepo, tenantA.tenantId, sessionId);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toMatchObject({
+      tenantId: tenantA.tenantId,
+      eventType: 'recording_consent.granted',
+      entityType: 'voice_session',
+      entityId: sessionId,
+      actorRole: 'system',
+      correlationId: sessionId,
+    });
+    expect(auditRows[0].metadata).toMatchObject({
+      kind: 'recording',
+      state: 'implicit',
+      source: 'voice',
+      phone,
+    });
   });
 
   it('a disclosure that fails closed (non-PCM TTS) never writes a consent_events row', async () => {
     const phone = '+15125550112';
     const callSid = 'CA-int-consent-failclosed';
-    const { ws, mediaAdapter } = await establishCall(
+    const { ws, mediaAdapter, sessionId } = await establishCall(
       tenantA.tenantId,
       callSid,
       phone,
@@ -291,15 +350,31 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
     mediaAdapter.start();
 
     ws.inboundJson(startFrame(callSid, 'MZ-int-fail'));
-    await flush();
-    await flush();
-    await sleep(50);
+    // Bounded poll rather than a fixed 50 ms sleep: the fail-closed branch
+    // runs behind the same real-Postgres bootstrap chain the other tests
+    // poll for (waitForSilenceArmMark above), and a loaded machine does not
+    // always finish it inside a fixed budget. Still fails loudly — the
+    // assertion below reports the un-closed socket if it genuinely never
+    // closes.
+    const closeDeadline = Date.now() + 2000;
+    while (!ws.closed && Date.now() < closeDeadline) await sleep(10);
 
     expect(ws.closed).toBe(true);
     expect(ws.closeReason).toBe('disclosure_init_failed');
 
     const rows = await consentRepo.listByPhone(tenantA.tenantId, phone);
     expect(rows).toHaveLength(0);
+
+    // …and the audit trail says nothing either: a consent that was never
+    // granted must never be audited as granted. (No poll — the assertion is
+    // an absence, and the fail-closed branch returns without ever calling
+    // commitRecordingConsent, so there is nothing in flight to wait for.)
+    const auditRows = await auditRepo.findByEntity(
+      tenantA.tenantId,
+      'voice_session',
+      sessionId,
+    );
+    expect(auditRows.filter((e) => e.eventType === 'recording_consent.granted')).toHaveLength(0);
   });
 
   it('T1: a consent row ledgered for tenant B never satisfies tenant A\'s gate for the same phone number', async () => {
@@ -321,5 +396,19 @@ describe('Postgres integration — recording-consent ledger ordering (RV-130)', 
     // scoped to tenant A's RLS context — must NOT see tenant B's row.
     const tenantARows = await consentRepo.listByPhone(tenantA.tenantId, sharedPhone);
     expect(tenantARows).toHaveLength(0);
+
+    // T1 on the audit leg too: tenant B's grant is audited under tenant B,
+    // and tenant A's read of that same session id returns nothing.
+    const tenantBAudit = await waitForGrantAudit(auditRepo, tenantB.tenantId, b.sessionId);
+    expect(tenantBAudit).toHaveLength(1);
+    expect(tenantBAudit[0].tenantId).toBe(tenantB.tenantId);
+    // Unfiltered on purpose: tenant A must see NOTHING for tenant B's
+    // session — not just no grant row, no row of any kind.
+    const crossRead = await auditRepo.findByEntity(
+      tenantA.tenantId,
+      'voice_session',
+      b.sessionId,
+    );
+    expect(crossRead).toHaveLength(0);
   });
 });
