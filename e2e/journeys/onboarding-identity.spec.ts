@@ -530,16 +530,25 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       const aiCheckStep = statusBody.steps?.find((s) => s.id === 'ai_check');
       expect(aiCheckStep?.status, 'ai_check step is done').toBe('done');
 
+      // verify-ai.ts writes tenant_settings.ai_verification_status = 'passed'
+      // BEFORE awaiting auditRepo.create() — so the status endpoint above can
+      // observe `ai_check: done` in the brief window before the audit row is
+      // actually committed. Poll the count rather than reading it once,
+      // bounded by the same 30s this journey already budgets per async step.
+      const auditCountSql =
+        `SELECT count(*) FROM audit_events WHERE tenant_id = '${owner.tenantId}' AND event_type = 'tenant.ai_verified';`;
+      await expect
+        .poll(() => String(queryOne(auditCountSql) ?? '').trim(), {
+          message: 'exactly one tenant.ai_verified audit event',
+          timeout: 30_000,
+        })
+        .toBe('1');
+
       pollDbSnapshotHere(
         '1.8-audit-events',
         `SELECT tenant_id, event_type, entity_type, entity_id FROM audit_events ` +
           `WHERE tenant_id = '${owner.tenantId}' AND event_type = 'tenant.ai_verified';`,
       );
-
-      const auditRow = queryOne(
-        `SELECT count(*) FROM audit_events WHERE tenant_id = '${owner.tenantId}' AND event_type = 'tenant.ai_verified';`,
-      );
-      expect(String(auditRow).trim(), 'exactly one tenant.ai_verified audit event').toBe('1');
 
       // ── T1 — the neighbour tenant seeded first, and never advanced past
       //    signup, has no ai_verified row and its own status is untouched. ──

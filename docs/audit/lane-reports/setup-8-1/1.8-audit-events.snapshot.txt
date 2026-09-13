@@ -1,5 +1,5 @@
               tenant_id               |     event_type     |   entity_type   |              entity_id               
 --------------------------------------+--------------------+-----------------+--------------------------------------
- ef2d62de-a51f-47d4-83f2-cc2200fb6fb1 | tenant.ai_verified | tenant_settings | ef2d62de-a51f-47d4-83f2-cc2200fb6fb1
+ 8fca63c4-3fd7-4341-9b4f-d24778ac1635 | tenant.ai_verified | tenant_settings | 8fca63c4-3fd7-4341-9b4f-d24778ac1635
 (1 row)
 
