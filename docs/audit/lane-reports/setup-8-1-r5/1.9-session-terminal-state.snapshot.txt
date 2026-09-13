@@ -1,0 +1,6 @@
+                  id                  |    fsm_state    | turn_count | turns |                                         clarification_count_by_state                                          
+--------------------------------------+-----------------+------------+-------+---------------------------------------------------------------------------------------------------------------
+ 00ed9b01-b5e0-4783-b9b4-0b0ba6a45f96 | profile_capture |          0 |     1 | {}
+ 6108b9da-0052-44d1-b64c-fa8613a7a6ce | capped          |         15 |    31 | {"team_capture": 2, "pricing_capture": 2, "profile_capture": 2, "category_capture": 2, "schedule_capture": 2}
+(2 rows)
+

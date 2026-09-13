@@ -37,6 +37,7 @@
  * digest must never fail to send because the LLM was down.
  */
 import type { Logger } from '../logging/logger';
+import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { SettingsRepository, TenantSettings } from '../settings/settings';
 import type { MessageDeliveryProvider } from '../notifications/delivery-provider';
 import type { DispatchRepository } from '../notifications/dispatch-repository';
@@ -212,7 +213,49 @@ export interface DailyDigestWorkerDeps {
   now?: () => Date;
   /** Bucket width for due matching; defaults to DIGEST_SWEEP_INTERVAL_MS. */
   intervalMs?: number;
+  /**
+   * Issue #1113 — `audit_events` for the digest's SEND outcome. Until now
+   * this worker had no audit repository at all: at real Postgres the sweep
+   * wrote the `daily_digests` row and the `message_dispatches` row and left
+   * no audit trail for any of it. (The `auditRepo` inside `computeDeps` is
+   * READ-only — `computeDigestPayload` consults it to build the WS22 "N
+   * fixed" reflection INSIDE the digest's content; it never records that a
+   * send happened.)
+   *
+   * Emits exactly one row per digest outcome, mirroring
+   * `thank-you-sms-worker.ts`'s `notification.thank_you_sms.sent` /
+   * `.suppressed`:
+   *
+   *   - `notification.daily_digest.sent`       — an SMS actually went out;
+   *   - `notification.daily_digest.suppressed` — generated on purpose but
+   *     not sent (`digestChannel: 'none'`, no owner phone, no transport
+   *     wired);
+   *   - `notification.daily_digest.failed`     — the retry cap was
+   *     exhausted (dead-letter) or the provider threw.
+   *
+   * A `claimed` pass — every segment already had a dispatch row from an
+   * earlier sweep and only the `sms_dispatch_id` claim was outstanding —
+   * writes NOTHING: the sweep that actually sent already audited it, and a
+   * second row would read as a second send.
+   *
+   * Optional, like every other seam here, so existing call sites compile
+   * unchanged; app.ts passes the real `PgAuditRepository`.
+   */
+  auditRepo?: AuditRepository;
 }
+
+/** Actor recorded on the digest's audit rows — no human is in the loop. */
+const DAILY_DIGEST_ACTOR = 'system:daily-digest-worker';
+
+/**
+ * What `sendDigestSms` did, rich enough for the #1113 audit row. The
+ * sweep's own counters are derived from `kind` exactly as before.
+ */
+type DigestSendOutcome =
+  | { kind: 'sent'; dispatchId: string }
+  | { kind: 'claimed' }
+  | { kind: 'suppressed'; reason: string }
+  | { kind: 'failed'; reason: string };
 
 export interface DailyDigestSweepResult {
   tenants: number;
@@ -360,13 +403,106 @@ async function processTenant(
     generated = true;
   }
 
-  const smsOutcome = await sendDigestSms(tenantId, record, settings, deps);
+  // #1113 — a provider that throws mid-send must still leave an audit
+  // trail. The throw is re-raised unchanged so the sweep's existing
+  // per-tenant failure isolation (and its `failed` counter) behaves exactly
+  // as before; the only new thing is the row.
+  let smsOutcome: DigestSendOutcome;
+  try {
+    smsOutcome = await sendDigestSms(tenantId, record, settings, deps);
+  } catch (err) {
+    await auditDigestOutcome(deps, {
+      tenantId,
+      record,
+      timezone,
+      now,
+      channel: settings.digestChannel ?? 'sms',
+      outcome: { kind: 'failed', reason: err instanceof Error ? err.message : String(err) },
+    });
+    throw err;
+  }
+
+  await auditDigestOutcome(deps, {
+    tenantId,
+    record,
+    timezone,
+    now,
+    channel: settings.digestChannel ?? 'sms',
+    outcome: smsOutcome,
+  });
+
   return {
     generated,
-    sent: smsOutcome === 'sent',
-    claimed: smsOutcome === 'claimed',
+    sent: smsOutcome.kind === 'sent',
+    claimed: smsOutcome.kind === 'claimed',
     skipped: false,
   };
+}
+
+/**
+ * #1113 — one guarded audit write per digest outcome.
+ *
+ * DELIBERATELY SWALLOWED, matching every other effect in this sweep: the
+ * worker's contract is "one tenant's failure is logged and swallowed so the
+ * loop keeps going", and the digest has already been sent by the time this
+ * runs — failing the tenant on a ledger write would re-enter the retry path
+ * for a message the owner has already received. `thank-you-sms-worker.ts`
+ * awaits its audit write inside the same per-tenant try/catch for the same
+ * reason.
+ */
+async function auditDigestOutcome(
+  deps: DailyDigestWorkerDeps,
+  input: {
+    tenantId: string;
+    record: DailyDigestRecord;
+    timezone: string;
+    now: Date;
+    channel: string;
+    outcome: DigestSendOutcome;
+  },
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  // A claim-only pass is not a send — the sweep that sent already audited.
+  if (input.outcome.kind === 'claimed') return;
+
+  const suffix =
+    input.outcome.kind === 'sent'
+      ? 'sent'
+      : input.outcome.kind === 'suppressed'
+        ? 'suppressed'
+        : 'failed';
+  const minutes = localMinutesOfDay(input.now, input.timezone);
+  const tenantLocalTime = `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(
+    minutes % 60,
+  ).padStart(2, '0')}`;
+
+  try {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: DAILY_DIGEST_ACTOR,
+        actorRole: 'system',
+        eventType: `notification.daily_digest.${suffix}`,
+        entityType: 'daily_digest',
+        entityId: input.record.id,
+        metadata: {
+          channel: input.channel,
+          digestDate: input.record.digestDate,
+          tenantLocalTime,
+          ...(input.outcome.kind === 'sent' ? { dispatchId: input.outcome.dispatchId } : {}),
+          ...(input.outcome.kind === 'suppressed' || input.outcome.kind === 'failed'
+            ? { reason: input.outcome.reason }
+            : {}),
+        },
+      }),
+    );
+  } catch (err) {
+    deps.logger.warn('Daily-digest sweep: audit write failed', {
+      tenantId: input.tenantId,
+      digestDate: input.record.digestDate,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function composeNarrativeSafe(
@@ -393,24 +529,25 @@ async function sendDigestSms(
   record: DailyDigestRecord,
   settings: TenantSettings,
   deps: DailyDigestWorkerDeps,
-): Promise<'sent' | 'claimed' | false> {
-  if ((settings.digestChannel ?? 'sms') !== 'sms') {
+): Promise<DigestSendOutcome> {
+  const channel = settings.digestChannel ?? 'sms';
+  if (channel !== 'sms') {
     // 'none' — digest is stored for the web view; no SMS.
-    return false;
+    return { kind: 'suppressed', reason: channel === 'none' ? 'channel_none' : 'channel_not_sms' };
   }
   if (!deps.delivery || !deps.dispatchRepo) {
     deps.logger.info('Daily-digest sweep: no SMS transport wired, digest stored only', {
       tenantId,
       digestDate: record.digestDate,
     });
-    return false;
+    return { kind: 'suppressed', reason: 'no_sms_transport' };
   }
   if (!settings.ownerPhone) {
     deps.logger.warn('Daily-digest sweep: tenant has no owner_phone, digest stored only', {
       tenantId,
       digestDate: record.digestDate,
     });
-    return false;
+    return { kind: 'suppressed', reason: 'no_owner_phone' };
   }
 
   // Render the digest into 320-char soft-limit segments (PRD §12). Each
@@ -449,7 +586,7 @@ async function sendDigestSms(
         attempts,
         cap: DIGEST_MAX_SEND_ATTEMPTS,
       });
-      return false;
+      return { kind: 'failed', reason: 'send_attempts_exhausted' };
     }
   }
 
@@ -545,7 +682,11 @@ async function sendDigestSms(
 
   // Every segment already had a dispatch row (a prior sweep sent them and only
   // the claim was outstanding) → this pass claimed without re-sending.
-  return anySent ? 'sent' : 'claimed';
+  if (!anySent) return { kind: 'claimed' };
+  // `firstDispatchId` is set by the k===0 branch on any pass that sent a
+  // segment; the `existingDispatches` fallback covers a resumed split where
+  // segment 0 was already delivered on an earlier pass.
+  return { kind: 'sent', dispatchId: claimDispatchId ?? firstDispatchId ?? '' };
 }
 
 /**
