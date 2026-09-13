@@ -1438,6 +1438,54 @@ export class TwilioGatherAdapter {
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
     await commit();
+
+    // Row 2.2 — the GRANT of implicit recording consent is a mutation
+    // (a `consent_events` row lands) and, until now, the only
+    // recording-consent transition with no `audit_events` row: the
+    // caller-initiated revocation already writes
+    // `recording_consent.revoked` through this same repository
+    // (`handleRecordingObjection` below). The ledger stays the
+    // append-only legal record; this is the operator-visible trail, so a
+    // grant and a revocation finally read the same way in the audit log.
+    //
+    // Guarded exactly like the revoked emitter: a ledger and a caller
+    // phone are what make a row possible at all (`discloseRecording`
+    // returns NO_CONSENT_LEDGER without both), so without them nothing
+    // was written and nothing is audited.
+    //
+    // DELIBERATELY SWALLOWED, unlike the dispatch-board emitter in
+    // #1040: every audit write on this path is best-effort by design —
+    // this runs mid-call from a fire-and-forget
+    // `void commitRecordingConsent(...)` in the media-streams adapter,
+    // and an audit failure must never drop a live call or, worse,
+    // unwind a consent row that was already committed.
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    if (this.deps.auditRepo && this.deps.consentEvents && callerPhone) {
+      try {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: session.tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'recording_consent.granted',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: {
+              kind: 'recording',
+              state: 'implicit',
+              source: 'voice',
+              phone: callerPhone,
+              customerId: session.customerId ?? null,
+              // Which transport's point-of-evidence committed it.
+              channel: session.channel,
+            },
+          }),
+        );
+      } catch {
+        /* audit is best-effort — see above */
+      }
+    }
   }
 
   /**
