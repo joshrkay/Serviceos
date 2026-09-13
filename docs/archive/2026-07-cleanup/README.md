@@ -5,7 +5,7 @@ This archive holds historical planning, launch-readiness, and story documents th
 ## Current-state entry points
 
 - Product overview and repository map: [`../../../README.md`](../../../README.md)
-- Canonical PRD: [`../../PRD.md`](../../PRD.md)
+- Canonical PRD: [`../../PRD-v5-as-built.md`](../../PRD-v5-as-built.md) — the as-built PRD (D-030). `../../PRD.md` (v2.0) is superseded.
 - Deployment runbook: [`../../deployment.md`](../../deployment.md)
 - Latest frontend/workflow assessment: [`../../quality/frontend-stability-and-workflow-assessment-2026-07-09.md`](../../quality/frontend-stability-and-workflow-assessment-2026-07-09.md)
 

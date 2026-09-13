@@ -587,6 +587,35 @@ export const updateSettingsSchema = z.object({
   // mirror the DB CHECK (NUMERIC(3,2) in [0.90, 0.99]).
   autonomousBookingEnabled: z.boolean().optional(),
   autonomousBookingThreshold: z.number().min(0.9).max(0.99).optional(),
+  // #1011 (wayfinder map #995) — five keys that `PgSettingsRepository`'s write
+  // column map already carries (pg-settings.ts:372,374,431,438,439) but that
+  // were ABSENT here, so z.object's default STRIP semantics discarded them and
+  // the caller got a 200 for a write that never happened (§12.4c).
+  //
+  // Zod strict mode is deliberately NOT the remediation: `voice_approval_pin_hash`
+  // is omitted from `escalationSettings` on purpose (see its comment above) and
+  // strip is what keeps a raw credential hash out of the generic PUT. (The
+  // §12.4c falsifier greps this schema for the strict-mode call and expects
+  // exactly ONE hit — the nested autoApproveThreshold object — so do not write
+  // that token in a comment here.)
+  //
+  // No `.nullable()` on the booleans — all three columns are NOT NULL with a
+  // DEFAULT (db/schema.ts:4848, :5250, :5222, :6081), so a null write would
+  // bounce off Postgres as a 500 instead of clearing.
+  /** Post-job thank-you SMS (column NOT NULL DEFAULT TRUE; workers/thank-you-sms-worker.ts:131). */
+  sendThankYouSms: z.boolean().optional(),
+  /** Post-job review request (column NOT NULL DEFAULT TRUE; workers/review-request-worker.ts:74). */
+  sendReviewRequest: z.boolean().optional(),
+  /** Weekly feedback email — opt-OUT (digest/weekly-feedback-config.ts:51). */
+  weeklyFeedbackEnabled: z.boolean().optional(),
+  // D-019 revoked autonomous EXECUTION; these two columns are retained and now
+  // only govern whether a held booking joins the owner-approval chain
+  // (docs/decisions.md D-019). Live readers:
+  // ai/voice-turn/create-voice-turn-processor.ts:3331, :3336-3337, :3498-3500.
+  autonomousCloseEnabled: z.boolean().optional(),
+  // Nullable (column is a nullable BIGINT, db/schema.ts:6083) — mirrors
+  // depositRequiredAboveCents above. null clears the cap.
+  autonomousCloseMaxCents: z.number().int().min(0).nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {
@@ -604,6 +633,20 @@ export const updateSettingsSchema = z.object({
         path: ['depositFixedCents'],
       });
     }
+  }
+  // #1011 — refuse the one payload shape that turns the close lane ON while
+  // clearing its spend bound in the same request. `above_close_cap`
+  // (create-voice-turn-processor.ts:3336-3337) is the only thing bounding what
+  // a held booking can carry into the owner-approval chain; enabling the lane
+  // and nulling the cap together is an unbounded opt-in typed as two fields.
+  // Clearing the cap on its own is still allowed (it is a separate act).
+  if (val.autonomousCloseEnabled === true && val.autonomousCloseMaxCents === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        'autonomousCloseMaxCents cannot be cleared in the same request that enables autonomousCloseEnabled',
+      path: ['autonomousCloseMaxCents'],
+    });
   }
 });
 
