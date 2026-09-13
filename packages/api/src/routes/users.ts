@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   commitRequestTransactionAndBegin,
   runAfterCommit,
@@ -135,6 +136,10 @@ export function createUsersRouter(
     requireAuth,
     requireTenant,
     requirePermission('users:edit_role'),
+    // #1096 — after requirePermission so 401/403 still answer before any
+    // existence signal; before the handler so a non-UUID id can never reach
+    // PgUserRepository.update's uuid comparison as a bare 500.
+    notFoundOnMalformedId('User not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = updateUserSchema.parse(req.body ?? {});
