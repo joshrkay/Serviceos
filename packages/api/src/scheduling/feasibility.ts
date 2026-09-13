@@ -1,7 +1,7 @@
 import { detectOverlappingAppointments, detectAvailabilityConflicts } from '../dispatch/validation';
 import {
   FeasibilityInput, FeasibilityDependencies, FeasibilityResult,
-  FeasibilityIssue, TravelTimeSummary,
+  FeasibilityIssue, TravelTimeSummary, SkillConstraintStatus,
 } from './feasibility-types';
 import { Appointment } from '../appointments/appointment';
 import { getDayOfWeekInTimezone } from '../appointments/time';
@@ -133,25 +133,36 @@ async function locationCoordsFor(
   return { coords: { latitude: lat, longitude: lng } };
 }
 
+/**
+ * 4.9 / issue #1001 — returns the constraint STATUS alongside the issues, so
+ * "no required skills are modeled" is reported as a named outcome rather than
+ * disappearing into an empty issue list that reads as "always feasible".
+ */
 async function skillMatchIssues(
   input: TechnicianScopedInput,
   deps: FeasibilityDependencies,
-): Promise<FeasibilityIssue[]> {
+): Promise<{ issues: FeasibilityIssue[]; constraints: SkillConstraintStatus }> {
   const required = await deps.skillMatcher.requiredSkillsForJob(input.tenantId, input.appointment.jobId);
-  if (required.length === 0) return [];
+  // The wired matcher is StubSkillMatcher, so this is today's normal path.
+  // `none_configured` says so out loud; it is NOT the same claim as
+  // "skills were checked and the technician holds them".
+  if (required.length === 0) return { issues: [], constraints: 'none_configured' };
   const held = await deps.skillMatcher.skillsForTechnician(input.tenantId, input.proposedTechnicianId);
   const missing = required.filter((s) => !held.includes(s));
-  if (missing.length === 0) return [];
+  if (missing.length === 0) return { issues: [], constraints: 'evaluated' };
   // Contract #12/#13: "holds required skill for service type if skills are
   // modeled" is a precondition → blocking. Vacuously clean while the wired
   // matcher is the stub (requiredSkillsForJob returns []); the moment a real
   // skills model lands, this gate enforces it with no further change.
-  return [{
-    check: 'skill_match' as const,
-    severity: 'blocking' as const,
-    message: `Technician is missing required skill(s): ${missing.join(', ')}`,
-    metadata: { missingSkills: missing },
-  }];
+  return {
+    issues: [{
+      check: 'skill_match' as const,
+      severity: 'blocking' as const,
+      message: `Technician is missing required skill(s): ${missing.join(', ')}`,
+      metadata: { missingSkills: missing },
+    }],
+    constraints: 'evaluated',
+  };
 }
 
 async function travelTimeIssues(
@@ -222,7 +233,11 @@ async function travelTimeIssues(
   return { issues, summary };
 }
 
-function partition(issues: FeasibilityIssue[], travelTime: TravelTimeSummary | null): FeasibilityResult {
+function partition(
+  issues: FeasibilityIssue[],
+  travelTime: TravelTimeSummary | null,
+  skillConstraints: SkillConstraintStatus,
+): FeasibilityResult {
   const blocking = issues.filter((i) => i.severity === 'blocking');
   const warnings = issues.filter((i) => i.severity === 'warning');
   const info = issues.filter((i) => i.severity === 'info');
@@ -230,6 +245,7 @@ function partition(issues: FeasibilityIssue[], travelTime: TravelTimeSummary | n
     feasible: blocking.length === 0,
     blocking, warnings, info,
     travelTime,
+    skillConstraints,
   };
 }
 
@@ -250,7 +266,9 @@ export async function checkFeasibility(
   // is correct here, not a degraded/unknown state: there being no
   // technician assigned yet is not itself a blocking scheduling conflict.
   if (!input.proposedTechnicianId) {
-    return partition([], null);
+    // 4.9 / #1001 — `feasible: true` with `not_evaluated`: nothing blocks,
+    // but the skill gate never ran, so the report must not imply it passed.
+    return partition([], null, 'not_evaluated');
   }
   const scoped: TechnicianScopedInput = { ...input, proposedTechnicianId: input.proposedTechnicianId };
   const [overlap, availability, travel, skill] = await Promise.all([
@@ -259,5 +277,9 @@ export async function checkFeasibility(
     travelTimeIssues(scoped, deps),
     skillMatchIssues(scoped, deps),
   ]);
-  return partition([...overlap, ...availability, ...travel.issues, ...skill], travel.summary);
+  return partition(
+    [...overlap, ...availability, ...travel.issues, ...skill.issues],
+    travel.summary,
+    skill.constraints,
+  );
 }

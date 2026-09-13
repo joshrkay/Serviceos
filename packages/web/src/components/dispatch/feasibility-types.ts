@@ -22,10 +22,18 @@ export interface TravelTimeSummary {
   degraded: boolean;
 }
 
+/**
+ * 4.9 / issue #1001 — mirrors the API's `SkillConstraintStatus`. Optional
+ * here (and only here) because an older API build returns responses without
+ * it; the API type itself never omits the field.
+ */
+export type SkillConstraintStatus = 'none_configured' | 'evaluated' | 'not_evaluated';
+
 export interface FeasibilityResult {
   feasible: boolean;
   blocking: FeasibilityIssue[];
   warnings: FeasibilityIssue[];
   info: FeasibilityIssue[];
   travelTime: TravelTimeSummary | null;
+  skillConstraints?: SkillConstraintStatus;
 }
