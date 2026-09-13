@@ -406,20 +406,109 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
     expect(res.ok(), `PUT identity (${businessName}) -> ${res.status()}`).toBeTruthy();
   }
 
+  /**
+   * T2 control — drives a tenant through identity -> pack -> phone ->
+   * billing(signed webhook) -> ai_check ENTIRELY over the API (no browser;
+   * the UI leg is what the main test proves) so a second, independently-
+   * configured tenant can reach its OWN passed ai_check state, concurrent
+   * with the tenant under test, on a DIFFERENT pack — proving the two
+   * don't interfere rather than merely that an untouched neighbour is
+   * invisible (that's T1, asserted separately below).
+   */
+  async function driveTenantToAiCheckViaApi(
+    request: import('@playwright/test').APIRequestContext,
+    tenant: { authHeaders: Record<string, string>; tenantId: string },
+    businessName: string,
+    packId: 'hvac' | 'plumbing',
+  ): Promise<void> {
+    await putIdentity(request, tenant.authHeaders, businessName);
+
+    const packRes = await request.post(`${API_URL}/api/onboarding/pack`, {
+      headers: { 'content-type': 'application/json', ...tenant.authHeaders },
+      data: JSON.stringify({ packId }),
+    });
+    expect(packRes.ok(), `POST pack (${businessName}) -> ${packRes.status()}`).toBeTruthy();
+
+    // Phone stub provisioning runs on signup already; poll status until it
+    // (and pack) land so the webhook below finds a tenant ready for billing.
+    await expect
+      .poll(
+        async () => {
+          const res = await request.get(`${API_URL}/api/onboarding/status`, {
+            headers: tenant.authHeaders,
+          });
+          const body = (await res.json()) as { currentStep?: string };
+          return body.currentStep;
+        },
+        { message: `${businessName} reaches billing`, timeout: 30_000 },
+      )
+      .toBe('billing');
+
+    const trialEnd = Math.floor(Date.now() / 1000) + 14 * 24 * 3600;
+    const webhookBody = JSON.stringify({
+      id: `evt_e2e_${randomUUID()}`,
+      type: 'customer.subscription.created',
+      data: {
+        object: {
+          id: `sub_e2e_${randomUUID()}`,
+          customer: `cus_e2e_${randomUUID()}`,
+          status: 'trialing',
+          trial_end: trialEnd,
+          metadata: { tenant_id: tenant.tenantId },
+        },
+      },
+    });
+    const whRes = await request.post(`${API_URL}/webhooks/stripe`, {
+      headers: {
+        'content-type': 'application/json',
+        'stripe-signature': stripeSignature(webhookBody, STRIPE_WEBHOOK_SECRET!),
+      },
+      data: webhookBody,
+    });
+    expect(whRes.status(), `${businessName} signed trial webhook -> ${await whRes.text()}`).toBe(200);
+
+    await expect
+      .poll(
+        async () => {
+          const res = await request.get(`${API_URL}/api/onboarding/status`, {
+            headers: tenant.authHeaders,
+          });
+          const body = (await res.json()) as { steps?: { id: string; status: string }[] };
+          return body.steps?.find((s) => s.id === 'ai_check')?.status;
+        },
+        { message: `${businessName} ai_check reaches done`, timeout: 30_000 },
+      )
+      .toBe('done');
+  }
+
   test(
     'identity -> pack -> phone (Twilio stub) -> billing (signed trial webhook) -> AI check ' +
-      'passes at real Postgres with its tenant.ai_verified audit row; a neighbour tenant is untouched (T1)',
+      'passes at real Postgres with its tenant.ai_verified audit row; a neighbour tenant on a ' +
+      'DIFFERENT pack completing its own AI check concurrently does not change this tenant\'s ' +
+      'answer (T2)',
     async ({ page, baseURL }, testInfo) => {
       // Default 30s is too short for a full identity->pack->phone(stub
-      // provisioning)->billing->ai_check(worker) walk; the phone step alone
-      // documents "usually 30 seconds, occasionally up to a minute".
+      // provisioning)->billing->ai_check(worker) walk TWICE (neighbour +
+      // tenant under test); the phone step alone documents "usually 30
+      // seconds, occasionally up to a minute".
       testInfo.setTimeout(180_000);
       const pageErrors: string[] = [];
       page.on('pageerror', (err) => pageErrors.push(err.message));
 
-      // ── Neighbour tenant, seeded FIRST and never touched again — the T1
-      //    control we check at the end has run NO onboarding steps at all. ──
+      // ── Neighbour tenant, seeded FIRST and driven to ITS OWN passed
+      //    ai_check (plumbing pack — deliberately different from the
+      //    tenant under test's HVAC) entirely over the API, before the
+      //    tenant-under-test's UI journey even starts. Fable's rung-5 ask:
+      //    a neighbour's OWN completed ai_check must not change this
+      //    tenant's answer — stronger than an untouched neighbour (T1,
+      //    asserted separately below). ─────────────────────────────────────
       const neighbour = await bootstrapOwner(page, 'aicheckneighbour');
+      await driveTenantToAiCheckViaApi(
+        page.request,
+        neighbour,
+        'Neighbour Plumbing Co',
+        'plumbing',
+      );
 
       // ── The tenant under test. Identity via the real PUT route directly —
       //    1.2's own browser-form proof is the spec above; re-driving the
@@ -550,21 +639,71 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
           `WHERE tenant_id = '${owner.tenantId}' AND event_type = 'tenant.ai_verified';`,
       );
 
-      // ── T1 — the neighbour tenant seeded first, and never advanced past
-      //    signup, has no ai_verified row and its own status is untouched. ──
+      // ── T2 — the neighbour, driven to its OWN passed ai_check on a
+      //    DIFFERENT pack before and during this tenant's journey, has
+      //    exactly its own audit row (not 0 — it genuinely completed — and
+      //    not 2, which would mean the two tenants' writes merged), a
+      //    DIFFERENT stripe_customer_id, and its OWN plumbing catalog —
+      //    while this tenant's own count (asserted above) stayed at
+      //    exactly 1 throughout. Two independently-configured tenants,
+      //    each correct, in one run. ────────────────────────────────────────
+      pollDbSnapshotHere(
+        '1.8-T2-neighbour-audit-events',
+        `SELECT tenant_id, event_type, entity_type, entity_id FROM audit_events ` +
+          `WHERE tenant_id = '${neighbour.tenantId}' AND event_type = 'tenant.ai_verified';`,
+      );
       const neighbourAudit = queryOne(
         `SELECT count(*) FROM audit_events WHERE tenant_id = '${neighbour.tenantId}' AND event_type = 'tenant.ai_verified';`,
       );
-      expect(String(neighbourAudit).trim(), 'neighbour tenant has no ai_verified row').toBe('0');
+      expect(String(neighbourAudit).trim(), 'neighbour has exactly its OWN ai_verified row').toBe('1');
 
       const neighbourStatusRes = await page.request.get(`${API_URL}/api/onboarding/status`, {
         headers: neighbour.authHeaders,
       });
       expect(neighbourStatusRes.ok()).toBeTruthy();
-      const neighbourStatus = (await neighbourStatusRes.json()) as { currentStep?: string };
-      expect(neighbourStatus.currentStep, 'neighbour tenant still sits at its own first step').toBe(
-        'identity',
-      );
+      const neighbourStatus = (await neighbourStatusRes.json()) as {
+        steps?: { id: string; status: string }[];
+      };
+      expect(
+        neighbourStatus.steps?.find((s) => s.id === 'ai_check')?.status,
+        'neighbour own ai_check is done — its completion is real, not a T1 no-op',
+      ).toBe('done');
+
+      // Same recipe as onboarding-pack.test.ts's T3 case: non-empty catalogs,
+      // disjoint names — the pack's own SKUs, not a shared/templated one.
+      const ownerCatalogNames = execFileSync(
+        'psql',
+        [
+          process.env.DATABASE_URL!,
+          '-t', '-A',
+          '-c',
+          `SELECT name FROM catalog_items WHERE tenant_id = '${owner.tenantId}' ORDER BY name;`,
+        ],
+        { encoding: 'utf8' },
+      ).trim().split('\n').filter(Boolean);
+      const neighbourCatalogNames = execFileSync(
+        'psql',
+        [
+          process.env.DATABASE_URL!,
+          '-t', '-A',
+          '-c',
+          `SELECT name FROM catalog_items WHERE tenant_id = '${neighbour.tenantId}' ORDER BY name;`,
+        ],
+        { encoding: 'utf8' },
+      ).trim().split('\n').filter(Boolean);
+      expect(ownerCatalogNames.length, 'this tenant (HVAC) got a non-empty catalog').toBeGreaterThan(0);
+      expect(neighbourCatalogNames.length, 'neighbour (plumbing) got a non-empty catalog').toBeGreaterThan(0);
+      const catalogOverlap = ownerCatalogNames.filter((n) => neighbourCatalogNames.includes(n));
+      expect(catalogOverlap, 'the two tenants\' catalogs share no line items — each got its own pack').toEqual([]);
+
+      // Re-read THIS tenant's own audit count once more, after the
+      // neighbour's concurrent completion above — still exactly 1, proving
+      // the neighbour's own passed check did not change this tenant's own
+      // answer (T2, per Fable's ask).
+      expect(
+        String(queryOne(auditCountSql) ?? '').trim(),
+        'this tenant STILL has exactly one ai_verified row after the neighbour completed its own',
+      ).toBe('1');
 
       expect(pageErrors, 'no uncaught page errors during the AI-check journey').toEqual([]);
     },

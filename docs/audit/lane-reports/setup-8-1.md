@@ -1,5 +1,22 @@
 # §8.1 Setup — Sonnet test-only lane report (branch `cloud/setup-8-1`)
 
+## Update — Fable gate PASS + the T2 leg (2026-09-13)
+
+Fable gated PR #1115 @ `6bf51e3d6`: **PASS**, row 1.8 stays 4 (T1), reached
+hermetically end to end; rung 5 asked for one more assertion — a T2 leg
+("a neighbour's AI-check state must not change this tenant's answer") in
+the same spec. Added: `driveTenantToAiCheckViaApi()` drives the neighbour
+through its OWN identity → pack (**plumbing**, deliberately different
+from the tenant-under-test's HVAC) → phone → billing (its own signed
+webhook) → ai_check, entirely over the API, seeded and completed BEFORE
+and DURING the tenant-under-test's UI journey. Final assertions: the
+neighbour has exactly its own `tenant.ai_verified` row (not 0 — it truly
+completed; not 2 — the writes didn't merge), its own `ai_check: done`
+status, and its own non-empty, non-overlapping catalog (same disjoint-
+names recipe as `onboarding-pack.test.ts`'s T3 case); the tenant under
+test's own audit count is re-checked to still be exactly 1 AFTER the
+neighbour's concurrent completion. `2 passed (55.2s)`, `tsc` clean.
+
 ## Before touching anything: most of this ticket was already done and merged
 
 Issue #1016's comment history shows this exact lane (branch name
