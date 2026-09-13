@@ -58,25 +58,68 @@ function buildMessage(payload: ProvisionTwilioPayload): QueueMessage<ProvisionTw
   };
 }
 
-/** The five Twilio HTTP responses for a full provision through "attach". */
-function stubTwilioFetch(): void {
-  const fn = vi.fn();
-  const bodies: unknown[] = [
-    { sid: 'ACsub', auth_token: 'subtoken' },
-    { sid: 'MG123' },
-    { incoming_phone_numbers: [] },
-    { sid: 'PN555', phone_number: CONTESTED_DID },
-    {},
-  ];
-  for (const body of bodies) {
-    fn.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => body,
-      text: async () => JSON.stringify(body),
-    });
-  }
+type FetchCall = [string, { method?: string } | undefined];
+
+/**
+ * A small STATEFUL fake of the Twilio subaccount, not an ordered queue of
+ * canned bodies.
+ *
+ * That distinction is the point of the orphan tests below. The recovery path
+ * calls `listSubaccountPhoneNumbers()` and uses whatever the subaccount still
+ * owns; a canned "empty list" would assert the fix into existence regardless
+ * of whether the release actually happened. Here `purchase` adds to `owned`
+ * and the release DELETE removes from it, so "the re-run reaches a different
+ * number" can only pass if the number was genuinely handed back.
+ *
+ * Survives across `worker.handle()` calls, which is what makes a second run
+ * meaningful. `releaseFails` makes every DELETE answer 500.
+ */
+function stubTwilioAccount(
+  purchases: Array<{ sid: string; phone_number: string }>,
+  opts: { releaseFails?: boolean } = {},
+) {
+  const owned = new Map<string, string>();
+  let nextPurchase = 0;
+  const ok = (body: unknown) => ({
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  const fn = vi.fn(async (url: string, init?: { method?: string }) => {
+    const method = init?.method ?? 'GET';
+
+    if (method === 'DELETE') {
+      if (opts.releaseFails) {
+        return { ok: false, status: 500, json: async () => ({}), text: async () => 'twilio is down' };
+      }
+      const sid = url.match(/IncomingPhoneNumbers\/(\w+)\.json/)?.[1];
+      if (sid) owned.delete(sid);
+      return ok({});
+    }
+    if (url.endsWith('/Accounts.json')) return ok({ sid: 'ACsub', auth_token: 'subtoken' });
+    if (url.includes('messaging.twilio.com') && url.endsWith('/Services')) return ok({});
+    if (url.endsWith('/Services.json')) return ok({ sid: 'MG123' });
+    if (url.includes('IncomingPhoneNumbers.json')) {
+      if (method === 'POST') {
+        const p = purchases[nextPurchase++];
+        owned.set(p.sid, p.phone_number);
+        return ok(p);
+      }
+      return ok({
+        incoming_phone_numbers: [...owned].map(([sid, phone_number]) => ({ sid, phone_number })),
+      });
+    }
+    return ok({});
+  });
+
   vi.stubGlobal('fetch', fn);
+  return { fn: fn as unknown as ReturnType<typeof vi.fn>, owned };
+}
+
+function deleteCalls(fn: ReturnType<typeof vi.fn>): FetchCall[] {
+  return (fn.mock.calls as FetchCall[]).filter(([, init]) => init?.method === 'DELETE');
 }
 
 async function seedSettings(pool: Pool, tenantId: string): Promise<void> {
@@ -146,7 +189,7 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
 
     const challenger = await createTestTenant(pool);
     await seedSettings(pool, challenger.tenantId);
-    stubTwilioFetch();
+    stubTwilioAccount([{ sid: 'PN555', phone_number: CONTESTED_DID }]);
 
     const worker = createProvisionTwilioWorker({ pool });
 
@@ -190,6 +233,111 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('full_readiness');
+  });
+
+  /**
+   * xhawk-ai review on PR #1120 (Medium/correctness), confirmed against the
+   * code: the conflict is detected AFTER the number has been purchased into
+   * the challenger's subaccount, and the UPDATE that would have persisted
+   * `phoneNumberSid` is the very one that failed. So nothing records the
+   * purchase — and the next run takes the `!phoneNumberSid` branch,
+   * `listSubaccountPhoneNumbers()` hands the orphan straight back, and the
+   * same conflict repeats while the tenant keeps paying for it.
+   *
+   * That makes the operator message ("provision this tenant on a different
+   * number, then re-run provisioning") a promise the code could not keep.
+   */
+  it('releases the number it just bought, so the tenant stops paying for an orphan', async () => {
+    const incumbent = await createTestTenant(pool);
+    await seedIncumbent(pool, incumbent.tenantId, '+15125559905');
+
+    const challenger = await createTestTenant(pool);
+    await seedSettings(pool, challenger.tenantId);
+    const { fn: fetchMock, owned } = stubTwilioAccount([
+      { sid: 'PN555', phone_number: '+15125559905' },
+    ]);
+
+    await createProvisionTwilioWorker({ pool }).handle(
+      buildMessage({
+        tenantId: challenger.tenantId,
+        region: null,
+        baseUrl: 'https://api.test',
+        phoneNumber: '+15125559905',
+      }),
+      logger,
+    );
+
+    const deletes = deleteCalls(fetchMock);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0][0]).toContain('/Accounts/ACsub/IncomingPhoneNumbers/PN555.json');
+    // …and the subaccount really no longer holds it.
+    expect([...owned.keys()]).toEqual([]);
+
+    const { rows } = await pool.query<{ last_error: string | null }>(
+      `SELECT last_error FROM tenant_integrations WHERE tenant_id = $1 AND provider = 'twilio'`,
+      [challenger.tenantId],
+    );
+    expect(rows[0].last_error).toContain('released');
+  });
+
+  it('a re-run then reaches a different number instead of recovering the orphan', async () => {
+    const incumbent = await createTestTenant(pool);
+    await seedIncumbent(pool, incumbent.tenantId, '+15125559906');
+
+    const challenger = await createTestTenant(pool);
+    await seedSettings(pool, challenger.tenantId);
+    // ONE stateful account across both runs: run 2's list reflects whatever
+    // run 1 left behind, so this cannot pass unless the orphan was released.
+    stubTwilioAccount([
+      { sid: 'PN555', phone_number: '+15125559906' },
+      { sid: 'PN556', phone_number: '+15125559907' },
+    ]);
+    const worker = createProvisionTwilioWorker({ pool });
+    const msg = (phoneNumber: string) =>
+      buildMessage({ tenantId: challenger.tenantId, region: null, baseUrl: 'https://api.test', phoneNumber });
+
+    await worker.handle(msg('+15125559906'), logger);
+
+    await worker.handle(msg('+15125559907'), logger);
+
+    const { rows } = await pool.query<{
+      status: string;
+      provider_data: { phoneE164?: string };
+    }>(
+      `SELECT status, provider_data FROM tenant_integrations WHERE tenant_id = $1 AND provider = 'twilio'`,
+      [challenger.tenantId],
+    );
+    expect(rows[0].provider_data.phoneE164).toBe('+15125559907');
+    expect(rows[0].status).toBe('full_readiness');
+  });
+
+  it('when the release itself fails, it says so and throws so the cleanup is retried', async () => {
+    const incumbent = await createTestTenant(pool);
+    await seedIncumbent(pool, incumbent.tenantId, '+15125559908');
+
+    const challenger = await createTestTenant(pool);
+    await seedSettings(pool, challenger.tenantId);
+    stubTwilioAccount([{ sid: 'PN555', phone_number: '+15125559908' }], { releaseFails: true });
+
+    await expect(
+      createProvisionTwilioWorker({ pool }).handle(
+        buildMessage({
+          tenantId: challenger.tenantId,
+          region: null,
+          baseUrl: 'https://api.test',
+          phoneNumber: '+15125559908',
+        }),
+        logger,
+      ),
+    ).rejects.toThrow(/release/i);
+
+    const { rows } = await pool.query<{ status: string; last_error: string | null }>(
+      `SELECT status, last_error FROM tenant_integrations WHERE tenant_id = $1 AND provider = 'twilio'`,
+      [challenger.tenantId],
+    );
+    expect(rows[0].status).toBe('failed');
+    // Names the SID an operator has to release by hand.
+    expect(rows[0].last_error).toContain('PN555');
   });
 
   it('isDidAlreadyClaimed distinguishes the DID index from the tenant/provider unique', () => {

@@ -10,6 +10,7 @@ import {
   purchasePhoneNumber,
   attachNumberToMessagingService,
   listSubaccountPhoneNumbers,
+  releasePhoneNumber,
 } from '../integrations/twilio/provisioning';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { isTwilioDeploymentEnv } from '../integrations/credentials';
@@ -397,16 +398,50 @@ export function createProvisionTwilioWorker(deps: {
             );
           } catch (err) {
             if (!isDidAlreadyClaimed(err)) throw err;
-            const msg =
-              `Phone number ${phoneE164} is already assigned to another tenant — ` +
-              'a DID can serve only one tenant (inbound routing resolves the tenant ' +
-              'from the number). Release it from the other tenant, or provision this ' +
-              'tenant on a different number, then re-run provisioning.';
             logger.error('Twilio DID already claimed by another tenant', {
               tenantId,
               phoneE164,
               phoneNumberSid,
             });
+
+            // The number was purchased (or recovered) into THIS tenant's
+            // subaccount moments ago, and the write that would have recorded
+            // its SID is the one that just failed — so nothing in the DB knows
+            // it exists. Hand it back, or two things go wrong: the tenant pays
+            // for a line it can never use, and the next run takes the
+            // `!phoneNumberSid` branch above, where listSubaccountPhoneNumbers
+            // returns this very number and walks into the same conflict. That
+            // would make the "provision this tenant on a different number"
+            // advice below impossible to act on. (PR #1120 review.)
+            let released = false;
+            let releaseError: string | null = null;
+            try {
+              await releasePhoneNumber(subaccountSid, authToken, phoneNumberSid!);
+              released = true;
+            } catch (releaseErr) {
+              releaseError =
+                releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+              logger.error('Failed to release the conflicting Twilio number', {
+                tenantId,
+                phoneNumberSid,
+                error: releaseError,
+              });
+            }
+
+            const conflict =
+              `Phone number ${phoneE164} is already assigned to another tenant — ` +
+              'a DID can serve only one tenant (inbound routing resolves the tenant ' +
+              'from the number).';
+            const msg = released
+              ? `${conflict} The number just purchased for this tenant has been released, ` +
+                'so nothing is being billed for it. Release the number from the other ' +
+                'tenant, or provision this tenant on a different number, then re-run ' +
+                'provisioning.'
+              : `${conflict} Releasing the number just purchased for this tenant FAILED ` +
+                `(${releaseError}) — release ${phoneNumberSid} from subaccount ` +
+                `${subaccountSid} by hand, or the next provisioning run will recover it ` +
+                'and hit this same conflict.';
+
             await tenantQuery(
               pool,
               tenantId,
@@ -415,6 +450,11 @@ export function createProvisionTwilioWorker(deps: {
                WHERE tenant_id = $2 AND provider = 'twilio'`,
               [msg, tenantId]
             );
+
+            // A successful release is terminal — retrying cannot un-claim the
+            // DID. A failed one is not: throw so the queue comes back and
+            // re-attempts the cleanup rather than stranding a paid orphan.
+            if (!released) throw new Error(msg);
             return;
           }
         }

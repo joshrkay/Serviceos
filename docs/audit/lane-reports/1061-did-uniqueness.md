@@ -170,6 +170,39 @@ export function isDidAlreadyClaimed(err: unknown): boolean {
 }
 ```
 
+### 4a. Releasing the orphaned number (PR #1120 review)
+
+`xhawk-ai` raised a Medium/correctness finding on the branch, and it was
+right — the first handler was incomplete in a way that made its own advice
+impossible to follow.
+
+The conflict is detected *after* the number has been purchased (or recovered)
+into the challenger's subaccount, and the UPDATE that would have recorded its
+`phoneNumberSid` is the one that failed. So nothing in the database knows the
+number exists. Two consequences:
+
+1. The tenant pays for a line it can never use.
+2. The next run takes the `!phoneNumberSid` branch, where
+   `listSubaccountPhoneNumbers()` hands that very number straight back — and
+   walks into the identical conflict. The operator message said "provision
+   this tenant on a different number, then re-run provisioning", which the
+   recovery path made impossible.
+
+The handler now releases the number before returning. If the release itself
+fails it says so, naming the SID and subaccount to release by hand, and
+throws — a successful release is terminal (retrying cannot un-claim the DID),
+a failed one is not, so the queue comes back and re-attempts the cleanup
+rather than stranding a paid orphan.
+
+Three tests cover it, all RED first. Worth noting how: the first attempt
+stubbed Twilio as an ordered queue of canned bodies, and the re-run test
+**passed against the broken code** — a canned empty list asserts the fix into
+existence regardless of whether the release happened. It was rewritten as a
+small stateful fake of the subaccount (purchase adds, the release DELETE
+removes, list reflects current contents, state shared across both
+`worker.handle()` calls), at which point it went genuinely RED with
+`expected undefined to be '+15125559907'` — the dead-end reproduced.
+
 Matched on **both** SQLSTATE and constraint name deliberately:
 `tenant_integrations` also carries 070's `UNIQUE (tenant_id, provider)`, which
 raises the same 23505 for a different — and genuinely retryable — reason, so
@@ -442,7 +475,7 @@ $ npx tsc --project tsconfig.build.json --noEmit
 
 $ RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts
  Test Files  263 passed (263)
-      Tests  1542 passed | 8 expected fail | 1 skipped (1551)
+      Tests  1545 passed | 8 expected fail | 1 skipped (1554)   # after §4a
 
 $ npx vitest run
  Test Files  1195 passed | 5 skipped (1200)
