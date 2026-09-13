@@ -296,6 +296,21 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     });
   }
 
+  /**
+   * #1092 — role / name / canFieldServe edits, tenant-scoped in the WHERE
+   * clause like every sibling method in this file.
+   *
+   * The tenant predicate is NOT redundant with RLS. The app connects as a
+   * privileged principal, so `tenant_isolation_users` only enforces when the
+   * connection drops into `rls_app_runtime` (RLS_RUNTIME_ROLE=true — see
+   * db/rls-runtime-role.ts); with the flag off — the default, and what every
+   * hermetic e2e/api path runs under — this predicate is the ONLY thing
+   * standing between `PATCH /api/users/:id` (gated on a permission every owner
+   * holds in their own tenant) and any user row in any other tenant.
+   *
+   * Returns null when no row in THIS tenant matched, so the route answers 404
+   * for a foreign id exactly as it does for an unknown one.
+   */
   async update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const fieldMap: Record<string, string> = {
@@ -318,9 +333,11 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
 
       setClauses.push(`updated_at = NOW()`);
       params.push(id);
+      params.push(tenantId);
       const result = await client.query(
         `UPDATE users SET ${setClauses.join(', ')}
          WHERE id = $${paramIndex}
+           AND tenant_id = $${paramIndex + 1}
            AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,

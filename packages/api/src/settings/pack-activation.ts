@@ -22,7 +22,18 @@ export interface PackActivationRepository {
   create(activation: TenantPackActivation): Promise<TenantPackActivation>;
   findByTenant(tenantId: string): Promise<TenantPackActivation[]>;
   findByTenantAndPack(tenantId: string, packId: string): Promise<TenantPackActivation | null>;
-  update(id: string, updates: Partial<TenantPackActivation>): Promise<TenantPackActivation | null>;
+  /**
+   * #1095 — `tenantId` is part of the identity of the row to update, not
+   * context: an implementation must scope the write to it (Postgres does so
+   * both in the predicate and via the tenant GUC) and return null when the
+   * id belongs to another tenant. Without it the id alone addressed any
+   * tenant's row.
+   */
+  update(
+    tenantId: string,
+    id: string,
+    updates: Partial<TenantPackActivation>
+  ): Promise<TenantPackActivation | null>;
 }
 
 export function validateActivationInput(input: ActivatePackInput): string[] {
@@ -57,7 +68,7 @@ export async function activatePack(
   let reactivated = false;
 
   if (existing && existing.status === 'deactivated') {
-    const updated = await repository.update(existing.id, {
+    const updated = await repository.update(input.tenantId, existing.id, {
       status: 'active',
       activatedAt: new Date(),
       deactivatedAt: undefined,
@@ -105,7 +116,7 @@ export async function deactivatePack(
   if (!existing) return null;
   if (existing.status === 'deactivated') return { ...existing };
 
-  const updated = await repository.update(existing.id, {
+  const updated = await repository.update(tenantId, existing.id, {
     status: 'deactivated',
     deactivatedAt: new Date(),
   });
@@ -196,9 +207,15 @@ export class InMemoryPackActivationRepository implements PackActivationRepositor
     return found ? { ...found } : null;
   }
 
-  async update(id: string, updates: Partial<TenantPackActivation>): Promise<TenantPackActivation | null> {
+  async update(
+    tenantId: string,
+    id: string,
+    updates: Partial<TenantPackActivation>
+  ): Promise<TenantPackActivation | null> {
     const existing = this.activations.get(id);
-    if (!existing) return null;
+    // #1095 — same scoping the Postgres implementation enforces in SQL: an
+    // id from another tenant addresses nothing.
+    if (!existing || existing.tenantId !== tenantId) return null;
     const { id: _id, tenantId: _tid, packId: _pid, ...safeUpdates } = updates;
     const updated = { ...existing, ...safeUpdates };
     this.activations.set(id, updated);
