@@ -630,6 +630,11 @@ export function createInvoiceRouter(
           tenantId: req.auth!.tenantId,
           invoiceId: req.params.id,
           ...parsed.data,
+          // #1145 — distinguishes this owner-triggered manual send from an
+          // unrelated proposal-execution send (invoice-delivery-adapter.ts)
+          // landing in the same wall-clock minute, so the two don't collide
+          // on idx_dispatches_idempotency.
+          idempotencyContext: 'owner',
         });
         // §6 Time-to-Cash. `sendInvoice` only stamps `sentAt`/`lastDispatchId`;
         // it does NOT transition the invoice's status. The job's money-state
