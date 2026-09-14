@@ -452,6 +452,66 @@ describe('runThankYouSmsSweep', () => {
     });
   });
 
+  describe('#1184 — the audit claim is spent only once the audit row is written', () => {
+    const SENT = 'notification.thank_you_sms.sent';
+
+    async function seed() {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      return job;
+    }
+
+    it('a failed audit write releases the audit claim and leaves the job unstamped; the next sweep records ONE audit row without resending', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      const create = vi.spyOn(auditRepo, 'create').mockRejectedValueOnce(new Error('connection dropped'));
+
+      const first = await runThankYouSmsSweep(deps([], { pool }));
+      expect(first.failed).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(claims.get(`${TENANT}::thank_you_sms:${job.id}`)?.status).toBe('sent');
+      expect(claims.has(`${TENANT}::thank_you_sms_audit:${job.id}`)).toBe(false);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeUndefined();
+
+      const second = await runThankYouSmsSweep(deps([], { pool }));
+      expect(second.sent).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledTimes(2);
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(1);
+      expect(claims.get(`${TENANT}::thank_you_sms_audit:${job.id}`)?.status).toBe('sent');
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('with no auditRepo the sweep sends and stamps but takes no audit claim', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+
+      const result = await runThankYouSmsSweep(deps([], { pool, auditRepo: undefined }));
+
+      expect(result.sent).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(claims.has(`${TENANT}::thank_you_sms_audit:${job.id}`)).toBe(false);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('an audit claim still in flight (fresh "claimed") is left to its owner — no audit row, no stamp from this sweep', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+      claims.set(`${TENANT}::thank_you_sms_audit:${job.id}`, { status: 'claimed', claimedAt: Date.now() });
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.suppressed).toBe(1);
+      expect(send).not.toHaveBeenCalled();
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(0);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeUndefined();
+    });
+  });
+
   /**
    * PR #994, Codex P1 — the production wiring, not a substitute for it.
    *

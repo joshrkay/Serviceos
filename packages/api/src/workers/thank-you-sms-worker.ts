@@ -75,7 +75,7 @@ const PERMANENT_GATE_REASONS: ReadonlySet<SmsSuppressionReason> = new Set<SmsSup
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
-import { withSendClaim, claimOnce } from '../notifications/send-claim-ledger';
+import { withSendClaim } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
@@ -244,8 +244,8 @@ function thankYouClaimKey(jobId: string): string {
 
 /**
  * #1140 — a DISTINCT claim_key namespace from `thankYouClaimKey`, used only
- * to gate the `notification.thank_you_sms.sent` audit write itself (see
- * `claimOnce` at the bottom of `sendOneThankYou`). The send-claim key above
+ * to gate the `notification.thank_you_sms.sent` audit write itself (see the
+ * audit `withSendClaim` at the bottom of `sendOneThankYou`). The send-claim key above
  * protects the PROVIDER call (at most one real SMS); this one protects the
  * bookkeeping that follows it (at most one audit row), which can be reached
  * by more than one caller once the send-claim is already `'sent'`.
@@ -359,38 +359,58 @@ async function sendOneThankYou(
     }
   }
 
-  await deps.jobRepo.update(tenantId, jobId, {
-    thankYouSmsSentAt: (deps.now ?? (() => new Date()))(),
-  });
-
   // #1140 — exactly one notification.thank_you_sms.sent audit event per job,
   // however many code paths converge here for the SAME real send: this
   // happy-path call (a claim this attempt itself just won), OR a reconcile
   // (`claimResult.priorStatus === 'sent'` above) running because a prior
-  // attempt's own jobRepo.update/emitAudit hasn't landed yet — the
-  // eligibility SELECT and the stamp UPDATE are not in one transaction, so
-  // TWO overlapping sweep ticks can both observe thank_you_sms_sent_at IS
-  // NULL for the same already-'sent' claim and both reach this exact line.
-  // The send-claim ledger's own claimed→sending CAS only protects the
-  // PROVIDER call, not this bookkeeping, so it can't be reused directly here
-  // — but the same atomic primitive (send_claims' UNIQUE (tenant_id,
-  // claim_key), via claimOnce) can: a SEPARATE claim_key namespace turns
-  // "write the audit" itself into a claim, so only the first of any number
-  // of concurrent or sequential callers actually writes it. No migration —
-  // reuses the existing send_claims table.
-  if (await claimOnce(pool, tenantId, thankYouAuditClaimKey(jobId))) {
-    await emitAudit(deps, {
+  // attempt's own audit/stamp hasn't landed yet — the eligibility SELECT and
+  // the stamp UPDATE are not in one transaction, so TWO overlapping sweep
+  // ticks can both observe thank_you_sms_sent_at IS NULL for the same
+  // already-'sent' claim and both reach this exact line. A SEPARATE claim_key
+  // namespace in the same send_claims ledger turns "write the audit" itself
+  // into a claim, so only one of any number of concurrent or sequential
+  // callers writes it. No migration — reuses the existing send_claims table.
+  //
+  // #1184 — and the claim is spent only once the row is WRITTEN. It is taken
+  // as 'claimed' and flips to 'sent' only after `auditRepo.create` resolves
+  // (withSendClaim's deferred mode: this "send" has no provider phase, so the
+  // claim never passes through the never-reclaimed 'sending' state). A throw
+  // releases the claim and propagates to the per-job catch; a crash leaves a
+  // 'claimed' row that `claimSend` stale-reclaims. Either way the stamp below
+  // has NOT been written, so the job is re-selected and the next sweep
+  // reconciles the audit (no resend: the SMS claim is already 'sent'). With
+  // no auditRepo wired there is nothing to record, so no claim is spent.
+  if (deps.auditRepo) {
+    const auditClaim = await withSendClaim(
+      pool,
       tenantId,
-      jobId,
-      customerId: customer.id,
-      outcome: 'sent',
-    });
-  } else {
-    deps.logger.info('Thank-you SMS sweep: audit already recorded for this send, skipping duplicate', {
-      tenantId,
-      jobId,
-    });
+      thankYouAuditClaimKey(jobId),
+      () => emitAudit(deps, { tenantId, jobId, customerId: customer.id, outcome: 'sent' }),
+      undefined,
+      { deferSendingUntilProviderStart: true },
+    );
+    if (auditClaim.outcome === 'duplicate') {
+      if (auditClaim.priorStatus !== 'sent') {
+        // Another attempt holds the audit claim and has not written the row
+        // yet. It stamps once its row lands; if its write fails, the stamp
+        // stays null so a later sweep records the audit. Stamping here would
+        // strand the job with no audit row.
+        deps.logger.info('Thank-you SMS sweep: audit write in flight by another attempt, not stamping', {
+          tenantId,
+          jobId,
+        });
+        return 'suppressed';
+      }
+      deps.logger.info('Thank-you SMS sweep: audit already recorded for this send, skipping duplicate', {
+        tenantId,
+        jobId,
+      });
+    }
   }
+
+  await deps.jobRepo.update(tenantId, jobId, {
+    thankYouSmsSentAt: (deps.now ?? (() => new Date()))(),
+  });
   return 'sent';
 }
 
