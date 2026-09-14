@@ -30,6 +30,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { Pool } from 'pg';
 import { getSharedTestDb, closeSharedTestDb, createTestTenant } from './shared';
 import type { AppWithLifecycle } from '../../src/app';
@@ -89,6 +91,14 @@ interface InvoiceRow {
 describe('#1203 — a milestone plan bills one recorded estimate (voice plan, real routes, real Postgres)', () => {
   let pool: Pool;
   let app: AppWithLifecycle;
+  /**
+   * One server bound to 127.0.0.1 for the whole file. supertest's per-request
+   * `request(app)` listens on a fresh ephemeral port each call; with other lanes'
+   * servers on this Mac one such call answered with a non-HTTP packet
+   * (HPE_INVALID_CONSTANT), so requests go to this explicit IPv4 address instead.
+   */
+  let server: Server;
+  let baseUrl: string;
   let prevEnv: Record<string, string | undefined>;
   let invoiceRepo: PgInvoiceRepository;
   let scheduleRepo: PgInvoiceScheduleRepository;
@@ -232,7 +242,7 @@ describe('#1203 — a milestone plan bills one recorded estimate (voice plan, re
 
   /** POST /api/estimates/:id/convert-to-invoice as the owner. */
   async function convert(s: Seeded, estimateId = s.estimateId) {
-    const res = await request(app)
+    const res = await request(baseUrl)
       .post(`/api/estimates/${estimateId}/convert-to-invoice`)
       .set('Authorization', bearer(s.userId))
       .send({});
@@ -241,13 +251,13 @@ describe('#1203 — a milestone plan bills one recorded estimate (voice plan, re
   }
 
   async function invoicePost(s: Seeded, path: string, body: Record<string, unknown>) {
-    const res = await request(app).post(path).set('Authorization', bearer(s.userId)).send(body);
+    const res = await request(baseUrl).post(path).set('Authorization', bearer(s.userId)).send(body);
     return res;
   }
 
   /** POST /api/jobs/:id/transition {status:'completed'} — the real completion effects run. */
   async function completeJob(s: Seeded) {
-    const res = await request(app)
+    const res = await request(baseUrl)
       .post(`/api/jobs/${s.jobId}/transition`)
       .set('Authorization', bearer(s.userId))
       .send({ status: 'completed' });
@@ -391,9 +401,13 @@ describe('#1203 — a milestone plan bills one recorded estimate (voice plan, re
     const { createApp } = await import('../../src/app');
     resetConfig();
     app = createApp();
+    server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
   afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await app.gracefulDrain('test-cleanup');
     const { resetConfig } = await import('../../src/shared/config');
     resetConfig();
