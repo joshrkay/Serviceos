@@ -20,40 +20,29 @@
  *     caller's session gets `session.b2bAccountContext` assembled, a
  *     residential caller's does not, and tenant B's caller (no B2B
  *     account at all) does not either.
- *   - #1010 wired the ONLY consumer: `create-voice-turn-processor.ts`
- *     resolves `session.b2bAccountContext` →
- *     `buildAccountContextPromptSection` → passed to `classifyIntent` as a
- *     SEPARATE, labelled SYSTEM message ahead of the transcript.
+ *   - #1010 wired the media-streams consumer (`create-voice-turn-processor.ts`
+ *     → `buildAccountContextPromptSection` → a SEPARATE, labelled SYSTEM
+ *     message to `classifyIntent`); #1155 wired the same section into the
+ *     Gather path (`twilio-adapter.ts` `_handleGatherLocked`) and stamps
+ *     `accountContext` on the proposal both transports mint.
  *
- * WHY THE ROW'S OWN "OBSERVABLY DIFFERENT" CANNOT BE SHOWN ON THIS SURFACE
- * HERMETICALLY (#1119-class — pinned below, not faked): the hermetic mock
- * gateway (`scriptHermeticResponse`, ai/providers/mock.ts) scripts its
- * `classify_intent` branch from `lastUserText(request)` ONLY — it reads
- * the last message with `role: 'user'` and never inspects any `role:
- * 'system'` message. The B2B account-context section #1010 wires in is
- * ALWAYS a system message (`create-voice-turn-processor.ts`'s
- * `b2bAccountPromptSection` assembly). So, with NO live model, a
- * property-manager caller and a residential caller who speak the IDENTICAL
- * turn produce the IDENTICAL classification, `intentType` included — there
- * is no external (HTTP response / DB row) signal this lane's hermetic
- * webhook surface can observe that distinguishes them. The row's own
- * "priority" field is never read anywhere else either (confirmed: grep
- * shows zero consumers of `ctx.priority` besides the prompt section
- * builder) — so nothing routes on it that a DB read-back could catch.
- * What IS proven below: the assembly path itself is reachable and inert
- * (never crashes, never errors) for all three configurations in one run —
- * a genuine, if partial, reachability result — with the "observably
- * different" requirement pinned as unreachable without a live model.
+ * #1155 (fixed) — "OBSERVABLY DIFFERENT" ON THIS SURFACE, HERMETICALLY:
+ * the hermetic mock gateway (`scriptHermeticResponse`, ai/providers/mock.ts)
+ * scripts `classify_intent` from the last USER message only and the hermetic
+ * gateway records no ai_runs rows, so the classify-prompt difference (the
+ * account-context SYSTEM message, now also sent by the Gather path) is proven
+ * at the integration level instead (test/integration/
+ * b2b-account-context-gather.test.ts, recorded gateway requests). What THIS
+ * surface can observe is the proposal row: since #1155 a proposal minted on a
+ * business caller's call carries `source_context.accountContext` (account
+ * type + PRIORITY). The second test drives the deterministic emergency path
+ * (a server-side keyword match, no LLM involved) for a property-manager
+ * caller and a residential caller speaking the IDENTICAL words, and reads
+ * both `emergency_dispatch` proposals back from Postgres.
  *
- * GENUINE PRODUCT GAP (report only, not fixed here — test-only lane): no
- * owner-facing route sets a customer's `accountType`. `createCustomerSchema`
- * (shared/contracts.ts) and `routes/customers.ts` never mention
- * `accountType`/`account_type` at all (grepped, zero hits) — it is settable
- * ONLY by direct SQL today. This spec sets it that way, same as any other
- * tenant/customer CONFIGURATION column this lane seeds directly when no
- * route exists (mirrors provisionTenant's own direct settings inserts) —
- * not a state the product's call-handling logic itself should have
- * produced.
+ * #1155 also closed the route gap: `accountType` is now accepted (and
+ * enum-validated) by POST/PUT /api/customers, so both tests set it through
+ * the real owner route instead of direct SQL.
  *
  * T3: tenant A's property-manager customer, tenant A's OWN residential
  * customer, and tenant B's (no-B2B-account) caller are all driven in the
@@ -68,6 +57,7 @@ import {
   sessionIdFromTwiml,
   devAuthBearerToken,
   createCustomerViaApi,
+  pollFor,
   type ProvisionedTenant,
 } from './fixtures/capture-8-2-lane';
 
@@ -79,6 +69,9 @@ const B_SUBACCOUNT = 'AC1014c12bbbbbbbbbbbbbbbbbbbbbbbbb';
 const A_TOKEN = 'tenant-a-twilio-auth-token-1014c12-121';
 const B_TOKEN = 'tenant-b-twilio-auth-token-1014c12-121';
 const TURN_TEXT = 'The unit at 4B has no hot water, can someone come out today';
+// E2 (not E1 life-safety) deterministic emergency phrase — mints an
+// emergency_dispatch proposal with no LLM call, identical for both callers.
+const EMERGENCY_TURN_TEXT = 'There is a burst pipe in the unit at 4B, can someone come out today';
 
 const enc = process.env.TENANT_ENCRYPTION_KEY;
 const dbReady = !!process.env.DATABASE_URL;
@@ -89,7 +82,7 @@ let tenantB: ProvisionedTenant;
 
 test.describe.configure({ mode: 'serial' });
 
-test.describe('#1014 row 2.12 — a property-manager caller reaches the B2B-context assembly path (phone surface, T3; observable-difference leg pinned #1119-class)', () => {
+test.describe('#1014 row 2.12 — a property-manager caller reaches the B2B-context assembly path and its call is observably different (phone surface, T3)', () => {
   test.skip(
     !dbReady || !enc,
     'Needs a real Postgres (DATABASE_URL, migrated) and TENANT_ENCRYPTION_KEY.',
@@ -116,7 +109,8 @@ test.describe('#1014 row 2.12 — a property-manager caller reaches the B2B-cont
     tenant: ProvisionedTenant,
     subaccountSid: string,
     authToken: string,
-  ): Promise<{ status: number; twiml: string }> {
+    speech: string = TURN_TEXT,
+  ): Promise<{ status: number; twiml: string; sessionId: string }> {
     const callSid = `CA-2-12-${tenant.tenantId.slice(0, 6)}-${crypto.randomUUID().slice(0, 8)}`;
     const voice = await signedPost(
       request,
@@ -125,15 +119,15 @@ test.describe('#1014 row 2.12 — a property-manager caller reaches the B2B-cont
       authToken,
     );
     const voiceTwiml = await voice.text();
-    if (voice.status() !== 200) return { status: voice.status(), twiml: voiceTwiml };
+    if (voice.status() !== 200) return { status: voice.status(), twiml: voiceTwiml, sessionId: '' };
     const sid = sessionIdFromTwiml(voiceTwiml);
     const gather = await signedPost(
       request,
       `/api/telephony/gather?sid=${sid}`,
-      { CallSid: callSid, AccountSid: subaccountSid, From: caller, To: tenant.did, SpeechResult: TURN_TEXT, Confidence: '0.95' },
+      { CallSid: callSid, AccountSid: subaccountSid, From: caller, To: tenant.did, SpeechResult: speech, Confidence: '0.95' },
       authToken,
     );
-    return { status: gather.status(), twiml: await gather.text() };
+    return { status: gather.status(), twiml: await gather.text(), sessionId: sid };
   }
 
   test('T3: a property-manager caller, a residential caller (same tenant), and a no-B2B-account caller (tenant B) all reach the assembly path without error', async ({
@@ -141,14 +135,15 @@ test.describe('#1014 row 2.12 — a property-manager caller reaches the B2B-cont
   }) => {
     const ownerA = devAuthBearerToken(tenantA.userId);
 
+    // #1155 — accountType set through the real owner route (see file header).
     const pm = await createCustomerViaApi(request, ownerA, {
       firstName: 'Portfolio',
       lastName: 'Manager',
       primaryPhone: '+15125551211',
+      accountType: 'property_manager',
     });
-    // No owner-facing route sets accountType (see file header) — direct SQL
-    // configuration, not a state the call-handling logic itself produces.
-    await pool.query(`UPDATE customers SET account_type = 'property_manager' WHERE id = $1`, [pm.id]);
+    const { rows: pmRows } = await pool.query(`SELECT account_type FROM customers WHERE id = $1`, [pm.id]);
+    expect(pmRows[0]?.account_type, 'POST /api/customers must persist accountType').toBe('property_manager');
 
     const residential = await createCustomerViaApi(request, ownerA, {
       firstName: 'Res',
@@ -168,55 +163,52 @@ test.describe('#1014 row 2.12 — a property-manager caller reaches the B2B-cont
     void residential;
   });
 
-  test(
-    'KNOWN GAP — the property-manager call should be OBSERVABLY DIFFERENT from the residential call (expected to fail hermetically)',
-    async ({ request }) => {
-      test.fail(
-        true,
-        'ai/providers/mock.ts scriptHermeticResponse (the hermetic no-' +
-          'AI_PROVIDER_API_KEY LLM gateway every spec in this lane runs ' +
-          'under) scripts classify_intent from lastUserText(request) ONLY — ' +
-          "it never inspects a role:'system' message. #1010's B2B account " +
-          "context (create-voice-turn-processor.ts's b2bAccountPromptSection) " +
-          'is ALWAYS carried as a separate system message, never folded into ' +
-          'the user turn, so a property-manager caller and a residential ' +
-          'caller speaking the IDENTICAL utterance produce the IDENTICAL ' +
-          'classification with no live model — there is no HTTP response or ' +
-          "DB row this hermetic webhook surface can read that distinguishes " +
-          "them. session.b2bAccountContext.priority also has NO OTHER " +
-          'consumer anywhere in the codebase (grepped) to route on instead. ' +
-          '#1119-class: the row\'s "observably different" claim needs a real ' +
-          'model to reach on this surface.',
+  test('#1155 — the property-manager call is OBSERVABLY DIFFERENT from the residential call: its proposal carries PRIORITY account context (formerly pinned KNOWN GAP); T3', async ({
+    request,
+  }) => {
+    const ownerA = devAuthBearerToken(tenantA.userId);
+    await createCustomerViaApi(request, ownerA, {
+      firstName: 'Portfolio2',
+      lastName: 'Manager2',
+      primaryPhone: '+15125551214',
+      accountType: 'property_manager',
+    });
+    await createCustomerViaApi(request, ownerA, {
+      firstName: 'Res2',
+      lastName: 'Idential2',
+      primaryPhone: '+15125551215',
+    });
+
+    const pmCall = await callAndCaptureTwiml(request, '+15125551214', tenantA, A_SUBACCOUNT, A_TOKEN, EMERGENCY_TURN_TEXT);
+    const residentialCall = await callAndCaptureTwiml(request, '+15125551215', tenantA, A_SUBACCOUNT, A_TOKEN, EMERGENCY_TURN_TEXT);
+    const tenantBCall = await callAndCaptureTwiml(request, '+15125551216', tenantB, B_SUBACCOUNT, B_TOKEN, EMERGENCY_TURN_TEXT);
+    for (const call of [pmCall, residentialCall, tenantBCall]) {
+      expect(call.status).toBe(200);
+      expect(call.sessionId).toMatch(/^[0-9a-f-]{36}$/i);
+    }
+
+    // #1133-style read-after-write: poll each call's own proposal row.
+    const proposalFor = async (tenantId: string, sessionId: string) =>
+      pollFor<{ proposal_type: string; account_context: Record<string, unknown> | null }>(
+        pool,
+        `SELECT proposal_type, source_context->'accountContext' AS account_context
+           FROM proposals
+          WHERE tenant_id = $1 AND source_context->>'sessionId' = $2
+            AND proposal_type = 'emergency_dispatch'`,
+        [tenantId, sessionId],
       );
+    const pmRows = await proposalFor(tenantA.tenantId, pmCall.sessionId);
+    const residentialRows = await proposalFor(tenantA.tenantId, residentialCall.sessionId);
+    const tenantBRows = await proposalFor(tenantB.tenantId, tenantBCall.sessionId);
 
-      const ownerA = devAuthBearerToken(tenantA.userId);
-      const pm2 = await createCustomerViaApi(request, ownerA, {
-        firstName: 'Portfolio2',
-        lastName: 'Manager2',
-        primaryPhone: '+15125551214',
-      });
-      await pool.query(`UPDATE customers SET account_type = 'property_manager' WHERE id = $1`, [pm2.id]);
-      const res2 = await createCustomerViaApi(request, ownerA, {
-        firstName: 'Res2',
-        lastName: 'Idential2',
-        primaryPhone: '+15125551215',
-      });
-
-      const pmCall = await callAndCaptureTwiml(request, '+15125551214', tenantA, A_SUBACCOUNT, A_TOKEN);
-      const residentialCall = await callAndCaptureTwiml(request, '+15125551215', tenantA, A_SUBACCOUNT, A_TOKEN);
-
-      void res2;
-      // Each call's TwiML embeds a fresh, random session id in the <Gather>
-      // action URL (`?sid=<uuid>`) — a meaningless difference present on
-      // EVERY pair of calls regardless of B2B logic. Strip it so the
-      // comparison reflects actual spoken/business content, not per-call
-      // plumbing — otherwise this assertion "passes" for the wrong reason
-      // (any two calls' raw TwiML always differ by this UUID alone).
-      const normalize = (twiml: string) => twiml.replace(/sid=[0-9a-f-]{36}/gi, 'sid=SESSION');
-      expect(
-        normalize(pmCall.twiml),
-        'expected the PM call to differ observably from the residential call',
-      ).not.toBe(normalize(residentialCall.twiml));
-    },
-  );
+    expect({
+      pm: pmRows.map((r) => r.account_context),
+      residential: residentialRows.map((r) => r.account_context),
+      tenantB: tenantBRows.map((r) => r.account_context),
+    }).toEqual({
+      pm: [{ accountType: 'property_manager', priority: true, managedPropertyCount: 0 }],
+      residential: [null],
+      tenantB: [null],
+    });
+  });
 });

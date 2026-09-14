@@ -20,6 +20,7 @@ import {
 } from '../files/file-service';
 import { JobPhotoService } from '../jobs/job-photo-service';
 import { isValidJobPhotoCategory } from '../jobs/job-photo';
+import { JobRepository } from '../jobs/job';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
@@ -55,10 +56,18 @@ export interface JobPhotosRouterDeps {
   storage: StorageProvider;
   bucket: string;
   auditRepo: AuditRepository;
+  /**
+   * #1187 — a well-formed but unknown job id must 404, not write an orphan
+   * `files` row (presign-upload; entity_id is TEXT, no FK) or hit the
+   * `job_photos.job_id` FK violation as a bare 500 (attach). Only
+   * `findById` is used, tenant-scoped, so a tenant B job id seen from
+   * tenant A also resolves to "missing".
+   */
+  jobRepo: Pick<JobRepository, 'findById'>;
 }
 
 export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
-  const { service, fileRepo, storage, bucket, auditRepo } = deps;
+  const { service, fileRepo, storage, bucket, auditRepo, jobRepo } = deps;
   const router = Router();
 
   // Step 1 of upload: client requests a presigned URL. We create the
@@ -69,6 +78,10 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    // #1187 — a malformed job id would otherwise reach jobRepo.findById's
+    // uuid-typed column comparison and 500; the id names nothing either
+    // way, so answer 404 for both a malformed and a well-formed-unknown id.
+    notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = (req.body ?? {}) as PresignBody;
       const jobId = req.params.id;
@@ -106,6 +119,15 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
             ? 'Photo exceeds maximum allowed size of ' + MAX_JOB_PHOTO_SIZE + ' bytes'
             : 'Photo size must be a positive number',
         });
+        return;
+      }
+
+      // #1187 — look the job up through the tenant-scoped repository
+      // before writing. files.entity_id is TEXT (no FK), so an unknown
+      // job id wrote an orphan row and a storage URL and still 201'd.
+      const job = await jobRepo.findById(tenantId, jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
         return;
       }
 
@@ -170,6 +192,15 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
       const takenAt = body.takenAt ? new Date(body.takenAt) : undefined;
       if (takenAt && Number.isNaN(takenAt.getTime())) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'takenAt is invalid' });
+        return;
+      }
+
+      // #1187 — look the job up through the tenant-scoped repository
+      // before writing. Without this, an unknown-but-well-formed job id
+      // reached the job_photos.job_id FK and surfaced as a bare 500.
+      const job = await jobRepo.findById(tenantId, jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
         return;
       }
 

@@ -127,7 +127,9 @@ describe('#1110 — malformed :id → 404 via notFoundOnMalformedId, at real Pos
       { router: 'customer-groups', method: 'get', path: (v) => `/api/customer-groups/for-customer/${v}`, message: 'Customer not found', unknownStatus: 200, technicianAllowed: true },
       { router: 'customer-groups', method: 'get', path: (v) => `/api/customer-groups/${v}/members`, message: 'Customer group not found', unknownStatus: 200, technicianAllowed: true },
       { router: 'customer-groups', method: 'put', path: (v) => `/api/customer-groups/${v}/members/${u()}`, body: {}, message: 'Customer group not found', unknownStatus: 404, technicianAllowed: false },
-      { router: 'customer-groups', method: 'put', path: (v) => `/api/customer-groups/${groupA}/members/${v}`, body: {}, message: 'Customer not found', unknownStatus: 500, technicianAllowed: false },
+      // #1187 fixed the well-formed-unknown-customerId 500 → 404 (a
+      // tenant-scoped customerRepo.findById lookup before the write).
+      { router: 'customer-groups', method: 'put', path: (v) => `/api/customer-groups/${groupA}/members/${v}`, body: {}, message: 'Customer not found', unknownStatus: 404, technicianAllowed: false },
       { router: 'customer-groups', method: 'delete', path: (v) => `/api/customer-groups/${v}/members/${u()}`, message: 'Customer group not found', unknownStatus: 200, technicianAllowed: false },
       { router: 'customer-groups', method: 'delete', path: (v) => `/api/customer-groups/${groupA}/members/${v}`, message: 'Customer not found', unknownStatus: 200, technicianAllowed: false },
       // files
@@ -153,7 +155,9 @@ describe('#1110 — malformed :id → 404 via notFoundOnMalformedId, at real Pos
       { router: 'job-forms', method: 'get', path: (v) => `/api/job-forms/submissions/${v}`, message: 'Job form submission not found', unknownStatus: 404, technicianAllowed: true },
       { router: 'job-forms', method: 'patch', path: (v) => `/api/job-forms/submissions/${v}`, body: { answers: [] }, message: 'Job form submission not found', unknownStatus: 404, technicianAllowed: true },
       // job-photos
-      { router: 'job-photos', method: 'post', path: (v) => `/api/jobs/${v}/photos`, body: { fileId: fileA, category: 'before' }, message: 'Job not found', unknownStatus: 500, technicianAllowed: true },
+      // #1187 fixed the well-formed-unknown-jobId 500 → 404 (a
+      // tenant-scoped jobRepo.findById lookup before the write).
+      { router: 'job-photos', method: 'post', path: (v) => `/api/jobs/${v}/photos`, body: { fileId: fileA, category: 'before' }, message: 'Job not found', unknownStatus: 404, technicianAllowed: true },
       { router: 'job-photos', method: 'get', path: (v) => `/api/jobs/${v}/photos`, message: 'Job not found', unknownStatus: 200, technicianAllowed: true },
       { router: 'job-photos', method: 'delete', path: (v) => `/api/jobs/${jobA}/photos/${v}`, message: 'Job photo not found', unknownStatus: 404, technicianAllowed: true },
       // marketing
