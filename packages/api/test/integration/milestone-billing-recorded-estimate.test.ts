@@ -33,6 +33,8 @@
  *   M1/M2 convert never returns a canceled plan milestone as "Invoice created"
  *   N1/N2 POST /api/invoices with the plan's estimate answers a readable 409
  *   O  milestone billing off → a plan with completion milestones is refused at approval
+ *   P  two concurrent converts of one estimate: both answer the one real conversion (the
+ *      uq_invoices_estimate collision is recovered inside the request, not a 500)
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
@@ -1024,5 +1026,17 @@ describe('#1203 — a milestone plan bills one estimate (voice plan, real routes
     expect(result.error).toBe(
       "Milestone billing is off, so this plan's completion milestones would never be billed. Turn milestone billing on in Settings, or invoice by hand. No invoice schedule was created.",
     );
+  });
+
+  it('P — two concurrent converts of one estimate both answer the single real conversion; nothing 500s', async () => {
+    const s = await seed('P');
+    const [first, second] = await Promise.all([convert(s), convert(s)]);
+    await dump(s, 'P concurrent converts');
+    say('P responses', `${first.status} ${first.body.invoiceNumber ?? first.body.message} | ${second.status} ${second.body.invoiceNumber ?? second.body.message}`);
+
+    const rows = await invoiceRows(s);
+    expect(rows.map((r) => [r.invoice_number, r.estimate_id, r.total_cents])).toEqual([['INV-0001', s.estimateId, 100000]]);
+    expect([first.status, second.status]).toEqual([201, 201]);
+    expect(second.body.id).toBe(first.body.id);
   });
 });

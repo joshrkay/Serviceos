@@ -13,6 +13,7 @@ import { ConflictError, ValidationError } from '../shared/errors';
 import { resolveSelectedLineItems } from '../shared/billing-engine';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { Logger } from '../logging/logger';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import { InvoiceScheduleRepository } from './invoice-schedule';
 import {
   estimateLinkHeldByMilestoneReason,
@@ -110,7 +111,11 @@ export async function convertEstimateToInvoice(
 
   let invoice;
   try {
-    invoice = await createInvoiceWithNextNumber(
+    // #1203 — SAVEPOINT-wrap the insert: on the request path (POST
+    // /estimates/:id/convert-to-invoice) a 23505 would otherwise abort the
+    // whole request transaction, so the re-fetch below could never run and the
+    // caller got a 500. No-op off the request path.
+    invoice = await withRequestSavepoint(() => createInvoiceWithNextNumber(
       {
         tenantId,
         jobId: estimate.jobId,
@@ -125,7 +130,7 @@ export async function convertEstimateToInvoice(
       deps.invoiceRepo,
       deps.settingsRepo,
       deps.auditRepo,
-    );
+    ));
   } catch (err) {
     // Concurrency backstop: a racing convert may have inserted the linked
     // invoice between our findByJob check and this insert, tripping the
