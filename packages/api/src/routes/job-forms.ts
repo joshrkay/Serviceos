@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { JobRepository } from '../jobs/job';
 import {
@@ -53,6 +54,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Job form template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const template = await jobFormRepo.findTemplateById(req.auth!.tenantId, req.params.id);
       if (!template) {
@@ -89,6 +91,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    notFoundOnMalformedId('Job form template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateJobFormTemplateSchema.parse(req.body);
       const template = await updateJobFormTemplate(
@@ -109,6 +112,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    notFoundOnMalformedId('Job form template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await archiveJobFormTemplate(
         req.auth!.tenantId,
@@ -133,6 +137,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Job not found', 'jobId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const submissions = await jobFormRepo.listSubmissionsByJob(
         req.auth!.tenantId,
@@ -147,6 +152,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job not found', 'jobId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createJobFormSubmissionSchema.parse(req.body);
       // Confirm the job belongs to this tenant before attaching a submission —
@@ -176,6 +182,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Job form submission not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const submission = await jobFormRepo.findSubmissionById(req.auth!.tenantId, req.params.id);
       if (!submission) {
@@ -191,6 +198,7 @@ export function createJobFormRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job form submission not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateJobFormSubmissionSchema.parse(req.body);
       const submission = await updateJobFormSubmission(
