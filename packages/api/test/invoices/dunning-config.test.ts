@@ -6,8 +6,12 @@ import {
   InMemoryDunningConfigRepository,
   InMemoryDunningEventRepository,
   defaultDunningConfig,
+  applyLateFeePolicy,
+  lateFeePolicyOf,
+  lateFeePolicyUpdateSchema,
 } from '../../src/invoices/dunning-config';
 import { selectDueReminderSteps } from '../../src/invoices/dunning-schedule';
+import { computeLateFeeCents } from '../../src/invoices/late-fee';
 
 const TENANT = 'tenant-dunning';
 
@@ -225,5 +229,100 @@ describe('selectDueReminderSteps', () => {
       sentStepKeys: [],
     });
     expect(due.map((d) => d.stepKey)).toEqual(['3:sms']);
+  });
+});
+
+// #1143 — the owner-editable late-fee slice of the config (PUT /api/settings/dunning).
+describe('lateFeePolicyUpdateSchema', () => {
+  it.each([
+    [{ lateFeeType: 'none' }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 1 }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 5000, lateFeeGraceDays: 10, lateFeeMaxCents: 2000 }],
+    [{ lateFeeType: 'percent', lateFeeValueCents: 10000, lateFeeMaxCents: null }],
+  ])('accepts %j', (body) => {
+    expect(lateFeePolicyUpdateSchema.safeParse(body).success).toBe(true);
+  });
+
+  it.each([
+    [{}],
+    [{ lateFeeType: 'flat' }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 0 }],
+    [{ lateFeeType: 'percent', lateFeeValueCents: 0 }],
+    [{ lateFeeType: 'percent', lateFeeValueCents: 10001 }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 1.5 }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 100, lateFeeGraceDays: 1.5 }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 100, lateFeeGraceDays: -1 }],
+    [{ lateFeeType: 'flat', lateFeeValueCents: 100, lateFeeMaxCents: -1 }],
+    [{ lateFeeType: 'daily', lateFeeValueCents: 100 }],
+    [{ lateFeeType: 'none', enabled: false }],
+    [{ lateFeeType: 'none', tenantId: 'someone-else' }],
+  ])('rejects %j', (body) => {
+    expect(lateFeePolicyUpdateSchema.safeParse(body).success).toBe(false);
+  });
+});
+
+describe('applyLateFeePolicy', () => {
+  const now = new Date('2026-09-13T12:00:00Z');
+
+  it('replaces only the late-fee fields, preserving id, tenant, enabled, cadence and createdAt', () => {
+    const current = makeConfig({ enabled: false });
+    const next = applyLateFeePolicy(
+      current,
+      { lateFeeType: 'flat', lateFeeValueCents: 5000, lateFeeGraceDays: 5, lateFeeMaxCents: 2000 },
+      now,
+    );
+    expect(next).toEqual({
+      ...current,
+      lateFeeType: 'flat',
+      lateFeeValueCents: 5000,
+      lateFeeGraceDays: 5,
+      lateFeeMaxCents: 2000,
+      updatedAt: now,
+    });
+    // Pure: the input is untouched.
+    expect(current.lateFeeType).toBe('none');
+  });
+
+  it('defaults an omitted grace to 0 and an omitted/null cap to uncapped', () => {
+    const next = applyLateFeePolicy(makeConfig(), { lateFeeType: 'percent', lateFeeValueCents: 150, lateFeeMaxCents: null }, now);
+    expect(next.lateFeeGraceDays).toBe(0);
+    expect(next.lateFeeMaxCents).toBeUndefined();
+  });
+
+  it("'none' clears the amount, grace and cap", () => {
+    const withFee = makeConfig({ lateFeeType: 'flat', lateFeeValueCents: 5000, lateFeeGraceDays: 5, lateFeeMaxCents: 2000 });
+    expect(applyLateFeePolicy(withFee, { lateFeeType: 'none' }, now)).toMatchObject({
+      lateFeeType: 'none',
+      lateFeeValueCents: 0,
+      lateFeeGraceDays: 0,
+      lateFeeMaxCents: undefined,
+    });
+  });
+
+  it('introduces no fee math: the policy it writes is clamped by the existing computeLateFeeCents cap', () => {
+    const next = applyLateFeePolicy(
+      makeConfig(),
+      { lateFeeType: 'flat', lateFeeValueCents: 5000, lateFeeGraceDays: 5, lateFeeMaxCents: 2000 },
+      now,
+    );
+    const dueDate = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+    expect(computeLateFeeCents(next, { amountDueCents: 100000, dueDate, now })).toBe(2000);
+    // Inside the grace window the same policy charges nothing.
+    const recent = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+    expect(computeLateFeeCents(next, { amountDueCents: 100000, dueDate: recent, now })).toBe(0);
+  });
+});
+
+describe('lateFeePolicyOf', () => {
+  it('projects the late-fee slice with an uncapped policy as null', () => {
+    expect(lateFeePolicyOf(defaultDunningConfig(TENANT))).toEqual({
+      lateFeeType: 'none',
+      lateFeeValueCents: 0,
+      lateFeeGraceDays: 0,
+      lateFeeMaxCents: null,
+    });
+    expect(
+      lateFeePolicyOf(makeConfig({ lateFeeType: 'flat', lateFeeValueCents: 900, lateFeeGraceDays: 2, lateFeeMaxCents: 1500 })),
+    ).toEqual({ lateFeeType: 'flat', lateFeeValueCents: 900, lateFeeGraceDays: 2, lateFeeMaxCents: 1500 });
   });
 });
