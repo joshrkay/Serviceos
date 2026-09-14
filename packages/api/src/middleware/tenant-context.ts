@@ -177,12 +177,22 @@ export function withTenantTransaction(pool: Pool) {
     // that did its last write, awaited, and then responded 200 without another
     // query reports success over writes that no longer exist.
     //
-    // So record it and answer the request ourselves while we still can. A
-    // handler that later tries to respond hits `res.headersSent`, which
-    // asyncRoute already guards. If the response has already started (a
-    // streamed body — a window of microseconds, since a finished response has
-    // already run `cleanup` and removed this listener) there is nothing left
-    // to correct, so we log and let `cleanup` skip the doomed COMMIT.
+    // So record it and, if nothing else answers, answer the request ourselves.
+    //
+    // "If nothing else answers" is the important part. `pg` raises this TWO
+    // ways at once when a query happens to be in flight: `_handleErrorEvent`
+    // calls `_errorAllQueries(err)` — rejecting the handler's own `await`, which
+    // flows through asyncRoute into the normal error pipeline — and THEN emits
+    // this event. Answering synchronously here would beat that pipeline to the
+    // response and leave it to write a second one into a committed response
+    // (ERR_HTTP_HEADERS_SENT, and Express's default handler then destroys the
+    // socket mid-flush). So defer by one turn and stand down if anything has
+    // started responding: the route's own error is the better answer whenever
+    // it exists, and this fires only for the case that has no other reporter —
+    // the handler that was awaiting something non-DB and would otherwise go on
+    // to report success over writes the server already discarded. The global
+    // handler in app.ts carries the matching `headersSent` guard for the
+    // orderings this cannot win.
     let connectionLost: Error | undefined;
     const onConnectionLost = (err: Error): void => {
       if (connectionLost) return;
@@ -190,12 +200,14 @@ export function withTenantTransaction(pool: Pool) {
       process.stderr.write(
         `request transaction connection lost — transaction rolled back by the server: ${err.message}\n`,
       );
-      if (!res.headersSent && !res.writableEnded) {
+      setImmediate(() => {
+        if (cleanedUp || released) return;
+        if (res.headersSent || res.writableEnded) return;
         res.status(500).json({
           error: 'INTERNAL_ERROR',
           message: 'Database connection was terminated; the request was rolled back',
         });
-      }
+      });
     };
     client.on('error', onConnectionLost);
 
