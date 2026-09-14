@@ -103,7 +103,12 @@ describe('#913 — assistant chat replies carry the classifier usage actually sp
       { proposalRepo },
     );
 
-    const res = await chat(app, 'Convert the Johnson lead to a customer');
+    // Free-text phrasing so the turn hits the real LLM classify (the
+    // scripted gateway supplies the usage). The anchored "Convert the X lead
+    // to a customer" command is short-circuited deterministically by
+    // matchOwnerOperatorCommand on an owner session, which legitimately
+    // reports zero usage — not the path #913 is about.
+    const res = await chat(app, 'Please convert the Johnson lead into a customer for me');
 
     expect(res.status).toBe(200);
     expect(res.body.message.proposal).toBeTruthy();

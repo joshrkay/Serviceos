@@ -87,7 +87,11 @@ describe('U10 — chat route threads the conversation id as the gateway session 
       classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
     ]);
 
-    const res = await chat(buildApp(gateway), 'Convert the Johnson lead to a customer');
+    // Free-text phrasing: main's deterministic owner-command short-circuit
+    // (matchOwnerOperatorCommand, gated on ownerSession) routes the anchored
+    // "Convert the X lead to a customer" form without a gateway call, so this
+    // test uses a phrasing that falls through to the real LLM classify.
+    const res = await chat(buildApp(gateway), 'Please convert the Johnson lead into a customer for me');
 
     expect(res.status).toBe(200);
     expect(typeof res.body.conversationId).toBe('string');
@@ -121,7 +125,7 @@ describe('U10 — chat route threads the conversation id as the gateway session 
       classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
     ]);
 
-    const res = await chat(buildApp(gateway), 'Convert the Johnson lead to a customer', conversationId);
+    const res = await chat(buildApp(gateway), 'Please convert the Johnson lead into a customer for me', conversationId);
 
     expect(res.status).toBe(200);
     expect(res.body.conversationId).toBe(conversationId);

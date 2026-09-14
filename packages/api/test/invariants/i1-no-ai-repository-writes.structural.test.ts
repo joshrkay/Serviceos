@@ -293,6 +293,11 @@ const GENERIC_RECEIVER_SITES: ReadonlyArray<{
     why: 'Evaluation record of invoice field provenance; eval store only.',
   },
   {
+    file: 'ai/agents/customer-calling/voice-session-store.ts',
+    as: 'ai-plane',
+    why: 'recordTurn persists a mid-call voice TRANSCRIPT turn (call_transcript_turns) for durability (U8) — the voice AI\'s own conversational record, keyed by CallSid + session id, never an operational business entity.',
+  },
+  {
     file: 'ai/tasks/estimate-template.ts',
     as: 'violation',
     why: 'repository.create(template) mints a tenant ESTIMATE TEMPLATE — priced, catalog-adjacent, operational — straight from an AI task module with no proposal. Found by the review that relaxed the receiver pattern; it was invisible to the first edition of this guard.',
