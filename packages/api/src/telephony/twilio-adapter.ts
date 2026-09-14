@@ -142,6 +142,7 @@ import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
 import type { EntityResolver } from '../ai/resolution/entity-resolver';
+import type { LocationRepository } from '../locations/location';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
@@ -189,9 +190,15 @@ export interface TwilioAdapterDeps {
    * P0 voice-safety — tenant-scoped entity resolver, spread straight into
    * `createVoiceTurnProcessor` by the constructor below. Declared here (rather
    * than relying on the untyped runtime spread from app.ts) so the Gather
-   * path's `resolveTurnEntities` call is type-checked against a real dep.
+   * path's `resolveTurnEntityEvent` call is type-checked against a real dep.
    */
   entityResolver?: EntityResolver;
+  /**
+   * #1118 — spread into the processor, which decorates `entityResolver` with
+   * the U3 customer address hint so a same-name disambiguation question can
+   * be answered by service address. Absent → phone-only hints.
+   */
+  locationRepo?: Pick<LocationRepository, 'findByCustomer'>;
   /** Used as actorId on proposal/audit rows when none is in scope. */
   systemActorId?: string;
   /** Business name used in recording disclosure copy. */
@@ -2684,17 +2691,33 @@ export class TwilioGatherAdapter {
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        const refs = await this.processor.resolveTurnEntities(
-          session,
-          opts.tenantId,
-          classifierEvent.intentType,
-          classifierEvent.entities as Record<string, unknown>,
+        // #1118 — an ambiguous reference becomes entity_ambiguous: the FSM
+        // asks (rendered to <Say> text below) instead of the ambiguity being
+        // folded into entity_resolved and dropped.
+        const resolutionFx = session.machine.dispatch(
+          await this.processor.resolveTurnEntityEvent(
+            session,
+            opts.tenantId,
+            classifierEvent.intentType,
+            classifierEvent.entities as Record<string, unknown>,
+          ),
         );
-        sideEffectsAll.push(
-          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
-        );
+        this.processor.expandDisambiguationTemplate(session, resolutionFx);
+        sideEffectsAll.push(...resolutionFx);
         this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
+    } else if (currentState === 'entity_resolution') {
+      // #1118 — the caller is answering the disambiguation question; the SAME
+      // shared handler the media-streams speechTurn runs. Without this branch
+      // the answer fell to the generic `else` → confidence_low, which the
+      // entity_resolution state ignores (a bare <Gather> with no <Say>).
+      sideEffectsAll.push(
+        ...(await this.processor.handleDisambiguationTurn(
+          session,
+          opts.tenantId,
+          opts.speechResult,
+        )),
+      );
     } else if (currentState === 'ask_caller') {
       // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
       // SAME find-or-create-customer + advance-to-intake logic the media-

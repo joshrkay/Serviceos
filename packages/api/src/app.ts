@@ -3618,6 +3618,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // spoken appointment/job reference and spoken time reached the proposal
     // unresolved and the payload could never satisfy its execution contract.
     ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
+    // #1118 — the U3 customer address hint on the phone's disambiguation
+    // question: two same-named customers are asked about, and matched, by
+    // service address — the same repo both in-app surfaces decorate with.
+    locationRepo,
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',

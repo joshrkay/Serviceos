@@ -26,6 +26,13 @@ import { createJobPhotosRouter } from '../../src/routes/job-photos';
 const TENANT_A = 'tenant-photos-a';
 const TENANT_B = 'tenant-photos-b';
 const BUCKET = 'serviceos-job-photos-test';
+// Job ids are uuids in production (job_photos.job_id uuid); the attach / list /
+// delete routes guard a malformed :id with a 404 (#1110), so fixtures on those
+// routes use real ones.
+const JOB_ATTACH_ID = '3a9c7e1f-2b4d-4f6a-8c1e-9d0b7a5f3e21';
+const JOB_BAD_FILE_ID = '8e2d4c6a-1f3b-4a5c-9e7d-0b2a4c6e8f13';
+const JOB_BAD_CAT_ID = 'c5f1a3e7-9b2d-4c8e-a6f0-1d3b5a7c9e02';
+const JOB_ISO_ID = '1b7d9f3a-5c2e-4e8b-b4a6-7f9d1c3e5a84';
 
 class FakeStorageProvider implements StorageProvider {
   async generateUploadUrl(bucket: string, key: string): Promise<string> {
@@ -115,7 +122,7 @@ describe('job-photo router (P12-001)', () => {
   });
 
   it('attach + list + delete round-trips a job-photo', async () => {
-    const jobId = 'job-attach-1';
+    const jobId = JOB_ATTACH_ID;
     const presign = await request(app)
       .post(`/api/jobs/${jobId}/photos/presign-upload`)
       .send({ filename: 'after.png', contentType: 'image/png', sizeBytes: 2048 });
@@ -153,7 +160,7 @@ describe('job-photo router (P12-001)', () => {
   });
 
   it('attach rejects unknown fileId with 404', async () => {
-    const jobId = 'job-bad-file';
+    const jobId = JOB_BAD_FILE_ID;
     const r = await request(app)
       .post(`/api/jobs/${jobId}/photos`)
       .send({ fileId: 'no-such-file', category: 'before' });
@@ -161,7 +168,7 @@ describe('job-photo router (P12-001)', () => {
   });
 
   it('attach rejects bad category with 400', async () => {
-    const jobId = 'job-bad-cat';
+    const jobId = JOB_BAD_CAT_ID;
     const presign = await request(app)
       .post(`/api/jobs/${jobId}/photos/presign-upload`)
       .send({ filename: 'x.jpg', contentType: 'image/jpeg', sizeBytes: 100 });
@@ -173,7 +180,7 @@ describe('job-photo router (P12-001)', () => {
   });
 
   it('enforces tenant isolation for list + delete', async () => {
-    const jobId = 'job-iso-1';
+    const jobId = JOB_ISO_ID;
     const presign = await request(app)
       .post(`/api/jobs/${jobId}/photos/presign-upload`)
       .send({ filename: 'a.jpg', contentType: 'image/jpeg', sizeBytes: 200 });

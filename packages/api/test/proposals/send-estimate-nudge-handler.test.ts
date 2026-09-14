@@ -199,18 +199,15 @@ describe('SendEstimateNudgeExecutionHandler', () => {
 
     expect(result.success).toBe(true);
     expect(result.resultEntityId).toBe(ESTIMATE_ID);
-    // objectContaining, not an exact match: main's #1145 threads an
-    // `idempotencyContext` onto the send input (its own concern, covered by
-    // estimate-nudge.test.ts). RV-086 pins that the shared send path is
-    // reused with the estimate, channel, and the owner's custom message.
-    expect(sendService.sendEstimate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tenantId: TENANT,
-        estimateId: ESTIMATE_ID,
-        channel: 'sms',
-        customMessage: 'Any questions?',
-      }),
-    );
+    expect(sendService.sendEstimate).toHaveBeenCalledWith({
+      tenantId: TENANT,
+      estimateId: ESTIMATE_ID,
+      channel: 'sms',
+      customMessage: 'Any questions?',
+      // #1145 — the nudge is claimed per occurrence (estimate, version,
+      // reminderCount + 1), so a retried first nudge dedupes and a later one does not.
+      idempotencyContext: `estimate_nudge:${ESTIMATE_ID}:v1:1`,
+    });
 
     const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
     expect(updated!.reminderCount).toBe(1);

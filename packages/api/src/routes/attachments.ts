@@ -33,6 +33,7 @@ import {
 import { AttachmentActor, AttachmentService } from '../attachments/attachment-service';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { validate } from '../shared/validation';
 
 // Presign is restricted to the entity types that have wired entity-existence
@@ -215,6 +216,7 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:delete'),
+    notFoundOnMalformedId('Attachment not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await service.archive(req.auth!.tenantId, actorOf(req), req.params.id);
       res.json(archived);
@@ -226,6 +228,7 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('attachments:visibility'),
+    notFoundOnMalformedId('Attachment not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = validate(visibilitySchema, req.body ?? {});
       const updated = await service.setPortalVisibility(
@@ -243,6 +246,7 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
+    notFoundOnMalformedId('Attachment not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = validate(pairSchema, req.body ?? {});
       const result = await service.pair(

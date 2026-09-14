@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createBundleSchema, updateBundleSchema, verticalTypeSchema } from '../shared/contracts';
 import {
   ServiceBundleRepository,
@@ -49,6 +50,7 @@ export function createBundleRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Bundle not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const bundle = await bundleRepo.findById(req.auth!.tenantId, req.params.id);
       if (!bundle) {
@@ -106,6 +108,7 @@ export function createBundleRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Bundle not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       // Validated like POST — raw req.body persisted unvalidated money in
       // lineItemTemplates straight to the bundles table.

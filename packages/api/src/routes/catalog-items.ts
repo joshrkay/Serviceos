@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { createCatalogItemSchema, updateCatalogItemSchema } from '../shared/contracts';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { z } from 'zod';
 import {
   CatalogCategory,
@@ -96,6 +97,7 @@ export function createCatalogItemsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    notFoundOnMalformedId('Catalog item not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateCatalogItemSchema.parse(req.body);
       if (Object.keys(parsed).length === 0) {
@@ -125,6 +127,7 @@ export function createCatalogItemsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    notFoundOnMalformedId('Catalog item not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await archiveCatalogItem(
         catalogRepo,

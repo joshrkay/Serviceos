@@ -178,7 +178,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/` | occasional | The general settings write. Configuration, by definition. | false | none | |
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |
 | `PUT /api/settings/capabilities/:key` | occasional | Per-tenant capability flags (#1011). Configuration. | false | none | |
-| `PUT /api/settings/dunning` | occasional | Dunning configuration — the overdue-invoice reminder cadence and late-fee policy the overdue sweep reads (#1143). Configuration, owner-only. | false | none | Reviewed: no SMS/voice on-ramp; dunning policy is set on screen. |
+| `PUT /api/settings/dunning` | occasional | The tenant's late-fee and dunning policy (#1143). Configuration set once and revisited rarely; the overdue sweep applies it with no owner action on a normal day. | false | none | |
 | `PUT /api/settings/packs/:packId/activate` | occasional | Vertical-pack activation. | false | none | |
 | `PUT /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken challenge. | false | none | |
 

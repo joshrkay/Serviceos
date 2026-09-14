@@ -5,6 +5,7 @@ import { MAX_FILE_SIZE, StorageProvider, UploadRequest, validateUpload } from '.
 import { JobFileRepository } from '../files/job-file-repository';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 
 interface UploadBody {
   filename?: string;
@@ -125,6 +126,7 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job file not found', 'fileId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const file = await jobFileRepo.findById(req.auth!.tenantId, req.params.fileId);
       if (!file || file.jobId !== req.params.id) {
