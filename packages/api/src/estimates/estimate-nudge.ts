@@ -116,6 +116,15 @@ export async function dispatchEstimateNudge(
     estimateId: estimate.id,
     channel,
     ...(input.customMessage !== undefined ? { customMessage: input.customMessage } : {}),
+    // #1145 — same per-revision, per-occurrence identity as this module's
+    // own send_claims claimKey below, so SendService's dispatch idempotency
+    // key can't collide with an unrelated owner manual send or
+    // proposal-triggered send of the SAME estimate+channel in the same
+    // wall-clock minute. Distinct occurrences are DELIBERATELY independent
+    // sends (that's the whole point of a reminder cadence), so each gets its
+    // own key; a genuine retry of this SAME occurrence still shares this
+    // context and dedupes as before.
+    idempotencyContext: estimateNudgeClaimKey(estimate.id, estimate.version, occurrence),
   };
 
   if (deps.pool) {
