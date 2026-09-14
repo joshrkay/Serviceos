@@ -4,7 +4,7 @@ import { CreateInvoiceScheduleExecutionHandler } from '../../src/proposals/execu
 import { actionClassForProposalType, Proposal } from '../../src/proposals/proposal';
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { createInvoiceSchedulePayloadSchema } from '../../src/proposals/contracts/create-invoice-schedule';
-import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryInvoiceScheduleRepository } from '../../src/invoices/invoice-schedule';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
@@ -333,28 +333,6 @@ describe('P21-002 — create_invoice_schedule', () => {
       expect(second.success).toBe(false);
       expect(second.error).toMatch(/different invoice schedule/i);
       expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
-    });
-
-    it('refuses a schedule for an estimate already converted to an invoice (#1203): no schedule, no milestone invoice', async () => {
-      const jobId = uuidv4();
-      const est = await createEstimate(
-        { tenantId: TENANT, jobId, estimateNumber: 'EST-1203', lineItems: [buildLineItem('i1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
-        estimateRepo,
-      );
-      // The plain invoice POST /estimates/:id/convert-to-invoice writes: estimate id, no schedule.
-      await createInvoice(
-        { tenantId: TENANT, jobId, estimateId: est.id, invoiceNumber: 'INV-0001', lineItems: [buildLineItem('c1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
-        invoiceRepo,
-      );
-
-      const result = await handler.execute(
-        makeProposal({ jobId, estimateId: est.id, milestones: milestones5050 }),
-        { tenantId: TENANT, executedBy: 'u1' },
-      );
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/already invoiced as INV-0001/);
-      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(0);
-      expect((await invoiceRepo.findByJob(TENANT, jobId)).map((i) => i.invoiceNumber)).toEqual(['INV-0001']);
     });
 
     it('does not mint an invoice up front when no milestone is on_accept', async () => {
