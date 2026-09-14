@@ -16,9 +16,7 @@
  * own domain, so a same-process HTTP server stands in for Twilio's media
  * CDN without live Twilio at all — hermetic by construction, not mocked.
  *
- * GENUINE PRODUCT/HERMETIC-MOCK BUG FOUND WHILE BUILDING THIS SPEC (report
- * only, not fixed here — test-only lane), reproduced in isolation outside
- * the whole HTTP/queue stack before writing this down:
+ * FORMER GENUINE PRODUCT/HERMETIC-MOCK BUG, FIXED (#1154 item 1):
  *
  *   `MmsEstimateTaskHandler.buildUserContent` (ai/tasks/mms-estimate-task
  *   .ts:318) embeds `JSON.stringify(input.context)` — e.g.
@@ -26,40 +24,30 @@
  *   prompt text sent to the LLM gateway. Under this repo's hermetic boot
  *   (no `AI_PROVIDER_API_KEY` — app.ts:1260-1261 falls back to
  *   `createHermeticMockLLMGateway()`), `scriptHermeticResponse`'s
- *   `extractName` helper (ai/providers/mock.ts) has a fallback that greps
- *   for ANY quoted substring (`/["']([^"']{2,80})["']/`) when its
- *   name-flavoured regexes miss — and the FIRST quoted substring in that
- *   JSON blob is the literal JSON KEY NAME `"customerId"`, not a customer's
- *   name. The mock then labels its one fixed line item
- *   `"Service estimate for customerId"` instead of the plain `"Service
- *   estimate"` its own doc comment claims. Every MMS/estimate draft under
- *   the hermetic gateway carries this label — `input.context` always
- *   includes `customerId` (customer-mms-intake.ts's call site), so no MMS
- *   body can avoid it. Confirmed directly: calling `ingestCustomerMms` in
- *   isolation (real Postgres, real `PgCatalogItemRepository`, the real
- *   hermetic gateway, no HTTP/queue involved) reproduces the identical
- *   description and the identical downstream failure.
- *
- *   Consequence: `groundLineItemPricing` (ai/resolution/catalog-resolver
- *   .ts) can only clear the mock's `catalogItemId: null` via an exact/high
- *   catalog-NAME match against that (buggy) description — a real tenant's
- *   catalog would never contain an item named "Service estimate for
- *   customerId", so the line stays uncatalogued and `catalogItemId` stays
- *   `null`. The `draft_estimate` Zod contract's `catalogItemId` is
- *   `z.string().uuid().optional()` — optional accepts ABSENT, not `null` —
- *   so `assertValidProposalPayload` throws and `MmsEstimateTaskHandler`
- *   returns `{status:'parse_failed', reason:'invalid_payload'}`: NO
- *   proposal, NO `customer_mms.estimate_drafted` audit, ever, under this
- *   hermetic boot. Naming a catalog item to literally match the buggy
- *   string would launder the bug into a passing assertion — not done here.
- *   #1119-adjacent: needs either a live model (whose real description
- *   would never echo a JSON key) or a mock.ts fix, neither in scope for a
- *   test-only lane. Pinned below with `test.fail()`.
+ *   `extractName` helper (ai/providers/mock.ts) USED TO grep for ANY quoted
+ *   substring (`/["']([^"']{2,80})["']/`) when its name-flavoured regexes
+ *   missed — and the FIRST quoted substring in that JSON blob was the
+ *   literal JSON KEY NAME `"customerId"`, not a customer's name, so every
+ *   MMS/estimate draft under the hermetic gateway was labelled "Service
+ *   estimate for customerId". The mock ALSO hardcoded `catalogItemId: null`
+ *   on every line item (a real model never emits that key at all), which
+ *   `groundLineItemPricing` (ai/resolution/catalog-resolver.ts) never
+ *   cleared for a tenant with no matching catalog item — the
+ *   `draft_estimate` Zod contract's `catalogItemId`
+ *   (`z.string().uuid().optional()`) rejects an explicit `null`, so
+ *   `assertValidProposalPayload` threw and `MmsEstimateTaskHandler` returned
+ *   `{status:'parse_failed', reason:'invalid_payload'}` — NO proposal, NO
+ *   `customer_mms.estimate_drafted` audit, ever, under the hermetic boot.
+ *   Both fixed in `ai/providers/mock.ts` (`extractName` now strips embedded
+ *   JSON blobs before scanning for a quoted name; the estimate/invoice
+ *   branch no longer emits `catalogItemId` at all — matching real-model
+ *   output). Mock-only; product callers unchanged.
  *
  *   WHAT IS GENUINELY REACHABLE, proven below: the webhook resolves/creates
  *   the customer by phone, fetches + stores the photo (a real `files` row +
- *   presigned URL), and reaches the vision-drafting call — everything up to
- *   the catalog-grounding/Zod gate the bug blocks.
+ *   presigned URL), reaches the vision-drafting call, and — now that the
+ *   mock produces a schema-valid draft — persists the `draft_estimate`
+ *   proposal and its audit row.
  *
  * Ambiguous sender: two customers sharing the exact same `primaryPhone`
  * (a shared household/office line — created through the real
@@ -209,30 +197,8 @@ test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real w
   });
 
   test(
-    'KNOWN GAP — the stored photo should draft a catalog-grounded draft_estimate proposal, audited (expected to fail hermetically)',
+    'the stored photo drafts a catalog-grounded draft_estimate proposal, audited (#1154 item 1 fixed)',
     async ({ request }) => {
-      test.fail(
-        true,
-        'ai/tasks/mms-estimate-task.ts buildUserContent embeds ' +
-          'JSON.stringify(input.context) (starts {"customerId":"<uuid>",...) ' +
-          "into the LLM prompt; ai/providers/mock.ts's scriptHermeticResponse " +
-          "extractName fallback greps the first quoted substring when its " +
-          'name regexes miss, grabbing the JSON KEY "customerId" — every ' +
-          'hermetic MMS draft is labelled "Service estimate for customerId", ' +
-          'not "Service estimate". No real tenant catalog item has that name, ' +
-          'so groundLineItemPricing never clears catalogItemId from null, ' +
-          "and the draft_estimate Zod contract's catalogItemId " +
-          '(z.string().uuid().optional()) rejects null — ' +
-          'assertValidProposalPayload throws, MmsEstimateTaskHandler returns ' +
-          "parse_failed/invalid_payload, and NO proposal or " +
-          '"customer_mms.estimate_drafted" audit is ever written under this ' +
-          "hermetic boot. Reproduced calling ingestCustomerMms directly " +
-          '(real Postgres, real catalog repo, real hermetic gateway, no ' +
-          'HTTP/queue) before writing this pin. #1119-adjacent: needs a ' +
-          'live model (whose real description would never echo a JSON key) ' +
-          'or a mock.ts fix — neither in scope for a test-only lane.',
-      );
-
       const from = '+15125558804';
       const res = await signedMmsPost(request, tenantA, {
         from,
@@ -248,6 +214,19 @@ test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real w
         { timeoutMs: 5_000 },
       );
       expect(events.length, 'a draft_estimate should have been audited').toBeGreaterThan(0);
+
+      // #1154 item 1 — the description must never carry the JSON key
+      // "customerId" (the bug this leg used to pin with test.fail()), and
+      // the persisted line item must carry no `catalogItemId: null` (the
+      // mock no longer emits the key at all, matching a real model).
+      const proposals = await pool.query<{ payload: { lineItems: Array<Record<string, unknown>> } }>(
+        `SELECT payload FROM proposals WHERE tenant_id = $1 AND proposal_type = 'draft_estimate' ORDER BY created_at DESC LIMIT 1`,
+        [tenantA.tenantId],
+      );
+      expect(proposals.rows).toHaveLength(1);
+      const line = proposals.rows[0]!.payload.lineItems[0]!;
+      expect(String(line.description)).not.toContain('customerId');
+      expect(line).not.toHaveProperty('catalogItemId');
     },
   );
 
