@@ -191,8 +191,8 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
    * genuinely `'sent'` from the real send above) and run the real sweep
    * again.
    */
-  it.fails(
-    'DESIRED (product gap, see comment above): a second concurrent sweep tick never adds a second audit row for one real send — ACTUAL: the crash-recovery reconcile path double-audits this realistic interleaving too',
+  it(
+    'FIXED (#1140): a second concurrent sweep tick never adds a second audit row for one real send — the crash-recovery reconcile path is now idempotent on the audit trail',
     async () => {
       const seed = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();

@@ -25,6 +25,21 @@ import { resolveCustomerLanguage } from '../i18n/resolve-language';
 
 export type SendChannel = 'sms' | 'email' | 'both';
 
+/**
+ * #1145 — caller-supplied tag identifying WHY this send is happening,
+ * folded into the dispatch idempotency key (see `buildIdempotencyKey`)
+ * alongside entity + channel + recipient. Two sends for the same
+ * entity+channel in the same wall-clock minute are the SAME occasion only
+ * when they also share this context — an owner's manual send
+ * (`'owner'`) and an automatic reminder occurrence
+ * (`nudge:v{version}:{occurrence}`) are legitimately independent and must
+ * both go out, not collide as duplicates. Omit it only for a caller with no
+ * distinguishable occasion (defaults to `'default'`); every caller that
+ * ALSO has another caller sending the same kind of entity+channel should
+ * set a distinct value here so the two can never collide by accident.
+ */
+type IdempotencyContext = string;
+
 export interface SendEstimateInput {
   tenantId: string;
   estimateId: string;
@@ -33,6 +48,7 @@ export interface SendEstimateInput {
   recipientPhone?: string;
   recipientEmail?: string;
   customMessage?: string;
+  idempotencyContext?: IdempotencyContext;
 }
 
 export interface SendInvoiceInput {
@@ -42,6 +58,7 @@ export interface SendInvoiceInput {
   recipientPhone?: string;
   recipientEmail?: string;
   customMessage?: string;
+  idempotencyContext?: IdempotencyContext;
 }
 
 /**
@@ -65,6 +82,7 @@ export interface SendPortalLinkInput {
   recipientPhone?: string;
   recipientEmail?: string;
   customMessage?: string;
+  idempotencyContext?: IdempotencyContext;
 }
 
 export interface SendPortalLinkResult {
@@ -230,6 +248,8 @@ export class SendService {
             'estimate',
             estimate.id,
             target.channel,
+            target.recipient,
+            input.idempotencyContext ?? 'default',
             sendStartedAt
           ),
           render: () =>
@@ -389,6 +409,8 @@ export class SendService {
             'invoice',
             invoice.id,
             target.channel,
+            target.recipient,
+            input.idempotencyContext ?? 'default',
             sendStartedAt
           ),
           render: () =>
@@ -513,6 +535,8 @@ export class SendService {
             'portal_session',
             input.portalSessionId,
             target.channel,
+            target.recipient,
+            input.idempotencyContext ?? 'default',
             sendStartedAt
           ),
           render: () =>
@@ -567,19 +591,32 @@ export class SendService {
   }
 
   /**
-   * Stable per-attempt key. Quantizes the timestamp to a 1-minute window
-   * so a user double-clicking "Send" within seconds dedupes at the
-   * provider, while a deliberate re-send 5 minutes later is treated as
-   * a new dispatch.
+   * #1145 — keyed on the send's semantic identity: entity + channel +
+   * recipient + the caller-supplied `context` (see `IdempotencyContext`),
+   * NOT just entity + channel + minute. The bare entity+channel+minute key
+   * this replaced could not tell an owner's manual send apart from an
+   * unrelated automatic reminder landing in the same wall-clock minute —
+   * both are legitimate, independent sends, but shared the exact same key
+   * and collided on `idx_dispatches_idempotency`
+   * (`UNIQUE (tenant_id, idempotency_key)`), so the second was rejected as
+   * if it were a duplicate of the first.
+   *
+   * The minute quantization is KEPT, but now only as a short retry window
+   * for TRUE duplicates of the same occasion (e.g. a double-tapped "Send"
+   * button re-invoking with the same context within the same minute) — the
+   * `context` segment is what makes two DIFFERENT occasions distinct
+   * instead of merely two attempts at the same one.
    */
   private buildIdempotencyKey(
     entityType: 'estimate' | 'invoice' | 'portal_session',
     entityId: string,
     channel: 'sms' | 'email',
+    recipient: string,
+    context: IdempotencyContext,
     nowMs: number
   ): string {
     const minute = Math.floor(nowMs / 60_000);
-    return `${entityType}:${entityId}:${channel}:${minute}`;
+    return `${entityType}:${entityId}:${channel}:${recipient}:${context}:${minute}`;
   }
 
   private renderEstimateSmsMessage(
