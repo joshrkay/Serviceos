@@ -6781,22 +6781,34 @@ export const MIGRATIONS = {
   '275_proposals_original_payload': `
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
   `,
-  // U8 (PR #975) — re-added after a main-merge migration-number collision
-  // dropped the original 274_call_transcript_turns_call_sid (main took 274 for
-  // 274_tenant_integrations_unique_twilio_did). Renumbered to 276 so it is
-  // lexicographically greatest and actually runs. Mid-call transcript
-  // durability: turns are persisted keyed by CallSid + session id before a
-  // recording exists, so voice_recording_id becomes nullable and the mid-call
-  // upsert conflicts on the (call_sid, session_id, turn_index) partial index.
-  '276_call_transcript_turns_call_sid': `
-    ALTER TABLE call_transcript_turns ALTER COLUMN voice_recording_id DROP NOT NULL;
-    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS call_sid TEXT;
-    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS session_id TEXT;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_call_leg
-      ON call_transcript_turns (tenant_id, call_sid, session_id, turn_index)
-      WHERE call_sid IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
-      ON call_transcript_turns (tenant_id, call_sid);
+  // #1131 — dispatch_analytics.event_type's CHECK (inline in 105) never listed
+  // 'en_route_notice_sent' / 'en_route_notice_failed', which the delay
+  // delivery worker (notifications/delay-notifications.ts) writes for every
+  // "on my way" notice, nor 'crew_added' / 'crew_removed', which
+  // proposals/execution/crew-handler.ts writes. Every such insert threw 23514.
+  // The list below is exactly DispatchEventType (dispatch/analytics.ts) — a
+  // strict superset of 105's list, so no existing row can violate it.
+  //
+  // 105 is CREATE TABLE IF NOT EXISTS, so on an existing database it never
+  // re-creates its (auto-named) constraint; on a fresh one it creates the old
+  // list and this step replaces it — both converge on the same definition.
+  // NOT VALID for the same reason as 190/269/270: the runner has no ledger and
+  // re-runs this on every boot, so a validating ADD would re-scan the whole
+  // table each deploy. New and updated rows are still checked.
+  //
+  // Pre-flight (informational — the widening cannot fail on existing data):
+  //   SELECT event_type, count(*) FROM dispatch_analytics GROUP BY 1;
+  '276_dispatch_analytics_event_type_en_route': `
+    ALTER TABLE dispatch_analytics
+      DROP CONSTRAINT IF EXISTS dispatch_analytics_event_type_check;
+    ALTER TABLE dispatch_analytics
+      ADD CONSTRAINT dispatch_analytics_event_type_check
+        CHECK (event_type IN (
+          'assigned', 'reassigned', 'crew_added', 'crew_removed',
+          'rescheduled', 'canceled', 'conflict_detected',
+          'delay_notice_sent', 'delay_notice_failed',
+          'en_route_notice_sent', 'en_route_notice_failed'
+        )) NOT VALID;
   `,
 };
 
