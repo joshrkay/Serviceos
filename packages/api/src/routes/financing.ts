@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { InvoiceRepository } from '../invoices/invoice';
 import { JobRepository } from '../jobs/job';
@@ -40,6 +41,7 @@ export function createFinancingRouter(deps: FinancingRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found', 'invoiceId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = offerFinancingSchema.parse(req.body);
       const tenantId = req.auth!.tenantId;
@@ -94,6 +96,7 @@ export function createFinancingRouter(deps: FinancingRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('invoices:view'),
+    notFoundOnMalformedId('Invoice not found', 'invoiceId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const apps = await deps.financingRepo.listByInvoice(req.auth!.tenantId, req.params.invoiceId);
       res.json(apps);
@@ -105,6 +108,7 @@ export function createFinancingRouter(deps: FinancingRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('invoices:view'),
+    notFoundOnMalformedId('Financing application not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const app = await deps.financingRepo.findById(req.auth!.tenantId, req.params.id);
       if (!app) {
