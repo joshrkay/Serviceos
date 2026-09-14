@@ -928,7 +928,13 @@ export interface VoiceTurnProcessor {
     sideEffects: SideEffect[],
     tenantId: string,
   ): Promise<void>;
-  /** Push token usage into the cost tracker. Returns true on cap exceeded. */
+  /**
+   * Push token usage into the cost tracker. Returns true when the session is
+   * over any cap and has not been ended for it yet: the caller dispatches
+   * `cost_cap_exceeded`. Level-triggered (#1204), so it also fires when the
+   * cap was crossed by usage recorded outside the turn, and at most once per
+   * session.
+   */
   recordCost(
     session: VoiceSession,
     usage: { input: number; output: number } | undefined,
@@ -1149,13 +1155,22 @@ export function createVoiceTurnProcessor(
     }
   }
 
-  function recordCost(
+  /**
+   * #1204 — sessions `recordCost` has already told a caller to end for an
+   * exceeded cap. Keyed by the live session object (GC'd with it, like
+   * `sessionTimezones`). Both phone transports share this processor, so the
+   * one-end-per-session guarantee holds across them.
+   */
+  const capEndedSessions = new WeakSet<VoiceSession>();
+
+  /** Record one turn's usage on the session tracker and emit cost_incurred. */
+  function recordTurnUsage(
     session: VoiceSession,
     usage: { input: number; output: number } | undefined,
-  ): boolean {
-    if (!usage) return false;
+  ): void {
+    if (!usage) return;
     const cents = estimateCostCents(usage.input, usage.output);
-    const events = session.costTracker.recordUsage({
+    session.costTracker.recordUsage({
       inputTokens: usage.input,
       outputTokens: usage.output,
       costCents: cents,
@@ -1164,11 +1179,27 @@ export function createVoiceTurnProcessor(
       'voice-event',
       costIncurredEvent(cents, session.costTracker.totals.costCents),
     );
-    const exceeded = events.some((e) => e.type === 'cost_cap_exceeded');
-    if (exceeded) {
-      session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+  }
+
+  function recordCost(
+    session: VoiceSession,
+    usage: { input: number; output: number } | undefined,
+  ): boolean {
+    recordTurnUsage(session, usage);
+    // #1204 — decide on the tracker's LEVEL, not on this turn's events. The
+    // tracker emits `cost_cap_exceeded` once per dimension, and the
+    // sentiment classifier / vulnerability grader record their own usage on
+    // the same tracker between turns and discard the events
+    // (`recordCompletionUsage`). A classifier that crossed the cap therefore
+    // consumed the event, and no later turn ever ended the call. `isExceeded`
+    // is set by the same recordUsage that emits the event, so a turn whose
+    // own usage crosses the cap still ends the call on that turn.
+    if (!session.costTracker.isExceeded || capEndedSessions.has(session)) {
+      return false;
     }
-    return exceeded;
+    capEndedSessions.add(session);
+    session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+    return true;
   }
 
   function expandIntentConfirmTemplate(
@@ -3810,7 +3841,11 @@ export function createVoiceTurnProcessor(
         tenantId,
         gateway: deps.gateway,
       });
-      recordCost(session, confirmation.tokenUsage);
+      // #1204 — record only. This turn never ends the call (the consent
+      // answer is still recorded or declined), so it must not take the
+      // one-per-session cap decision; the next turn's recordCost reads the
+      // tracker's level and ends the call there.
+      recordTurnUsage(session, confirmation.tokenUsage);
       granted = confirmation.confirmed;
     } catch (err) {
       // Fail closed — an evaluation error is treated as "no consent".
