@@ -1,0 +1,6 @@
+              tenant_id               | pack_id  | count 
+--------------------------------------+----------+-------
+ 6d097a3f-6d9d-496c-a26c-aeec488abffe | plumbing |     6
+ 7ab48ad9-0a57-48f3-b5a2-5088e93f3c82 | hvac     |     6
+(2 rows)
+

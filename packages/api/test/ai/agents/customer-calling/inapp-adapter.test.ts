@@ -22,6 +22,10 @@ import {
 } from '../../../../src/proposals/execution/voice-extended-handlers';
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import type { Customer } from '../../../../src/customers/customer';
+import { InMemoryMoneyDashboardRepository } from '../../../../src/reports/money-dashboard';
+import { InMemoryJobRepository } from '../../../../src/jobs/job';
+import { InMemoryInvoiceRepository } from '../../../../src/invoices/invoice';
+import { LOOKUP_UNAVAILABLE_LINE } from '../../../../src/workers/voice-lookup-answer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
 import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
 import { InMemoryBrandVoiceRepository } from '../../../../src/tenants/brand/in-memory-brand-voice-repository';
@@ -121,31 +125,285 @@ describe('InAppVoiceAdapter', () => {
     expect(callerPlanResolver).not.toHaveBeenCalled();
   });
 
-  it('answers an authenticated owner lookup without mutation confirmation', async () => {
-    const ownerLookupResolver = vi.fn(async () => 'You have two appointments today.');
-    const adapter = new InAppVoiceAdapter({
-      store,
-      gateway: scriptedGateway([
-        JSON.stringify({
-          intentType: 'lookup_day_overview',
-          confidence: 0.98,
-          extractedEntities: {},
-        }),
-      ]),
-      proposalRepo,
-      auditRepo,
-      onCallRepo,
-      extendedIntentsEnabled: async () => true,
-      ownerLookupResolver,
+  /**
+   * Read-only `lookup_*` turns.
+   *
+   * The surface used to intercept exactly ONE intent (`lookup_day_overview`),
+   * and only for owner sessions, through a bespoke `ownerLookupResolver`.
+   * Everything else — "what does Khan owe?", "when's Garcia's next
+   * appointment?" — fell into the drafting FSM, and because the lookup family
+   * is deliberately absent from `INTENT_TO_PROPOSAL_TYPE`, a confirming "yes"
+   * minted a dead `voice_clarification` card. The adapter now routes EVERY
+   * lookup at confidence >= TAU_INT through the shared dispatch
+   * (`ai/voice-turn/inapp-lookup-surface.ts`), out of the FSM entirely.
+   */
+  describe('read-only lookups answer out-of-FSM', () => {
+    const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+
+    function resolvesTo(id: string, label: string): EntityResolver {
+      return {
+        resolve: vi.fn(async ({ kind }: { kind: string }) => ({
+          kind: 'resolved' as const,
+          candidate: { id, kind: kind as never, label, score: 0.97 },
+        })),
+      } as unknown as EntityResolver;
+    }
+
+    async function seededCustomerRepo() {
+      const customerRepo = new InMemoryCustomerRepository();
+      await customerRepo.create({
+        id: CUSTOMER_ID,
+        tenantId: TENANT,
+        displayName: 'Priya Khan',
+        firstName: 'Priya',
+        lastName: 'Khan',
+        isArchived: false,
+        createdBy: USER,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as unknown as Customer);
+      return customerRepo;
+    }
+
+    it('lookup_customer speaks the customer, stays in intent_capture, mints nothing', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_customer',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo, proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'Pull up Khan');
+
+      expect(result.ttsText?.toLowerCase()).toContain('priya khan');
+      // The FSM never saw the turn: no readback, no proposal, ready for the
+      // next question.
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
     });
 
-    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
-    const result = await adapter.handleInput(sessionId, 'What appointments are scheduled today?');
+    it('a lookup no longer needs an owner session — a plain operator is answered', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_customer',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo, proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
 
-    expect(result.state).toBe('intent_capture');
-    expect(result.ttsText).toBe('You have two appointments today.');
-    expect(result.proposalIds).toHaveLength(0);
-    expect(ownerLookupResolver).toHaveBeenCalledWith(TENANT, sessionId, 'lookup_day_overview');
+      // No `role` argument at all — the old gate (`ownerSession === true`)
+      // would have dropped this straight into the proposal funnel.
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'dispatcher');
+      const result = await adapter.handleInput(sessionId, 'Pull up Khan');
+
+      expect(result.ttsText?.toLowerCase()).toContain('priya khan');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('an ambiguous customer name asks which one — never a silent guess', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_balance',
+            confidence: 0.93,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo: new InMemoryCustomerRepository(), proposalRepo },
+          entityResolver: {
+            // Two records with the SAME display name — the case that made the
+            // old copy unanswerable ("Smith; Smith"). The hint is what the
+            // operator can actually choose between.
+            resolve: vi.fn(async ({ kind }: { kind: string }) => ({
+              kind: 'ambiguous' as const,
+              candidates: [
+                {
+                  id: 'c-1',
+                  kind: kind as never,
+                  label: 'Khan Household',
+                  hint: '104 QA Cedar Avenue',
+                  score: 0.86,
+                },
+                {
+                  id: 'c-2',
+                  kind: kind as never,
+                  label: 'Khan Household',
+                  hint: '77 Mill Road',
+                  score: 0.84,
+                },
+              ],
+            })),
+          } as unknown as EntityResolver,
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'What does Khan owe?');
+
+      expect(result.ttsText).toContain('More than one match for "Khan"');
+      expect(result.ttsText).toContain('Khan Household (104 QA Cedar Avenue)');
+      expect(result.ttsText).toContain('Khan Household (77 Mill Road)');
+      expect(result.ttsText).toMatch(/which one did you mean\?/i);
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('"what does Khan owe us" is answered ABOUT Khan — never "your account"', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_balance',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: { invoiceRepo: new InMemoryInvoiceRepository() },
+          shared: { customerRepo, jobRepo: new InMemoryJobRepository(), proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'What does Khan owe us?');
+
+      // The skill's phone-shaped copy is "Your account is paid in full —
+      // nothing currently owed"; the operator is not the customer.
+      expect(result.ttsText).not.toMatch(/\byour\b/i);
+      expect(result.ttsText).toContain("Priya Khan's account is paid in full");
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('a technician asking for revenue hears the refusal, never the number', async () => {
+      const moneyDashboardRepo = new InMemoryMoneyDashboardRepository();
+      moneyDashboardRepo.setSummary({
+        month: '2026-09',
+        revenueCents: 4_250_00,
+        outstandingCents: 90_000,
+      } as never);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_revenue',
+            confidence: 0.94,
+            extractedEntities: {},
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          // The DB-authoritative role — deliberately independent of the
+          // session's own role claim, which is the point of the gate.
+          answers: { moneyDashboardRepo, resolveMemberRole: async () => 'technician' },
+          shared: { proposalRepo },
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, 'user-tech', undefined, 'technician');
+      const result = await adapter.handleInput(sessionId, 'How much revenue this month?');
+
+      expect(result.ttsText).toContain("That's an owner-level report");
+      expect(result.ttsText).not.toMatch(/4,?250/);
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('below TAU_INT a lookup still takes the reprompt path — nothing is looked up', async () => {
+      const resolve = vi.fn();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_customer',
+            confidence: 0.4,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo: new InMemoryCustomerRepository(), proposalRepo },
+          entityResolver: { resolve } as unknown as EntityResolver,
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'mmm khan something');
+
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+      // Below the band we do not claim to know what was asked, so no repo is
+      // read and no answer is invented.
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('with no lookups bundle wired the operator hears the honest unavailable line', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_day_overview',
+            confidence: 0.98,
+            extractedEntities: {},
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        extendedIntentsEnabled: async () => true,
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+      const result = await adapter.handleInput(sessionId, 'What appointments are scheduled today?');
+
+      expect(result.state).toBe('intent_capture');
+      expect(result.ttsText).toBe(LOOKUP_UNAVAILABLE_LINE);
+      // The regression this replaced: a dead clarification card.
+      expect(result.proposalIds).toHaveLength(0);
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    });
   });
 
   it('happy path: high-confidence intent creates a proposal and closes', async () => {
@@ -1341,8 +1599,13 @@ describe('InAppVoiceAdapter', () => {
       expect(merged.appointmentReference).toBeUndefined();
       expect(merged.dateTimeDescription).toBeUndefined();
 
-      await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
-      const exhausted = await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
+      // R2 — the follow-up attempts must be DISTINCT utterances. A verbatim
+      // re-send within 15 s is now a client retry (the duplicate-turn guard
+      // replays the readback without re-classifying), so it is deliberately
+      // not an attempt against the no-progress budget. Three separate tries
+      // that contribute nothing still exhaust it, which is the invariant.
+      await adapter.handleInput(sessionId, 'the inspection tomorrow at three');
+      const exhausted = await adapter.handleInput(sessionId, "that inspection, tomorrow 3pm");
       expect(exhausted.state).toBe('intent_capture');
       expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
     });
@@ -1443,8 +1706,14 @@ describe('InAppVoiceAdapter', () => {
       await adapter.handleInput(sessionId, 'Book a diagnostic visit');
 
       // MAX_CONFIRM_DETAIL_RETRIES = 2 no-progress turns are absorbed…
-      for (const attempt of [1, 2]) {
-        const noSlots = await adapter.handleInput(sessionId, 'hmm what were we doing');
+      // R2 — each attempt is a DIFFERENT sentence on purpose: a verbatim
+      // re-send within 15 s is a client retry (replayed by the duplicate-turn
+      // guard without re-classifying), not a fresh attempt at the readback.
+      for (const [attempt, utterance] of [
+        [1, 'hmm what were we doing'],
+        [2, 'sorry, what were we talking about'],
+      ] as const) {
+        const noSlots = await adapter.handleInput(sessionId, utterance);
         expect(noSlots.state, `attempt ${attempt} must not wipe the booking`).toBe(
           'intent_confirm',
         );
@@ -1455,7 +1724,7 @@ describe('InAppVoiceAdapter', () => {
 
       // …and the third gives up, exactly as the pre-Train-7 first turn did,
       // so an unparseable conversation can never park here forever.
-      const exhausted = await adapter.handleInput(sessionId, 'hmm what were we doing');
+      const exhausted = await adapter.handleInput(sessionId, 'wait, what was that again');
       expect(exhausted.state).toBe('intent_capture');
       expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
     });
@@ -2730,13 +2999,20 @@ describe('InAppVoiceAdapter#toResolutionEvent', () => {
     }
   });
 
-  it('not_found on a record-operating intent → entity_not_found with no payload (Fix 1 regression guard)', async () => {
+  it('not_found on a record-operating intent → entity_not_found carrying WHAT was not found (Fix 1 regression guard)', async () => {
     const event = await toResolutionEvent({
       status: 'not_found',
       refs: {},
       notFound: { entityKind: 'job', reference: 'the QA Matrix job' },
     });
-    expect(event).toEqual({ type: 'entity_not_found' });
+    // SCH-D3 — the kind/reference ride along so the in-app operator surface
+    // can say what it could not find ("I couldn't find a matching job for the
+    // QA Matrix job"). Telephony ignores both and escalates exactly as before.
+    expect(event).toEqual({
+      type: 'entity_not_found',
+      entityKind: 'job',
+      reference: 'the QA Matrix job',
+    });
   });
 
   // VOX-02 — the escalation is narrowed to intents that need a pre-existing

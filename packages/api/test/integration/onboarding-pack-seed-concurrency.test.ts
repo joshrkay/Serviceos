@@ -148,5 +148,107 @@ describe('Postgres integration — concurrent onboarding pack-seed execution (re
       [tenant.tenantId],
     );
     expect(totalTemplates.rows[0].n).toBeGreaterThan(0);
+
+    // Real Postgres, both legs: the write AND its audit event. The loser of
+    // the advisory lock (if any) short-circuits with PACK_ACTIVATION_IN_
+    // PROGRESS before ever reaching activatePackWithSeed's audit write, so
+    // exactly one 'tenant.pack_activated' row exists per handler that
+    // actually reported success — never duplicated by the race.
+    const successCount = [settingsResult, categoryResult].filter((r) => r.success).length;
+    const auditRows = await auditRepo.findByEntity(tenant.tenantId, 'tenant_packs', 'hvac');
+    expect(auditRows).toHaveLength(successCount);
+    expect(auditRows.every((r) => r.eventType === 'tenant.pack_activated')).toBe(true);
+  });
+
+  it('T1 — a second tenant racing the SAME pack-seed concurrency scenario at the same time neither leaks into nor is affected by the first tenant\'s rows or audit trail', async () => {
+    const tenantB = await createTestTenant(pool);
+    const auditRepo = new PgAuditRepository(pool);
+
+    // Pre-seed a minimal tenant_settings row for BOTH tenants. This isolates
+    // the case under test (does the per-(tenant, pack) advisory lock stay
+    // tenant-scoped under real concurrency?) from a separate, pre-existing
+    // race in activatePackWithSeed: its settingsRepo upsert (INSERT when no
+    // row exists) runs BEFORE the advisory lock is taken, so two concurrent
+    // first-ever writes for the SAME brand-new tenant can both observe "no
+    // row" and both INSERT, tripping tenant_settings' unique constraint.
+    // That's a real, separate gap (also present, just less likely to fire,
+    // in this file's single-tenant race above) — out of scope here (test-
+    // only rows, no src changes) and orthogonal to what T1 is proving.
+    for (const t of [tenant, tenantB]) {
+      await pool.query(
+        `INSERT INTO tenant_settings (id, tenant_id, business_name, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
+         VALUES (gen_random_uuid(), $1, 'Concurrency Co', 'EST-', 'INV-', 1001, 1001, 30)`,
+        [t.tenantId],
+      );
+    }
+
+    function race(forTenant: { tenantId: string; userId: string }) {
+      const { settingsRepo, packActivationRepo, auditRepo, packSeedDeps } = buildDeps();
+      const tenantSettingsHandler = new OnboardingTenantSettingsExecutionHandler(
+        settingsRepo,
+        packActivationRepo,
+        auditRepo,
+        packSeedDeps,
+        pool,
+      );
+      const serviceCategoryHandler = new OnboardingServiceCategoryExecutionHandler(
+        settingsRepo,
+        packActivationRepo,
+        auditRepo,
+        packSeedDeps,
+        pool,
+      );
+      const context = { tenantId: forTenant.tenantId, executedBy: forTenant.userId, executedByRole: 'owner' };
+      return Promise.all([
+        tenantSettingsHandler.execute(tenantSettingsProposal(forTenant.tenantId), context),
+        serviceCategoryHandler.execute(serviceCategoryProposal(forTenant.tenantId), context),
+      ]);
+    }
+
+    // Both tenants' races run AT THE SAME TIME — the per-(tenant, pack)
+    // advisory-lock key must be tenant-scoped, or tenant B's race would
+    // contend with tenant A's lock and either duplicate or spuriously lock.
+    const [[aSettings, aCategory], [bSettings, bCategory]] = await Promise.all([
+      race(tenant),
+      race(tenantB),
+    ]);
+
+    for (const r of [aSettings, aCategory, bSettings, bCategory]) {
+      if (!r.success) {
+        expect(r.error).toMatch(/PACK_ACTIVATION_IN_PROGRESS/);
+      }
+    }
+
+    const catalogUnderB = await pool.query(
+      `SELECT id FROM catalog_items WHERE tenant_id = $1`,
+      [tenantB.tenantId],
+    );
+    const catalogUnderA = await pool.query(
+      `SELECT id FROM catalog_items WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(catalogUnderA.rows.length).toBeGreaterThan(0);
+    expect(catalogUnderB.rows.length).toBeGreaterThan(0);
+
+    // Each tenant's audit trail is exactly its own success count — the
+    // other tenant's race never contributes to (or subtracts from) it.
+    const auditA = await auditRepo.findByEntity(tenant.tenantId, 'tenant_packs', 'hvac');
+    const auditB = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_packs', 'hvac');
+    expect(auditA).toHaveLength([aSettings, aCategory].filter((r) => r.success).length);
+    expect(auditB).toHaveLength([bSettings, bCategory].filter((r) => r.success).length);
+
+    // Neither tenant's pack row is visible under the other's id.
+    const packUnderB = await pool.query(
+      `SELECT pack_id FROM pack_activations WHERE tenant_id = $1 AND pack_id = 'hvac'`,
+      [tenantB.tenantId],
+    );
+    expect(packUnderB.rows.length).toBeGreaterThan(0);
+    const totalPackRows = await pool.query(
+      `SELECT tenant_id FROM pack_activations WHERE pack_id = 'hvac' AND tenant_id IN ($1, $2)`,
+      [tenant.tenantId, tenantB.tenantId],
+    );
+    // Exactly one row per tenant (activatePack no-ops on an already-active
+    // pack rather than duplicating) — no cross-tenant bleed either way.
+    expect(totalPackRows.rows).toHaveLength(2);
   });
 });

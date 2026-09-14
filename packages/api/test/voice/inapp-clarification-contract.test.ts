@@ -2,23 +2,30 @@
  * The in-app half of the `voice_clarification` fall-through.
  *
  * `intentToProposalType` (proposals/voice-intent-map.ts) DEFAULTS to
- * `voice_clarification` for any intent it does not map — and `lookup_*`
- * intents are deliberately unmapped (P11-001: they are read-only and answered
- * by the lookup-skill family, not by a proposal). On the phone path a lookup
- * intent short-circuits before ever reaching proposal creation. In-app it does
- * not: the short-circuit requires BOTH `ownerSession` and a wired
- * `ownerLookupResolver`, so with either absent the intent walks the normal
- * FSM route — intent_confirm → confirmed → create_proposal — carrying
- * `intent: 'lookup_catalog'`.
+ * `voice_clarification` for any intent it does not map. When such a request
+ * DOES reach proposal creation, the payload must be the canonical
+ * clarification shape — the raw `{intent, entities, sessionId}` envelope is
+ * REJECTED by `voiceClarificationPayloadSchema` (which requires `transcript`
+ * + `reason`) and lands in the operator's queue as a malformed card. The
+ * phone path degraded these correctly; in-app now does too, via the same
+ * shared `buildVoiceClarificationPayload`.
  *
- * That produced a `voice_clarification` whose payload was the raw
- * `{intent, entities, sessionId}` envelope, which
- * `voiceClarificationPayloadSchema` REJECTS (it requires `transcript` +
- * `reason`). Result: a malformed card in the operator's queue.
+ * WHAT CHANGED (2026-09, in-app 50-case sweep, cluster "search")
+ * -------------------------------------------------------------
+ * `lookup_*` used to be the example of that fall-through: the in-app
+ * short-circuit required BOTH an `ownerSession` and a wired
+ * `ownerLookupResolver`, so with either absent a lookup walked the FSM —
+ * intent_confirm → confirmed → create_proposal — and the operator's "yes"
+ * minted a card nobody could action.
  *
- * The phone path already degraded these to a canonical clarification; this
- * suite pins that in-app now does too, via the same shared
- * `buildVoiceClarificationPayload`.
+ * Lookups no longer reach proposal creation on ANY surface: every
+ * `lookup_*` at confidence >= TAU_INT is answered out-of-FSM through the
+ * shared dispatch (`ai/voice-turn/inapp-lookup-surface.ts`), and a
+ * deployment with no lookups bundle speaks an honest unavailable line rather
+ * than minting a card. So the lookup case below pins the ABSENCE of a
+ * proposal, and the canonical-payload contract is pinned where the in-app
+ * degrade is still reachable: the `respond_to_review` capability gate (A46),
+ * which builds its clarification from the same shared module.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { InAppVoiceAdapter } from '../../src/ai/agents/customer-calling/inapp-adapter';
@@ -27,6 +34,7 @@ import { InMemoryProposalRepository, type Proposal } from '../../src/proposals/p
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import { validateProposalPayload } from '../../src/proposals/contracts';
+import { LOOKUP_UNAVAILABLE_LINE } from '../../src/workers/voice-lookup-answer';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { assertVoiceProposalPayloadValid } from './helpers/voice-proposal-contract';
 
@@ -43,7 +51,11 @@ function scriptedGateway(response: string): LLMGateway {
 }
 
 /** Drive an in-app session to proposal creation, returning what it minted. */
-async function mintViaInApp(intentType: string, entities: Record<string, unknown>) {
+async function mintViaInApp(
+  intentType: string,
+  entities: Record<string, unknown>,
+  utterance = 'how much is drain cleaning',
+) {
   const store = new VoiceSessionStore({ startInterval: false });
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
@@ -62,48 +74,69 @@ async function mintViaInApp(intentType: string, entities: Record<string, unknown
     proposalRepo,
     auditRepo,
     onCallRepo: new InMemoryOnCallRepository(),
-    // NO ownerLookupResolver — the condition under which a lookup intent
-    // reaches proposal creation at all.
+    // NO `lookups` bundle and NO respondToReviewTaskHandler — the two
+    // "capability not wired here" conditions each case below exercises.
   });
 
   const { sessionId } = await adapter.startSession('tenant-x', 'user-x');
-  const first = await adapter.handleInput(sessionId, 'how much is drain cleaning');
-  if (first.state === 'intent_confirm') await adapter.handleInput(sessionId, 'yes');
+  const first = await adapter.handleInput(sessionId, utterance);
+  const second =
+    first.state === 'intent_confirm' ? await adapter.handleInput(sessionId, 'yes') : undefined;
   store.dispose();
-  return { minted, auditRepo };
+  return { minted, auditRepo, first, second };
 }
 
-describe('in-app adapter — unmapped intents degrade to a CONTRACT-VALID clarification', () => {
-  it('lookup_catalog persists a canonical voice_clarification, not the raw envelope', async () => {
-    const { minted } = await mintViaInApp('lookup_catalog', { catalogQuery: 'drain cleaning' });
+describe('in-app adapter — a lookup never reaches proposal creation at all', () => {
+  it('lookup_catalog is answered out-of-FSM: no card, malformed or otherwise', async () => {
+    const { minted, first } = await mintViaInApp('lookup_catalog', {
+      catalogQuery: 'drain cleaning',
+    });
+
+    // THE regression this file was opened for: this used to mint a
+    // clarification card (and before that, a malformed one).
+    expect(minted).toHaveLength(0);
+    // The turn is answered honestly instead — no bundle is wired here, so
+    // the operator is told the lookup is unavailable rather than being
+    // handed a card that claims work nobody can action.
+    expect(first.ttsText).toBe(LOOKUP_UNAVAILABLE_LINE);
+    // And the FSM never advanced, so the next utterance is a fresh request.
+    expect(first.state).toBe('intent_capture');
+  });
+
+  it('records no contract-failure degrade for a lookup — nothing was built to fail', async () => {
+    const { auditRepo } = await mintViaInApp('lookup_catalog', { catalogQuery: 'drain cleaning' });
+    const events = await auditRepo.findRecentByTenant('tenant-x', { limit: 200 });
+    expect(events.find((e) => e.eventType === 'voice.payload_contract_failed')).toBeUndefined();
+  });
+});
+
+describe('in-app adapter — a gated capability degrades to a CONTRACT-VALID clarification', () => {
+  it('respond_to_review with no drafting handler persists the canonical shape', async () => {
+    const { minted } = await mintViaInApp(
+      'respond_to_review',
+      { reviewReference: 'the one-star Google review' },
+      'reply to that one-star Google review',
+    );
 
     expect(minted).toHaveLength(1);
     const proposal = minted[0]!;
     expect(proposal.proposalType).toBe('voice_clarification');
 
-    // THE regression: this used to be {intent, entities, sessionId} and fail
-    // validateProposalPayload outright.
+    // THE regression class: a raw {intent, entities, sessionId} envelope
+    // fails validateProposalPayload outright and cannot be actioned.
     const validation = validateProposalPayload(proposal.proposalType, proposal.payload);
     expect(validation.errors ?? []).toEqual([]);
     expect(validation.valid).toBe(true);
     assertVoiceProposalPayloadValid(proposal);
 
-    // The canonical shape: the schema's two required keys, plus the operator's
-    // context for what was actually asked.
+    // The canonical shape: the schema's two required keys, plus the
+    // operator's context for what was actually asked.
     expect(typeof proposal.payload.transcript).toBe('string');
-    expect(proposal.payload.reason).toBe('unknown_intent');
-    expect(proposal.payload.suggestedIntents).toEqual(['lookup_catalog']);
+    expect(proposal.payload.reason).toBe('missing_entities');
+    expect(proposal.payload.suggestedIntents).toEqual(['respond_to_review']);
     // The raw envelope keys are gone — that shape is what the executor chokes on.
     expect(proposal.payload.intent).toBeUndefined();
     expect(proposal.payload.entities).toBeUndefined();
-  });
-
-  it('records the degrade in the audit trail so it is diagnosable', async () => {
-    const { auditRepo } = await mintViaInApp('lookup_catalog', { catalogQuery: 'drain cleaning' });
-    const events = await auditRepo.findRecentByTenant('tenant-x', { limit: 200 });
-    const contractFailure = events.find((e) => e.eventType === 'voice.payload_contract_failed');
-    expect(contractFailure).toBeDefined();
-    expect(contractFailure?.metadata?.outcome).toBe('degraded_to_clarification');
   });
 
   it('does NOT degrade a real proposal type — the operator keeps an editable draft', async () => {

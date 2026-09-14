@@ -104,6 +104,10 @@ Key routing rules:
 
 ## Agent skills
 
+Matt Pocock's engineering and productivity skills are vendored in `.claude/skills/`
+(attribution and source commit in `.claude/skills/ATTRIBUTION.md`). `/ask-matt` routes
+between them; they read the per-repo configuration below.
+
 ### Issue tracker
 
 Issues live in GitHub Issues for `joshrkay/Serviceos` (use `gh`). See `docs/agents/issue-tracker.md`.

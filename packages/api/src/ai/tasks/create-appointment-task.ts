@@ -902,13 +902,23 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         });
       }
       const laneStamp = laneEvaluation ? autonomousLaneStamp(laneEvaluation) : undefined;
-      const bookingSourceContext =
-        context.conversationId || laneStamp
-          ? {
-              ...(context.conversationId ? { conversationId: context.conversationId } : {}),
-              ...(laneStamp ?? {}),
-            }
-          : undefined;
+      const bookingSourceContext = {
+        ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+        ...(laneStamp ?? {}),
+        // THE HOLD ID IS DB-VERIFIED BY CONSTRUCTION — this handler just wrote
+        // that appointment row through `placeAppointmentHold`, ownership check
+        // and all. It has to say so, because `verifiedIds` is the marker
+        // routes/assistant.ts's `dropUnverifiedIds` reads before deleting any
+        // id-shaped payload value the operator did not type: a freshly minted
+        // uuid appears in neither the transcript nor the classifier entities,
+        // so without this stamp the scrub deleted `payload.appointmentId` — the
+        // ONLY field `createBookingPayloadSchema` requires — a few lines after
+        // this returns, leaving an approve-to-fail card behind a real held
+        // slot. Found by the in-app 50-case register's chat surfaces, which
+        // added a contract gate at the chat chokepoint and watched every
+        // `create_booking` come back gated on the id it had just created.
+        verifiedIds: { appointmentId: holdResult.appointmentId },
+      };
 
       const bookingInput: CreateProposalInput = {
         tenantId: context.tenantId,

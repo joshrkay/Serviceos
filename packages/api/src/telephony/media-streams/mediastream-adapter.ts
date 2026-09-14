@@ -156,6 +156,8 @@ export type SpeechTurnHandler = (args: {
 }) => Promise<SideEffect[]>;
 
 export interface MediaStreamAdapterDeps {
+  /** Call/account authenticated by the WebSocket upgrade, not the start frame. */
+  authenticatedCall?: { callSid: string; accountSid: string };
   store: VoiceSessionStore;
   streamingProvider: StreamingTranscriptionProvider;
   ttsProvider?: TtsProvider;
@@ -1163,6 +1165,14 @@ export class TwilioMediaStreamAdapter {
         callSid,
       });
       this.closeWs(1008, 'unknown_callsid');
+      return;
+    }
+
+    const bound = this.deps.authenticatedCall;
+    if ((bound && (callSid !== bound.callSid || frame.start.accountSid !== bound.accountSid ||
+        session.twilioAccountSid !== bound.accountSid)) || (session.twilioAccountSid && !bound)) {
+      this.logSecurityEvent('authenticated_call_mismatch', { callSid });
+      this.closeWs(1008, 'authenticated_call_mismatch');
       return;
     }
 

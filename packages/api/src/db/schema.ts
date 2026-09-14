@@ -6670,27 +6670,116 @@ export const MIGRATIONS = {
       WHERE status = 'pending';
   `,
 
-  // U8 (R8) — transcripts survive restarts. VoiceSessionStore.appendTranscript
-  // persists each turn mid-call, before Twilio's recording webhook has created
-  // the voice_recordings row, so voice_recording_id must be nullable and the
-  // row needs its own key: (tenant_id, call_sid, session_id, turn_index). The
-  // key includes session_id because a second session can be created for the
-  // same CallSid (gather-fallback after a restart, Twilio re-delivery after a
-  // reap) and restarts its index at 0. The recording webhook's attachRecording
-  // later sets voice_recording_id and renumbers across legs, after which the
-  // original UNIQUE (voice_recording_id, turn_index) from 060 holds again.
-  // Partial index (WHERE call_sid IS NOT NULL) so the worker's direct
-  // recording-keyed writes (call_sid NULL) never participate. Every statement
-  // is idempotent — the runner replays the whole registry on every boot.
-  '274_call_transcript_turns_call_sid': `
-    ALTER TABLE call_transcript_turns ALTER COLUMN voice_recording_id DROP NOT NULL;
-    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS call_sid TEXT;
-    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS session_id TEXT;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_call_leg
-      ON call_transcript_turns (tenant_id, call_sid, session_id, turn_index)
-      WHERE call_sid IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
-      ON call_transcript_turns (tenant_id, call_sid);
+  // #1061 — one tenant per DID.
+  //
+  // `tenant_integrations.provider_data->>'phoneE164'` had no uniqueness
+  // constraint, so two tenants could each be provisioned with the same Twilio
+  // number. Three call sites then pick a row with `LIMIT 1` and no ORDER BY:
+  // PgPhoneNumberRepository.findByNumber, app.ts's resolveTenantIdByPhoneNumber
+  // (inbound /voice + /gather routing), and — since PR #1082 — tenant
+  // credential selection in integrations/credentials.ts. An inbound call to a
+  // shared DID lands in an arbitrary tenant and replies on arbitrary
+  // credentials. Every one of those resolves the tenant FROM the DID, so there
+  // is no tenant scope in which application code could check for the conflict:
+  // the guarantee has to be a database constraint.
+  //
+  // ADDITIVE. Creates an index; drops nothing. 070's UNIQUE (tenant_id,
+  // provider) stays as-is (it forbids two twilio rows for ONE tenant; this
+  // forbids one DID across TWO tenants — different, complementary guarantees).
+  //
+  // ── OPERATOR PRE-FLIGHT — RUN BEFORE DEPLOYING THIS ────────────────────
+  // The runner has no ledger: getMigrationSQL() re-executes every migration on
+  // every boot, and applyMigrations() sends the whole corpus as ONE statement,
+  // so a CREATE UNIQUE INDEX that fails on pre-existing duplicates fails the
+  // entire migration run and blocks the deploy (migrate.ts sets
+  // process.exitCode = 1). Confirm there are no duplicate claims first:
+  //
+  //   SET app.system_lookup = 'true';  -- tenant_integrations is FORCE RLS (074)
+  //   SELECT provider_data->>'phoneE164'              AS phone_e164,
+  //          count(*)                                 AS claim_count,
+  //          array_agg(tenant_id  ORDER BY created_at) AS tenant_ids,
+  //          array_agg(status     ORDER BY created_at) AS statuses,
+  //          array_agg(created_at ORDER BY created_at) AS created_ats
+  //     FROM tenant_integrations
+  //    WHERE provider = 'twilio'
+  //      AND provider_data->>'phoneE164' IS NOT NULL
+  //      AND provider_data->>'phoneE164' NOT LIKE '+1500555____'
+  //    GROUP BY 1
+  //   HAVING count(*) > 1
+  //    ORDER BY claim_count DESC, phone_e164;
+  //
+  // The WHERE clause must stay character-for-character identical to the
+  // index's below: if the two drift, the pre-flight stops predicting whether
+  // the index can be built, which is the only job it has.
+  //
+  // Zero rows → this migration applies cleanly. Any rows → reconcile them
+  // first (decide which tenant keeps the DID; the loser's phoneE164 must be
+  // cleared and its line re-provisioned), because the index cannot be created
+  // while a duplicate exists. See docs/audit/lane-reports/1061-did-uniqueness.md.
+  //
+  // ── Why not CONCURRENTLY ───────────────────────────────────────────────
+  // The runner does NOT support it. applyMigrations() issues the whole corpus
+  // via a single client.query(), which node-pg sends as a simple query — an
+  // implicit transaction block — and CREATE INDEX CONCURRENTLY is rejected
+  // inside one (25001). It also sets statement_timeout = '25s'. On a table
+  // this size (one row per tenant per provider) a plain build takes
+  // milliseconds and the ACCESS EXCLUSIVE lock is negligible. If
+  // tenant_integrations ever grows large enough to matter, an operator can
+  // build it CONCURRENTLY out-of-band BEFORE the deploy — the
+  // `IF NOT EXISTS` below then finds it already present and no-ops:
+  //
+  //   CREATE UNIQUE INDEX CONCURRENTLY uq_tenant_integrations_twilio_phone_e164
+  //     ON tenant_integrations (provider, (provider_data->>'phoneE164'))
+  //     WHERE provider = 'twilio'
+  //       AND provider_data->>'phoneE164' IS NOT NULL
+  //       AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
+  //
+  // ── Why the test-exchange carve-out ────────────────────────────────────
+  // workers/provision-twilio.ts assigns the SAME Twilio magic test number
+  // (+15005550006, STUB_DEV_PHONE_E164) to EVERY tenant provisioned without
+  // real Twilio credentials. Those numbers are not dialable and never route a
+  // real inbound call, so uniqueness over them protects nothing — and without
+  // a carve-out the second dev/CI tenant onward would fail to provision.
+  //
+  // The carve-out is the EXCHANGE, not the `stub: true` marker those rows
+  // also carry, matching isTwilioTestNumber (telephony/phone-policy.ts):
+  // 500-555 is not an assignable NANP block, so "there is no legitimate
+  // tenant line to false-positive on". Two reasons the marker is the wrong
+  // key, both found on PR #1120:
+  //   1. Rows hold the magic number WITHOUT the marker — the marker postdates
+  //      them (public-intake.test.ts calls them "rows predating it"), and a
+  //      pre-flight against a real database returned four of them. Keying on
+  //      the marker would fail CREATE INDEX on those rows and block a deploy.
+  //   2. Keying on the marker is a loophole in the other direction: `stub:
+  //      true` on a REAL dialable number would exempt it from the constraint.
+  // LIKE rather than a regex deliberately — `\d` and `\+` inside this
+  // template literal would be swallowed as JS escapes before Postgres saw them.
+  '274_tenant_integrations_unique_twilio_did': `
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_integrations_twilio_phone_e164
+      ON tenant_integrations (provider, (provider_data->>'phoneE164'))
+      WHERE provider = 'twilio'
+        AND provider_data->>'phoneE164' IS NOT NULL
+        AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
+  `,
+
+  // #1139 (rows 9.8/9.9) — the payload AS FIRST PROPOSED. `editProposal`
+  // overwrites `proposals.payload` with the operator's correction before
+  // approval (the executor executes that payload, and records it as
+  // proposal_executions.executed_payload). The correction-lesson recorder
+  // diffs "what the AI drafted" against "what was executed", but the draft
+  // was gone — so no correction lesson was ever recorded on the real
+  // pipeline. `editProposal` now copies the pre-edit payload here on the
+  // FIRST edit that changes a field and never again; NULL = never edited, so
+  // `payload` is still the original. Nullable, no default, no backfill:
+  // existing rows keep their current meaning.
+  //
+  // Pre-flight: none needed — ADD COLUMN of a nullable JSONB with no default
+  // cannot fail on existing rows (catalog-only change, no table rewrite).
+  // Sanity check before deploy (expect 0 rows — nothing else owns the name):
+  //   SELECT 1 FROM information_schema.columns
+  //    WHERE table_name = 'proposals' AND column_name = 'original_payload';
+  '275_proposals_original_payload': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
   `,
 };
 

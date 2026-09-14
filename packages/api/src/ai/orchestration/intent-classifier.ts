@@ -1070,6 +1070,18 @@ export interface ClassifyContext {
    */
   planPromptSection?: string;
   /**
+   * 2.12 — B2B/property-manager account context, produced by
+   * `buildAccountContextPromptSection(ctx)` in
+   * `packages/api/src/ai/agents/customer-calling/b2b-account-context.ts` from
+   * the session's `b2bAccountContext` (assembled once, on caller
+   * identification, by the twilio adapter). When supplied, tells the model
+   * this call is a business/property-management account so it prioritizes
+   * and (for a managed sub-account) names the parent portfolio. Optional —
+   * a residential or unmatched caller never sets `b2bAccountContext`, so the
+   * session omits this field and the prompt is byte-identical to today.
+   */
+  b2bAccountPromptSection?: string;
+  /**
    * True when the inbound caller has already been resolved to an
    * existing customer (e.g. by caller-ID). Suppresses the deterministic
    * "sign up" → create_customer override: an established customer who
@@ -1304,6 +1316,17 @@ interface OwnerOperatorCommandPattern {
 }
 
 /**
+ * Does this free text NAME AN EXISTING JOB, rather than describe work?
+ *
+ * Deliberately conservative — a trailing "job"/"jobs" or an explicit
+ * JOB-NNNN number, nothing else. Everything the operator says after "quote X
+ * for …" is work to be priced unless they said the word "job", and a WRONG
+ * job link is worse than none: the estimate silently attaches to whatever a
+ * trigram happened to match.
+ */
+const EXISTING_JOB_REFERENCE_RE = /\bjobs?\b\s*$|JOB-\d/i;
+
+/**
  * U2 — narrow, deterministic coverage for the operator corpus commands that
  * repeatedly fail closed when the provider is degraded. These patterns are
  * consulted only on an authenticated owner session. They are anchored and
@@ -1369,13 +1392,36 @@ const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern
     }),
   },
   {
+    // "Quote Khan for a three-ton condenser replacement" — match[2] is the
+    // WORK the operator wants priced, so it is a LINE ITEM, not a reference
+    // to an existing job. Emitting it only as `jobReference` (what this entry
+    // did originally) threw the whole request away: `draft_estimate`'s
+    // contract requires `lineItems`, `jobReference` never becomes one, and
+    // the card minted with `missingFields: ['lineItems']` — an estimate for
+    // nothing — even when the tenant's price book held the exact item
+    // (register case est-01). `lineItemDescriptions` is what
+    // `buildVoiceProposalPayload` grounds against the catalog
+    // (ai/resolution/catalog-resolver.ts), mirroring this table's own
+    // `update_invoice` line-item entries above.
+    //
+    // `jobReference` is KEPT only when the tail actually looks like an
+    // existing job ("for the Patel job", "for JOB-0012") — `draft_estimate`
+    // is a JOB_REF_INTENTS member, so a real job reference must still
+    // resolve. Otherwise it is dropped rather than sent to the job resolver,
+    // which would otherwise trigram-match spoken WORK against job summaries
+    // and link the estimate to whatever job happened to score
+    // ("three-ton condenser replacement" matched Khan's install job live).
     intentType: 'draft_estimate',
     pattern:
       /^\s*quote\s+([a-z][a-z .'-]{0,58}?)\s+for\s+(?:a\s+)?(.{3,120}?)\s*[.!?]?\s*$/i,
-    extract: (match) => ({
-      customerName: match[1].trim(),
-      jobReference: match[2].trim(),
-    }),
+    extract: (match) => {
+      const work = match[2].trim();
+      return {
+        customerName: match[1].trim(),
+        lineItemDescriptions: [work.replace(/^(?:a|an|the)\s+/i, '')],
+        ...(EXISTING_JOB_REFERENCE_RE.test(work) ? { jobReference: work } : {}),
+      };
+    },
   },
   {
     intentType: 'update_invoice',
@@ -1387,10 +1433,24 @@ const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern
     }),
   },
   {
+    // "Text Smith the invoice link". BOTH alternations of the verb — "sms"
+    // and "text" — name the SMS channel, and the operator naming a channel is
+    // the whole difference between this and "email Smith the invoice link".
+    //
+    // U5 (owner-command parity audit): this extract used to emit only
+    // `customerName`, which was harmless while the pattern was reachable on
+    // the voice session alone (buildVoiceProposalPayload gates `channel` and
+    // the operator picks it on the card). Reached from chat it is not:
+    // `SendInvoiceTaskHandler` reads `ee.sendChannel ?? 'email'`, so dropping
+    // the channel silently turned "TEXT Smith the invoice link" into an
+    // EMAIL — a deterministic path producing a worse payload than the LLM it
+    // short-circuits. The register (inv-05) scripts `sendChannel: 'sms'` for
+    // this exact sentence; the pattern now agrees with it rather than the
+    // register being edited down to the pattern.
     intentType: 'send_invoice',
     pattern:
       /^\s*(?:sms|text)\s+([a-z][a-z .'-]{0,58}?)\s+(?:the\s+)?invoice\s+link\s*[.!?]?\s*$/i,
-    extract: (match) => ({ customerName: match[1].trim() }),
+    extract: (match) => ({ customerName: match[1].trim(), sendChannel: 'sms' }),
   },
 ];
 
@@ -2677,6 +2737,17 @@ async function classifyIntentRaw(
     systemMessages.push({
       role: 'system',
       content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
+    });
+  }
+  // 2.12 — B2B/property-manager account context (see ClassifyContext doc
+  // comment). Same treatment as vertical/plan above: a separate, clearly
+  // labeled system message — never merged into the untrusted transcript slot
+  // the caller's own words occupy below (R14/R19: trusted context lives in
+  // the system role; caller speech is data, never instruction).
+  if (context.b2bAccountPromptSection && context.b2bAccountPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Caller account context (use to prioritize and inform tone; do not change the JSON output schema):\n${context.b2bAccountPromptSection}`,
     });
   }
   // RV-071 — owner-approval intents are documented to the model ONLY on a

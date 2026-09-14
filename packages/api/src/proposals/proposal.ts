@@ -129,6 +129,14 @@ export interface Proposal {
   proposalType: ProposalType;
   status: ProposalStatus;
   payload: Record<string, unknown>;
+  /**
+   * #1139 — the payload AS FIRST PROPOSED (usually the AI's draft), kept by
+   * `editProposal` on the first edit that changes a field, since that edit
+   * overwrites `payload` with the operator's correction. Undefined when the
+   * proposal was never edited (then `payload` is still the original). The
+   * correction-lesson recorder diffs this against the executed payload.
+   */
+  originalPayload?: Record<string, unknown>;
   summary: string;
   explanation?: string;
   confidenceScore?: number;

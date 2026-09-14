@@ -1,0 +1,6 @@
+              tenant_id               |                     actor_id                     | actor_role |           event_type            |              entity_id               |                                                              metadata                                                               
+--------------------------------------+--------------------------------------------------+------------+---------------------------------+--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------
+ 515f626c-f6c6-4a6e-920d-dfc7055392f0 | user_e2e_aowner_f59446096d1e46739de1585e1fff35c4 | owner      | appointment.technician_assigned | 7549543d-7fca-47c5-bfb7-e6bcb299dd24 | {"isPrimary": true, "assignmentId": "dfec48e0-cc56-4d78-8e4e-dfb7ae9199f6", "technicianId": "6d527a16-8bae-4512-bc09-4305a1f7c4f7"}
+ 515f626c-f6c6-4a6e-920d-dfc7055392f0 | user_e2e_aowner_f59446096d1e46739de1585e1fff35c4 | system     | appointment.technician_assigned | 4d44306a-10bb-4c6a-b97c-36093600f39d | {"isPrimary": true, "assignmentId": "8c917019-fac8-492e-8f81-b3593b48f575", "technicianId": "6d527a16-8bae-4512-bc09-4305a1f7c4f7"}
+(2 rows)
+

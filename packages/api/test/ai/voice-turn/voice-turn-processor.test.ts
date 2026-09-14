@@ -2072,3 +2072,57 @@ describe('#850 — speechTurn redacts the spoken approval challenge', () => {
     expect(store.get(session.id)!.transcript.join('\n')).toContain('boiler');
   });
 });
+
+// ─── B2B account context prompt wiring (2.12) ───────────────────────────────
+
+describe('createVoiceTurnProcessor.speechTurn — B2B account context wiring (2.12)', () => {
+  it("threads the session's b2bAccountContext into the classify prompt as an account-context system section", async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.2, reasoning: 'n/a' }),
+    );
+    const { processor, session } = makeCtx({ gateway });
+    // Twilio adapter stashes this at session establishment
+    // (twilio-adapter.ts:953) for a resolved business/property-manager
+    // caller — set directly here since assembling it is out of scope for
+    // this unit (assembleB2bAccountContext already has its own coverage).
+    session.b2bAccountContext = {
+      customerId: 'cust-1',
+      accountType: 'property_manager',
+      priority: true,
+      parentMissing: false,
+      subAccounts: [],
+    };
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'my tenant says the water heater is leaking',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const call = (gateway.complete as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0];
+    const serialized = JSON.stringify((call as { messages?: unknown })?.messages ?? call);
+    expect(serialized).toContain('property-management account');
+    expect(serialized).toContain('PRIORITY');
+  });
+
+  it('sends no account-context section for a residential session (no b2bAccountContext set)', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.2, reasoning: 'n/a' }),
+    );
+    const { processor, session } = makeCtx({ gateway });
+    // session.b2bAccountContext left unset — the residential/default case.
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'my sink is leaking',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const call = (gateway.complete as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0];
+    const serialized = JSON.stringify((call as { messages?: unknown })?.messages ?? call);
+    expect(serialized).not.toContain('property-management account');
+    expect(serialized).not.toContain('business account');
+  });
+});

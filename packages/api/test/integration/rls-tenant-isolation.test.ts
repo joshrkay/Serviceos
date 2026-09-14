@@ -172,9 +172,15 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
     const SECRET_B = 'asst_tenantB_secret';
 
     beforeAll(async () => {
-      for (const [t, secret] of [
-        [tenantA, SECRET_A] as const,
-        [tenantB, SECRET_B] as const,
+      // A DISTINCT phoneE164 per tenant: #1061's migration 274 makes a twilio
+      // DID unique across tenants, and these two rows previously shared one
+      // literal. The number is incidental to what this block asserts (that
+      // `vapiAssistantId` is not readable across tenants), so per-tenant
+      // numbers change nothing under test — and two live tenants sharing a
+      // DID is now exactly the state the schema forbids.
+      for (const [t, secret, phoneE164] of [
+        [tenantA, SECRET_A, '+15125550000'] as const,
+        [tenantB, SECRET_B, '+15125550001'] as const,
       ]) {
         await pool.query(
           `INSERT INTO tenant_settings (id, tenant_id, business_name, activated_at, vapi_assistant_id)
@@ -186,7 +192,7 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
           `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
              VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)
            ON CONFLICT (tenant_id, provider) DO NOTHING`,
-          [t.tenantId, JSON.stringify({ phoneE164: '+15125550000', vapiAssistantId: secret })],
+          [t.tenantId, JSON.stringify({ phoneE164, vapiAssistantId: secret })],
         );
       }
     });

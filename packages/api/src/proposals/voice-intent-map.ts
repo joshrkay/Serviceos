@@ -69,8 +69,13 @@ import type { ProposalType } from './proposal';
  * handleEnRouteVoiceIntent wrapper), ai/voice-turn/phone-en-route-surface.ts
  * (BOTH live phone transports: the Gather branch in
  * telephony/twilio-adapter.ts and media-streams finals via speechTurn in
- * create-voice-turn-processor.ts), and routes/assistant.ts (the chat branch,
- * before the unmapped-capability refusal). The SMS OMW keyword
+ * create-voice-turn-processor.ts), routes/assistant.ts (the chat branch,
+ * before the unmapped-capability refusal), and
+ * ai/voice-turn/inapp-en-route-surface.ts (in-app voice, called from
+ * `InAppVoiceAdapter.handleAdapterAct` before the FSM — SCH-D4; until it
+ * landed, in-app was the one live surface with no branch and produced
+ * exactly the dead clarification card this comment predicts). The SMS OMW
+ * keyword
  * (sms/tech-status/en-route-keyword.ts) fires the SAME audited
  * `triggerEnRoute` act but predates the core and still resolves inline —
  * folding it in is a filed follow-up, so don't read it as a caller here.

@@ -482,6 +482,15 @@ export interface TwilioAdapterDeps {
  *   3. Neither:
  *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
+ *
+ * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
+ * tenant's own `tenant_settings.business_name` — when the per-tenant
+ * persona resolver found one; the `businessName` PARAMETER (the
+ * platform-wide `TWILIO_BUSINESS_NAME` env value / literal `'our team'`
+ * fallback the caller passes in) is used only when the tenant has none on
+ * file. Without this, every tenant that completed onboarding (which
+ * captures a business name) but never wrote a custom `voice_greeting`
+ * heard the SAME platform-wide string as every other tenant.
  */
 export function buildTelephonyGreeting(
   businessName: string,
@@ -500,10 +509,12 @@ export function buildTelephonyGreeting(
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
-  // ends with a CTA (the ES CTA already ends with '?').
+  // ends with a CTA (the ES CTA already ends with '?'). #1156: the
+  // tenant's own resolved business name wins over the env-wide fallback.
+  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
-    ? t('greeting.opener_named', language, { business: businessName, agent: persona.agentName })
-    : t('greeting.opener_default', language, { business: businessName });
+    ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
+    : t('greeting.opener_default', language, { business: resolvedBusinessName });
   const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
@@ -1052,6 +1063,7 @@ export class TwilioGatherAdapter {
    * channel before Twilio finishes the connect.
    */
   async handleInboundForStream(opts: {
+    accountSid?: string;
     callSid: string;
     from: string;
     tenantId: string;
@@ -1067,7 +1079,13 @@ export class TwilioGatherAdapter {
       from: opts.from,
       tenantId: opts.tenantId,
     });
-    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+    if (opts.accountSid) {
+      if (session.twilioAccountSid && session.twilioAccountSid !== opts.accountSid) {
+        throw new Error('Twilio account mismatch on replayed call');
+      }
+      session.twilioAccountSid = opts.accountSid;
+    }
+    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid, accountSid: session.twilioAccountSid });
   }
 
   /**
@@ -1441,6 +1459,54 @@ export class TwilioGatherAdapter {
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
     await commit();
+
+    // Row 2.2 — the GRANT of implicit recording consent is a mutation
+    // (a `consent_events` row lands) and, until now, the only
+    // recording-consent transition with no `audit_events` row: the
+    // caller-initiated revocation already writes
+    // `recording_consent.revoked` through this same repository
+    // (`handleRecordingObjection` below). The ledger stays the
+    // append-only legal record; this is the operator-visible trail, so a
+    // grant and a revocation finally read the same way in the audit log.
+    //
+    // Guarded exactly like the revoked emitter: a ledger and a caller
+    // phone are what make a row possible at all (`discloseRecording`
+    // returns NO_CONSENT_LEDGER without both), so without them nothing
+    // was written and nothing is audited.
+    //
+    // DELIBERATELY SWALLOWED, unlike the dispatch-board emitter in
+    // #1040: every audit write on this path is best-effort by design —
+    // this runs mid-call from a fire-and-forget
+    // `void commitRecordingConsent(...)` in the media-streams adapter,
+    // and an audit failure must never drop a live call or, worse,
+    // unwind a consent row that was already committed.
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    if (this.deps.auditRepo && this.deps.consentEvents && callerPhone) {
+      try {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: session.tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'recording_consent.granted',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: {
+              kind: 'recording',
+              state: 'implicit',
+              source: 'voice',
+              phone: callerPhone,
+              customerId: session.customerId ?? null,
+              // Which transport's point-of-evidence committed it.
+              channel: session.channel,
+            },
+          }),
+        );
+      } catch {
+        /* audit is best-effort — see above */
+      }
+    }
   }
 
   /**
@@ -1491,14 +1557,17 @@ export class TwilioGatherAdapter {
    * `publicBaseUrl`'s host when set; otherwise emits an explicit
    * placeholder so a missing publicBaseUrl is loud at deploy time.
    */
-  buildStreamTwiML(opts: { sessionId: string; callSid: string }): string {
+  buildStreamTwiML(opts: { sessionId: string; callSid: string; accountSid?: string }): string {
     const baseRaw = this.deps.publicBaseUrl?.replace(/\/+$/, '') ?? '';
     // Translate http(s):// → ws(s):// so Twilio gets a valid ws URL even
     // when the operator only configured PUBLIC_API_URL.
     const wsBase = baseRaw
       ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
       : 'wss://media-streams-base-url-not-configured';
-    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}`;
+    // Stream URLs cannot carry query parameters. Bind the upgrade to the
+    // authenticated call via its path; the server resolves its account token.
+    const callPath = opts.accountSid ? `/${encodeURIComponent(opts.callSid)}` : '';
+    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}${callPath}`;
     return (
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +

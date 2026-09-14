@@ -131,11 +131,10 @@ export const COVERAGE_TABLE: Readonly<Record<IntentFamilyId, CoverageRow>> = {
     },
     inapp: {
       status: 'reachable',
-      hole: true,
       module:
-        'ai/agents/customer-calling/inapp-adapter.ts#_handleInputLocked (ownerSession-gated deps.ownerLookupResolver)',
+        'ai/agents/customer-calling/inapp-adapter.ts#_handleInputLocked → ai/voice-turn/inapp-lookup-surface.ts#answerInAppLookup → ai/orchestration/lookup-dispatch.ts#dispatchAssistantLookup (shared dispatch: workers/voice-lookup-answer.ts)',
       notes:
-        'Narrow twice over: only owner sessions are eligible, and the production resolver (app.ts) answers ONLY lookup_day_overview — every other lookup_* (and any non-owner session) falls to the FSM and degrades to a clarification card.',
+        'Every lookup_* at confidence >= TAU_INT is answered out-of-FSM (state stays intent_capture, no proposal). Authorization is the shared RBAC gate on session.actorUserId — the authenticated operator — not the ownerSession flag; free-text customer/job/crew references resolve through the same EntityResolver chat uses, ambiguity becomes a which-one question. Until 2026-09 this was ownerSession-gated and answered ONLY lookup_day_overview; everything else degraded to a clarification card.',
     },
     memo: {
       status: 'reachable',
@@ -160,13 +159,11 @@ export const COVERAGE_TABLE: Readonly<Record<IntentFamilyId, CoverageRow>> = {
       notes: 'TAU_INT-gated (a low-confidence en_route takes the normal repair path).',
     },
     inapp: {
-      status: 'refuse',
-      hole: true,
-      module: 'ai/agents/customer-calling/inapp-adapter.ts (no en_route branch)',
-      copy:
-        'No en-route act fires. The intent falls through the FSM to intentToProposalType\'s default and degrades to a voice_clarification card — the exact degradation proposals/voice-intent-map.ts predicts for a surface without a branch.',
+      status: 'reachable',
+      module:
+        'ai/agents/customer-calling/inapp-adapter.ts#handleAdapterAct → ai/voice-turn/inapp-en-route-surface.ts#answerInAppEnRoute',
       notes:
-        'The chat surface (routes/assistant.ts) has the branch; the in-app VOICE surface does not.',
+        'SCH-D4: closed the last en_route hole. TAU_INT-gated and handled BEFORE the FSM (an adapter act), so the turn stays in intent_capture and mints nothing — where it previously fell through to intentToProposalType\'s default and degraded to a voice_clarification card. Identity is the AUTHENTICATED session user (session.actorUserId → resolveCanonicalUser), so unlike the phone/SMS legs there is no caller-ID to spoof and no technician-role gate; the core still scopes to that user\'s own assignments.',
     },
     memo: {
       status: 'reachable',

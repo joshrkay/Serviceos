@@ -203,6 +203,20 @@ export interface GatedReferenceOutcome {
    * no reference at all). Reported for telemetry; they keep their gate.
    */
   unresolved: string[];
+  /**
+   * The subset of `unresolved` where the resolver LOOKED and there is no such
+   * record — every reference the operator gave came back `not_found`.
+   *
+   * Distinct from the rest of `unresolved` on purpose, because the honest
+   * answer differs. A field that is unresolved because there was nothing to
+   * look with, or because the best match was only `low_confidence`, is a card
+   * the operator can still finish. A field that is unresolved because THE
+   * RECORD DOES NOT EXIST cannot be finished by anyone: "cancel the Patel
+   * appointment" when there is no Patel is not a form with a blank in it, it
+   * is a miss, and gating a card on it produces a capability that can never be
+   * approved (#909). Callers use this to say so instead.
+   */
+  notFound: string[];
 }
 
 function trimmed(value: unknown): string | undefined {
@@ -318,7 +332,7 @@ export async function resolveGatedReferences(
   proposal: Pick<Proposal, 'payload' | 'sourceContext'>,
   entities?: Record<string, unknown>,
 ): Promise<GatedReferenceOutcome> {
-  const outcome: GatedReferenceOutcome = { filled: {}, unresolved: [] };
+  const outcome: GatedReferenceOutcome = { filled: {}, unresolved: [], notFound: [] };
   if (!resolver) return outcome;
 
   const lookups = planGatedReferenceLookups(proposal, entities);
@@ -326,6 +340,11 @@ export async function resolveGatedReferences(
 
   for (const lookup of lookups) {
     let settled = false;
+    // Every reference tried for this field came back `not_found` — see
+    // `GatedReferenceOutcome.notFound`. Starts true only when there IS a
+    // reference to look with; a field with nothing to search on is unresolved,
+    // never "confirmed absent".
+    let allNotFound = lookup.references.length > 0;
 
     // Ladder: try each reference the operator gave, most specific first.
     // A `resolved` or `ambiguous` outcome settles the field; only a
@@ -343,10 +362,13 @@ export async function resolveGatedReferences(
           ...(outcome.filled.jobId ? { jobId: outcome.filled.jobId } : {}),
         });
       } catch {
-        // This reference is unusable; a sibling may still answer.
+        // This reference is unusable; a sibling may still answer. A throw is
+        // not evidence of absence.
+        allNotFound = false;
         continue;
       }
 
+      if (result.kind !== 'not_found') allNotFound = false;
       if (result.kind === 'resolved') {
         outcome.filled[lookup.idField] = result.candidate.id;
         settled = true;
@@ -369,7 +391,10 @@ export async function resolveGatedReferences(
       // taken. `not_found` / `skipped` fall through to the next reference.
     }
 
-    if (!settled) outcome.unresolved.push(lookup.idField);
+    if (!settled) {
+      outcome.unresolved.push(lookup.idField);
+      if (allNotFound) outcome.notFound.push(lookup.idField);
+    }
   }
 
   return outcome;

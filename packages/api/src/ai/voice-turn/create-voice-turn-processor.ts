@@ -120,6 +120,7 @@ import {
 } from '../tasks/create-customer-task';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import { recordVoiceError } from '../../analytics/posthog';
+import { buildAccountContextPromptSection } from '../agents/customer-calling/b2b-account-context';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -1789,6 +1790,15 @@ export function createVoiceTurnProcessor(
               : session.customerId
                 ? { callerCustomerId: session.customerId }
                 : {}),
+            // The caller's words for the REQUEST turn (the FSM parks them on
+            // `context.lastUtterance` at intent_classified and threads them
+            // back here — transitions.ts). Same reason and same single reader
+            // as the in-app leg: a contract field the classifier never
+            // extracts, like update_job's spoken status. Threaded on BOTH
+            // voice surfaces so they cannot drift apart again.
+            ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
+              ? { utterance: fx.payload.utterance }
+              : {}),
           },
           {
             tenantId,
@@ -1802,6 +1812,12 @@ export function createVoiceTurnProcessor(
         payloadConfidence = built.confidence;
         if (built.ok) {
           payload = built.payload;
+          // A payload can satisfy its Zod contract and still be unapprovable:
+          // `updateCustomerPayloadSchema` requires only `customerId`, so an
+          // edit naming no new value validates and then executes as a silent
+          // no-op. `missingFieldPaths` is therefore read independently of
+          // `ok` — see voice-payload.ts `namedContractGap`.
+          contractMissingFields = built.missingFieldPaths;
         } else {
           const gateable =
             effectiveProposalType !== 'voice_clarification' &&
@@ -4371,6 +4387,14 @@ export function createVoiceTurnProcessor(
         tenantId,
         session.customerId,
       );
+      // 2.12 — B2B/property-manager account context, assembled once by the
+      // twilio adapter at caller identification (twilio-adapter.ts:953) and
+      // stashed on the session. Resolved into its prompt-ready string here,
+      // same treatment as vertical/plan above — absent for a residential or
+      // unmatched caller, so that session's prompt stays byte-identical.
+      const b2bAccountPromptSection = session.b2bAccountContext
+        ? buildAccountContextPromptSection(session.b2bAccountContext)
+        : undefined;
       // #886/#887 — surface-conditional taxonomy: derived from session
       // identity (owner line / trusted channel / D-026 phone actor). Hoisted
       // so the off-surface audit below records the same profile the guard
@@ -4387,6 +4411,7 @@ export function createVoiceTurnProcessor(
             verticalPromptSection,
             planPromptSection,
             classifierProfile,
+            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
             // RV-071 — the owner-approval prompt section is appended ONLY
             // on a recognized owner line (caller-ID match; see
             // approver-identity.ts), keeping every other call's

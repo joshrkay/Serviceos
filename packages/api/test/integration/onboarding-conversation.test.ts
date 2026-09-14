@@ -2,6 +2,34 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { Pool, PoolClient } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgOnboardingSessionRepository } from '../../src/db/onboarding-session-repository';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { OnboardingConversationOrchestrator } from '../../src/ai/orchestration/onboarding-conversation';
+import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
+
+function scriptedGateway(): LLMGateway {
+  return {
+    async complete(req: LLMRequest): Promise<LLMResponse> {
+      // Only the profile_capture extractor is exercised below — a single
+      // scripted response is enough for one turn.
+      const payload = {
+        business_name: 'Audit Trail HVAC',
+        city: 'Tempe',
+        state: 'AZ',
+        verticals: [{ type: 'hvac', confidence: 0.95, source_text: 'hvac' }],
+        service_descriptions: ['repair'],
+        confidence_score: 0.9,
+      };
+      return {
+        content: JSON.stringify(payload),
+        model: 'test',
+        provider: 'test',
+        tokenUsage: { input: 0, output: 0, total: 0 },
+        latencyMs: 0,
+      };
+    },
+  } as unknown as LLMGateway;
+}
 
 /**
  * Cross-tenant isolation is meaningless under the testcontainer's default
@@ -173,5 +201,46 @@ describe('onboarding_session — integration', () => {
     });
     expect(updated?.fsmState).toBe('completed');
     expect(updated?.completedAt?.toISOString()).toBe(completedAt.toISOString());
+  });
+
+  it('a conversation turn is AUDITED against real Postgres (T1: invisible under a second tenant)', async () => {
+    // 1.9 (§8.1) — the G1 grade found this file proves the conversation
+    // flow at T1 (secondTenant, above) but asserts NO audit event at all.
+    // The FSM emits an `audit_log` side effect (agent.onboarding.
+    // extractor_called) on every user_turn in an extraction state — drive
+    // one real turn through the orchestrator and read that event back.
+    const auditRepo = new PgAuditRepository(pool);
+    const orchestrator = new OnboardingConversationOrchestrator({
+      gateway: scriptedGateway(),
+      sessionRepo: repo,
+      proposalRepo: new InMemoryProposalRepository(),
+      auditRepo,
+      pool,
+    });
+
+    const opened = await orchestrator.turn({ tenantId: tenant.tenantId, userId: tenant.userId });
+    const sessionId = opened.sessionId;
+
+    await orchestrator.turn({
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      sessionId,
+      userMessage: 'we run Audit Trail HVAC out of Tempe AZ',
+    });
+
+    const auditRows = await auditRepo.findByEntity(tenant.tenantId, 'onboarding_session', sessionId);
+    expect(auditRows.length).toBeGreaterThan(0);
+    expect(auditRows.some((r) => r.eventType === 'agent.onboarding.extractor_called')).toBe(true);
+    // The scripted extraction succeeds within this same turn (confidence
+    // 0.9, above MIN_EXTRACTION_CONFIDENCE), so the FSM also advances
+    // profile_capture → category_capture and emits its OWN audit_log side
+    // effect (agent.onboarding.advanced) — asserted here, not just implied.
+    expect(auditRows.some((r) => r.eventType === 'agent.onboarding.advanced')).toBe(true);
+    expect(auditRows[0].actorId).toBe(tenant.userId);
+
+    // Cross-tenant negative: the same query under the second tenant's id
+    // (already used above for the RLS case) sees none of tenant A's events.
+    const auditUnderB = await auditRepo.findByEntity(secondTenant.tenantId, 'onboarding_session', sessionId);
+    expect(auditUnderB).toHaveLength(0);
   });
 });

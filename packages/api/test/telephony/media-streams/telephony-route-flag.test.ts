@@ -88,12 +88,13 @@ describe('P8-012 mediaStreamsEnabled flag dispatch', () => {
       }),
     );
     const res = await signedVoicePost(app, {
+      AccountSid: 'AC-subaccount',
       CallSid: 'CA-flag-on',
       From: '+15125550100',
       To: '+15125550999',
     });
     expect(res.status).toBe(200);
-    expect(handleInboundForStream).toHaveBeenCalledTimes(1);
+    expect(handleInboundForStream).toHaveBeenCalledWith({ callSid: 'CA-flag-on', from: '+15125550100', tenantId: 'tenant-1', accountSid: 'AC-subaccount' });
     expect(handleInbound).not.toHaveBeenCalled();
     expect(res.text).toContain('<Connect>');
     expect(res.text).toContain('<Stream');

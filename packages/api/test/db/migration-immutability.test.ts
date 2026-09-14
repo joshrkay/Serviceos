@@ -530,7 +530,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // schema.ts's comment on the key for why it flipped. Deliberate snapshot
   // update for a NEW migration — 272 was NOT edited.
   ['273_material_items_urgency_index', '0327e1316d8935b47272f639f98836551172168c4150eb8b6fed648a6c7242f0'],
-  ['274_call_transcript_turns_call_sid', '10b6695fe7b6da9106c56fa21f0445d46b41c7125ef2670d891701efafaf5e5a'],
+  ['274_tenant_integrations_unique_twilio_did', '411eb83584f65f04b75a649a1c4e2a3a96290b05e6e8dc6ea4cefefc6ec05579'],
+  // #1139 — proposals.original_payload (payload as first proposed). NEW
+  // migration; nothing above was edited.
+  ['275_proposals_original_payload', 'b21fd09557ecd2dced85a5ebf9955200743260790cbcf7bd9c82bb8110057331'],
 ];
 
 function hashMigration(value: string): string {

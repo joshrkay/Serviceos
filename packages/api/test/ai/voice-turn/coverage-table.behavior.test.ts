@@ -296,6 +296,42 @@ describe('lookup — answered on Gather, silently degraded on media-streams (D-0
     // cell declares): the FSM advanced out of intent_capture.
     expect(h.session.machine.currentState).not.toBe('intent_capture');
   });
+
+  it('inapp: the SAME turn is answered out-of-FSM through the shared dispatch (cell: reachable)', async () => {
+    expect(COVERAGE_TABLE.lookup.inapp.status).toBe('reachable');
+    const listPending = vi.fn(async () => [
+      {
+        id: 'm1',
+        tenantId: TENANT,
+        description: '3/4 inch copper elbows',
+        quantity: 6,
+        status: 'pending',
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    const store = new VoiceSessionStore({ startInterval: false });
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: gatewayAlways(classifyJson('lookup_materials')),
+      proposalRepo: new InMemoryProposalRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      onCallRepo: new InMemoryOnCallRepository(),
+      // The SAME bundle shape the phone gets — app.ts builds ONE object.
+      lookups: materialsLookups(listPending),
+    });
+    const { sessionId } = await adapter.startSession(TENANT, 'user-tech', undefined, 'technician');
+
+    const result = await adapter.handleInput(sessionId, 'what materials do I need');
+
+    expect(listPending).toHaveBeenCalled();
+    expect(result.ttsText).toContain('copper elbows');
+    // Out-of-FSM, exactly like Gather: state untouched and nothing minted.
+    expect(result.state).toBe('intent_capture');
+    expect(result.proposalIds).toHaveLength(0);
+    store.dispose();
+  });
 });
 
 // ── language_switch ─────────────────────────────────────────────────────────
@@ -611,31 +647,39 @@ describe('memo surface — map-membership anchors for the declared cells', () =>
   });
 });
 
-// ── en_route on the in-app voice surface (declared hole) ────────────────────
+// ── en_route on the in-app voice surface (SCH-D4 — the hole is closed) ──────
 
-describe('en_route — direct act on phone + memo, degradation on the in-app voice surface', () => {
-  it('inapp: no en-route act fires; the intent falls into the drafting funnel (cell: refuse + hole)', async () => {
-    expectRefuseHole(COVERAGE_TABLE.en_route.inapp);
+describe('en_route — the same direct act on every live surface, in-app included', () => {
+  it('inapp: the turn is an ADAPTER ACT — nothing is minted and the FSM stays in intent_capture', async () => {
+    // The cell used to read `refuse + hole`: the intent fell through the FSM
+    // to intentToProposalType's default and degraded to a voice_clarification
+    // card, exactly as proposals/voice-intent-map.ts predicts for a live
+    // surface with no branch. SCH-D4 added the branch.
+    expect(COVERAGE_TABLE.en_route.inapp.status).toBe('reachable');
     const store = new VoiceSessionStore({ startInterval: false });
     const auditRepo = new InMemoryAuditRepository();
+    const proposalRepo = new InMemoryProposalRepository();
     const adapter = new InAppVoiceAdapter({
       store,
       gateway: gatewayAlways(classifyJson('en_route', { jobReference: 'the Miller job' })),
-      proposalRepo: new InMemoryProposalRepository(),
+      proposalRepo,
       auditRepo,
       onCallRepo: new InMemoryOnCallRepository(),
+      // No `enRoute` bundle: this deployment cannot fire the act, and the
+      // honest answer for that is a spoken line — still never a card.
     });
     const { sessionId } = await adapter.startSession(TENANT, 'user-tech', undefined, 'technician');
 
-    await adapter.handleInput(sessionId, "I'm on my way to the Miller job");
+    const turn = await adapter.handleInput(sessionId, "I'm on my way to the Miller job");
 
-    // The direct status act (appointment.en_route_triggered) never fires on
-    // this surface — the phone transports and the memo router all audit it.
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    expect(store.get(sessionId)?.machine.currentState).toBe('intent_capture');
+    expect(turn.ttsText).toMatch(/en-route button/i);
+    // Unwired here, so the act itself cannot have fired — the wired path is
+    // pinned in test/ai/agents/customer-calling/inapp-scheduling-dispatch.test.ts.
     expect(
       auditRepo.getAll().find((e) => e.eventType === 'appointment.en_route_triggered'),
     ).toBeUndefined();
-    // The turn was consumed by the generic FSM funnel instead.
-    expect(store.get(sessionId)?.machine.currentState).not.toBe('intent_capture');
     store.dispose();
   });
 });

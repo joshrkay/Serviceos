@@ -6,7 +6,7 @@
 # which need a running Docker daemon and the pgvector/pgvector:pg16 image.
 #
 # Steps (idempotent, non-interactive):
-#   1. Install workspace dependencies (npm install).
+#   1. Install workspace dependencies (npm ci — see install_dependencies).
 #   2. Start the Docker daemon if it isn't already running (clearing stale
 #      pid files left behind by a container pause/resume).
 #   3. Pre-pull the Postgres + testcontainers-reaper images so integration
@@ -22,8 +22,140 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-echo "[session-start] Installing workspace dependencies…"
-npm install
+# `npm ci` rather than `npm install`, deliberately.
+#
+# `npm install` rewrites package-lock.json on every session in this image: npm
+# 10.9.7 strips the `libc` metadata from 14 Linux native-binary optional deps
+# (@tailwindcss/oxide-linux-*, @rolldown/binding-linux-*-musl and siblings) —
+# 42 deletions, 0 additions, every single time. That field is functional: npm
+# uses it to pick the glibc vs musl build, so dropping it is a regression for
+# musl environments, not cosmetic noise. It also left every session with a
+# dirty tree, which trained the stop hook to cry wolf.
+#
+# `npm ci` installs exactly what the lockfile says and never writes to it,
+# which is the correct semantic for a bootstrap anyway. It costs ~33s against
+# ~5s for a warm `npm install` (measured in this image); that is the price of
+# a reproducible tree and a clean `git status`.
+#
+# Consequence worth keeping: this hook never writes package-lock.json on any
+# path (see the fallback below), so a dirty lockfile always means a human
+# changed it deliberately. Do not reflexively revert it.
+install_dependencies() {
+  echo "[session-start] Installing workspace dependencies (npm ci)…"
+  if npm ci; then
+    return 0
+  fi
+
+  # `npm ci` fails for two different reasons and the hook cannot tell them
+  # apart: package.json and package-lock.json genuinely disagree, OR the
+  # registry was unreachable. That matters, because the fallback below is the
+  # very `npm install` this file exists to avoid.
+  #
+  # In the out-of-sync case its lockfile changes would be meaningful. In the
+  # registry case — where a warm npm cache can still let it succeed — its only
+  # change is the `libc` stripping described above, i.e. the corruption. An
+  # earlier version of this hook told the reader the change was REAL and should
+  # be committed, which is right for the first case and actively wrong for the
+  # second (Codex P2, PR #994).
+  #
+  # So: run the fallback for its node_modules, then put the lockfile back. A
+  # bootstrap hook's job is to make the session usable, not to update
+  # dependencies — any lockfile edit it produces is a side effect nobody asked
+  # for. The invariant holds on every path: THIS HOOK NEVER REWRITES
+  # package-lock.json, so a dirty lockfile always means a human did it.
+  echo "[session-start] WARNING: npm ci failed — either package-lock.json is out of sync"
+  echo "[session-start]          with package.json, or the registry is unreachable."
+  echo "[session-start]          Falling back to npm install so the session is usable."
+
+  # Record whether the lockfile EXISTED, not just its contents. An earlier
+  # version snapshotted contents and guarded the restore with `[ -s ]`, which
+  # silently exempted the one case where the invariant matters most: if a
+  # developer has deliberately deleted package-lock.json, the snapshot is empty,
+  # the guard is false, and `npm install` below RECREATES the file — the hook
+  # writing a lockfile on the very path that claimed never to (Codex P2, #994).
+  local snapshot had_lockfile=0 restored=0
+  snapshot="$(mktemp)"
+  if [ -f package-lock.json ]; then
+    # If the snapshot cannot be taken there is no way to honour the invariant,
+    # so don't run the fallback at all rather than run it and hope. A failed
+    # bootstrap is recoverable; a silently rewritten lockfile is the thing this
+    # whole function exists to prevent.
+    if ! cp package-lock.json "$snapshot"; then
+      echo "[session-start] WARNING: could not snapshot package-lock.json, so the npm install"
+      echo "[session-start]          fallback was SKIPPED — it could not be undone if it"
+      echo "[session-start]          rewrote the lockfile. node_modules may be incomplete."
+      rm -f "$snapshot"
+      return 0
+    fi
+    had_lockfile=1
+  fi
+
+  # The restore runs from a trap, not just inline after npm. Remote startup can
+  # be cancelled or time out mid-install; a signal would then skip an inline
+  # restore and leave a half-rewritten lockfile — the invariant broken by a
+  # SIGTERM rather than by a code path (Codex P2, #994). Bash scoping is
+  # dynamic, so this sees $snapshot and $had_lockfile from the caller.
+  _restore_lockfile() {
+    # Idempotent: the signal handler calls this and so does the normal path.
+    # The flag is set at the END, not here — bash defers a trap to the next
+    # command boundary, so a signal arriving mid-restore re-enters this
+    # function. Redoing an identical restore is harmless; returning early from
+    # a half-finished one is not.
+    [ "$restored" -eq 1 ] && return 0
+    if [ "$had_lockfile" -eq 1 ]; then
+      # No `-s` test on the snapshot: `had_lockfile` already proves the file
+      # existed and was copied. Testing for non-empty here silently exempted a
+      # zero-byte lockfile — it exists, so it is snapshotted and restorable,
+      # but the guard skipped the restore and let the fallback's regenerated
+      # file stand (Codex P2, #994 — fourth hole found in this invariant).
+      if ! cmp -s package-lock.json "$snapshot"; then
+        cp "$snapshot" package-lock.json
+        echo "[session-start]          NOTE: the fallback modified package-lock.json and the change"
+        echo "[session-start]          was REVERTED — it cannot be distinguished from the libc"
+        echo "[session-start]          stripping this hook exists to prevent. If package.json really"
+        echo "[session-start]          did change, regenerate the lockfile deliberately (npm install)"
+        echo "[session-start]          and review the diff before committing."
+      fi
+    elif [ -f package-lock.json ]; then
+      # There was no lockfile when this hook started; the fallback made one.
+      # Absence was someone's choice — restoring it means deleting the new file.
+      rm -f package-lock.json
+      echo "[session-start]          NOTE: package-lock.json did not exist when this session"
+      echo "[session-start]          started and the fallback created one. It was REMOVED —"
+      echo "[session-start]          a bootstrap hook does not get to decide that a repo has a"
+      echo "[session-start]          lockfile. node_modules is installed either way."
+    fi
+    restored=1
+    rm -f "$snapshot"
+  }
+  # A trap handler that RETURNS does not terminate the script — bash resumes
+  # where it left off, so trapping INT/TERM/HUP on the restore alone would undo
+  # the lockfile and then carry on into Docker setup as if the cancellation had
+  # not happened (Codex P2, #994 — fifth hole, and a consequence of the fourth
+  # fix). Signals restore once and then re-exit with the conventional 128+n;
+  # EXIT keeps handling ordinary termination.
+  _on_signal() {
+    _restore_lockfile
+    trap - EXIT INT TERM HUP
+    exit $((128 + $1))
+  }
+  trap _restore_lockfile EXIT
+  trap '_on_signal 2' INT
+  trap '_on_signal 15' TERM
+  trap '_on_signal 1' HUP
+
+  npm install || echo "[session-start] WARNING: npm install also failed — dependencies are incomplete."
+
+  # Restore FIRST, then clear the traps. The other order leaves a window: a
+  # signal arriving after `trap -` but before the restore takes bash's default
+  # termination action and the fallback's rewritten lockfile survives (Codex
+  # P2, #994 — sixth finding on this function). Idempotency makes a signal
+  # during the restore itself safe.
+  _restore_lockfile
+  trap - EXIT INT TERM HUP
+}
+
+install_dependencies
 
 # Postgres image used by test/integration/global-setup.ts. Override-able so the
 # hook tracks the test config if the image ever changes.

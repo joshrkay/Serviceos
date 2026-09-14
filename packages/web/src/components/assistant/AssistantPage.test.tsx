@@ -843,3 +843,67 @@ describe('auto-approved proposal — undo parity', () => {
     expect(screen.queryByTestId('undo-toast')).toBeNull();
   });
 });
+
+// ─── #1153 — the voice-command nav shortcut must never hijack an Assistant
+// composer turn. matchVoiceCommand's `\b(new|create|add)\s+…(customer|client)\b`
+// pattern used to run over EVERY chat turn (typed or dictated) before it
+// reached the conversation API, so a full sentence like "Add a new
+// customer, Mario Delingo, 412 Oak Street" navigated straight to
+// /customers/new and dropped the name/address — the server's deterministic
+// create_customer classifier (intent-classifier.ts) was unreachable from
+// chat. Fix: the Assistant composer no longer applies navigation shortcuts
+// at all — every turn always reaches POST /api/assistant/chat. The global
+// voice-nav surface (VoiceBar.tsx, and matchVoiceCommand's own unit tests)
+// is untouched and keeps navigating on a bare "new customer" utterance.
+describe('#1153 — voice-command nav shortcut does not hijack the Assistant composer', () => {
+  it('sends a full "Add a new customer, …" turn to the conversation API instead of navigating away', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: "Got it — I've added Mario Delingo." }, conversationId: 'c-1153' }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    const text = 'Add a new customer, Mario Delingo, 412 Oak Street';
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    // The full turn — name and address included — reaches the chat API.
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/api/assistant/chat',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining(text),
+      }),
+    ));
+    // The user's own message renders verbatim in the transcript — not
+    // replaced by a synthetic "Adding new customer." label.
+    expect(screen.getByText(text)).toBeInTheDocument();
+    // The reply that actually answers the request is shown.
+    await waitFor(() =>
+      expect(screen.getByText("Got it — I've added Mario Delingo.")).toBeInTheDocument(),
+    );
+  });
+
+  it('sends a bare "new customer" typed in the composer too — the composer never navigates locally', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: 'Sure — what\'s their name?' }, conversationId: 'c-1153b' }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'new customer' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/api/assistant/chat',
+      expect.objectContaining({ method: 'POST' }),
+    ));
+    expect(screen.getByText("Sure — what's their name?")).toBeInTheDocument();
+  });
+});

@@ -353,7 +353,7 @@ export function EstimateForm({
   const totalDisplay = formatCurrency(total);
 
   return (
-    <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
+    <form onSubmit={handleSubmit} noValidate className="p-4 md:p-6 max-w-3xl mx-auto">
       <h1 className="text-foreground mb-4">New Estimate</h1>
       {error && (
         <div
@@ -521,8 +521,17 @@ export function EstimateForm({
       </div>
 
       <div className="mt-4 flex gap-2">
-        <Button type="submit" loading={submitting}>
-          Create estimate
+        {/* #1146 — the job <select required> is invalid (empty placeholder
+            value) until useListQuery's jobs list resolves, so submitting in
+            that window used to hit the BROWSER's own native constraint
+            validation (blocking the submit event silently, before
+            handleSubmit's "Job is required." check ever ran — see
+            `noValidate` above, which stops that native block so our own
+            message always surfaces instead). Disabling Submit — with a
+            visible "Loading…" label — during that same window means the
+            owner is never looking at a dead button in the first place. */}
+        <Button type="submit" loading={submitting} disabled={jobsLoading}>
+          {jobsLoading ? 'Loading…' : 'Create estimate'}
         </Button>
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel

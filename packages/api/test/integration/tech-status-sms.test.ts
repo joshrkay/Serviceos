@@ -248,4 +248,154 @@ describe('Postgres integration — tech-status "I\'m out" SMS (U1 / P6-028)', ()
     expect(result.handled).toBe(false);
     expect(result.reason).toBe('unknown_mobile');
   });
+
+  // #1017 row 4.8 — the registered handler is a SINGLETON bound once above,
+  // exactly as app.ts wires it for every tenant. A second, wholly separate
+  // tenant fixture proves the SAME registered handler keeps tenant B's
+  // "OUT" from touching tenant A's blocks/proposals/audit rows — the T1
+  // gap #1008 flagged ("4.8 → 3 (single tenant) — neighbour").
+  describe('T1 — a second tenant', () => {
+    let tenantB: { tenantId: string; userId: string };
+    const techBId = '55555555-5555-5555-5555-555555555555';
+    const techBMobile = '+15559998888';
+
+    beforeAll(async () => {
+      tenantB = await createTestTenant(pool);
+      const settingsRepoB = new PgSettingsRepository(pool);
+      const customerRepoB = new PgCustomerRepository(pool);
+      const locationRepoB = new PgLocationRepository(pool);
+      const jobRepoB = new PgJobRepository(pool);
+      const appointmentRepoB = new PgAppointmentRepository(pool);
+      const assignmentRepoB = new PgAssignmentRepository(pool);
+
+      await pool.query(
+        `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, mobile_number)
+         VALUES ($1, $2, $3, $4, 'technician', $5)`,
+        [techBId, tenantB.tenantId, techBId, 'tech-b@example.com', techBMobile],
+      );
+
+      await settingsRepoB.create({
+        id: crypto.randomUUID(),
+        tenantId: tenantB.tenantId,
+        businessName: 'Neighbour Plumbing',
+        timezone: 'America/New_York',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const customerId = crypto.randomUUID();
+      await customerRepoB.create({
+        id: customerId,
+        tenantId: tenantB.tenantId,
+        firstName: 'Robin',
+        lastName: 'Nguyen',
+        displayName: 'Robin Nguyen',
+        preferredChannel: 'sms',
+        smsConsent: true,
+        isArchived: false,
+        createdBy: tenantB.userId,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const locationId = crypto.randomUUID();
+      await locationRepoB.create({
+        id: locationId,
+        tenantId: tenantB.tenantId,
+        customerId,
+        street1: '9 Nguyen Court',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+        country: 'USA',
+        isPrimary: true,
+        addressType: 'service',
+        isArchived: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const jobId = crypto.randomUUID();
+      await jobRepoB.create({
+        id: jobId,
+        tenantId: tenantB.tenantId,
+        customerId,
+        locationId,
+        jobNumber: 'JOB-B-1',
+        summary: 'Water heater replacement',
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: tenantB.userId,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const appointmentId = crypto.randomUUID();
+      await appointmentRepoB.create({
+        id: appointmentId,
+        tenantId: tenantB.tenantId,
+        jobId,
+        scheduledStart: new Date('2026-06-15T19:00:00Z'),
+        scheduledEnd: new Date('2026-06-15T20:00:00Z'),
+        timezone: 'America/New_York',
+        status: 'scheduled',
+        holdPendingApproval: false,
+        createdBy: tenantB.userId,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await assignmentRepoB.create({
+        id: crypto.randomUUID(),
+        tenantId: tenantB.tenantId,
+        appointmentId,
+        technicianId: techBId,
+        isPrimary: true,
+        assignedBy: tenantB.userId,
+        assignedAt: now,
+      });
+    });
+
+    it("routes tenant B's tech OUT to tenant B's own block + proposal + audit, and never touches tenant A's", async () => {
+      const result = await dispatchInboundSms({
+        tenantId: tenantB.tenantId,
+        fromE164: techBMobile,
+        body: 'OUT',
+        messageSid: `SM-${crypto.randomUUID()}`,
+      });
+
+      expect(result.handled).toBe(true);
+      expect(result.reason).toBe('recorded');
+
+      // Tenant B gets its own real rows.
+      const blocksB = await unavailableRepo.findByTechnician(tenantB.tenantId, techBId);
+      expect(blocksB).toHaveLength(1);
+
+      const proposalsB = await proposalRepo.findByTenant(tenantB.tenantId);
+      expect(proposalsB.filter((p) => p.proposalType === 'reschedule_appointment')).toHaveLength(1);
+
+      const auditsB = await auditRepo.findByEntity(tenantB.tenantId, 'tech_status', techBId);
+      expect(auditsB.some((a) => a.eventType === 'tech_status.recorded')).toBe(true);
+
+      // Tenant A's rows (seeded in the outer beforeAll, exercised by the
+      // tests above) are untouched by tenant B's OUT — still exactly the
+      // one block and one proposal from tenant A's own fixture, and no
+      // audit row under tenant A's id references tenant B's technician.
+      const blocksA = await unavailableRepo.findByTechnician(tenant.tenantId, techId);
+      expect(blocksA).toHaveLength(1);
+      const proposalsA = await proposalRepo.findByTenant(tenant.tenantId);
+      expect(proposalsA.filter((p) => p.proposalType === 'reschedule_appointment')).toHaveLength(1);
+      const auditsA = await auditRepo.findByEntity(tenant.tenantId, 'tech_status', techBId);
+      expect(auditsA).toHaveLength(0);
+
+      // And the reverse read is invisible too — tenant A's audit repo read
+      // scoped to tenant B's id sees none of tenant A's own tech's events.
+      const crossRead = await auditRepo.findByEntity(tenantB.tenantId, 'tech_status', techId);
+      expect(crossRead).toHaveLength(0);
+    });
+  });
 });

@@ -203,6 +203,38 @@ describe('OwnerNotificationService', () => {
       expect(provider.sent).toHaveLength(0);
     });
 
+    it('honours the target user\'s mute for the type — no push (4.11 review)', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[tech]', platform: 'ios' });
+      const withMute = new OwnerNotificationService({
+        deviceTokenRepo: repo,
+        provider,
+        // tech-clerk muted appointment_assigned ("New job assigned").
+        resolveMutedUserIds: async () => new Set(['tech-clerk']),
+      });
+
+      await withMute.notifyUser(TENANT, 'tech-clerk', 'appointment_assigned', {
+        appointmentId: 'a', customerName: 'C', whenLabel: 'w', serviceLabel: 's',
+      });
+
+      expect(provider.sent).toHaveLength(0);
+    });
+
+    it('still sends to a non-muted targeted user (regression guard)', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[tech]', platform: 'ios' });
+      const withMute = new OwnerNotificationService({
+        deviceTokenRepo: repo,
+        provider,
+        // A different user muted the type; tech-clerk did not.
+        resolveMutedUserIds: async () => new Set(['someone-else']),
+      });
+
+      await withMute.notifyUser(TENANT, 'tech-clerk', 'appointment_assigned', {
+        appointmentId: 'a', customerName: 'C', whenLabel: 'w', serviceLabel: 's',
+      });
+
+      expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[tech]']);
+    });
+
     it('prunes a dead token on the user-targeted path', async () => {
       await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[dead]', platform: 'ios' });
       provider.deadTokens.add('ExponentPushToken[dead]');

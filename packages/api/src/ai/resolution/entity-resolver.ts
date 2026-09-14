@@ -116,5 +116,31 @@ export interface EntityResolver {
      * by every other kind.
      */
     jobId?: string;
+    /**
+     * Customer anchor for `kind: 'appointment'` lookups — the CUSTOMER the
+     * same turn already resolved. Operators name the person, not the visit
+     * ("text Garcia that I'm running late"), so a delay/confirm/cancel turn
+     * frequently carries a resolved `customerId` and NO appointment
+     * reference at all. With this set, `PgEntityResolver` scopes the
+     * appointment lookup to that customer's own upcoming appointments
+     * instead of falling through to the tenant-wide "soonest upcoming"
+     * fallback (which could answer about somebody else entirely).
+     *
+     * Honest by construction, exactly like the job anchor: one upcoming
+     * appointment resolves, two or more become the existing one-tap
+     * disambiguation, none is `not_found`. Ignored by every other kind.
+     *
+     * Because the anchor alone identifies a scope, an EMPTY `reference` is
+     * meaningful here (and only here): "Garcia's next appointment, whenever
+     * it is". Every other kind still treats an empty reference as
+     * `skipped`.
+     *
+     * For `invoice` / `estimate` the anchor scopes "that customer's open
+     * document" when the reference is empty or is the customer's own name;
+     * an explicit document number (INV-0042 / EST-0042) always resolves
+     * through the named path instead — the anchor never overrides a number
+     * the operator actually said.
+     */
+    customerId?: string;
   }): Promise<EntityResolverResult>;
 }
