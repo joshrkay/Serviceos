@@ -25,8 +25,15 @@ import { hasViteClerkKey } from '../helpers/clerk-key';
  * (`appointment.running_late_triggered`) lands, and — because this fixture
  * gives the SAME technician a second, later appointment the same service
  * day (what `NextCustomerSelector` requires to find a notify target) — a
- * real `delay_notice_state` row lands too. T1: a neighbour tenant with its
- * own technician/job is proven untouched.
+ * real `delay_notice_state` row lands too.
+ *
+ * T2 (#1193, map #995): tenant B has its OWN concurrent appointment at the
+ * SAME service-day slot as tenant A's, and its OWN technician taps a
+ * DIFFERENT delay chip (10, not A's 20) in a separate browser session. Each
+ * tenant's `appointment.running_late_triggered` audit row and
+ * `delay_notice_state` row carries exactly its OWN tapped delay — proven in
+ * both directions (A's tap never touches B's rows, and B's tap never
+ * changes or duplicates A's).
  *
  * `packages/api/test/integration/running-late.test.ts` already proves the
  * ROUTE's Postgres behavior in isolation (in-memory-repo unit coverage plus
@@ -232,6 +239,10 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
   let appointmentId: string;
   let nextAppointmentId: string;
   let neighbour: Awaited<ReturnType<typeof bootstrapOwnerTenant>>;
+  let neighbourTech: Awaited<ReturnType<typeof inviteAndJoinTechnician>>;
+  let neighbourJob: CreatedEntity;
+  let neighbourAppointmentId: string;
+  let neighbourNextAppointmentId: string;
 
   async function appointmentIdForJob(authHeaders: Record<string, string>, jobId: string): Promise<string> {
     const res = await apiCtx.get(`${API_URL}/api/appointments?jobId=${jobId}`, { headers: authHeaders });
@@ -313,10 +324,13 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
     });
     nextAppointmentId = await appointmentIdForJob(owner.authHeaders, nextJob.id);
 
-    // T1 — a neighbour tenant with its own owner/technician/job (divergent
-    // data), proven untouched by tenant A's running-late tap below.
+    // T2 — a neighbour tenant (B) with its OWN owner/technician/job at the
+    // SAME service-day slot as tenant A's job, plus its OWN second/later
+    // appointment (so `NextCustomerSelector` can resolve B's OWN
+    // delay_notice_state target) — the tenant-B setup helpers already used
+    // for the earlier T1 leg, now extended with B's own chip tap below.
     neighbour = await bootstrapOwnerTenant(apiCtx, 'chipneighbour');
-    const neighbourTech = await inviteAndJoinTechnician(apiCtx, neighbour.authHeaders, neighbour.tenantId, 'chipneighbourtech');
+    neighbourTech = await inviteAndJoinTechnician(apiCtx, neighbour.authHeaders, neighbour.tenantId, 'chipneighbourtech');
     const neighbourCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, neighbour.authHeaders, {
       firstName: 'Neighbour',
       lastName: `Customer ${Date.now()}`,
@@ -335,23 +349,54 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
       postalCode: '62701',
       isPrimary: true,
     });
-    await postJson(apiCtx, `${API_URL}/api/jobs`, neighbour.authHeaders, {
+    neighbourJob = await postJson(apiCtx, `${API_URL}/api/jobs`, neighbour.authHeaders, {
       customerId: neighbourCustomer.id,
       locationId: neighbourLocation.id,
-      summary: 'Neighbour tenant job (untouched control)',
+      summary: 'Neighbour tenant job (own chip tap, T2)',
       priority: 'normal',
       scheduledStart: `${todayStr}T10:00:00.000Z`,
       durationMin: 60,
       timezone: 'Etc/UTC',
       technicianId: neighbourTech.techId,
     });
+    neighbourAppointmentId = await appointmentIdForJob(neighbour.authHeaders, neighbourJob.id);
+
+    const neighbourNextCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, neighbour.authHeaders, {
+      firstName: 'NeighbourNext',
+      lastName: `Customer ${Date.now()}`,
+      primaryPhone: '555-0199',
+      email: `neighbournext+${Date.now()}@example.com`,
+      preferredChannel: 'sms',
+      smsConsent: true,
+      source: 'referral',
+    });
+    const neighbourNextLocation = await postJson(apiCtx, `${API_URL}/api/locations`, neighbour.authHeaders, {
+      customerId: neighbourNextCustomer.id,
+      label: 'Home',
+      street1: '2 Neighbour Ave',
+      city: 'Springfield',
+      state: 'IL',
+      postalCode: '62701',
+      isPrimary: true,
+    });
+    const neighbourNextJob = await postJson(apiCtx, `${API_URL}/api/jobs`, neighbour.authHeaders, {
+      customerId: neighbourNextCustomer.id,
+      locationId: neighbourNextLocation.id,
+      summary: 'Neighbour tenant NEXT job (own delay_notice_state target)',
+      priority: 'normal',
+      scheduledStart: `${todayStr}T14:00:00.000Z`,
+      durationMin: 60,
+      timezone: 'Etc/UTC',
+      technicianId: neighbourTech.techId,
+    });
+    neighbourNextAppointmentId = await appointmentIdForJob(neighbour.authHeaders, neighbourNextJob.id);
   });
 
   test.afterAll(async () => {
     await apiCtx?.dispose();
   });
 
-  test('#1135 — tapping "Yes" then a delay chip (20) is the one-tap confirm: no second dialog, writes appointment.running_late_triggered + delay_notice_state, tenant B untouched (T1)', async ({
+  test('#1135 — tapping "Yes" then a delay chip (20) is the one-tap confirm: no second dialog, writes appointment.running_late_triggered + delay_notice_state; tenant B has its OWN concurrent appointment and taps a DIFFERENT chip (10) in a separate session — each tenant carries exactly its OWN delay (T2)', async ({
     page,
     baseURL,
   }) => {
@@ -430,11 +475,121 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
       /^(queued|retrying|sent|fallback_in_app)\|(sms|in_app)$/,
     );
 
-    // T1 — the neighbour tenant's audit table is untouched by this tap.
-    const neighbourAuditCount = queryScalar(
+    // Isolation check #1 (A → B): tenant A's tap alone must not create any
+    // running-late audit row for tenant B — checked BEFORE B taps anything.
+    const neighbourAuditCountBeforeBTap = queryScalar(
       `SELECT COUNT(*) FROM audit_events WHERE tenant_id = '${neighbour.tenantId}' ` +
         `AND event_type = 'appointment.running_late_triggered';`,
     );
-    expect(neighbourAuditCount, 'tenant B (neighbour) must see zero running-late audit rows').toBe('0');
+    expect(
+      neighbourAuditCountBeforeBTap,
+      "tenant A's chip tap must not create any running-late audit row for tenant B",
+    ).toBe('0');
+
+    // T2 — tenant B has its OWN concurrent appointment (same service-day
+    // slot as A's) and its OWN technician taps a DIFFERENT delay chip (10,
+    // not A's 20) in a SEPARATE browser session, reusing the exact same
+    // chip-row flow driven above against B's own job/appointment.
+    const neighbourContext = await page.context().browser()!.newContext();
+    const neighbourPage = await neighbourContext.newPage();
+    try {
+      const neighbourPageErrors: string[] = [];
+      neighbourPage.on('pageerror', (err) => neighbourPageErrors.push(err.message));
+
+      await installClerkStub(neighbourPage, {
+        signedIn: true,
+        sub: neighbourTech.sub,
+        token: neighbourTech.token,
+      });
+      await neighbourPage.addInitScript(
+        ({ welcomeKey, whatsNewKey }) => {
+          try {
+            localStorage.setItem(welcomeKey, '1');
+            localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
+          } catch {
+            /* private mode — ignore */
+          }
+        },
+        { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
+      );
+      await blockExternalHosts(neighbourPage, baseURL!);
+      await neighbourPage.goto(`/jobs/${neighbourJob.id}?view=tech`);
+
+      await expect(neighbourPage.getByText('Running behind?', { exact: true })).toBeVisible({ timeout: 15_000 });
+
+      const neighbourRunningLatePromise = neighbourPage.waitForResponse(
+        (r) => r.request().method() === 'POST' && /running-late/.test(new URL(r.url()).pathname),
+        { timeout: 10_000 },
+      );
+      await neighbourPage.getByRole('button', { name: 'Yes', exact: true }).click();
+      await expect(neighbourPage.getByRole('dialog')).toHaveCount(0);
+      // A DIFFERENT chip than tenant A's (20) — 10, not 20.
+      await neighbourPage.getByRole('button', { name: '10', exact: true }).click();
+
+      const neighbourRes = await neighbourRunningLatePromise;
+      expect(neighbourRes.status(), "tenant B's chip tap must call running-late and succeed").toBe(200);
+      expect(new URL(neighbourRes.request().url()).pathname).toBe(
+        `/api/appointments/${neighbourAppointmentId}/running-late`,
+      );
+      expect(JSON.parse(neighbourRes.request().postData() ?? '{}')).toEqual({ delayMinutes: 10 });
+
+      await neighbourPage.screenshot({
+        path: `${REPORT_DIR}/4.6-chip-row-tenant-b-different-chip.png`,
+        fullPage: true,
+      });
+
+      expect(neighbourPageErrors, "no uncaught page errors on tenant B's tech job view").toEqual([]);
+    } finally {
+      await neighbourContext.close();
+    }
+
+    // #1133 workaround — poll until tenant B's own rows land.
+    const neighbourAuditCountAfterBTap = queryScalarUntilNonEmpty(
+      `SELECT COUNT(*) FROM audit_events WHERE tenant_id = '${neighbour.tenantId}' ` +
+        `AND entity_id = '${neighbourAppointmentId}' AND event_type = 'appointment.running_late_triggered';`,
+    );
+    expect(
+      neighbourAuditCountAfterBTap,
+      "a running_late_triggered audit row must land for tenant B's own appointment",
+    ).toBe('1');
+
+    const neighbourAuditMetadataDelay = queryScalar(
+      `SELECT metadata->>'delayMinutes' FROM audit_events WHERE tenant_id = '${neighbour.tenantId}' ` +
+        `AND entity_id = '${neighbourAppointmentId}' AND event_type = 'appointment.running_late_triggered' LIMIT 1;`,
+    );
+    expect(
+      neighbourAuditMetadataDelay,
+      "tenant B's audit row must record ITS OWN tapped delay (10 minutes)",
+    ).toBe('10');
+
+    const neighbourNoticeRow = queryScalarUntilNonEmpty(
+      `SELECT status || '|' || channel FROM delay_notice_state WHERE tenant_id = '${neighbour.tenantId}' ` +
+        `AND appointment_id = '${neighbourNextAppointmentId}';`,
+    );
+    expect(
+      neighbourNoticeRow,
+      "a delay_notice_state row must land for tenant B's OWN next appointment",
+    ).toMatch(/^(queued|retrying|sent|fallback_in_app)\|(sms|in_app)$/);
+
+    // Isolation check #2 (B → A): tenant B's own tap (delay 10) must not
+    // change or duplicate tenant A's own row — A still carries exactly ITS
+    // OWN tapped delay (20), one row, unaffected by B's concurrent tap.
+    const ownerAuditCountAfterBTap = queryScalar(
+      `SELECT COUNT(*) FROM audit_events WHERE tenant_id = '${owner.tenantId}' ` +
+        `AND entity_id = '${appointmentId}' AND event_type = 'appointment.running_late_triggered';`,
+    );
+    expect(
+      ownerAuditCountAfterBTap,
+      "tenant A's audit row count must stay exactly 1 after tenant B's own tap",
+    ).toBe('1');
+
+    const ownerAuditMetadataDelayAfterBTap = queryScalar(
+      `SELECT metadata->>'delayMinutes' FROM audit_events WHERE tenant_id = '${owner.tenantId}' ` +
+        `AND entity_id = '${appointmentId}' AND event_type = 'appointment.running_late_triggered' LIMIT 1;`,
+    );
+    expect(
+      ownerAuditMetadataDelayAfterBTap,
+      "tenant A's audit row must still carry ITS OWN delay (20), not tenant B's (10)",
+    ).toBe('20');
   });
 });
