@@ -1053,6 +1053,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     vapiSecretResolver,
     // #6 phase 4 — persist saved cards on setup_intent.succeeded.
     // customerPaymentMethodRepo is wired in after its instantiation below.
+    // SECURITY #1177 — the saved card's metadata customer_id is resolved through
+    // this tenant-scoped repo first; a customer that is not the named tenant's
+    // is refused and nothing is stored.
+    customerRepo,
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
