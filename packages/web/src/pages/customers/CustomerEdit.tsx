@@ -67,6 +67,10 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
   const [loading, setLoading] = useState(Boolean(customerId));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // #1155 — true once the loaded customer already carries a classification.
+  // PUT cannot clear accountType (no un-classify path), so "Not set" would be
+  // a silent no-op save; it is only offered while nothing is stored.
+  const [hasStoredAccountType, setHasStoredAccountType] = useState(false);
 
   const setField = useCallback(<K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -101,6 +105,9 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             ? data.accountType
             : '') as AccountTypeOption,
         });
+        setHasStoredAccountType(
+          ACCOUNT_TYPES.some((t) => t.value !== '' && t.value === data.accountType),
+        );
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load customer');
@@ -276,7 +283,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             onChange={(e) => setField('accountType', e.target.value as AccountTypeOption)}
             className="min-h-11"
           >
-            {ACCOUNT_TYPES.map((t) => (
+            {ACCOUNT_TYPES.filter((t) => t.value !== '' || !hasStoredAccountType).map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
             ))}
           </Select>

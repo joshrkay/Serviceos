@@ -407,4 +407,42 @@ describe('CustomerEdit — account type (#1155)', () => {
       'accountType',
     );
   });
+
+  // #1155 review — there is no un-classify path (PUT rejects '' and null), so
+  // once a customer HAS a classification, "Not set" would save as a silent
+  // no-op while the form reports success. It must not be offered.
+  it('does not offer "Not set" once a customer has a stored accountType', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseCustomer, accountType: 'property_manager' }),
+    } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('accountType')).toHaveValue('property_manager');
+    });
+    const labels = Array.from(
+      (screen.getByLabelText('accountType') as HTMLSelectElement).options,
+    ).map((o) => o.textContent);
+    expect(labels).not.toContain('Not set');
+    expect(labels.length).toBeGreaterThan(0);
+  });
+
+  it('still offers "Not set" for an unclassified customer', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => baseCustomer,
+    } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('firstName')).toHaveValue('Alice');
+    });
+    const labels = Array.from(
+      (screen.getByLabelText('accountType') as HTMLSelectElement).options,
+    ).map((o) => o.textContent);
+    expect(labels).toContain('Not set');
+  });
 });
