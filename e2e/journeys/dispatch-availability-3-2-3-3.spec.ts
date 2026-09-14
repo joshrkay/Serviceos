@@ -333,27 +333,14 @@ test.describe('dispatch availability (3.2 business hours/buffer/isolation + 3.3 
     //    the identity step), is told its timezone/hours are DEFAULTS, through
     //    the owner's own real session. ──────────────────────────────────────
     //
-    // FINDING (product gap, not a test bug): `bufferSource` is NOT 'default'
-    // here, unlike the isolated-router integration test's "zero
-    // tenant_settings row" cold tenant. The real Clerk `user.created`
-    // webhook handler (packages/api/src/auth/clerk.ts:622) calls
-    // `ensureTenantSettings` (packages/api/src/settings/settings.ts:1154),
-    // which inserts a tenant_settings row for EVERY real tenant at
-    // signup — before onboarding/identity ever runs — deliberately leaving
-    // `timezone`/`businessHours` unset (nullable columns, settings.ts:1163
-    // comment: "the zone stays UNSET until the tenant picks one") but never
-    // touching `jobBufferMinutes`, which the schema declares `NOT NULL
-    // DEFAULT 30` (migration 098, contracts.ts comment above
-    // `jobBufferMinutes`). So the row's `job_buffer_minutes` column reads 30
-    // from the moment the tenant is born, and `schedulingConfigFromSettings`
-    // /`findBookableSlotsDetailed`'s bufferSource check
-    // (`input.bufferMinutes != null` — booking-availability.ts:314) can only
-    // ever see "non-null" for a REAL tenant. A genuinely bufferSource:
-    // 'default' response is reachable only for a tenant with ZERO
-    // tenant_settings row at all — impossible via the real onboarding
-    // surface, only via a hand-built DB tenant that skips ensureTenantSettings
-    // entirely (what dispatch-availability-stale-defaults.integration.test.ts
-    // does). Asserted here as the row's REAL, reachable behaviour.
+    // #1158 (fixed): the real Clerk `user.created` webhook still seeds a
+    // tenant_settings row at signup (`ensureTenantSettings`), but
+    // `job_buffer_minutes` is now NULL until the owner sets one (migration
+    // 277 dropped the schema's `NOT NULL DEFAULT 30`). So a real-onboarded
+    // cold tenant is told the buffer is a DEFAULT too — with the 30-minute
+    // default still applied to its slots. (Before #1158 this asserted
+    // 'tenant': the stored schema default was indistinguishable from a
+    // chosen buffer.)
     const coldContext = await page.context().browser()!.newContext();
     const coldPage = await coldContext.newPage();
     await installClerkStub(coldPage, { signedIn: true, sub: tenantCold.sub, token: tenantCold.jwt });
@@ -361,9 +348,10 @@ test.describe('dispatch availability (3.2 business hours/buffer/isolation + 3.3 
     const availCold = await getAvailability(coldPage.request, tenantCold.authHeaders, FUTURE_DAY);
     expect(availCold.config.timezoneSource).toBe('default');
     expect(availCold.config.businessHoursSource).toBe('default');
-    expect(availCold.config.bufferSource, 'see FINDING above — a real tenant always has a settings row with the schema default buffer').toBe('tenant');
+    expect(availCold.config.bufferSource, '#1158 — an unset buffer is labelled a default for a real onboarded tenant').toBe('default');
     expect(availCold.config.bufferMinutes).toBe(30);
-    expect(availCold.config.notes.length).toBeGreaterThanOrEqual(2);
+    expect(availCold.config.notes.length).toBeGreaterThanOrEqual(3);
+    expect(availCold.config.notes.join(' ')).toMatch(/Travel buffer not configured/);
     expect(availCold.config.notes.join(' ')).toMatch(/not configured/i);
     // T1 — the cold tenant's own defaults never leak the configured tenant's
     // timezone (a neighbour tenant queried in the SAME run). The fallback

@@ -120,7 +120,10 @@ import {
 } from '../tasks/create-customer-task';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import { recordVoiceError } from '../../analytics/posthog';
-import { buildAccountContextPromptSection } from '../agents/customer-calling/b2b-account-context';
+import {
+  buildAccountContextPromptSection,
+  proposalAccountContext,
+} from '../agents/customer-calling/b2b-account-context';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -2195,6 +2198,13 @@ export function createVoiceTurnProcessor(
           // isProposalTypeAllowedOnSurface applied at creation. Only ever set
           // by trusted server code — never from transcript content.
           ...(systemDetectedSafety ? { systemDetectedSafety: true } : {}),
+          // #1155 (row 2.12) — a business / property-manager caller's
+          // proposal carries its PRIORITY account context (session identity
+          // from caller-ID, never transcript content). Both transports mint
+          // proposals here, so Gather and media-streams stamp it alike.
+          ...(session.b2bAccountContext
+            ? { accountContext: proposalAccountContext(session.b2bAccountContext) }
+            : {}),
           // The IDENTIFIED caller's customer id (caller-ID match / self-signup
           // — session identity, never transcript content). S1 self-service
           // ops that target existing records (reschedule own appointment)
@@ -4337,6 +4347,7 @@ export function createVoiceTurnProcessor(
     speechResult,
     callSid: _callSid,
     tenantId,
+    transcriptAppended = false,
   }): Promise<SideEffect[]> => {
     // Note: `processCallerUtterance` historically took `sessionId` and
     // looked up the session via the store. The mediastream adapter
@@ -4358,10 +4369,12 @@ export function createVoiceTurnProcessor(
 
     // 1. Append caller utterance to transcript.
     // #850 — redacted when the session is awaiting a spoken money-approval
-    // challenge. This site is REACHED TWICE on the media-streams path (the
-    // adapter routes through TwilioGatherAdapter#processCallerUtterance, which
-    // appends first), so an unguarded append here re-leaked the secret that
-    // the other site had just redacted.
+    // challenge.
+    // #859 — on the media-streams path the host
+    // (TwilioGatherAdapter#processCallerUtterance) appends BEFORE delegating
+    // here and says so via `transcriptAppended`, so this site is skipped and
+    // each utterance lands exactly once. A direct caller passes nothing and
+    // gets this single append.
     // #962 (PR-B) — on a surface whose silence ladder is served HERE (the
     // ported Gather ladder), an empty SpeechResult is a no-speech timeout:
     // Gather's loop deliberately skips the empty `caller:` line so
@@ -4370,8 +4383,9 @@ export function createVoiceTurnProcessor(
     // (media-streams: adapter-side A3/T2-F05) keep the unconditional
     // append, byte-identical to main.
     if (
-      speechResult.trim().length > 0 ||
-      !servesFamilyHere('silence_low_stt_ladder')
+      !transcriptAppended &&
+      (speechResult.trim().length > 0 ||
+        !servesFamilyHere('silence_low_stt_ladder'))
     ) {
       deps.store.appendTranscript(session.id, {
         speaker: 'caller',
@@ -4578,6 +4592,9 @@ export function createVoiceTurnProcessor(
           speechResult,
           {
             tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
             classifierProfile,

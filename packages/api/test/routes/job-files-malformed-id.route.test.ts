@@ -10,12 +10,22 @@
  *     reached Postgres, threw `invalid input syntax for type uuid`, and
  *     `asyncRoute` answered a bare `500 INTERNAL_ERROR`. → guarded here.
  *
- * Not converted, because they do not 500 today (#1110 converts only the bare
- * 500s): `POST /:id/files/upload-url`, `POST /:id/files/upload` and
- * `GET /:id/files` bind `:id` to `files.entity_id`, which is `TEXT`, so a
- * malformed `:id` is stored / compared as text. On `DELETE`, `:id` is
- * compared in JavaScript (`file.jobId !== req.params.id`) and already answers
- * `404 Job file not found` — pinned below.
+ * Not converted by #1110, because they did not 500 then (#1110 converts only
+ * the bare 500s): `GET /:id/files` binds `:id` to `files.entity_id`, which is
+ * `TEXT`, so a malformed `:id` is stored / compared as text. On `DELETE`,
+ * `:id` is compared in JavaScript (`file.jobId !== req.params.id`) and
+ * already answers `404 Job file not found` — pinned below.
+ *
+ * #1187 (extends this sweep): `POST /:id/files/upload-url` and
+ * `POST /:id/files/upload` now look the job up through a tenant-scoped
+ * `jobRepo.findById` before writing (a well-formed-but-unknown job id used to
+ * write an orphan `files` row and 201 — real-Postgres leg:
+ * test/integration/unknown-parent-id-404.test.ts). A malformed `:id` would
+ * reach that lookup's uuid-typed column comparison and 500, so
+ * `notFoundOnMalformedId` now guards both routes too — pinned below. The
+ * `jobRepo` double here always resolves any well-formed id as found; job
+ * existence for a *malformed* id is what these two new cases pin, not
+ * well-formed-unknown (that's #1187's integration leg).
  *
  * The PgLike subclass throws exactly what Postgres would for the columns that
  * are uuid (pattern: users-malformed-id.route.test.ts); the real-Postgres leg
@@ -29,7 +39,16 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { ObjectMetadata, StorageProvider } from '../../src/files/file-service';
 import { InMemoryJobFileRepository } from '../../src/files/job-file-repository';
+import type { Job, JobRepository } from '../../src/jobs/job';
 import { createJobFilesRouter } from '../../src/routes/job-files';
+
+// #1187 — this file is about :fileId / malformed :id handling, not job
+// existence, so the double resolves any well-formed job id as found (the
+// well-formed-*unknown* case is proven at real Postgres in
+// test/integration/unknown-parent-id-404.test.ts).
+const alwaysFoundJobRepo: Pick<JobRepository, 'findById'> = {
+  findById: async () => ({} as Job),
+};
 
 const TENANT = 'tenant-job-files-malformed';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -95,6 +114,7 @@ function buildApp(repo: InMemoryJobFileRepository, role: string | null = 'owner'
       storage: new FakeStorageProvider(),
       bucket: 'job-files-malformed-test',
       auditRepo: new InMemoryAuditRepository(),
+      jobRepo: alwaysFoundJobRepo,
     }),
   );
   return app;
@@ -133,6 +153,20 @@ describe('job files: malformed :fileId never reaches Postgres as a raw uuid comp
     const res = await removeFile(app, 'not-a-uuid', upload.body.fileId);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Job file not found' });
+  });
+
+  it('#1187: POST /api/jobs/:id/files/upload-url with a malformed :id answers 404, never a 500', async () => {
+    const res = await request(buildApp(repo)).post('/api/jobs/not-a-uuid/files/upload-url').send(UPLOAD);
+    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Job not found' });
+  });
+
+  it('#1187: POST /api/jobs/:id/files/upload with a malformed :id answers 404, never a 500', async () => {
+    const res = await request(buildApp(repo)).post('/api/jobs/not-a-uuid/files/upload').send(UPLOAD);
+    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Job not found' });
   });
 
   it('a valid id is unaffected — upload, list and delete still apply', async () => {

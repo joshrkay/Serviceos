@@ -29,6 +29,7 @@ import {
 } from '../payments/payment-service';
 import { randomUUID, createHmac, timingSafeEqual } from 'crypto';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
+import type { CustomerRepository } from '../customers/customer';
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
@@ -189,6 +190,12 @@ export interface WebhookRouterDeps {
    * stripeConfig + stripeFetch back the PaymentMethod-details retrieve.
    */
   customerPaymentMethodRepo?: CustomerPaymentMethodRepository;
+  /**
+   * SECURITY #1177 — the tenant-scoped customer lookup `setup_intent.succeeded`
+   * binds the metadata `customer_id` through before storing a saved card. The
+   * card is stored only when this is wired too (like `stripeConfig`).
+   */
+  customerRepo?: CustomerRepository;
   stripeConfig?: { apiKey: string };
   stripeFetch?: StripeFetch;
   integrationResolver?: (tenantId: string, provider: 'twilio' | 'sendgrid') => Promise<{
@@ -351,6 +358,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
   /** The single reason string: response body, audit row, and error_message. */
   const STRIPE_ACCOUNT_MISMATCH = 'stripe_account_mismatch';
+  /**
+   * SECURITY #1177 — the saved-card branch's metadata `customer_id` is not one
+   * of the named tenant's own customers (a neighbour's, or none at all).
+   */
+  const STRIPE_CUSTOMER_TENANT_MISMATCH = 'stripe_customer_tenant_mismatch';
+  type StripeRefusalReason = typeof STRIPE_ACCOUNT_MISMATCH | typeof STRIPE_CUSTOMER_TENANT_MISMATCH;
 
   type EventAccountBinding =
     | { ok: true }
@@ -433,6 +446,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    * existing vocabulary's non-processed terminal status (the column's CHECK
    * allows only received/processing/processed/failed), so `processed_at`
    * stays null and no reader can mistake a refusal for a settlement.
+   *
+   * #1177 — the same path refuses a saved card whose metadata customer is not
+   * the named tenant's (`reason: STRIPE_CUSTOMER_TENANT_MISMATCH`); every other
+   * caller keeps the default account-mismatch reason and its exact output.
    */
   const refuseUnboundStripeEvent = async (
     res: Response,
@@ -444,20 +461,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       paymentId?: string;
       eventId: string;
       eventType: string;
-      eventAccount: string;
-      tenantConnectAccountId: string | null;
+      /** null for a platform-origin delivery (no `event.account`). */
+      eventAccount: string | null;
+      /** Omitted when the refusal is not about the account binding (#1177). */
+      tenantConnectAccountId?: string | null;
+      /** Defaults to STRIPE_ACCOUNT_MISMATCH. */
+      reason?: StripeRefusalReason;
+      /** #1177 — the foreign customer a saved card would have pointed at. */
+      customerId?: string;
     },
   ): Promise<Response> => {
-    logger.warn('Stripe event refused — event.account is not the tenant\'s connected account', {
-      eventId: ctx.eventId,
-      type: ctx.eventType,
-      tenantId: ctx.tenantId,
-      invoiceId: ctx.invoiceId,
-      paymentId: ctx.paymentId,
-      eventAccount: ctx.eventAccount,
-      tenantConnectAccountId: ctx.tenantConnectAccountId,
-      reason: STRIPE_ACCOUNT_MISMATCH,
-    });
+    const reason = ctx.reason ?? STRIPE_ACCOUNT_MISMATCH;
+    logger.warn(
+      reason === STRIPE_CUSTOMER_TENANT_MISMATCH
+        ? 'Stripe event refused — the metadata customer is not the tenant\'s customer'
+        : 'Stripe event refused — event.account is not the tenant\'s connected account',
+      {
+        eventId: ctx.eventId,
+        type: ctx.eventType,
+        tenantId: ctx.tenantId,
+        invoiceId: ctx.invoiceId,
+        paymentId: ctx.paymentId,
+        customerId: ctx.customerId,
+        eventAccount: ctx.eventAccount,
+        tenantConnectAccountId: ctx.tenantConnectAccountId,
+        reason,
+      },
+    );
     // Best-effort (a failed audit write must not turn a correctly-refused
     // event into a 500), and skipped for a malformed tenant id, which the
     // tenant-scoped audit write could not accept anyway.
@@ -470,16 +500,19 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             actorRole: 'system',
             eventType: 'webhook.auth_failed',
             entityType: 'webhook',
-            entityId: STRIPE_ACCOUNT_MISMATCH,
+            entityId: reason,
             correlationId: ctx.eventId,
             metadata: {
-              reason: STRIPE_ACCOUNT_MISMATCH,
+              reason,
               stripeEventId: ctx.eventId,
               stripeEventType: ctx.eventType,
               eventAccount: ctx.eventAccount,
-              tenantConnectAccountId: ctx.tenantConnectAccountId,
+              ...(ctx.tenantConnectAccountId !== undefined
+                ? { tenantConnectAccountId: ctx.tenantConnectAccountId }
+                : {}),
               invoiceId: ctx.invoiceId ?? null,
               ...(ctx.paymentId ? { paymentId: ctx.paymentId } : {}),
+              ...(ctx.customerId ? { customerId: ctx.customerId } : {}),
             },
           }),
         )
@@ -493,10 +526,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     await webhookRepo.updateStatus(
       webhookEventId,
       'failed',
-      `${STRIPE_ACCOUNT_MISMATCH}: event.account '${ctx.eventAccount}' is not tenant ` +
-        `${ctx.tenantId}'s connected account (${ctx.tenantConnectAccountId ?? 'none'})`,
+      reason === STRIPE_CUSTOMER_TENANT_MISMATCH
+        ? `${reason}: customer '${ctx.customerId}' is not one of tenant ${ctx.tenantId}'s customers`
+        : `${reason}: event.account '${ctx.eventAccount}' is not tenant ` +
+            `${ctx.tenantId}'s connected account (${ctx.tenantConnectAccountId ?? 'none'})`,
     );
-    return res.status(403).json({ error: 'Forbidden', reason: STRIPE_ACCOUNT_MISMATCH });
+    return res.status(403).json({ error: 'Forbidden', reason });
   };
 
   /**
@@ -1270,12 +1305,37 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
         if (
           deps.customerPaymentMethodRepo &&
+          deps.customerRepo &&
           deps.stripeConfig &&
           siTenantId &&
           siCustomerId &&
           si.customer &&
           si.payment_method
         ) {
+          // SECURITY #1177 — binding the account is not enough: the metadata
+          // could name the sender's own tenant with ANOTHER tenant's customer_id,
+          // storing a cross-tenant reference (and answering a customer-existence
+          // oracle). Resolve the customer through the tenant-scoped repository
+          // for the named tenant before anything is read or written; a customer
+          // that is not that tenant's is refused through the same path, audited
+          // on the named tenant, and nothing is stored. Malformed ids (the UUID
+          // check) are refused without a query rather than 500-ing into retries.
+          const siCustomer =
+            isValidTenantId(siTenantId) && isValidTenantId(siCustomerId)
+              ? await deps.customerRepo.findById(siTenantId, siCustomerId)
+              : null;
+          if (!siCustomer) {
+            const eventAccount = (event as { account?: string }).account;
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId: siTenantId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: typeof eventAccount === 'string' && eventAccount ? eventAccount : null,
+              reason: STRIPE_CUSTOMER_TENANT_MISMATCH,
+              customerId: siCustomerId,
+            });
+          }
+
           const already = await deps.customerPaymentMethodRepo.findByStripePaymentMethodId(
             siTenantId,
             si.payment_method,

@@ -620,3 +620,43 @@ describe('Customer source (acquisition channel — Jobber parity)', () => {
     expect(updated?.source).toBe('google');
   });
 });
+
+// #1155 (row 2.12) — accountType is settable through the customer service
+// (the customers routes' create/update path) and enum-validated.
+describe('Customer accountType (B2B / property-manager classification)', () => {
+  let repo: InMemoryCustomerRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryCustomerRepository();
+  });
+
+  it('persists accountType on create and changes it on update, auditing the edit', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Manager', createdBy: 'u1', accountType: 'property_manager' },
+      repo,
+    );
+    expect((await getCustomer('t1', created.id, repo))?.accountType).toBe('property_manager');
+
+    const updated = await updateCustomer('t1', created.id, { accountType: 'b2b' }, repo, 'u1', auditRepo);
+    expect(updated?.accountType).toBe('b2b');
+    const audit = auditRepo.getAll().filter((e) => e.eventType === 'customer.updated');
+    expect(audit).toHaveLength(1);
+    expect((audit[0].metadata as { changes: string[] }).changes).toContain('accountType');
+  });
+
+  it('rejects an unknown accountType on create and on update', async () => {
+    expect(
+      validateCustomerInput({
+        tenantId: 't1', firstName: 'A', lastName: 'B', createdBy: 'u1',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        accountType: 'enterprise' as any,
+      }),
+    ).toContain('Invalid accountType');
+    const created = await createCustomer({ tenantId: 't1', firstName: 'A', lastName: 'B', createdBy: 'u1' }, repo);
+    expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      validateCustomerUpdateInput(created, { accountType: 'enterprise' as any }),
+    ).toContain('Invalid accountType');
+  });
+});
