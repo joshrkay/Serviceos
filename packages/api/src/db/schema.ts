@@ -6810,6 +6810,23 @@ export const MIGRATIONS = {
           'en_route_notice_sent', 'en_route_notice_failed'
         )) NOT VALID;
   `,
+  // U8 (PR #975) — mid-call transcript durability. Dropped repeatedly by the
+  // main-merge collisions at the MIGRATIONS tail (originally 274, then 276);
+  // numbered 277 to sit past main's #1186 tail (276) so check:migration-keys
+  // is satisfied and it actually runs. Turns are persisted keyed by CallSid +
+  // session id before a recording exists, so voice_recording_id becomes
+  // nullable and the mid-call upsert conflicts on (call_sid, session_id,
+  // turn_index).
+  '277_call_transcript_turns_call_sid': `
+    ALTER TABLE call_transcript_turns ALTER COLUMN voice_recording_id DROP NOT NULL;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS call_sid TEXT;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS session_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_call_leg
+      ON call_transcript_turns (tenant_id, call_sid, session_id, turn_index)
+      WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
+      ON call_transcript_turns (tenant_id, call_sid);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
