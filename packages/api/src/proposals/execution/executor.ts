@@ -419,11 +419,11 @@ export class ProposalExecutor {
         const row = await this.executionRepo.recordExecution({
           tenantId: updatedProposal.tenantId,
           proposalId: updatedProposal.id,
-          // Capture the as-executed payload. v1 mirrors proposal.payload
-          // because we don't yet have a "dispatcher edit" surface that
-          // overrides the AI draft mid-flight; when dispatcher edits land
-          // they'll surface here as a different shape, and the
-          // correction-worker's diff will become non-empty.
+          // Capture the as-executed payload. proposal.payload already
+          // carries any operator edit (editProposal overwrites it before
+          // approval); the AI's first draft is kept separately in
+          // proposal.originalPayload (#1139), which is what the
+          // correction-lesson recorder diffs this against.
           executedPayload: updatedProposal.payload,
           executedBy: context.executedBy,
           status: result.success ? 'succeeded' : 'failed',
