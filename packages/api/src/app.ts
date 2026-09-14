@@ -5582,6 +5582,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1173 — the files repo + object storage an Assistant chat photo was
+      // uploaded through (POST /api/files/upload-url), so a photo turn's
+      // fileIds resolve tenant-scoped into image parts on the estimate draft.
+      photoAttachments: { fileRepo, storage: storageProvider },
       // The tenant's IANA zone for the scheduling handlers this route
       // dispatches. NOTE: `lookups.tenantTimezoneResolver` below is a
       // DIFFERENT field consumed by the read-only lookup skills — it does not
