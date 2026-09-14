@@ -47,6 +47,17 @@ describe('BusinessIdentityInputSchema', () => {
     ).toBe(false);
   });
 
+  // #1158 — the buffer may be omitted (keep what's stored; NULL = not
+  // configured) so an echo-only surface never turns "unset" into 30. A
+  // present value stays bounded.
+  it('accepts an omitted jobBufferMinutes but still bounds a present one', () => {
+    const base = { businessName: 'Acme HVAC', businessHours: {}, hourlyRateCents: 12500 };
+    expect(BusinessIdentityInputSchema.safeParse(base).success).toBe(true);
+    expect(BusinessIdentityInputSchema.safeParse({ ...base, jobBufferMinutes: 0 }).success).toBe(true);
+    expect(BusinessIdentityInputSchema.safeParse({ ...base, jobBufferMinutes: 241 }).success).toBe(false);
+    expect(BusinessIdentityInputSchema.safeParse({ ...base, jobBufferMinutes: -1 }).success).toBe(false);
+  });
+
   it('rejects empty business name', () => {
     const result = BusinessIdentityInputSchema.safeParse({
       businessName: '',
