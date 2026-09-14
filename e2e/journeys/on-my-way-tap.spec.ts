@@ -143,6 +143,45 @@ function queryOne(sql: string): string | null {
   return out || null;
 }
 
+/**
+ * The delay-notice worker drains the queue asynchronously (app.ts poll loop),
+ * so the delay_notice_state row starts 'queued'. Poll up to ~15s for it to
+ * settle, returning the tab-delimited `status\tlast_error` row.
+ */
+function settledDeliveryState(appointmentId: string, tenantId: string, timeoutMs = 15_000): string | null {
+  const deadline = Date.now() + timeoutMs;
+  let row: string | null = null;
+  while (Date.now() < deadline) {
+    row = queryOne(
+      `SELECT status, coalesce(last_error, '') FROM delay_notice_state WHERE idempotency_key = '${appointmentId}:en_route' ` +
+        `AND tenant_id = '${tenantId}';`,
+    );
+    const status = row?.split('\t')[0];
+    if (status && status !== 'queued' && status !== 'retrying') return row;
+    execFileSync('sleep', ['0.25']);
+  }
+  return row;
+}
+
+/**
+ * Comma-joined dispatch_analytics event types for one tenant's appointment.
+ * The worker records analytics just after it settles the state row, so poll
+ * briefly (≤5s) for the first row to land.
+ */
+function analyticsEventsFor(tenantId: string, appointmentId: string, timeoutMs = 5_000): string {
+  const deadline = Date.now() + timeoutMs;
+  let events = '';
+  while (Date.now() < deadline) {
+    events = queryScalar(
+      `SELECT coalesce(string_agg(event_type, ',' ORDER BY recorded_at), '') FROM dispatch_analytics ` +
+        `WHERE tenant_id = '${tenantId}' AND appointment_id = '${appointmentId}';`,
+    );
+    if (events) return events;
+    execFileSync('sleep', ['0.25']);
+  }
+  return events;
+}
+
 function pollDbSnapshot(label: string, sql: string): void {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) return;
@@ -393,11 +432,6 @@ test.describe('on-my-way tap (4.5) — real Postgres, no DEV_AUTH_BYPASS (issue 
       `SELECT tenant_id, actor_id, actor_role, event_type, entity_type, entity_id ` +
         `FROM audit_events WHERE tenant_id = '${fixtureA.owner.tenantId}' AND event_type = 'appointment.en_route_triggered';`,
     );
-    pollDbSnapshot(
-      '4.5-delay-notice-state-a',
-      `SELECT idempotency_key, tenant_id, appointment_id, status, channel ` +
-        `FROM delay_notice_state WHERE tenant_id = '${fixtureA.owner.tenantId}';`,
-    );
 
     const auditA = queryScalar(
       `SELECT count(*) FROM audit_events WHERE tenant_id = '${fixtureA.owner.tenantId}' ` +
@@ -406,31 +440,26 @@ test.describe('on-my-way tap (4.5) — real Postgres, no DEV_AUTH_BYPASS (issue 
     );
     expect(auditA, 'A: exactly one en_route_triggered audit row with the TECH as actor').toBe('1');
 
-    // §12.4d honesty — the ETA dispatch row IS created (proving the tap
-    // reaches the coordinator), but it deterministically settles at
-    // 'failed' rather than 'sent': see the KNOWN GAP test below for the
-    // confirmed product bug (dispatch_analytics' CHECK constraint doesn't
-    // list 'en_route_notice_sent'/'en_route_notice_failed', so recording
-    // analytics for EVERY en-route delivery throws, which the delivery
-    // worker's own catch handler then records as a delivery failure). This
-    // assertion accepts 'failed' as a real, reproducible state — not
-    // invented around — and pins the exact cause via last_error.
-    const stateRow = queryOne(
-      `SELECT status, last_error FROM delay_notice_state WHERE idempotency_key = '${fixtureA.appointment.id}:en_route' ` +
-        `AND tenant_id = '${fixtureA.owner.tenantId}';`,
-    );
+    // #1131 (fixed) — the ETA dispatch row is created by the tap and the
+    // delivery worker settles it 'sent' (it used to flip to 'failed' because
+    // dispatch_analytics' CHECK rejected 'en_route_notice_sent'). The worker
+    // drains asynchronously, so wait for the row to leave 'queued'.
+    const stateRow = settledDeliveryState(fixtureA.appointment.id, fixtureA.owner.tenantId);
     expect(stateRow, 'A: a delay_notice_state row must exist for the en-route notice').toBeTruthy();
     const [stateA, lastErrorA] = (stateRow ?? '\t').split('\t');
+    expect(stateA, `A: delay_notice_state status -> ${stateA} (last_error: ${lastErrorA})`).toBe('sent');
+    // queryOne trims its output, so an empty trailing last_error column drops
+    // the tab entirely — undefined and '' both mean "no last_error".
+    expect(lastErrorA ?? '', 'A: a delivered notice carries no last_error').toBe('');
     expect(
-      ['queued', 'sent', 'fallback_in_app', 'failed'],
-      `A: delay_notice_state status -> ${stateA}`,
-    ).toContain(stateA);
-    if (stateA === 'failed') {
-      expect(
-        lastErrorA,
-        'A: if failed, it must be the KNOWN dispatch_analytics CHECK-constraint bug, not something else',
-      ).toContain('dispatch_analytics_event_type_check');
-    }
+      analyticsEventsFor(fixtureA.owner.tenantId, fixtureA.appointment.id),
+      'A: exactly one en_route_notice_sent analytics row for its own appointment',
+    ).toBe('en_route_notice_sent');
+    pollDbSnapshot(
+      '4.5-delay-notice-state-a',
+      `SELECT idempotency_key, tenant_id, appointment_id, status, channel ` +
+        `FROM delay_notice_state WHERE tenant_id = '${fixtureA.owner.tenantId}';`,
+    );
 
     const auditB = queryScalar(
       `SELECT count(*) FROM audit_events WHERE tenant_id = '${fixtureB.owner.tenantId}' ` +
@@ -444,62 +473,41 @@ test.describe('on-my-way tap (4.5) — real Postgres, no DEV_AUTH_BYPASS (issue 
     );
     expect(crossTenantLeak, 'A\'s tenant must have ZERO audit rows for B\'s appointment').toBe('0');
 
-    const stateRowB = queryOne(
-      `SELECT status, last_error FROM delay_notice_state WHERE idempotency_key = '${fixtureB.appointment.id}:en_route' ` +
-        `AND tenant_id = '${fixtureB.owner.tenantId}';`,
-    );
+    const stateRowB = settledDeliveryState(fixtureB.appointment.id, fixtureB.owner.tenantId);
     expect(stateRowB, 'B: a delay_notice_state row must exist for ITS OWN en-route notice').toBeTruthy();
     const [stateB, lastErrorB] = (stateRowB ?? '\t').split('\t');
+    expect(stateB, `B: delay_notice_state status -> ${stateB} (last_error: ${lastErrorB})`).toBe('sent');
     expect(
-      ['queued', 'sent', 'fallback_in_app', 'failed'],
-      `B: delay_notice_state status -> ${stateB}`,
-    ).toContain(stateB);
-    if (stateB === 'failed') {
-      expect(
-        lastErrorB,
-        'B: if failed, it must be the KNOWN dispatch_analytics CHECK-constraint bug, not something else',
-      ).toContain('dispatch_analytics_event_type_check');
-    }
+      analyticsEventsFor(fixtureB.owner.tenantId, fixtureB.appointment.id),
+      'B: exactly one en_route_notice_sent analytics row for ITS OWN appointment',
+    ).toBe('en_route_notice_sent');
+    expect(
+      queryScalar(
+        `SELECT count(*) FROM dispatch_analytics WHERE tenant_id = '${fixtureA.owner.tenantId}' ` +
+          `AND appointment_id = '${fixtureB.appointment.id}';`,
+      ),
+      'A\'s tenant must have ZERO analytics rows for B\'s appointment',
+    ).toBe('0');
   });
 
-  test('KNOWN GAP — en-route delivery should record analytics + settle "sent", not fail on a schema mismatch', () => {
-    // PRODUCT BUG (not a test artifact — out of scope for this TEST-ONLY
-    // lane to fix): packages/api/src/notifications/delay-notifications.ts
-    // (the delay-delivery queue worker) calls
-    // `captureDispatchEvent(deps.analyticsRepo, tenantId,
-    // 'en_route_notice_sent', ...)` on the success path (line 546) and
-    // `'en_route_notice_failed'` on the failure path (line 569). But the
-    // `dispatch_analytics.event_type` CHECK constraint
-    // (packages/api/src/db/schema.ts, migration '105_create_dispatch_analytics',
-    // ~line 2775) only allows: 'assigned', 'reassigned', 'rescheduled',
-    // 'canceled', 'conflict_detected', 'delay_notice_sent',
-    // 'delay_notice_failed' — NEITHER en_route_notice_* value is listed.
-    // Every "on my way" delivery therefore throws
-    // `new row for relation "dispatch_analytics" violates check constraint
-    // "dispatch_analytics_event_type_check"` the instant it tries to
-    // record analytics — which happens INSIDE the same try/catch as the
-    // delivery itself, so the catch handler overwrites the just-set 'sent'
-    // status back to 'failed' (see the test above: the delay_notice_state
-    // row is real and reachable, but always ends up 'failed' with this
-    // exact last_error, never 'sent'). This is 100% reproducible, not
-    // flaky — confirmed via two independent tenants in the test above.
-    // Flagged for Fable/Josh to ticket; not filed by this lane per §12.4d.
-    test.fail(
-      true,
-      'KNOWN PRODUCT BUG: dispatch_analytics_event_type_check does not list en_route_notice_sent/' +
-        'en_route_notice_failed, so every "on my way" delivery fails at the analytics-recording step. ' +
-        'See the comment above this test for file:line and the exact error.',
-    );
-    // Real assertion, not a contrived placeholder: the test above already
-    // drove TWO real en-route deliveries (tenants A and B) against this
-    // same Postgres instance. If the bug were fixed, at least one
-    // 'en_route_notice_sent' row would exist in dispatch_analytics by now.
+  test('#1131 — en-route deliveries record en_route_notice_sent analytics (formerly pinned KNOWN GAP)', () => {
+    // Formerly `test.fail()`: dispatch_analytics_event_type_check did not
+    // list 'en_route_notice_sent'/'en_route_notice_failed', so every "on my
+    // way" delivery failed at the analytics step and the worker recorded the
+    // delivered notice as 'failed'. Migration 276 widens the CHECK and the
+    // worker now records analytics outside the delivery try-block (#1131).
+    // The test above drove TWO real en-route deliveries (tenants A and B)
+    // against this same Postgres instance.
     const sentCount = queryScalar(
       `SELECT count(*) FROM dispatch_analytics WHERE event_type = 'en_route_notice_sent';`,
     );
     expect(
       Number(sentCount || '0'),
-      'once fixed, at least the two en-route deliveries above should have recorded analytics',
-    ).toBeGreaterThan(0);
+      'the two en-route deliveries above must each have recorded analytics',
+    ).toBeGreaterThanOrEqual(2);
+    const failedStates = queryScalar(
+      `SELECT count(*) FROM delay_notice_state WHERE idempotency_key LIKE '%:en_route' AND status = 'failed';`,
+    );
+    expect(failedStates, 'no en-route notice may be recorded as failed').toBe('0');
   });
 });

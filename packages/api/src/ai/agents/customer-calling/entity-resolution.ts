@@ -465,7 +465,7 @@ export interface ParsedWindow {
 /**
  * U4 (Part E punch #1) — per-session inputs for spoken-datetime resolution.
  * Threaded by the two live-call entry points (create-voice-turn-processor's
- * `resolveTurnEntities` and InAppVoiceAdapter's `resolveEntities`), each of
+ * `resolveTurnEntityEvent` and InAppVoiceAdapter's `resolveEntities`), each of
  * which resolves the tenant settings ONCE per session.
  */
 export interface SchedulingResolutionOptions {
