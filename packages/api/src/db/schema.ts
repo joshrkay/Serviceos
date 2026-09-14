@@ -982,7 +982,7 @@ export const MIGRATIONS = {
     ALTER TABLE proposals ALTER COLUMN idempotency_key DROP NOT NULL;
     ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
     ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
-      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone')) NOT VALID;
   `,
 
   '040_create_technician_location_pings': `
@@ -1912,7 +1912,7 @@ export const MIGRATIONS = {
   '069_extend_leads_source_check': `
     ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
     ALTER TABLE leads ADD CONSTRAINT leads_source_check
-      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal')) NOT VALID;
   `,
 
   // Twilio per-tenant subaccount model.
@@ -1969,7 +1969,7 @@ export const MIGRATIONS = {
         'suspended',
         'terminated',
         'releasing'
-      ));
+      )) NOT VALID;
   `,
 
   '072_add_executing_status': `
@@ -1977,7 +1977,7 @@ export const MIGRATIONS = {
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
     ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
-      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone')) NOT VALID;
   `,
 
   '073_add_execution_retry_count': `
@@ -2070,7 +2070,7 @@ export const MIGRATIONS = {
           deposit_strategy IS NULL
           OR (deposit_strategy = 'percentage' AND deposit_percentage_bps IS NOT NULL)
           OR (deposit_strategy = 'fixed' AND deposit_fixed_cents IS NOT NULL)
-        );
+        ) NOT VALID;
   `,
 
   '078_jobs_deposit_columns': `
@@ -2107,7 +2107,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS jobs_deposit_paid_lte_required;
     ALTER TABLE jobs
       ADD CONSTRAINT jobs_deposit_paid_lte_required
-        CHECK (deposit_paid_cents <= deposit_required_cents);
+        CHECK (deposit_paid_cents <= deposit_required_cents) NOT VALID;
   `,
 
   '079_tenant_settings_deposit_timing_policy': `
@@ -2418,7 +2418,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
     ALTER TABLE tenant_settings
       ADD CONSTRAINT tenant_settings_region_format_check
-        CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$');
+        CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$') NOT VALID;
   `,
 
   '089_drop_vertical_packs_type_check': `
@@ -2444,11 +2444,11 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_voice_agent_name_length,
       ADD CONSTRAINT tenant_settings_voice_agent_name_length
-        CHECK (voice_agent_name IS NULL OR length(voice_agent_name) <= 80);
+        CHECK (voice_agent_name IS NULL OR length(voice_agent_name) <= 80) NOT VALID;
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length,
       ADD CONSTRAINT tenant_settings_voice_greeting_length
-        CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500);
+        CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500) NOT VALID;
   `,
 
   // B2 — Persistent outcome stamping. Mirrors voice_recordings.outcome
@@ -3472,7 +3472,7 @@ export const MIGRATIONS = {
     -- CHECK. Explicit DROP + ADD mirrors proposals_status_check.
     ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
-      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other')) NOT VALID;
   `,
 
   '134_proposal_chains': `
@@ -3918,7 +3918,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS tenant_integrations_provider_check;
     ALTER TABLE tenant_integrations
       ADD CONSTRAINT tenant_integrations_provider_check
-        CHECK (provider IN ('twilio', 'sendgrid', 'google_business'));
+        CHECK (provider IN ('twilio', 'sendgrid', 'google_business')) NOT VALID;
 
     -- Add the credentials JSONB column used by CredentialResolver.getCredential.
     -- Defaults to '{}' so existing twilio/sendgrid rows are unaffected.
@@ -4121,7 +4121,7 @@ export const MIGRATIONS = {
           'proposal_rendered','reapproval_rendered','clarification_sent',
           'reply_approve','reply_reject','edit_session_opened','edit_request',
           'review_required_rendered'
-        ));
+        )) NOT VALID;
   `,
 
   // RV-120 — per-call vulnerability triage outcomes. One row per
@@ -4239,7 +4239,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS chk_recording_retention_days_positive;
     ALTER TABLE tenant_settings
       ADD CONSTRAINT chk_recording_retention_days_positive
-        CHECK (recording_retention_days > 0);
+        CHECK (recording_retention_days > 0) NOT VALID;
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE voice_recordings
@@ -4279,7 +4279,7 @@ export const MIGRATIONS = {
           'proposal_rendered','reapproval_rendered','clarification_sent',
           'reply_approve','reply_reject','edit_session_opened','edit_request',
           'review_required_rendered','voice_reapproval'
-        ));
+        )) NOT VALID;
   `,
 
   // F17 / P15-001 — per-tenant QuickBooks (Xero enum reserved) accounting sync.
@@ -4332,7 +4332,7 @@ export const MIGRATIONS = {
 
     ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
     ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
-      CHECK (provider IN ('google', 'quickbooks', 'xero'));
+      CHECK (provider IN ('google', 'quickbooks', 'xero')) NOT VALID;
   `,
 
   '173_create_hfcr_weekly_sends': `
@@ -4373,7 +4373,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS chk_agreement_renewal_term_positive;
     ALTER TABLE service_agreements
       ADD CONSTRAINT chk_agreement_renewal_term_positive
-        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0);
+        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0) NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_agreements_auto_renew
       ON service_agreements (tenant_id, ends_on)
       WHERE auto_renew = TRUE AND status = 'active';
@@ -4390,7 +4390,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS chk_agreement_member_discount_bps;
     ALTER TABLE service_agreements
       ADD CONSTRAINT chk_agreement_member_discount_bps
-        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
+        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000) NOT VALID;
   `,
 
   // Membership engine (#6 phase 3) — priority booking. A membership with
@@ -4548,7 +4548,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS appointment_type TEXT;
     ALTER TABLE appointments
       ADD CONSTRAINT appointments_appointment_type_check
-      CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+      CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic')) NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
   `,
 
@@ -4559,7 +4559,7 @@ export const MIGRATIONS = {
     -- so the INSERT failed (23514). Widen the constraint to include the value.
     ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_account_type_check;
     ALTER TABLE customers ADD CONSTRAINT customers_account_type_check
-      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager')) NOT VALID;
   `,
 
   '184_tenant_settings_labor_rate': `
@@ -4732,7 +4732,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS address_type TEXT NOT NULL DEFAULT 'service';
     ALTER TABLE service_locations
       ADD CONSTRAINT service_locations_address_type_check
-      CHECK (address_type IN ('service', 'billing', 'both'));
+      CHECK (address_type IN ('service', 'billing', 'both')) NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_service_locations_billing
       ON service_locations(tenant_id, customer_id)
       WHERE address_type IN ('billing', 'both');
@@ -4755,7 +4755,7 @@ export const MIGRATIONS = {
           'reply_approve','reply_reject','edit_session_opened','edit_request',
           'review_required_rendered','voice_reapproval',
           'digest_approve_all_rendered'
-        ));
+        )) NOT VALID;
   `,
 
   // U6 (CRM Jobber parity, Phase 2 — communication loop): widen the
@@ -4802,7 +4802,7 @@ export const MIGRATIONS = {
   '191_extend_leads_source_check_sms': `
     ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
     ALTER TABLE leads ADD CONSTRAINT leads_source_check
-      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal','sms'));
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal','sms')) NOT VALID;
   `,
 
   // The DNC management UI (commit 98b5a43) rewrote PgDncRepository to read/write
@@ -4825,7 +4825,7 @@ export const MIGRATIONS = {
   '193_extend_vertical_training_assets_painting': `
     ALTER TABLE vertical_training_assets DROP CONSTRAINT IF EXISTS vertical_training_assets_vertical_type_check;
     ALTER TABLE vertical_training_assets ADD CONSTRAINT vertical_training_assets_vertical_type_check
-      CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting'));
+      CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting')) NOT VALID;
   `,
 
   // Post-job thank-you SMS (PRD §7.2 demo moment). Adds:
@@ -5142,7 +5142,7 @@ export const MIGRATIONS = {
   '207_jobs_status_canonical_lifecycle': `
     ALTER TABLE jobs
       ADD CONSTRAINT jobs_status_check
-      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled')) NOT VALID;
   `,
 
   '209_create_corrections': `
@@ -5531,7 +5531,7 @@ export const MIGRATIONS = {
     ALTER TABLE recurring_jobs
       ADD CONSTRAINT recurring_jobs_appointment_type_check
       CHECK (appointment_type IS NULL OR appointment_type IN
-        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic')) NOT VALID;
 
     -- Materialization ledger: one row per generated occurrence. The UNIQUE
     -- constraint is the idempotency guarantee (claimOccurrence does an
@@ -6526,7 +6526,7 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewed_script_length,
       ADD CONSTRAINT tenant_settings_e1_reviewed_script_length
-        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000);
+        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000) NOT VALID;
   `,
 
   // ANS-001 — (tenant_id, session_id) alone collapsed DISTINCT follow-ups for

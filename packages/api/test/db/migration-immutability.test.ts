@@ -97,7 +97,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['036_create_quality_metrics', '09bb4206c3c1e1c37a2b3c2eda621729c22b0d9e185fcdaf9d3e835c0742f12e'],
   ['037_create_notes', '94e192f02ba3b528263570b51933ca4ce011ce9688c17a7707e276f54489f5f0'],
   ['038_create_pack_activations', 'ec634010ea4ef3a4d325a9f3f9d24071126aba981d0c1357c4eb27c3747c224e'],
-  ['039_proposals_v2', '4b034ecf0c4d5426d4385d18923e236fa2a922660e2faa08208c95c9b4e8b7ee'],
+  ['039_proposals_v2', 'f6e118d0817d1221cee42e7dee4584dbbb4640c4aa30ad9e4a77a06c9d0fc9ce'],
   ['040_create_technician_location_pings', '6b0002aeafa546016ef19bb95b7eaeed4c82e312f29c9f2a384b7484ddfd52ea'],
   ['041_create_catalog_items', '3323c01a7efc6958957f3f4ef25a9d802b0bff9d3443df115ea074f7bc1dd1dd'],
   ['042_create_feedback_requests', '080183352fd99fc18a5444b5a0a5f0c19debb13f4b5be2aae7b2ada3bea1e170'],
@@ -126,16 +126,16 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
   ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
-  ['069_extend_leads_source_check', '12bbc1a8418385bed45dd66e9429700f82626b5f09c6752d195dac9cf87fdd84'],
+  ['069_extend_leads_source_check', '881aeb61d3da8670bab3c92fb45c35cebd722ec3b3549cf6fe8b7f1e6047caff'],
   ['070_tenant_integrations', '2277f0362097114bd08cab63b070edb519916bb530777a37656777d2465ee930'],
-  ['071_widen_tenant_integrations_status', '00d8a500f7bf1bc64bb1f8175ff63900ee3d15effddaec6fa3ec266dbe4f1600'],
-  ['072_add_executing_status', 'cccb33af535e3d99643c7d0de588afb78fe39af2759132d9d126e9f4f022a357'],
+  ['071_widen_tenant_integrations_status', 'c1de06cbb98448a6177c9b3854d409faa3ec66c8858796df434569109285db06'],
+  ['072_add_executing_status', '8822af272dc6a38706616734463efef409ceecf9e3f285abfcaeace117b19a4a'],
   ['073_add_execution_retry_count', '061fc84a465b30151cd19619172d0dc5b3e01676272adada9488f4a635c09b22'],
   ['074_tenant_integrations_system_lookup', '3832dcf271a018e9a6d9d66c3ebba87c82ad3b910ff1e7debce83dbce870bd0d'],
   ['075_tenant_settings_quick_toggles', '66b5bde61e7778e6ac8f76e49097bff708ea5137ccdb52d0816496b2380bbcb6'],
   ['076_tenant_settings_auto_approve_threshold', 'f1bdefbaa0c21afb4f7ddf11e1c2f8da528ff38ed54fc97595f9a0425d7ade89'],
-  ['077_tenant_settings_deposit_rules', 'a3a600e39f688c733850d6baec9e6aa163e730f999b00200cce8d0f7f5179163'],
-  ['078_jobs_deposit_columns', '7346a842c870d8cc9333cc9fc5c5145931d5efe656e4aad98f9b189c0b18e78c'],
+  ['077_tenant_settings_deposit_rules', '176066cfebfff1e943e788091e4f140d12e8ea39b2d676b464c01869c546500b'],
+  ['078_jobs_deposit_columns', '0b6112d1415693f69502d2b237e721dd19afbaa65e0b7a0f23876baa623563cb'],
   ['079_tenant_settings_deposit_timing_policy', '7a175b9d0562783dfb7156e9ad9e5e999085f2a1c83ef3dc46c0ad23a233053a'],
   ['080_jobs_deposit_stripe_payment_link', 'aa8a9af29c34f9e94aaaf84f986ddf1e8c0ed1ea366346efe57fa833bfeb18a4'],
   ['081_jobs_deposit_credited_to_invoice', 'bf7f98ac752a53459c1cecf2a8bcae1eae925359f33b90efb81af10250af0b54'],
@@ -145,9 +145,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['085_create_oauth_states', '32616c9ce0945fab815e7c4b2de968720a30c2533efdb3c53ce59d6332218c17'],
   ['086_create_appointment_calendar_events', '766a31919b81cb02372b34c5ba610b1fec70c800c6d56cf565cf99bc77ab5172'],
   ['087_tenants_stripe_connect', 'f3cf954e5fccbe1a3650b39dbcd5fd0dd8979ea1a1e909458f53791b23c5dd59'],
-  ['088_fix_schema_constraints', '38dbe26a4e3d0389536214d8d4897f0d9e967d6ec8dc6e0638c849e0c9d38512'],
+  ['088_fix_schema_constraints', '1ba2a34a903d1d286b0ffd845e8d3fa33ef8a1754fc35e437d8330f8f505c9b5'],
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
-  ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
+  ['090_tenant_settings_voice_persona', 'b7707c070c53f2cb43f023f2023bf91961102680561b80320d937fa31b78598a'],
   ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
   // 092_extend_dispatch_entity_types: replay-safe on populated databases; the intermediate
   // CHECK constraint is added NOT VALID so rows permitted by later migrations do not block boot.
@@ -195,7 +195,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['130_force_rls_missing_tables', '118b99fadd7df2d32568791a0976031e0893619e93e6c5ea199d937e28183c13'],
   ['131_appointment_assignments_no_double_booking', '27484d3c8eef021201ccd827419b3cbbec8516c14868759543b0f16d7ba3f295'],
   ['132_customer_consent_status', 'd4d2d0b5de1471a746cb9db7757630e27ef5a0f45e4fd61ad9c236645c49396d'],
-  ['133_payments_reversal_tracking', '9e4be3033b999501b6faa258b4475d58452f322f797751b57f203529668f6afb'],
+  ['133_payments_reversal_tracking', 'f325ce3b675b034609e7348b4e6f21eb0e2bc6540aeb66d02cabe4c5fac5e779'],
   ['134_proposal_chains', 'edcfadb2580167f35be75ea42d258fa7d499088d28cca5bbfc8b84823aa9e2ad'],
   ['135_appointments_idempotency_key', 'ab65a6bf7b64221c2761b81e7c5d6f42b2e048b7fa7fcb52ab4adffe1c370aeb'],
   ['136_create_invoice_dunning', '085bab2c52bb030111b677d061d70019eded0a144aa99797ac1eff80bfb3149a'],
@@ -218,7 +218,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
   ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
   // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
-  ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
+  ['155_tenant_integrations_google_business', '58ba921c46731601640f6079796407fd4e06bfa51097b986c61c90b645331ae2'],
   // P2-034: SMS approval transport — proposal_sms_events
   ['156_proposal_sms_events', '57fcfceeddded524d51d9d941e139b094dc684e818ea6c5772d561710a72d469'],
   // P2-034 review: sender-scoped edit sessions
@@ -238,7 +238,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Replay-safe on populated databases: the intermediate CHECK is added NOT VALID.
   ['164_dispatch_entity_daily_digest', 'ec48142ffff3ffd510be3e05e7a21381ec2d8314a37056a29d758ea004ce5676'],
   // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
-  ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
+  ['165_proposal_sms_events_review_required_kind', '53c669400f41e13ba103c6cf6992ac92e3643660544442cecd9547549bdac469'],
   // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
   // tier CHECK added (none/low/elevated/critical = UrgencyTier enum) — branch-local, pre-deploy
   ['166_create_triage_events', 'a6e1f2eeefc1aba830d600aa36b1635535938bd9a83abc16c371c590f7568147'],
@@ -248,15 +248,15 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['168_create_consent_events', '6c9ba983361d9dec2a5a28e97ff13b210628cd194d22b6b5bd5b880a4af11970'],
   // RV-132: per-tenant retention horizon + legal hold + purge tombstone
   // CHECK (recording_retention_days > 0) added — branch-local, pre-deploy
-  ['169_recording_retention', 'aac50e6e535fc4347f0c9f3dc45f27ac8016902bc0fbbceb2b9ba9cd0d033afa'],
+  ['169_recording_retention', 'e35e6c67ee363bb396d1d01075dc9e5a8220a9b14839ccee792e718264911347'],
   // RV-115: FSM context snapshot on dropped-call recovery rows
   ['170_dropped_call_recovery_context', 'f05149c2f4fb0fabaa390b35054ba3bd9c8caeb75298cf729992e5a3955d91f6'],
   // block, never a reply anchor)
-  ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
-  ['172_create_accounting_integrations', '70acc51d76a63c01b9047b15198502d8ae013bcf0985f457d67a03a405097d33'],
+  ['171_proposal_sms_events_voice_reapproval_kind', '94c7ef25e04d8e63c468eb920d31bf61b4caa58846bfe24311d9405ffab52b4b'],
+  ['172_create_accounting_integrations', 'ea68088104f6884078112b29abe10c2a883c8ae3b255f76a2d8ba3b385fd09ef'],
   ['173_create_hfcr_weekly_sends', '2f1846bc7819304ca7af8db0a79f2a8aa99f25f4e076f50f88049122a035e2eb'],
-  ['173_service_agreements_auto_renew', 'bbb2f2cdd6b753ae227e5ae3490e17989da183d52a1a994dc1a7d55fa6d9160a'],
-  ['174_service_agreements_member_discount', '06383ea2c1d89c9e3ac39411a2c2469b4146255d18106f27d949a788dd7e83bf'],
+  ['173_service_agreements_auto_renew', 'd3cea50749b6f62d18bcda19886e0970e97f8a309c7cf8934784e17e869ea1ab'],
+  ['174_service_agreements_member_discount', '32e8f80b7cdeea7fe8214c03d34c6dc0fb8551da378bf3203ebddabb7740db4b'],
   ['175_service_agreements_priority_booking', '60fee2029f69335f9adafb133c3ae61b71cb11868e523c426fffd43845f6b9da'],
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
@@ -274,9 +274,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['180_customers_parent_account', '7019b21f41726e45265629443c381175f5cc5ef8e01dd14b8d60fec701d4303b'],
   // appointment-type feature (from main); migration landed in schema.ts but its
   // snapshot entry was lost in the auto-merge into this branch.
-  ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
+  ['182_appointment_type', '32146727c4dc21a19b128d596a850e827aa37f519e922e006dc0e8d15d68d1f8'],
   // CI fix: merged features whose code shipped without their migrations.
-  ['183_customers_account_type_property_manager', 'f373682884c0e1e5b74d1b8a186d44fb302e25c1791595da9814a7b572c453c3'],
+  ['183_customers_account_type_property_manager', '00ac2bdce2a73a45d51f3dc9ad2f030abb6dd9917ccf7197a78e835ab6c4938a'],
   ['184_tenant_settings_labor_rate', '5552a7d845275663af1ac4f2df1c64897989f11625ffeb6f595153d9305b1355'],
   ['185_correction_lessons', 'cb361b7505166e97eab2b627e660df67788b446fedd147f918e877d14b8ca8cf'],
   // U1 (CRM Jobber parity): multiple contacts per customer.
@@ -284,10 +284,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U2 (CRM Jobber parity): customer tags + tenant-defined custom fields.
   ['187_customer_tags_custom_fields', 'b1f86f9b3a0073f5d82cfeb0d3b2d7e5c288c37a206d91a8e2506f03449d9ad4'],
   // U3 (CRM Jobber parity): billing vs service address on service_locations.
-  ['188_service_location_address_type', '0595b37bf8f98f5663ab0b55c50834f6d38e5124c05768ff18bde6ad88db62d2'],
+  ['188_service_location_address_type', '543c9dd2e0be26531435c3b46293beef801a0f1d7fbb1fd869cb2d42463e396a'],
   // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
   // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
-  ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
+  ['189_proposal_sms_events_digest_approve_all_kind', '7067ba7a2c09b8674524e417ff86a133fa4e6bcbbd8eb1800715f301b84085af'],
   // Deploy-blocker fix (2026-08-29, branch fix/dispatch-vocab-reconciliation):
   // this migration's ADD CONSTRAINT had no NOT VALID, unlike 092/125/164
   // above and 070 (see that comment). The runner replays every migration on
@@ -300,11 +300,11 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Added NOT VALID; hash regenerated to lock in the edit.
   ['190_dispatch_entity_conversation_reply', 'fec82faa1028436ca7b262a44a36d29412bd3270830ec9750e245cd1ff1a1ab3'],
   // CRM two-way comms: extend leads_source_check to admit 'sms' (text-origin leads).
-  ['191_extend_leads_source_check_sms', 'a255c4625c8fd00f4f0e1b4335d001f518bc20616e3c60af87ac2d87d836aef2'],
+  ['191_extend_leads_source_check_sms', 'fb40460a20f4f362795d3078248d72df7bc1776a460567f5782f135e589853d0'],
   // Add the missing tenant_dnc_list.source column (DNC UI used it without a migration).
   ['192_tenant_dnc_list_source', '9272eec111ff95e052be82cdc677a792e4ad2f8570d9b3b21f737dee1732cd3b'],
   // U3 (PRD gap closure): widen vertical_training_assets vertical_type CHECK for 'painting'.
-  ['193_extend_vertical_training_assets_painting', 'b05549a1922233695dfe170e22c9ebcad87c583495a21e9e15ac7b347e892d68'],
+  ['193_extend_vertical_training_assets_painting', '3ac4652cea4cc2a2f546ec05ef5685d6483ffb108c99fe3b11a2ce945f077e63'],
   // U2 (PRD gap closure): 2hr post-job thank-you SMS — jobs.completed_at,
   // jobs.thank_you_sms_sent_at, tenant_settings.send_thank_you_sms, backfill,
   // partial index on the sweep-eligibility predicate.
@@ -340,7 +340,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
   // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
   ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
-  ['207_jobs_status_canonical_lifecycle', '6e4e921973b79047ed517efbb629b80c293cb1586698464551a09324c718bba5'],
+  ['207_jobs_status_canonical_lifecycle', '7e1723157d16e200af056367b289ca05deb91e83137f5c0fd00bed64fff620c4'],
   // Per-user owner-notification opt-outs (U10).
   ['208_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
   // Story 3.9: raw per-field proposal-edit corrections log (intent + field +
@@ -378,7 +378,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // fields, consumer financing, marketing campaigns, customer groups.
   ['221_create_job_forms', '813a7e1bfd1c7140a91fbc6ca54cf381b74a5b36b9959385d0630cc42b1f528d'],
   ['222_create_recurring_jobs', '2ce277b37d9b12b7ae00a7b4b87debb4887b7d26a9ff4accb9464e13685dccbc'],
-  ['223_recurring_job_materialization', '5c4b2253a9abac06b2f78b6150435cc77cd477522ddcba43c575d12ced5f9d33'],
+  ['223_recurring_job_materialization', '3140545124e90cb48413038ce0b36eb04c63e6065a8c24065880133d7b143eca'],
   ['224_create_job_custom_fields', '65412cbeca763526715dabb0877a86879584b68b273ccfc71f44f2ccb2719e21'],
   ['225_create_financing_applications', '17a9f061c2728f957ae3256a9c624ad073a7ea1ec834d3f76d894ef3efeea5c4'],
   ['226_create_marketing_campaigns', '731467814951e56ebe330c61334c70db40ad08a43a1d996f62705abe0d275e45'],
@@ -476,7 +476,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['266_proposals_executed_by_role', '75a8f66b03c36528111b5a5743a1d03ab8676a9d6647a345fa0d44aa9f564727'],
   // FIX 10(i) (ANS-001): per-tenant reviewed E1 life-safety script column.
   // Renumbered 197→267 on the origin/main merge (SQL unchanged → hash preserved).
-  ['267_tenant_settings_e1_reviewed_script', '5bff650e5b0f0d8be04958f3fa5da7b71f22196fc7d3c2084e94c5dd6f7640a4'],
+  ['267_tenant_settings_e1_reviewed_script', '2dc58760ae2b14de70733687f97249be009569b52e97eaa0dccc4fd7fc11e785'],
   // ANS-001: call_me_back idempotency key gains `reason` so an E1 call's
   // life-safety alert task is no longer swallowed by its booking task.
   // Renumbered 198→268 on the origin/main merge (SQL unchanged → hash preserved).

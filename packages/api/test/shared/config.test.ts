@@ -788,6 +788,26 @@ describe('P0-006 — Secrets/config framework', () => {
       ).toThrow();
     });
   });
+
+  describe('U5 — VOICE_MAX_CALL_DURATION_MS', () => {
+    it('defaults to 15 minutes when unset', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.VOICE_MAX_CALL_DURATION_MS).toBe(15 * 60 * 1000);
+    });
+
+    it('coerces a string override to a number', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '600000' });
+      expect(c.VOICE_MAX_CALL_DURATION_MS).toBe(600000);
+    });
+
+    it('rejects 0, negative and non-integer values at boot', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '-1' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '1.5' })).toThrow();
+    });
+  });
 });
 
 describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
@@ -983,5 +1003,48 @@ describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {
         DEEPGRAM_API_KEY: 'dg_x',
       }),
     ).toBe(false);
+  });
+});
+
+describe('U10 — LANGFUSE_* trace export config', () => {
+  beforeEach(() => {
+    resetConfig();
+  });
+
+  it('defaults: no keys, the Langfuse cloud base URL, content capture OFF', () => {
+    const config = loadConfig({ NODE_ENV: 'dev' });
+    expect(config.LANGFUSE_PUBLIC_KEY).toBeUndefined();
+    expect(config.LANGFUSE_SECRET_KEY).toBeUndefined();
+    expect(config.LANGFUSE_BASE_URL).toBe('https://cloud.langfuse.com');
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(false);
+  });
+
+  it('reads both keys, a self-hosted base URL and the capture flag as a real boolean', () => {
+    const config = loadConfig({
+      NODE_ENV: 'dev',
+      LANGFUSE_PUBLIC_KEY: 'pk-lf-live',
+      LANGFUSE_SECRET_KEY: 'sk-lf-live',
+      LANGFUSE_BASE_URL: 'https://langfuse.internal.example',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_PUBLIC_KEY).toBe('pk-lf-live');
+    expect(config.LANGFUSE_SECRET_KEY).toBe('sk-lf-live');
+    expect(config.LANGFUSE_BASE_URL).toBe('https://langfuse.internal.example');
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('empty-string keys are unset (an unset Railway secret never half-configures the exporter)', () => {
+    const config = loadConfig({ NODE_ENV: 'dev', LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' });
+    expect(config.LANGFUSE_PUBLIC_KEY).toBeUndefined();
+    expect(config.LANGFUSE_SECRET_KEY).toBeUndefined();
+  });
+
+  it('rejects a non-URL base URL and a non-boolean capture flag', () => {
+    expect(() => loadConfig({ NODE_ENV: 'dev', LANGFUSE_BASE_URL: 'not a url' })).toThrow(
+      'Configuration validation failed',
+    );
+    expect(() => loadConfig({ NODE_ENV: 'dev', LANGFUSE_CAPTURE_CONTENT: 'yes' })).toThrow(
+      'Configuration validation failed',
+    );
   });
 });
