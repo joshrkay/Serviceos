@@ -343,11 +343,11 @@ const KNOWN_VIOLATIONS: ReadonlyArray<{ at: string; why: string }> = [
     why: 'callMeBackRepo.create — creates an owner call-back task row directly from the AI skill.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2651',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2661',
     why: 'callMeBackRepo.create — same entity from the voice-turn processor.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2816',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2826',
     why: 'appointmentRepo.update — the E1 revoke path CANCELS a held appointment (`status: canceled`) without a proposal. The strongest of the six: a state-changing write to a scheduled entity.',
   },
   {
