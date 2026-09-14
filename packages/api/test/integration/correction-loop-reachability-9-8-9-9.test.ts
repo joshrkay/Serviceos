@@ -13,36 +13,38 @@
  * with the SAME `recordCorrectionLessonsOnExecution` wired into `onExecuted`
  * exactly as `app.ts` wires it.
  *
- * FINDING (test.fails below, both real-Postgres, real-pipeline runs):
- *   `ProposalExecutor.execute()` always writes
- *   `executedPayload: keyedProposal.payload` (executor.ts:279 and :427) —
- *   literally the SAME object `recordCorrectionLessonsOnExecution` reads as
- *   `drafted` a moment later, in the same onExecuted callback
- *   (record-on-execution.ts:114-115: `drafted = proposal.payload`,
- *   `executed = execution.executedPayload`). Because `editProposal` (the
- *   route the owner's "correction" goes through) mutates `proposal.payload`
- *   IN PLACE *before* approval, by the time execution runs, `proposal.
- *   payload` already IS the corrected value — so `drafted === executed`
- *   (same values, often the same object), `computeInvoiceDeltas` sees zero
- *   line differences, and `record-on-execution.ts:126`
- *   (`if (deltas.length === 0) return [];`) always short-circuits. Every
- *   PASSING test of `recordCorrectionLessonsOnExecution` in this repo
- *   (test/integration/correction-lesson-on-execution.test.ts,
- *   test/learning/corrections/record-on-execution.test.ts) manually inserts
- *   a `proposal_executions` row with a HAND-DIVERGENT `executedPayload` —
- *   nothing in the real approve→execute pipeline can ever produce that
- *   divergence. Net: rows 9.8 and 9.9's entire mechanism is wired and
- *   audited, but is NEVER INVOKED by any real product path today. This is a
- *   product gap, not a test gap — reported here per §12.4d, not filed by
- *   this lane.
+ * HISTORY — the two pins below were `it.fails` (PR #1138) until #1139:
+ *   `ProposalExecutor.execute()` writes `executedPayload: keyedProposal.
+ *   payload` (executor.ts, the in-guard recordExecution) — and that IS what
+ *   was executed. The defect was on the other side of the diff:
+ *   `recordCorrectionLessonsOnExecution` read `drafted = proposal.payload`,
+ *   but `editProposal` (the route the owner's "correction" goes through)
+ *   OVERWRITES `proposal.payload` with the corrected value before approval,
+ *   so the AI's draft was gone and `drafted === executed` on every real
+ *   run — `computeInvoiceDeltas` saw zero differences and no lesson was
+ *   ever recorded. Every PASSING test of the recorder
+ *   (correction-lesson-on-execution.test.ts, the unit suite) hand-inserted
+ *   a divergent `proposal_executions` row.
  *
- * 9.9 is doubly unreachable: even granting a lesson existed, `undoProposal`
- * (proposals/actions.ts:512-515) refuses any proposal whose status is not
- * 'approved' — and a lesson can only ever be recorded in `onExecuted`,
- * which fires strictly AFTER the proposal has already transitioned to
- * 'executed' (past `UNDO_WINDOW_MS`, proposals/lifecycle.ts:53). There is no
- * tick of real time at which a real lesson exists AND its source proposal
- * is still undoable.
+ *   FIX (#1139): `editProposal` now preserves the payload AS FIRST PROPOSED
+ *   in `proposals.original_payload` (migration 275, written once, on the
+ *   first edit that changes a field), and the recorder diffs
+ *   `originalPayload ?? payload` against the executed payload. The executor
+ *   and `executed_payload` are unchanged in meaning (see
+ *   executor-executed-payload-money-guard-1139.test.ts).
+ *
+ * 9.9 was doubly unreachable: `undoProposal` refuses any proposal whose
+ * status is not 'approved', and a lesson only exists after the proposal is
+ * 'executed' (terminal in lifecycle.ts). FIX (#1139): the approval undo
+ * keeps that refusal — an executed proposal is NOT undone and its estimate
+ * stays — but an explicit `{ scope: 'lessons' }` undo (POST
+ * /api/proposals/:id/undo with that body) reverses the lessons an executed
+ * proposal recorded and the tenant config each cascaded. It requires
+ * `settings:update` because it writes tenant config.
+ *
+ * Ports: these tests use `createPgConfigPorts` — the same settings/catalog
+ * stores app.ts's `correctionConfigPorts` write — so the cascade (tenant
+ * labor rate) and its reversal are observed in real rows, not a fake.
  *
  * What DOES work, and is proven here as the positive case: the owner's
  * edit-before-approve mechanism itself is real end to end — the estimate
@@ -64,11 +66,13 @@ import { PgCorrectionLessonRepository } from '../../src/learning/corrections/pg-
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createProposal } from '../../src/proposals/proposal';
 import { editProposal, approveProposal, undoProposal } from '../../src/proposals/actions';
+import { ValidationError } from '../../src/shared/errors';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { recordCorrectionLessonsOnExecution } from '../../src/learning/corrections/record-on-execution';
+import { createPgConfigPorts } from '../../src/learning/corrections/pg-config-ports';
 import type { ConfigPorts } from '../../src/learning/corrections/lesson-applicator';
 
 async function seedJob(
@@ -96,20 +100,6 @@ async function seedJob(
   return { jobId, customerId };
 }
 
-function makePorts(catalogRepo: PgCatalogItemRepository, laborItemId: string): ConfigPorts {
-  return {
-    async setLaborRateCents(tenantId, cents) {
-      if (cents === null) return;
-      await catalogRepo.update(tenantId, laborItemId, { unitPriceCents: cents });
-    },
-    async setSkuPriceCents(tenantId, catalogItemId, cents) {
-      await catalogRepo.update(tenantId, catalogItemId, { unitPriceCents: cents });
-    },
-    async setBannedPhrases() {},
-    async setTemplateWeight() {},
-  };
-}
-
 describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a labor-rate correction', () => {
   let pool: Pool;
   let proposalRepo: PgProposalRepository;
@@ -119,6 +109,9 @@ describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a 
   let catalogRepo: PgCatalogItemRepository;
   let lessonRepo: PgCorrectionLessonRepository;
   let auditRepo: PgAuditRepository;
+  // The production-equivalent ConfigPorts (the same stores app.ts's
+  // correctionConfigPorts write): labor rate → tenant_settings.
+  let ports: ConfigPorts;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -129,6 +122,7 @@ describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a 
     catalogRepo = new PgCatalogItemRepository(pool);
     lessonRepo = new PgCorrectionLessonRepository(pool);
     auditRepo = new PgAuditRepository(pool);
+    ports = createPgConfigPorts({ settingsRepo, catalogRepo });
   });
 
   afterAll(async () => {
@@ -155,6 +149,10 @@ describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a 
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    // The tenant's configured labor rate is $115/hr — the price the AI draft
+    // below grounds its labor line on. (settingsRepo.create does not persist
+    // this column, so it is set through the real update path.)
+    await settingsRepo.update(tenantId, { laborRateCentsPerHour: 11500 });
 
     // AI-drafted proposal (seeded — no live model call; see e2e preamble
     // #1119). Labor line at $115/hr, exactly as an AI draft would price it.
@@ -244,7 +242,7 @@ describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a 
             settingsRepo,
             lessonRepo,
             catalogRepo,
-            ports: makePorts(catalogRepo, 'unused'),
+            ports,
             auditRepo,
           },
         );
@@ -278,52 +276,113 @@ describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a 
     expect(crossRead).toBeNull();
   });
 
-  it.fails(
-    '9.8 DESIRED (currently FAILS — product gap, see file header): a real owner correction through the real pipeline should record a correction_lesson, but executedPayload always mirrors proposal.payload (executor.ts:279/427), so the diff (record-on-execution.ts:114-126) is always empty',
-    async () => {
-      const tenant = await createTestTenant(pool);
-      const { jobId, customerId } = await seedJob(pool, tenant.tenantId, tenant.userId);
-      const { proposalId } = await driveRealPipeline(tenant.tenantId, tenant.userId, jobId, customerId, 13500);
+  it('9.8: a real owner correction through the real edit→approve→execute pipeline records a correction_lesson (AI draft vs executed payload) and cascades it into tenant config — a neighbour tenant (T2) with a divergent correction keeps its own lesson and rate', async () => {
+    const tenantA = await createTestTenant(pool);
+    const tenantB = await createTestTenant(pool);
+    const { jobId: jobA, customerId: customerA } = await seedJob(pool, tenantA.tenantId, tenantA.userId);
+    const { jobId: jobB, customerId: customerB } = await seedJob(pool, tenantB.tenantId, tenantB.userId);
 
-      const lessons = await lessonRepo.findBySourceProposal(tenant.tenantId, proposalId);
-      // DESIRED: a labor_rate_changed lesson recorded from this real
-      // correction. ACTUAL today: always [].
-      expect(lessons.length).toBeGreaterThan(0);
-    },
-  );
+    const resA = await driveRealPipeline(tenantA.tenantId, tenantA.userId, jobA, customerA, 13500);
+    const resB = await driveRealPipeline(tenantB.tenantId, tenantB.userId, jobB, customerB, 9900);
 
-  it.fails(
-    "9.9 DESIRED (currently FAILS — product gap, see file header): even granting a lesson existed, undoProposal should be able to reverse it after real execution — but it refuses any proposal whose status isn't 'approved' (actions.ts:512-515), and a lesson can only ever exist after execution (status already 'executed')",
-    async () => {
-      const tenant = await createTestTenant(pool);
-      const { jobId, customerId } = await seedJob(pool, tenant.tenantId, tenant.userId);
-      const { proposalId } = await driveRealPipeline(tenant.tenantId, tenant.userId, jobId, customerId, 13500);
+    // The lesson — recorded by the REAL onExecuted → recorder path, not seeded.
+    const lessonsA = await lessonRepo.findBySourceProposal(tenantA.tenantId, resA.proposalId);
+    expect(lessonsA).toHaveLength(1);
+    expect(lessonsA[0].lessonType).toBe('labor_rate_changed');
+    expect(lessonsA[0].status).toBe('applied');
+    expect(lessonsA[0].payload).toEqual({ kind: 'labor_rate_changed', beforeCents: 11500, afterCents: 13500 });
 
-      // Manually seed the lesson the real pipeline can never produce (see the
-      // 9.8 test above), tied to the REAL, really-executed proposal, so THIS
-      // test isolates the undo-reachability question alone.
-      const { buildCorrectionLesson } = await import('../../src/learning/corrections/correction-lesson');
-      const lesson = buildCorrectionLesson({
-        id: uuidv4(),
-        tenantId: tenant.tenantId,
-        lessonType: 'labor_rate_changed',
-        sourceProposalId: proposalId,
-        ownerId: tenant.userId,
-        summary: 'labor rate change',
-        payload: { kind: 'labor_rate_changed', beforeCents: 11500, afterCents: 13500 },
-        localDate: '2026-06-14',
-      });
-      await lessonRepo.create(lesson);
+    // Where the diff's two sides live: the AI draft is preserved on the
+    // proposal (original_payload); the executed value is the proposal's
+    // payload AND the execution row's executed_payload.
+    const proposalA = await proposalRepo.findById(tenantA.tenantId, resA.proposalId);
+    const originalA = proposalA!.originalPayload as { lineItems: Array<{ unitPriceCents: number }> };
+    expect(originalA.lineItems[0].unitPriceCents).toBe(11500);
+    expect((proposalA!.payload.lineItems as Array<{ unitPriceCents: number }>)[0].unitPriceCents).toBe(13500);
+    const executionA = await executionRepo.findLatestByProposal(tenantA.tenantId, resA.proposalId);
+    expect(executionA!.status).toBe('succeeded');
+    expect((executionA!.executedPayload.lineItems as Array<{ unitPriceCents: number }>)[0].unitPriceCents).toBe(13500);
 
-      // DESIRED: the owner can undo it through the real proposal-undo route.
-      // ACTUAL today: the proposal is already 'executed' — undoProposal
-      // throws a ValidationError before it ever reaches the
-      // undoCorrectionLesson block.
-      const undone = await undoProposal(proposalRepo, tenant.tenantId, proposalId, tenant.userId, 'owner', auditRepo, {
-        lessonRepo,
-        ports: makePorts(catalogRepo, 'unused'),
-      });
-      expect(undone.status).toBe('undone');
-    },
-  );
+    // The cascade reached real tenant config.
+    expect((await settingsRepo.findByTenant(tenantA.tenantId))!.laborRateCentsPerHour).toBe(13500);
+
+    // T2 — the neighbour's divergent correction produced ITS lesson and ITS
+    // rate; neither tenant can see the other's lesson.
+    const lessonsB = await lessonRepo.findBySourceProposal(tenantB.tenantId, resB.proposalId);
+    expect(lessonsB).toHaveLength(1);
+    expect(lessonsB[0].payload).toEqual({ kind: 'labor_rate_changed', beforeCents: 11500, afterCents: 9900 });
+    expect((await settingsRepo.findByTenant(tenantB.tenantId))!.laborRateCentsPerHour).toBe(9900);
+    expect(await lessonRepo.findBySourceProposal(tenantB.tenantId, resA.proposalId)).toEqual([]);
+    expect(await lessonRepo.findBySourceProposal(tenantA.tenantId, resB.proposalId)).toEqual([]);
+  });
+
+  it("9.9: the owner reverses the lesson a real executed correction recorded (and the labor rate it cascaded) through undoProposal's explicit lessons scope — the approval undo still refuses the executed proposal, the estimate stays, and a neighbour tenant (T2) keeps its lesson and rate", async () => {
+    const tenantA = await createTestTenant(pool);
+    const tenantB = await createTestTenant(pool);
+    const { jobId: jobA, customerId: customerA } = await seedJob(pool, tenantA.tenantId, tenantA.userId);
+    const { jobId: jobB, customerId: customerB } = await seedJob(pool, tenantB.tenantId, tenantB.userId);
+
+    const resA = await driveRealPipeline(tenantA.tenantId, tenantA.userId, jobA, customerA, 13500);
+    const resB = await driveRealPipeline(tenantB.tenantId, tenantB.userId, jobB, customerB, 9900);
+
+    // The REAL lesson from the real pipeline (9.8) — nothing seeded.
+    const lessonsA = await lessonRepo.findBySourceProposal(tenantA.tenantId, resA.proposalId);
+    expect(lessonsA).toHaveLength(1);
+    const lessonA = lessonsA[0];
+    expect((await settingsRepo.findByTenant(tenantA.tenantId))!.laborRateCentsPerHour).toBe(13500);
+
+    const correctionLoop = { lessonRepo, ports };
+
+    // Refusal kept: the approval undo (no scope — what the post-approve undo
+    // toast sends) still refuses an executed proposal and touches nothing.
+    await expect(
+      undoProposal(proposalRepo, tenantA.tenantId, resA.proposalId, tenantA.userId, 'owner', auditRepo, correctionLoop),
+    ).rejects.toThrow(ValidationError);
+    expect((await lessonRepo.findById(tenantA.tenantId, lessonA.id))!.status).toBe('applied');
+    expect((await settingsRepo.findByTenant(tenantA.tenantId))!.laborRateCentsPerHour).toBe(13500);
+
+    // The lesson undo.
+    const result = await undoProposal(
+      proposalRepo,
+      tenantA.tenantId,
+      resA.proposalId,
+      tenantA.userId,
+      'owner',
+      auditRepo,
+      correctionLoop,
+      { scope: 'lessons' },
+    );
+    // The proposal stays executed (terminal) and its estimate stays.
+    expect(result.status).toBe('executed');
+    expect((await proposalRepo.findById(tenantA.tenantId, resA.proposalId))!.status).toBe('executed');
+    expect((await estimateRepo.findById(tenantA.tenantId, resA.estimateId))!.lineItems[0].unitPriceCents).toBe(13500);
+
+    // The lesson is reverted and the cascaded labor rate is restored.
+    expect((await lessonRepo.findById(tenantA.tenantId, lessonA.id))!.status).toBe('reverted');
+    expect((await settingsRepo.findByTenant(tenantA.tenantId))!.laborRateCentsPerHour).toBe(11500);
+    const revertAuditsFor = async () =>
+      (await auditRepo.findByEntity(tenantA.tenantId, 'correction_lesson', lessonA.id)).filter(
+        (e) => e.eventType === 'correction_lesson.reverted',
+      );
+    expect(await revertAuditsFor()).toHaveLength(1);
+
+    // Idempotent: a second lesson undo re-reverses nothing and re-audits nothing.
+    await undoProposal(proposalRepo, tenantA.tenantId, resA.proposalId, tenantA.userId, 'owner', auditRepo, correctionLoop, {
+      scope: 'lessons',
+    });
+    expect((await settingsRepo.findByTenant(tenantA.tenantId))!.laborRateCentsPerHour).toBe(11500);
+    expect(await revertAuditsFor()).toHaveLength(1);
+
+    // T2 — the neighbour's lesson and rate are untouched, and tenant A cannot
+    // reach tenant B's proposal through the lesson undo.
+    const lessonsB = await lessonRepo.findBySourceProposal(tenantB.tenantId, resB.proposalId);
+    expect(lessonsB).toHaveLength(1);
+    await expect(
+      undoProposal(proposalRepo, tenantA.tenantId, resB.proposalId, tenantA.userId, 'owner', auditRepo, correctionLoop, {
+        scope: 'lessons',
+      }),
+    ).rejects.toThrow();
+    expect((await lessonRepo.findById(tenantB.tenantId, lessonsB[0].id))!.status).toBe('applied');
+    expect((await settingsRepo.findByTenant(tenantB.tenantId))!.laborRateCentsPerHour).toBe(9900);
+  });
 });

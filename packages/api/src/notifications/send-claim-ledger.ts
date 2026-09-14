@@ -108,6 +108,36 @@ export async function markSendClaimSending(
 }
 
 /**
+ * #1140 — atomic "exactly once, ever" gate for a bookkeeping side effect
+ * (e.g. writing a completion audit row) rather than the claimed → sending →
+ * sent PROVIDER-call lifecycle the rest of this module models. Reuses the
+ * same `send_claims` table and its `UNIQUE (tenant_id, claim_key)`
+ * constraint under a caller-chosen, DISTINCT claim_key namespace — no new
+ * table or migration needed. Returns true only for the very first caller,
+ * ever, for this (tenantId, claimKey) pair; every other caller — concurrent
+ * or arbitrarily later — gets false and must skip the side effect.
+ *
+ * Unlike `claimSend`, this claim is NEVER reclaimable (no stale-timeout
+ * path): the side effect it's guarding either already happened (this row
+ * exists) or it hasn't (row absent) — there's no "abandoned mid-flight"
+ * state to recover from, so nothing should ever delete or reset this row.
+ */
+export async function claimOnce(
+  pool: Pool,
+  tenantId: string,
+  claimKey: string,
+): Promise<boolean> {
+  const res = await pool.query(
+    `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
+     VALUES ($1, $2, 'sent', NOW(), NOW())
+     ON CONFLICT (tenant_id, claim_key) DO NOTHING
+     RETURNING claim_key`,
+    [tenantId, claimKey],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/**
  * Permanently finalize a claim as sent. Idempotent; once a row is `'sent'`,
  * `claimSend`'s guard means it is never matched again for this key.
  */

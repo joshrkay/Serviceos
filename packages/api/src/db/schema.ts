@@ -6761,6 +6761,26 @@ export const MIGRATIONS = {
         AND provider_data->>'phoneE164' IS NOT NULL
         AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
   `,
+
+  // #1139 (rows 9.8/9.9) — the payload AS FIRST PROPOSED. `editProposal`
+  // overwrites `proposals.payload` with the operator's correction before
+  // approval (the executor executes that payload, and records it as
+  // proposal_executions.executed_payload). The correction-lesson recorder
+  // diffs "what the AI drafted" against "what was executed", but the draft
+  // was gone — so no correction lesson was ever recorded on the real
+  // pipeline. `editProposal` now copies the pre-edit payload here on the
+  // FIRST edit that changes a field and never again; NULL = never edited, so
+  // `payload` is still the original. Nullable, no default, no backfill:
+  // existing rows keep their current meaning.
+  //
+  // Pre-flight: none needed — ADD COLUMN of a nullable JSONB with no default
+  // cannot fail on existing rows (catalog-only change, no table rewrite).
+  // Sanity check before deploy (expect 0 rows — nothing else owns the name):
+  //   SELECT 1 FROM information_schema.columns
+  //    WHERE table_name = 'proposals' AND column_name = 'original_payload';
+  '275_proposals_original_payload': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
