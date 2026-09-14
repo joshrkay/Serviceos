@@ -5008,6 +5008,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       agreementRepo,
       customerRepo,
       connectAccountResolver,
+      invoiceScheduleRepo,
     ),
   );
 

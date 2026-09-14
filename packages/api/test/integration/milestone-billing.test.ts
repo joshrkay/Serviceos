@@ -130,7 +130,9 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
       locationId,
       jobNumber: `J-${jobId.slice(0, 8)}`,
       summary: 'Big staged job',
-      status: 'completed',
+      // #1203 — plans are approved before completion (a plan on a completed job
+      // is refused); completion itself is driven by mintCompletionMilestones below.
+      status: 'in_progress',
       priority: 'normal',
       createdBy: userId,
       createdAt: now,
@@ -151,7 +153,7 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
       createdAt: now,
       updatedAt: now,
     });
-    return { tenantId, userId, jobId, job };
+    return { tenantId, userId, jobId, job: { ...job, status: 'completed' } };
   }
 
   function scheduleProposal(seeded: SeededJob): Proposal {
@@ -201,6 +203,8 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
       invoiceRepo,
       settingsRepo,
       estimateRepo,
+      undefined,
+      jobRepo,
     );
   });
 
@@ -278,13 +282,24 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
   });
 
   it('mints no completion milestone for a tenant that has not enabled milestone billing (PR #1029 owner control)', async () => {
-    const seeded = await seedJob(false);
+    // #1203 — a NEW plan with completion milestones is refused while billing is off …
+    const off = await seedJob(false);
+    const refused = await handler.execute(scheduleProposal(off), {
+      tenantId: off.tenantId,
+      executedBy: off.userId,
+    });
+    expect(refused.success).toBe(false);
+    expect(refused.error).toMatch(/Milestone billing is off/);
+    expect(await scheduleRepo.findByJob(off.tenantId, off.jobId)).toEqual([]);
 
+    // … and the kill switch still halts a plan approved while it was on.
+    const seeded = await seedJob(true);
     const result = await handler.execute(scheduleProposal(seeded), {
       tenantId: seeded.tenantId,
       executedBy: seeded.userId,
     });
     expect(result.success).toBe(true);
+    await settingsRepo.update(seeded.tenantId, { milestoneBillingEnabled: false });
 
     const minted = await mintCompletionMilestones(
       { scheduleRepo, invoiceRepo, settingsRepo, auditRepo },

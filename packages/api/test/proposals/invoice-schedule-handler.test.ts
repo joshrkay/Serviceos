@@ -6,7 +6,8 @@ import { validateProposalPayload } from '../../src/proposals/contracts';
 import { createInvoiceSchedulePayloadSchema } from '../../src/proposals/contracts/create-invoice-schedule';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
-import { InMemoryInvoiceScheduleRepository } from '../../src/invoices/invoice-schedule';
+import { InMemoryInvoiceScheduleRepository, InvoiceMilestone, buildInvoiceSchedule } from '../../src/invoices/invoice-schedule';
+import { InMemoryJobRepository, Job } from '../../src/jobs/job';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
 import { buildLineItem } from '../../src/shared/billing-engine';
@@ -34,6 +35,10 @@ function makeSettings(): TenantSettings {
     nextEstimateNumber: 1,
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: 30,
+    // #1203 — a plan with on_completion milestones is refused while milestone
+    // billing is off (completion would never bill them); these tests exercise
+    // the approval path, so they enable it. The refusal is covered below.
+    milestoneBillingEnabled: true,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -437,16 +442,93 @@ describe('P21-002 — create_invoice_schedule', () => {
         expect(deposit.totals.totalCents).toBe(10000);
       });
 
-      it('refuses a voice plan when the job has no accepted estimate, writing nothing', async () => {
+      it('lets a voice plan through on a job with no accepted estimate (time and materials): it records no estimate', async () => {
         const jobId = uuidv4();
         await createEstimate(
           { tenantId: TENANT, jobId, estimateNumber: 'EST-S', lineItems: [buildLineItem('i1', 'Work', 1, 20000, 0, true)], createdBy: 'u1' },
           estimateRepo,
         );
         const result = await handler.execute(makeProposal(voicePayload(jobId)), { tenantId: TENANT, executedBy: 'u1' });
-        expect(result.success).toBe(false);
-        expect(result.error).toMatch(/no accepted estimate/);
+        expect(result.success).toBe(true);
+        const [schedule] = await scheduleRepo.findByJob(TENANT, jobId);
+        expect(schedule.estimateId).toBeUndefined();
+        const [deposit] = await invoiceRepo.findByJob(TENANT, jobId);
+        expect(deposit.estimateId).toBeUndefined();
+        expect(deposit.totals.totalCents).toBe(10000);
+      });
+
+      it("a genuine retry of a half-written plan that recorded no estimate is idempotent once the job's estimate is accepted", async () => {
+        const jobId = uuidv4();
+        // A legacy/T&M schedule row exists with no estimate and no minted deposit
+        // (the earlier execution failed before drafting it).
+        await scheduleRepo.create(
+          buildInvoiceSchedule({ tenantId: TENANT, jobId, totalAmountCents: 20000, milestones: milestones5050 as InvoiceMilestone[], createdBy: 'u1' }),
+        );
+        await acceptedEstimateFor(jobId);
+        const retry = await handler.execute(makeProposal(voicePayload(jobId)), { tenantId: TENANT, executedBy: 'u1' });
+        expect(retry.success).toBe(true);
+        expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+        expect((await invoiceRepo.findByJob(TENANT, jobId)).map((i) => i.totals.totalCents)).toEqual([10000]);
+        const again = await handler.execute(makeProposal(voicePayload(jobId)), { tenantId: TENANT, executedBy: 'u1' });
+        expect(again.success).toBe(true);
+        expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+      });
+
+      it('refuses a new plan with completion milestones while milestone billing is off; an up-front-only plan still goes through', async () => {
+        await settingsRepo.update(TENANT, { milestoneBillingEnabled: false });
+        const jobId = uuidv4();
+        await acceptedEstimateFor(jobId);
+        const refused = await handler.execute(makeProposal(voicePayload(jobId)), { tenantId: TENANT, executedBy: 'u1' });
+        expect(refused.success).toBe(false);
+        expect(refused.error).toBe(
+          "Milestone billing is off, so this plan's completion milestones would never be billed. Turn milestone billing on in Settings, or invoice by hand. No invoice schedule was created.",
+        );
         await nothingWritten(jobId, 0);
+
+        const upFront = await handler.execute(
+          makeProposal(
+            {
+              jobId,
+              totalAmountCents: 20000,
+              milestones: [
+                { label: 'Deposit', type: 'percent', value: 5000, trigger: 'on_accept' },
+                { label: 'Rest', type: 'remainder', value: 0, trigger: 'manual' },
+              ],
+            },
+            { id: 'p2' },
+          ),
+          { tenantId: TENANT, executedBy: 'u1' },
+        );
+        expect(upFront.success).toBe(true);
+      });
+
+      it('refuses a new plan with completion milestones on a job already past completion (and an unknown job)', async () => {
+        const jobRepo = new InMemoryJobRepository();
+        const withJobs = new CreateInvoiceScheduleExecutionHandler(scheduleRepo, invoiceRepo, settingsRepo, estimateRepo, undefined, jobRepo);
+        const job = (await jobRepo.create({
+          id: uuidv4(),
+          tenantId: TENANT,
+          customerId: uuidv4(),
+          locationId: uuidv4(),
+          jobNumber: 'JOB-DONE',
+          summary: 'Done',
+          status: 'completed',
+          priority: 'normal',
+          createdBy: 'u1',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        } as Job)) as Job;
+        await acceptedEstimateFor(job.id);
+        const refused = await withJobs.execute(makeProposal(voicePayload(job.id)), { tenantId: TENANT, executedBy: 'u1' });
+        expect(refused.success).toBe(false);
+        expect(refused.error).toBe(
+          "This job is already completed, so this plan's completion milestones can't be billed. Invoice the balance by hand. No invoice schedule was created.",
+        );
+        await nothingWritten(job.id, 0);
+
+        const unknown = await withJobs.execute(makeProposal(voicePayload(uuidv4()), { id: 'p3' }), { tenantId: TENANT, executedBy: 'u1' });
+        expect(unknown.success).toBe(false);
+        expect(unknown.error).toMatch(/job was not found/);
       });
 
       it('refuses a voice plan when the job has several accepted estimates (legacy rows), naming them', async () => {
@@ -492,7 +574,7 @@ describe('P21-002 — create_invoice_schedule', () => {
         await nothingWritten(jobId, 1);
       });
 
-      it('a canceled or unpaid void invoice does not block; a void one holding a payment does, with the refund reason', async () => {
+      it('a canceled or unpaid void invoice does not block; a void one holding a payment does, with a workable reason', async () => {
         for (const [status, paid, allowed] of [['canceled', 0, true], ['void', 0, true], ['void', 5000, false]] as const) {
           const jobId = uuidv4();
           const est = await acceptedEstimateFor(jobId);
@@ -501,7 +583,9 @@ describe('P21-002 — create_invoice_schedule', () => {
           const result = await handler.execute(makeProposal(voicePayload(jobId)), { tenantId: TENANT, executedBy: 'u1' });
           expect(result.success).toBe(allowed);
           if (!allowed) {
-            expect(result.error).toMatch(/INV-0001, which is void but still holds \$50\.00 of payments\. Refund or move that payment first/);
+            expect(result.error).toBe(
+              'This estimate already has a paid voided invoice (INV-0001, $50.00 paid). Invoice the remaining balance by hand. No invoice schedule was created.',
+            );
           }
         }
       });
@@ -538,7 +622,7 @@ describe('P21-002 — create_invoice_schedule', () => {
         expect(result.success).toBe(true);
         expect((await proposalRepo.findById(TENANT, proposal.id))?.explanation).toBe(
           'Voice plan\n\nHeads-up: this job also has an invoice not tied to an estimate: INV-0001 ($150.00). ' +
-            'The milestone plan bills its estimate only, so check it is not for the same work.',
+            'The milestone plan does not include it, so check it is not for the same work.',
         );
       });
     });

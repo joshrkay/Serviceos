@@ -74,6 +74,7 @@ export async function runJobCompletionEffects(
           auditRepo: deps.auditRepo,
           // #1203 — milestones held at completion reach the owner as a draft.
           proposalRepo: deps.proposalRepo,
+          estimateRepo: deps.estimateRepo,
         },
         job,
       );

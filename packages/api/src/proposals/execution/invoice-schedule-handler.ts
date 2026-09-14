@@ -4,8 +4,14 @@ import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers'
 import { createInvoiceWithNextNumber, InvoiceRepository } from '../../invoices/invoice';
 import { SettingsRepository } from '../../settings/settings';
 import { Estimate, EstimateRepository } from '../../estimates/estimate';
+import { JobRepository } from '../../jobs/job';
+import { isPostCompletionStatus } from '../../jobs/job-lifecycle';
 import {
+  PLAN_REFUSED_BILLING_OFF_REASON,
+  PLAN_REFUSED_JOB_COMPLETED_REASON,
+  acceptedEstimateIds,
   invoicesWithoutEstimateWarning,
+  planBilledEstimateId,
   planRefusedByWholeInvoiceReason,
   wholeInvoiceBillingEstimate,
 } from '../../invoices/milestone-billing-guard';
@@ -50,11 +56,15 @@ function milestonesMatch(a: InvoiceMilestone[], b: InvoiceMilestone[]): boolean 
  *
  * #1203 — a plan bills ONE estimate, recorded on the schedule row. The payload
  * names it (contract shape) or, for voice plans (which never do), it is the
- * job's single accepted estimate. With none or several, or with a named
- * estimate from another job, the plan is refused rather than guessed. A plan
- * whose estimate is already billed by a live invoice outside the plan is
- * refused too, before anything is written. Live invoices on the job that carry
- * no estimate do not block; they are listed on the proposal's explanation.
+ * job's single accepted estimate. A job with no accepted estimate (time and
+ * materials, a spoken total) records none and bills as on main. Several
+ * accepted estimates, or a named estimate from another job, is refused rather
+ * than guessed. Before anything is written, a NEW plan is also refused when
+ * completion could never bill its on_completion milestones (milestone billing
+ * off, or the job already past completion), and any plan is refused when a
+ * live invoice outside it already bills its estimate. Live invoices on the job
+ * that carry no estimate do not block; they are listed on the proposal's
+ * explanation.
  *
  * Capture-class (never auto-approved): no money moves and nothing is sent —
  * the drafted milestone invoice still goes out via a separate send step.
@@ -73,6 +83,9 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
     // #1203 — writes the "invoices not tied to an estimate" note onto the
     // approved proposal's explanation. Absent → the note is skipped.
     private readonly proposalRepo?: ProposalRepository,
+    // #1203 — refuses a new plan whose on_completion milestones could never
+    // bill because the job is already past completion. Absent → not checked.
+    private readonly jobRepo?: JobRepository,
   ) {}
 
   // U8 — degrades to a synthetic-id passthrough (schedules nothing) without
@@ -110,17 +123,18 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       typeof payload.estimateId === 'string' ? payload.estimateId : undefined;
 
     try {
-      // #1203 — the ONE estimate this plan bills, recorded on the schedule row.
+      // #1203 — the ONE estimate this plan bills, recorded on the schedule row
+      // (undefined when the job has no accepted estimate).
       const resolved = await this.resolvePlanEstimate(context.tenantId, payload.jobId, payloadEstimateId);
       if ('error' in resolved) return { success: false, error: resolved.error };
-      const estimateId = resolved.estimate.id;
+      const estimateId = resolved.estimateId;
 
       // Resolve the schedule total: explicit payload value, else derive from
       // the payload's estimate. (Unchanged by #1203: a voice plan's resolved
       // estimate does not supply a total the payload did not ask for.)
       let totalCents =
         typeof payload.totalAmountCents === 'number' ? payload.totalAmountCents : undefined;
-      if (totalCents === undefined && payloadEstimateId) {
+      if (totalCents === undefined && payloadEstimateId && resolved.estimate) {
         // Use the accepted estimate's persisted totals (tax + discount + the
         // accepted good/better/best selection already applied) so milestones
         // are allocated from the amount the customer actually accepted.
@@ -151,13 +165,38 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       );
       let schedule = existingForJob[0];
 
+      // #1203 — a NEW plan whose on_completion milestones completion could
+      // never bill is refused, so nothing it plans to bill is dropped silently.
+      // A retry of a half-written plan skips this: its schedule already existed
+      // when the job completed, so completion handled it.
+      const hasCompletionMilestones = allocations.some(
+        (a) => a.trigger === 'on_completion' && a.amountCents > 0,
+      );
+      if (!schedule && hasCompletionMilestones) {
+        if (this.jobRepo) {
+          const job = await this.jobRepo.findById(context.tenantId, payload.jobId);
+          if (!job) {
+            return { success: false, error: 'That job was not found. No invoice schedule was created.' };
+          }
+          if (isPostCompletionStatus(job.status)) {
+            return { success: false, error: PLAN_REFUSED_JOB_COMPLETED_REASON };
+          }
+        }
+        const settings = await this.settingsRepo.findByTenant(context.tenantId);
+        if (!settings?.milestoneBillingEnabled) {
+          return { success: false, error: PLAN_REFUSED_BILLING_OFF_REASON };
+        }
+      }
+
       // #1203 — convert then plan: an invoice outside this plan already bills
       // the estimate (typically POST /estimates/:id/convert-to-invoice). Refuse
       // before the schedule row or any milestone invoice is written. Canceled
       // invoices and unpaid void ones do not count; a void one holding a
-      // payment does, and the reason says to refund or move it first.
+      // payment does (the reason says to invoice the remaining balance by hand).
       const jobInvoices = await this.invoiceRepo.findByJob(context.tenantId, payload.jobId);
-      const billedOutside = wholeInvoiceBillingEstimate(estimateId, jobInvoices, schedule?.id);
+      const billedOutside = estimateId
+        ? wholeInvoiceBillingEstimate(estimateId, jobInvoices, schedule?.id)
+        : undefined;
       if (billedOutside) {
         return { success: false, error: planRefusedByWholeInvoiceReason(billedOutside) };
       }
@@ -176,9 +215,12 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
         // idempotency backstop this case was already rejected by the unique
         // index's 23505 on insert; this keeps that guarantee while still letting
         // a true retry succeed.)
+        // #1203 — a schedule that recorded no estimate (created before #1203,
+        // or while the job had no accepted estimate) bills the job's single
+        // accepted estimate, so a genuine retry of it still matches.
         if (
           schedule.totalAmountCents !== totalCents ||
-          schedule.estimateId !== estimateId ||
+          planBilledEstimateId(schedule, resolved.jobAcceptedEstimateIds) !== estimateId ||
           !milestonesMatch(schedule.milestones, milestones)
         ) {
           // estimateId included: a revised proposal for a DIFFERENT estimate with
@@ -269,34 +311,35 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
   /**
    * #1203 — the estimate a plan bills. A payload estimateId must name an
    * estimate on the plan's job. With none (every voice plan) the job's single
-   * accepted estimate is used; zero or several is refused, never guessed.
+   * accepted estimate is used; with no accepted estimate the plan records none
+   * (a time-and-materials plan, billed as on main); several is refused, never
+   * guessed. Without an estimate repository (legacy wiring) the payload's
+   * estimate id is taken as given, as on main.
    */
   private async resolvePlanEstimate(
     tenantId: string,
     jobId: string,
     payloadEstimateId: string | undefined,
-  ): Promise<{ estimate: Estimate } | { error: string }> {
+  ): Promise<
+    | { estimateId: string | undefined; estimate?: Estimate; jobAcceptedEstimateIds: string[] }
+    | { error: string }
+  > {
     if (!this.estimateRepo) {
-      return { error: 'Cannot tell which estimate this plan bills (estimates are not available). No invoice schedule was created.' };
+      return { estimateId: payloadEstimateId, jobAcceptedEstimateIds: [] };
     }
+    const jobEstimates = await this.estimateRepo.findByJob(tenantId, jobId);
+    const jobAcceptedEstimateIds = acceptedEstimateIds(jobEstimates);
     if (payloadEstimateId) {
       const named = await this.estimateRepo.findById(tenantId, payloadEstimateId);
       if (!named) return { error: 'That estimate was not found. No invoice schedule was created.' };
       if (named.jobId !== jobId) {
         return { error: 'That estimate belongs to a different job. No invoice schedule was created.' };
       }
-      return { estimate: named };
+      return { estimateId: named.id, estimate: named, jobAcceptedEstimateIds };
     }
-    const accepted = (await this.estimateRepo.findByJob(tenantId, jobId)).filter(
-      (e) => e.status === 'accepted',
-    );
-    if (accepted.length === 1) return { estimate: accepted[0] };
-    if (accepted.length === 0) {
-      return {
-        error:
-          'This job has no accepted estimate, so there is nothing for a milestone plan to bill. ' +
-          'Accept the estimate first. No invoice schedule was created.',
-      };
+    const accepted = jobEstimates.filter((e) => e.status === 'accepted');
+    if (accepted.length <= 1) {
+      return { estimateId: accepted[0]?.id, estimate: accepted[0], jobAcceptedEstimateIds };
     }
     return {
       error:

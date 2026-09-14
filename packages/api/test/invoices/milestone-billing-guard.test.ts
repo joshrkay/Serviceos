@@ -12,9 +12,12 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   completionWillMintPlan,
   formatCentsUsd,
+  heldMilestonesSummary,
   invoiceStillBills,
   milestonePlanBillingEstimate,
+  planBilledEstimateId,
   wholeInvoiceBillingEstimate,
+  wholeInvoiceRefusalReason,
   wholeInvoiceRefusedByPlanReason,
 } from '../../src/invoices/milestone-billing-guard';
 import {
@@ -34,6 +37,7 @@ import { maybeAutoInvoiceOnCompletion } from '../../src/invoices/auto-invoice-on
 import { mintCompletionMilestones, heldMilestonesIdempotencyKey } from '../../src/invoices/schedule-completion';
 import { CreateInvoiceExecutionHandler } from '../../src/proposals/execution/invoice-execution-handler';
 import { buildLineItem } from '../../src/shared/billing-engine';
+import { ConflictError } from '../../src/shared/errors';
 
 const TENANT = 'tenant-1203';
 
@@ -185,7 +189,7 @@ describe('#1203 milestone-billing guard', () => {
     it('a plan bills the estimate while a milestone still bills or completion will still mint it', async () => {
       const { job: j, estimate } = await seedJob();
       const p = await plan(j, estimate.id, DEPOSIT_BALANCE);
-      const base = { estimateId: estimate.id, schedules: [p], milestoneBillingEnabled: true, completionStillAhead: true };
+      const base = { estimateId: estimate.id, schedules: [p], jobAcceptedEstimateIds: [estimate.id], milestoneBillingEnabled: true, completionStillAhead: true };
       // Nothing minted, completion ahead: it will bill.
       expect(milestonePlanBillingEstimate({ ...base, invoices: [] })?.completionWillMint).toBe(true);
       // Nothing minted, job already complete: nothing will bill → no conflict.
@@ -205,6 +209,39 @@ describe('#1203 milestone-billing guard', () => {
       expect(milestonePlanBillingEstimate({ ...base, invoices: [canceled], milestoneBillingEnabled: false })).toBeNull();
       // No plan for this estimate → never a conflict (C2).
       expect(milestonePlanBillingEstimate({ ...base, estimateId: 'another-estimate', invoices: [] })).toBeNull();
+      // …but the canceled deposit still holds the estimate's single link: a whole
+      // invoice can never be linked, so the refusal says to invoice by hand.
+      expect(wholeInvoiceRefusalReason({ ...base, invoices: [canceled], milestoneBillingEnabled: false })).toBe(
+        'This estimate is linked to INV-0001, a canceled invoice from its milestone plan, so no new invoice can be ' +
+          'linked to it and none was created. Invoice the remaining balance by hand (without choosing the estimate).',
+      );
+    });
+
+    it("a plan that recorded no estimate bills the job's single accepted estimate, resolved at check time", async () => {
+      const { job: j, estimate } = await seedJob();
+      const legacy = await plan(j, undefined, BOTH_ON_COMPLETION);
+      expect(planBilledEstimateId(legacy, [estimate.id])).toBe(estimate.id);
+      expect(planBilledEstimateId(legacy, [])).toBeUndefined();
+      expect(planBilledEstimateId(legacy, ['a', 'b'])).toBeUndefined();
+      expect(planBilledEstimateId({ estimateId: 'recorded' }, [estimate.id])).toBe('recorded');
+      const check = { estimateId: estimate.id, schedules: [legacy], invoices: [], milestoneBillingEnabled: true, completionStillAhead: true };
+      expect(milestonePlanBillingEstimate({ ...check, jobAcceptedEstimateIds: [estimate.id] })?.plan.id).toBe(legacy.id);
+      // No accepted estimate on the job: nothing to protect (behaves as main).
+      expect(milestonePlanBillingEstimate({ ...check, jobAcceptedEstimateIds: [] })).toBeNull();
+    });
+
+    it("the held-milestone draft's summary names the invoice that already bills the estimate", async () => {
+      const { job: j, estimate } = await seedJob();
+      const whole = await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id });
+      expect(
+        heldMilestonesSummary(
+          [
+            { index: 0, label: 'Half', trigger: 'on_completion', amountCents: 50000 },
+            { index: 1, label: 'Rest', trigger: 'on_completion', amountCents: 50000 },
+          ],
+          whole,
+        ),
+      ).toBe('Milestone invoice held: estimate already billed by INV-0001 (Half, Rest)');
     });
   });
 
@@ -236,6 +273,42 @@ describe('#1203 milestone-billing guard', () => {
       await plan(j, 'change-order-estimate', BOTH_ON_COMPLETION);
       expect((await convertEstimateToInvoice(TENANT, estimate.id, convertDeps()))?.estimateId).toBe(estimate.id);
     });
+
+    it("a plan that recorded no estimate blocks converting the job's single accepted estimate", async () => {
+      const { job: j, estimate } = await seedJob();
+      await plan(j, undefined, BOTH_ON_COMPLETION);
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, convertDeps())).rejects.toThrow(/billed by a milestone plan/);
+    });
+
+    it('a canceled plan deposit that holds the link is refused before the insert, never returned', async () => {
+      const { job: j, estimate } = await seedJob();
+      const p = await plan(j, estimate.id, DEPOSIT_BALANCE);
+      await invoice(j, 'INV-0001', 50000, { estimateId: estimate.id, scheduleId: p.id, milestoneIndex: 0, status: 'canceled' });
+      await settingsRepo.update(TENANT, { milestoneBillingEnabled: false });
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, convertDeps())).rejects.toThrow(
+        /linked to INV-0001, a canceled invoice from its milestone plan/,
+      );
+      expect((await invoiceRepo.findByJob(TENANT, j.id)).map((i) => i.invoiceNumber)).toEqual(['INV-0001']);
+    });
+
+    it('a uq_invoices_estimate collision never returns a milestone or non-billing invoice as the conversion', async () => {
+      // No schedule repo wired (so no pre-check), a canceled milestone holding the
+      // link, and the insert rejected the way Postgres's unique index rejects it.
+      const { job: j, estimate } = await seedJob();
+      await invoice(j, 'INV-0001', 50000, { estimateId: estimate.id, scheduleId: 'plan-1', milestoneIndex: 0, status: 'canceled' });
+      invoiceRepo.create = async () => {
+        throw Object.assign(new Error('duplicate key value violates unique constraint "uq_invoices_estimate"'), {
+          code: '23505',
+          constraint: 'uq_invoices_estimate',
+        });
+      };
+      const { scheduleRepo: _omit, ...noScheduleDeps } = convertDeps();
+      const attempt = convertEstimateToInvoice(TENANT, estimate.id, noScheduleDeps);
+      await expect(attempt).rejects.toBeInstanceOf(ConflictError);
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, noScheduleDeps)).rejects.toThrow(
+        /linked to INV-0001, a canceled invoice from its milestone plan/,
+      );
+    });
   });
 
   describe('plan then draft_invoice', () => {
@@ -255,7 +328,8 @@ describe('#1203 milestone-billing guard', () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
-    const handler = () => new CreateInvoiceExecutionHandler(invoiceRepo, settingsRepo, auditRepo, jobRepo, undefined, undefined, scheduleRepo);
+    const handler = () =>
+      new CreateInvoiceExecutionHandler(invoiceRepo, settingsRepo, auditRepo, jobRepo, undefined, undefined, scheduleRepo, estimateRepo);
 
     it('refuses a whole-estimate draft when the plan has a live milestone, and names what is unbilled', async () => {
       const { job: j, estimate } = await seedJob({ status: 'completed' });
@@ -265,6 +339,14 @@ describe('#1203 milestone-billing guard', () => {
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/INV-0001 \(\$500\.00\) so far.*remaining \$500\.00 is not invoiced automatically/);
       expect(await invoiceRepo.findByJob(TENANT, j.id)).toHaveLength(1);
+    });
+
+    it("refuses a whole-estimate draft when a plan that recorded no estimate bills the job's accepted estimate", async () => {
+      const { job: j, estimate } = await seedJob();
+      await plan(j, undefined, BOTH_ON_COMPLETION);
+      const result = await handler().execute(draft(j, estimate.id), { tenantId: TENANT, executedBy: 'owner-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/invoices the remaining \$1,000\.00 when the job is completed/);
     });
 
     it('lets the draft through when the plan will bill nothing (milestone billing off, nothing minted)', async () => {
@@ -291,15 +373,15 @@ describe('#1203 milestone-billing guard', () => {
       expect(draft?.payload.estimateId).toBe(estimate.id);
     });
 
-    it('does not yield to a plan that records no estimate (created before #1203)', async () => {
+    it("yields to a plan that recorded no estimate: it bills the job's single accepted estimate", async () => {
       const { job: j } = await seedJob({ status: 'completed' }, { autoInvoiceOnCompletion: true });
       await plan(j, undefined, BOTH_ON_COMPLETION);
-      expect(await maybeAutoInvoiceOnCompletion(autoDeps(), j)).not.toBeNull();
+      expect(await maybeAutoInvoiceOnCompletion(autoDeps(), j)).toBeNull();
     });
   });
 
   describe('completion holds milestones instead of dropping them (C1)', () => {
-    const mintDeps = () => ({ scheduleRepo, invoiceRepo, settingsRepo, auditRepo, proposalRepo });
+    const mintDeps = () => ({ scheduleRepo, invoiceRepo, settingsRepo, auditRepo, proposalRepo, estimateRepo });
 
     it('raises one ready_for_review draft with the held milestones and why; mints nothing on top', async () => {
       const { job: j, estimate } = await seedJob({ status: 'completed' });
@@ -311,6 +393,7 @@ describe('#1203 milestone-billing guard', () => {
 
       const [held] = await proposalRepo.findByStatus(TENANT, 'ready_for_review');
       expect(held.proposalType).toBe('draft_invoice');
+      expect(held.summary).toBe('Milestone invoice held: estimate already billed by INV-0001 (Half, Rest)');
       expect(held.idempotencyKey).toBe(heldMilestonesIdempotencyKey(p.id));
       expect(held.payload.estimateId).toBeUndefined();
       expect((held.payload.lineItems as Array<{ description: string; totalCents: number }>).map((l) => [l.description, l.totalCents])).toEqual([
@@ -330,13 +413,13 @@ describe('#1203 milestone-billing guard', () => {
       expect(await proposalRepo.findByStatus(TENANT, 'ready_for_review')).toHaveLength(1);
     });
 
-    it('a void blocker holding a payment asks for a refund; a canceled one does not block at all', async () => {
+    it('a void blocker holding a payment points to invoicing the balance by hand; a canceled one does not block at all', async () => {
       const { job: j, estimate } = await seedJob({ status: 'completed' });
       await plan(j, estimate.id, BOTH_ON_COMPLETION);
       await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id, status: 'void', amountPaidCents: 20000 });
       await mintCompletionMilestones(mintDeps(), j);
       const [held] = await proposalRepo.findByStatus(TENANT, 'ready_for_review');
-      expect(held.explanation).toMatch(/INV-0001 is void and still holds \$200\.00 of payments.*Refund or move that payment/);
+      expect(held.explanation).toMatch(/already has a paid voided invoice \(INV-0001, \$200\.00 paid\).*invoice the remaining balance by hand/);
 
       const other = await seedJob({ status: 'completed' });
       await plan(other.job, other.estimate.id, BOTH_ON_COMPLETION);
@@ -354,8 +437,18 @@ describe('#1203 milestone-billing guard', () => {
       expect(await invoiceRepo.findByJob(TENANT, j.id)).toHaveLength(1);
     });
 
-    it('a plan with no recorded estimate (created before #1203) mints exactly as before', async () => {
+    it("a plan that recorded no estimate is held when a whole invoice bills the job's single accepted estimate", async () => {
       const { job: j, estimate } = await seedJob({ status: 'completed' });
+      const legacy = await plan(j, undefined, BOTH_ON_COMPLETION);
+      await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id });
+      expect(await mintCompletionMilestones(mintDeps(), j)).toEqual([]);
+      const [held] = await proposalRepo.findByStatus(TENANT, 'ready_for_review');
+      expect(held.idempotencyKey).toBe(heldMilestonesIdempotencyKey(legacy.id));
+    });
+
+    it('a plan that recorded no estimate, on a job with no accepted estimate, mints exactly as before', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' });
+      await estimateRepo.update(TENANT, estimate.id, { status: 'sent' });
       await plan(j, undefined, BOTH_ON_COMPLETION);
       await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id });
       expect((await mintCompletionMilestones(mintDeps(), j)).map((i) => i.totals.totalCents)).toEqual([50000, 50000]);

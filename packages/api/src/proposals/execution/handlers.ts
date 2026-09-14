@@ -1386,6 +1386,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.customerRepo,
       // #1203 — refuses a whole-estimate draft for an estimate a milestone plan bills.
       deps?.scheduleRepo,
+      deps?.estimateRepo,
     ),
     new CreateInvoiceScheduleExecutionHandler(
       deps?.scheduleRepo,
@@ -1394,6 +1395,8 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.estimateRepo,
       // #1203 — notes invoices without an estimate on the approved plan.
       deps?.proposalRepo,
+      // #1203 — refuses a new plan on a job already past completion.
+      deps?.jobRepo,
     ),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),

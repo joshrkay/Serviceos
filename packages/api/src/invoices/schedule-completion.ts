@@ -13,13 +13,14 @@
  * milestones are left for an explicit action; zero-amount milestones are
  * skipped rather than minting a $0 invoice.
  *
- * #1203 — when an invoice outside the plan already bills the plan's recorded
- * estimate (e.g. it was converted while milestone billing was off, or a void
- * invoice still holds a payment), minting would bill the estimate twice. The
+ * #1203 — when an invoice outside the plan already bills the plan's estimate
+ * (e.g. it was converted while milestone billing was off, or a void invoice
+ * still holds a payment), minting would bill the estimate twice. The
  * milestones are then HELD, not dropped: completion runs once, so the owner
  * gets a ready_for_review `draft_invoice` proposal listing exactly what was not
- * billed and why, to approve or reject. Plans with no recorded estimate
- * (created before #1203) mint exactly as before.
+ * billed and why, to approve or reject. A plan that recorded no estimate bills
+ * the job's single accepted estimate (resolved now); with no accepted estimate
+ * it mints exactly as before.
  */
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
@@ -31,7 +32,14 @@ import {
   milestoneEstimateLink,
   splitMilestones,
 } from './invoice-schedule';
-import { heldMilestonesReason, wholeInvoiceBillingEstimate } from './milestone-billing-guard';
+import {
+  acceptedEstimateIds,
+  heldMilestonesReason,
+  heldMilestonesSummary,
+  planBilledEstimateId,
+  wholeInvoiceBillingEstimate,
+} from './milestone-billing-guard';
+import { EstimateRepository } from '../estimates/estimate';
 import { SettingsRepository } from '../settings/settings';
 import { withRequestSavepoint } from '../middleware/tenant-context';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -51,6 +59,8 @@ export interface ScheduleCompletionDeps {
   auditRepo?: AuditRepository;
   /** #1203 — raises the owner draft for milestones held at completion. */
   proposalRepo?: ProposalRepository;
+  /** #1203 — resolves plans that recorded no estimate to the job's single accepted estimate. */
+  estimateRepo?: EstimateRepository;
 }
 
 /** Idempotency key of the owner draft for a plan's held completion milestones. */
@@ -86,14 +96,21 @@ export async function mintCompletionMilestones(
       .map((inv) => `${inv.scheduleId}:${inv.milestoneIndex}`),
   );
 
+  // #1203 — plans that recorded no estimate bill the job's single accepted estimate.
+  const jobAccepted =
+    deps.estimateRepo && schedules.some((s) => !s.estimateId)
+      ? acceptedEstimateIds(await deps.estimateRepo.findByJob(job.tenantId, job.id))
+      : [];
+
   const created: Invoice[] = [];
   for (const schedule of schedules) {
     const allocations = splitMilestones(schedule.totalAmountCents, schedule.milestones);
 
     // #1203 — an invoice outside the plan already bills the plan's estimate:
     // hold this plan's due milestones for the owner instead of billing twice.
-    if (schedule.estimateId) {
-      const blocking = wholeInvoiceBillingEstimate(schedule.estimateId, existing, schedule.id);
+    const billedEstimateId = planBilledEstimateId(schedule, jobAccepted);
+    if (billedEstimateId) {
+      const blocking = wholeInvoiceBillingEstimate(billedEstimateId, existing, schedule.id);
       const due = allocations.filter(
         (a) => a.trigger === 'on_completion' && a.amountCents > 0 && !minted.has(`${schedule.id}:${a.index}`),
       );
@@ -215,13 +232,13 @@ async function holdMilestonesForOwner(
       tenantId: job.tenantId,
       proposalType: 'draft_invoice',
       payload,
-      summary: `Milestone invoice held for review: ${held.map((a) => a.label).join(', ')}`,
+      summary: heldMilestonesSummary(held, blocking),
       explanation: reason,
       sourceContext: {
         source: 'milestone_mint_held',
         jobId: job.id,
         scheduleId: schedule.id,
-        estimateId: schedule.estimateId,
+        estimateId: blocking.estimateId,
         milestoneIndexes: held.map((a) => a.index),
         blockingInvoiceId: blocking.id,
         blockingInvoiceNumber: blocking.invoiceNumber,
