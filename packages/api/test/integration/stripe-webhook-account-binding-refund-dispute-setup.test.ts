@@ -27,6 +27,14 @@
  *   • MATCH (the tenant's own account)            → behaves exactly as before.
  *   • PLATFORM-ORIGIN (no `event.account`)        → behaves exactly as before.
  *
+ * SECURITY #1177 — binding the ACCOUNT is not enough for the saved-card branch:
+ * a delivery on tenant A's own account naming tenant A in metadata could still
+ * carry a `customer_id` that belongs to tenant B, and the row was stored under A
+ * pointing at B's customer. The `#1177` block below proves the metadata customer
+ * is resolved through the tenant-scoped customer repository first, and a foreign
+ * customer is refused through the same refusal path (403, audited on the named
+ * tenant, webhook row 'failed', nothing written).
+ *
  * Tenant grade: tenant B (whose connected account appears on every forged
  * event) has its own settled payment and saved card; the last test proves
  * none of the refusals touched B's rows or B's audit trail.
@@ -482,6 +490,9 @@ describe('Postgres integration — #1109 refund, dispute and saved-card Stripe e
         auditRepo,
         webhookRepo,
         customerPaymentMethodRepo: cpmRepo,
+        // #1177 — the tenant-scoped customer lookup the saved-card branch binds
+        // the metadata customer_id through (app.ts wires the same repo).
+        customerRepo: new PgCustomerRepository(pool),
         stripeConfig: { apiKey: STRIPE_API_KEY },
         stripeFetch,
         stripeWebhookSecret: STRIPE_SECRET,
@@ -579,6 +590,116 @@ describe('Postgres integration — #1109 refund, dispute and saved-card Stripe e
         { stripe_payment_method_id: `pm_${eventId}`, stripe_account_id: null, is_default: true },
       ]);
       expect((await webhookRow(eventId))?.status).toBe('processed');
+    });
+  });
+
+  // ═══════ #1177 — setup_intent.succeeded: the metadata customer is the named tenant's ═══════
+
+  describe('setup_intent.succeeded — #1177 the metadata customer_id must belong to the metadata tenant', () => {
+    const CUSTOMER_REFUSED = { error: 'Forbidden', reason: 'stripe_customer_tenant_mismatch' };
+
+    /** Every saved-card row for a payment method, in ANY tenant (raw pool read). */
+    async function cardsForPaymentMethod(
+      paymentMethodId: string,
+    ): Promise<Array<{ tenant_id: string; customer_id: string }>> {
+      const { rows } = await pool.query<{ tenant_id: string; customer_id: string }>(
+        `SELECT tenant_id, customer_id FROM customer_payment_methods WHERE stripe_payment_method_id = $1`,
+        [paymentMethodId],
+      );
+      return rows;
+    }
+
+    /** The #1177 refusal contract: 403, one audit row on the NAMED tenant, webhook row failed. */
+    async function expectCustomerRefusal(params: {
+      res: request.Response;
+      stripeEventId: string;
+      namedTenant: TestTenant;
+      auditRowsBefore: number;
+      foreignCustomerId: string;
+      eventAccount: string | null;
+    }): Promise<void> {
+      const { res, stripeEventId, namedTenant, auditRowsBefore, foreignCustomerId, eventAccount } = params;
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual(CUSTOMER_REFUSED);
+
+      const rows = await auditRows(namedTenant.tenantId);
+      expect(rows).toHaveLength(auditRowsBefore + 1);
+      const refused = rows[rows.length - 1];
+      expect(refused.event_type).toBe('webhook.auth_failed');
+      expect(refused.entity_id).toBe('stripe_customer_tenant_mismatch');
+      expect(refused.metadata.reason).toBe('stripe_customer_tenant_mismatch');
+      expect(refused.metadata.stripeEventId).toBe(stripeEventId);
+      expect(refused.metadata.stripeEventType).toBe('setup_intent.succeeded');
+      expect(refused.metadata.customerId).toBe(foreignCustomerId);
+      expect(refused.metadata.eventAccount).toBe(eventAccount);
+
+      const row = await webhookRow(stripeEventId);
+      expect(row?.status).toBe('failed');
+      expect(row?.processed_at).toBeNull();
+      expect(row?.error_message).toContain('stripe_customer_tenant_mismatch');
+
+      // The customer's owner (tenant B) gets nothing in its audit trail.
+      expect(await auditRows(tenantB.tenantId)).toHaveLength(bAuditCount);
+    }
+
+    it('REFUSES — and stores no row in EITHER tenant — when tenant A\'s own account names tenant A but a customer_id of tenant B', async () => {
+      const bCardsBefore = await savedCards(tenantB.tenantId, bCustomerId);
+      expect(bCardsBefore).toHaveLength(1);
+      const auditBefore = (await auditRows(tenantA.tenantId)).length;
+
+      const eventId = `evt_${randomUUID()}`;
+      const paymentMethodId = `pm_${eventId}`;
+      const res = await postSigned(
+        setupIntentSucceeded(eventId, tenantA.tenantId, bCustomerId, paymentMethodId, ACCOUNT_A),
+      );
+
+      await expectCustomerRefusal({
+        res, stripeEventId: eventId, namedTenant: tenantA, auditRowsBefore: auditBefore,
+        foreignCustomerId: bCustomerId, eventAccount: ACCOUNT_A,
+      });
+      // No saved-card row for this payment method anywhere — not under A, not under B.
+      expect(await cardsForPaymentMethod(paymentMethodId)).toEqual([]);
+      expect(await savedCards(tenantA.tenantId, bCustomerId)).toHaveLength(0);
+      // Tenant B's own card on that customer is exactly as it was.
+      expect(await savedCards(tenantB.tenantId, bCustomerId)).toEqual(bCardsBefore);
+    });
+
+    it('REFUSES a PLATFORM-ORIGIN delivery (no event.account) naming tenant A with a customer_id of tenant B', async () => {
+      const bCardsBefore = await savedCards(tenantB.tenantId, bCustomerId);
+      const auditBefore = (await auditRows(tenantA.tenantId)).length;
+
+      const eventId = `evt_${randomUUID()}`;
+      const paymentMethodId = `pm_${eventId}`;
+      const body = setupIntentSucceeded(eventId, tenantA.tenantId, bCustomerId, paymentMethodId);
+      expect(body).not.toHaveProperty('account');
+      const res = await postSigned(body);
+
+      await expectCustomerRefusal({
+        res, stripeEventId: eventId, namedTenant: tenantA, auditRowsBefore: auditBefore,
+        foreignCustomerId: bCustomerId, eventAccount: null,
+      });
+      expect(await cardsForPaymentMethod(paymentMethodId)).toEqual([]);
+      expect(await savedCards(tenantB.tenantId, bCustomerId)).toEqual(bCardsBefore);
+    });
+
+    it('SAVES exactly one row when tenant A\'s own account names tenant A and A\'s OWN customer (legit case)', async () => {
+      const customerId = await seedCustomer(tenantA);
+      const auditBefore = (await auditRows(tenantA.tenantId)).length;
+
+      const eventId = `evt_${randomUUID()}`;
+      const paymentMethodId = `pm_${eventId}`;
+      const res = await postSigned(
+        setupIntentSucceeded(eventId, tenantA.tenantId, customerId, paymentMethodId, ACCOUNT_A),
+      );
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ received: true });
+
+      expect(await cardsForPaymentMethod(paymentMethodId)).toEqual([
+        { tenant_id: tenantA.tenantId, customer_id: customerId },
+      ]);
+      expect((await webhookRow(eventId))?.status).toBe('processed');
+      // No refusal was audited for the legit delivery.
+      expect(await auditRows(tenantA.tenantId)).toHaveLength(auditBefore);
     });
   });
 

@@ -2631,7 +2631,54 @@ async function generateAssistantReply(
         ...(conversationId ? { sessionId: conversationId } : {}),
       };
 
-      const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+      // #1173 — a turn carrying photos: resolve every fileId TENANT-SCOPED and
+      // presign it BEFORE classifying. Any id this tenant cannot use (another
+      // tenant's file, a non-image, a missing row, no storage wired) refuses
+      // the whole turn deterministically — nothing is drafted from a partial
+      // or foreign photo set, and no URL for it is ever minted.
+      let chatImages: TaskImage[] = [];
+      if (attachments && attachments.length > 0) {
+        const resolvedPhotos = deps.photoAttachments
+          ? await resolveChatImageAttachments(deps.photoAttachments, tenantId, attachments)
+          : { images: [], refused: attachments.map((a) => a.fileId) };
+        if (resolvedPhotos.refused.length > 0) {
+          logger.warn('assistant/chat: photo attachment refused', {
+            correlationId,
+            tenantId,
+            refused: resolvedPhotos.refused.length,
+            wired: Boolean(deps.photoAttachments),
+          });
+          return {
+            taskType: 'assistant.photo_attachment_unavailable',
+            model: 'policy-guard',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content:
+                "I couldn't open that photo, so I haven't drafted anything from it. Try attaching it again.",
+              reasoning:
+                'A photo on this turn is not a readable image in this workspace — refused rather than drafting without it.',
+            },
+          };
+        }
+        chatImages = resolvedPhotos.images;
+      }
+
+      const classified = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+      // #1173 — ASSUMPTION (easy to flip: this one predicate). A photo turn
+      // whose text names no request of its own — the Assistant's own photo
+      // prompt, "Here's the photo — can you identify the issue?", classifies
+      // `unknown` — is a request to draft an estimate FROM the photo (row 7.1:
+      // "given … a customer photo, a real estimate/proposal row persists").
+      // A photo riding a real request keeps that request's intent.
+      const classification =
+        chatImages.length > 0 && classified.intentType === 'unknown'
+          ? {
+              ...classified,
+              intentType: 'draft_estimate' as const,
+              reasoning: 'Photo attached with no other request — drafting an estimate from the photo.',
+            }
+          : classified;
       classifierUsage = usageOf(classification.tokenUsage);
       guardIntent = classification.intentType;
       guardConfidence = classification.confidence;
