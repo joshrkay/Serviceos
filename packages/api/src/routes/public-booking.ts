@@ -35,6 +35,7 @@ import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { TenantRepository } from '../auth/clerk';
 import {
+  effectiveBufferMinutes,
   findBookableSlots,
   isSlotFree,
   isWithinBusinessHours,
@@ -347,8 +348,9 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
           start: slotStart,
           end: slotEnd,
           // Tenant travel buffer — a crafted POST must not land a slot the
-          // buffered availability (GET) would never have offered.
-          bufferMinutes: scheduling.bufferMinutes,
+          // buffered availability (GET) would never have offered. #1158 —
+          // an unset (NULL) buffer applies the same default GET applies.
+          bufferMinutes: effectiveBufferMinutes(scheduling.bufferMinutes),
         });
         if (!stillFree) {
           return { ok: false as const };

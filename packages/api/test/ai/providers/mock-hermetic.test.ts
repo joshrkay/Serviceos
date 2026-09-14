@@ -85,6 +85,33 @@ describe('scriptHermeticResponse', () => {
     expect(parsed.jobReference).toBe('Henderson');
     expect(parsed.priority).toBe('urgent');
   });
+
+  // #1173 — a photo-bearing draft_estimate is scripted as a photo-diagnosed
+  // line, so a hermetic run can tell it from a text-only draft.
+  it('scripts a vision draft_estimate when the request carries image parts', () => {
+    const photo: LLMRequest = {
+      taskType: 'draft_estimate',
+      messages: [
+        {
+          role: 'user',
+          content: "Here's the photo — can you identify the issue?",
+          parts: [{ type: 'image', url: 'https://storage.test/a.jpg' }],
+        },
+      ],
+    };
+    const vision = JSON.parse(scriptHermeticResponse(photo)) as {
+      lineItems: Array<{ description: string; unitPrice: number }>;
+      notes: string;
+    };
+    expect(vision.lineItems[0]?.description).toBe('Repair shown in photo');
+    expect(vision.lineItems[0]?.unitPrice).toBe(15000);
+    expect(vision.notes).toContain('1 photo(s)');
+
+    const textOnly = JSON.parse(
+      scriptHermeticResponse(req('draft_estimate', "Here's the photo — can you identify the issue?")),
+    ) as { lineItems: Array<{ description: string }> };
+    expect(textOnly.lineItems[0]?.description).toBe('Service estimate');
+  });
 });
 
 // #1132 — the hermetic mock had no branch for `taskType === 'brand_voice_v1'`
