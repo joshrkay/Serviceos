@@ -683,6 +683,32 @@ export function TechJobView({
   const [cameraOpen, setCam] = useState(false);
   const [isRunningBehind, setIsRunningBehind] = useState<boolean | null>(null);
   const [delayMinutes, setDelayMinutes] = useState<DelayOption | null>(null);
+  // #1135 — the appointment this job's chip row confirms against. Jobs don't
+  // carry an appointmentId column; POST /:apptId/running-late needs the
+  // appointment id, not the job id, so it's resolved once on mount via the
+  // existing jobId-filtered appointments list (technicians already hold
+  // `appointments:view`, the same permission that route requires).
+  const [appointmentId, setAppointmentId] = useState<string | null>(null);
+  const [delaySending, setDelaySending] = useState(false);
+  const [delayError, setDelayError] = useState<string | null>(null);
+
+  // #1135 — resolve the appointment backing this job so the delay chips have
+  // something to confirm against. GET /api/appointments?jobId=<id> is the
+  // existing legacy (bare-array) contract; pick the latest non-canceled
+  // appointment, falling back to whatever comes back if all are canceled.
+  const loadAppointment = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/appointments?jobId=${id}`);
+      if (!res.ok) return;
+      const list = await res.json() as Array<{ id: string; status?: string }>;
+      if (!Array.isArray(list) || list.length === 0) return;
+      const active = list.find((a) => a.status !== 'canceled') ?? list[0];
+      setAppointmentId(active.id);
+    } catch {
+      // Non-critical for page load — the chip tap surfaces its own error
+      // if it can't find an appointment to confirm against.
+    }
+  }, [apiFetch, id]);
 
   const loadJob = useCallback(async () => {
     setIsLoading(true);
@@ -750,7 +776,36 @@ export function TechJobView({
     void loadJob();
     void loadNotes();
     void loadPhotos();
-  }, [loadJob, loadNotes, loadPhotos]);
+    void loadAppointment();
+  }, [loadJob, loadNotes, loadPhotos, loadAppointment]);
+
+  // #1135 — the delay chip IS the confirm: tapping 10/15/20/60 posts the
+  // running-late notice immediately (no second dialog). Optimistic: the chip
+  // shows selected right away; on failure the selection reverts and an error
+  // is surfaced instead of silently doing nothing.
+  const handleDelayChipTap = useCallback(async (minutes: DelayOption) => {
+    const previous = delayMinutes;
+    setDelayError(null);
+    setDelayMinutes(minutes);
+    if (!appointmentId) {
+      setDelayMinutes(previous);
+      setDelayError('Unable to send a running-late notice: no appointment found for this job.');
+      return;
+    }
+    setDelaySending(true);
+    try {
+      const res = await apiFetch(`/api/appointments/${appointmentId}/running-late`, {
+        method: 'POST',
+        body: JSON.stringify({ delayMinutes: minutes }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      setDelayMinutes(previous);
+      setDelayError(err instanceof Error ? err.message : 'Failed to send running-late notice');
+    } finally {
+      setDelaySending(false);
+    }
+  }, [apiFetch, appointmentId, delayMinutes]);
 
   if (isLoading) {
     return (
@@ -1095,6 +1150,7 @@ export function TechJobView({
                         onClick={() => {
                           const behind = label === 'Yes';
                           setIsRunningBehind(behind);
+                          setDelayError(null);
                           if (!behind) setDelayMinutes(null);
                         }}
                         className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
@@ -1112,8 +1168,8 @@ export function TechJobView({
                   {DELAY_OPTIONS.map((minutes) => (
                     <button
                       key={minutes}
-                      onClick={() => setDelayMinutes(minutes)}
-                      disabled={isRunningBehind !== true}
+                      onClick={() => void handleDelayChipTap(minutes)}
+                      disabled={isRunningBehind !== true || delaySending}
                       className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                         delayMinutes === minutes
                           ? 'bg-primary text-primary-foreground border-primary'
@@ -1124,6 +1180,11 @@ export function TechJobView({
                     </button>
                   ))}
                 </div>
+                {delayError && (
+                  <p data-testid="tech-delay-error" role="alert" className="mt-2 text-xs text-destructive">
+                    {delayError}
+                  </p>
+                )}
               </div>
               <p className="text-xs text-muted-foreground mb-2 px-1">Or tap to add manually</p>
               <div className="grid grid-cols-4 gap-2">
