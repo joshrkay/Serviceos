@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemoryJobFileRepository } from '../../src/files/job-file-repository';
+import { InMemoryJobRepository } from '../../src/jobs/job';
 import { ObjectMetadata, StorageProvider } from '../../src/files/file-service';
 import { createJobFilesRouter } from '../../src/routes/job-files';
 import { buildTestApp } from './test-app';
@@ -54,6 +55,9 @@ function buildOtherTenantApp(repo: InMemoryJobFileRepository): Express {
       storage: new FakeStorageProvider(),
       bucket: BUCKET,
       auditRepo: new InMemoryAuditRepository(),
+      // Unused by this app's GET/DELETE-only tests — no upload calls cross
+      // this tenant boundary.
+      jobRepo: new InMemoryJobRepository(),
     })
   );
 
@@ -74,6 +78,9 @@ describe('job files router', () => {
         storage: new FakeStorageProvider(),
         bucket: BUCKET,
         auditRepo: new InMemoryAuditRepository(),
+        // #1187 — the same jobRepo backing the /api/jobs router mounted by
+        // buildTestApp(), so the real jobs created in these tests resolve.
+        jobRepo: built.jobRepo,
       })
     );
     app = built.app;

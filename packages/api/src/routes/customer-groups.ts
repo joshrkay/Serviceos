@@ -12,6 +12,7 @@ import {
   removeCustomerFromGroup,
   updateCustomerGroup,
 } from '../customers/customer-group';
+import { CustomerRepository } from '../customers/customer';
 import { createCustomerGroupSchema, updateCustomerGroupSchema } from '../shared/contracts';
 
 /**
@@ -23,7 +24,16 @@ import { createCustomerGroupSchema, updateCustomerGroupSchema } from '../shared/
  */
 export function createCustomerGroupRouter(
   repo: CustomerGroupRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  /**
+   * #1187 — a well-formed but unknown customer id on `PUT .../members/:customerId`
+   * hit the `customer_group_members.customer_id` FK and surfaced as a bare
+   * 500. Only `findById` is used, tenant-scoped, so a tenant B customer id
+   * seen from tenant A also resolves to "missing". The group id itself is
+   * already covered — `addCustomerToGroup` throws `NotFoundError` when
+   * `findGroupById` comes back null.
+   */
+  customerRepo: Pick<CustomerRepository, 'findById'>
 ): Router {
   const router = Router();
 
@@ -133,6 +143,15 @@ export function createCustomerGroupRouter(
     notFoundOnMalformedId('Customer group not found'),
     notFoundOnMalformedId('Customer not found', 'customerId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      // #1187 — look the customer up through the tenant-scoped repository
+      // before writing; the group id is already checked inside
+      // addCustomerToGroup (NotFoundError from findGroupById).
+      const customer = await customerRepo.findById(req.auth!.tenantId, req.params.customerId);
+      if (!customer) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
+
       const added = await addCustomerToGroup(
         req.auth!.tenantId,
         req.params.id,
