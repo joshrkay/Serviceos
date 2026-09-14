@@ -8,6 +8,8 @@ import {
   InvoiceMilestone,
   InvoiceScheduleRepository,
   buildInvoiceSchedule,
+  estimateAlreadyInvoicedReason,
+  invoiceOutsideSchedule,
   isDuplicateMilestoneError,
   milestoneEstimateLink,
   splitMilestones,
@@ -164,6 +166,19 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
           milestones,
           createdBy: context.executedBy,
         });
+      }
+
+      // #1203: never bill an estimate twice. If the estimate already has an
+      // invoice that is not one of THIS schedule's milestones (e.g. it was
+      // converted to a plain invoice), refuse before the schedule row or any
+      // milestone invoice is written. The schedule's own milestones (a retry)
+      // are recognised by schedule_id and do not refuse.
+      const jobInvoices = await this.invoiceRepo.findByJob(context.tenantId, payload.jobId);
+      const alreadyInvoiced = invoiceOutsideSchedule(schedule, jobInvoices);
+      if (alreadyInvoiced) {
+        return { success: false, error: estimateAlreadyInvoicedReason(alreadyInvoiced.invoiceNumber) };
+      }
+      if (existingForJob.length === 0) {
         await this.scheduleRepo.create(schedule);
       }
 
@@ -176,10 +191,6 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       // drafted rather than failing the whole proposal).
       const onAcceptAllocations = allocations.filter((a) => a.trigger === 'on_accept');
       if (onAcceptAllocations.length > 0) {
-        const jobInvoices = await this.invoiceRepo.findByJob(
-          context.tenantId,
-          payload.jobId,
-        );
         const drafted = new Set(
           jobInvoices
             .filter((inv) => inv.scheduleId === schedule.id && inv.milestoneIndex !== undefined)

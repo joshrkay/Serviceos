@@ -47,6 +47,16 @@ import {
  * real approve route, and the REAL execution sweep lands the fee line. No
  * config row is ever written by this spec — only by the product.
  *
+ * ── T3 upgrade (#1193, map #995) ──────────────────────────────────────────
+ * Tenant B is no longer "not overdue, untouched" — it is now ALSO overdue
+ * in the SAME sweep run, with a DIFFERENT late-fee policy (`percent`, a
+ * different cap) saved through the SAME Late fees sheet UI tenant A used
+ * above. Each invoice ends with exactly its OWN tenant's fee: proves the
+ * sweep reads EACH tenant's own saved dunning config row, not a shared or
+ * global one (T3 = a second tenant with different per-tenant config where
+ * the code reads config). Tenant A's own reminder-cadence / late-fee /
+ * approval assertions above are unchanged by this upgrade.
+ *
  * Run (one spec per process, dedicated ports, under the lane test lock):
  *   PORT=38630 E2E_API_URL=http://localhost:38630 PUBLIC_API_URL=http://localhost:38630 \
  *   VITE_API_URL=http://localhost:38630 E2E_WEB_PORT=38631 E2E_DEV_AUTH=0 E2E_NOAUTHBYPASS=0 \
@@ -85,7 +95,7 @@ async function rawInsertDunningEvent(
   }
 }
 
-test.describe('dunning cadence sweeps for real; the owner-set late fee is drafted, capped and applied (8.9 / 8.10) — real Postgres', () => {
+test.describe('dunning cadence sweeps for real; the owner-set late fee is drafted, capped and applied (8.9 / 8.10) — real Postgres (T3: two tenants, two late-fee policies set via the same UI, two independent outcomes)', () => {
   const canRun =
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
@@ -100,12 +110,12 @@ test.describe('dunning cadence sweeps for real; the owner-set late fee is drafte
       'OVERDUE_SWEEP_INTERVAL_MS (e.g. 4000) so the interval fires quickly in this run.',
   );
 
-  test('a 15-days-overdue invoice, swept twice by the REAL interval, ends with exactly three reminder rows and proposals; a duplicate 7:sms insert raises 23505; the late fee the owner set in Settings is drafted once, clamped at the cap, and lands on the invoice after approval; a neighbour tenant is untouched', async ({
+  test('a 15-days-overdue invoice, swept twice by the REAL interval, ends with exactly three reminder rows and proposals; a duplicate 7:sms insert raises 23505; the late fee the owner set in Settings is drafted once, clamped at the cap, and lands on the invoice after approval; a neighbour tenant is ALSO overdue in the same run with its OWN different late-fee policy (percent, a different cap) set through the same UI, and ends with exactly its OWN fee (T3)', async ({
     request,
     page,
     baseURL,
   }) => {
-    test.setTimeout(240_000);
+    test.setTimeout(300_000);
     const sweepIntervalMs = Number(process.env.OVERDUE_SWEEP_INTERVAL_MS);
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
@@ -162,11 +172,46 @@ test.describe('dunning cadence sweeps for real; the owner-set late fee is drafte
     // ── Narrow, precedented clock-field exception (see header) ──────────
     await backdateInvoiceDueDate(tenantA.tenantId, invoiceA.invoiceId, 15);
 
-    // ── Tenant B: a neighbour, NOT overdue, must stay untouched ──────────
-    const tenantB = await bootstrapOwner(request, 'b', 'Untouched Plumbing 8.9');
-    const seedB = await seedCustomerJob(request, tenantB, 'Indigo', '8.9 neighbour journey');
+    // ── T3: tenant B (neighbour) is ALSO overdue in the SAME interval run,
+    // with a DIFFERENT late-fee policy — percent (not A's flat), a
+    // DIFFERENT cap ($5.00, not A's $20.00) — set through the SAME Late
+    // fees sheet UI, before B's invoice goes overdue (mirrors A's ordering
+    // above so no sweep tick can precede B's own policy either).
+    const tenantB = await bootstrapOwner(request, 'b', 'Neighbour Plumbing 8.9');
+
+    await installClerkStub(page, { signedIn: true, sub: tenantB.ownerSub, token: tenantB.jwt });
+    await page.goto('/settings');
+    await page.getByText('Late fees', { exact: true }).click({ timeout: 15_000 });
+    const sheetB = page.getByRole('dialog', { name: 'Late fees' });
+    await expect(sheetB.getByLabel(/No late fee/)).toBeChecked({ timeout: 15_000 });
+    await sheetB.getByLabel(/Percentage of balance/).check();
+    await sheetB.getByLabel('Percentage', { exact: true }).fill('10');
+    await sheetB.getByLabel(/Grace period/).fill('3');
+    await sheetB.getByLabel(/Maximum fee/).fill('5');
+    await sheetB.screenshot({ path: test.info().outputPath('late-fees-sheet-tenant-b.png') });
+    const putPromiseB = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/settings/dunning',
+    );
+    await sheetB.getByRole('button', { name: 'Save' }).click();
+    const putResB = await putPromiseB;
+    expect(putResB.status(), `PUT /api/settings/dunning (B) -> ${putResB.status()}`).toBe(200);
+    await expect(sheetB).toBeHidden();
+
+    // Read back through the real API — the durable proof B's OWN UI write landed.
+    const policyResB = await request.get(`${API_URL}/api/settings/dunning`, { headers: tenantB.authHeaders });
+    expect(policyResB.status()).toBe(200);
+    expect(await policyResB.json()).toMatchObject({
+      configured: true,
+      lateFeeType: 'percent',
+      lateFeeValueCents: 1000, // 10.00% stored as basis points
+      lateFeeGraceDays: 3,
+      lateFeeMaxCents: 500,
+    });
+
+    const seedB = await seedCustomerJob(request, tenantB, 'Indigo', '8.9/8.10 neighbour journey (T3)');
     const invoiceB = await seedIssuedInvoice(request, tenantB, seedB.jobId, 9_000, { paymentTermDays: 30 });
     await pollUntilOk(request, `${API_URL}/api/invoices/${invoiceB.invoiceId}`, tenantB.authHeaders);
+    await backdateInvoiceDueDate(tenantB.tenantId, invoiceB.invoiceId, 15);
 
     // ── Wait for the REAL sweep interval to fire at least ONCE ───────────
     const firstPassEvents = await pollRows(
@@ -295,39 +340,104 @@ test.describe('dunning cadence sweeps for real; the owner-set late fee is drafte
     expect(Number(policyRows[0].late_fee_value_cents)).toBe(5000);
     expect(Number(policyRows[0].late_fee_max_cents)).toBe(2000);
 
-    // ── T2: neighbour tenant (not overdue) is completely untouched ───────
-    const neighbourEvents = await queryAsTenant(
+    // ── T3: tenant B's OWN late fee — a DIFFERENT type (percent, not
+    //    flat), a DIFFERENT cap ($5.00, not $20.00), drafted from the SAME
+    //    sweep run that drafted A's ─────────────────────────────────────
+    const lateFeeEventsB = await pollRows(
       tenantB.tenantId,
-      `SELECT id FROM invoice_dunning_events WHERE tenant_id = $1`,
-      [tenantB.tenantId],
+      `SELECT step_key, amount_cents FROM invoice_dunning_events WHERE tenant_id = $1 AND invoice_id = $2 AND kind = 'late_fee'`,
+      [tenantB.tenantId, invoiceB.invoiceId],
+      { timeoutMs: Math.max(30_000, sweepIntervalMs * 4) },
     );
-    expect(neighbourEvents).toHaveLength(0);
-    const neighbourProposals = await queryAsTenant(
-      tenantB.tenantId,
-      `SELECT id FROM proposals WHERE tenant_id = $1 AND proposal_type IN ('send_payment_reminder', 'apply_late_fee')`,
-      [tenantB.tenantId],
-    );
-    expect(neighbourProposals).toHaveLength(0);
-    // Tenant A's policy is not B's: B has no config row and still reads the default.
+    expect(lateFeeEventsB, "exactly one late_fee ledger row for tenant B's OWN invoice").toHaveLength(1);
+    expect(lateFeeEventsB[0].step_key).toBe('initial');
     expect(
-      await queryAsTenant(tenantB.tenantId, `SELECT id FROM invoice_dunning_configs WHERE tenant_id = $1`, [tenantB.tenantId]),
-    ).toHaveLength(0);
-    const neighbourPolicy = await request.get(`${API_URL}/api/settings/dunning`, { headers: tenantB.authHeaders });
-    expect(await neighbourPolicy.json()).toMatchObject({ configured: false, lateFeeType: 'none' });
-    const neighbourLines = await queryAsTenant(
-      tenantB.tenantId,
-      `SELECT description FROM invoice_line_items WHERE invoice_id = $1`,
-      [invoiceB.invoiceId],
-    );
-    expect(neighbourLines.map((l) => l.description)).toEqual(['Service call']);
+      Number(lateFeeEventsB[0].amount_cents),
+      "tenant B's ledger holds ITS OWN clamped fee — 10% of the $90.00 balance ($9.00) capped at B's OWN $5.00 cap",
+    ).toBe(500);
 
-    expect(pageErrors, 'no uncaught page errors while setting the late-fee policy').toEqual([]);
-    // Tenant A's events are invisible under tenant B's RLS session, too.
-    const crossRead = await queryAsTenant(
+    const lateFeeProposalsB = await queryAsTenant(
+      tenantB.tenantId,
+      `SELECT id, status, payload FROM proposals WHERE tenant_id = $1 AND proposal_type = 'apply_late_fee'`,
+      [tenantB.tenantId],
+    );
+    expect(lateFeeProposalsB, "one apply_late_fee proposal drafted for tenant B's owner").toHaveLength(1);
+    expect(lateFeeProposalsB[0].status).toBe('ready_for_review');
+    expect(lateFeeProposalsB[0].payload).toMatchObject({
+      invoiceId: invoiceB.invoiceId,
+      feeCents: 500,
+      stepKey: 'initial',
+    });
+
+    // The owner approves through the real route, same as tenant A above —
+    // the REAL execution sweep appends tenant B's OWN fee independently.
+    const lateFeeProposalIdB = lateFeeProposalsB[0].id as string;
+    const approveResB = await request.post(`${API_URL}/api/proposals/${lateFeeProposalIdB}/approve`, {
+      headers: { 'content-type': 'application/json', ...tenantB.authHeaders },
+      data: '{}',
+    });
+    expect(
+      approveResB.status(),
+      `approve apply_late_fee (B) -> ${approveResB.status()} ${await approveResB.text()}`,
+    ).toBe(200);
+
+    const feeLinesB = await pollRows(
+      tenantB.tenantId,
+      `SELECT description, total_cents FROM invoice_line_items WHERE invoice_id = $1 AND description = 'Late fee'`,
+      [invoiceB.invoiceId],
+      { timeoutMs: 30_000 },
+    );
+    expect(feeLinesB, "tenant B's approved late fee lands as exactly one invoice line").toHaveLength(1);
+    expect(Number(feeLinesB[0].total_cents), "the line carries tenant B's OWN clamped fee (500, not A's 2000)").toBe(
+      500,
+    );
+
+    const invoiceAfterFeeB = await request.get(`${API_URL}/api/invoices/${invoiceB.invoiceId}`, {
+      headers: tenantB.authHeaders,
+    });
+    expect(
+      ((await invoiceAfterFeeB.json()) as { totals: { totalCents: number } }).totals.totalCents,
+      "tenant B's invoice ends with exactly ITS OWN fee applied (9000 + 500)",
+    ).toBe(9_500);
+
+    // The owner-set policy was written by the product, never by this spec —
+    // same discipline as tenant A's check above.
+    const policyRowsB = await queryAsTenant(
+      tenantB.tenantId,
+      `SELECT late_fee_type, late_fee_value_cents, late_fee_grace_days, late_fee_max_cents FROM invoice_dunning_configs WHERE tenant_id = $1`,
+      [tenantB.tenantId],
+    );
+    expect(policyRowsB).toHaveLength(1);
+    expect(policyRowsB[0]).toMatchObject({ late_fee_type: 'percent', late_fee_grace_days: 3 });
+    expect(Number(policyRowsB[0].late_fee_value_cents)).toBe(1000);
+    expect(Number(policyRowsB[0].late_fee_max_cents)).toBe(500);
+
+    // ── Cross-tenant isolation, both directions — divergent VALUES, not
+    //    just divergent presence/absence (the T3 bar) ─────────────────────
+    expect(
+      lateFeeEventsB.map((r) => Number(r.amount_cents)),
+      "tenant B's late-fee row never carries tenant A's clamped amount (2000)",
+    ).not.toContain(2000);
+    expect(
+      lateFeeEvents.map((r) => Number(r.amount_cents)),
+      "tenant A's late-fee row never carries tenant B's clamped amount (500)",
+    ).not.toContain(500);
+
+    expect(pageErrors, 'no uncaught page errors while setting either tenant\'s late-fee policy').toEqual([]);
+
+    // Tenant A's events are invisible under tenant B's RLS session, and B's
+    // under A's, in both directions.
+    const crossReadAintoB = await queryAsTenant(
       tenantB.tenantId,
       `SELECT id FROM invoice_dunning_events WHERE tenant_id = $1 AND invoice_id = $2`,
       [tenantB.tenantId, invoiceA.invoiceId],
     );
-    expect(crossRead).toHaveLength(0);
+    expect(crossReadAintoB, "tenant A's events are invisible under tenant B's RLS session").toHaveLength(0);
+    const crossReadBintoA = await queryAsTenant(
+      tenantA.tenantId,
+      `SELECT id FROM invoice_dunning_events WHERE tenant_id = $1 AND invoice_id = $2`,
+      [tenantA.tenantId, invoiceB.invoiceId],
+    );
+    expect(crossReadBintoA, "tenant B's events are invisible under tenant A's RLS session").toHaveLength(0);
   });
 });

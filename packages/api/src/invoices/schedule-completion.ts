@@ -11,16 +11,21 @@
  * Idempotent — a milestone already minted (an invoice with this schedule_id +
  * milestone_index) is skipped, so re-entry never double-bills. `manual`
  * milestones are left for an explicit action; zero-amount milestones are
- * skipped rather than minting a $0 invoice.
+ * skipped rather than minting a $0 invoice. A schedule whose estimate was
+ * already invoiced outside the schedule (e.g. converted to a plain invoice)
+ * mints nothing: the run throws a ConflictError before any insert (#1203).
  */
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
 import {
   InvoiceScheduleRepository,
+  estimateAlreadyInvoicedReason,
+  invoiceOutsideSchedule,
   isDuplicateMilestoneError,
   milestoneEstimateLink,
   splitMilestones,
 } from './invoice-schedule';
+import { ConflictError } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
 import { withRequestSavepoint } from '../middleware/tenant-context';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -58,6 +63,19 @@ export async function mintCompletionMilestones(
   // Which (schedule, milestone) pairs are already invoiced — covers the
   // on_accept milestone minted at approval and any prior completion run.
   const existing = await deps.invoiceRepo.findByJob(job.tenantId, job.id);
+
+  // #1203: never bill an estimate twice. A schedule approved before its
+  // estimate was converted (or written before this guard existed) must not
+  // mint over the converted invoice. Checked for every schedule before the
+  // first insert, so a refusal writes no invoice row. The caller
+  // (runJobCompletionEffects) logs the error without failing the completion.
+  for (const schedule of schedules) {
+    const alreadyInvoiced = invoiceOutsideSchedule(schedule, existing);
+    if (alreadyInvoiced) {
+      throw new ConflictError(estimateAlreadyInvoicedReason(alreadyInvoiced.invoiceNumber));
+    }
+  }
+
   const minted = new Set(
     existing
       .filter((inv) => inv.scheduleId !== undefined && inv.milestoneIndex !== undefined)

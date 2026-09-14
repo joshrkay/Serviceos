@@ -71,6 +71,7 @@ function buildApp(pool: Pool, tenantId: string, userId: string) {
   const photoRepo = new PgJobPhotoRepository(pool);
   const attachmentRepo = new PgAttachmentRepository(pool);
   const auditRepo = new PgAuditRepository(pool);
+  const jobRepo = new PgJobRepository(pool);
   const storage = new FakeStorageProvider();
   const service = new JobPhotoService(photoRepo, fileRepo, storage, attachmentRepo);
 
@@ -85,7 +86,10 @@ function buildApp(pool: Pool, tenantId: string, userId: string) {
     } as AuthenticatedRequest['auth'];
     next();
   });
-  app.use('/api/jobs', createJobPhotosRouter({ service, fileRepo, storage, bucket: BUCKET, auditRepo }));
+  app.use(
+    '/api/jobs',
+    createJobPhotosRouter({ service, fileRepo, storage, bucket: BUCKET, auditRepo, jobRepo }),
+  );
   return { app, auditRepo, photoRepo, attachmentRepo, fileRepo };
 }
 
