@@ -6781,6 +6781,23 @@ export const MIGRATIONS = {
   '275_proposals_original_payload': `
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
   `,
+  // U8 (PR #975) — re-added after a main-merge migration-number collision
+  // dropped the original 274_call_transcript_turns_call_sid (main took 274 for
+  // 274_tenant_integrations_unique_twilio_did). Renumbered to 276 so it is
+  // lexicographically greatest and actually runs. Mid-call transcript
+  // durability: turns are persisted keyed by CallSid + session id before a
+  // recording exists, so voice_recording_id becomes nullable and the mid-call
+  // upsert conflicts on the (call_sid, session_id, turn_index) partial index.
+  '276_call_transcript_turns_call_sid': `
+    ALTER TABLE call_transcript_turns ALTER COLUMN voice_recording_id DROP NOT NULL;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS call_sid TEXT;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS session_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_call_leg
+      ON call_transcript_turns (tenant_id, call_sid, session_id, turn_index)
+      WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
+      ON call_transcript_turns (tenant_id, call_sid);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
