@@ -534,6 +534,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // #1139 — proposals.original_payload (payload as first proposed). NEW
   // migration; nothing above was edited.
   ['275_proposals_original_payload', 'b21fd09557ecd2dced85a5ebf9955200743260790cbcf7bd9c82bb8110057331'],
+  ['276_dispatch_analytics_event_type_en_route', 'e3635f6dfcaa29a6e7b01a96724d81db84a7ccae1bfff08714234fa40a29a11b'],
 ];
 
 function hashMigration(value: string): string {
