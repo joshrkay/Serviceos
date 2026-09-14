@@ -228,6 +228,7 @@ import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { recordApiError } from './analytics/posthog';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { createInflightSweeps } from './workers/inflight-sweeps';
+import { runLeaderGatedTick } from './workers/leader-tick';
 import { createStorageProvider } from './files/storage-provider';
 import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
@@ -2279,27 +2280,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // Leader election holds a SESSION advisory lock across work(), so it must
     // run on a direct (non-PgBouncer) connection — see createDirectPool. `pool`
     // is non-null here (guarded above), so `directPool ?? pool` is defined.
-    const client = await (directPool ?? pool).connect();
-    try {
-      const res = await client.query<{ locked: boolean }>(
-        'SELECT pg_try_advisory_lock($1) AS locked',
-        [lockKey],
-      );
-      if (!res.rows[0]?.locked) return; // another instance owns this tick
-      try {
-        await work();
-        // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
-        // work() must read as lag). Keyed by lock key; the SLO monitor reads
-        // the queue-depth sampler's heartbeat as its worker-loop liveness
-        // canary. In-process registry — see monitoring/sweep-heartbeats.ts
-        // for the multi-replica caveat.
-        recordSweepSuccess(String(lockKey));
-      } finally {
-        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
-      }
-    } finally {
-      client.release();
-    }
+    // The pg_try_advisory_lock / pg_advisory_unlock pair lives in
+    // workers/leader-tick.ts (#1125).
+    await runLeaderGatedTick(directPool ?? pool, lockKey, work, () => {
+      // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
+      // work() must read as lag). Keyed by lock key; the SLO monitor reads
+      // the queue-depth sampler's heartbeat as its worker-loop liveness
+      // canary. In-process registry — see monitoring/sweep-heartbeats.ts
+      // for the multi-replica caveat.
+      recordSweepSuccess(String(lockKey));
+    });
   };
 
   // scale-to-1000 C1 — sample the durable job-queue backlog into /metrics so the
