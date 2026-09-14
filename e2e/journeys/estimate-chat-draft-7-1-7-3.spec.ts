@@ -71,8 +71,10 @@ async function signInBrowser(page: Page, baseURL: string, tenant: Tenant): Promi
  * catalog-groundable line item from the message text. This is the
  * documented "spoken description" analog this lane can drive end-to-end
  * with no live model: see the file-level "what is NOT proven" note for why
- * literal browser-simulated speech-to-text is not attempted here, and why
- * the "customer photo" leg is a real product gap, not a reachability limit.
+ * literal browser-simulated speech-to-text is not attempted here. The
+ * "customer photo" leg (last test) was a pinned product gap until #1144
+ * (upload + attachments contract) and #1173 (the photo reaches the draft as
+ * an image part).
  */
 
 const SCREENSHOT_DIR = join(process.cwd(), 'docs/audit/lane-reports/8-7-quote-r5');
@@ -304,52 +306,138 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
     expect(pageErrors, 'no uncaught page errors during the drafting journey').toEqual([]);
   });
 
-  // ── 7.1 — product gap, pinned rather than faked ─────────────────────────
-  test('the "customer photo" leg has NO owner-facing transmission path — pinned, not faked', async ({
+  // ── 7.1 — the "customer photo" leg (flipped by #1173, on top of #1144) ───
+  test('the "customer photo" leg: a photo uploaded through the files route and carried on the Assistant turn drafts a real estimate proposal from the photo; a neighbour tenant\'s photo is refused (T2)', async ({
     request,
   }) => {
-    test.setTimeout(60_000);
-    // AssistantPage.tsx's `send()` accepts `opts.attachments` and renders
-    // them in the LOCAL chat-bubble state (AssistantPage.tsx:919
-    // `attachments: opts?.attachments`), but `sendToConversationAPI`
-    // (AssistantPage.tsx:69-90) POSTs only `{ messages, conversationId,
-    // inputMode }` to `/api/assistant/chat` — the attachment's bytes/URL
-    // are NEVER included in that body. A customer photo attached through
-    // the owner's real Assistant UI is therefore never seen by the
-    // backend, `EstimateTaskHandler`, or any vision task — it cannot draft
-    // anything. The ONLY vision-drafting path in the codebase is the
-    // CUSTOMER-initiated MMS surface (`sms/customer-mms/customer-mms-intake.ts`,
-    // dispatched from `workers/mms-ingest-worker.ts`, a background worker —
-    // not the synchronous webhook request), a different persona/channel
-    // from "M" reviewing a call/photo in the Assistant, and out of scope
-    // for a browser-driven owner spec. Filed here rather than silently
-    // worked around.
-    test.fail(
-      true,
-      'AssistantPage.tsx:1052 + sendToConversationAPI (AssistantPage.tsx:69-90): the "photo" ' +
-        'input mode captures an attachment in local UI state but never transmits it to ' +
-        'POST /api/assistant/chat — no owner-facing draft-from-photo path exists to reach.',
+    test.setTimeout(180_000);
+    // The wire sequence AssistantPage.tsx's photo picker produces (#1144,
+    // createSignedPhotoUpload → send): POST /api/files/upload-url → PUT the
+    // bytes to the returned URL → POST /api/assistant/chat carrying
+    // `attachments: [{ fileId }]` with the page's own photo prompt. The
+    // file-picker DOM half is pinned by #1144's AssistantPage.test.tsx; this
+    // leg drives the real API routes at real Postgres.
+    //
+    // The chat route resolves the fileId TENANT-SCOPED (files repo) and
+    // presigns it; EstimateTaskHandler sends it to the gateway as an image
+    // part. With no AI_PROVIDER_API_KEY the app boots
+    // createHermeticMockLLMGateway(), whose PRODUCTION `scriptHermeticResponse`
+    // scripts a DISTINCT line ("Repair shown in photo") only when the
+    // draft_estimate request actually carries an image part — so that line on
+    // the persisted proposal is the hermetic proof the photo reached the model.
+    const PHOTO_PROMPT = "Here's the photo — can you identify the issue?";
+    // A 1x1 JPEG — real image bytes, not a placeholder.
+    const JPEG = Buffer.from(
+      '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=',
+      'base64',
     );
 
-    const tenant = await bootstrapOwner(request, 'pin', 'Copper Line HVAC 7.1 Pin');
-    await seedJob(request, tenant, 'Photo');
+    async function uploadPhoto(tenant: Tenant, filename: string): Promise<string> {
+      const presign = await request.post(`${API_URL}/api/files/upload-url`, {
+        headers: { 'content-type': 'application/json', ...tenant.authHeaders },
+        data: JSON.stringify({
+          filename,
+          contentType: 'image/jpeg',
+          sizeBytes: JPEG.length,
+          entityType: 'assistant_chat_photo',
+        }),
+      });
+      expect(presign.ok(), `files/upload-url -> ${presign.status()} ${await presign.text()}`).toBeTruthy();
+      const { fileId, uploadUrl } = (await presign.json()) as { fileId: string; uploadUrl: string };
+      const put = await request.put(uploadUrl, { headers: { 'content-type': 'image/jpeg' }, data: JPEG });
+      expect(put.ok(), `PUT ${uploadUrl} -> ${put.status()}`).toBeTruthy();
+      return fileId;
+    }
 
-    // The REAL wire request a photo turn produces — byte-for-byte what
-    // `sendToConversationAPI` sends when `send(input || "Here's the photo — can
-    // you identify the issue?", { attachments })` fires (AssistantPage.tsx:1052):
-    // the attachment is absent from the body by construction.
-    const res = await request.post(`${API_URL}/api/assistant/chat`, {
-      headers: { 'content-type': 'application/json', ...tenant.authHeaders },
-      data: JSON.stringify({
-        messages: [{ role: 'user', content: "Here's the photo — can you identify the issue?" }],
-      }),
-    });
-    expect(res.ok(), `assistant/chat -> ${res.status()} ${await res.text()}`).toBeTruthy();
-    const body = (await res.json()) as { message?: { proposal?: unknown } };
+    async function photoTurn(tenant: Tenant, fileId: string) {
+      const res = await request.post(`${API_URL}/api/assistant/chat`, {
+        headers: { 'content-type': 'application/json', ...tenant.authHeaders },
+        data: JSON.stringify({
+          messages: [{ role: 'user', content: PHOTO_PROMPT }],
+          attachments: [{ fileId }],
+        }),
+        timeout: 90_000,
+      });
+      expect(res.ok(), `assistant/chat -> ${res.status()} ${await res.text()}`).toBeTruthy();
+      return (await res.json()) as { message?: { content?: string; proposal?: { id?: string } } };
+    }
 
-    // What the row needs — a drafted proposal from the photo — is what the
-    // real route cannot produce from the real client's request. This is the
-    // observation that is expected to keep failing until the gap is closed.
+    const tenant = await bootstrapOwner(request, 'photo', 'Copper Line HVAC 7.1 Photo');
+    const neighbour = await bootstrapOwner(request, 'photob', 'Bluebonnet Plumbing 7.1 Photo');
+
+    const fileId = await uploadPhoto(tenant, 'leak-under-sink.jpg');
+    const neighbourFileId = await uploadPhoto(neighbour, 'neighbour-water-heater.jpg');
+
+    // ── The photo turn drafts a proposal ────────────────────────────────
+    const body = await photoTurn(tenant, fileId);
     expect(body.message?.proposal, 'a customer photo should yield a drafted proposal').toBeTruthy();
+
+    // #1133 — poll for the row (the request transaction commits on res.finish).
+    let proposalRow: Record<string, unknown> | undefined;
+    for (let i = 0; i < 100 && !proposalRow; i++) {
+      const rows = await queryAsTenant(
+        tenant.tenantId,
+        `SELECT id, proposal_type, status,
+                payload->'lineItems'->0->>'description' AS line_description,
+                source_context->'photoFileIds'           AS photo_file_ids
+           FROM proposals
+          WHERE tenant_id = $1 AND proposal_type = 'draft_estimate'
+          ORDER BY created_at DESC LIMIT 1`,
+        [tenant.tenantId],
+      );
+      proposalRow = rows[0];
+      if (!proposalRow) await new Promise((r) => setTimeout(r, 100));
+    }
+    logRows('7.1 photo leg — proposals row drafted from the uploaded photo', proposalRow);
+    expect(proposalRow, '#1133 workaround: polled for the photo-drafted proposal').toBeTruthy();
+    expect(proposalRow!.line_description).toBe('Repair shown in photo');
+    expect(proposalRow!.photo_file_ids).toEqual([fileId]);
+    expect(proposalRow!.status).not.toBe('approved');
+
+    let auditRows: Record<string, unknown>[] = [];
+    for (let i = 0; i < 100 && auditRows.length === 0; i++) {
+      auditRows = await queryAsTenant(
+        tenant.tenantId,
+        `SELECT event_type, entity_type, entity_id, metadata
+           FROM audit_events
+          WHERE tenant_id = $1 AND event_type = 'assistant.photo_estimate_drafted' AND entity_id = $2`,
+        [tenant.tenantId, proposalRow!.id],
+      );
+      if (auditRows.length === 0) await new Promise((r) => setTimeout(r, 100));
+    }
+    logRows('7.1 photo leg — audit_events assistant.photo_estimate_drafted', auditRows);
+    expect(auditRows).toHaveLength(1);
+
+    // ── T2 — tenant A naming the neighbour's fileId is refused ───────────
+    const draftsBefore = await queryAsTenant(
+      tenant.tenantId,
+      `SELECT id FROM proposals WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    const crossTurn = await photoTurn(tenant, neighbourFileId);
+    logRows('7.1 photo leg T2 — tenant A chat naming tenant B fileId', crossTurn.message);
+    expect(crossTurn.message?.proposal).toBeFalsy();
+    expect(String(crossTurn.message?.content)).toMatch(/couldn.t open that photo/i);
+    const draftsAfter = await queryAsTenant(
+      tenant.tenantId,
+      `SELECT id FROM proposals WHERE tenant_id = $1`,
+      [tenant.tenantId],
+    );
+    expect(draftsAfter).toHaveLength(draftsBefore.length);
+    const neighbourProposals = await queryAsTenant(
+      neighbour.tenantId,
+      `SELECT id FROM proposals WHERE tenant_id = $1`,
+      [neighbour.tenantId],
+    );
+    expect(neighbourProposals).toHaveLength(0);
+    // …and tenant B's own photo is still readable to tenant B only.
+    const neighbourFile = await request.get(`${API_URL}/api/files/${neighbourFileId}`, {
+      headers: neighbour.authHeaders,
+    });
+    expect(neighbourFile.ok()).toBeTruthy();
+    const crossFile = await request.get(`${API_URL}/api/files/${neighbourFileId}`, {
+      headers: tenant.authHeaders,
+    });
+    expect([403, 404]).toContain(crossFile.status());
   });
 });

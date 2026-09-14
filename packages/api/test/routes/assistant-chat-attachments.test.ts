@@ -16,17 +16,11 @@
  * silently ignored — proof the field is genuinely recognized, not just
  * tolerated as inert JSON.
  *
- * §12.4d honesty — this is as far as the contract goes. No chat-reachable
- * skill has an image input to hand the fileId to: EstimateTaskHandler
- * (ai/tasks/estimate-task.ts, wired to the chat draft_estimate intent) takes
- * no image parameter, and the only vision-drafting task in the codebase
- * (MmsEstimateTaskHandler, ai/tasks/mms-estimate-task.ts) is wired
- * exclusively to the customer-initiated MMS pipeline
- * (sms/customer-mms/customer-mms-intake.ts via workers/mms-ingest-worker.ts),
- * never to this route. `parsed.attachments` is retained but not consumed by
- * `createAssistantRouter`'s handler — see e2e/journeys/
- * estimate-chat-draft-7-1-7-3.spec.ts's pinned "customer photo" leg, left
- * unflipped for exactly this reason.
+ * #1173 consumes the field: the fileId is resolved tenant-scoped and reaches
+ * the draft estimate as an image part — proven at real Postgres in
+ * test/integration/assistant-photo-estimate-draft.test.ts. (This file's
+ * router has no `photoAttachments` wired, so its 200 leg is the honest
+ * "couldn't open that photo" reply, not a draft.)
  */
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
