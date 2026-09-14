@@ -121,6 +121,24 @@ export interface TaskContext {
    * leaves this undefined and never blocks the task.
    */
   standingInstructions?: InjectedStandingInstruction[];
+  /**
+   * #1173 — photos the operator attached to this turn (Assistant chat),
+   * already resolved TENANT-SCOPED by the entry point and presigned to a URL
+   * the gateway can fetch (`files/chat-image-attachments.ts`). A handler that
+   * accepts images (EstimateTaskHandler) sends one image part per photo on
+   * its model request — the same `LLMContentPart` shape
+   * MmsEstimateTaskHandler builds. `fileId` rides along for provenance only;
+   * the model never sees it. Absent → a text-only request, byte-identical to
+   * before.
+   */
+  images?: TaskImage[];
+}
+
+/** #1173 — one resolved, presigned photo handed to a drafting task. */
+export interface TaskImage {
+  url: string;
+  contentType?: string;
+  fileId?: string;
 }
 
 export interface TaskResult {

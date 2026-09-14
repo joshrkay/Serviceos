@@ -1,4 +1,4 @@
-import type { LLMProvider, LLMRequest, LLMResponse } from '../gateway/gateway';
+import { messagesContainImage, type LLMProvider, type LLMRequest, type LLMResponse } from '../gateway/gateway';
 import { matchUpdateJobPriorityPhrase } from '../orchestration/intent-classifier';
 
 /**
@@ -291,6 +291,36 @@ export function scriptHermeticResponse(request: LLMRequest): string {
     }
     return JSON.stringify({ intentType: 'unknown', confidence: 0.2 });
   }
+
+  // ── #1173 (lane O6) — hermetic VISION estimate ─────────────────────────
+  // A draft_estimate request that carries image parts (an Assistant chat
+  // photo → EstimateTaskHandler) is scripted as a photo-diagnosed line, so a
+  // hermetic run can tell a photo-informed draft from a text-only one. Kept
+  // as its own delimited branch, ahead of the generic estimate branch below,
+  // so edits to the surrounding task-type branches do not collide with it.
+  if (taskType === 'draft_estimate' && messagesContainImage(request.messages ?? [])) {
+    const photos = (request.messages ?? []).reduce(
+      (n, m) => n + (Array.isArray(m.parts) ? m.parts.filter((p) => p?.type === 'image').length : 0),
+      0,
+    );
+    const name = extractName(text);
+    return JSON.stringify({
+      lineItems: [
+        {
+          description: name ? `Repair shown in photo for ${name}` : 'Repair shown in photo',
+          quantity: 1,
+          // Integer cents, like the branch below. No `catalogItemId: null`:
+          // the draft_estimate contract types it as a string when present, so
+          // the grounding pass (not the model) decides the catalog link.
+          unitPrice: 15000,
+        },
+      ],
+      confidence_score: 0.8,
+      summary: text.slice(0, 160) || 'Photo estimate',
+      notes: `Hermetic mock vision draft from ${photos} photo(s) — review prices before approving.`,
+    });
+  }
+  // ── end #1173 ────────────────────────────────────────────────────────────
 
   if (
     taskType === 'draft_estimate' ||
