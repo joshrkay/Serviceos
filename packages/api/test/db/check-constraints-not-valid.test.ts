@@ -48,7 +48,7 @@ const ADD_CHECK_RE = /ADD CONSTRAINT\s+([a-z_][a-z0-9_]*)\s+CHECK\b/g;
  * regex ever stops matching a layout, the count drops and the test fails
  * loudly instead of passing vacuously.
  */
-const EXPECTED_CHECK_CONSTRAINT_SITES = 33;
+const EXPECTED_CHECK_CONSTRAINT_SITES = 34;
 
 interface CheckSite {
   name: string;

@@ -538,6 +538,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // 277: 275 is on main and #1131's PR (#1186) holds 276.
   ['277_tenant_settings_job_buffer_nullable', 'de82e5365dc6ec62f15cecd4148b8f907e83be0d18c9fcf764956f3212f2e38d'],
   ['276_dispatch_analytics_event_type_en_route', 'e3635f6dfcaa29a6e7b01a96724d81db84a7ccae1bfff08714234fa40a29a11b'],
+  // #975 U8 (renumbered 278 after #1188's 277): call_transcript_turns gains call_sid/session_id; voice_recording_id nullable
+  ['278_call_transcript_turns_call_sid', '10b6695fe7b6da9106c56fa21f0445d46b41c7125ef2670d891701efafaf5e5a'],
 ];
 
 function hashMigration(value: string): string {
