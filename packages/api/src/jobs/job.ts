@@ -245,6 +245,17 @@ export interface JobRepository {
   ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
   /**
+   * #1152 — atomic replacement for the getNextJobNumber() + create()
+   * two-step, which let two concurrent creates for the same tenant read
+   * the same "next number" (each call is its own transaction) and race to
+   * insert the same job_number, tripping `idx_jobs_number` as a raw
+   * unmapped 500. Optional on the interface so the in-memory fake (whose
+   * Map-backed counters are inherently serialized inside single-threaded
+   * Node) keeps its existing getNextJobNumber() + create() path; only the
+   * Postgres-backed repository needs the lock.
+   */
+  createWithAutoNumber?(job: Omit<Job, 'jobNumber'>): Promise<Job>;
+  /**
    * Tier 4 (Deposit rules — PR 3c follow-up). Atomic claim of a job's
    * paid deposit for a specific invoice. Returns the updated job
    * (with `depositCreditedToInvoiceId` set) ONLY when the row was in
@@ -291,14 +302,11 @@ export async function createJob(
     throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
   }
 
-  const jobNumber = await repository.getNextJobNumber(input.tenantId);
-
-  const job: Job = {
+  const jobWithoutNumber: Omit<Job, 'jobNumber'> = {
     id: uuidv4(),
     tenantId: input.tenantId,
     customerId: input.customerId,
     locationId: input.locationId,
-    jobNumber: `JOB-${String(jobNumber).padStart(4, '0')}`,
     summary: input.summary,
     problemDescription: input.problemDescription,
     status: 'new',
@@ -316,7 +324,20 @@ export async function createJob(
     updatedAt: new Date(),
   };
 
-  const created = await repository.create(job);
+  // #1152 — createWithAutoNumber (when the repository implements it, i.e.
+  // Postgres) computes the job_number AND inserts inside one tenant-scoped
+  // advisory-locked transaction, closing the race where two concurrent
+  // creates for the same tenant could read the same getNextJobNumber()
+  // count in separate transactions and collide on idx_jobs_number. Fall
+  // back to the old two-step for repositories that don't implement it
+  // (e.g. the in-memory fake, whose Map-backed counters are already
+  // serialized inside single-threaded Node).
+  const created = repository.createWithAutoNumber
+    ? await repository.createWithAutoNumber(jobWithoutNumber)
+    : await repository.create({
+        ...jobWithoutNumber,
+        jobNumber: `JOB-${String(await repository.getNextJobNumber(input.tenantId)).padStart(4, '0')}`,
+      });
 
   if (auditRepo) {
     const event = createAuditEvent({

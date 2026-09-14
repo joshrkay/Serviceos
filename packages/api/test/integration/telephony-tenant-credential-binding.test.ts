@@ -181,6 +181,29 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     };
   }
 
+  /**
+   * The baseline for "writes NOTHING under the victim". A legitimate call made
+   * by an earlier case (or by this case's own setup) finishes some writes AFTER
+   * its response — the recording-consent ledger row and its
+   * `recording_consent.granted` audit are fire-and-forget by design
+   * (`twilio-adapter.ts`, the `void this.commitRecordingConsent(...)` beside the
+   * Gather TwiML). Snapshotting while those are still in flight lets a
+   * legitimate row land inside the attack window and fail the comparison.
+   * So wait until the victim's counts stop moving (two equal reads 250 ms
+   * apart, bounded) before taking the baseline. The assertion stays strict:
+   * any row the forged request writes after this point still fails it.
+   */
+  async function settledVictimCounts(tenantId: string): Promise<VictimCounts> {
+    let prev = await victimCounts(tenantId);
+    for (let i = 0; i < 20; i += 1) {
+      await settle(250);
+      const next = await victimCounts(tenantId);
+      if (JSON.stringify(next) === JSON.stringify(prev)) return next;
+      prev = next;
+    }
+    return prev;
+  }
+
   /** The rows the recording/voicemail callbacks would plant under a victim. */
   async function recordingCount(tenantId: string): Promise<number> {
     const { rows } = await pool.query<{ n: number }>(
@@ -300,7 +323,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
   });
 
   it('(a) THE ATTACK — A\'s own AccountSid + A\'s own token + To=B\'s DID is refused 403 and writes NOTHING under B', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     const callSid = `CA-1072-forged-${crypto.randomUUID().slice(0, 8)}`;
 
     // Tenant A uses ONLY credentials it legitimately owns. The one hostile
@@ -319,7 +342,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
   });
 
   it('(a2) the attack is refused even with the AccountSid omitted entirely', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     const callSid = `CA-1072-forged-nosid-${crypto.randomUUID().slice(0, 8)}`;
 
     // With no AccountSid there is nothing to cross-check — the refusal has to
@@ -351,7 +374,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     const sid = sessionIdFromTwiml(voice.text);
     expect(sid, `no ?sid= in TwiML: ${voice.text}`).toBeDefined();
 
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
 
     const forged = await signedPost(
       `/api/telephony/gather?sid=${sid}`,
@@ -401,7 +424,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
   });
 
   it('(d3) the recording status callback — A\'s credential naming B\'s DID is refused 403', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     const callSid = `CA-1072-rec-${crypto.randomUUID().slice(0, 8)}`;
 
     // `Called` is the field Twilio uses on the recording callback's tenant
@@ -426,7 +449,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
   });
 
   it('(d4) the voicemail status callback — A\'s credential naming B\'s DID is refused 403', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     const callSid = `CA-1072-vm-${crypto.randomUUID().slice(0, 8)}`;
 
     const forged = await signedPost(
@@ -475,7 +498,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     const victimSid = sessionIdFromTwiml(voice.text);
     expect(victimSid, `no ?sid= in TwiML: ${voice.text}`).toBeDefined();
 
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
 
     // Every credential here is one tenant A legitimately owns — its own DID in
     // `To`, its own AccountSid, its own token. The only hostile field is `sid`.
@@ -507,7 +530,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     expect(voice.status).toBe(200);
     const victimSid = sessionIdFromTwiml(voice.text);
 
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
 
     const forged = await signedPost(
       `/api/telephony/dial-result?sid=${victimSid}`,
@@ -576,7 +599,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     );
     expect(voice.status).toBe(200);
 
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
 
     // A's own DID in `Called`, A's own AccountSid, A's own token — every
     // credential legitimately A's. The hostile field is the victim's CallSid.
@@ -609,7 +632,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     );
     expect(voice.status).toBe(200);
 
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
 
     const forged = await signedPost(
       '/api/telephony/voicemail-status',
@@ -695,7 +718,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
    * session, so nothing else stood in the way.
    */
   it('(f6) /recording — To and Called naming different tenants cannot write under the one in Called', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     // A CallSid with no in-process session, so the handler takes the fallback path.
     const callSid = `CA-1072-alias-rec-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -721,7 +744,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
   });
 
   it('(f7) /voicemail-status — the same alias split cannot mint a lead under the tenant in Called', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     const callSid = `CA-1072-alias-vm-${crypto.randomUUID().slice(0, 8)}`;
 
     const forged = await signedPost(
@@ -760,7 +783,7 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
   });
 
   it('(e2) the fallback token does NOT open a path into a tenant that owns its own credential', async () => {
-    const before = await victimCounts(tenantB.tenantId);
+    const before = await settledVictimCounts(tenantB.tenantId);
     const callSid = `CA-1072-fallback-forged-${crypto.randomUUID().slice(0, 8)}`;
 
     // The deployment's master token is not tenant B's token: once B owns a
