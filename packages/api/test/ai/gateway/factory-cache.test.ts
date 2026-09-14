@@ -4,8 +4,13 @@
  * Verifies that createLLMGateway() correctly wraps or skips the cache layer
  * based on AI_CACHE_ENABLED and REDIS_URL environment variables.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { AppConfig } from '../../../src/shared/config';
+import type { LLMGateway } from '../../../src/ai/gateway/gateway';
+import type {
+  LLMTraceCompletionEvent,
+  LLMTraceExporter,
+} from '../../../src/ai/gateway/trace-exporter';
 
 function cfg(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -114,5 +119,128 @@ describe('createLLMGateway — cache wiring', () => {
     // Non-deterministic types must NOT be in the list
     expect(taskTypes).not.toContain('draft_estimate');
     expect(taskTypes).not.toContain('generate_proposal');
+  });
+
+  // ── U10 — trace export from the cache-hit branch + factory threading ──────
+  // Cache hits BYPASS gateway.complete (the wrapper returns the stored
+  // response at cache.ts's hit branch), so the wrapper must export the hit
+  // itself — the same gap writeAiRunForCacheHit closes for ai_runs.
+
+  function noopExporter(): LLMTraceExporter {
+    return { recordCompletion: () => {}, flush: async () => {} };
+  }
+
+  const cacheHitRequest = {
+    taskType: 'classify_intent',
+    tenantId: 'tenant-cache',
+    messages: [{ role: 'user' as const, content: 'invoice Acme for the tune-up' }],
+    metadata: { tenantId: 'tenant-cache', sessionId: 'voice-sess-3', promptVersionId: 'classify-v7' },
+  };
+
+  function fakeInnerGateway() {
+    return {
+      complete: vi.fn(async () => ({
+        content: '{"intentType":"create_invoice"}',
+        model: 'gpt-4o-mini',
+        provider: 'openai',
+        tokenUsage: { input: 10, output: 5, total: 15 },
+        latencyMs: 12,
+      })),
+    };
+  }
+
+  it('cache hit → exporter receives one event with cached:true and the inner gateway is not called again', async () => {
+    const { CachingGatewayWrapper, InMemoryCacheStore } = await import('../../../src/ai/gateway/cache');
+    const inner = fakeInnerGateway();
+    const events: LLMTraceCompletionEvent[] = [];
+    const traceExporter: LLMTraceExporter = {
+      recordCompletion: (e) => {
+        events.push(e);
+      },
+      flush: async () => {},
+    };
+    const wrapper = new CachingGatewayWrapper(
+      inner as unknown as LLMGateway,
+      new InMemoryCacheStore(),
+      { enabled: true, defaultTtlMs: 60_000, deterministicTaskTypes: ['classify_intent'] },
+      'system',
+      undefined,
+      traceExporter,
+    );
+
+    const miss = await wrapper.complete(cacheHitRequest);
+    const hit = await wrapper.complete(cacheHitRequest);
+
+    expect(inner.complete).toHaveBeenCalledTimes(1);
+    expect(miss.cached).toBeUndefined();
+    expect(hit.cached).toBe(true);
+    // The miss is exported by the inner gateway (a fake here, so nothing);
+    // the hit never reaches it, so the wrapper exports exactly that one.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      cached: true,
+      degraded: false,
+      tenantId: 'tenant-cache',
+      taskType: 'classify_intent',
+      sessionId: 'voice-sess-3',
+      promptVersionId: 'classify-v7',
+      servedModel: 'gpt-4o-mini',
+      provider: 'openai',
+      tokenUsage: { input: 10, output: 5, total: 15 },
+      costMicroCents: 0,
+      latencyMs: 0,
+      output: '{"intentType":"create_invoice"}',
+    });
+    expect(typeof events[0].correlationId).toBe('string');
+    expect(events[0].input).toEqual(cacheHitRequest.messages);
+  });
+
+  it('an exporter that throws on the hit branch never blocks the cached response', async () => {
+    const { CachingGatewayWrapper, InMemoryCacheStore } = await import('../../../src/ai/gateway/cache');
+    const inner = fakeInnerGateway();
+    const wrapper = new CachingGatewayWrapper(
+      inner as unknown as LLMGateway,
+      new InMemoryCacheStore(),
+      { enabled: true, defaultTtlMs: 60_000, deterministicTaskTypes: ['classify_intent'] },
+      'system',
+      undefined,
+      {
+        recordCompletion: () => {
+          throw new Error('langfuse queue full');
+        },
+        flush: async () => {},
+      },
+    );
+
+    await wrapper.complete(cacheHitRequest);
+    const hit = await wrapper.complete(cacheHitRequest);
+
+    expect(hit.cached).toBe(true);
+    expect(hit.content).toBe('{"intentType":"create_invoice"}');
+    expect(inner.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('createLLMGateway(config, { traceExporter }) threads the exporter and is NOT coerced into a logger', async () => {
+    const { createLLMGateway } = await import('../../../src/ai/gateway/factory');
+    const traceExporter = noopExporter();
+
+    const bare = createLLMGateway(cfg(), { traceExporter }) as unknown as {
+      traceExporter?: unknown;
+      logger?: unknown;
+    };
+    expect(bare.traceExporter).toBe(traceExporter);
+    expect(bare.logger).toBeUndefined();
+
+    process.env.AI_CACHE_ENABLED = 'true';
+    const wrapped = createLLMGateway(cfg(), { traceExporter }) as unknown as {
+      traceExporter?: unknown;
+    };
+    expect(wrapped.traceExporter).toBe(traceExporter);
+  });
+
+  it('createLLMGateway(config, { resilience }) is not coerced into a logger either', async () => {
+    const { createLLMGateway } = await import('../../../src/ai/gateway/factory');
+    const gateway = createLLMGateway(cfg(), { resilience: {} }) as unknown as { logger?: unknown };
+    expect(gateway.logger).toBeUndefined();
   });
 });
