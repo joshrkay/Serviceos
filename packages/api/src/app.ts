@@ -4990,6 +4990,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       agreementRepo,
       templateRepo,
       customerRepo,
+      invoiceScheduleRepo,
     ),
   );
   app.use(

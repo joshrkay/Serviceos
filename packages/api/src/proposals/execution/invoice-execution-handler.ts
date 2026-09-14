@@ -8,9 +8,15 @@ import {
 } from '../../invoices/invoice';
 import { SettingsRepository } from '../../settings/settings';
 import { AuditRepository } from '../../audit/audit';
-import { JobRepository, createJob } from '../../jobs/job';
+import { Job, JobRepository, createJob } from '../../jobs/job';
+import { isPostCompletionStatus } from '../../jobs/job-lifecycle';
 import { LocationRepository } from '../../locations/location';
 import { CustomerRepository } from '../../customers/customer';
+import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
+import {
+  milestonePlanBillingEstimate,
+  wholeInvoiceRefusedByPlanReason,
+} from '../../invoices/milestone-billing-guard';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -22,6 +28,11 @@ import { CustomerRepository } from '../../customers/customer';
  * When the deps are absent (legacy in-memory tests that exercise the
  * validation shape without touching persistence), it falls back to the
  * synthetic-id behavior so existing tests still pass.
+ *
+ * #1203 — a draft that names an estimate a milestone plan bills (the plan has
+ * a milestone that still bills, or completion will still mint it) is refused:
+ * approving it would bill that estimate twice. Typical source: the whole-
+ * estimate draft auto-invoice raised at completion before the plan existed.
  */
 export class CreateInvoiceExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_invoice';
@@ -46,6 +57,9 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     // customerId. See the guard in execute(); optional so the existing
     // partially-wired unit fixtures keep their current behavior.
     private readonly customerRepo?: CustomerRepository,
+    // #1203 — when wired, a whole-estimate draft for an estimate a milestone
+    // plan bills is refused. Absent → no plan check (legacy fixtures).
+    private readonly scheduleRepo?: InvoiceScheduleRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without both
@@ -132,15 +146,34 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
         };
       }
     }
+    let existingJob: Job | null = null;
     if (jobId && this.jobRepo) {
-      const job = await this.jobRepo.findById(context.tenantId, jobId);
-      if (!job) {
+      existingJob = await this.jobRepo.findById(context.tenantId, jobId);
+      if (!existingJob) {
         return {
           success: false,
           error:
             `Invoice draft references job '${jobId}', which does not exist in this tenant — ` +
             `link a real job before approving`,
         };
+      }
+    }
+
+    // #1203 — plan then draft_invoice: never a second, whole-estimate invoice.
+    const draftEstimateId = typeof payload.estimateId === 'string' ? payload.estimateId : undefined;
+    if (draftEstimateId && jobId && this.scheduleRepo) {
+      const schedules = await this.scheduleRepo.findByJob(context.tenantId, jobId);
+      if (schedules.some((sched) => sched.estimateId === draftEstimateId)) {
+        const invoices = await this.invoiceRepo.findByJob(context.tenantId, jobId);
+        const settings = await this.settingsRepo.findByTenant(context.tenantId);
+        const billing = milestonePlanBillingEstimate({
+          estimateId: draftEstimateId,
+          schedules,
+          invoices,
+          milestoneBillingEnabled: Boolean(settings?.milestoneBillingEnabled),
+          completionStillAhead: !existingJob || !isPostCompletionStatus(existingJob.status),
+        });
+        if (billing) return { success: false, error: wholeInvoiceRefusedByPlanReason(billing) };
       }
     }
 
@@ -192,7 +225,7 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
       const input: Omit<CreateInvoiceInput, 'invoiceNumber'> = {
         tenantId: context.tenantId,
         jobId,
-        estimateId: typeof payload.estimateId === 'string' ? payload.estimateId : undefined,
+        estimateId: draftEstimateId,
         lineItems,
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,

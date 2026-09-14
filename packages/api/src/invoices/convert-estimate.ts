@@ -12,7 +12,10 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ConflictError, ValidationError } from '../shared/errors';
 import { resolveSelectedLineItems } from '../shared/billing-engine';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { isPostCompletionStatus } from '../jobs/job-lifecycle';
 import { Logger } from '../logging/logger';
+import { InvoiceScheduleRepository } from './invoice-schedule';
+import { milestonePlanBillingEstimate, wholeInvoiceRefusedByPlanReason } from './milestone-billing-guard';
 
 export interface ConvertEstimateDeps {
   estimateRepo: EstimateRepository;
@@ -26,6 +29,11 @@ export interface ConvertEstimateDeps {
   moneyStateDeps?: RefreshJobMoneyStateDeps;
   actorId: string;
   logger?: Logger;
+  /**
+   * #1203 — when wired, an estimate billed by a milestone plan is not
+   * converted into a second, whole-estimate invoice.
+   */
+  scheduleRepo?: InvoiceScheduleRepository;
 }
 
 /**
@@ -39,6 +47,9 @@ export interface ConvertEstimateDeps {
  * rather than trusting the estimate's stored totals. Any paid deposit on
  * the linked job is credited onto the new invoice. Emits
  * `estimate.converted` and rolls up the job money state.
+ *
+ * #1203 — refused (409) while a milestone plan bills the estimate: the plan
+ * has minted a milestone that still bills, or completion will still mint it.
  *
  * Returns null when the estimate doesn't exist.
  */
@@ -58,8 +69,12 @@ export async function convertEstimateToInvoice(
 
   // Idempotency: an estimate converts to at most one invoice. Return the
   // existing one rather than minting a second invoice number.
+  // A milestone plan's first invoice also carries the estimate id; it is not
+  // a conversion (#1203), so only a non-milestone invoice short-circuits.
   const existing = await deps.invoiceRepo.findByJob(tenantId, estimate.jobId);
-  const alreadyConverted = existing.find((inv) => inv.estimateId === estimate.id);
+  const alreadyConverted = existing.find(
+    (inv) => inv.estimateId === estimate.id && inv.scheduleId === undefined,
+  );
   if (alreadyConverted) return alreadyConverted;
 
   // Bill only the items the customer selected (tiers + add-ons), falling
@@ -70,6 +85,22 @@ export async function convertEstimateToInvoice(
   }
 
   const job = (await deps.jobRepo.findById(tenantId, estimate.jobId)) as Job | null;
+
+  // #1203 — plan then convert: never a second, whole-estimate invoice.
+  if (deps.scheduleRepo) {
+    const schedules = await deps.scheduleRepo.findByJob(tenantId, estimate.jobId);
+    if (schedules.some((s) => s.estimateId === estimate.id)) {
+      const settings = await deps.settingsRepo.findByTenant(tenantId);
+      const billing = milestonePlanBillingEstimate({
+        estimateId: estimate.id,
+        schedules,
+        invoices: existing,
+        milestoneBillingEnabled: Boolean(settings?.milestoneBillingEnabled),
+        completionStillAhead: !job || !isPostCompletionStatus(job.status),
+      });
+      if (billing) throw new ConflictError(wholeInvoiceRefusedByPlanReason(billing));
+    }
+  }
 
   let invoice;
   try {
