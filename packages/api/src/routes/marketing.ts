@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { CustomerRepository } from '../customers/customer';
 import { TagRepository } from '../customers/tag';
@@ -70,6 +71,10 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    // #1110 — the guard is mounted only when a delivery provider is configured:
+    // without one the handler answers 503 NOT_CONFIGURED for every id before
+    // reading it, and that capability answer must not be pre-empted by a 404.
+    ...(deps.delivery ? [notFoundOnMalformedId('Campaign not found')] : []),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!deps.delivery) {
         res.status(503).json({ error: 'NOT_CONFIGURED', message: 'No email provider configured' });
