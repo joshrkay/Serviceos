@@ -18,6 +18,11 @@ import type { Queue } from '../../src/queues/queue';
 import type { FileRepository, StorageProvider } from '../../src/files/file-service';
 
 const TENANT = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+// Recording ids are uuids in production (voice_recordings.id uuid); the routes
+// under test guard a malformed :id with a 404 (#1110), so fixtures use real ones.
+const REC_ID = '0f7b2a4e-3c1d-4e8a-9b6f-5d2c1a0e9f41';
+const REC_NOFILE_ID = '6c9e1d2b-8a4f-4b3e-a7d5-2e1f0c9b8a73';
+const UNKNOWN_REC_ID = 'b4d3c2a1-9e8f-4a7b-8c6d-5e4f3a2b1c0d';
 
 function makeQueue(): Queue {
   return { send: vi.fn(async () => 'queued-1') } as unknown as Queue;
@@ -85,7 +90,7 @@ async function seedRecording(
   overrides: Partial<Parameters<InMemoryVoiceRepository['create']>[0]> = {},
 ) {
   return voiceRepo.create({
-    id: 'rec-1',
+    id: REC_ID,
     tenantId: TENANT,
     fileId: 'file-1',
     callSid: 'CA-1',
@@ -105,7 +110,7 @@ describe('RV-132 — GET /api/voice/recordings/:id/audio', () => {
     const storage = makeStorage();
     const app = buildApp({ voiceRepo, storage, fileRepo: makeFileRepo() });
 
-    const res = await request(app).get('/api/voice/recordings/rec-1/audio');
+    const res = await request(app).get(`/api/voice/recordings/${REC_ID}/audio`);
     expect(res.status).toBe(200);
     expect(res.body.downloadUrl).toBe('https://s3.test/download?sig=abc');
     expect(storage.generateDownloadUrl).toHaveBeenCalledWith(
@@ -121,7 +126,7 @@ describe('RV-132 — GET /api/voice/recordings/:id/audio', () => {
     const storage = makeStorage();
     const app = buildApp({ voiceRepo, storage, fileRepo: makeFileRepo() });
 
-    const res = await request(app).get('/api/voice/recordings/rec-1/audio');
+    const res = await request(app).get(`/api/voice/recordings/${REC_ID}/audio`);
     expect(res.status).toBe(410);
     expect(res.body.error).toBe('RECORDING_PURGED');
     expect(res.body.purgedAt).toBe(purgedAt.toISOString());
@@ -133,25 +138,25 @@ describe('RV-132 — GET /api/voice/recordings/:id/audio', () => {
     await seedRecording(voiceRepo, { purgedAt: new Date() });
     const app = buildApp({ voiceRepo, storage: makeStorage(), fileRepo: makeFileRepo() });
 
-    const res = await request(app).get('/api/voice/recordings/rec-1');
+    const res = await request(app).get(`/api/voice/recordings/${REC_ID}`);
     expect(res.status).toBe(200);
     expect(res.body.transcript).toBe('hello there');
   });
 
   it('404s for an unknown recording and for a recording without a stored file', async () => {
     const voiceRepo = new InMemoryVoiceRepository();
-    await seedRecording(voiceRepo, { id: 'rec-nofile', fileId: undefined });
+    await seedRecording(voiceRepo, { id: REC_NOFILE_ID, fileId: undefined });
     const app = buildApp({ voiceRepo, storage: makeStorage(), fileRepo: makeFileRepo() });
 
-    expect((await request(app).get('/api/voice/recordings/nope/audio')).status).toBe(404);
-    expect((await request(app).get('/api/voice/recordings/rec-nofile/audio')).status).toBe(404);
+    expect((await request(app).get(`/api/voice/recordings/${UNKNOWN_REC_ID}/audio`)).status).toBe(404);
+    expect((await request(app).get(`/api/voice/recordings/${REC_NOFILE_ID}/audio`)).status).toBe(404);
   });
 
   it('501s when the download deps are not configured', async () => {
     const voiceRepo = new InMemoryVoiceRepository();
     await seedRecording(voiceRepo);
     const app = buildApp({ voiceRepo });
-    const res = await request(app).get('/api/voice/recordings/rec-1/audio');
+    const res = await request(app).get(`/api/voice/recordings/${REC_ID}/audio`);
     expect(res.status).toBe(501);
   });
 });
@@ -163,12 +168,12 @@ describe('RV-132 — POST /api/voice/recordings/:id/retry on a purged recording'
     const app = buildApp({ voiceRepo, storage: makeStorage(), fileRepo: makeFileRepo() });
 
     const res = await request(app)
-      .post('/api/voice/recordings/rec-1/retry')
+      .post(`/api/voice/recordings/${REC_ID}/retry`)
       .send({ audioUrl: 'https://s3.test/rec/CA-1.mp3' });
     expect(res.status).toBe(410);
     expect(res.body.error).toBe('RECORDING_PURGED');
     // Status untouched — the row stays a completed tombstone.
-    const rec = await voiceRepo.findById(TENANT, 'rec-1');
+    const rec = await voiceRepo.findById(TENANT, REC_ID);
     expect(rec!.status).toBe('completed');
   });
 });

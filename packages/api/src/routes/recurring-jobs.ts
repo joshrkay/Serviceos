@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
@@ -90,6 +91,7 @@ export function createRecurringJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const job = await repo.findById(req.auth!.tenantId, req.params.id);
       if (!job) {
@@ -105,6 +107,7 @@ export function createRecurringJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const job = await repo.findById(req.auth!.tenantId, req.params.id);
       if (!job) {
@@ -128,6 +131,7 @@ export function createRecurringJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateRecurringJobSchema.parse(req.body);
       const job = await updateRecurringJob(
@@ -148,6 +152,7 @@ export function createRecurringJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await archiveRecurringJob(
         req.auth!.tenantId,
@@ -172,6 +177,7 @@ export function createRecurringJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:create'),
+    notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const job = await repo.findById(req.auth!.tenantId, req.params.id);
       if (!job) {

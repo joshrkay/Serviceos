@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   FileRepository,
   MAX_FILE_SIZE,
@@ -105,6 +106,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:view'),
+    notFoundOnMalformedId('File not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const record = await fileRepo.findById(req.auth!.tenantId, req.params.id);
       if (!record) {
@@ -126,6 +128,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
+    notFoundOnMalformedId('File not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const record = await fileRepo.findById(req.auth!.tenantId, req.params.id);
       if (!record) {
