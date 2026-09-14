@@ -74,6 +74,21 @@ export interface UndoCorrectionLoopDeps {
   ports: ConfigPorts;
 }
 
+/**
+ * #1139 (row 9.9) — what an undo reverses.
+ *  - 'approval' (default): Decision 9 — reverse an approval inside the undo
+ *    window (and any lessons it recorded). The contract the post-approve undo
+ *    toast relies on: an executed proposal is refused.
+ *  - 'lessons': reverse the correction lessons an EXECUTED proposal recorded
+ *    (and the tenant config each cascaded). The proposal itself is untouched —
+ *    'executed' stays terminal and its entity stays. Explicit rather than
+ *    implied by status so a late approval-undo tap that races execution can
+ *    never silently revert a lesson while the UI reports "undone".
+ */
+export interface UndoProposalOptions {
+  scope?: 'approval' | 'lessons';
+}
+
 export interface BatchApproveResult {
   approved: string[];
   failed: { id: string; reason: string }[];
@@ -491,6 +506,9 @@ export async function approveChainSet(
  * Transitions an approved proposal to 'undone' (terminal). After the
  * window passes, undo fails — the only way to "undo" then is to
  * reverse the underlying entity via a new proposal.
+ *
+ * `{ scope: 'lessons' }` (#1139) instead reverses the correction lessons an
+ * executed proposal recorded — see `undoExecutedProposalLessons`.
  */
 export async function undoProposal(
   proposalRepo: ProposalRepository,
@@ -500,6 +518,7 @@ export async function undoProposal(
   actorRole: Role,
   auditRepo?: AuditRepository,
   correctionLoop?: UndoCorrectionLoopDeps,
+  options: UndoProposalOptions = {},
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     // Same permission as approve — if you can approve you can undo.
@@ -509,6 +528,10 @@ export async function undoProposal(
   const proposal = await proposalRepo.findById(tenantId, proposalId);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  if (options.scope === 'lessons') {
+    return undoExecutedProposalLessons(proposal, actorId, actorRole, auditRepo, correctionLoop);
   }
 
   if (proposal.status !== 'approved') {
@@ -576,6 +599,51 @@ export async function undoProposal(
   }
 
   return updated;
+}
+
+/**
+ * #1139 (row 9.9) — `undoProposal(..., { scope: 'lessons' })`. A correction
+ * lesson is recorded only after its proposal executed, so this is the only
+ * point at which one can be reversed. Unlike the approval branch it is NOT
+ * failure-soft: reversing the lessons is the whole effect, so an error
+ * surfaces to the caller (each reversal is idempotent, so a retry is safe).
+ *
+ * Requires `settings:update` on top of `proposals:approve`: every reversal
+ * writes tenant configuration (labor rate, SKU price, banned phrases) — the
+ * same authority CONFIG_WRITING_PROPOSAL_TYPES demands above.
+ */
+async function undoExecutedProposalLessons(
+  proposal: Proposal,
+  actorId: string,
+  actorRole: Role,
+  auditRepo: AuditRepository | undefined,
+  correctionLoop: UndoCorrectionLoopDeps | undefined,
+): Promise<Proposal> {
+  if (proposal.status !== 'executed') {
+    throw new ValidationError(
+      `Cannot undo correction lessons of a proposal in '${proposal.status}' status — lessons are only recorded once a proposal has executed`,
+    );
+  }
+  if (!correctionLoop || !auditRepo) {
+    throw new ValidationError('Correction-lesson undo is not configured');
+  }
+
+  const lessons = await correctionLoop.lessonRepo.findBySourceProposal(proposal.tenantId, proposal.id);
+  if (lessons.length === 0) {
+    throw new ValidationError('This proposal recorded no correction lessons to undo');
+  }
+  if (!hasPermission(actorRole, 'settings:update')) {
+    throw new ForbiddenError('Undoing a correction lesson changes tenant settings and requires settings:update');
+  }
+
+  for (const lesson of lessons) {
+    await undoCorrectionLesson(
+      { tenantId: proposal.tenantId, lessonId: lesson.id, ownerId: actorId },
+      { repository: correctionLoop.lessonRepo, ports: correctionLoop.ports, auditRepo, actorRole },
+    );
+  }
+
+  return proposal;
 }
 
 export async function rejectProposal(
@@ -735,8 +803,16 @@ export async function editProposal(
       ? nextSourceContext
       : undefined;
 
+  // #1139 — this write overwrites `payload`, so keep the payload AS FIRST
+  // PROPOSED the first time an edit actually changes it. The correction-lesson
+  // recorder diffs it against the executed payload; without it the AI's draft
+  // is gone and a real correction never produces a lesson. Never overwritten
+  // by later edits (both fields come from the same row read above).
+  const preserveOriginal = editedFields.length > 0 && proposal.originalPayload === undefined;
+
   const updated = await proposalRepo.update(tenantId, proposalId, {
     payload: updatedPayload,
+    ...(preserveOriginal ? { originalPayload: proposal.payload } : {}),
     ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
   });
   if (!updated) {

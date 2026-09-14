@@ -11,6 +11,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
     proposalType: row.proposal_type as Proposal['proposalType'],
     status: row.status as ProposalStatus,
     payload: row.payload as Record<string, unknown>,
+    originalPayload: (row.original_payload as Record<string, unknown>) ?? undefined,
     summary: row.summary as string,
     explanation: (row.explanation as string) ?? undefined,
     confidenceScore: row.confidence_score != null ? Number(row.confidence_score) : undefined,
@@ -505,6 +506,8 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       const fieldMap: Record<string, string> = {
         proposalType: 'proposal_type',
         payload: 'payload',
+        // #1139 — set once by editProposal (payload as first proposed).
+        originalPayload: 'original_payload',
         summary: 'summary',
         explanation: 'explanation',
         confidenceScore: 'confidence_score',
@@ -540,7 +543,10 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         if (key in updates) {
           const val = (updates as Record<string, unknown>)[key];
           const serialized =
-            key === 'payload' || key === 'confidenceFactors' || key === 'sourceContext'
+            key === 'payload' ||
+            key === 'originalPayload' ||
+            key === 'confidenceFactors' ||
+            key === 'sourceContext'
               ? val != null ? JSON.stringify(val) : null
               : val ?? null;
           setClauses.push(`${column} = $${p++}`);
