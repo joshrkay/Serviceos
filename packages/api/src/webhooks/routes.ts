@@ -342,6 +342,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   // connected account the money actually landed in) is compared against the
   // named tenant's own `tenants.stripe_connect_account_id` BEFORE any branch
   // touches an invoice or a payment.
+  //
+  // SECURITY #1109 — the same seam guards the other money-touching branches:
+  // `setup_intent.succeeded` (saved card), `charge.refunded`,
+  // `charge.refund.updated` and `charge.dispute.created`. The refund/dispute
+  // branches bind the RESOLVED tenant (metadata, or the payments row found by
+  // the cross-tenant payment_intent lookup) once it is known, before the write.
 
   /** The single reason string: response body, audit row, and error_message. */
   const STRIPE_ACCOUNT_MISMATCH = 'stripe_account_mismatch';
@@ -434,6 +440,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     ctx: {
       tenantId: string;
       invoiceId?: string;
+      /** #1109 — the payment a refund/dispute would have written to. */
+      paymentId?: string;
       eventId: string;
       eventType: string;
       eventAccount: string;
@@ -445,6 +453,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       type: ctx.eventType,
       tenantId: ctx.tenantId,
       invoiceId: ctx.invoiceId,
+      paymentId: ctx.paymentId,
       eventAccount: ctx.eventAccount,
       tenantConnectAccountId: ctx.tenantConnectAccountId,
       reason: STRIPE_ACCOUNT_MISMATCH,
@@ -470,6 +479,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               eventAccount: ctx.eventAccount,
               tenantConnectAccountId: ctx.tenantConnectAccountId,
               invoiceId: ctx.invoiceId ?? null,
+              ...(ctx.paymentId ? { paymentId: ctx.paymentId } : {}),
             },
           }),
         )
@@ -1242,6 +1252,22 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         };
         const siTenantId = si.metadata?.tenant_id;
         const siCustomerId = si.metadata?.customer_id;
+
+        // SECURITY #1109 — a card saved on another tenant's connected account
+        // must not be stored against (and later charged for) the named tenant.
+        if (siTenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, siTenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId: siTenantId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
+
         if (
           deps.customerPaymentMethodRepo &&
           deps.stripeConfig &&
@@ -2398,6 +2424,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           return res.status(200).json({ received: true, skipped: true });
         }
 
+        // SECURITY #1109 — the refund must have happened on the resolved
+        // tenant's own connected account before it touches their payment.
+        const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+        if (!binding.ok) {
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId,
+            paymentId,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: binding.eventAccount,
+            tenantConnectAccountId: binding.tenantConnectAccountId,
+          });
+        }
+
         // Stripe's `created` is a unix-seconds epoch; convert to JS Date.
         const refundedAt = refund.created
           ? new Date(refund.created * 1000)
@@ -2539,6 +2579,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           throw new NotFoundError('Payment', refund.id ?? 'unknown');
         }
 
+        // SECURITY #1109 — bind the RESOLVED tenant (metadata, or the owner of
+        // the payments row the cross-tenant lookup found) to event.account.
+        const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+        if (!binding.ok) {
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId,
+            paymentId,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: binding.eventAccount,
+            tenantConnectAccountId: binding.tenantConnectAccountId,
+          });
+        }
+
         const refundedAt = refund.created ? new Date(refund.created * 1000) : new Date();
 
         try {
@@ -2618,6 +2672,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             eventId: event.id, disputeId: dispute.id,
           });
           throw new NotFoundError('Payment', dispute.id ?? 'unknown');
+        }
+
+        // SECURITY #1109 — the chargeback must be on the resolved payment's
+        // tenant's own connected account before we reverse it.
+        const binding = await assertEventAccountBelongsToTenant(event, payment.tenantId);
+        if (!binding.ok) {
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId: payment.tenantId,
+            invoiceId: payment.invoiceId,
+            paymentId: payment.id,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: binding.eventAccount,
+            tenantConnectAccountId: binding.tenantConnectAccountId,
+          });
         }
 
         const result = await reversePayment(

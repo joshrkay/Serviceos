@@ -21,12 +21,16 @@
  *  - Public routes (health, /e/:viewToken, /pay/:viewToken, public
  *    payments) MUST NOT receive this middleware: they have no tenantId.
  *    app.ts is responsible for mounting it only on protected routes.
- *  - On `res.finish` (response fully flushed) we COMMIT only when the
+ *  - When the route ends its response (`res.end`, which res.json/send/
+ *    redirect/sendStatus all go through) we settle the transaction FIRST
+ *    and only then let the response out (#1133): COMMIT only when the
  *    status is < 400; a >=400 response rolls back so partial writes from
- *    a failed request never persist. Rollback also happens on `res.close`
- *    if it fires before `finish` (client disconnect). A boolean guard
- *    ensures release fires exactly once. Routes that must commit despite
- *    a >=400 status can set `res.locals.forceCommit = true`.
+ *    a failed request never persist. A COMMIT that fails turns a success
+ *    response into a 500. Rollback also happens on `res.close` if the
+ *    client disconnects before the route responds; `res.finish` remains a
+ *    backstop. A boolean guard ensures release fires exactly once. Routes
+ *    that must commit despite a >=400 status can set
+ *    `res.locals.forceCommit = true`.
  */
 import type { Request, Response, NextFunction } from 'express';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -117,6 +121,23 @@ function isLlmLongCallRoute(req: { method: string; path: string }): boolean {
   return LLM_LONG_CALL_ROUTES.some((r) => r.method === req.method && r.re.test(req.path));
 }
 
+/**
+ * Headers that describe the route's success body. Stripped when a success
+ * response is replaced by a 500 because its COMMIT did not happen (#1133), so
+ * the error does not carry the created resource's Location, a download's
+ * Content-Disposition, or a stale ETag. Everything else (CORS, security and
+ * rate-limit headers set by earlier middleware) stays.
+ */
+const SUCCESS_REPRESENTATION_HEADERS = [
+  'content-type',
+  'content-length',
+  'content-disposition',
+  'content-encoding',
+  'etag',
+  'last-modified',
+  'location',
+] as const;
+
 export function withTenantTransaction(pool: Pool) {
   return async (
     req: AuthenticatedRequest,
@@ -133,8 +154,8 @@ export function withTenantTransaction(pool: Pool) {
     }
 
     // SSE / long-lived streams: a `text/event-stream` response keeps the HTTP
-    // request open indefinitely (heartbeats), and `res.finish` — which commits
-    // and releases the transaction below — does not fire until the stream
+    // request open indefinitely (heartbeats), and `res.end` — which commits
+    // and releases the transaction below — does not run until the stream
     // closes. Holding a BEGIN open that long pins one pooled connection, and
     // under PgBouncer transaction pooling one Postgres server backend, for the
     // entire stream; ~`default_pool_size` idle dashboards would exhaust the
@@ -179,10 +200,12 @@ export function withTenantTransaction(pool: Pool) {
     //
     // So record it and answer the request ourselves while we still can. A
     // handler that later tries to respond hits `res.headersSent`, which
-    // asyncRoute already guards. If the response has already started (a
-    // streamed body — a window of microseconds, since a finished response has
-    // already run `cleanup` and removed this listener) there is nothing left
-    // to correct, so we log and let `cleanup` skip the doomed COMMIT.
+    // asyncRoute already guards. If the route has already ended its response,
+    // `res.headersSent` reads true while that response waits on its COMMIT
+    // (#1133, below), so this stands down and the settle path — whose COMMIT
+    // fails on the dead connection — answers the 500 instead. If a streamed
+    // body has already put a status on the wire there is nothing left to
+    // correct, so we log and let `cleanup` skip the doomed COMMIT.
     let connectionLost: Error | undefined;
     const onConnectionLost = (err: Error): void => {
       if (connectionLost) return;
@@ -227,17 +250,16 @@ export function withTenantTransaction(pool: Pool) {
       return;
     }
 
-    // Wire commit/rollback to the response lifecycle. `finish` fires
-    // after the last byte of the response is flushed; `close` fires
-    // when the underlying connection is torn down. They can fire in
-    // either order on different runtimes (and `close` MAY fire even
-    // when finish has already happened). Both flow through a single
-    // `cleanup()` that's idempotent — the `cleanedUp` flag prevents
-    // a COMMIT-after-ROLLBACK race that would otherwise execute a
-    // query on a client that's already back in the pool.
+    // Settle (COMMIT/ROLLBACK) and release. Reached from the response
+    // lifecycle below; `close` and `finish` can also fire, in either order on
+    // different runtimes (and `close` MAY fire even when finish has already
+    // happened). All paths flow through this single idempotent `cleanup()` —
+    // the `cleanedUp` flag prevents a COMMIT-after-ROLLBACK race that would
+    // otherwise execute a query on a client that's already back in the pool.
+    // Resolves `true` only when the COMMIT is durable.
     let cleanedUp = false;
-    const cleanup = async (commit: boolean) => {
-      if (cleanedUp || released) return;
+    const cleanup = async (commit: boolean): Promise<boolean> => {
+      if (cleanedUp || released) return false;
       cleanedUp = true;
       let committed = false;
       if (connectionLost) {
@@ -247,7 +269,7 @@ export function withTenantTransaction(pool: Pool) {
         // after-commit hooks below correctly never fire.
         client.off('error', onConnectionLost);
         releaseOnce();
-        return;
+        return false;
       }
       try {
         await client.query(commit ? 'COMMIT' : 'ROLLBACK');
@@ -283,19 +305,102 @@ export function withTenantTransaction(pool: Pool) {
           }
         }
       }
+      return committed;
     };
+
+    // Commit only on a success status. `async-route` converts a thrown
+    // handler error into a >=400 response, so committing unconditionally
+    // would persist partial writes from a request that failed midway — e.g.
+    // the first of two writes succeeding while the second throws. Roll back
+    // on any >=400.
+    //
+    // Escape hatch: a route that intentionally writes *and* returns a client
+    // error (rare — e.g. recording an attempt while returning 409) can force
+    // the commit with `res.locals.forceCommit = true`.
+    const shouldCommit = (): boolean => res.statusCode < 400 || res.locals?.forceCommit === true;
+
+    // #1133 — settle the transaction BEFORE the response can reach the client.
+    // Committing from `finish` raced the client: Node emits `finish` only after
+    // the response has been handed to the socket, so a client could hold the
+    // 201 and fire its dependent request into a transaction that cannot see
+    // the row yet (observed: `POST /api/jobs → 404 Location not found` 9 ms
+    // after the location's 201). Every response body leaves through `res.end`,
+    // so hold that call until COMMIT/ROLLBACK has returned, then run the real
+    // `end`.
+    //
+    // From the moment the route calls `end` its response is decided, so while
+    // the settle is pending it behaves as already sent: `res.headersSent`
+    // reads true (asyncRoute, `onConnectionLost` and error handlers stand down
+    // on it), a second `end` is ignored, and the status and headers the route
+    // set are restored before the real `end` — a late writer can neither
+    // replace nor corrupt the response. A success response whose COMMIT did
+    // not happen becomes a 500: reporting success over writes Postgres
+    // discarded is the #1090 silent false success. (SSE streams and the
+    // LLM-long-call routes never get here — they bypass the transaction above.)
+    const originalEnd = res.end as unknown as (...args: unknown[]) => Response;
+    let settling = false;
+    const endAfterSettling = (...args: unknown[]): Response => {
+      if (settling) return res;
+      if (cleanedUp || released) return originalEnd.apply(res, args);
+      settling = true;
+      const commit = shouldCommit();
+      const decided = {
+        statusCode: res.statusCode,
+        statusMessage: res.statusMessage,
+        headers: res.getHeaders(),
+      };
+      const ownHeadersSent = Object.getOwnPropertyDescriptor(res, 'headersSent');
+      Object.defineProperty(res, 'headersSent', { configurable: true, get: () => true });
+
+      void cleanup(commit)
+        .then((committed) => {
+          if (ownHeadersSent) Object.defineProperty(res, 'headersSent', ownHeadersSent);
+          else delete (res as { headersSent?: boolean }).headersSent;
+          settling = false;
+          if (res.headersSent) {
+            // A streamed body (`res.write` before `end`) already put its status
+            // on the wire, so it cannot be turned into a 500 — but it must not
+            // complete as a success over writes that did not commit either.
+            if (commit && !committed) res.destroy();
+            else originalEnd.apply(res, args);
+            return;
+          }
+          res.statusCode = decided.statusCode;
+          res.statusMessage = decided.statusMessage;
+          for (const name of res.getHeaderNames()) {
+            if (!(name in decided.headers)) res.removeHeader(name);
+          }
+          for (const [name, value] of Object.entries(decided.headers)) {
+            if (value !== undefined) res.setHeader(name, value);
+          }
+          if (commit && !committed) {
+            process.stderr.write(
+              `request transaction did not commit — answering 500 instead of ${decided.statusCode}\n`,
+            );
+            for (const name of SUCCESS_REPRESENTATION_HEADERS) res.removeHeader(name);
+            res.status(500).json({
+              error: 'INTERNAL_ERROR',
+              message: 'The request could not be committed; nothing was saved',
+            });
+            return;
+          }
+          originalEnd.apply(res, args);
+        })
+        .catch((err: unknown) => {
+          process.stderr.write(
+            `request transaction response could not be sent: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+          res.destroy();
+        });
+      return res;
+    };
+    res.end = endAfterSettling as unknown as Response['end'];
+
+    // Backstops. `finish` only matters if a response ever ends without going
+    // through `res.end` above; `close` before the route responds is a client
+    // disconnect, so roll back.
     res.once('finish', () => {
-      // Commit only on a success status. `async-route` converts a thrown
-      // handler error into a >=400 response (which still fires `finish`),
-      // so committing unconditionally here would persist partial writes
-      // from a request that failed midway — e.g. the first of two writes
-      // succeeding while the second throws. Roll back on any >=400.
-      //
-      // Escape hatch: a route that intentionally writes *and* returns a
-      // client error (rare — e.g. recording an attempt while returning
-      // 409) can force the commit with `res.locals.forceCommit = true`.
-      const commit = res.statusCode < 400 || res.locals?.forceCommit === true;
-      void cleanup(commit);
+      void cleanup(shouldCommit());
     });
     res.once('close', () => {
       void cleanup(false);
@@ -313,9 +418,10 @@ export function withTenantTransaction(pool: Pool) {
 /**
  * Defer a side effect until AFTER the request transaction commits.
  *
- * Under `/api` the `withTenantTransaction` middleware commits on `res.finish`,
- * so anything a route runs inline (e.g. publishing a dispatch-board SSE
- * revision) happens while the writes are still uncommitted — a reader woken by
+ * Under `/api` the `withTenantTransaction` middleware commits when the route
+ * ends its response, so anything a route runs inline before that (e.g.
+ * publishing a dispatch-board SSE revision) happens while the writes are
+ * still uncommitted — a reader woken by
  * that event can refetch and cache board contents that don't yet include the
  * new row, then never get a second event. Registering the effect here runs it
  * only once COMMIT succeeds; on rollback it never fires.
