@@ -496,6 +496,55 @@ describe('runThankYouSmsSweep', () => {
       expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
     });
 
+    it('review (PR #1196): an SMS claim already "sent" skips the suppression checks — a customer now on DNC gets the sent audit, never a suppressed row', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+      await dncRepo.addToDnc(TENANT, '+15551234567', 'inbound-stop');
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.sent).toBe(1);
+      expect(result.suppressed).toBe(0);
+      expect(send).not.toHaveBeenCalled();
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(1);
+      expect(events.filter((e) => e.eventType === 'notification.thank_you_sms.suppressed')).toHaveLength(0);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('review (PR #1196): a reclaimed audit claim whose sent row already exists completes without a second row', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+      // The row committed but the claim's completion did not; the claim is past the stale window.
+      claims.set(`${TENANT}::thank_you_sms_audit:${job.id}`, {
+        status: 'claimed',
+        claimedAt: Date.now() - 20 * 60_000,
+      });
+      await auditRepo.create({
+        id: 'audit-already-written',
+        tenantId: TENANT,
+        actorId: 'system:thank_you_sms',
+        actorRole: 'system',
+        eventType: SENT,
+        entityType: 'job',
+        entityId: job.id,
+        metadata: { customerId: 'cust-1' },
+        createdAt: NOW,
+      });
+      const create = vi.spyOn(auditRepo, 'create');
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.sent).toBe(1);
+      expect(create).not.toHaveBeenCalled();
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(1);
+      expect(claims.get(`${TENANT}::thank_you_sms_audit:${job.id}`)?.status).toBe('sent');
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
     it('an audit claim still in flight (fresh "claimed") is left to its owner — no audit row, no stamp from this sweep', async () => {
       const job = await seed();
       const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
