@@ -14,6 +14,7 @@ import {
   assessUnverifiedB2bClaim,
   isBusinessAccount,
   buildAccountContextPromptSection,
+  proposalAccountContext,
   UNVERIFIED_B2B_CLAIM_MARKER_REASON,
 } from '../../../src/ai/agents/customer-calling/b2b-account-context';
 import {
@@ -348,5 +349,34 @@ describe('U4 — buildAccountContextPromptSection', () => {
     });
     const section = buildAccountContextPromptSection(ctx!);
     expect(section).toMatch(/managed property under the account "Acme Property Mgmt"/);
+  });
+});
+
+// #1155 (row 2.12) — the proposal-side projection: PRIORITY + account type,
+// ids and counts only (sourceContext is persisted and listed — no names).
+describe('#1155 — proposalAccountContext', () => {
+  it('projects a top-level PM account with its managed-property count', async () => {
+    const repo = new InMemoryCustomerRepository();
+    const parent = await seed(repo, makeCustomer({ displayName: 'Acme PM', accountType: 'property_manager' }));
+    await seed(repo, makeCustomer({ displayName: 'Acme — Unit A', accountType: 'b2b', parentAccountId: parent.id }));
+    await seed(repo, makeCustomer({ displayName: 'Acme — Unit B', accountType: 'b2b', parentAccountId: parent.id }));
+    const ctx = await assembleB2bAccountContext({ tenantId: TENANT, customer: parent, repo });
+    expect(proposalAccountContext(ctx!)).toEqual({
+      accountType: 'property_manager',
+      priority: true,
+      managedPropertyCount: 2,
+    });
+  });
+
+  it('carries the parent id (never its name) for a sub-account caller', async () => {
+    const repo = new InMemoryCustomerRepository();
+    const parent = await seed(repo, makeCustomer({ displayName: 'Acme PM', accountType: 'property_manager' }));
+    const unit = await seed(repo, makeCustomer({ displayName: 'Acme — Unit A', accountType: 'b2b', parentAccountId: parent.id }));
+    // A sibling: the caller itself is never counted among the managed properties.
+    await seed(repo, makeCustomer({ displayName: 'Acme — Unit B', accountType: 'b2b', parentAccountId: parent.id }));
+    const ctx = await assembleB2bAccountContext({ tenantId: TENANT, customer: unit, repo });
+    const projected = proposalAccountContext(ctx!);
+    expect(projected).toEqual({ accountType: 'b2b', priority: true, parentAccountId: parent.id, managedPropertyCount: 1 });
+    expect(JSON.stringify(projected)).not.toContain('Acme');
   });
 });
