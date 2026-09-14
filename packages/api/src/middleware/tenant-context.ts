@@ -213,12 +213,14 @@ export function withTenantTransaction(pool: Pool) {
       process.stderr.write(
         `request transaction connection lost — transaction rolled back by the server: ${err.message}\n`,
       );
-      if (!res.headersSent && !res.writableEnded) {
+      setImmediate(() => {
+        if (cleanedUp || released) return;
+        if (res.headersSent || res.writableEnded) return;
         res.status(500).json({
           error: 'INTERNAL_ERROR',
           message: 'Database connection was terminated; the request was rolled back',
         });
-      }
+      });
     };
     client.on('error', onConnectionLost);
 

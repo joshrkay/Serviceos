@@ -250,7 +250,7 @@ export class ProposalExecutor {
     // execution-outcome audit event — inside ONE transaction on the advisory
     // lock's OWN connection, so they commit all-or-nothing while the lock is
     // still held, and only unlock after COMMIT.
-    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async (lockClient) => {
+    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async (lockClient, lease) => {
       // Shared closure: given the handler's result, compute the post-execution
       // proposal view, write the idempotency marker (on success), and transition
       // the status. Factored out so it isn't duplicated across the DB-only and
@@ -357,7 +357,36 @@ export class ProposalExecutor {
       // undefined client so there is no real transaction to open — everything
       // runs directly (as it did before this change), with the audit write
       // still mandatory and unswallowed.
+      //
+      // #1125 — fencing. Path B holds the lock's connection idle for the whole
+      // external call, so if Postgres terminates that backend the lock is
+      // released and a second caller can take it, see no idempotency record,
+      // and run the handler again. The lease (lockClient's error/end) is how
+      // this execution learns it no longer owns the proposal:
+      //   1. never START the external call without the lock;
+      //   2. while the handler runs, the lease is ambient (idempotency-lock.ts),
+      //      so a handler that persists before it sends (record_payment) is
+      //      refused at that write instead of sending;
+      //   3. never write the idempotency record / status on a lost lock — the
+      //      lock's connection is gone and the proposal may now belong to the
+      //      new holder. The row stays 'executing'; the error surfaces to the
+      //      execution sweep, which records it (execution_error).
+      // Path A needs no extra fence: its whole unit is one transaction on the
+      // lock's own connection, which dies — and rolls back — with the lock.
+      lease?.assertHeld();
       const handlerResult = await handler.execute(keyedProposal, context);
+      if (lease?.lost) {
+        logger.error(
+          'proposal-executor: idempotency lock lost during an external-I/O handler; its outcome is NOT recorded',
+          {
+            tenantId: keyedProposal.tenantId,
+            proposalId: keyedProposal.id,
+            proposalType: keyedProposal.proposalType,
+            handlerSucceeded: handlerResult.success,
+          },
+        );
+        lease.assertHeld();
+      }
       await executeAudited({
         client: lockClient,
         tenantId: keyedProposal.tenantId,

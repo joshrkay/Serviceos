@@ -343,6 +343,18 @@ const assistantChatRequestSchema = z.object({
   // voice approval stays deferred (RV-071/RV-225 posture — approvals are a
   // screen tap here).
   inputMode: z.enum(['voice', 'text']).optional(),
+  // #1144 — additive contract only: the web client now uploads a chat photo
+  // through the existing files route (POST /api/files/upload-url → PUT →
+  // fileId) and can reference it here. NOT YET consumed by any handler —
+  // no chat-reachable skill (EstimateTaskHandler included) has an image
+  // input today; the only vision-drafting task in the codebase
+  // (MmsEstimateTaskHandler, ai/tasks/mms-estimate-task.ts) is wired
+  // exclusively to the customer-initiated MMS pipeline
+  // (sms/customer-mms/customer-mms-intake.ts), not this route. Declaring
+  // the field here stops it from being silently stripped by `.parse()` (Zod
+  // drops unknown keys by default) so a future skill wiring is additive
+  // from here, not a second contract change.
+  attachments: z.array(z.object({ fileId: z.string() })).optional(),
 });
 
 /**
@@ -356,6 +368,9 @@ const assistantChatRequestSchema = z.object({
  */
 import { VOICE_APPROVAL_REFUSAL } from '../ai/agents/customer-calling/tts-copy';
 export { VOICE_APPROVAL_REFUSAL };
+// #1144 — exported so its contract (specifically the additive `attachments`
+// field) can be pinned directly, without a full Express app boot.
+export { assistantChatRequestSchema };
 
 /**
  * The line the voice FSM speaks for a `confirm` with nothing pending, reused

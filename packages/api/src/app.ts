@@ -228,6 +228,7 @@ import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { recordApiError } from './analytics/posthog';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { createInflightSweeps } from './workers/inflight-sweeps';
+import { runLeaderGatedTick } from './workers/leader-tick';
 import { createStorageProvider } from './files/storage-provider';
 import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
@@ -2279,27 +2280,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // Leader election holds a SESSION advisory lock across work(), so it must
     // run on a direct (non-PgBouncer) connection — see createDirectPool. `pool`
     // is non-null here (guarded above), so `directPool ?? pool` is defined.
-    const client = await (directPool ?? pool).connect();
-    try {
-      const res = await client.query<{ locked: boolean }>(
-        'SELECT pg_try_advisory_lock($1) AS locked',
-        [lockKey],
-      );
-      if (!res.rows[0]?.locked) return; // another instance owns this tick
-      try {
-        await work();
-        // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
-        // work() must read as lag). Keyed by lock key; the SLO monitor reads
-        // the queue-depth sampler's heartbeat as its worker-loop liveness
-        // canary. In-process registry — see monitoring/sweep-heartbeats.ts
-        // for the multi-replica caveat.
-        recordSweepSuccess(String(lockKey));
-      } finally {
-        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
-      }
-    } finally {
-      client.release();
-    }
+    // The pg_try_advisory_lock / pg_advisory_unlock pair lives in
+    // workers/leader-tick.ts (#1125).
+    await runLeaderGatedTick(directPool ?? pool, lockKey, work, () => {
+      // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
+      // work() must read as lag). Keyed by lock key; the SLO monitor reads
+      // the queue-depth sampler's heartbeat as its worker-loop liveness
+      // canary. In-process registry — see monitoring/sweep-heartbeats.ts
+      // for the multi-replica caveat.
+      recordSweepSuccess(String(lockKey));
+    });
   };
 
   // scale-to-1000 C1 — sample the durable job-queue backlog into /metrics so the
@@ -7023,6 +7013,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
 
   // Global error handler
   app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    // #1090 — an error can reach here AFTER the response is already committed:
+    // asyncRoute forwards with `next(err)` precisely when `res.headersSent`,
+    // and the tenant-transaction middleware answers 500 on its own when
+    // Postgres kills the request's connection while the handler is still
+    // running. Writing a second response then throws ERR_HTTP_HEADERS_SENT,
+    // and Express's default handler answers that by destroying the socket —
+    // truncating the response the caller was already receiving. End it
+    // cleanly instead; the first response is the one that counts.
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     const { statusCode, body } = toErrorResponse(err);
     // OBS — surface server 5xx in PostHog (api_error), attributable to the
     // already-redacted route + tenant, so "where are customers hitting bugs"
@@ -7122,6 +7124,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // them first does not impede the drain. (Codex review on PR #628.)
       shuttingDown = true;
       for (const handle of backgroundIntervals) clearInterval(handle);
+      // #1090 — start draining the sweep tick that is ALREADY RUNNING right
+      // here, NOT awaited: it then overlaps the voice drain below instead of
+      // adding to it. The whole sequence lives inside index.ts's
+      // SHUTDOWN_FORCE_EXIT_MS (30s default) while the voice drain alone may
+      // take DRAIN_TIMEOUT_MS (25s), so a sweep drain appended after it could
+      // be force-exited mid-flight — or push `pool.end()` past the backstop,
+      // which is the very thing this drain exists to prevent. Overlapping
+      // costs no budget: both are just waiting. Awaited below, immediately
+      // before the pool closes.
+      const sweepDrain = inflightSweeps.drain(SWEEP_DRAIN_TIMEOUT_MS);
       // Now DRAIN: wait (bounded) for in-flight voice sessions to finish before
       // tearing down the pool/Redis/sessions. The window must be shorter than
       // index.ts's force-exit and Railway's stop grace period; calls still live
@@ -7162,17 +7174,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // fan-out, quota, and the refactored cache) after the cache flush and
       // BEFORE the pg pool drains, in the same shutdown slot as the cache.
       await shutdownRedisClients();
-      // #1090 — the sweep tick that was ALREADY RUNNING when the intervals
-      // were cleared is still awaiting its compose/send round-trip. Give it a
-      // bounded window to finish BEFORE the pool closes: otherwise pool.end()
-      // below pulls the pool out from under it and every remaining repository
-      // call throws "Cannot use a pool after calling end on the pool" — once
-      // per tenant/row, and, worse, after a recovery SMS may already have gone
-      // out but before it was stamped `sent` (the next boot re-sends it).
-      // Bounded so a sweep wedged on a hung upstream can't hold the process
-      // past index.ts's force-exit backstop; we proceed either way.
+      // #1090 — collect the sweep drain started back at the top of shutdown.
+      // A sweep still mid-flight when pool.end() runs would have every
+      // remaining repository call throw "Cannot use a pool after calling end
+      // on the pool" — once per tenant/row, and, worse, after a recovery SMS
+      // may already have gone out but before it was stamped `sent` (the next
+      // boot re-sends it). Bounded, and already overlapped with the voice
+      // drain above, so it adds nothing to the force-exit budget; we proceed
+      // either way.
       {
-        const { drained, remaining } = await inflightSweeps.drain(SWEEP_DRAIN_TIMEOUT_MS);
+        const { drained, remaining } = await sweepDrain;
         if (!drained) {
           // eslint-disable-next-line no-console
           console.warn(

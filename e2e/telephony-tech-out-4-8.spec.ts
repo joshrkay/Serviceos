@@ -17,30 +17,35 @@
  * `POST /api/jobs` call (the only place in this codebase that wires a
  * technician to an appointment).
  *
- * REACHABILITY FINDING (own test below documents it, marked `test.fail()`
- * per the lane's evidence rules — do not remove until the product gap is
- * fixed): the acceptance criterion's "each carrying a brand-voiced message"
- * (and the T2/T3 "B's OUT produces B's block/proposal with B's brand
- * voice") is NOT verifiable under this repo's hermetic (no
- * `AI_PROVIDER_API_KEY`) boot. `createRescheduleProposalsFromTechOut`
+ * FORMER REACHABILITY GAP, FIXED (#1132): the acceptance criterion's "each
+ * carrying a brand-voiced message" (and the T2/T3 "B's OUT produces B's
+ * block/proposal with B's brand voice") was NOT verifiable under this
+ * repo's hermetic (no `AI_PROVIDER_API_KEY`) boot.
+ * `createRescheduleProposalsFromTechOut`
  * (packages/api/src/scheduling/reschedule/from-tech-out.ts) drafts the
  * customer SMS via `draftCustomerRescheduleMessage` →
  * `composeBrandVoiceMessage` (packages/api/src/ai/brand-voice/composer.ts),
  * which uses the LLM gateway's `response.content` VERBATIM as the message
  * text (only banned-phrase stripping + a char-cap trim are applied in
  * code). The hermetic mock provider
- * (packages/api/src/ai/providers/mock.ts `scriptHermeticResponse`) has no
- * branch for `taskType === 'brand_voice_v1'`
- * (`BRAND_VOICE_TASK_TYPE`, ai/prompt-registry.ts:133) — it falls through to
+ * (packages/api/src/ai/providers/mock.ts `scriptHermeticResponse`) USED TO
+ * have no branch for `taskType === 'brand_voice_v1'`
+ * (`BRAND_VOICE_TASK_TYPE`, ai/prompt-registry.ts:133) — it fell through to
  * the generic catch-all `{"ok":true,"mock":true,"taskType":"brand_voice_v1",
- * "note":"hermetic-mock"}`, which never contains the tenant's business name
- * or any brand-voice tone. Verified EMPIRICALLY (not assumed from reading
- * source) with a standalone probe calling
- * `createHermeticMockLLMGateway()` + `composeBrandVoiceMessage()` directly
- * with a settings repo stub carrying a real `business_name` — the probe's
- * output is quoted verbatim in the lane report. Everything else the row
- * asks for (the unavailable block, exactly one proposal PER appointment,
- * the audit row, same-day idempotency, the unregistered-number refusal, and
+ * "note":"hermetic-mock"}`, which never contained the tenant's business name
+ * or any brand-voice tone. Fixed with a deterministic `brand_voice_v1`
+ * branch that reads the SYSTEM message `buildBrandVoicePrompt`
+ * (ai/brand-voice/prompts.ts) renders the tenant's tone into
+ * (`renderToneAuthority`'s `The business name is "..."` line), returning
+ * plain tenant-voiced text — mock-only, `composeBrandVoiceMessage` itself is
+ * unchanged. Separately, `provisionTenant`'s `businessName` option only ever
+ * set the plain `tenant_settings.business_name` column, never the
+ * `tenant_settings.brand_voice` JSONB `readToneFromSettings` actually reads
+ * — this spec's `beforeAll` now seeds `brand_voice` directly (same pattern
+ * as the `timezone` override below) so there is a real per-tenant business
+ * name for ANY model, real or mock, to render. Everything else the row asks
+ * for (the unavailable block, exactly one proposal PER appointment, the
+ * audit row, same-day idempotency, the unregistered-number refusal, and
  * full tenant isolation of data AND of a per-tenant config value) is proven
  * below the normal way, through the real webhook and real Postgres.
  */
@@ -137,6 +142,24 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
     // own per-tenant CONFIG read, not just per-tenant data.
     await pool.query(`UPDATE tenant_settings SET timezone = $1 WHERE tenant_id = $2`, [A_TIMEZONE, tenantA.tenantId]);
     await pool.query(`UPDATE tenant_settings SET timezone = $1 WHERE tenant_id = $2`, [B_TIMEZONE, tenantB.tenantId]);
+    // #1132 — `provisionTenant`'s `businessName` option only sets the plain
+    // `tenant_settings.business_name` column (display/attribution use), NOT
+    // the `tenant_settings.brand_voice` JSONB `readToneFromSettings`
+    // (ai/brand-voice/composer.ts) actually reads to render the SYSTEM
+    // prompt's tone/business-name line — that column defaults to `{}` and is
+    // otherwise never populated by this fixture. Seed it here (same pattern
+    // as the timezone override above: per-tenant CONFIG, not action-faking)
+    // so `composeBrandVoiceMessage` has a real per-tenant business name to
+    // render — the SAME path a live model would read, exercising T3 (two
+    // tenants reading DIFFERENT per-tenant brand-voice config).
+    await pool.query(`UPDATE tenant_settings SET brand_voice = $1::jsonb WHERE tenant_id = $2`, [
+      JSON.stringify({ business_name: A_BUSINESS_NAME }),
+      tenantA.tenantId,
+    ]);
+    await pool.query(`UPDATE tenant_settings SET brand_voice = $1::jsonb WHERE tenant_id = $2`, [
+      JSON.stringify({ business_name: B_BUSINESS_NAME }),
+      tenantB.tenantId,
+    ]);
 
     ownerTokenA = devAuthBearerToken(tenantA.userId);
     ownerTokenB = devAuthBearerToken(tenantB.userId);
@@ -263,27 +286,13 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
   });
 
   test(
-    'KNOWN GAP — each reschedule SMS draft should carry the tenant\'s brand voice / business name (expected to fail under this repo\'s hermetic AI mock)',
+    "each reschedule SMS draft carries the tenant's brand voice / business name (#1132 fixed)",
     async ({ request }) => {
-      test.fail(
-        true,
-        'packages/api/src/ai/providers/mock.ts scriptHermeticResponse has no branch for ' +
-          "taskType 'brand_voice_v1' (BRAND_VOICE_TASK_TYPE, ai/prompt-registry.ts:133); " +
-          'composeBrandVoiceMessage (ai/brand-voice/composer.ts) uses the gateway response ' +
-          'VERBATIM as the SMS text (only banned-phrase stripping + a char-cap trim run in ' +
-          'code), so under the hermetic no-AI_PROVIDER_API_KEY boot every brand-voice draft ' +
-          'is the generic catch-all {"ok":true,"mock":true,"taskType":"brand_voice_v1",' +
-          '"note":"hermetic-mock"} — never the tenant\'s business name or tone. Verified ' +
-          'empirically (standalone probe of createHermeticMockLLMGateway + ' +
-          'composeBrandVoiceMessage; output quoted in the lane report). Product code ' +
-          '(mock.ts) is out of scope for this TEST-ONLY lane — filing is Fable\'s call.',
-      );
-
       const { data } = await rescheduleProposals(request, ownerTokenA);
       for (const p of data) {
         expect(
           p.sourceContext?.draftSms,
-          `proposal ${p.id}'s draftSms should mention tenant A's business name once brand voice is wired hermetically`,
+          `proposal ${p.id}'s draftSms should mention tenant A's business name`,
         ).toContain(A_BUSINESS_NAME);
       }
     },
@@ -360,6 +369,14 @@ test.describe('#1017 row 4.8 — a verified tech OUT reaches unavailable-block +
     const { data: proposalsB } = await rescheduleProposals(request, ownerTokenB);
     expect(proposalsB).toHaveLength(1);
     expect(proposalsB[0]!.targetEntityId).toBe(apptB1);
+    // T3 (#1132) — tenant B's draft is composed from tenant B's OWN
+    // brand-voice config (business name), never tenant A's, proving the
+    // per-tenant CONFIG read, not just per-tenant data.
+    expect(
+      proposalsB[0]!.sourceContext?.draftSms,
+      "tenant B's draftSms should carry tenant B's business name, never tenant A's",
+    ).toContain(B_BUSINESS_NAME);
+    expect(proposalsB[0]!.sourceContext?.draftSms).not.toContain(A_BUSINESS_NAME);
 
     const auditB = await pool.query(
       `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'tech_status.recorded' AND actor_id = $2`,

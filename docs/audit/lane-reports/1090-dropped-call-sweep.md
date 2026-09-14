@@ -431,6 +431,51 @@ $ cd packages/api && npx vitest run test/middleware/tenant-context.test.ts --rep
       Tests  24 passed (24)
 ```
 
+### Second review round (Codex, two P1s) — one real, one that did not reproduce
+
+**P1 "Drain sweeps before consuming the force-exit budget" — real, fixed.**
+Arithmetic, and it checks out: the voice drain alone may take
+`DRAIN_TIMEOUT_MS` (25s default, `app.ts:7114`), the sweep drain was appended
+*after* it at 5s, and `index.ts:13` arms a single `SHUTDOWN_FORCE_EXIT_MS`
+(30s default) over the whole sequence. With a live voice session running to its
+deadline the process could be force-exited during the sweep drain — or before
+`pool.end()` — which is the exact outcome this drain exists to prevent. Fixed
+by starting the drain immediately after the intervals are cleared and awaiting
+it just before `pool.end()`: it now OVERLAPS the voice drain rather than adding
+to it, so it costs nothing against the backstop (both are only waiting).
+
+**P1 "Avoid replying directly from the client error event" — premise correct,
+stated harm did not reproduce.** The premise is right: when a query is in
+flight, `pg` raises both ways at once — `_handleErrorEvent` calls
+`_errorAllQueries` (rejecting the handler's own await, which flows through
+`asyncRoute` into the error pipeline) and *then* emits the event. And the
+global handler at `app.ts:7010` did lack a `headersSent` guard, so a second
+write was genuinely attempted.
+
+But the predicted consequence — `ERR_HTTP_HEADERS_SENT`, Express destroying the
+socket, a truncated response — does not occur in this stack. Driven against
+real Postgres (terminate the backend with `pg_sleep(5)` in flight, the real
+`asyncRoute`, and a replica of the global handler deliberately WITHOUT the
+guard), the caller got one complete, readable 500, no error reached the
+trailing error handler, and no unhandled rejection fired. The reason is that
+Express's `res.json` → `res.send` only calls `set('Content-Type', …)` when the
+header is not already present; the first response set it, so the second write
+never reaches `setHeader` after headers are sent, and the trailing `end()` is
+inert.
+
+Kept two changes anyway, as hardening rather than as a bug fix, and labelled as
+such:
+
+| File | Change |
+| --- | --- |
+| `middleware/tenant-context.ts` | The connection-lost answer is deferred by one turn and stands down if anything has started responding. The route's own error is the better answer whenever it exists (it says what actually failed, not a generic "connection terminated"), and the middleware now fires only for the case with no other reporter — the handler awaiting something non-DB. |
+| `app.ts` (global error handler) | The standard `headersSent` guard, which `asyncRoute:13` already has: end cleanly instead of writing a second response. Cheap insurance against the orderings the deferral cannot win, and against any other double-response cause. |
+
+`test/integration/request-transaction-connection-lost.test.ts`'s second case is
+a **regression pin, not a RED/GREEN** — it passed both before and after, and is
+honestly described here as such. It would catch a future change that makes the
+double write actually harmful.
+
 ---
 
 ## Not done
