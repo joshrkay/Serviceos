@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 54,
+  "ownerOnlyRoutes": 55,
   "daily": 2,
   "onboarding": 6,
-  "occasional": 46,
+  "occasional": 47,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 6
 }
@@ -178,6 +178,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/` | occasional | The general settings write. Configuration, by definition. | false | none | |
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |
 | `PUT /api/settings/capabilities/:key` | occasional | Per-tenant capability flags (#1011). Configuration. | false | none | |
+| `PUT /api/settings/dunning` | occasional | The tenant's late-fee and dunning policy (#1143). Configuration set once and revisited rarely; the overdue sweep applies it with no owner action on a normal day. | false | none | |
 | `PUT /api/settings/packs/:packId/activate` | occasional | Vertical-pack activation. | false | none | |
 | `PUT /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken challenge. | false | none | |
 
