@@ -75,7 +75,7 @@ const PERMANENT_GATE_REASONS: ReadonlySet<SmsSuppressionReason> = new Set<SmsSup
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
-import { withSendClaim } from '../notifications/send-claim-ledger';
+import { withSendClaim, claimOnce } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
@@ -242,6 +242,18 @@ function thankYouClaimKey(jobId: string): string {
   return `thank_you_sms:${jobId}`;
 }
 
+/**
+ * #1140 — a DISTINCT claim_key namespace from `thankYouClaimKey`, used only
+ * to gate the `notification.thank_you_sms.sent` audit write itself (see
+ * `claimOnce` at the bottom of `sendOneThankYou`). The send-claim key above
+ * protects the PROVIDER call (at most one real SMS); this one protects the
+ * bookkeeping that follows it (at most one audit row), which can be reached
+ * by more than one caller once the send-claim is already `'sent'`.
+ */
+function thankYouAuditClaimKey(jobId: string): string {
+  return `thank_you_sms_audit:${jobId}`;
+}
+
 async function sendOneThankYou(
   deps: ThankYouSmsWorkerDeps,
   pool: Pool,
@@ -350,12 +362,35 @@ async function sendOneThankYou(
   await deps.jobRepo.update(tenantId, jobId, {
     thankYouSmsSentAt: (deps.now ?? (() => new Date()))(),
   });
-  await emitAudit(deps, {
-    tenantId,
-    jobId,
-    customerId: customer.id,
-    outcome: 'sent',
-  });
+
+  // #1140 — exactly one notification.thank_you_sms.sent audit event per job,
+  // however many code paths converge here for the SAME real send: this
+  // happy-path call (a claim this attempt itself just won), OR a reconcile
+  // (`claimResult.priorStatus === 'sent'` above) running because a prior
+  // attempt's own jobRepo.update/emitAudit hasn't landed yet — the
+  // eligibility SELECT and the stamp UPDATE are not in one transaction, so
+  // TWO overlapping sweep ticks can both observe thank_you_sms_sent_at IS
+  // NULL for the same already-'sent' claim and both reach this exact line.
+  // The send-claim ledger's own claimed→sending CAS only protects the
+  // PROVIDER call, not this bookkeeping, so it can't be reused directly here
+  // — but the same atomic primitive (send_claims' UNIQUE (tenant_id,
+  // claim_key), via claimOnce) can: a SEPARATE claim_key namespace turns
+  // "write the audit" itself into a claim, so only the first of any number
+  // of concurrent or sequential callers actually writes it. No migration —
+  // reuses the existing send_claims table.
+  if (await claimOnce(pool, tenantId, thankYouAuditClaimKey(jobId))) {
+    await emitAudit(deps, {
+      tenantId,
+      jobId,
+      customerId: customer.id,
+      outcome: 'sent',
+    });
+  } else {
+    deps.logger.info('Thank-you SMS sweep: audit already recorded for this send, skipping duplicate', {
+      tenantId,
+      jobId,
+    });
+  }
   return 'sent';
 }
 
