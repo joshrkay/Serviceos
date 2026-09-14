@@ -21,10 +21,25 @@ function jsonRes(ok: boolean, status: number, body: unknown) {
   return { ok, status, text: async () => JSON.stringify(body), json: async () => body };
 }
 
+/**
+ * #1109 — the saved-card branch binds `event.account` to the named tenant's
+ * own connected account, so the router is wired the way app.ts wires
+ * production: a resolver under which TENANT owns `acct_tenant` (the account
+ * the fixture events come from). A test can override it.
+ */
 function buildApp(deps: WebhookRouterDeps) {
   const app = express();
   app.use('/webhooks/stripe', express.raw({ type: '*/*' }));
-  app.use('/webhooks', createWebhookRouter({} as never, deps));
+  app.use(
+    '/webhooks',
+    createWebhookRouter({} as never, {
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async (tenantId: string) =>
+          tenantId === TENANT ? { accountId: 'acct_tenant', chargesEnabled: true } : null,
+      },
+      ...deps,
+    }),
+  );
   return app;
 }
 
@@ -38,12 +53,12 @@ async function postSigned(app: express.Express, body: Record<string, unknown>) {
 }
 
 function setupIntentSucceeded(
-  opts: { paymentMethod?: string; metadata?: Record<string, string> } = {},
+  opts: { paymentMethod?: string; metadata?: Record<string, string>; account?: string } = {},
 ): Record<string, unknown> {
   return {
     id: `evt_${uuidv4()}`,
     type: 'setup_intent.succeeded',
-    account: 'acct_tenant',
+    account: opts.account ?? 'acct_tenant',
     data: {
       object: {
         id: `seti_${uuidv4()}`,
@@ -127,5 +142,22 @@ describe('webhook: setup_intent.succeeded', () => {
     expect(saved).toHaveLength(1);
     expect(saved[0].stripePaymentMethodId).toBe('pm_nofetch');
     expect(saved[0].brand).toBeUndefined();
+  });
+
+  it('#1109 — refuses (403, nothing stored) a card saved on a connected account the tenant does not own', async () => {
+    const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
+    const app = buildApp({
+      stripeWebhookSecret: STRIPE_SECRET,
+      customerPaymentMethodRepo: cpmRepo,
+      stripeConfig: { apiKey: 'sk' },
+      stripeFetch: async () => jsonRes(true, 200, { id: 'pm_stranger', card: { brand: 'visa' } }),
+    });
+    const res = await postSigned(
+      app,
+      setupIntentSucceeded({ paymentMethod: 'pm_stranger', account: 'acct_somebody_else' }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_account_mismatch' });
+    expect(await cpmRepo.findByCustomer(TENANT, CUSTOMER)).toHaveLength(0);
   });
 });

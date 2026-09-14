@@ -33,10 +33,23 @@ const mockJob = {
 describe('TechJobView delay acknowledgement prompt', () => {
   beforeEach(() => {
     mockFetcher.mockReset();
-    // /api/jobs/j1 → job detail; /api/notes → empty list
+    // /api/jobs/j1 → job detail; /api/appointments?jobId=j1 → the one
+    // appointment backing this job (#1135 — the chip row needs an
+    // appointmentId to confirm against); running-late POST → 200 queued;
+    // /api/notes and everything else → empty list.
     mockFetcher.mockImplementation((path: string) => {
       if (path.startsWith('/api/jobs/')) {
         return Promise.resolve(new Response(JSON.stringify(mockJob), { status: 200 }));
+      }
+      if (path.startsWith('/api/appointments?jobId=')) {
+        return Promise.resolve(
+          new Response(JSON.stringify([{ id: 'appt-1', jobId: 'j1', status: 'scheduled' }]), { status: 200 }),
+        );
+      }
+      if (path === '/api/appointments/appt-1/running-late') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ appointmentId: 'appt-1', delayMinutes: 20, queued: true }), { status: 200 }),
+        );
       }
       return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
     });
@@ -80,6 +93,102 @@ describe('TechJobView delay acknowledgement prompt', () => {
     expect(chip15).toBeDisabled();
     expect(chip20).toBeDisabled();
     expect(chip60).toBeDisabled();
+    expect(chip20).not.toHaveClass('bg-primary');
+  });
+
+  // #1135 — the chip row was decorative: tapping 10/15/20/60 only set local
+  // component state and never called the running-late route. The chip tap
+  // must BE the one-tap confirm — no second dialog.
+  it('#1135 — tapping a delay chip posts the running-late notice with the minutes (one-tap confirm)', async () => {
+    mockFetcher.mockImplementation((path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(new Response(JSON.stringify(mockJob), { status: 200 }));
+      }
+      if (path.startsWith('/api/appointments?jobId=')) {
+        return Promise.resolve(
+          new Response(JSON.stringify([{ id: 'appt-1', jobId: 'j1', status: 'scheduled' }]), { status: 200 }),
+        );
+      }
+      if (path === '/api/appointments/appt-1/running-late') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ appointmentId: 'appt-1', delayMinutes: 20, queued: true }), { status: 200 }),
+        );
+      }
+      void init;
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+
+    render(
+      <MemoryRouter>
+        <TechJobView id="j1" />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText('Running behind?')).toBeInTheDocument());
+    // Let the appointment-id resolution (GET /api/appointments?jobId=j1)
+    // settle before tapping, mirroring how the real page has data by the
+    // time a technician can tap anything.
+    await waitFor(() =>
+      expect(mockFetcher.mock.calls.some(([p]) => String(p).startsWith('/api/appointments?jobId='))).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    fireEvent.click(screen.getByRole('button', { name: '20' }));
+
+    await waitFor(() =>
+      expect(
+        mockFetcher.mock.calls.some(([p]) => p === '/api/appointments/appt-1/running-late'),
+      ).toBe(true),
+    );
+    const runningLateCall = mockFetcher.mock.calls.find(
+      ([p]) => p === '/api/appointments/appt-1/running-late',
+    );
+    expect(runningLateCall).toBeDefined();
+    const [, callInit] = runningLateCall as [string, RequestInit];
+    expect(callInit.method).toBe('POST');
+    expect(JSON.parse(callInit.body as string)).toEqual({ delayMinutes: 20 });
+
+    // No second dialog: the chip tap is the confirm.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('#1135 — reverts the chip and surfaces an error when the running-late request fails', async () => {
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(new Response(JSON.stringify(mockJob), { status: 200 }));
+      }
+      if (path.startsWith('/api/appointments?jobId=')) {
+        return Promise.resolve(
+          new Response(JSON.stringify([{ id: 'appt-1', jobId: 'j1', status: 'scheduled' }]), { status: 200 }),
+        );
+      }
+      if (path === '/api/appointments/appt-1/running-late') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: 'FORBIDDEN' }), { status: 403 }),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+
+    render(
+      <MemoryRouter>
+        <TechJobView id="j1" />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText('Running behind?')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(mockFetcher.mock.calls.some(([p]) => String(p).startsWith('/api/appointments?jobId='))).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    const chip20 = screen.getByRole('button', { name: '20' });
+    fireEvent.click(chip20);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('tech-delay-error')).toHaveTextContent('HTTP 403'),
+    );
+    // Optimistic selection reverted on failure.
     expect(chip20).not.toHaveClass('bg-primary');
   });
 

@@ -10,38 +10,28 @@ import { hasViteClerkKey } from '../helpers/clerk-key';
  * 4.6 — "running late in one tap" (the chip row), real Postgres, no
  * DEV_AUTH_BYPASS (issue #1086).
  *
- * §12.4d honesty — this row's acceptance ("Given the chip row, when I tap
+ * #1135 FIXED — this row's acceptance ("Given the chip row, when I tap
  * 10/20/30, then the chip row is the confirm — no second dialog — and a
- * delay notice is written") is NOT met by the product. Two facts, read
- * directly off the running code:
+ * delay notice is written") is now met. Previously
+ * `packages/web/src/components/jobs/TechJobView.tsx`'s "Running behind?"
+ * card only set local `isRunningBehind`/`delayMinutes` state; tapping a chip
+ * never called `apiFetch`. The fix resolves the job's backing appointment
+ * (`GET /api/appointments?jobId=`, since jobs don't carry an appointmentId
+ * column) and, on chip tap, immediately posts
+ * `POST /api/appointments/:id/running-late` with `{ delayMinutes }` —
+ * optimistic chip selection, reverted with an error message on failure, no
+ * second dialog. This spec proves that end-to-end at real Postgres: the tap
+ * itself calls the route, the route's real audit row
+ * (`appointment.running_late_triggered`) lands, and — because this fixture
+ * gives the SAME technician a second, later appointment the same service
+ * day (what `NextCustomerSelector` requires to find a notify target) — a
+ * real `delay_notice_state` row lands too. T1: a neighbour tenant with its
+ * own technician/job is proven untouched.
  *
- *   1. The ONLY "chip row" in the app matching that description is
- *      `packages/web/src/components/jobs/TechJobView.tsx`'s "Running
- *      behind?" card (`isRunningBehind`/`delayMinutes` state, declared
- *      lines 684-685; the Yes/No + 10/15/20/60 buttons, lines ~1085-1123).
- *      Neither `isRunningBehind` nor `delayMinutes` is read ANYWHERE else
- *      in the file — `advanceStatus()` (the only function that calls the
- *      API on this screen, lines 808-843) never references them. Tapping
- *      a chip only changes local component state; it never calls
- *      `apiFetch`, never reaches `/api/appointments/:id/running-late`, and
- *      writes NOTHING to Postgres. This spec proves that with a live
- *      network capture: tapping "Yes" then "20" in Carlos's real browser
- *      session produces ZERO matching network requests.
- *   2. The ONE technician-facing surface that actually calls
- *      `POST /api/appointments/:id/running-late` is
- *      `packages/web/src/pages/technician/TechnicianDayView.tsx`'s GPS
- *      auto-detection heuristic (`markRunningLate`, lines 533-554),
- *      reached only through its own two-step delay-prompt dialog
- *      (`technician-day-delay-prompt` -> tap "Accept",
- *      `technician-day-delay-accept`, lines 679-707) — the opposite of
- *      "no second dialog", and not reachable by a deliberate one-tap
- *      chip at all. `packages/api/test/integration/running-late.test.ts`
- *      already proves the ROUTE's real Postgres behavior (audit row +
- *      consent-gated `delay_notice_state` row) once that dialog's Accept
- *      is reached; this spec does not re-prove the route (out of E2E
- *      browser-reachability scope) — it proves the CHIP ROW specifically
- *      is dead UI, and pins the gap. Flagged for Fable/Josh — see the lane
- *      report. Nothing here is faked: no SQL writes, no invented pass.
+ * `packages/api/test/integration/running-late.test.ts` already proves the
+ * ROUTE's Postgres behavior in isolation (in-memory-repo unit coverage plus
+ * a dedicated real-Postgres suite); this spec is the browser-reachability
+ * leg — proving the CHIP ROW itself is what drives it.
  *
  * Runs under the `chromium-noauthbypass` Playwright project only (see
  * playwright.config.ts's NO_AUTH_BYPASS_SPECS / technician-day-view.spec.ts's
@@ -236,13 +226,25 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
   );
 
   let apiCtx: APIRequestContext;
+  let owner: Awaited<ReturnType<typeof bootstrapOwnerTenant>>;
   let carlos: Awaited<ReturnType<typeof inviteAndJoinTechnician>>;
   let job: CreatedEntity;
+  let appointmentId: string;
+  let nextAppointmentId: string;
+  let neighbour: Awaited<ReturnType<typeof bootstrapOwnerTenant>>;
+
+  async function appointmentIdForJob(authHeaders: Record<string, string>, jobId: string): Promise<string> {
+    const res = await apiCtx.get(`${API_URL}/api/appointments?jobId=${jobId}`, { headers: authHeaders });
+    expect(res.ok(), `GET /api/appointments?jobId=${jobId} -> ${res.status()}: ${await res.text()}`).toBeTruthy();
+    const list = (await res.json()) as CreatedEntity[];
+    expect(list.length, `expected an appointment for job ${jobId}`).toBeGreaterThan(0);
+    return list[0].id;
+  }
 
   test.beforeAll(async () => {
     if (!canRun) return;
     apiCtx = await pwRequest.newContext();
-    const owner = await bootstrapOwnerTenant(apiCtx, 'chipowner');
+    owner = await bootstrapOwnerTenant(apiCtx, 'chipowner');
     carlos = await inviteAndJoinTechnician(apiCtx, owner.authHeaders, owner.tenantId, 'chiptech');
 
     const customer = await postJson(apiCtx, `${API_URL}/api/customers`, owner.authHeaders, {
@@ -274,24 +276,87 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
       timezone: 'Etc/UTC',
       technicianId: carlos.techId,
     });
+    appointmentId = await appointmentIdForJob(owner.authHeaders, job.id);
+
+    // `NextCustomerSelector` (delay-notifications.ts) resolves the delay
+    // notice to Carlos's NEXT appointment later the SAME service day — not
+    // the one the chip is tapped on — so a real `delay_notice_state` row
+    // requires a second, later appointment for the SAME technician with an
+    // SMS-reachable customer.
+    const nextCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, owner.authHeaders, {
+      firstName: 'ChipRowNext',
+      lastName: `Customer ${Date.now()}`,
+      primaryPhone: '555-0177',
+      email: `chiprownext+${Date.now()}@example.com`,
+      preferredChannel: 'sms',
+      smsConsent: true,
+      source: 'referral',
+    });
+    const nextLocation = await postJson(apiCtx, `${API_URL}/api/locations`, owner.authHeaders, {
+      customerId: nextCustomer.id,
+      label: 'Home',
+      street1: '9 Chip Row Ave',
+      city: 'Springfield',
+      state: 'IL',
+      postalCode: '62701',
+      isPrimary: true,
+    });
+    const nextJob = await postJson(apiCtx, `${API_URL}/api/jobs`, owner.authHeaders, {
+      customerId: nextCustomer.id,
+      locationId: nextLocation.id,
+      summary: 'Chip row NEXT test job',
+      priority: 'normal',
+      scheduledStart: `${todayStr}T14:00:00.000Z`,
+      durationMin: 60,
+      timezone: 'Etc/UTC',
+      technicianId: carlos.techId,
+    });
+    nextAppointmentId = await appointmentIdForJob(owner.authHeaders, nextJob.id);
+
+    // T1 — a neighbour tenant with its own owner/technician/job (divergent
+    // data), proven untouched by tenant A's running-late tap below.
+    neighbour = await bootstrapOwnerTenant(apiCtx, 'chipneighbour');
+    const neighbourTech = await inviteAndJoinTechnician(apiCtx, neighbour.authHeaders, neighbour.tenantId, 'chipneighbourtech');
+    const neighbourCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, neighbour.authHeaders, {
+      firstName: 'Neighbour',
+      lastName: `Customer ${Date.now()}`,
+      primaryPhone: '555-0188',
+      email: `neighbour+${Date.now()}@example.com`,
+      preferredChannel: 'sms',
+      smsConsent: true,
+      source: 'referral',
+    });
+    const neighbourLocation = await postJson(apiCtx, `${API_URL}/api/locations`, neighbour.authHeaders, {
+      customerId: neighbourCustomer.id,
+      label: 'Home',
+      street1: '1 Neighbour Ave',
+      city: 'Springfield',
+      state: 'IL',
+      postalCode: '62701',
+      isPrimary: true,
+    });
+    await postJson(apiCtx, `${API_URL}/api/jobs`, neighbour.authHeaders, {
+      customerId: neighbourCustomer.id,
+      locationId: neighbourLocation.id,
+      summary: 'Neighbour tenant job (untouched control)',
+      priority: 'normal',
+      scheduledStart: `${todayStr}T10:00:00.000Z`,
+      durationMin: 60,
+      timezone: 'Etc/UTC',
+      technicianId: neighbourTech.techId,
+    });
   });
 
   test.afterAll(async () => {
     await apiCtx?.dispose();
   });
 
-  test('tapping "Yes" then a delay chip (20) never calls any API — the chip row is decorative, dead UI', async ({
+  test('#1135 — tapping "Yes" then a delay chip (20) is the one-tap confirm: no second dialog, writes appointment.running_late_triggered + delay_notice_state, tenant B untouched (T1)', async ({
     page,
     baseURL,
   }) => {
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
-
-    const apiRequestsSeen: string[] = [];
-    page.on('request', (req) => {
-      const url = req.url();
-      if (url.includes('/api/')) apiRequestsSeen.push(`${req.method()} ${url}`);
-    });
 
     await installClerkStub(page, { signedIn: true, sub: carlos.sub, token: carlos.token });
     await page.addInitScript(
@@ -311,102 +376,65 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
     const runningBehindLabel = page.getByText('Running behind?', { exact: true });
     await expect(runningBehindLabel).toBeVisible({ timeout: 15_000 });
 
-    // Snapshot every /api/ request fired just to LOAD the screen, so the
-    // post-tap comparison below only counts NEW requests caused by the taps.
-    const requestsBeforeTap = apiRequestsSeen.length;
-
-    await page.getByRole('button', { name: 'Yes', exact: true }).click();
-    await page.getByRole('button', { name: '20', exact: true }).click();
-
-    // Give any async handler a real chance to fire before asserting absence.
-    await page.waitForTimeout(1500);
-
-    await page.screenshot({
-      path: `${REPORT_DIR}/4.6-chip-row-no-api-call.png`,
-      fullPage: true,
-    });
-
-    const requestsAfterTap = apiRequestsSeen.slice(requestsBeforeTap);
-    const delayRelated = requestsAfterTap.filter(
-      (r) => /running-late|en-route|delay/.test(r),
-    );
-    expect(
-      delayRelated,
-      'tapping the "Running behind?" chip row must not call any delay/running-late/en-route ' +
-        `endpoint today (it does not wire to anything) — saw: ${JSON.stringify(requestsAfterTap)}`,
-    ).toEqual([]);
-
-    expect(pageErrors, 'no uncaught page errors on the tech job view').toEqual([]);
-  });
-
-  test('KNOWN GAP — tapping a delay chip should be the one-tap confirm that writes a running-late notice', async ({
-    page,
-    baseURL,
-  }) => {
-    // Desired behavior per the §8.4 PRD row (acceptance: "Given the chip
-    // row, when I tap 10/20/30, then the chip row is the confirm — no
-    // second dialog — and a delay notice is written"). Root cause, read
-    // directly off the running code (this is a PRODUCT gap, not a test
-    // artifact — out of scope for this TEST-ONLY lane to fix):
-    //
-    //   packages/web/src/components/jobs/TechJobView.tsx:684-685 declares
-    //   `isRunningBehind` / `delayMinutes`; the chip buttons at
-    //   ~1085-1123 only call `setIsRunningBehind` / `setDelayMinutes`.
-    //   Neither state variable is read anywhere else in the file —
-    //   `advanceStatus()` (the file's ONLY function that calls `apiFetch`,
-    //   lines 808-843) never references them, and there is no other
-    //   effect/handler in the file that does either. A tap changes local
-    //   UI state and nothing else.
-    //
-    //   The only technician-facing UI that DOES call
-    //   `POST /api/appointments/:id/running-late` is
-    //   packages/web/src/pages/technician/TechnicianDayView.tsx:533
-    //   `markRunningLate()`, invoked from `sendDelayNotification()` (:556)
-    //   — itself only reachable via the GPS-triggered
-    //   `technician-day-delay-prompt` dialog's Accept button (:679-707,
-    //   `technician-day-delay-accept`). That IS a second dialog (the GPS
-    //   heuristic prompt, then Accept), the opposite of "no second
-    //   dialog", and it is not a deliberate one-tap chip at all.
-    //
-    // `packages/api/test/integration/running-late.test.ts` already proves
-    // the route itself (real Postgres: `appointment.running_late_triggered`
-    // audit + consent-gated `delay_notice_state` row) once THAT dialog's
-    // Accept is reached — this lane does not re-prove the route. Filed for
-    // Fable/Josh to ticket; not filed by this lane per §12.4d.
-    test.fail(
-      true,
-      'KNOWN PRODUCT GAP: TechJobView.tsx\'s "Running behind?" chip row ' +
-        '(delayMinutes/isRunningBehind, lines 684-685, 1085-1123) is never read by any ' +
-        'handler — tapping a chip calls no API and writes nothing. See the comment above.',
-    );
-
-    await installClerkStub(page, { signedIn: true, sub: carlos.sub, token: carlos.token });
-    await page.addInitScript(
-      ({ welcomeKey, whatsNewKey }) => {
-        try {
-          localStorage.setItem(welcomeKey, '1');
-          localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
-        } catch {
-          /* private mode — ignore */
-        }
-      },
-      { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
-    );
-    await blockExternalHosts(page, baseURL!);
-    await page.goto(`/jobs/${job.id}?view=tech`);
-    await expect(page.getByText('Running behind?', { exact: true })).toBeVisible({ timeout: 15_000 });
-
-    // Desired: tapping "Yes" then "20" fires POST .../running-late.
-    // Actual (today): nothing calls it, so this times out — the natural
-    // failure `test.fail()` above expects.
+    // The chip tap IS the confirm — wait for the running-late response
+    // triggered directly by the tap, with no intervening dialog.
     const runningLatePromise = page.waitForResponse(
       (r) => r.request().method() === 'POST' && /running-late/.test(new URL(r.url()).pathname),
-      { timeout: 5_000 },
+      { timeout: 10_000 },
     );
     await page.getByRole('button', { name: 'Yes', exact: true }).click();
+    // No second dialog appears between "Yes" and the delay chip.
+    await expect(page.getByRole('dialog')).toHaveCount(0);
     await page.getByRole('button', { name: '20', exact: true }).click();
 
     const res = await runningLatePromise;
-    expect(res.status(), 'once fixed, tapping a delay chip should call running-late and succeed').toBe(200);
+    expect(res.status(), 'tapping the delay chip must call running-late and succeed').toBe(200);
+    expect(new URL(res.request().url()).pathname).toBe(`/api/appointments/${appointmentId}/running-late`);
+    expect(JSON.parse(res.request().postData() ?? '{}')).toEqual({ delayMinutes: 20 });
+
+    // Still no dialog after the tap resolves.
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    await page.screenshot({
+      path: `${REPORT_DIR}/4.6-chip-row-one-tap-confirm.png`,
+      fullPage: true,
+    });
+
+    expect(pageErrors, 'no uncaught page errors on the tech job view').toEqual([]);
+
+    // #1133 workaround — poll until the audit/state rows the request wrote
+    // are visible (the transaction commits after the response is flushed).
+    const auditCount = queryScalarUntilNonEmpty(
+      `SELECT COUNT(*) FROM audit_events WHERE tenant_id = '${owner.tenantId}' ` +
+        `AND entity_id = '${appointmentId}' AND event_type = 'appointment.running_late_triggered';`,
+    );
+    expect(auditCount, 'a running_late_triggered audit row must land for the tapped appointment').toBe('1');
+
+    const auditMetadataDelay = queryScalar(
+      `SELECT metadata->>'delayMinutes' FROM audit_events WHERE tenant_id = '${owner.tenantId}' ` +
+        `AND entity_id = '${appointmentId}' AND event_type = 'appointment.running_late_triggered' LIMIT 1;`,
+    );
+    expect(auditMetadataDelay, 'the audit row must record the tapped delay (20 minutes)').toBe('20');
+
+    // delay_notice_state is keyed by the NEXT appointment (the one being
+    // notified about), not the one the chip was tapped on.
+    const noticeRow = queryScalarUntilNonEmpty(
+      `SELECT status || '|' || channel FROM delay_notice_state WHERE tenant_id = '${owner.tenantId}' ` +
+        `AND appointment_id = '${nextAppointmentId}';`,
+    );
+    // Status may already have progressed past 'queued' to 'sent' by the
+    // time this reads — the queue worker (transcription-worker) drains
+    // delay_notice_delivery messages in the same process and can win the
+    // race with this poll.
+    expect(noticeRow, 'a delay_notice_state row must land for the next appointment the notice targets').toMatch(
+      /^(queued|retrying|sent|fallback_in_app)\|(sms|in_app)$/,
+    );
+
+    // T1 — the neighbour tenant's audit table is untouched by this tap.
+    const neighbourAuditCount = queryScalar(
+      `SELECT COUNT(*) FROM audit_events WHERE tenant_id = '${neighbour.tenantId}' ` +
+        `AND event_type = 'appointment.running_late_triggered';`,
+    );
+    expect(neighbourAuditCount, 'tenant B (neighbour) must see zero running-late audit rows').toBe('0');
   });
 });
