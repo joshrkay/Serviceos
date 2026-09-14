@@ -1384,8 +1384,17 @@ export function createExecutionHandlerRegistry(deps?: {
       // QA-2026-07-28 — enables the tenant-scoped customer existence check
       // (the jobId check uses jobRepo, already threaded above).
       deps?.customerRepo,
+      // #1203 — refuses a whole-estimate draft for an estimate a milestone plan bills.
+      deps?.scheduleRepo,
     ),
-    new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
+    new CreateInvoiceScheduleExecutionHandler(
+      deps?.scheduleRepo,
+      deps?.invoiceRepo,
+      deps?.settingsRepo,
+      deps?.estimateRepo,
+      // #1203 — notes invoices without an estimate on the approved plan.
+      deps?.proposalRepo,
+    ),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
     new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),

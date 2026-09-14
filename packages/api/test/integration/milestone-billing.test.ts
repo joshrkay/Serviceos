@@ -38,6 +38,8 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { CreateInvoiceScheduleExecutionHandler } from '../../src/proposals/execution/invoice-schedule-handler';
 import { mintCompletionMilestones } from '../../src/invoices/schedule-completion';
 import { InvoiceMilestone } from '../../src/invoices/invoice-schedule';
@@ -69,6 +71,7 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
   let locationRepo: PgLocationRepository;
   let settingsRepo: PgSettingsRepository;
   let auditRepo: PgAuditRepository;
+  let estimateRepo: PgEstimateRepository;
   let handler: CreateInvoiceScheduleExecutionHandler;
 
   async function seedJob(milestoneBillingEnabled: boolean): Promise<SeededJob> {
@@ -133,6 +136,21 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
       createdAt: now,
       updatedAt: now,
     });
+    // #1203 — a plan bills the job's single accepted estimate (recorded on the schedule).
+    const items = [buildLineItem(uuidv4(), 'Big staged job', 1, SCHEDULE_TOTAL_CENTS, 0, true)];
+    await estimateRepo.create({
+      id: uuidv4(),
+      tenantId,
+      jobId,
+      estimateNumber: `EST-${jobId.slice(0, 8)}`,
+      status: 'accepted',
+      lineItems: items,
+      totals: calculateDocumentTotals(items, 0, 0),
+      version: 1,
+      createdBy: userId,
+      createdAt: now,
+      updatedAt: now,
+    });
     return { tenantId, userId, jobId, job };
   }
 
@@ -177,10 +195,12 @@ describe('Postgres integration — milestone billing persisted (§8.11)', () => 
     locationRepo = new PgLocationRepository(pool);
     settingsRepo = new PgSettingsRepository(pool);
     auditRepo = new PgAuditRepository(pool);
+    estimateRepo = new PgEstimateRepository(pool);
     handler = new CreateInvoiceScheduleExecutionHandler(
       scheduleRepo,
       invoiceRepo,
       settingsRepo,
+      estimateRepo,
     );
   });
 

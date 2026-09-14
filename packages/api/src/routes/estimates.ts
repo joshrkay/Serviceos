@@ -44,6 +44,7 @@ import { JobRepository } from '../jobs/job';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { convertEstimateToInvoice } from '../invoices/convert-estimate';
+import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { applyBps, resolveSelectedLineItems } from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
@@ -120,6 +121,9 @@ export function createEstimateRouter(
   // (resolved estimate → job → customer) so the UI stops rendering the
   // literal "Customer" fallback. Optional so legacy harnesses build.
   customerRepo?: CustomerRepository,
+  // #1203 — convert-to-invoice refuses an estimate billed by a milestone plan.
+  // Optional so legacy harnesses build (the check is skipped when absent).
+  scheduleRepo?: InvoiceScheduleRepository,
 ): Router {
   const router = Router();
 
@@ -730,6 +734,7 @@ export function createEstimateRouter(
           moneyStateDeps: refreshDeps,
           actorId: req.auth!.userId,
           logger,
+          scheduleRepo,
         });
         if (!invoice) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
