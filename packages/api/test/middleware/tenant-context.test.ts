@@ -740,7 +740,10 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
 });
 
 describe('#1133 — the request transaction settles BEFORE the response leaves', () => {
-  const nextMacrotask = () => new Promise<void>((r) => setImmediate(r));
+  const nextMacrotask = () =>
+    new Promise<void>((r) => {
+      setImmediate(r);
+    });
 
   it('COMMIT has completed before the response is flushed (finish)', async () => {
     const order: string[] = [];
