@@ -46,6 +46,12 @@ const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
 });
 
+// #1139 (row 9.9) — POST /:id/undo body. Absent scope keeps the approval-undo
+// contract; 'lessons' reverses an executed proposal's correction lessons.
+const undoProposalBodySchema = z.object({
+  scope: z.enum(['approval', 'lessons']).optional(),
+});
+
 // §5.5 — how far back the inbox surfaces expired schedule cards. Operators
 // re-propose recent lapses; bounding the window keeps the response from growing
 // as expired history accumulates (the cards are still re-proposable via the
@@ -428,6 +434,9 @@ export function createProposalsRouter(
     requireTenant,
     requirePermission('proposals:approve'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      // #1139 — optional `{ scope: 'lessons' }` reverses the correction
+      // lessons an EXECUTED proposal recorded; no body = the approval undo.
+      const { scope } = validate(undoProposalBodySchema, req.body ?? {});
       const result = await undoProposal(
         proposalRepo,
         req.auth!.tenantId,
@@ -436,6 +445,7 @@ export function createProposalsRouter(
         req.auth!.role as Role,
         auditRepo,
         undoCorrectionLoop,
+        { scope },
       );
       res.json(result);
     })
