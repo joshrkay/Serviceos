@@ -20,6 +20,29 @@
  * `legal_hold = true` rows are exempt unconditionally (excluded by the
  * repo's due-query, mirroring the migration's partial index).
  *
+ * #1202 — unattached transcript turns. `persistTurn` (voice-session-store)
+ * writes mid-call turns with `voice_recording_id` NULL; only the recording
+ * webhook's `attachRecording` links them to a recording. A call that never
+ * gets one (Media Streams, missing storage/Twilio credentials, a failed
+ * upload) would otherwise keep its transcript forever, so the sweep also
+ * deletes unattached turns whose own `created_at` is past the tenant's
+ * horizon, and audits each call as `voice_session.transcript_purged`.
+ *   - Legal hold: an unattached turn has no recording, so there is no
+ *     `legal_hold` flag to honour. Attached turns are never touched by this
+ *     path; they leave only with their recording (`purgeDerived`), so a held
+ *     recording keeps its turns.
+ *   - Ingestion window: the recording webhook attaches within minutes and the
+ *     horizon is at least one day (`recording_retention_days > 0`), so a row
+ *     still waiting for its recording is never past the horizon. A row still
+ *     unattached past the horizon is treated as a call that never got a
+ *     recording. A concurrent attach is safe: the DELETE re-checks
+ *     `voice_recording_id IS NULL` on the row version it locks, so a row
+ *     attached first is left for the recording path.
+ *   - Same conventions as the recording drain: cross-tenant selection
+ *     (`withCrossTenantSweep`), tenant-scoped bounded deletes, and one
+ *     tenant's failure is logged and retried next sweep without stopping the
+ *     rest.
+ *
  * Pattern: cross-tenant batch drain like dropped-call-worker — per-row
  * failures are logged and left unpurged for the next sweep; the table query
  * is the queue. app.ts drives the cadence behind `runAsLeader`
@@ -33,6 +56,12 @@ import type { Logger } from '../logging/logger';
 
 /** Default rows purged per sweep — bounds S3 round-trips under a backlog. */
 export const RECORDING_RETENTION_SWEEP_BATCH = 50;
+
+/** #1202 — tenants with expired unattached transcript turns served per sweep. */
+export const UNATTACHED_TURN_SWEEP_TENANT_LIMIT = 100;
+
+/** #1202 — unattached transcript turns deleted per tenant per sweep. */
+export const UNATTACHED_TURN_SWEEP_BATCH = 1000;
 
 /** A purgeable recording (joined with its files row for the object key). */
 export interface PurgeableRecording {
@@ -51,6 +80,14 @@ export interface PurgedDerivedCounts {
   knowledgeChunks: number;
 }
 
+/** #1202 — one call's unattached transcript turns removed by `purgeUnattachedTurns`. */
+export interface PurgedUnattachedCall {
+  /** Always set by `persistTurn`; null only for a row written outside it. */
+  callSid: string | null;
+  transcriptTurns: number;
+  oldestTurnAt: Date;
+}
+
 export interface RecordingRetentionRepository {
   /**
    * Cross-tenant: recordings past their tenant's retention horizon that are
@@ -66,6 +103,22 @@ export interface RecordingRetentionRepository {
   purgeDerived(tenantId: string, id: string): Promise<PurgedDerivedCounts>;
   /** Stamp the tombstone. Idempotent (`purged_at IS NULL` guard). */
   markPurged(tenantId: string, id: string, purgedAt: Date): Promise<void>;
+  /**
+   * #1202 — cross-tenant: tenants holding `call_transcript_turns` rows with
+   * no recording whose `created_at` is past the tenant's horizon, oldest
+   * backlog first.
+   */
+  findTenantsWithDueUnattachedTurns(now: Date, limit: number): Promise<string[]>;
+  /**
+   * #1202 — delete up to `limit` of the tenant's unattached turns past its
+   * horizon (oldest first) in one tenant-scoped transaction, grouped per call
+   * for the audit row. Never touches a turn that has a recording.
+   */
+  purgeUnattachedTurns(
+    tenantId: string,
+    now: Date,
+    limit: number,
+  ): Promise<PurgedUnattachedCall[]>;
 }
 
 export class PgRecordingRetentionRepository
@@ -153,6 +206,94 @@ export class PgRecordingRetentionRepository
       };
     });
   }
+
+  async findTenantsWithDueUnattachedTurns(now: Date, limit: number): Promise<string[]> {
+    // Cross-tenant selection, same role convention as findDue. Driven from
+    // tenant_settings (one row per tenant) with a LATERAL probe, so each
+    // tenant is an index range scan on idx_call_transcript_turns_tenant
+    // (tenant_id, created_at) below its own horizon rather than a full scan
+    // of the turns table every hour.
+    return this.withCrossTenantSweep(async (client) => {
+      const { rows } = await client.query(
+        `SELECT ts.tenant_id
+           FROM tenant_settings ts
+           CROSS JOIN LATERAL (
+             SELECT ctt.created_at
+               FROM call_transcript_turns ctt
+              WHERE ctt.tenant_id = ts.tenant_id
+                AND ctt.voice_recording_id IS NULL
+                AND ctt.created_at <
+                    $1::timestamptz - make_interval(days => ts.recording_retention_days)
+              ORDER BY ctt.created_at ASC
+              LIMIT 1
+           ) oldest
+          ORDER BY oldest.created_at ASC
+          LIMIT $2`,
+        [now, limit],
+      );
+      return rows.map((row) => String(row.tenant_id));
+    });
+  }
+
+  async purgeUnattachedTurns(
+    tenantId: string,
+    now: Date,
+    limit: number,
+  ): Promise<PurgedUnattachedCall[]> {
+    // Tenant-scoped. The horizon is re-read from tenant_settings inside the
+    // DELETE, so a retention change between selection and deletion is
+    // honoured. The outer `voice_recording_id IS NULL` is re-evaluated against
+    // the row version the DELETE locks, so a turn attachRecording linked
+    // concurrently is skipped rather than deleted from under its recording.
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `DELETE FROM call_transcript_turns t
+          USING (
+            SELECT ctt.id
+              FROM call_transcript_turns ctt
+              JOIN tenant_settings ts ON ts.tenant_id = ctt.tenant_id
+             WHERE ctt.tenant_id = $1
+               AND ctt.voice_recording_id IS NULL
+               AND ctt.created_at <
+                   $2::timestamptz - make_interval(days => ts.recording_retention_days)
+             ORDER BY ctt.created_at ASC
+             LIMIT $3
+          ) due
+          WHERE t.id = due.id
+            AND t.tenant_id = $1
+            AND t.voice_recording_id IS NULL
+          RETURNING t.call_sid, t.created_at`,
+        [tenantId, now, limit],
+      );
+      return groupPurgedTurnsByCall(
+        rows.map((row) => ({
+          callSid: (row.call_sid as string | null) ?? null,
+          createdAt: new Date(row.created_at as string),
+        })),
+      );
+    });
+  }
+}
+
+/** #1202 — fold deleted turn rows into one audit entry per call. */
+function groupPurgedTurnsByCall(
+  turns: ReadonlyArray<{ callSid: string | null; createdAt: Date }>,
+): PurgedUnattachedCall[] {
+  const byCall = new Map<string | null, PurgedUnattachedCall>();
+  for (const turn of turns) {
+    const call = byCall.get(turn.callSid);
+    if (!call) {
+      byCall.set(turn.callSid, {
+        callSid: turn.callSid,
+        transcriptTurns: 1,
+        oldestTurnAt: turn.createdAt,
+      });
+    } else {
+      call.transcriptTurns += 1;
+      if (turn.createdAt < call.oldestTurnAt) call.oldestTurnAt = turn.createdAt;
+    }
+  }
+  return [...byCall.values()];
 }
 
 /** In-memory implementation for unit tests. */
@@ -172,7 +313,38 @@ export class InMemoryRecordingRetentionRepository
         retentionDays: number;
       }
     > = [],
+    /** #1202 — call_transcript_turns rows with no recording. */
+    public unattachedTurns: Array<{
+      tenantId: string;
+      callSid: string | null;
+      createdAt: Date;
+      retentionDays: number;
+    }> = [],
   ) {}
+
+  private dueUnattachedTurns(now: Date) {
+    return this.unattachedTurns
+      .filter(
+        (t) => t.createdAt.getTime() < now.getTime() - t.retentionDays * 24 * 3600 * 1000,
+      )
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  }
+
+  async findTenantsWithDueUnattachedTurns(now: Date, limit: number): Promise<string[]> {
+    return [...new Set(this.dueUnattachedTurns(now).map((t) => t.tenantId))].slice(0, limit);
+  }
+
+  async purgeUnattachedTurns(
+    tenantId: string,
+    now: Date,
+    limit: number,
+  ): Promise<PurgedUnattachedCall[]> {
+    const doomed = this.dueUnattachedTurns(now)
+      .filter((t) => t.tenantId === tenantId)
+      .slice(0, limit);
+    this.unattachedTurns = this.unattachedTurns.filter((t) => !doomed.includes(t));
+    return groupPurgedTurnsByCall(doomed);
+  }
 
   async purgeDerived(tenantId: string, id: string): Promise<PurgedDerivedCounts> {
     this.derivedPurged.push({ tenantId, id });
@@ -217,6 +389,8 @@ export interface RecordingRetentionWorkerDeps {
   auditRepo?: AuditRepository;
   logger: Logger;
   batchSize?: number;
+  /** #1202 — unattached transcript turns deleted per tenant per sweep. */
+  unattachedTurnBatchSize?: number;
   now?: () => Date;
 }
 
@@ -224,6 +398,77 @@ export interface RecordingRetentionSweepResult {
   due: number;
   purged: number;
   failed: number;
+  /** #1202 — call_transcript_turns rows with no recording deleted past the horizon. */
+  unattachedTurnsPurged: number;
+  /** #1202 — tenants whose unattached-turn purge failed (retried next sweep). */
+  unattachedTurnTenantsFailed: number;
+}
+
+/**
+ * #1202 — the unattached-turn phase of the sweep. A tenant whose purge fails
+ * is logged and keeps its rows for the next sweep; the other tenants continue.
+ * Never throws.
+ */
+async function purgeUnattachedTranscriptTurns(
+  deps: RecordingRetentionWorkerDeps,
+  now: () => Date,
+): Promise<
+  Pick<RecordingRetentionSweepResult, 'unattachedTurnsPurged' | 'unattachedTurnTenantsFailed'>
+> {
+  const batchSize = deps.unattachedTurnBatchSize ?? UNATTACHED_TURN_SWEEP_BATCH;
+  let tenantIds: string[];
+  try {
+    tenantIds = await deps.repo.findTenantsWithDueUnattachedTurns(
+      now(),
+      UNATTACHED_TURN_SWEEP_TENANT_LIMIT,
+    );
+  } catch (err) {
+    deps.logger.error('recording-retention sweep: unattached-turn tenant selection failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { unattachedTurnsPurged: 0, unattachedTurnTenantsFailed: 0 };
+  }
+
+  let unattachedTurnsPurged = 0;
+  let unattachedTurnTenantsFailed = 0;
+  for (const tenantId of tenantIds) {
+    let calls: PurgedUnattachedCall[];
+    try {
+      calls = await deps.repo.purgeUnattachedTurns(tenantId, now(), batchSize);
+    } catch (err) {
+      unattachedTurnTenantsFailed++;
+      deps.logger.warn('recording-retention sweep: unattached-turn purge failed for tenant', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    for (const call of calls) {
+      unattachedTurnsPurged += call.transcriptTurns;
+      if (!deps.auditRepo) continue;
+      try {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: 'recording-retention-worker',
+            actorRole: 'system',
+            eventType: 'voice_session.transcript_purged',
+            entityType: call.callSid ? 'voice_session' : 'tenant',
+            entityId: call.callSid ?? tenantId,
+            metadata: {
+              callSid: call.callSid,
+              reason: 'no_recording_past_retention',
+              oldestTurnAt: call.oldestTurnAt.toISOString(),
+              derivedPurged: { transcriptTurns: call.transcriptTurns },
+            },
+          }),
+        );
+      } catch {
+        /* audit is best-effort; the purge already happened */
+      }
+    }
+  }
+  return { unattachedTurnsPurged, unattachedTurnTenantsFailed };
 }
 
 /**
@@ -243,7 +488,9 @@ export async function runRecordingRetentionSweep(
     deps.logger.error('recording-retention sweep: findDue failed', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { due: 0, purged: 0, failed: 0 };
+    // #1202 — a separate selection; a failed recording query doesn't skip it.
+    const unattached = await purgeUnattachedTranscriptTurns(deps, now);
+    return { due: 0, purged: 0, failed: 0, ...unattached };
   }
 
   let purged = 0;
@@ -298,10 +545,15 @@ export async function runRecordingRetentionSweep(
     }
   }
 
+  // #1202 — turns that never got a recording (never reached by the drain
+  // above, which only deletes turns linked to a due recording).
+  const unattached = await purgeUnattachedTranscriptTurns(deps, now);
+
   deps.logger.info('recording-retention sweep completed', {
     due: due.length,
     purged,
     failed,
+    ...unattached,
   });
-  return { due: due.length, purged, failed };
+  return { due: due.length, purged, failed, ...unattached };
 }

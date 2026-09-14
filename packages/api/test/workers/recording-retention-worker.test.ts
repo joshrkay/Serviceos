@@ -16,6 +16,9 @@ const noopLogger = {
   debug: () => undefined,
 } as never;
 
+/** #1202 — sweeps with no unattached transcript turns report zero for that phase. */
+const NO_UNATTACHED = { unattachedTurnsPurged: 0, unattachedTurnTenantsFailed: 0 };
+
 function ageDays(days: number): Date {
   return new Date(NOW.getTime() - days * 24 * 3600 * 1000);
 }
@@ -63,7 +66,7 @@ describe('RV-132 — recording retention sweep', () => {
       now: () => NOW,
     });
 
-    expect(result).toEqual({ due: 1, purged: 1, failed: 0 });
+    expect(result).toEqual({ due: 1, purged: 1, failed: 0, ...NO_UNATTACHED });
     expect(deleteObject).toHaveBeenCalledWith('bkt', 't1/old-1.mp3');
     expect(repo.rows.find((r) => r.id === 'old-1')?.purgedAt).toEqual(NOW);
     expect(repo.rows.find((r) => r.id === 'fresh-1')?.purgedAt).toBeNull();
@@ -135,7 +138,7 @@ describe('RV-132 — recording retention sweep', () => {
       logger: noopLogger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 2, purged: 1, failed: 1 });
+    expect(result).toEqual({ due: 2, purged: 1, failed: 1, ...NO_UNATTACHED });
     expect(repo.rows.find((r) => r.id === 'flaky-1')?.purgedAt).toBeNull();
     expect(repo.rows.find((r) => r.id === 'ok-1')?.purgedAt).toEqual(NOW);
   });
@@ -150,7 +153,7 @@ describe('RV-132 — recording retention sweep', () => {
       storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
       logger: noopLogger,
     });
-    expect(result).toEqual({ due: 0, purged: 0, failed: 0 });
+    expect(result).toEqual({ due: 0, purged: 0, failed: 0, ...NO_UNATTACHED });
   });
 
   it('respects the batch bound', async () => {
@@ -180,7 +183,7 @@ describe('RV-132 — recording retention sweep', () => {
       logger: noopLogger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 1, purged: 1, failed: 0 });
+    expect(result).toEqual({ due: 1, purged: 1, failed: 0, ...NO_UNATTACHED });
     expect(repo.rows[0].purgedAt).toEqual(NOW);
   });
 });
@@ -205,7 +208,7 @@ describe('C6 derived-data purge', () => {
       logger: noopLogger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 1, purged: 1, failed: 0 });
+    expect(result).toEqual({ due: 1, purged: 1, failed: 0, ...NO_UNATTACHED });
     expect(repo.derivedPurged).toEqual([{ tenantId: 't1', id: 'rec-1' }]);
     expect(repo.rows[0].purgedAt).toEqual(NOW);
     const audit = auditRepo.create.mock.calls[0][0];
@@ -228,7 +231,122 @@ describe('C6 derived-data purge', () => {
       logger: noopLogger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 1, purged: 0, failed: 1 });
+    expect(result).toEqual({ due: 1, purged: 0, failed: 1, ...NO_UNATTACHED });
     expect(repo.rows[0].purgedAt).toBeFalsy();
+  });
+});
+
+// ─── #1202 — transcript turns that never got a recording ─────────────────────
+
+describe('#1202 unattached transcript-turn purge', () => {
+  function turn(tenantId: string, callSid: string | null, age: number, retentionDays = 30) {
+    return { tenantId, callSid, createdAt: ageDays(age), retentionDays };
+  }
+
+  it('purges per tenant horizon, counts the rows, and audits one event per call', async () => {
+    const repo = new InMemoryRecordingRetentionRepository(
+      [],
+      [
+        turn('tA', 'CA-old', 31),
+        turn('tA', 'CA-old', 32),
+        turn('tA', 'CA-fresh', 1),
+        turn('tB', 'CA-b', 31, 90),
+      ],
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      auditRepo,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({
+      due: 0,
+      purged: 0,
+      failed: 0,
+      unattachedTurnsPurged: 2,
+      unattachedTurnTenantsFailed: 0,
+    });
+    expect(repo.unattachedTurns.map((t) => t.callSid)).toEqual(['CA-fresh', 'CA-b']);
+    const events = auditRepo.getAll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId: 'tA',
+      actorId: 'recording-retention-worker',
+      actorRole: 'system',
+      eventType: 'voice_session.transcript_purged',
+      entityType: 'voice_session',
+      entityId: 'CA-old',
+    });
+    expect(events[0].metadata).toEqual({
+      callSid: 'CA-old',
+      reason: 'no_recording_past_retention',
+      oldestTurnAt: ageDays(32).toISOString(),
+      derivedPurged: { transcriptTurns: 2 },
+    });
+  });
+
+  it('a tenant whose purge throws is counted and logged; the next tenant is still purged', async () => {
+    const repo = new InMemoryRecordingRetentionRepository(
+      [],
+      [turn('t-doomed', 'CA-1', 60), turn('t-ok', 'CA-2', 40)],
+    );
+    const real = repo.purgeUnattachedTurns.bind(repo);
+    repo.purgeUnattachedTurns = async (tenantId, now, limit) => {
+      if (tenantId === 't-doomed') throw new Error('delete failed');
+      return real(tenantId, now, limit);
+    };
+    const warn = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      logger: { ...(noopLogger as object), warn } as never,
+      now: () => NOW,
+    });
+    expect(result.unattachedTurnTenantsFailed).toBe(1);
+    expect(result.unattachedTurnsPurged).toBe(1);
+    expect(repo.unattachedTurns.map((t) => t.tenantId)).toEqual(['t-doomed']);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: unattached-turn purge failed for tenant',
+      { tenantId: 't-doomed', error: 'delete failed' },
+    );
+  });
+
+  it('still runs when the recording selection fails', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [turn('tA', 'CA-1', 45)]);
+    repo.findDue = vi.fn(async () => {
+      throw new Error('pg down');
+    });
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({
+      due: 0,
+      purged: 0,
+      failed: 0,
+      unattachedTurnsPurged: 1,
+      unattachedTurnTenantsFailed: 0,
+    });
+  });
+
+  it('respects the per-tenant batch bound', async () => {
+    const repo = new InMemoryRecordingRetentionRepository(
+      [],
+      [turn('tA', 'CA-1', 40), turn('tA', 'CA-1', 41), turn('tA', 'CA-1', 42)],
+    );
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      logger: noopLogger,
+      now: () => NOW,
+      unattachedTurnBatchSize: 2,
+    });
+    expect(result.unattachedTurnsPurged).toBe(2);
+    // Oldest first: the 40-day-old row is the one left for the next sweep.
+    expect(repo.unattachedTurns.map((t) => t.createdAt)).toEqual([ageDays(40)]);
   });
 });
