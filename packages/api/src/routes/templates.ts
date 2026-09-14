@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createTemplateSchema, updateTemplateSchema, verticalTypeSchema } from '../shared/contracts';
 import {
   EstimateTemplateRepository,
@@ -55,6 +56,7 @@ export function createTemplateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const template = await templateRepo.findById(req.auth!.tenantId, req.params.id);
       if (!template) {
@@ -91,6 +93,7 @@ export function createTemplateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:create'),
+    notFoundOnMalformedId('Template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const template = await templateRepo.findById(req.auth!.tenantId, req.params.id);
       if (!template) {
@@ -108,6 +111,7 @@ export function createTemplateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       // Validated like POST — raw req.body here persisted float/negative
       // money and out-of-range tax rates straight to the templates table.
