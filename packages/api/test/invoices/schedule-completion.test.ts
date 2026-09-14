@@ -173,6 +173,32 @@ describe('mintCompletionMilestones', () => {
     expect(created[0].estimateId).toBe(estimateId);
   });
 
+  // #1203: the estimate was converted to a plain invoice outside the schedule.
+  // Minting the balance next to it would bill the estimate twice.
+  it('refuses to mint when the estimate was already invoiced outside the schedule', async () => {
+    const job = makeJob();
+    const estimateId = uuidv4();
+    await seedScheduleWithDeposit(job, { estimateId, depositCarriesEstimate: false });
+    await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        estimateId,
+        invoiceNumber: 'INV-CONVERTED',
+        lineItems: [buildLineItem('c1', 'Whole job', 1, 20000, 0, true)],
+        createdBy: 'u1',
+      },
+      invoiceRepo,
+    );
+
+    await expect(mintCompletionMilestones(deps(), job)).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: expect.stringMatching(/already invoiced as INV-CONVERTED/),
+    });
+    // Only the legacy deposit and the converted invoice: no balance was minted.
+    expect(await invoiceRepo.findByJob(TENANT, job.id)).toHaveLength(2);
+  });
+
   it('treats a duplicate on the (schedule, milestone) index as already minted', async () => {
     const job = makeJob();
     await seedScheduleWithDeposit(job);

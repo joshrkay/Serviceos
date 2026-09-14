@@ -5,6 +5,8 @@ import {
   buildInvoiceSchedule,
   InvoiceMilestone,
   InMemoryInvoiceScheduleRepository,
+  invoiceOutsideSchedule,
+  estimateAlreadyInvoicedReason,
 } from '../../src/invoices/invoice-schedule';
 
 const deposit5050: InvoiceMilestone[] = [
@@ -155,5 +157,42 @@ describe('buildInvoiceSchedule + InMemoryInvoiceScheduleRepository', () => {
         createdBy: 'u1',
       }),
     ).toThrow(/invalid milestones/i);
+  });
+});
+
+describe('invoiceOutsideSchedule (#1203 — never bill an estimate twice)', () => {
+  const schedule = { id: 'sched-1', estimateId: 'est-1' };
+
+  it('finds a converted invoice that carries the estimate id but no schedule', () => {
+    const converted = { invoiceNumber: 'INV-0001', estimateId: 'est-1' };
+    expect(invoiceOutsideSchedule(schedule, [converted])).toBe(converted);
+  });
+
+  it("does not count the schedule's own milestones, including the one that carries the estimate link", () => {
+    const invoices = [
+      { invoiceNumber: 'INV-0001', estimateId: 'est-1', scheduleId: 'sched-1' },
+      { invoiceNumber: 'INV-0002', scheduleId: 'sched-1' },
+    ];
+    expect(invoiceOutsideSchedule(schedule, invoices)).toBeUndefined();
+  });
+
+  it("counts another schedule's milestone that carries the same estimate id", () => {
+    const other = { invoiceNumber: 'INV-0009', estimateId: 'est-1', scheduleId: 'sched-OTHER' };
+    expect(invoiceOutsideSchedule(schedule, [other])).toBe(other);
+  });
+
+  it('ignores job invoices for other estimates or no estimate, and schedules without an estimate', () => {
+    const invoices = [
+      { invoiceNumber: 'INV-0003', estimateId: 'est-2' },
+      { invoiceNumber: 'INV-0004' },
+    ];
+    expect(invoiceOutsideSchedule(schedule, invoices)).toBeUndefined();
+    expect(
+      invoiceOutsideSchedule({ id: 'sched-2' }, [{ invoiceNumber: 'INV-0005', estimateId: 'est-1' }]),
+    ).toBeUndefined();
+  });
+
+  it('gives an owner-facing reason that names the existing invoice', () => {
+    expect(estimateAlreadyInvoicedReason('INV-0001')).toMatch(/already invoiced as INV-0001/);
   });
 });
