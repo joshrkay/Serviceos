@@ -1,4 +1,5 @@
 import type { LLMProvider, LLMRequest, LLMResponse } from '../gateway/gateway';
+import { matchUpdateJobPriorityPhrase } from '../orchestration/intent-classifier';
 
 /**
  * Deterministic mock provider for unit tests and hermetic local/dev.
@@ -80,10 +81,51 @@ function lastUserText(request: LLMRequest): string {
   return '';
 }
 
+/**
+ * Concatenated content of every `system`-role message, in order. Several
+ * task prompts (notably `brand_voice_v1` — `buildBrandVoicePrompt`,
+ * ai/brand-voice/prompts.ts) render tenant-specific data (business name,
+ * tone) into a SYSTEM message, never the last user message `lastUserText`
+ * reads (#1132).
+ */
+function systemText(request: LLMRequest): string {
+  const messages = request.messages ?? [];
+  return messages
+    .filter((m) => m?.role === 'system' && typeof m.content === 'string')
+    .map((m) => m.content as string)
+    .join('\n');
+}
+
+/**
+ * Drop the first top-level `{...}` run from `text`. Several prompts embed a
+ * `JSON.stringify(...)` context blob inline in otherwise natural-language
+ * text (e.g. `MmsEstimateTaskHandler.buildUserContent`:
+ * `Customer/property: {"customerId":"<uuid>",...}`). `extractName`'s
+ * heuristics must never treat a JSON KEY or VALUE from that blob as a
+ * captured name (#1154 item 1) — depth-counted so nested braces (an object
+ * value) still remove the whole blob, not just up to the first `}`.
+ */
+function stripJsonBlobs(text: string): string {
+  const start = text.indexOf('{');
+  if (start === -1) return text;
+  let depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(0, start) + text.slice(i + 1);
+    }
+  }
+  // Unterminated (shouldn't happen for well-formed JSON.stringify output) —
+  // drop the rest defensively rather than risk scanning into it.
+  return text.slice(0, start);
+}
+
 function extractName(text: string): string | undefined {
+  const clean = stripJsonBlobs(text);
   // Prefer explicit "named X" / "name is X" so "customer named Jane" does not
   // capture the word "named" (case-insensitive [A-Z] would match it).
-  const named = text.match(
+  const named = clean.match(
     /\b(?:named|name\s+is)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,3})/,
   );
   if (named?.[1]) return named[1].trim();
@@ -91,11 +133,11 @@ function extractName(text: string): string | undefined {
   // 412 Oak Street" — without it the comma blocks the match and the mock
   // falls back to the literal 'New Customer', which would make any corpus
   // script using that phrasing grade a placeholder instead of the real name.
-  const forCustomer = text.match(
+  const forCustomer = clean.match(
     /\b(?:customer|for)\s*,?\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,3})/,
   );
   if (forCustomer?.[1]) return forCustomer[1].trim();
-  const quoted = text.match(/["']([^"']{2,80})["']/);
+  const quoted = clean.match(/["']([^"']{2,80})["']/);
   return quoted?.[1]?.trim();
 }
 
@@ -157,6 +199,60 @@ export function scriptHermeticResponse(request: LLMRequest): string {
     return idx >= 0 ? text.slice(idx + marker.length) : text;
   }
 
+  if (taskType === 'update_job') {
+    // #1154 item 2 — UpdateJobTaskHandler.buildUserMessage sends
+    // `Transcript: <operator words>` (+ optional `Classifier hints: ...`).
+    // The router's `matchUpdateJobPriorityPhrase` (intent-classifier.ts) may
+    // already have deterministically recognized "mark the X job as
+    // <priority> priority" at the classify step WITHOUT a gateway call, but
+    // drafting still needs THIS separate `update_job` gateway call — reuse
+    // the SAME matcher against the request's own transcript so the two
+    // never disagree, and so the draft carries at least one changeable
+    // field (updateJobPayloadSchema's "at least one field to change"
+    // refine — proposals/contracts.ts — otherwise rejects it; jobId itself
+    // comes from the router's entity resolution, not from this response).
+    const marker = 'Transcript: ';
+    const idx = text.indexOf(marker);
+    const transcript = idx >= 0 ? text.slice(idx + marker.length).split('\n')[0] : text;
+    const priorityPhrase = matchUpdateJobPriorityPhrase(transcript);
+    if (priorityPhrase) {
+      const priority = transcript.match(/\b(low|normal|high|urgent)\b\s+priority/i)?.[1]?.toLowerCase();
+      return JSON.stringify({
+        jobReference: priorityPhrase.jobReference,
+        ...(priority ? { priority } : {}),
+        confidence_score: 0.9,
+      });
+    }
+    // No deterministic match (a status/title/description edit, or free-form
+    // phrasing) — fall through to the generic catch-all below; only the
+    // anchored priority phrasing is scripted deterministically here.
+  }
+
+  if (taskType === 'brand_voice_v1') {
+    // #1132 — composeBrandVoiceMessage (ai/brand-voice/composer.ts) treats
+    // response.content as the LITERAL customer-facing text (responseFormat:
+    // 'text', never JSON), and buildBrandVoicePrompt (ai/brand-voice
+    // /prompts.ts) renders the tenant's tone — including the business name —
+    // into a SYSTEM message (renderToneAuthority), not the last user
+    // message. Read the system text (never just `text`/lastUserText) so a
+    // hermetic draft is tenant-voiced instead of the generic catch-all, and
+    // return plain text, not JSON.
+    const system = systemText(request);
+    const businessName = system.match(/business name is "([^"]+)"/i)?.[1];
+    const firstPerson = /first person as "i"/i.test(system) ? 'I' : 'we';
+    const signoff = system.match(/Sign off with: "([^"]+)"/i)?.[1];
+    // renderContext (ai/brand-voice/prompts.ts) renders caller-supplied
+    // context as `- key: value` lines in the LAST user message.
+    const customerName = text.match(/-\s*customerName:\s*([^\n]+)/i)?.[1]?.trim();
+    const greeting = customerName ? `Hi ${customerName}, ` : '';
+    const businessBit = businessName ? `this is ${businessName} — ` : '';
+    const raw =
+      `${greeting}${businessBit}${firstPerson === 'I' ? "I'm" : "we're"} ` +
+      `sorry for the schedule change and will follow up shortly with next steps.` +
+      (signoff ? ` ${signoff}` : '');
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
   if (taskType === 'classify_intent' || taskType.startsWith('classify')) {
     if (
       /\b(create|add|new)\b.*\bcustomer\b/.test(lower) ||
@@ -204,14 +300,20 @@ export function scriptHermeticResponse(request: LLMRequest): string {
   ) {
     const label = taskType.includes('invoice') ? 'Service work' : 'Service estimate';
     // Estimate/invoice draft handlers expect `unitPrice` in integer cents
-    // (see EstimateTaskHandler / InvoiceTaskHandler system prompts).
+    // (see EstimateTaskHandler / InvoiceTaskHandler system prompts). No
+    // `catalogItemId` key here — a real model never emits one (see
+    // `validVisionJson` in mms-estimate-task.test.ts): it is ONLY ever
+    // attached later by `groundLineItemPricing` on a catalog match. A
+    // hardcoded `catalogItemId: null` broke `draft_estimate`'s Zod contract
+    // (`catalogItemId: z.string().uuid().optional()` rejects an explicit
+    // `null`) for any tenant with no matching catalog item, independent of
+    // the description text (#1154 item 1).
     return JSON.stringify({
       lineItems: [
         {
           description: extractName(text) ? `${label} for ${extractName(text)}` : label,
           quantity: 1,
           unitPrice: 15000,
-          catalogItemId: null,
         },
       ],
       confidence_score: 0.82,
