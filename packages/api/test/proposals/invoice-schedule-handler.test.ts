@@ -205,6 +205,52 @@ describe('P21-002 — create_invoice_schedule', () => {
       expect(byIndex.has(2)).toBe(false);
     });
 
+    it('links the estimate on the first on_accept invoice only (uq_invoices_estimate)', async () => {
+      // One invoice per estimate: a permit fee drafted alongside the deposit
+      // must not carry the same estimate_id, or its INSERT is rejected.
+      const jobId = uuidv4();
+      const est = await createEstimate(
+        { tenantId: TENANT, jobId, estimateNumber: 'EST-9', lineItems: [buildLineItem('i1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
+        estimateRepo,
+      );
+      const result = await handler.execute(
+        makeProposal({
+          jobId,
+          estimateId: est.id,
+          totalAmountCents: 100000,
+          milestones: [
+            { label: 'Deposit', type: 'percent', value: 3000, trigger: 'on_accept' },
+            { label: 'Permit fee', type: 'flat', value: 15000, trigger: 'on_accept' },
+            { label: 'Balance', type: 'remainder', value: 0, trigger: 'on_completion' },
+          ],
+        }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(true);
+
+      const invoices = await invoiceRepo.findByJob(TENANT, jobId);
+      expect(invoices).toHaveLength(2);
+      const byIndex = new Map(invoices.map((inv) => [inv.milestoneIndex, inv.estimateId]));
+      expect(byIndex.get(0)).toBe(est.id);
+      expect(byIndex.get(1)).toBeUndefined();
+    });
+
+    it('fails the execution on a 23505 from any index other than the milestone index', async () => {
+      const jobId = uuidv4();
+      invoiceRepo.create = async () => {
+        throw Object.assign(new Error('duplicate key value violates unique constraint "uq_invoices_estimate"'), {
+          code: '23505',
+          constraint: 'uq_invoices_estimate',
+        });
+      };
+      const result = await handler.execute(
+        makeProposal({ jobId, totalAmountCents: 20000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('uq_invoices_estimate');
+    });
+
     it('re-execution after a partial mint drafts only the missing on_accept milestone', async () => {
       // Simulate a prior run that minted milestone 0 but not 1 (e.g. crashed
       // mid-loop, no resultEntityId persisted), then retry.
