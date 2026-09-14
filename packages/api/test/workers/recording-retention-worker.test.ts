@@ -349,4 +349,45 @@ describe('#1202 unattached transcript-turn purge', () => {
     // Oldest first: the 40-day-old row is the one left for the next sweep.
     expect(repo.unattachedTurns.map((t) => t.createdAt)).toEqual([ageDays(40)]);
   });
+
+  it("a legal hold on a same-tenant recording for the call's CallSid protects its unattached turns; another tenant's hold does not", async () => {
+    // Recording rows are young (not due), so the recording drain is a no-op;
+    // only their CallSid + legal_hold matter here.
+    const repo = new InMemoryRecordingRetentionRepository(
+      [
+        { ...row('vm-held', { tenantId: 'tA', createdAt: ageDays(1), legalHold: true }), callSid: 'CA-held' },
+        { ...row('vm-open', { tenantId: 'tA', createdAt: ageDays(1) }), callSid: 'CA-open' },
+        { ...row('vm-other', { tenantId: 'tOther', createdAt: ageDays(1), legalHold: true }), callSid: 'CA-shared' },
+      ],
+      [turn('tA', 'CA-held', 45), turn('tA', 'CA-open', 45), turn('tB', 'CA-shared', 45)],
+    );
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+    expect(result.unattachedTurnsPurged).toBe(2);
+    expect(repo.unattachedTurns.map((t) => `${t.tenantId}/${t.callSid}`)).toEqual(['tA/CA-held']);
+  });
+
+  it('a failed audit write after the purge is logged with tenant, CallSid and turn count', async () => {
+    const repo = new InMemoryRecordingRetentionRepository(
+      [],
+      [turn('tA', 'CA-1', 45), turn('tA', 'CA-1', 46)],
+    );
+    const warn = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      auditRepo: { create: vi.fn().mockRejectedValue(new Error('audit down')) } as never,
+      logger: { ...(noopLogger as object), warn } as never,
+      now: () => NOW,
+    });
+    expect(result.unattachedTurnsPurged).toBe(2);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: unattached-turn audit write failed',
+      { tenantId: 'tA', callSid: 'CA-1', transcriptTurns: 2, error: 'audit down' },
+    );
+  });
 });

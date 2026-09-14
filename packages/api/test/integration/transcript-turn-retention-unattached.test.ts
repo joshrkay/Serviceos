@@ -43,6 +43,7 @@ import { PgCallTranscriptTurnRepository } from '../../src/voice/pg-call-transcri
 import { PgVoiceRepository } from '../../src/voice/pg-voice';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { DevStorageProvider } from '../../src/files/storage-provider';
+import { recordInboundCall } from '../../src/voice/voice-service';
 import {
   PgRecordingRetentionRepository,
   runRecordingRetentionSweep,
@@ -310,6 +311,113 @@ describe('#1202 — the retention sweep purges unattached transcript turns past 
       [tenantB.tenantId],
     );
     expect(rows[0].n).toBe(0);
+  });
+});
+
+describe('#1202 review — a legal hold on the call\'s recording protects its unattached turns (real Postgres)', () => {
+  // `voice_recording_id IS NULL` does NOT mean "this call has no recording".
+  // Two product paths leave a call's turns unattached next to a real
+  // voice_recordings row for the same CallSid:
+  //   - voicemail-status-route.ts persists the voicemail leg through
+  //     recordInboundCall and never attaches turns (a Media Streams call whose
+  //     patch dial failed keeps its AI-conversation turns unattached);
+  //   - recording-transcript-hook.ts swallows an attachRecording failure and
+  //     Twilio retries arrive inserted=false, so nothing re-attaches.
+  // The recording row here is written by recordInboundCall, the voicemail
+  // leg's own writer. legal_hold has no product setter, so it is a fixture.
+  let held: TestTenant; // 30-day retention, hold on one call's recording
+  let neighbour: TestTenant; // 30-day retention, no hold of its own
+  let stranger: TestTenant; // holds a recording with neighbour's CallSid string
+  let heldCall: string;
+  let unheldCall: string;
+  let neighbourCall: string;
+  let heldRecordingId: string;
+  let strangerRecordingId: string;
+
+  async function voicemailLeg(t: TestTenant, callSid: string): Promise<string> {
+    const { voiceRecordingId, inserted } = await recordInboundCall(pool, {
+      tenantId: t.tenantId,
+      callSid,
+      recordingUrl: `https://api.twilio.com/2010-04-01/Accounts/AC0/Recordings/RE${crypto.randomUUID().replace(/-/g, '')}`,
+      durationSeconds: 12,
+      storageBucket: 'test-bucket',
+      storageKey: `voicemail/${t.tenantId}/${callSid}.mp3`,
+      sizeBytes: 2048,
+      createdBy: 'voicemail_webhook',
+    });
+    expect(inserted).toBe(true);
+    return voiceRecordingId;
+  }
+
+  beforeAll(async () => {
+    held = await seedTenant(30);
+    neighbour = await seedTenant(30);
+    stranger = await seedTenant(30);
+
+    // Held: 31-day-old unattached turns + a voicemail-leg recording for the
+    // same CallSid that is on legal hold.
+    heldCall = await seedUnattachedCall(held, [
+      'I slipped on the wet floor your tech left',
+      'I am sorry, let me get a manager',
+    ]);
+    await ageCallTurns(held.tenantId, heldCall, 31);
+    heldRecordingId = await voicemailLeg(held, heldCall);
+    await pool.query(`UPDATE voice_recordings SET legal_hold = true WHERE id = $1`, [heldRecordingId]);
+
+    // Same tenant, same shape, recording NOT on hold → still purged.
+    unheldCall = await seedUnattachedCall(held, ['please call me back about my quote']);
+    await ageCallTurns(held.tenantId, unheldCall, 31);
+    await voicemailLeg(held, unheldCall);
+
+    // T1: another tenant holds a recording under the SAME CallSid string.
+    neighbourCall = await seedUnattachedCall(neighbour, ['the thermostat is blank']);
+    await ageCallTurns(neighbour.tenantId, neighbourCall, 31);
+    strangerRecordingId = await voicemailLeg(stranger, neighbourCall);
+    await pool.query(`UPDATE voice_recordings SET legal_hold = true WHERE id = $1`, [strangerRecordingId]);
+
+    const dump = `SELECT CASE t.tenant_id WHEN $1 THEN 'held' WHEN $2 THEN 'neighbour' END AS tenant,
+                         t.call_sid, t.turn_index, t.voice_recording_id,
+                         extract(day from now() - t.created_at)::int AS age_days,
+                         (SELECT string_agg(CASE vr.tenant_id WHEN $1 THEN 'held' WHEN $2 THEN 'neighbour' ELSE 'stranger' END
+                                            || ':legal_hold=' || vr.legal_hold, ', ')
+                            FROM voice_recordings vr WHERE vr.call_sid = t.call_sid) AS recordings_for_call_sid
+                    FROM call_transcript_turns t
+                   WHERE t.tenant_id IN ($1, $2)
+                   ORDER BY 1, t.call_sid, t.turn_index`;
+    const before = await pool.query(dump, [held.tenantId, neighbour.tenantId]);
+    console.log('[#1202 hold] call_transcript_turns BEFORE sweep:\n' + JSON.stringify(before.rows, null, 2));
+
+    const result = await runRecordingRetentionSweep({
+      repo: new PgRecordingRetentionRepository(pool),
+      storage,
+      auditRepo,
+      logger: capturingLogger([]),
+    });
+
+    const after = await pool.query(dump, [held.tenantId, neighbour.tenantId]);
+    console.log('[#1202 hold] call_transcript_turns AFTER sweep:\n' + JSON.stringify(after.rows, null, 2));
+    console.log('[#1202 hold] sweep result: ' + JSON.stringify(result));
+  });
+
+  it('keeps unattached turns past retention when a recording for the same CallSid is on legal hold', async () => {
+    expect(await turnsOfCall(held.tenantId, heldCall)).toEqual([
+      { turn_index: 0, voice_recording_id: null },
+      { turn_index: 1, voice_recording_id: null },
+    ]);
+    expect(await auditRepo.findByEntity(held.tenantId, 'voice_session', heldCall)).toEqual([]);
+  });
+
+  it('still purges unattached turns past retention when the same-CallSid recording is NOT on hold', async () => {
+    expect(await turnsOfCall(held.tenantId, unheldCall)).toEqual([]);
+  });
+
+  it("T1: another tenant's held recording with the same CallSid string does not protect this tenant's turns", async () => {
+    expect(await turnsOfCall(neighbour.tenantId, neighbourCall)).toEqual([]);
+    const { rows } = await pool.query(
+      `SELECT tenant_id, legal_hold, purged_at FROM voice_recordings WHERE id = $1`,
+      [strangerRecordingId],
+    );
+    expect(rows).toEqual([{ tenant_id: stranger.tenantId, legal_hold: true, purged_at: null }]);
   });
 });
 

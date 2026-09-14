@@ -27,10 +27,15 @@
  * upload) would otherwise keep its transcript forever, so the sweep also
  * deletes unattached turns whose own `created_at` is past the tenant's
  * horizon, and audits each call as `voice_session.transcript_purged`.
- *   - Legal hold: an unattached turn has no recording, so there is no
- *     `legal_hold` flag to honour. Attached turns are never touched by this
- *     path; they leave only with their recording (`purgeDerived`), so a held
- *     recording keeps its turns.
+ *   - Legal hold: `voice_recording_id IS NULL` does NOT mean the call has no
+ *     recording. The voicemail leg (voicemail-status-route → recordInboundCall)
+ *     never attaches turns, and recording-transcript-hook swallows a failed
+ *     attach that no retry repeats, so unattached turns can sit beside a real
+ *     `voice_recordings` row for the same CallSid. A same-tenant recording
+ *     with that CallSid on `legal_hold` therefore exempts the call's
+ *     unattached turns (checked in both the tenant selection and the DELETE).
+ *     Attached turns are never touched by this path; they leave only with
+ *     their recording (`purgeDerived`), which honours the hold itself.
  *   - Ingestion window: the recording webhook attaches within minutes and the
  *     horizon is at least one day (`recording_retention_days > 0`), so a row
  *     still waiting for its recording is never past the horizon. A row still
@@ -105,14 +110,15 @@ export interface RecordingRetentionRepository {
   markPurged(tenantId: string, id: string, purgedAt: Date): Promise<void>;
   /**
    * #1202 — cross-tenant: tenants holding `call_transcript_turns` rows with
-   * no recording whose `created_at` is past the tenant's horizon, oldest
-   * backlog first.
+   * no recording whose `created_at` is past the tenant's horizon and whose
+   * CallSid has no same-tenant recording on legal hold, oldest backlog first.
    */
   findTenantsWithDueUnattachedTurns(now: Date, limit: number): Promise<string[]>;
   /**
    * #1202 — delete up to `limit` of the tenant's unattached turns past its
    * horizon (oldest first) in one tenant-scoped transaction, grouped per call
-   * for the audit row. Never touches a turn that has a recording.
+   * for the audit row. Never touches a turn that has a recording, nor one
+   * whose CallSid has a same-tenant recording on legal hold.
    */
   purgeUnattachedTurns(
     tenantId: string,
@@ -212,7 +218,8 @@ export class PgRecordingRetentionRepository
     // tenant_settings (one row per tenant) with a LATERAL probe, so each
     // tenant is an index range scan on idx_call_transcript_turns_tenant
     // (tenant_id, created_at) below its own horizon rather than a full scan
-    // of the turns table every hour.
+    // of the turns table every hour. Held calls are excluded here too, so a
+    // tenant whose only old rows are on hold never takes a tenant slot.
     return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT ts.tenant_id
@@ -224,6 +231,12 @@ export class PgRecordingRetentionRepository
                 AND ctt.voice_recording_id IS NULL
                 AND ctt.created_at <
                     $1::timestamptz - make_interval(days => ts.recording_retention_days)
+                AND NOT EXISTS (
+                  SELECT 1 FROM voice_recordings vr
+                   WHERE vr.tenant_id = ctt.tenant_id
+                     AND vr.call_sid = ctt.call_sid
+                     AND vr.legal_hold
+                )
               ORDER BY ctt.created_at ASC
               LIMIT 1
            ) oldest
@@ -245,6 +258,9 @@ export class PgRecordingRetentionRepository
     // honoured. The outer `voice_recording_id IS NULL` is re-evaluated against
     // the row version the DELETE locks, so a turn attachRecording linked
     // concurrently is skipped rather than deleted from under its recording.
+    // Legal hold on a same-tenant recording for the call's CallSid exempts
+    // the row: excluded inside the batch (so held rows never consume the
+    // LIMIT and stall the drain) and re-checked on the deleted row itself.
     return this.withTenantTransaction(tenantId, async (client) => {
       const { rows } = await client.query(
         `DELETE FROM call_transcript_turns t
@@ -256,12 +272,24 @@ export class PgRecordingRetentionRepository
                AND ctt.voice_recording_id IS NULL
                AND ctt.created_at <
                    $2::timestamptz - make_interval(days => ts.recording_retention_days)
+               AND NOT EXISTS (
+                 SELECT 1 FROM voice_recordings vr
+                  WHERE vr.tenant_id = ctt.tenant_id
+                    AND vr.call_sid = ctt.call_sid
+                    AND vr.legal_hold
+               )
              ORDER BY ctt.created_at ASC
              LIMIT $3
           ) due
           WHERE t.id = due.id
             AND t.tenant_id = $1
             AND t.voice_recording_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM voice_recordings vr
+               WHERE vr.tenant_id = t.tenant_id
+                 AND vr.call_sid = t.call_sid
+                 AND vr.legal_hold
+            )
           RETURNING t.call_sid, t.created_at`,
         [tenantId, now, limit],
       );
@@ -325,7 +353,12 @@ export class InMemoryRecordingRetentionRepository
   private dueUnattachedTurns(now: Date) {
     return this.unattachedTurns
       .filter(
-        (t) => t.createdAt.getTime() < now.getTime() - t.retentionDays * 24 * 3600 * 1000,
+        (t) =>
+          t.createdAt.getTime() < now.getTime() - t.retentionDays * 24 * 3600 * 1000 &&
+          // Legal hold on a same-tenant recording for this call's CallSid.
+          !this.rows.some(
+            (r) => r.tenantId === t.tenantId && r.callSid === t.callSid && r.legalHold,
+          ),
       )
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
@@ -463,8 +496,15 @@ async function purgeUnattachedTranscriptTurns(
             },
           }),
         );
-      } catch {
-        /* audit is best-effort; the purge already happened */
+      } catch (err) {
+        // Best-effort: the rows are already gone, so the purge stands, but a
+        // missing audit row must not be silent.
+        deps.logger.warn('recording-retention sweep: unattached-turn audit write failed', {
+          tenantId,
+          callSid: call.callSid,
+          transcriptTurns: call.transcriptTurns,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
