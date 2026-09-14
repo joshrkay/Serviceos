@@ -155,7 +155,10 @@ export interface Message {
   time: string;
   inputMode?: 'text' | 'voice' | 'photo';
   voiceDuration?: number;
-  attachments?: { type: 'photo' | 'document'; url?: string; name?: string }[];
+  // #1144 — fileId is the reference actually transmitted to
+  // POST /api/assistant/chat (assistantChatRequestSchema.attachments); url
+  // stays local-preview-only (never sent to the server).
+  attachments?: { type: 'photo' | 'document'; url?: string; name?: string; fileId?: string }[];
   proposal?: AIProposal;
   autoApplied?: boolean;
   reasoning?: string;

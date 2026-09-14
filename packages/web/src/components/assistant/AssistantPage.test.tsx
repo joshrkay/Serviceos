@@ -843,3 +843,104 @@ describe('auto-approved proposal — undo parity', () => {
     expect(screen.queryByTestId('undo-toast')).toBeNull();
   });
 });
+
+// ─── #1144 — the customer-photo leg must actually leave the Assistant chat ──
+// Previously "Photo from camera" faked `pendingAttachment` with no real file
+// at all (no upload, no bytes) and `sendToConversationAPI` posted only
+// `{ messages, conversationId, inputMode }` — a photo turn's attachment
+// never reached the server. Fix: a real <input type="file"> uploads through
+// POST /api/files/upload-url → PUT, and the resulting fileId rides the chat
+// turn as an additive `attachments: [{ fileId }]` field.
+describe('#1144 — a photo attachment is uploaded and its fileId reaches POST /api/assistant/chat', () => {
+  function makePhotoFile(): File {
+    return new File(['fake-bytes'], 'issue.jpg', { type: 'image/jpeg' });
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uploads the selected photo and sends its fileId on the chat turn', async () => {
+    // The signed-upload POST goes through the mocked apiFetch (same client
+    // every other /api/* call in this file uses); the raw PUT of the bytes
+    // goes through global fetch (mirrors createSignedAudioUpload's PUT).
+    mockedApiFetch.mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u === '/api/files/upload-url') {
+        return jsonResponse({ fileId: 'file-photo-1', uploadUrl: 'https://storage.example/put', downloadUrl: 'https://cdn.example/issue.jpg' });
+      }
+      if (u === '/api/assistant/chat') {
+        return jsonResponse({ message: { content: 'That looks like a cracked coil.' }, conversationId: 'c-1144' });
+      }
+      return jsonResponse({});
+    });
+    const putSpy = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal('fetch', putSpy);
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Attach' }));
+    fireEvent.click(screen.getByText('Photo from camera'));
+
+    const fileInput = screen.getByTestId('assistant-photo-input') as HTMLInputElement;
+    const file = makePhotoFile();
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    // The upload completes (PUT to the signed URL) before Send is usable.
+    await waitFor(() => expect(putSpy).toHaveBeenCalledWith('https://storage.example/put', expect.objectContaining({ method: 'PUT' })));
+    await waitFor(() => expect(screen.queryByTestId('assistant-photo-uploading')).not.toBeInTheDocument());
+
+    const input = screen.getByPlaceholderText(/Add a note about this attachment|Ask anything/);
+    fireEvent.change(input, { target: { value: 'What is wrong here?' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() =>
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/assistant/chat',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('"attachments":[{"fileId":"file-photo-1"}]'),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText('That looks like a cracked coil.')).toBeInTheDocument(),
+    );
+  });
+
+  it('surfaces a visible error and sends nothing when the upload fails', async () => {
+    mockedApiFetch.mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u === '/api/files/upload-url') {
+        return new Response('Service Unavailable', { status: 503 });
+      }
+      if (u === '/api/files/upload') {
+        return new Response('Service Unavailable', { status: 503 });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Attach' }));
+    fireEvent.click(screen.getByText('Photo from camera'));
+
+    const fileInput = screen.getByTestId('assistant-photo-input') as HTMLInputElement;
+    fireEvent.change(fileInput, { target: { files: [makePhotoFile()] } });
+
+    await waitFor(() =>
+      expect(screen.getByTestId('assistant-photo-upload-error')).toHaveTextContent(
+        'Unable to get a signed upload URL.',
+      ),
+    );
+    expect(
+      mockedApiFetch.mock.calls.some(([p]) => String(p) === '/api/assistant/chat'),
+    ).toBe(false);
+  });
+});
