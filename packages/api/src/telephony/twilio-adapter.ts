@@ -472,6 +472,15 @@ export interface TwilioAdapterDeps {
  *   3. Neither:
  *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
+ *
+ * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
+ * tenant's own `tenant_settings.business_name` — when the per-tenant
+ * persona resolver found one; the `businessName` PARAMETER (the
+ * platform-wide `TWILIO_BUSINESS_NAME` env value / literal `'our team'`
+ * fallback the caller passes in) is used only when the tenant has none on
+ * file. Without this, every tenant that completed onboarding (which
+ * captures a business name) but never wrote a custom `voice_greeting`
+ * heard the SAME platform-wide string as every other tenant.
  */
 export function buildTelephonyGreeting(
   businessName: string,
@@ -490,10 +499,12 @@ export function buildTelephonyGreeting(
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
-  // ends with a CTA (the ES CTA already ends with '?').
+  // ends with a CTA (the ES CTA already ends with '?'). #1156: the
+  // tenant's own resolved business name wins over the env-wide fallback.
+  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
-    ? t('greeting.opener_named', language, { business: businessName, agent: persona.agentName })
-    : t('greeting.opener_default', language, { business: businessName });
+    ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
+    : t('greeting.opener_default', language, { business: resolvedBusinessName });
   const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
