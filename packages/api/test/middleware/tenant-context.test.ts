@@ -24,6 +24,7 @@ import {
   runAfterCommit,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
+import { asyncRoute } from '../../src/middleware/async-route';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
@@ -44,7 +45,13 @@ interface CapturedQuery {
  *   - Records every query in the shared `calls` log.
  *   - Returns the current GUC value for `current_setting(...)`.
  */
-function makeMockPool(opts: { maxClients?: number } = {}) {
+function makeMockPool(
+  opts: {
+    maxClients?: number;
+    /** Runs inside every COMMIT before it resolves — delay it, emit on the client, or throw. */
+    onCommit?: (client: PoolClient) => Promise<void>;
+  } = {},
+) {
   const calls: CapturedQuery[] = [];
   const clients: Array<PoolClient & { _gucTenant?: string; _released: boolean; _id: number }> = [];
   let connectCount = 0;
@@ -67,6 +74,7 @@ function makeMockPool(opts: { maxClients?: number } = {}) {
           return { rows: [], rowCount: 0, command: 'BEGIN', oid: 0, fields: [] } as unknown as QueryResult;
         }
         if (/^COMMIT/i.test(sql)) {
+          if (opts.onCommit) await opts.onCommit(c);
           return { rows: [], rowCount: 0, command: 'COMMIT', oid: 0, fields: [] } as unknown as QueryResult;
         }
         if (/^ROLLBACK/i.test(sql)) {
@@ -728,6 +736,116 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     );
 
     expect(currentTenantContext()).toBeUndefined();
+  });
+});
+
+describe('#1133 — the request transaction settles BEFORE the response leaves', () => {
+  const nextMacrotask = () => new Promise<void>((r) => setImmediate(r));
+
+  it('COMMIT has completed before the response is flushed (finish)', async () => {
+    const order: string[] = [];
+    const { pool } = makeMockPool({
+      onCommit: async () => {
+        // A COMMIT that takes real time: it resolves on a later macrotask.
+        await nextMacrotask();
+        order.push('COMMIT done');
+      },
+    });
+    const app = buildApp(pool, async (_req, res) => {
+      await currentTenantContext()!.client.query('INSERT INTO things (id) VALUES (11)');
+      res.on('finish', () => order.push('response flushed'));
+      res.status(201).json({ id: 11 });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    await nextMacrotask();
+
+    expect(response.status).toBe(201);
+    expect(order).toEqual(['COMMIT done', 'response flushed']);
+  });
+
+  it('a COMMIT that fails answers 500 instead of the handler 2xx, and skips after-commit hooks', async () => {
+    const { pool, calls } = makeMockPool({
+      onCommit: async () => {
+        throw Object.assign(new Error('deferred constraint violated at COMMIT'), { code: '23505' });
+      },
+    });
+    let hookRan = false;
+    const app = buildApp(pool, async (_req, res) => {
+      await currentTenantContext()!.client.query('INSERT INTO things (id) VALUES (12)');
+      runAfterCommit(res, () => {
+        hookRan = true;
+      });
+      res.setHeader('Location', '/things/12');
+      res.status(201).json({ id: 12 });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    await nextMacrotask();
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({ error: 'INTERNAL_ERROR' });
+    // The handler's representation of the success must not leak onto the 500.
+    expect(response.headers.location).toBeUndefined();
+    expect(calls.map((c) => c.sql)).toContain('ROLLBACK');
+    expect(hookRan).toBe(false);
+  });
+
+  it('#1112 — a connection lost while the COMMIT is in flight answers one 500 and drops its listener', async () => {
+    const { pool, clients } = makeMockPool({
+      onCommit: async (client) => {
+        const err = new Error('terminating connection due to administrator command');
+        // What pg does: reject the in-flight query AND emit on the client.
+        setImmediate(() => (client as unknown as EventEmitter).emit('error', err));
+        await nextMacrotask();
+        throw err;
+      },
+    });
+    const app = buildApp(pool, async (_req, res) => {
+      await currentTenantContext()!.client.query('INSERT INTO things (id) VALUES (13)');
+      res.status(200).json({ ok: true });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    await nextMacrotask();
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({ error: 'INTERNAL_ERROR' });
+    expect((clients[0] as unknown as EventEmitter).listenerCount('error')).toBe(0);
+  });
+
+  it('a late writer while the COMMIT is pending can neither replace nor corrupt the response', async () => {
+    const { pool } = makeMockPool({ onCommit: nextMacrotask });
+    let headersSentAfterRespond: boolean | undefined;
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post(
+      '/api/things',
+      asyncRoute(async (_req, res) => {
+        await currentTenantContext()!.client.query('INSERT INTO things (id) VALUES (14)');
+        res.status(201).json({ id: 14, name: 'the real response' });
+        headersSentAfterRespond = res.headersSent;
+        // Work after responding that throws: asyncRoute forwards it because
+        // headers count as sent…
+        throw new Error('post-response failure');
+      }),
+    );
+    // …to a global handler WITHOUT a headersSent guard (app.ts on main), which
+    // tries to write a second, differently-sized response.
+    app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message, padding: 'x'.repeat(64) });
+    });
+
+    const response = await request(app).post('/api/things');
+    await nextMacrotask();
+
+    expect(headersSentAfterRespond).toBe(true);
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({ id: 14, name: 'the real response' });
   });
 });
 
