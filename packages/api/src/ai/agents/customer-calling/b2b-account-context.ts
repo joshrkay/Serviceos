@@ -252,6 +252,30 @@ export function assessUnverifiedB2bClaim(
   };
 }
 
+/** The account context a proposal minted on a business caller's call carries. */
+export interface ProposalAccountContext {
+  accountType: BusinessAccountType;
+  priority: true;
+  parentAccountId?: string;
+  managedPropertyCount: number;
+}
+
+/**
+ * #1155 (row 2.12) — the proposal-side projection of a B2B call's account
+ * context, stamped on `proposal.sourceContext.accountContext` so the owner's
+ * review surface (and any router) can see the proposal came from a PRIORITY
+ * business account. Ids and counts only — no names — because sourceContext
+ * is persisted and listed.
+ */
+export function proposalAccountContext(ctx: B2bAccountContext): ProposalAccountContext {
+  return {
+    accountType: ctx.accountType,
+    priority: ctx.priority,
+    ...(ctx.parentAccount ? { parentAccountId: ctx.parentAccount.customerId } : {}),
+    managedPropertyCount: ctx.subAccounts.length,
+  };
+}
+
 /**
  * Render the assembled business-account context as a prompt section for the
  * live-call classifier / persona, mirroring the seam the vulnerable-caller

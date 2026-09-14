@@ -335,3 +335,76 @@ describe('CustomerEdit — create mode (no customerId)', () => {
     expect(screen.getByRole('button', { name: /cancel/i }).className).toContain('min-h-11');
   });
 });
+
+// #1155 (row 2.12) — the owner can mark a customer as a business /
+// property-manager account from the customer form; the choice rides the same
+// PUT/POST the other fields do.
+describe('CustomerEdit — account type (#1155)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('pre-fills the stored accountType and PUTs a changed one', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...baseCustomer, accountType: 'property_manager' }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...baseCustomer, accountType: 'b2b' }),
+      } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('accountType')).toHaveValue('property_manager');
+    });
+    expect(screen.getByLabelText('accountType').className).toContain('min-h-11');
+
+    fireEvent.change(screen.getByLabelText('accountType'), { target: { value: 'b2b' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => {
+      const body = JSON.parse(vi.mocked(apiFetch).mock.calls[1][1]?.body as string);
+      expect(body.accountType).toBe('b2b');
+    });
+  });
+
+  it('POSTs the chosen accountType on create, and omits the key when not set', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({ id: 'c-pm' }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({ id: 'c-plain' }),
+      } as unknown as Response);
+
+    const { unmount } = render(<CustomerEdit onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Pat' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Manager' } });
+    fireEvent.change(screen.getByLabelText('accountType'), { target: { value: 'property_manager' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(vi.mocked(apiFetch).mock.calls[0][1]?.body as string).accountType).toBe(
+      'property_manager',
+    );
+    unmount();
+
+    const onSaved = vi.fn();
+    render(<CustomerEdit onSaved={onSaved} />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Rita' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Residential' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('c-plain'));
+    expect(JSON.parse(vi.mocked(apiFetch).mock.calls[1][1]?.body as string)).not.toHaveProperty(
+      'accountType',
+    );
+  });
+});

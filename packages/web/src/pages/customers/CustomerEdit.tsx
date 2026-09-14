@@ -4,6 +4,17 @@ import { Field, Input, Select, Textarea, Button } from '../../components/ui';
 
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
+// #1155 — `customers.account_type`. A business / property-manager account's
+// inbound calls route as PRIORITY with its managed properties in context.
+// '' = not classified (the key is omitted from the request).
+const ACCOUNT_TYPES = [
+  { value: '', label: 'Not set' },
+  { value: 'residential', label: 'Residential' },
+  { value: 'b2b', label: 'Business' },
+  { value: 'property_manager', label: 'Property manager' },
+] as const;
+type AccountTypeOption = (typeof ACCOUNT_TYPES)[number]['value'];
+
 export interface CustomerEditProps {
   // Omitted for the create flow (`/customers/new`) — the form starts blank
   // and POSTs a new customer instead of loading + PUTing an existing one.
@@ -23,6 +34,7 @@ interface FormState {
   communicationNotes: string;
   // D4: SMS consent capture
   smsConsent: boolean;
+  accountType: AccountTypeOption;
 }
 
 const empty: FormState = {
@@ -35,6 +47,7 @@ const empty: FormState = {
   preferredChannel: 'email',
   communicationNotes: '',
   smsConsent: false,
+  accountType: '',
 };
 
 /**
@@ -84,6 +97,9 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             : 'email') as FormState['preferredChannel'],
           communicationNotes: data.communicationNotes ?? '',
           smsConsent: data.smsConsent ?? false,
+          accountType: (ACCOUNT_TYPES.some((t) => t.value === data.accountType)
+            ? data.accountType
+            : '') as AccountTypeOption,
         });
       } catch (err) {
         if (!cancelled) {
@@ -143,6 +159,8 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
         communicationNotes: form.communicationNotes.trim(),
         // D4: Include SMS consent in update
         smsConsent: form.smsConsent,
+        // #1155 — only a chosen classification is sent.
+        ...(form.accountType ? { accountType: form.accountType } : {}),
       };
 
       setSubmitting(true);
@@ -248,6 +266,18 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
           >
             {CHANNELS.map((c) => (
               <option key={c} value={c}>{c}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Account type">
+          <Select
+            aria-label="accountType"
+            value={form.accountType}
+            onChange={(e) => setField('accountType', e.target.value as AccountTypeOption)}
+            className="min-h-11"
+          >
+            {ACCOUNT_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>{t.label}</option>
             ))}
           </Select>
         </Field>
