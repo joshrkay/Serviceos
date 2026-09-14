@@ -293,6 +293,11 @@ const GENERIC_RECEIVER_SITES: ReadonlyArray<{
     why: 'Evaluation record of invoice field provenance; eval store only.',
   },
   {
+    file: 'ai/agents/customer-calling/voice-session-store.ts',
+    as: 'ai-plane',
+    why: 'recordTurn persists a mid-call voice TRANSCRIPT turn (call_transcript_turns) for durability (U8) — the voice AI\'s own conversational record, keyed by CallSid + session id, never an operational business entity.',
+  },
+  {
     file: 'ai/tasks/estimate-template.ts',
     as: 'violation',
     why: 'repository.create(template) mints a tenant ESTIMATE TEMPLATE — priced, catalog-adjacent, operational — straight from an AI task module with no proposal. Found by the review that relaxed the receiver pattern; it was invisible to the first edition of this guard.',
@@ -338,11 +343,11 @@ const KNOWN_VIOLATIONS: ReadonlyArray<{ at: string; why: string }> = [
     why: 'callMeBackRepo.create — creates an owner call-back task row directly from the AI skill.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2474',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2651',
     why: 'callMeBackRepo.create — same entity from the voice-turn processor.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2639',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2816',
     why: 'appointmentRepo.update — the E1 revoke path CANCELS a held appointment (`status: canceled`) without a proposal. The strongest of the six: a state-changing write to a scheduled entity.',
   },
   {

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import {
   CustomFieldRepository,
@@ -61,6 +62,7 @@ export function createCustomerCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    notFoundOnMalformedId('Custom field not found', 'fieldDefId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await customFieldRepo.archiveDef(
         req.auth!.tenantId,

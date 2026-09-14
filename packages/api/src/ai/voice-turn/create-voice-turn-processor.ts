@@ -225,8 +225,14 @@ import {
 } from '../../proposals/voice-intent-map';
 import { buildVoiceClarificationPayload } from '../../proposals/voice-clarification';
 import type { EntityResolver } from '../resolution/entity-resolver';
+import { withCustomerAddressHints } from '../resolution/customer-address-hint';
+import type { LocationRepository } from '../../locations/location';
 import {
+  MAX_DISAMBIGUATION_ATTEMPTS,
+  refKeyForEntityKind,
+  resolveDisambiguationFollowUp,
   resolveSchedulingEntities,
+  type PendingEntityAmbiguity,
   type SchedulingEntityResolution,
 } from '../agents/customer-calling/entity-resolution';
 import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
@@ -702,6 +708,15 @@ export interface VoiceTurnProcessorDeps {
    * guess, decides what happens next.
    */
   entityResolver?: EntityResolver;
+  /**
+   * #1118 — U3 customer address hint for the phone's disambiguation question.
+   * When wired, `entityResolver` is decorated with `withCustomerAddressHints`
+   * ONCE here (the same decorator both in-app surfaces apply where they
+   * compose their resolver), so two same-named customers are asked about and
+   * matched by service address ("the one on 12 Oak Street"). Absent → the
+   * question still fires with the resolver's phone-only hints.
+   */
+  locationRepo?: Pick<LocationRepository, 'findByCustomer'>;
   systemActorId?: string;
   businessName: string;
   publicBaseUrl?: string;
@@ -872,17 +887,41 @@ export interface VoiceTurnProcessor {
   ): void;
   /**
    * Resolve a classified turn's free-text references + spoken times into the
-   * `entity_resolved` refs the FSM merges onto `extractedEntities`. Shared with
+   * FSM event that follows `intent_classified`. Shared with
    * `TwilioGatherAdapter` so the Gather transport and the media-streams
    * transport resolve identically instead of the Gather path echoing the
    * classifier back at itself.
+   *
+   * #1118 — `entity_ambiguous` (the in-app adapter's exact payload) when the
+   * shared resolver returned more than one candidate, so both phone
+   * transports ASK; otherwise `entity_resolved` with the refs the FSM merges
+   * onto `extractedEntities` (partial on any other terminal outcome).
    */
-  resolveTurnEntities(
+  resolveTurnEntityEvent(
     session: VoiceSession,
     tenantId: string,
     intent: string,
     entities: Record<string, unknown>,
-  ): Promise<Record<string, string>>;
+  ): Promise<CallingAgentEvent>;
+  /**
+   * #1118 — consume a turn spoken while a disambiguation question is
+   * standing (FSM in `entity_resolution`): place the answer through the
+   * shared `resolveDisambiguationFollowUp` (never outside the offered
+   * candidates), re-ask on a miss, and proceed with the partial refs once
+   * MAX_DISAMBIGUATION_ATTEMPTS is spent. Returns the side effects of the
+   * dispatched event with any readback / question already rendered to text.
+   */
+  handleDisambiguationTurn(
+    session: VoiceSession,
+    tenantId: string,
+    speechResult: string,
+  ): Promise<SideEffect[]>;
+  /**
+   * #1118 — render an FSM `disambiguate` template tts_play into its spoken
+   * text (Gather's `<Say>` speaks `payload.text` verbatim). Lossless for
+   * media streams, which re-renders the same template from the same payload.
+   */
+  expandDisambiguationTemplate(session: VoiceSession, sideEffects: SideEffect[]): void;
   /** Execute audit/proposal/notify_oncall side effects against wired repos. */
   executeSideEffects(
     session: VoiceSession,
@@ -1392,6 +1431,18 @@ export function createVoiceTurnProcessor(
   }
 
   /**
+   * #1118 — the resolver this processor hands out: `deps.entityResolver`,
+   * decorated ONCE with the U3 customer address hint when `locationRepo` is
+   * wired, so the pre-draft resolution, the `entity_ambiguous` question and
+   * `resolveDisambiguationFollowUp`'s re-resolve on the answer turn all see the
+   * same candidate hints (the in-app adapter's `getEntityResolver` shape).
+   */
+  const turnEntityResolver: EntityResolver | undefined =
+    deps.entityResolver && deps.locationRepo
+      ? withCustomerAddressHints(deps.entityResolver, deps.locationRepo)
+      : deps.entityResolver;
+
+  /**
    * REAL entity resolution for a classified turn (replaces the blind echo the
    * Gather/media-streams paths used to run inline).
    *
@@ -1404,26 +1455,26 @@ export function createVoiceTurnProcessor(
    *
    * Delegates to the SHARED `resolveSchedulingEntities` that already serves the
    * in-app adapter and the voice-action-router — no new resolution logic here.
-   * Terminal outcomes (ambiguous / not_found / low_confidence) return the
-   * PARTIAL refs: the unresolved id is simply absent, never guessed, and the
-   * payload contract downstream turns "absent" into a clarification rather than
-   * a malformed proposal.
+   * Terminal outcomes carry the PARTIAL refs: the unresolved id is simply
+   * absent, never guessed. `not_found` / `low_confidence` proceed with them and
+   * the payload contract downstream turns "absent" into a clarification rather
+   * than a malformed proposal; `ambiguous` is asked about first (#1118,
+   * `resolveTurnEntityEvent`).
    */
-  async function resolveTurnEntities(
+  async function runTurnResolution(
     session: VoiceSession,
     tenantId: string,
     intent: string,
     entities: Record<string, unknown>,
-  ): Promise<Record<string, string>> {
-    let resolution: SchedulingEntityResolution;
+  ): Promise<SchedulingEntityResolution> {
     try {
       // U4 — tenant zone (resolved once per session) so "Thursday at 2pm"
       // books in the TENANT's timezone, matching the recorded-memo path.
       // Unresolved zone ⇒ spoken times stay unresolved (never silent UTC)
       // and the booking gates downstream instead of mis-booking.
       const timezone = await resolveSessionTimezone(session, tenantId);
-      resolution = await resolveSchedulingEntities(
-        deps.entityResolver,
+      return await resolveSchedulingEntities(
+        turnEntityResolver,
         tenantId,
         intent,
         entities,
@@ -1440,9 +1491,135 @@ export function createVoiceTurnProcessor(
         sessionId: session.id,
         intent,
       });
-      return {};
+      return { status: 'resolved', refs: {} };
     }
-    return resolution.refs;
+  }
+
+  /**
+   * #1118 — the pending ambiguity a multi-candidate resolution parks on the
+   * FSM, in the in-app adapter's EXACT shape (`toResolutionEvent` /
+   * `resolvePendingForDisambiguation`, inapp-adapter.ts): the resolver's
+   * `label` spoken as `name`, hint carried only when present. Undefined for
+   * any other outcome, or an entity kind with no ref key.
+   */
+  function pendingAmbiguityFrom(
+    resolution: SchedulingEntityResolution,
+  ): PendingEntityAmbiguity | undefined {
+    if (resolution.status !== 'ambiguous' || !resolution.ambiguous) return undefined;
+    const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
+    if (!refKey) return undefined;
+    return {
+      entityKind: resolution.ambiguous.entityKind,
+      reference: resolution.ambiguous.reference,
+      refKey,
+      candidates: resolution.ambiguous.candidates.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.label,
+        score: candidate.score,
+        ...(candidate.hint ? { hint: candidate.hint } : {}),
+      })),
+      partialRefs: resolution.refs,
+      attemptCount: 0,
+    };
+  }
+
+  /**
+   * #1118 — map a classified turn's resolution to its FSM event. Only the
+   * AMBIGUOUS outcome changes: it becomes `entity_ambiguous` (the FSM asks
+   * and parks the candidates) instead of being folded into `entity_resolved`
+   * and dropped. Every other outcome keeps the transports' existing
+   * behaviour — `entity_resolved` with the partial refs, the unresolved id
+   * absent, never guessed.
+   */
+  async function resolveTurnEntityEvent(
+    session: VoiceSession,
+    tenantId: string,
+    intent: string,
+    entities: Record<string, unknown>,
+  ): Promise<CallingAgentEvent> {
+    const resolution = await runTurnResolution(session, tenantId, intent, entities);
+    const pending = pendingAmbiguityFrom(resolution);
+    if (pending) {
+      return {
+        type: 'entity_ambiguous',
+        candidates: pending.candidates,
+        entityKind: pending.entityKind,
+        reference: pending.reference,
+        refKey: pending.refKey,
+        partialRefs: pending.partialRefs,
+      };
+    }
+    return { type: 'entity_resolved', refs: resolution.refs };
+  }
+
+  /**
+   * #1118 — the answer turn, mirroring the in-app adapter's
+   * `stateBeforeTurn === 'entity_resolution'` branch: the shared matcher
+   * places the answer inside the pending candidate set (resolved → merge the
+   * id), a miss re-asks with `retry`, and once MAX_DISAMBIGUATION_ATTEMPTS is
+   * spent the call proceeds with the partial refs — the id absent, never a
+   * pick. If the pending set is missing (a recovered session), the parked
+   * intent is re-resolved exactly as on the first turn.
+   */
+  async function handleDisambiguationTurn(
+    session: VoiceSession,
+    tenantId: string,
+    speechResult: string,
+  ): Promise<SideEffect[]> {
+    const ctx = session.machine.currentContext;
+    let event: CallingAgentEvent;
+    const pending = ctx.pendingEntityAmbiguity;
+    if (!pending) {
+      const intent = ctx.currentIntent;
+      const entities = ctx.extractedEntities;
+      event =
+        intent && entities && typeof entities === 'object'
+          ? await resolveTurnEntityEvent(session, tenantId, intent, entities as Record<string, unknown>)
+          : { type: 'entity_resolved', refs: {} };
+    } else {
+      let match: Awaited<ReturnType<typeof resolveDisambiguationFollowUp>>;
+      try {
+        match = await resolveDisambiguationFollowUp(
+          turnEntityResolver,
+          tenantId,
+          speechResult,
+          pending,
+        );
+      } catch {
+        match = { status: 'unmatched' };
+      }
+      if (match.status === 'resolved') {
+        event = {
+          type: 'entity_resolved',
+          refs: { ...pending.partialRefs, [pending.refKey]: match.candidateId },
+        };
+      } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
+        event = { type: 'entity_resolved', refs: pending.partialRefs };
+      } else {
+        event = {
+          type: 'entity_ambiguous',
+          candidates: pending.candidates,
+          entityKind: pending.entityKind,
+          reference: pending.reference,
+          refKey: pending.refKey,
+          partialRefs: pending.partialRefs,
+          retry: true,
+        };
+      }
+    }
+    const sideEffects = session.machine.dispatch(event);
+    expandDisambiguationTemplate(session, sideEffects);
+    expandIntentConfirmTemplate(sideEffects, ctx.currentIntent ?? 'that');
+    return sideEffects;
+  }
+
+  function expandDisambiguationTemplate(session: VoiceSession, sideEffects: SideEffect[]): void {
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    for (const fx of sideEffects) {
+      if (fx.type === 'tts_play' && fx.payload.template === 'disambiguate') {
+        fx.payload.text = renderTtsText(String(fx.payload.text ?? ''), fx.payload, lang);
+      }
+    }
   }
 
   async function handleCreateProposal(
@@ -1779,7 +1956,7 @@ export function createVoiceTurnProcessor(
             intent,
             proposalType: effectiveProposalType,
             // POST-resolution: `entities` already carries whatever
-            // `resolveTurnEntities` folded onto the FSM context this turn.
+            // `resolveTurnEntityEvent` folded onto the FSM context this turn.
             entities,
             envelope: {
               sessionId: session.id,
@@ -4170,6 +4347,7 @@ export function createVoiceTurnProcessor(
     speechResult,
     callSid: _callSid,
     tenantId,
+    transcriptAppended = false,
   }): Promise<SideEffect[]> => {
     // Note: `processCallerUtterance` historically took `sessionId` and
     // looked up the session via the store. The mediastream adapter
@@ -4191,10 +4369,12 @@ export function createVoiceTurnProcessor(
 
     // 1. Append caller utterance to transcript.
     // #850 — redacted when the session is awaiting a spoken money-approval
-    // challenge. This site is REACHED TWICE on the media-streams path (the
-    // adapter routes through TwilioGatherAdapter#processCallerUtterance, which
-    // appends first), so an unguarded append here re-leaked the secret that
-    // the other site had just redacted.
+    // challenge.
+    // #859 — on the media-streams path the host
+    // (TwilioGatherAdapter#processCallerUtterance) appends BEFORE delegating
+    // here and says so via `transcriptAppended`, so this site is skipped and
+    // each utterance lands exactly once. A direct caller passes nothing and
+    // gets this single append.
     // #962 (PR-B) — on a surface whose silence ladder is served HERE (the
     // ported Gather ladder), an empty SpeechResult is a no-speech timeout:
     // Gather's loop deliberately skips the empty `caller:` line so
@@ -4203,8 +4383,9 @@ export function createVoiceTurnProcessor(
     // (media-streams: adapter-side A3/T2-F05) keep the unconditional
     // append, byte-identical to main.
     if (
-      speechResult.trim().length > 0 ||
-      !servesFamilyHere('silence_low_stt_ladder')
+      !transcriptAppended &&
+      (speechResult.trim().length > 0 ||
+        !servesFamilyHere('silence_low_stt_ladder'))
     ) {
       deps.store.appendTranscript(session.id, {
         speaker: 'caller',
@@ -4411,6 +4592,9 @@ export function createVoiceTurnProcessor(
           speechResult,
           {
             tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
             classifierProfile,
@@ -4753,17 +4937,23 @@ export function createVoiceTurnProcessor(
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        const refs = await resolveTurnEntities(
-          session,
-          tenantId,
-          classifierEvent.intentType,
-          classifierEvent.entities as Record<string, unknown>,
+        // #1118 — an ambiguous reference is ASKED about (entity_ambiguous),
+        // never folded into entity_resolved and dropped.
+        const resolutionFx = session.machine.dispatch(
+          await resolveTurnEntityEvent(
+            session,
+            tenantId,
+            classifierEvent.intentType,
+            classifierEvent.entities as Record<string, unknown>,
+          ),
         );
-        sideEffectsAll.push(
-          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
-        );
+        expandDisambiguationTemplate(session, resolutionFx);
+        sideEffectsAll.push(...resolutionFx);
         expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
+    } else if (currentState === 'entity_resolution') {
+      // #1118 — the caller is answering the disambiguation question.
+      sideEffectsAll.push(...(await handleDisambiguationTurn(session, tenantId, speechResult)));
     } else {
       logger.info('speechTurn: unhandled state, treating as confidence_low', {
         state: currentState,
@@ -4816,7 +5006,9 @@ export function createVoiceTurnProcessor(
     finalizeTerminatedSession,
     // Exposed so TwilioGatherAdapter's Gather entry point runs the SAME real
     // resolution as speechTurn instead of its own duplicated blind echo.
-    resolveTurnEntities,
+    resolveTurnEntityEvent,
+    handleDisambiguationTurn,
+    expandDisambiguationTemplate,
     executeSideEffects,
     recordCost,
     expandIntentConfirmTemplate,

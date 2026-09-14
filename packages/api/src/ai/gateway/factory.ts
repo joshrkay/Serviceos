@@ -10,6 +10,7 @@ import {
 } from '../evaluation/shadow-comparison';
 import type { AppConfig } from '../../shared/config';
 import type { AiRunRepository } from '../ai-run';
+import type { LLMTraceExporter } from './trace-exporter';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
 import { createTenantQuotaStore, DEFAULT_TIER_CONFIG } from './tenant-quota';
 import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
@@ -69,6 +70,12 @@ export interface CreateLLMGatewayOptions {
    * When not supplied the defaults in composeResilienceStack() are used.
    */
   resilience?: ResilienceStackOptions;
+  /**
+   * U10 — optional LLM trace exporter (Langfuse). Threaded into the gateway
+   * (success + error hooks) AND the cache wrapper (its hit branch bypasses
+   * the gateway). Absent → nothing is exported.
+   */
+  traceExporter?: LLMTraceExporter;
 }
 
 /**
@@ -111,7 +118,9 @@ export function createLLMGateway(
     ? {}
     : 'shadowStore' in (loggerOrOpts as CreateLLMGatewayOptions) ||
         'logger' in (loggerOrOpts as CreateLLMGatewayOptions) ||
-        'aiRunRepo' in (loggerOrOpts as CreateLLMGatewayOptions)
+        'aiRunRepo' in (loggerOrOpts as CreateLLMGatewayOptions) ||
+        'resilience' in (loggerOrOpts as CreateLLMGatewayOptions) ||
+        'traceExporter' in (loggerOrOpts as CreateLLMGatewayOptions)
       ? (loggerOrOpts as CreateLLMGatewayOptions)
       : { logger: loggerOrOpts as LLMGatewayLogger };
 
@@ -201,7 +210,13 @@ export function createLLMGateway(
     config.AI_DEFAULT_MODEL,
     opts.logger,
   );
-  const bareGateway = new LLMGateway(gatewayConfig, providers, opts.logger, opts.aiRunRepo);
+  const bareGateway = new LLMGateway(
+    gatewayConfig,
+    providers,
+    opts.logger,
+    opts.aiRunRepo,
+    opts.traceExporter,
+  );
 
   // P2-031 — optional response cache. Opt in with AI_CACHE_ENABLED=true.
   // Cache sits OUTSIDE the resilience stack so a hit never burns breaker budget.
@@ -261,6 +276,7 @@ function maybeBuildCacheWrapper(
       cacheConfig,
       'system',
       opts.aiRunRepo,
+      opts.traceExporter,
     );
 
     createRedisCacheStore(redisUrl).then((redisStore) => {
@@ -286,6 +302,7 @@ function maybeBuildCacheWrapper(
     cacheConfig,
     'system',
     opts.aiRunRepo,
+    opts.traceExporter,
   ) as unknown as LLMGateway;
 }
 

@@ -704,6 +704,9 @@ export class TextModeDriver implements AgentDriver {
         callerTranscript,
         {
           tenantId: session.tenantId,
+          // U10 — trace-session grouping (metadata only; prompt unchanged).
+          sessionId: session.id,
+          ...(session.callSid ? { callSid: session.callSid } : {}),
           callerIsExistingCustomer: state?.identityState === 'resolved',
           // WS21b — the owner-approval prompt section is appended to the
           // classifier prompt ONLY on a recognized owner line, so every

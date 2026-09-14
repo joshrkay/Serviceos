@@ -22,6 +22,7 @@ import { JobPhotoService } from '../jobs/job-photo-service';
 import { isValidJobPhotoCategory } from '../jobs/job-photo';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 
 // Photos are bounded tighter than the generic 100MB file limit:
 // mobile cameras commonly emit 4–8MB JPEGs; 10MB is a comfortable
@@ -148,6 +149,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = (req.body ?? {}) as AttachBody;
       const jobId = req.params.id;
@@ -206,6 +208,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const photos = await service.listJobPhotos(tenantId, req.params.id);
@@ -222,6 +225,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job photo not found', 'photoId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const removed = await service.deleteJobPhoto(tenantId, req.params.id, req.params.photoId);

@@ -6,6 +6,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { createRateLimitStore } from '../middleware/rate-limit-store';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   enableVoiceAgentLive,
   pauseVoiceAgentLive,
@@ -517,6 +518,7 @@ export function createVoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('files:view'),
+    notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const recording = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
       if (!recording) {
@@ -538,6 +540,7 @@ export function createVoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('files:view'),
+    notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const recording = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
       if (!recording) {
@@ -623,6 +626,7 @@ export function createVoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
+    notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = req.body as RetryTranscriptionBody;
       if (!body?.audioUrl) {
