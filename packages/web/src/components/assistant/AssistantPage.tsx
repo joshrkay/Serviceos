@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
-import { useNavigate, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { UndoToast } from '../common/UndoToast';
@@ -22,7 +22,6 @@ import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } fr
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
 import { track } from '../../lib/analytics';
-import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 
 interface ApiMessage {
   id: string;
@@ -837,7 +836,6 @@ export function AssistantPage() {
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
@@ -931,18 +929,17 @@ export function AssistantPage() {
     setPendingAttachment([]);
     setFailedSend(null); // a fresh attempt clears any prior retry affordance
 
-    const command = opts?.attachments?.length ? null : matchVoiceCommand(text);
-    if (command) {
-      setMessages(prev => [...prev, {
-        id: uid(),
-        role: 'assistant',
-        content: `${command.label}.`,
-        time: now(),
-      }]);
-      navigate(command.route);
-      return;
-    }
-
+    // #1153 — this composer used to run every turn (typed OR dictated)
+    // through matchVoiceCommand (useVoiceCommands.ts) and navigate away
+    // on a match — e.g. "Add a new customer, Mario Delingo, 412 Oak
+    // Street" hijacked into a bare `/customers/new` navigation, dropping
+    // everything after "customer" and making the server's deterministic
+    // create_customer classifier (intent-classifier.ts) unreachable from
+    // chat. The Assistant composer is a chat surface: every turn — bare
+    // or not — must always reach the conversation API, which has its own
+    // intent handling. The global voice-nav surface (VoiceBar.tsx) still
+    // applies matchVoiceCommand for its own bare spoken commands; this
+    // page no longer does.
     setTyping(true);
     setTypingReason('Thinking…');
 
@@ -1029,7 +1026,7 @@ export function AssistantPage() {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId, navigate, ttsEnabled, speak, startUndo]);
+  }, [conversationId, ttsEnabled, speak, startUndo]);
 
   // UB-B2 — conversational voice session: continuous STT, per-utterance
   // auto-submit through the SAME chat path as typed input (inputMode: 'voice'

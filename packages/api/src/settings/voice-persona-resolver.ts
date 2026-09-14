@@ -29,6 +29,16 @@ export interface VoicePersona {
    * other text is added — the tenant owns the complete opening line.
    */
   greeting?: string;
+  /**
+   * #1156 — the tenant's own `tenant_settings.business_name`, so the
+   * DEFAULT greeting template (`buildTelephonyGreeting`'s branch 2/3, used
+   * when `greeting` above is unset) can say the tenant's own business name
+   * instead of the platform-wide `TWILIO_BUSINESS_NAME` env fallback /
+   * literal `'our team'`. Omitted when the tenant has no business name on
+   * file (a brand-new settings row can have `businessName === ''`), so the
+   * caller falls back to its own default.
+   */
+  businessName?: string;
 }
 
 export type VoicePersonaResolver = (tenantId: string) => Promise<VoicePersona | null>;
@@ -80,6 +90,7 @@ export function createVoicePersonaResolver(
         const result: VoicePersona = {};
         if (settings.voiceAgentName) result.agentName = settings.voiceAgentName;
         if (settings.voiceGreeting) result.greeting = settings.voiceGreeting;
+        if (settings.businessName) result.businessName = settings.businessName;
         if (Object.keys(result).length > 0) persona = result;
       }
     } catch {

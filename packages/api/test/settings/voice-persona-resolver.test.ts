@@ -19,12 +19,24 @@ describe('createVoicePersonaResolver', () => {
       expect(await resolve('tenant-1')).toBeNull();
     });
 
-    it('returns null when neither field is set', async () => {
+    it('returns null when no persona fields at all are set (brand-new settings row)', async () => {
+      const repo = makeRepo({
+        findByTenant: vi.fn().mockResolvedValue({ businessName: '' }),
+      });
+      const resolve = createVoicePersonaResolver(repo, { ttlMs: 0 });
+      expect(await resolve('tenant-1')).toBeNull();
+    });
+
+    // #1156 — businessName is now also a persona field (used by the DEFAULT
+    // greeting template when voiceGreeting is unset), so a tenant with only
+    // a business name on file — no custom agentName/greeting — is no longer
+    // "no persona at all".
+    it('#1156 — returns businessName when set, even with no other persona field configured', async () => {
       const repo = makeRepo({
         findByTenant: vi.fn().mockResolvedValue({ businessName: 'Acme' }),
       });
       const resolve = createVoicePersonaResolver(repo, { ttlMs: 0 });
-      expect(await resolve('tenant-1')).toBeNull();
+      expect(await resolve('tenant-1')).toEqual({ businessName: 'Acme' });
     });
 
     it('returns agentName when voiceAgentName is set', async () => {
