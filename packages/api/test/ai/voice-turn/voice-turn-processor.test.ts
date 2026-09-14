@@ -782,6 +782,303 @@ describe('createVoiceTurnProcessor.recordCost', () => {
     const { processor, session } = makeCtx();
     expect(processor.recordCost(session, undefined)).toBe(false);
   });
+
+  it('#1204 — returns true exactly once when the cap was already crossed by usage recorded outside the turn', () => {
+    const { processor, session } = makeCtx();
+    // A classifier's recordUsage crossed the output cap; its events were discarded.
+    session.costTracker.recordUsage({ inputTokens: 10, outputTokens: 1600, costMicroCents: 1 });
+    expect(processor.recordCost(session, { input: 1, output: 1 })).toBe(true);
+    // Never a second end for the same session, with or without usage.
+    expect(processor.recordCost(session, { input: 1, output: 1 })).toBe(false);
+    expect(processor.recordCost(session, undefined)).toBe(false);
+  });
+
+  it('#1204 — the event path still returns true once, then never again', () => {
+    const { processor, session } = makeCtx();
+    expect(processor.recordCost(session, { input: 10, output: 1600 })).toBe(true);
+    expect(processor.recordCost(session, { input: 10, output: 10 })).toBe(false);
+  });
+});
+
+// ─── #1204: token cap is level-triggered across classifier usage ────────────
+
+describe('createVoiceTurnProcessor — #1204 token cap crossed between turns', () => {
+  const LOW_CONFIDENCE_UNKNOWN = JSON.stringify({
+    intentType: 'unknown',
+    confidence: 0.1,
+    reasoning: 'unclear',
+    extractedEntities: {},
+  });
+  // An S1-allowed intent (the default makeCtx session is untrusted telephony).
+  const DRAFT_ESTIMATE = JSON.stringify({
+    intentType: 'draft_estimate',
+    confidence: 0.95,
+    reasoning: 'wants a quote',
+    extractedEntities: { customerName: 'Acme' },
+  });
+  const CONFIRM_YES = JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' });
+  const CAP_WRAP_UP = "I'm connecting you with a team member who can assist you further.";
+
+  /** One gateway completion per step, each with its own output-token count. */
+  function makeGatewayScript(steps: Array<{ content: string; output: number }>): LLMGateway {
+    let i = 0;
+    return {
+      complete: vi.fn().mockImplementation(async () => {
+        const step = steps[Math.min(i, steps.length - 1)]!;
+        i += 1;
+        const response: LLMResponse = {
+          content: step.content,
+          model: 'mock-model',
+          provider: 'mock',
+          tokenUsage: { input: 500, output: step.output, total: 500 + step.output },
+          latencyMs: 1,
+        };
+        return response;
+      }),
+    } as unknown as LLMGateway;
+  }
+
+  /** The real sentiment classifier, recording its own usage on the session tracker. */
+  async function runSentimentClassifier(
+    session: BuiltCtx['session'],
+    outputTokens: number,
+  ): Promise<void> {
+    const { classifyTurnSentiment } = await import(
+      '../../../src/ai/agents/customer-calling/sentiment-classifier'
+    );
+    await classifyTurnSentiment(
+      { transcript: 'hello?', priorTurns: [], intent: 'unknown', tenantId: 'tenant-abc' },
+      {
+        llm: {
+          complete: async () => ({
+            text: '{"frustrationScore":0.1}',
+            tokenUsage: { input: 200, output: outputTokens },
+            model: 'mock-model',
+          }),
+        },
+        costTracker: session.costTracker,
+        sessionCostCapCents: session.costTracker.costCapCents,
+        maxSentimentBudgetRatio: 0.8,
+      },
+    );
+  }
+
+  function watchTerminations(session: BuiltCtx['session']): { count: () => number } {
+    let n = 0;
+    session.events.on('voice-event', (ev: { type: string; cause?: string }) => {
+      if (ev.type === 'session_terminated' && ev.cause === 'cap_exceeded') n += 1;
+    });
+    return { count: () => n };
+  }
+
+  function capOutcome(
+    ctx: BuiltCtx,
+    sideEffects: SideEffect[],
+    terminations: { count: () => number },
+  ) {
+    return {
+      state: ctx.session.machine.currentState,
+      escalationReason: ctx.session.machine.currentContext.escalationReason,
+      tts: sideEffects.filter((fx) => fx.type === 'tts_play').map((fx) => fx.payload.text),
+      notifyReasons: sideEffects
+        .filter((fx) => fx.type === 'notify_oncall')
+        .map((fx) => fx.payload.reason),
+      capAudits: ctx.auditRepo
+        .getAll()
+        .filter((a) => a.eventType.endsWith('.cost_cap_exceeded'))
+        .map((a) => a.eventType),
+      capTerminations: terminations.count(),
+    };
+  }
+
+  const turn = (ctx: BuiltCtx, speechResult: string) =>
+    ctx.processor.speechTurn({
+      session: ctx.session,
+      speechResult,
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+  it('classify branch: a classifier that crosses the output-token cap between turns — the next turn ends the call', async () => {
+    // Turn 1 = 1,450 output tokens (under the 1,500 cap), unclear → repair.
+    // Turn 2 = a clear intent costing 1 output token.
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+
+    await turn(ctx, 'um I have a question');
+    expect(ctx.session.machine.currentState).toBe('intent_capture');
+    expect(ctx.session.costTracker.isExceeded).toBe(false);
+
+    // The fire-and-forget classifier adds 60 output tokens → 1,510 ≥ 1,500.
+    // Its recordUsage returns cost_cap_exceeded:tokens and discards it.
+    await runSentimentClassifier(ctx.session, 60);
+    expect(ctx.session.costTracker.isExceeded).toBe(true);
+
+    const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+    expect(capOutcome(ctx, fx, terminations)).toEqual({
+      state: 'escalating',
+      escalationReason: 'cost_cap_exceeded',
+      tts: [CAP_WRAP_UP],
+      notifyReasons: ['cost_cap_exceeded'],
+      capAudits: ['agent.calling.intent_capture.cost_cap_exceeded'],
+      capTerminations: 1,
+    });
+  });
+
+  it('confirm branch: a classifier that crosses the cap while the readback is pending — the caller\'s yes ends the call', async () => {
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: DRAFT_ESTIMATE, output: 1450 },
+        { content: CONFIRM_YES, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+
+    await turn(ctx, 'I would like a quote for a water heater');
+    expect(ctx.session.machine.currentState).toBe('intent_confirm');
+    await runSentimentClassifier(ctx.session, 60);
+
+    const fx = await turn(ctx, 'yes that is right');
+
+    expect(capOutcome(ctx, fx, terminations)).toEqual({
+      state: 'escalating',
+      escalationReason: 'cost_cap_exceeded',
+      tts: [CAP_WRAP_UP],
+      notifyReasons: ['cost_cap_exceeded'],
+      capAudits: ['agent.calling.intent_confirm.cost_cap_exceeded'],
+      capTerminations: 1,
+    });
+    // Nothing was drafted on the turn the call ended.
+    expect(await ctx.proposalRepo.findByTenant('tenant-abc')).toEqual([]);
+  });
+
+  it('the level-triggered end produces the same wrap-up, notify, audit and termination event as the event path', async () => {
+    // Level path: the classifier crossed the cap between turns.
+    const level = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const levelTerminations = watchTerminations(level.session);
+    await turn(level, 'um I have a question');
+    await runSentimentClassifier(level.session, 60);
+    const levelFx = await turn(level, 'I would like a quote for a water heater');
+
+    // Event path: the turn's OWN usage crosses the cap (today's behaviour).
+    const event = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 60 },
+      ]),
+      withRepos: true,
+    });
+    const eventTerminations = watchTerminations(event.session);
+    await turn(event, 'um I have a question');
+    const eventFx = await turn(event, 'I would like a quote for a water heater');
+
+    expect(capOutcome(event, eventFx, eventTerminations).escalationReason).toBe('cost_cap_exceeded');
+    expect(capOutcome(level, levelFx, levelTerminations)).toEqual(
+      capOutcome(event, eventFx, eventTerminations),
+    );
+  });
+
+  it('never ends the call twice: a later classify turn after the level-triggered end does not re-escalate', async () => {
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+    await turn(ctx, 'um I have a question');
+    await runSentimentClassifier(ctx.session, 60);
+    await turn(ctx, 'I would like a quote for a water heater');
+    expect(ctx.session.machine.currentState).toBe('escalating');
+
+    // escalating → closing (proposal_queued) puts the FSM back on a classify
+    // branch that consults the cap again; the tracker is still over it.
+    ctx.session.machine.dispatch({ type: 'proposal_queued', proposalId: 'p-1' });
+    expect(ctx.session.machine.currentState).toBe('closing');
+    const fx = await turn(ctx, 'and one more thing, a quote for a furnace');
+
+    const outcome = capOutcome(ctx, fx, terminations);
+    expect(outcome.notifyReasons).not.toContain('cost_cap_exceeded');
+    expect(outcome.tts).not.toContain(CAP_WRAP_UP);
+    expect(outcome.capAudits).toHaveLength(1);
+    expect(outcome.capTerminations).toBe(1);
+  });
+
+  it('a consent-capture turn whose own usage crosses the cap does not swallow the end: the next turn ends the call', async () => {
+    // Turn 1 = 1,450 output tokens. Turn 2 answers a pending SMS-consent
+    // question; its confirmIntent costs 60 tokens and crosses the cap on a
+    // path that never ends the call. Turn 3 = a clear intent.
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: CONFIRM_YES, output: 60 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+    await turn(ctx, 'um I have a question');
+    ctx.session.pendingConsentCapture = { customerId: 'cust-1', phone: '+15125550100' };
+
+    const consentFx = await turn(ctx, 'yes you can text me');
+    expect(ctx.session.costTracker.isExceeded).toBe(true);
+    expect(ctx.session.pendingConsentCapture).toBeUndefined();
+    expect(consentFx.some((f) => f.type === 'audit_log')).toBe(true);
+
+    const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+    expect(capOutcome(ctx, fx, terminations)).toEqual({
+      state: 'escalating',
+      escalationReason: 'cost_cap_exceeded',
+      tts: [CAP_WRAP_UP],
+      notifyReasons: ['cost_cap_exceeded'],
+      capAudits: ['agent.calling.intent_capture.cost_cap_exceeded'],
+      capTerminations: 1,
+    });
+  });
+
+  it('a call whose classifier stays under the cap is unaffected', async () => {
+    const script = () =>
+      makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]);
+    // Control: no classifier between turns.
+    const control = makeCtx({ gateway: script(), withRepos: true });
+    const controlTerminations = watchTerminations(control.session);
+    await turn(control, 'um I have a question');
+    const controlFx = await turn(control, 'I would like a quote for a water heater');
+
+    // Classifier adds 10 output tokens → 1,461 < 1,500.
+    const ctx = makeCtx({ gateway: script(), withRepos: true });
+    const terminations = watchTerminations(ctx.session);
+    await turn(ctx, 'um I have a question');
+    await runSentimentClassifier(ctx.session, 10);
+    expect(ctx.session.costTracker.isExceeded).toBe(false);
+    const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+    const outcome = capOutcome(ctx, fx, terminations);
+    expect(outcome.state).toBe('intent_confirm');
+    expect(outcome.capAudits).toEqual([]);
+    expect(outcome.capTerminations).toBe(0);
+    expect(outcome).toEqual(capOutcome(control, controlFx, controlTerminations));
+  });
 });
 
 // ─── expandIntentConfirmTemplate ────────────────────────────────────────────

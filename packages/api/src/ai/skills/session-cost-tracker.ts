@@ -192,7 +192,11 @@ export class SessionCostTracker {
     };
   }
 
-  /** True if any hard cap has been exceeded. */
+  /**
+   * True if any hard cap has been exceeded. Read-only and sticky until
+   * reset(), unlike the one-shot `cost_cap_exceeded` event, so it still
+   * reports a cap crossed by a caller that discarded the event (#1204).
+   */
   get isExceeded(): boolean {
     return this._exceededDimensions.size > 0;
   }

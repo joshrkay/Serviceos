@@ -9,6 +9,7 @@ import {
   estimateCostMicroCents,
 } from '../../../src/ai/skills/session-cost-tracker';
 import type { SessionCapConfig, SessionCapEvent } from '../../../src/ai/skills/session-cost-tracker';
+import { recordCompletionUsage } from '../../../src/ai/agents/customer-calling/sentiment-classifier';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -366,5 +367,35 @@ describe('SessionCostTracker — micro-cent accumulation', () => {
     expect(estimateCostMicroCents(10_000, 2_000)).toBe(6_000_000);
     expect(estimateCostCents(10_000, 2_000)).toBe(6);
     expect(estimateCostMicroCents(-5, -5)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1204 — the exceeded state stays readable after a classifier eats the event
+// ---------------------------------------------------------------------------
+
+describe('SessionCostTracker — isExceeded after a discarded cap event (#1204)', () => {
+  it('a classifier crossing the output cap consumes the one-shot event, but isExceeded stays true for every later read', () => {
+    const tracker = new SessionCostTracker(DEFAULT_TELEPHONY_CAPS);
+    // The main voice turn: 1,450 of 1,500 output tokens, under the cap.
+    const turnEvents = tracker.recordUsage({ inputTokens: 500, outputTokens: 1450, costCents: 2 });
+    expect(eventTypes(turnEvents)).not.toContain('cost_cap_exceeded:tokens');
+    expect(tracker.isExceeded).toBe(false);
+
+    // Between turns the vulnerability grader / sentiment classifier records
+    // its own 60 output tokens through the shared helper, which discards the
+    // returned events. The one-shot cost_cap_exceeded:tokens is gone.
+    recordCompletionUsage(tracker, {
+      text: '{}',
+      tokenUsage: { input: 200, output: 60 },
+      model: 'mock-model',
+    });
+
+    // The next turn's own recordUsage never sees the event again...
+    const nextTurnEvents = tracker.recordUsage({ inputTokens: 1, outputTokens: 1, costCents: 0 });
+    expect(eventTypes(nextTurnEvents)).not.toContain('cost_cap_exceeded:tokens');
+    // ...but the level is still readable, on every read.
+    expect(tracker.isExceeded).toBe(true);
+    expect(tracker.isExceeded).toBe(true);
   });
 });
