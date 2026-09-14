@@ -218,7 +218,13 @@ async function waitUntilReadable(
 export async function createCustomerViaApi(
   request: APIRequestContext,
   ownerToken: string,
-  opts: { firstName: string; lastName: string; primaryPhone?: string },
+  opts: {
+    firstName: string;
+    lastName: string;
+    primaryPhone?: string;
+    /** #1155 — optional `customers.account_type`, set through the real route. */
+    accountType?: 'residential' | 'b2b' | 'property_manager';
+  },
 ): Promise<{ id: string }> {
   const res = await request.post(`${API_URL}/api/customers`, {
     headers: { authorization: `Bearer ${ownerToken}` },
@@ -226,6 +232,7 @@ export async function createCustomerViaApi(
       firstName: opts.firstName,
       lastName: opts.lastName,
       ...(opts.primaryPhone ? { primaryPhone: opts.primaryPhone } : {}),
+      ...(opts.accountType ? { accountType: opts.accountType } : {}),
       preferredChannel: 'sms',
       smsConsent: true,
     },
