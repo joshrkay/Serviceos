@@ -60,6 +60,15 @@
  * T1: tenant B's own MMS, same media server, resolves its OWN independent
  * customer + stored photo, never touching tenant A's — proven at the layer
  * this bug does not block.
+ *
+ * T2 (#1193, map #995): the SAME sender phone number is ALREADY a known
+ * customer in tenant B (created through the real `POST /api/customers`, not
+ * SQL). Tenant A's MMS from that identical phone still resolves/creates
+ * A's OWN independent customer (by `tenant_id`, not phone alone) and drafts
+ * for A; tenant B's pre-existing customer and its files are byte-for-byte
+ * unchanged — proving the phone-match lookup is scoped per tenant, not
+ * global, even when a customer with that exact number already exists
+ * elsewhere.
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { Pool } from 'pg';
@@ -143,7 +152,7 @@ let media: { port: number; close: () => Promise<void>; url: string };
 
 test.describe.configure({ mode: 'serial' });
 
-test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real webhook; an ambiguous sender clarifies (SMS surface, T1); the draft persist leg is pinned', () => {
+test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real webhook; an ambiguous sender clarifies (SMS surface, T2); the draft persist leg is pinned', () => {
   test.skip(
     !dbReady || !enc,
     'Needs a real Postgres (DATABASE_URL, migrated) and TENANT_ENCRYPTION_KEY.',
@@ -316,4 +325,89 @@ test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real w
     );
     expect(crossLeak.rows).toHaveLength(0);
   });
+
+  test(
+    "T2: the same sender phone is already a known customer in tenant B; tenant A's MMS still resolves/creates its OWN customer and drafts for A, tenant B's customer and files are unchanged",
+    async ({ request }) => {
+      const sharedPhone = '+15125558805';
+
+      // Tenant B already has a real customer on this exact phone number —
+      // created through the real API, never SQL.
+      const ownerTokenB = devAuthBearerToken(tenantB.userId);
+      const knownCustomerB = await createCustomerViaApi(request, ownerTokenB, {
+        firstName: 'Carol',
+        lastName: 'Neighbour',
+        primaryPhone: sharedPhone,
+      });
+
+      const beforeB = await pool.query<{ id: string }>(
+        `SELECT id FROM customers WHERE tenant_id = $1 AND primary_phone = $2`,
+        [tenantB.tenantId, sharedPhone],
+      );
+      expect(beforeB.rows).toHaveLength(1);
+      expect(beforeB.rows[0]!.id).toBe(knownCustomerB.id);
+      const filesBeforeB = await pool.query(
+        `SELECT id FROM files WHERE tenant_id = $1 AND entity_type = 'customer' AND entity_id = $2`,
+        [tenantB.tenantId, knownCustomerB.id],
+      );
+
+      // Tenant A's MMS arrives from the IDENTICAL phone number.
+      const messageSid = `SM${crypto.randomUUID().replace(/-/g, '')}`;
+      const res = await signedMmsPost(request, tenantA, {
+        from: sharedPhone,
+        body: "Leaking heater, same number as our office manager's apparently",
+        mediaUrl: media.url,
+        messageSid,
+      });
+      expect(res.status()).toBe(200);
+
+      // Tenant A resolves/creates its OWN customer for this phone — a
+      // DIFFERENT id from tenant B's pre-existing customer on the same number.
+      const customersA = await pollFor<{ id: string }>(
+        pool,
+        `SELECT id FROM customers WHERE tenant_id = $1 AND primary_phone = $2`,
+        [tenantA.tenantId, sharedPhone],
+      );
+      expect(customersA).toHaveLength(1);
+      expect(customersA[0]!.id).not.toBe(knownCustomerB.id);
+
+      // A's photo/draft leg proceeds exactly as for any other sender: a
+      // real files row, plus the draft_estimate proposal + audit, scoped to
+      // THIS post's own messageSid.
+      const filesA = await pollFor(
+        pool,
+        `SELECT id FROM files WHERE tenant_id = $1 AND entity_type = 'customer' AND entity_id = $2`,
+        [tenantA.tenantId, customersA[0]!.id],
+      );
+      expect(filesA).toHaveLength(1);
+
+      const eventsA = await pollFor<{ id: string; entity_id: string }>(
+        pool,
+        `SELECT id, entity_id FROM audit_events WHERE tenant_id = $1 AND event_type = 'customer_mms.estimate_drafted' AND metadata->>'messageSid' = $2`,
+        [tenantA.tenantId, messageSid],
+        { timeoutMs: 5_000 },
+      );
+      expect(eventsA.length, 'a draft_estimate should have been audited for tenant A').toBeGreaterThan(0);
+
+      // Tenant B's pre-existing customer row is byte-for-byte unchanged —
+      // same id, same name — and its files are unchanged.
+      const afterB = await pool.query<{ id: string; first_name: string; last_name: string }>(
+        `SELECT id, first_name, last_name FROM customers WHERE tenant_id = $1 AND primary_phone = $2`,
+        [tenantB.tenantId, sharedPhone],
+      );
+      expect(afterB.rows).toHaveLength(1);
+      expect(afterB.rows[0]!.id).toBe(knownCustomerB.id);
+      expect(afterB.rows[0]!.first_name).toBe('Carol');
+      expect(afterB.rows[0]!.last_name).toBe('Neighbour');
+
+      const filesAfterB = await pool.query(
+        `SELECT id FROM files WHERE tenant_id = $1 AND entity_type = 'customer' AND entity_id = $2`,
+        [tenantB.tenantId, knownCustomerB.id],
+      );
+      expect(
+        filesAfterB.rows.length,
+        "tenant B's file count for its known customer must be unchanged by A's MMS",
+      ).toBe(filesBeforeB.rows.length);
+    },
+  );
 });
