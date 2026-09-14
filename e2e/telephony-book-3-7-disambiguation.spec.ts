@@ -5,26 +5,24 @@
  * self-signed Twilio-shaped webhook driven through the real
  * `/api/telephony/*` routes at a real Postgres.
  *
- * GAP FOUND, NOT FIXED (mirrors e2e/telephony-e1-signed-webhook.spec.ts's
- * "SECURITY GAP FOUND, NOT FIXED" convention — this lane is test-only and
- * may not touch product code). `entity_ambiguous` — the FSM event that
- * turns a same-name collision into a disambiguation question — is
- * dispatched from exactly ONE place in the whole codebase:
- * `ai/agents/customer-calling/inapp-adapter.ts` (the in-app/chat operator
- * surface). Neither the classic `/api/telephony/gather` adapter
- * (telephony/twilio-adapter.ts) nor the media-streams voice-turn processor
- * (`ai/voice-turn/create-voice-turn-processor.ts`) ever dispatches it: both
- * call the SAME `resolveTurnEntities` → `resolveSchedulingEntities`
- * pipeline, but unconditionally fold whatever `resolution.refs` comes back
- * into an `entity_resolved` event and move straight to `intent_confirm` —
- * an ambiguous resolution (multiple same-scored candidates) is silently
- * dropped rather than surfaced. Verified two ways below: (1) a direct
- * `PgEntityResolver.resolve()` call against the exact fixture confirms
- * Postgres genuinely reports `{kind: 'ambiguous', candidates: [...]}` for
- * two same-named customers — so this is not a seeding problem; (2) the RED
- * capture (see the lane report) shows the live phone call proceeding
- * straight to the `create_job` confirm readback with no disambiguation
- * prompt at all, for the identical fixture.
+ * FIXED by #1118 (this file pinned the gap on #1015). `entity_ambiguous` —
+ * the FSM event that turns a same-name collision into a disambiguation
+ * question — used to be dispatched only by the in-app adapter: both phone
+ * transports (the classic `/api/telephony/gather` adapter and the
+ * media-streams voice-turn processor) ran the SAME
+ * `resolveSchedulingEntities` pipeline but folded whatever came back into
+ * `entity_resolved`, so the call went straight to the `create_job` confirm
+ * readback with no question. They now dispatch `entity_ambiguous` (the
+ * in-app adapter's payload) via the processor's shared
+ * `resolveTurnEntityEvent`, and route the caller's answer through
+ * `resolveDisambiguationFollowUp` (`handleDisambiguationTurn`).
+ *
+ * Reached hermetically, with NO model: the owner-line utterance below is
+ * classified by the deterministic `OWNER_OPERATOR_COMMAND_PATTERNS`
+ * create_job matcher, the ambiguity is `PgEntityResolver`'s own pg_trgm
+ * result (proven directly below), the question is the FSM's `disambiguate`
+ * template, and the ordinal follow-up is placed by the shared deterministic
+ * `matchDisambiguationFollowUp`.
  *
  * `create_job` (not `create_appointment`) is the vehicle: it is the
  * nearest deterministic, entity-bearing, customer-naming write intent
@@ -158,7 +156,7 @@ test.describe('#1015 row 3.7 — the AI asks instead of guessing when two custom
     tenant: ProvisionedTenant,
     ownerPhone: string,
     callSid: string,
-  ): Promise<{ identifyTwiml: string; bookingTwiml: string }> {
+  ): Promise<{ identifyTwiml: string; bookingTwiml: string; sid: string }> {
     const voice = await signedPost(
       request,
       '/api/telephony/voice',
@@ -172,14 +170,13 @@ test.describe('#1015 row 3.7 — the AI asks instead of guessing when two custom
     sid = identify.sid;
     const booking = await gatherTurn(request, tenant, callSid, sid, BOOKING_UTTERANCE);
 
-    return { identifyTwiml: identify.twiml, bookingTwiml: booking.twiml };
+    return { identifyTwiml: identify.twiml, bookingTwiml: booking.twiml, sid: booking.sid };
   }
 
-  test('GAP (found on #1015, NOT fixed here): two same-named customers on tenant A never trigger a disambiguation question on the phone surface', async ({
+  test('FIXED (#1118, gap found on #1015): two same-named customers on tenant A trigger a disambiguation question on the phone surface', async ({
     request,
   }) => {
-    // Direct proof #1: Postgres itself genuinely reports this as ambiguous
-    // — the gap is in the phone adapter's wiring, not the seeded fixture.
+    // Direct proof #1: Postgres itself genuinely reports this as ambiguous.
     const directResolve = await new PgEntityResolver(pool).resolve({
       tenantId: tenantA.tenantId,
       reference: SHARED_NAME,
@@ -195,29 +192,33 @@ test.describe('#1015 row 3.7 — the AI asks instead of guessing when two custom
     const { identifyTwiml, bookingTwiml } = await driveOwnerBookingCall(request, tenantA, A_OWNER_PHONE, callSid);
     expect(identifyTwiml).toContain('How can I help you today?');
 
-    // TODAY: the call proceeds straight to the ordinary confirm readback —
-    // no disambiguation, despite two equally-scored "Jamie Rivera" rows.
-    expect(bookingTwiml.toLowerCase()).toContain('create job');
-    expect(bookingTwiml.toLowerCase()).toContain('is that right');
-    expect(bookingTwiml.toLowerCase()).not.toMatch(/which .*(rivera|jamie)|more than one|two customers/);
+    // The call ASKS — the FSM's `disambiguate` line for identically-named
+    // candidates — instead of reading back create_job.
+    expect(bookingTwiml).toContain('<Say');
+    expect(bookingTwiml.toLowerCase()).toMatch(/more than one record under that name/);
+    expect(bookingTwiml.toLowerCase()).not.toContain('is that right');
 
-    // No proposal was drafted either way — this gap doesn't accidentally
-    // book the wrong customer, it just never asks (silently proceeds toward
-    // the confirm gate, which the phone surface's own model-dependent seam
-    // — see row 3.1's spec — then blocks from ever completing).
+    // Nothing was drafted on a guess.
     const { rows } = await pool.query(`SELECT proposal_type FROM proposals WHERE tenant_id = $1`, [tenantA.tenantId]);
     expect(rows).toHaveLength(0);
   });
 
   test(
-    'DESIRED (currently FAILS, see the GAP above): the phone surface should ask a disambiguation question instead of silently dropping the ambiguity',
+    'DESIRED (flipped by #1118): the phone surface asks a disambiguation question, and the caller\'s answer resolves it — the call moves on to the create_job readback',
     async ({ request }) => {
-      test.fail();
       const callSid = `CA-book37-desired-${crypto.randomUUID().slice(0, 8)}`;
-      const { bookingTwiml } = await driveOwnerBookingCall(request, tenantA, A_OWNER_PHONE, callSid);
-      // The day this starts passing is the day to delete this test, promote
-      // the assertion into the GAP test above, and re-grade the row.
-      expect(bookingTwiml.toLowerCase()).toMatch(/which .*(rivera|jamie)|more than one match/);
+      const { bookingTwiml, sid } = await driveOwnerBookingCall(request, tenantA, A_OWNER_PHONE, callSid);
+      // `more than one record` is the shipped copy (tts-copy.ts
+      // renderDisambiguation) for candidates whose names are identical.
+      expect(bookingTwiml.toLowerCase()).toMatch(/which .*(rivera|jamie)|more than one (match|record)/);
+
+      // These API-created customers carry no phone/address hint, so the
+      // answer a caller can give is an ordinal — placed by the shared
+      // `matchDisambiguationFollowUp`, never outside the offered pair.
+      const answer = await gatherTurn(request, tenantA, callSid, sid, 'The first one');
+      expect(answer.twiml.toLowerCase()).toContain('create job');
+      expect(answer.twiml.toLowerCase()).toContain('is that right');
+      expect(answer.twiml.toLowerCase()).not.toMatch(/more than one (match|record)/);
     },
   );
 
