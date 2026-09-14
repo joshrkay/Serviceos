@@ -57,6 +57,12 @@ function buildDeps(opts: {
   executionStatus?: 'succeeded' | 'failed';
   laborRateCents?: number | null;
   catalogItems?: CatalogItem[];
+  /**
+   * #1139 — the payload as first proposed, preserved by editProposal. When
+   * set, `draftedItems` plays the role of the proposal's CURRENT (edited)
+   * payload, as it is after a real owner edit.
+   */
+  originalItems?: LineItem[];
 }): {
   deps: RecordOnExecutionDeps;
   ports: FakeConfigPorts;
@@ -72,6 +78,7 @@ function buildDeps(opts: {
             proposalType: 'draft_estimate',
             status: 'executed',
             payload: { lineItems: opts.draftedItems },
+            ...(opts.originalItems ? { originalPayload: { lineItems: opts.originalItems } } : {}),
           } as unknown as Proposal)
         : null,
   } as unknown as ProposalRepository;
@@ -173,6 +180,28 @@ describe('U7 — recordCorrectionLessonsOnExecution', () => {
 
     expect(lessons).toHaveLength(1);
     expect(lessons[0].lessonType).toBe('labor_rate_changed');
+    expect(ports.laborRateCents).toBe(13500);
+    expect(await lessonRepo.findAppliedForDay(TENANT, '2026-06-15')).toHaveLength(1);
+  });
+
+  it('#1139 — after a real owner edit (payload already overwritten with the correction), diffs the preserved originalPayload against the executed payload', async () => {
+    // Real pipeline shape: editProposal overwrote payload with the owner's
+    // 13500, the executor recorded that same payload as executed, and the
+    // AI's 11500 survives only in originalPayload.
+    const { deps, ports, lessonRepo } = buildDeps({
+      draftedItems: [li({ id: 'l1', unitPriceCents: 13500 })],
+      executedItems: [li({ id: 'l1', unitPriceCents: 13500 })],
+      originalItems: [li({ id: 'l1', unitPriceCents: 11500 })],
+      laborRateCents: 11500,
+    });
+
+    const lessons = await recordCorrectionLessonsOnExecution(
+      { tenantId: TENANT, proposalId: PROPOSAL },
+      deps,
+    );
+
+    expect(lessons).toHaveLength(1);
+    expect(lessons[0].payload).toEqual({ kind: 'labor_rate_changed', beforeCents: 11500, afterCents: 13500 });
     expect(ports.laborRateCents).toBe(13500);
     expect(await lessonRepo.findAppliedForDay(TENANT, '2026-06-15')).toHaveLength(1);
   });
