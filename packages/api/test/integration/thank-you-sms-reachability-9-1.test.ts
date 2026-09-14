@@ -21,6 +21,17 @@
  *   2. a "sent" claim with a NULL stamp is reconciled, not resent (and still
  *      produces exactly one audit row, not a duplicate);
  *   3. the send actually clears the real block-mode gate (not suppressed).
+ *
+ * #1184 adds the audit-claim ordering block at the bottom: the audit claim is
+ * only spent once the audit row is written, so a failed write is retried by the
+ * next sweep (exactly one audit row, one SMS) and a sweep with no auditRepo
+ * spends nothing.
+ *
+ * #1184 review follow-up: a job whose SMS already went out is never
+ * re-routed into a suppression branch (a STOP reply / consent revocation that
+ * lands between a failed audit write and the next sweep must not stamp it
+ * "suppressed"), and a stale audit claim whose row already committed is never
+ * written twice.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
@@ -36,6 +47,9 @@ import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { PgConsentEventRepository } from '../../src/compliance/consent-events';
+import { normalizePhone } from '../../src/compliance/dnc';
+import { buildStopKeywordHandler } from '../../src/compliance/stop-reply';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const NOW = new Date('2026-06-20T15:00:00Z');
@@ -142,6 +156,12 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     // re-proven here with the REAL gate standing in for the dispatcher.
     expect(base.sentSms.filter((m) => m.to === a.phone)).toHaveLength(1);
     expect(base.sentSms.filter((m) => m.to === b.phone)).toHaveLength(1);
+
+    // Exactly one `notification.thank_you_sms.sent` audit row per tenant's job.
+    for (const t of [a, b]) {
+      const events = await auditRepo.findByEntity(t.tenantId, 'job', t.jobId);
+      expect(events.filter((e) => e.eventType === 'notification.thank_you_sms.sent')).toHaveLength(1);
+    }
 
     // T2 isolation: tenant B's job audit is invisible under tenant A's id.
     const crossTenantRead = await auditRepo.findByEntity(a.tenantId, 'job', b.jobId);
@@ -257,5 +277,301 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     expect(row.rows[0].thank_you_sms_sent_at).toEqual(NOW);
     const events = await auditRepo.findByEntity(seed.tenantId, 'job', seed.jobId);
     expect(events.filter((e) => e.eventType === 'notification.thank_you_sms.sent')).toHaveLength(1);
+  });
+  /**
+   * #1184 — follow-up to #1140. The audit claim (`thank_you_sms_audit:{jobId}`)
+   * used to be inserted ALREADY 'sent' before `auditRepo.create` ran, as a
+   * separate statement, and after the job was stamped. A failed audit write
+   * (connection drop, RLS/config error) or a crash between the two statements
+   * therefore left the job with one real SMS and ZERO
+   * `notification.thank_you_sms.sent` rows forever: the stamp stopped the job
+   * being re-selected, and the spent claim would have skipped the audit anyway.
+   * And a sweep with no `auditRepo` spent the claim without writing anything.
+   *
+   * These tests pin the fix: the claim is 'claimed' until the audit row lands
+   * (then 'sent'), a failed write releases it and leaves the job unstamped so
+   * the next sweep reconciles the audit without resending, a crash-abandoned
+   * claim is stale-reclaimed like `claimSend`, and no claim is taken at all
+   * without an `auditRepo`.
+   */
+  describe('#1184 — the audit claim is spent only once the audit row is written', () => {
+    const SENT = 'notification.thank_you_sms.sent';
+
+    async function sentAuditRows(tenantId: string, jobId: string) {
+      const events = await auditRepo.findByEntity(tenantId, 'job', jobId);
+      return events.filter((e) => e.eventType === SENT);
+    }
+
+    async function suppressedAuditRows(tenantId: string, jobId: string) {
+      const events = await auditRepo.findByEntity(tenantId, 'job', jobId);
+      return events.filter((e) => e.eventType === 'notification.thank_you_sms.suppressed');
+    }
+
+    async function auditClaim(tenantId: string, jobId: string): Promise<string | null> {
+      const { rows } = await pool.query<{ status: string }>(
+        `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+        [tenantId, `thank_you_sms_audit:${jobId}`],
+      );
+      return rows[0]?.status ?? null;
+    }
+
+    async function stampOf(jobId: string): Promise<Date | null> {
+      const { rows } = await pool.query<{ thank_you_sms_sent_at: Date | null }>(
+        `SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`,
+        [jobId],
+      );
+      return rows[0].thank_you_sms_sent_at;
+    }
+
+    /**
+     * The real Pg audit repository, except that its FIRST
+     * `notification.thank_you_sms.sent` write for `failTenantId` throws — a
+     * connection drop / RLS error standing in. Every other write (the other
+     * tenant's, the retry) goes to real Postgres.
+     */
+    function auditRepoFailingOnceFor(failTenantId: string): { repo: PgAuditRepository; failures: () => number } {
+      let failures = 0;
+      const repo = Object.create(auditRepo) as PgAuditRepository;
+      repo.create = async (event) => {
+        if (failures === 0 && event.tenantId === failTenantId && event.eventType === SENT) {
+          failures++;
+          throw new Error('synthetic audit write failure (#1184)');
+        }
+        return auditRepo.create(event);
+      };
+      return { repo, failures: () => failures };
+    }
+
+    it('auditRepo.create throws once → two sweeps: exactly ONE sent audit row and exactly ONE SMS — and the neighbour tenant is untouched (T2)', async () => {
+      const a = await seedTenantWithJob();
+      const b = await seedTenantWithJob();
+      const base = new InMemoryDeliveryProvider();
+      const dispatcher = realGateDispatcher(base);
+      const flaky = auditRepoFailingOnceFor(a.tenantId);
+
+      const first = await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        now: () => NOW,
+      });
+      expect(flaky.failures()).toBe(1);
+      expect(first.failed).toBeGreaterThanOrEqual(1);
+      // The SMS went out, but with no audit row the claim is NOT spent and the
+      // job is NOT stamped — so the next sweep can still record the audit.
+      expect(base.sentSms.filter((m) => m.to === a.phone)).toHaveLength(1);
+      expect(await sentAuditRows(a.tenantId, a.jobId)).toHaveLength(0);
+      expect(await auditClaim(a.tenantId, a.jobId)).toBeNull();
+      expect(await stampOf(a.jobId)).toBeNull();
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        now: () => NOW,
+      });
+
+      // Tenant A: one real SMS (no resend), exactly one audit row, claim spent, job stamped.
+      expect(base.sentSms.filter((m) => m.to === a.phone)).toHaveLength(1);
+      expect(await sentAuditRows(a.tenantId, a.jobId)).toHaveLength(1);
+      expect(await auditClaim(a.tenantId, a.jobId)).toBe('sent');
+      expect(await stampOf(a.jobId)).toEqual(NOW);
+
+      // Tenant B (divergent: its audit write never failed): one SMS, one audit
+      // row written by the FIRST sweep, nothing added by the second.
+      expect(base.sentSms.filter((m) => m.to === b.phone)).toHaveLength(1);
+      expect(await sentAuditRows(b.tenantId, b.jobId)).toHaveLength(1);
+      expect(await auditClaim(b.tenantId, b.jobId)).toBe('sent');
+      expect(await stampOf(b.jobId)).toEqual(NOW);
+      // And neither tenant's job audit is visible under the other's id.
+      expect(await auditRepo.findByEntity(a.tenantId, 'job', b.jobId)).toHaveLength(0);
+      expect(await auditRepo.findByEntity(b.tenantId, 'job', a.jobId)).toHaveLength(0);
+    });
+
+    it('a sweep with NO auditRepo sends and stamps but does not spend the audit claim', async () => {
+      const seed = await seedTenantWithJob();
+      const base = new InMemoryDeliveryProvider();
+      const dispatcher = realGateDispatcher(base);
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, logger,
+        now: () => NOW,
+      });
+
+      expect(base.sentSms.filter((m) => m.to === seed.phone)).toHaveLength(1);
+      expect(await stampOf(seed.jobId)).toEqual(NOW);
+      expect(await auditClaim(seed.tenantId, seed.jobId)).toBeNull();
+      expect(await sentAuditRows(seed.tenantId, seed.jobId)).toHaveLength(0);
+    });
+
+    it('a crash-abandoned audit claim (still "claimed", past the stale window) is reclaimed: the audit row is written once, no resend', async () => {
+      const seed = await seedTenantWithJob();
+      // State a crash leaves: the SMS went out (send claim 'sent'), the audit
+      // claim was taken but the process died before the row landed, and the job
+      // was never stamped.
+      await pool.query(
+        `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
+         VALUES ($1, $2, 'sent', NOW(), NOW())`,
+        [seed.tenantId, `thank_you_sms:${seed.jobId}`],
+      );
+      await pool.query(
+        `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+         VALUES ($1, $2, 'claimed', NOW() - INTERVAL '20 minutes')`,
+        [seed.tenantId, `thank_you_sms_audit:${seed.jobId}`],
+      );
+      const base = new InMemoryDeliveryProvider();
+      const dispatcher = realGateDispatcher(base);
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        now: () => NOW,
+      });
+
+      expect(base.sentSms.filter((m) => m.to === seed.phone)).toHaveLength(0);
+      expect(await sentAuditRows(seed.tenantId, seed.jobId)).toHaveLength(1);
+      expect(await auditClaim(seed.tenantId, seed.jobId)).toBe('sent');
+      expect(await stampOf(seed.jobId)).toEqual(NOW);
+    });
+    /**
+     * Review finding on PR #1196 (MEDIUM). With the audit write retryable, "SMS
+     * delivered, audit write failed, job unstamped" is a normal state. If the
+     * customer opts out before the next sweep (a STOP reply to the thank-you
+     * itself), the permanent-suppression checks used to run BEFORE the worker
+     * learnt the SMS claim was already 'sent', so the job was stamped with a
+     * `notification.thank_you_sms.suppressed` row for a message that was
+     * delivered, and the `sent` row was never written.
+     */
+    it('an SMS already sent is reconciled, never suppressed, when the customer replies STOP between a failed audit write and the next sweep — and a neighbour already on DNC is still suppressed (T2)', async () => {
+      const a = await seedTenantWithJob();
+      const b = await seedTenantWithJob();
+      const base = new InMemoryDeliveryProvider();
+      const dispatcher = realGateDispatcher(base);
+      const flaky = auditRepoFailingOnceFor(a.tenantId);
+      const stop = buildStopKeywordHandler({
+        dncRepo,
+        consentRepo: new PgConsentEventRepository(pool),
+        customerRepo,
+        pool,
+      });
+      // Tenant B (divergent): its customer opted out BEFORE any thank-you went out.
+      await stop.handle({ tenantId: b.tenantId, fromE164: b.phone, body: 'STOP', messageSid: `SM${uuidv4()}` });
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        now: () => NOW,
+      });
+      expect(flaky.failures()).toBe(1);
+      expect(base.sentSms.filter((m) => m.to === a.phone)).toHaveLength(1);
+      expect(await sentAuditRows(a.tenantId, a.jobId)).toHaveLength(0);
+      expect(await stampOf(a.jobId)).toBeNull();
+
+      // Tenant A's customer replies STOP to the thank-you, through the real handler.
+      const handled = await stop.handle({
+        tenantId: a.tenantId, fromE164: a.phone, body: 'STOP', messageSid: `SM${uuidv4()}`,
+      });
+      expect(handled.handled).toBe(true);
+      expect(await dncRepo.isOnDnc(a.tenantId, normalizePhone(a.phone))).toBe(true);
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        now: () => NOW,
+      });
+
+      // Tenant A: one SMS, exactly one `sent` row, zero `suppressed` rows, stamped.
+      expect(base.sentSms.filter((m) => m.to === a.phone)).toHaveLength(1);
+      expect(await sentAuditRows(a.tenantId, a.jobId)).toHaveLength(1);
+      expect(await suppressedAuditRows(a.tenantId, a.jobId)).toHaveLength(0);
+      expect(await stampOf(a.jobId)).toEqual(NOW);
+
+      // Tenant B: never sent, suppressed exactly once as on_dnc, stamped.
+      expect(base.sentSms.filter((m) => m.to === b.phone)).toHaveLength(0);
+      const bSuppressed = await suppressedAuditRows(b.tenantId, b.jobId);
+      expect(bSuppressed).toHaveLength(1);
+      expect((bSuppressed[0].metadata as { reason?: string }).reason).toBe('on_dnc');
+      expect(await sentAuditRows(b.tenantId, b.jobId)).toHaveLength(0);
+      expect(await stampOf(b.jobId)).toEqual(NOW);
+    });
+
+    it('an SMS already sent is reconciled, never suppressed, when smsConsent is revoked between a failed audit write and the next sweep', async () => {
+      const seed = await seedTenantWithJob();
+      const base = new InMemoryDeliveryProvider();
+      const dispatcher = realGateDispatcher(base);
+      const flaky = auditRepoFailingOnceFor(seed.tenantId);
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        now: () => NOW,
+      });
+      expect(flaky.failures()).toBe(1);
+      expect(base.sentSms.filter((m) => m.to === seed.phone)).toHaveLength(1);
+      expect(await stampOf(seed.jobId)).toBeNull();
+
+      // The owner revokes SMS consent on the customer record (the repository write the app uses).
+      const updated = await customerRepo.update(seed.tenantId, seed.customerId, { smsConsent: false });
+      expect(updated?.smsConsent).toBe(false);
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        now: () => NOW,
+      });
+
+      expect(base.sentSms.filter((m) => m.to === seed.phone)).toHaveLength(1);
+      expect(await sentAuditRows(seed.tenantId, seed.jobId)).toHaveLength(1);
+      expect(await suppressedAuditRows(seed.tenantId, seed.jobId)).toHaveLength(0);
+      expect(await stampOf(seed.jobId)).toEqual(NOW);
+    });
+
+    /**
+     * Review finding on PR #1196 (LOW). The audit claim's completion
+     * (`markSendClaimComplete`) is a separate statement after the audit row
+     * commits. If it fails, the claim stays 'claimed' and a sweep past the
+     * stale window used to reclaim it and write a SECOND `sent` row.
+     */
+    it('a stale audit claim whose audit row already committed is completed without writing a second row', async () => {
+      const seed = await seedTenantWithJob();
+      const base = new InMemoryDeliveryProvider();
+      const dispatcher = realGateDispatcher(base);
+      const auditKey = `thank_you_sms_audit:${seed.jobId}`;
+      // The real pool, except the audit claim's completion UPDATE fails once
+      // (a transient DB error after the audit row committed).
+      let completionFailures = 0;
+      const flakyPool = {
+        query: (sql: string, params?: unknown[]) => {
+          if (
+            completionFailures === 0 &&
+            /UPDATE send_claims SET status = 'sent'/.test(sql) &&
+            Array.isArray(params) && params[1] === auditKey
+          ) {
+            completionFailures++;
+            return Promise.reject(new Error('synthetic claim-completion failure (#1184 review)'));
+          }
+          return pool.query(sql, params as unknown[]);
+        },
+      } as unknown as Pool;
+
+      await runThankYouSmsSweep({
+        pool: flakyPool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        now: () => NOW,
+      });
+      expect(completionFailures).toBe(1);
+      expect(base.sentSms.filter((m) => m.to === seed.phone)).toHaveLength(1);
+      expect(await sentAuditRows(seed.tenantId, seed.jobId)).toHaveLength(1);
+      expect(await auditClaim(seed.tenantId, seed.jobId)).toBe('claimed');
+      expect(await stampOf(seed.jobId)).toBeNull();
+
+      // The stale window passes (claimSend compares against NOW(); there is no
+      // clock seam, so the claim's own timestamp is aged instead).
+      await pool.query(
+        `UPDATE send_claims SET claimed_at = NOW() - INTERVAL '20 minutes'
+          WHERE tenant_id = $1 AND claim_key = $2`,
+        [seed.tenantId, auditKey],
+      );
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        now: () => NOW,
+      });
+
+      expect(base.sentSms.filter((m) => m.to === seed.phone)).toHaveLength(1);
+      expect(await sentAuditRows(seed.tenantId, seed.jobId)).toHaveLength(1);
+      expect(await auditClaim(seed.tenantId, seed.jobId)).toBe('sent');
+      expect(await stampOf(seed.jobId)).toEqual(NOW);
+    });
   });
 });

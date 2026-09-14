@@ -17,6 +17,16 @@
  * a well-formed id that names nothing answers 200 with an empty result there,
  * and that is unchanged. Only a value that cannot be a uuid — which today is a
  * 500 — now answers the seam's 404.
+ *
+ * #1187 (extends this sweep): `PUT /:id/members/:customerId` also now looks
+ * the customer up through a tenant-scoped `customerRepo.findById` before
+ * writing — a well-formed but *unknown* customer id used to hit
+ * `customer_group_members.customer_id`'s foreign key as a bare 500 (real
+ * Postgres) / silently insert (this file's in-memory PgLike, which has no
+ * FK) and 201. The "malformed :customerId" row's well-formed-unknown answer
+ * changes from 201 to 404 below; every other row is unaffected (the group id
+ * is already covered — `addCustomerToGroup` 404s on an unknown group
+ * before this customer check ever runs).
  */
 import express, { Request, Response, NextFunction, type Express } from 'express';
 import request from 'supertest';
@@ -25,6 +35,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemoryCustomerGroupRepository } from '../../src/customers/customer-group';
+import { Customer, InMemoryCustomerRepository } from '../../src/customers/customer';
 import { createCustomerGroupRouter } from '../../src/routes/customer-groups';
 
 const TENANT = 'tenant-customer-groups-malformed';
@@ -70,7 +81,13 @@ class PgLikeCustomerGroupRepository extends InMemoryCustomerGroupRepository {
   }
 }
 
-function buildApp(repo: InMemoryCustomerGroupRepository, role: string | null = 'owner'): Express {
+function buildApp(
+  repo: InMemoryCustomerGroupRepository,
+  role: string | null = 'owner',
+  // #1187 — fresh (empty) by default: any well-formed customerId a test
+  // doesn't explicitly seed here resolves to "not found".
+  customerRepo: InMemoryCustomerRepository = new InMemoryCustomerRepository(),
+): Express {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -84,8 +101,28 @@ function buildApp(repo: InMemoryCustomerGroupRepository, role: string | null = '
     }
     next();
   });
-  app.use('/api/customer-groups', createCustomerGroupRouter(repo, new InMemoryAuditRepository()));
+  app.use(
+    '/api/customer-groups',
+    createCustomerGroupRouter(repo, new InMemoryAuditRepository(), customerRepo),
+  );
   return app;
+}
+
+async function seedCustomer(repo: InMemoryCustomerRepository, id: string): Promise<void> {
+  const customer: Customer = {
+    id,
+    tenantId: TENANT,
+    firstName: 'Test',
+    lastName: 'Customer',
+    displayName: 'Test Customer',
+    preferredChannel: 'phone',
+    smsConsent: false,
+    isArchived: false,
+    createdBy: 'user-customer-groups-malformed',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  await repo.create(customer);
 }
 
 async function seedGroup(repo: InMemoryCustomerGroupRepository): Promise<string> {
@@ -149,7 +186,8 @@ const HANDLERS: Array<{ route: string; message: string; send: Send; unknownStatu
     message: CUSTOMER,
     send: (app, bad, groupId) =>
       request(app).put(`/api/customer-groups/${groupId}/members/${bad}`).send({}),
-    unknownStatus: 201,
+    // #1187 fixed the well-formed-unknown-customerId 201 (silent write) → 404.
+    unknownStatus: 404,
   },
   {
     route: 'DELETE /api/customer-groups/:id/members/:customerId (malformed :id)',
@@ -189,8 +227,10 @@ describe('customer groups: malformed :id / :customerId never reach Postgres as a
   }
 
   it('a valid id is unaffected — rename, add/list/remove member, archive still apply', async () => {
-    const app = buildApp(repo);
     const customerId = uuidv4();
+    const customerRepo = new InMemoryCustomerRepository();
+    await seedCustomer(customerRepo, customerId);
+    const app = buildApp(repo, 'owner', customerRepo);
 
     const renamed = await request(app).patch(`/api/customer-groups/${groupId}`).send({ name: 'Renamed' });
     expect(renamed.status).toBe(200);
