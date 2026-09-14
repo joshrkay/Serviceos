@@ -47,7 +47,10 @@ import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import type { ConversationRepository } from '../conversations/conversation-service';
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
-import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
+import {
+  assembleB2bAccountContext,
+  buildAccountContextPromptSection,
+} from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
@@ -2432,6 +2435,14 @@ export class TwilioGatherAdapter {
         opts.tenantId,
         session.customerId,
       );
+      // #1155 (row 2.12) — the SAME B2B/property-manager account section the
+      // media-streams turn sends (create-voice-turn-processor.ts speechTurn),
+      // from the context loadB2bAccountContext stashed at caller
+      // identification. Absent for a residential or unmatched caller, so that
+      // call's classify prompt stays byte-identical.
+      const b2bAccountPromptSection = session.b2bAccountContext
+        ? buildAccountContextPromptSection(session.b2bAccountContext)
+        : undefined;
       // #886/#887 — surface-conditional taxonomy: derived from session
       // identity (owner line / trusted channel / D-026 phone actor). Hoisted
       // so the off-surface audit below records the same profile the guard
@@ -2448,6 +2459,7 @@ export class TwilioGatherAdapter {
             verticalPromptSection,
             planPromptSection,
             classifierProfile,
+            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
             // RV-071 — appended ONLY on verified owner sessions so every
             // other call's prompt stays byte-identical (cassette hashes).
             ...(session.machine.currentContext.ownerSession === true

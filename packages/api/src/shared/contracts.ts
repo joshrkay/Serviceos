@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { catalogUnitSchema } from '@ai-service-os/shared';
+import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 
 export const tenantIdHeader = 'x-tenant-id';
@@ -152,6 +152,16 @@ export const createCustomerSchema = z.object({
   smsConsent: z.boolean().optional(),
   communicationNotes: z.string().optional(),
   source: z.enum(CUSTOMER_SOURCES).optional(),
+  // #1155 — additive: lets an owner mark a business / property-manager
+  // account (previously Zod stripped it, so only direct SQL could set it).
+  accountType: accountTypeSchema.optional(),
+});
+
+// #1155 — PUT /api/customers/:id forwards the body as-is (see routes/
+// customers.ts); this validates ONLY the accountType key so an out-of-enum
+// value is a 400 instead of reaching the account_type CHECK as a 500.
+export const updateCustomerAccountTypeSchema = z.object({
+  accountType: accountTypeSchema.optional(),
 });
 
 // U1 (CRM Jobber parity) — request bodies for the nested customer-contacts

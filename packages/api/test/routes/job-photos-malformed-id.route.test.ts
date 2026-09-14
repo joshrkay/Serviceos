@@ -16,8 +16,20 @@
  * found this router masked by synthetic `job-…` fixtures in
  * test/jobs/job-photos.test.ts; those fixtures now use real uuids.
  *
- * Not converted (it does not 500 today): `POST /:id/photos/presign-upload`
+ * Not converted by #1110 (it did not 500 then): `POST /:id/photos/presign-upload`
  * stores `:id` in `files.entity_id`, which is TEXT.
+ *
+ * #1187 (extends this sweep): `POST /:id/photos` and `POST
+ * /:id/photos/presign-upload` now look the job up through a tenant-scoped
+ * `jobRepo.findById` before writing — the FK-backed `POST /:id/photos` used
+ * to hit `job_photos.job_id`'s foreign key as a bare 500 on a well-formed
+ * but unknown job id, and `presign-upload` (TEXT `entity_id`, no FK) used to
+ * write an orphan `files` row and 201 (real-Postgres leg: test/integration/
+ * unknown-parent-id-404.test.ts). A malformed `:id` would reach that
+ * lookup's uuid-typed column comparison and 500, so `notFoundOnMalformedId`
+ * now guards `presign-upload` too — pinned below. The `jobRepo` double here
+ * always resolves any well-formed id as found; well-formed-*unknown* job
+ * ids are #1187's integration leg, not this file's concern.
  *
  * The PgLike subclasses throw exactly what Postgres would for the uuid columns
  * (pattern: users-malformed-id.route.test.ts); the real-Postgres leg is
@@ -37,7 +49,16 @@ import {
 } from '../../src/files/file-service';
 import { CreateJobPhotoInput, InMemoryJobPhotoRepository } from '../../src/jobs/job-photo';
 import { JobPhotoService } from '../../src/jobs/job-photo-service';
+import type { Job, JobRepository } from '../../src/jobs/job';
 import { createJobPhotosRouter } from '../../src/routes/job-photos';
+
+// #1187 — this file is about :id / :photoId malformed-value handling, not
+// job existence, so the double resolves any well-formed job id as found
+// (well-formed-*unknown* job ids are proven at real Postgres in
+// test/integration/unknown-parent-id-404.test.ts).
+const alwaysFoundJobRepo: Pick<JobRepository, 'findById'> = {
+  findById: async () => ({} as Job),
+};
 
 const TENANT = 'tenant-job-photos-malformed';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -126,6 +147,7 @@ function buildApp(
       storage,
       bucket: 'job-photos-malformed-test',
       auditRepo: new InMemoryAuditRepository(),
+      jobRepo: alwaysFoundJobRepo,
     }),
   );
   return app;
@@ -177,6 +199,16 @@ describe('job photos: malformed :id / :photoId never reach Postgres as a raw uui
       route: 'DELETE /api/jobs/:id/photos/:photoId (malformed :photoId)',
       message: 'Job photo not found',
       send: (app, bad) => request(app).delete(`/api/jobs/${uuidv4()}/photos/${bad}`),
+    },
+    {
+      // #1187 — presign-upload now looks the job up before writing (see
+      // file header), so it needs the same malformed-:id guard.
+      route: 'POST /api/jobs/:id/photos/presign-upload',
+      message: 'Job not found',
+      send: (app, bad) =>
+        request(app)
+          .post(`/api/jobs/${bad}/photos/presign-upload`)
+          .send({ filename: 'before.jpg', contentType: 'image/jpeg', sizeBytes: 1024 }),
     },
   ];
 

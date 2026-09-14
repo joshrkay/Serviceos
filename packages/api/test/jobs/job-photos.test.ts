@@ -21,7 +21,16 @@ import {
   JobPhotoService,
   mapJobPhotoCategoryToAttachmentCategory,
 } from '../../src/jobs/job-photo-service';
+import type { Job, JobRepository } from '../../src/jobs/job';
 import { createJobPhotosRouter } from '../../src/routes/job-photos';
+
+// #1187 — this file exercises the presign/attach/list/delete flow, not job
+// existence (which is proven at real Postgres in test/integration/
+// unknown-parent-id-404.test.ts), so the double resolves any well-formed
+// job id as found.
+const alwaysFoundJobRepo: Pick<JobRepository, 'findById'> = {
+  findById: async () => ({} as Job),
+};
 
 const TENANT_A = 'tenant-photos-a';
 const TENANT_B = 'tenant-photos-b';
@@ -82,6 +91,7 @@ function buildApp(opts: BuildOpts): Express {
       storage,
       bucket: BUCKET,
       auditRepo: new InMemoryAuditRepository(),
+      jobRepo: alwaysFoundJobRepo,
     })
   );
   return app;
@@ -99,7 +109,9 @@ describe('job-photo router (P12-001)', () => {
   });
 
   it('presign-upload validates content type, size, and returns fileId + uploadUrl', async () => {
-    const jobId = 'job-presign-1';
+    // #1187 — presign-upload now guards a malformed :id with a 404 (job ids
+    // are uuids in production; see the header comment on JOB_ATTACH_ID etc.).
+    const jobId = '4c8e2a6f-3d1b-4f9a-8e5c-2b6a4d8f0c17';
     const ok = await request(app)
       .post(`/api/jobs/${jobId}/photos/presign-upload`)
       .send({ filename: 'before.jpg', contentType: 'image/jpeg', sizeBytes: 1024 });

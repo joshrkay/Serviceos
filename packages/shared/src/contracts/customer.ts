@@ -21,6 +21,16 @@ import { z } from 'zod';
  */
 export const preferredChannelSchema = z.enum(['phone', 'email', 'sms', 'none']);
 export type PreferredChannelValue = z.infer<typeof preferredChannelSchema>;
+
+/**
+ * Account classification — `customers.account_type` CHECK (migrations
+ * 113/178). 'b2b' / 'property_manager' route inbound calls as PRIORITY
+ * business accounts (b2b-account-context.ts). Shared by the entity contract
+ * and the customer create/update request contracts (#1155).
+ */
+export const accountTypeSchema = z.enum(['residential', 'b2b', 'property_manager']);
+export type AccountTypeValue = z.infer<typeof accountTypeSchema>;
+
 export const customerSchema = z.object({
   id: z.string().uuid(),
   tenantId: z.string().uuid(),
@@ -39,7 +49,7 @@ export const customerSchema = z.object({
   originatingLeadId: z.string().optional(),
   preferredLanguage: z.string().optional(),
   dateOfBirth: z.string().optional(),
-  accountType: z.enum(['residential', 'b2b', 'property_manager']).optional(),
+  accountType: accountTypeSchema.optional(),
   parentAccountId: z.string().optional(),
   createdBy: z.string(),
   createdAt: z.string(),
