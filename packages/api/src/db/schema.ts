@@ -6781,6 +6781,35 @@ export const MIGRATIONS = {
   '275_proposals_original_payload': `
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
   `,
+  // #1131 — dispatch_analytics.event_type's CHECK (inline in 105) never listed
+  // 'en_route_notice_sent' / 'en_route_notice_failed', which the delay
+  // delivery worker (notifications/delay-notifications.ts) writes for every
+  // "on my way" notice, nor 'crew_added' / 'crew_removed', which
+  // proposals/execution/crew-handler.ts writes. Every such insert threw 23514.
+  // The list below is exactly DispatchEventType (dispatch/analytics.ts) — a
+  // strict superset of 105's list, so no existing row can violate it.
+  //
+  // 105 is CREATE TABLE IF NOT EXISTS, so on an existing database it never
+  // re-creates its (auto-named) constraint; on a fresh one it creates the old
+  // list and this step replaces it — both converge on the same definition.
+  // NOT VALID for the same reason as 190/269/270: the runner has no ledger and
+  // re-runs this on every boot, so a validating ADD would re-scan the whole
+  // table each deploy. New and updated rows are still checked.
+  //
+  // Pre-flight (informational — the widening cannot fail on existing data):
+  //   SELECT event_type, count(*) FROM dispatch_analytics GROUP BY 1;
+  '276_dispatch_analytics_event_type_en_route': `
+    ALTER TABLE dispatch_analytics
+      DROP CONSTRAINT IF EXISTS dispatch_analytics_event_type_check;
+    ALTER TABLE dispatch_analytics
+      ADD CONSTRAINT dispatch_analytics_event_type_check
+        CHECK (event_type IN (
+          'assigned', 'reassigned', 'crew_added', 'crew_removed',
+          'rescheduled', 'canceled', 'conflict_detected',
+          'delay_notice_sent', 'delay_notice_failed',
+          'en_route_notice_sent', 'en_route_notice_failed'
+        )) NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

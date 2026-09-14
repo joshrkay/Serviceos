@@ -3,7 +3,7 @@ import { Appointment, AppointmentRepository } from '../appointments/appointment'
 import { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
-import { DispatchAnalyticsRepository, captureDispatchEvent } from '../dispatch/analytics';
+import { DispatchAnalyticsRepository, DispatchEventType, captureDispatchEvent } from '../dispatch/analytics';
 import { DispatchEntityType } from './dispatch-repository';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
 import { Logger } from '../logging/logger';
@@ -517,6 +517,30 @@ export function createDelayNotificationWorker(deps: {
       } as const;
 
       const isEnRoute = payload.kind === 'en_route';
+
+      // #1131 — analytics is bookkeeping ABOUT a delivery. It runs only after
+      // the delivery state is settled and its failure is logged, never
+      // thrown: inside the delivery try-block a failed insert flipped an
+      // already-sent notice to 'failed' and made the queue redeliver (and
+      // re-send) the message.
+      const recordAnalytics = async (
+        eventType: DispatchEventType,
+        metadata: Record<string, unknown>,
+      ): Promise<void> => {
+        try {
+          await captureDispatchEvent(deps.analyticsRepo, payload.tenantId, eventType, {
+            appointmentId: payload.appointmentId,
+            metadata,
+          });
+        } catch (analyticsError) {
+          logger.error('Dispatch analytics write failed', {
+            appointmentId: payload.appointmentId,
+            eventType,
+            error: analyticsError instanceof Error ? analyticsError.message : String(analyticsError),
+          });
+        }
+      };
+
       try {
         const response = await deps.service.sendDelayNotice({
           tenantId: payload.tenantId,
@@ -539,16 +563,6 @@ export function createDelayNotificationWorker(deps: {
           providerMessageId: response.providerMessageId,
           updatedAt: new Date(),
         });
-
-        await captureDispatchEvent(
-          deps.analyticsRepo,
-          payload.tenantId,
-          isEnRoute ? 'en_route_notice_sent' : 'delay_notice_sent',
-          {
-            appointmentId: payload.appointmentId,
-            metadata: { channel: payload.channel, delayVersion: payload.delayVersion },
-          },
-        );
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         const isTransient = error instanceof DelayNotificationTransientError;
@@ -563,21 +577,13 @@ export function createDelayNotificationWorker(deps: {
         });
 
         if (!isTransient || exhausted) {
-          await captureDispatchEvent(
-            deps.analyticsRepo,
-            payload.tenantId,
-            isEnRoute ? 'en_route_notice_failed' : 'delay_notice_failed',
-            {
-              appointmentId: payload.appointmentId,
-              metadata: {
-                channel: payload.channel,
-                delayVersion: payload.delayVersion,
-                transient: isTransient,
-                exhausted,
-                error: err.message,
-              },
-            },
-          );
+          await recordAnalytics(isEnRoute ? 'en_route_notice_failed' : 'delay_notice_failed', {
+            channel: payload.channel,
+            delayVersion: payload.delayVersion,
+            transient: isTransient,
+            exhausted,
+            error: err.message,
+          });
           logger.error('Delay notification delivery failed', {
             appointmentId: payload.appointmentId,
             error: err.message,
@@ -595,6 +601,11 @@ export function createDelayNotificationWorker(deps: {
         });
         throw err;
       }
+
+      await recordAnalytics(isEnRoute ? 'en_route_notice_sent' : 'delay_notice_sent', {
+        channel: payload.channel,
+        delayVersion: payload.delayVersion,
+      });
     },
   };
 }
