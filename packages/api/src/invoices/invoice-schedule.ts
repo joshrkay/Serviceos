@@ -175,6 +175,8 @@ export function isDuplicateMilestoneError(err: unknown): boolean {
  * estimate carries the link; later milestones reach the estimate through
  * their schedule row. Returns the estimateId to stamp on the next milestone
  * invoice, or undefined when an invoice on the job already holds the link.
+ * Callers must first refuse via invoiceOutsideSchedule, so the holder can
+ * only be one of the schedule's own milestones (#1203).
  */
 export function milestoneEstimateLink(
   estimateId: string | undefined,
@@ -182,6 +184,38 @@ export function milestoneEstimateLink(
 ): string | undefined {
   if (!estimateId) return undefined;
   return jobInvoices.some((inv) => inv.estimateId === estimateId) ? undefined : estimateId;
+}
+
+/**
+ * #1203: the invoice that already bills the schedule's estimate from OUTSIDE
+ * the schedule, or undefined. The usual case is the plain invoice written by
+ * POST /estimates/:id/convert-to-invoice. Minting milestones next to it bills
+ * the estimate twice (the converted total plus every milestone), and since
+ * milestoneEstimateLink then stamps no link, uq_invoices_estimate cannot catch
+ * it. Both mint paths refuse, writing nothing, when this returns an invoice.
+ *
+ * Membership comes from the schedule linkage (invoices.schedule_id), never
+ * from estimate_id alone: the schedule's own first milestone carries the
+ * estimate id and must not block the later milestones. Every status counts,
+ * so a voided converted invoice still refuses. Job invoices that do not carry
+ * the estimate id are not billing this estimate and are ignored.
+ */
+export function invoiceOutsideSchedule<I extends { estimateId?: string; scheduleId?: string }>(
+  schedule: { id: string; estimateId?: string },
+  jobInvoices: ReadonlyArray<I>,
+): I | undefined {
+  if (!schedule.estimateId) return undefined;
+  return jobInvoices.find(
+    (inv) => inv.estimateId === schedule.estimateId && inv.scheduleId !== schedule.id,
+  );
+}
+
+/** Owner-facing reason both mint paths give when invoiceOutsideSchedule refuses. */
+export function estimateAlreadyInvoicedReason(invoiceNumber: string): string {
+  return (
+    `This estimate was already invoiced as ${invoiceNumber}. No milestone invoices were ` +
+    'created for it, because they would bill the same estimate a second time.'
+  );
 }
 
 export interface CreateInvoiceScheduleInput {
