@@ -115,6 +115,8 @@ export interface CreateCustomerInput {
   smsConsent?: boolean;
   communicationNotes?: string;
   source?: CustomerSource;
+  /** #1155 — business / property-manager classification. */
+  accountType?: Customer['accountType'];
   createdBy: string;
   actorRole?: string;
 }
@@ -130,6 +132,8 @@ export interface UpdateCustomerInput {
   smsConsent?: boolean;
   communicationNotes?: string;
   source?: CustomerSource;
+  /** #1155 — business / property-manager classification. */
+  accountType?: Customer['accountType'];
 }
 
 export interface CustomerListOptions {
@@ -252,7 +256,10 @@ interface CustomerFieldValues {
   email?: string;
   preferredChannel?: string;
   source?: string;
+  accountType?: string;
 }
+
+const ACCOUNT_TYPES: ReadonlyArray<string> = ['residential', 'b2b', 'property_manager'];
 
 /**
  * Field-level rules shared by create and update validation. `alwaysCheckChannel`
@@ -291,6 +298,9 @@ function validateCustomerFields(
   if (fields.source && !CUSTOMER_SOURCES.includes(fields.source as CustomerSource)) {
     errors.push('Invalid source');
   }
+  if (fields.accountType && !ACCOUNT_TYPES.includes(fields.accountType)) {
+    errors.push('Invalid accountType');
+  }
   return errors;
 }
 
@@ -316,6 +326,7 @@ export function validateCustomerUpdateInput(
       email: input.email ?? existing.email,
       preferredChannel: input.preferredChannel ?? existing.preferredChannel,
       source: input.source ?? existing.source,
+      accountType: input.accountType ?? existing.accountType,
     },
     true
   );
@@ -367,6 +378,7 @@ export async function createCustomer(
     smsConsent: input.smsConsent ?? false,
     communicationNotes: input.communicationNotes,
     source: input.source,
+    ...(input.accountType ? { accountType: input.accountType } : {}),
     isArchived: false,
     createdBy: input.createdBy,
     createdAt: new Date(),

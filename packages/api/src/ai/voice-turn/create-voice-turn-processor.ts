@@ -120,7 +120,10 @@ import {
 } from '../tasks/create-customer-task';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import { recordVoiceError } from '../../analytics/posthog';
-import { buildAccountContextPromptSection } from '../agents/customer-calling/b2b-account-context';
+import {
+  buildAccountContextPromptSection,
+  proposalAccountContext,
+} from '../agents/customer-calling/b2b-account-context';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -2195,6 +2198,13 @@ export function createVoiceTurnProcessor(
           // isProposalTypeAllowedOnSurface applied at creation. Only ever set
           // by trusted server code — never from transcript content.
           ...(systemDetectedSafety ? { systemDetectedSafety: true } : {}),
+          // #1155 (row 2.12) — a business / property-manager caller's
+          // proposal carries its PRIORITY account context (session identity
+          // from caller-ID, never transcript content). Both transports mint
+          // proposals here, so Gather and media-streams stamp it alike.
+          ...(session.b2bAccountContext
+            ? { accountContext: proposalAccountContext(session.b2bAccountContext) }
+            : {}),
           // The IDENTIFIED caller's customer id (caller-ID match / self-signup
           // — session identity, never transcript content). S1 self-service
           // ops that target existing records (reschedule own appointment)

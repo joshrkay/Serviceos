@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createCustomerSchema } from '../shared/contracts';
+import { createCustomerSchema, updateCustomerAccountTypeSchema } from '../shared/contracts';
 import { uuidSchema } from '../shared/validation';
 import { asyncRoute } from '../middleware/async-route';
 import {
@@ -214,6 +214,10 @@ export function createCustomerRouter(
     requirePermission('customers:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (rejectMalformedId(res, req.params.id)) return;
+      // #1155 — accountType is enum-validated (ZodError → 400) before the body
+      // reaches updateCustomer; the edit is audited with the other changed
+      // keys in customer.updated.
+      updateCustomerAccountTypeSchema.parse(req.body ?? {});
       const result = await updateCustomer(
         req.auth!.tenantId,
         req.params.id,

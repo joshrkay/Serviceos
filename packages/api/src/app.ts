@@ -4684,7 +4684,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   );
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
   app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
-  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo, customerRepo));
   app.use(
     '/api/standing-instructions',
     createStandingInstructionRouter(standingInstructionRepo, auditRepo)
@@ -4789,6 +4789,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,
+      jobRepo,
     })
   );
   app.use(
@@ -4802,6 +4803,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,
+      jobRepo,
     })
   );
   app.use(
