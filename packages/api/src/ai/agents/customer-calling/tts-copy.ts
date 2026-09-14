@@ -163,6 +163,41 @@ export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
   "I didn't quite catch that — could you say that again?";
 
 /**
+ * U5 — spoken when a call reaches the absolute per-call duration cap
+ * (`VOICE_MAX_CALL_DURATION_MS`). Media streams speak it 30 s before the
+ * limit and then end the leg at the limit; Gather speaks it on the first
+ * turn that arrives past the limit, immediately before `<Hangup/>`. One
+ * line serves both transports so they can never drift; it is the
+ * exact-match key of its es translation in {@link SENTENCE_CATALOG_ES}.
+ */
+export const MAX_CALL_DURATION_WRAP_UP_COPY =
+  "We're almost out of time for this call, so I'll need to wrap up now. If you need anything else, please call back and we'll pick up where we left off.";
+
+/**
+ * RV-071 / RV-225 — spoken when a proposal approve/reject/edit is asked for
+ * by VOICE on an in-app session.
+ *
+ * D-025 permits owner voice approval, but scopes it to "a human owner on a
+ * transport-identified owner line": the RV-070 caller-ID identity is what
+ * authorises it, and the money-class spoken challenge
+ * (`proposal-approval-task.ts`) is the control that makes a *phone* approval
+ * safe. An in-app session has neither — and needs neither, because the
+ * operator is already authenticated in an app that shows the proposal card
+ * with a tap-to-approve button. Porting the spoken PIN dialogue to a surface
+ * that already has a screen would add a re-spoken static secret (the exposure
+ * D-025's own constraint flags under #850) to buy nothing.
+ *
+ * So in-app voice POINTS AT THE CARD instead. This is the same posture — and
+ * deliberately the same sentence, so the two surfaces can never drift — that
+ * the assistant-chat route already takes for a voice-mode turn (UB-B3,
+ * `routes/assistant.ts`, which re-exports this constant). The refusal is
+ * honest in the strict sense the honesty guard demands: it states that
+ * nothing was approved, and names the one action that does work.
+ */
+export const VOICE_APPROVAL_REFUSAL =
+  "Tap the card to approve — I don't take approvals by voice here yet.";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -210,6 +245,9 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
   // A3 — low acoustic STT confidence reprompt.
   [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
     'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
+  // U5 — absolute per-call duration cap wrap-up.
+  [MAX_CALL_DURATION_WRAP_UP_COPY]:
+    'Estamos por llegar al límite de tiempo de esta llamada, así que tendré que terminar ahora. Si necesita algo más, por favor llame de nuevo y continuaremos donde lo dejamos.',
   'Of course! What else can I help you with?':
     '¡Por supuesto! ¿En qué más puedo ayudarle?',
   'This call has been terminated due to policy violations.':
@@ -218,6 +256,11 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Sigo teniendo dificultades para entenderle. ¿Podría describir en pocas palabras lo que necesita?',
   'I can help with scheduling and service questions. What do you need help with today?':
     'Puedo ayudarle con citas y preguntas de servicio. ¿En qué necesita ayuda hoy?',
+  // RV-071/RV-225 — the in-app voice approval refusal. Listed for the same
+  // reason as the UB-C2 block above: a Spanish session must not flip to
+  // English mid-flow just because the operator asked to approve by voice.
+  [VOICE_APPROVAL_REFUSAL]:
+    'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
 };
 
 /**
@@ -328,6 +371,24 @@ export function renderTtsText(
       return lang === 'es'
         ? `Encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} "${summary}" — ¿es a la que se refiere?`
         : `I found a ${entityKindLabel(entityKind, 'en')} "${summary}" — is that the one you mean?`;
+    }
+    case 'entity_not_found_operator': {
+      // SCH-D3 — the AUTHENTICATED OPERATOR's honest not-found. Distinct
+      // from the caller-facing escalation line ("Let me connect you with a
+      // team member"): an operator IS the team member, so the line names
+      // what was searched for and offers the two real ways forward.
+      // Templated rather than a SENTENCE_CATALOG_ES entry because the
+      // reference is dynamic — an exact-match catalog cannot localize it.
+      const entityKind = typeof payload.entityKind === 'string' ? payload.entityKind : undefined;
+      const reference = typeof payload.reference === 'string' ? payload.reference.trim() : '';
+      if (!reference) {
+        return lang === 'es'
+          ? `No encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} que coincida. ¿Quiere intentar con otro nombre, o crearlo?`
+          : `I couldn't find a matching ${entityKindLabel(entityKind, 'en')}. Want to try a different name, or create it?`;
+      }
+      return lang === 'es'
+        ? `No encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} que coincida con ${reference}. ¿Quiere intentar con otro nombre, o crearlo?`
+        : `I couldn't find a matching ${entityKindLabel(entityKind, 'en')} for ${reference}. Want to try a different name, or create it?`;
     }
     case 'greeting':
       return lang === 'es'

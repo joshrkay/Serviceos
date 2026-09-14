@@ -13,9 +13,12 @@ import {
 // minted for it (see learning/entity-aliases/entity-alias.ts's
 // `EntityAliasKind`), so a lead reference has no alias row to hit and
 // delegates straight through to the trigram resolver. Adding it here without
-// an alias kind behind it would be dead configuration (#909).
+// an alias kind behind it would be dead configuration (#909). `catalogItem`
+// is excluded for the identical reason — `ENTITY_ALIAS_ENTITY_KINDS`
+// (@ai-service-os/shared) has no 'catalogItem' member, so there is no
+// tenant_entity_aliases row a catalog reference could ever hit.
 const ENTITY_LABEL_QUERIES: Record<
-  Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead'>,
+  Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead' | 'catalogItem'>,
   { table: string; labelColumn: string; extraWhere?: string }
 > = {
   customer: {
@@ -45,10 +48,25 @@ export class AliasFirstEntityResolver implements EntityResolver {
     private readonly pool: Pool,
   ) {}
 
+  /**
+   * `jobId` / `customerId` are the resolver-interface ANCHORS (SCH-03 job
+   * anchor, SCH-D2 customer anchor for `kind: 'appointment'`). They are
+   * named here, rather than left to structural pass-through, so this
+   * decorator provably forwards the WHOLE input to the delegate: an alias
+   * miss on an anchored lookup must reach the trigram resolver with its
+   * anchor intact, or a customer-anchored appointment lookup silently
+   * becomes a tenant-wide one. Aliases themselves are keyed by
+   * (tenant, kind, normalized alias) only — an anchor never selects an
+   * alias row, and an empty reference has no alias to hit either
+   * (`resolveViaAlias` returns null), so both anchored shapes fall straight
+   * through to the delegate.
+   */
   async resolve(input: {
     tenantId: string;
     reference: string;
     kind: EntityKind;
+    jobId?: string;
+    customerId?: string;
   }): Promise<EntityResolverResult> {
     const aliasResult = await this.resolveViaAlias(input);
     if (aliasResult) return aliasResult;
@@ -65,6 +83,9 @@ export class AliasFirstEntityResolver implements EntityResolver {
       input.kind === 'estimate' ||
       // #909 — no `lead` alias kind is minted, so there is nothing to look up.
       input.kind === 'lead' ||
+      // #909 (live sweeps 9/10) — no `catalogItem` alias kind is minted
+      // either, same reason as `lead`/`estimate` above.
+      input.kind === 'catalogItem' ||
       !input.reference ||
       input.reference.trim() === ''
     ) {
@@ -97,7 +118,7 @@ export class AliasFirstEntityResolver implements EntityResolver {
 
   private async loadGroundedCandidate(
     tenantId: string,
-    kind: Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead'>,
+    kind: Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead' | 'catalogItem'>,
     entityId: string,
     sourceAlias: string,
   ): Promise<EntityCandidate | null> {

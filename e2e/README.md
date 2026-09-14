@@ -8,7 +8,9 @@ Playwright-based end-to-end tests covering critical user journeys.
 # From repo root — starts API + web dev servers automatically and runs smoke tests
 npm run e2e:smoke
 
-# Run the full suite (smoke + journeys — most journeys are currently skipped)
+# Run the full suite: the legacy `chromium` project (Clerk-key/E2E_BASE_URL-gated)
+# AND `chromium-devauth` (D-2 — runs the same auth-gated specs for real against the
+# repo's dev test-auth mode, see "Dev-auth mode" below)
 npm run e2e
 
 # Interactive debugger
@@ -18,7 +20,108 @@ npm run e2e:ui
 npm run e2e:report
 ```
 
-First run downloads Chromium (~90MB). Cached after that.
+First run downloads Chromium (~90MB). Cached after that. This container's
+pinned Chromium build is sometimes replaced by a pre-installed one at a
+different path — if so, set `QA_CHROMIUM_PATH=/path/to/chrome` (both the
+`chromium` and `chromium-devauth` projects honor it) and never run
+`playwright install`.
+
+## Dev-auth mode (the `chromium-devauth` project) — D-2
+
+Most auth-gated specs historically self-skipped on a bare PR runner: no real
+Clerk publishable key, no authenticated `E2E_BASE_URL`. This repo also ships
+a **dev test-auth mode** — `VITE_AUTH_MODE=dev` aliases `@clerk/clerk-react`
+to a local shim (`packages/web/src/dev/clerk-dev-shim.tsx`) that returns an
+always-signed-in session whose `getToken()` mints an unsigned JWT, and the
+API's `DEV_AUTH_BYPASS=true` decodes that JWT to bootstrap a dev tenant (no
+Clerk cloud, no Postgres — InMemory repos). See
+`packages/web/.claude/skills/verify/SKILL.md` for the full manual recipe.
+
+The `chromium-devauth` Playwright project runs that stack automatically:
+
+- Its own API + vite pair, on **separate ports** from the legacy pair (it
+  cannot share vite's dev server — the Clerk alias is baked in at that
+  server's startup, so it needs its own process): `E2E_DEVAUTH_WEB_PORT`
+  (default `5174`) and `E2E_DEVAUTH_API_PORT` (default `3001`). Override
+  either if those happen to collide with something else on the box.
+- A `devauth-setup` project (Playwright "setup project", runs once, after
+  the dev-auth pair is confirmed healthy, before any `chromium-devauth`
+  test) seeds representative data — a customer, 3 jobs, 2 appointments, an
+  estimate, a draft invoice — by calling `packages/api/scripts/verify-seed.mjs`'s
+  `seedVerifyData()` export against the dev-auth API. See
+  `e2e/fixtures/dev-auth-seed.setup.ts`.
+- `e2e/helpers/dev-auth.ts` exports a `test` (extending `@playwright/test`'s)
+  with a **project-scoped** `devAuthActive` fixture option — true only for
+  `chromium-devauth` (set via that project's `use` block in
+  `playwright.config.ts`). Specs that were gated on
+  `hasRealClerkPublishableKey()` / `E2E_BASE_URL` now also check
+  `devAuthActive` in a `test.beforeEach`, so they run for real under
+  `chromium-devauth` instead of self-skipping. It's deliberately a fixture
+  option, not a bare `process.env` flag: `npm run e2e` runs both projects in
+  the same Node process, and the legacy `chromium` project boots the REAL
+  Clerk SDK — a global "dev-auth is active" flag would make its tests skip
+  their guard too and then fail for real (no network egress to Clerk's CDN
+  in CI/sandboxes), rather than cleanly self-skipping as before.
+- Disable it with `E2E_DEV_AUTH=0` (it's also skipped automatically when
+  `E2E_BASE_URL` is set — nothing local to boot against then).
+- Scoped via `testMatch` to exactly the specs it exists to unlock —
+  `booking-mobile`, `estimate-approval-mobile`, `invoice-payment-mobile`,
+  `comms-inbox-mobile`, `review-response-approval-mobile`,
+  `job-scheduling-mobile`, `settings-mobile` — NOT the whole `e2e/` dir like
+  `chromium`. Every other spec is either already always-on under `chromium`
+  (running it again here would be pure waste) or needs real Clerk secrets
+  (out of scope — see below). One is actively incompatible: the hermetic
+  signup journey's signed webhook needs `CLERK_WEBHOOK_SECRET`, which is
+  only wired into the legacy pair's API env, not `devAuthApiServerEnv`.
+- Always call `dismissWhatsNewModal(page)` (from `helpers/dev-auth.ts`)
+  right after navigating to an authenticated route, before any click. The
+  "What's new" modal (`components/walkthrough/WhatsNewModal.tsx`) is a
+  pure-localStorage "seen the latest release?" gate — under `chromium-devauth`
+  every test gets a fresh browser context AND a fresh InMemory tenant, so it
+  opens on literally every authenticated page's first render, and its
+  `fixed inset-0` backdrop intercepts pointer events until dismissed.
+
+**Never active in a real build** — `VITE_AUTH_MODE=dev` is only read by
+`packages/web/vite.config.ts`'s dev-server alias and by the shim itself;
+production builds never set it, so `@clerk/clerk-react` resolves to the real
+package. `DEV_AUTH_BYPASS` is likewise refused outside `NODE_ENV=dev`.
+
+**Not every auth-gated spec is dev-auth eligible.** `smoke.spec.ts`'s UI
+tests stay gated to a real Clerk key / `E2E_BASE_URL` only — they assert
+either the actual Clerk SignIn/SignUp widget (the dev shim renders a plain
+placeholder div instead) or signed-**out** behavior (the landing page,
+redirect-to-login), and dev-auth's shim is always signed in by design, so it
+structurally cannot represent a logged-out visitor. See the comment at the
+top of that file.
+
+### Known failures under dev-auth
+
+None outstanding — three harness bugs surfaced the first time these specs
+actually ran (all fixed in the same change that added `chromium-devauth`,
+D-2):
+
+- **`comms-inbox-mobile.spec.ts`** — its `page.route('**/api/conversations**', …)`
+  mock also matched vite's own dev-server module URL for the page's source
+  file, `/src/api/conversations.ts` (the glob is a "contains" match, and that
+  path contains the substring `api/conversations` too), so the mock served
+  JSON in place of the real JS module and the whole app failed to boot (blank
+  page). Fixed by matching on `url.pathname` with an anchored regex
+  (`/^\/api\/conversations(\/|\?|$)/`) instead of a bare glob string.
+- **`comms-inbox-mobile.spec.ts`** (the thread-click test) — timed out
+  clicking a thread row because the "What's new" modal (see above) was still
+  open and intercepting the click. Fixed by calling `dismissWhatsNewModal`.
+- **`job-scheduling-mobile.spec.ts`** — the "open the first job" locator
+  (`getByRole('link', { name: /JOB-/ })`) never matched anything: job rows
+  are clickable `role="button"` divs (`JobsList.tsx`), not links, so this
+  self-skipped as "no jobs seeded" on every prior run this describe actually
+  executed. Fixed to `getByRole('button', { name: /JOB-/ })`. Once it could
+  actually open a job, a second bug surfaced: `getByText(/Schedule/i).first()`
+  matched the sidebar's "Schedule" nav link (present but hidden at the 320px
+  viewport) ahead of the job detail page's own visible "Schedule" label in
+  DOM order. Fixed with `.filter({ visible: true })` before `.first()`.
+
+If a new one shows up, record it here as: spec, assertion, screenshot/trace
+path under `test-results/`, and suspected root cause.
 
 ## What's covered today
 
@@ -184,7 +287,11 @@ e2e/
 │       └── public-estimate-view.ts        # Zod-pinned public estimate fixture
 ├── helpers/
 │   ├── clerk-stub.ts                      # offline Clerk for hermetic UI
+│   ├── clerk-key.ts                       # real-vs-placeholder Clerk pk gate
+│   ├── dev-auth.ts                        # D-2 devAuthActive fixture (chromium-devauth)
 │   └── stripe-stub.ts                     # offline Stripe for W1-4 status poll
+├── fixtures/
+│   └── dev-auth-seed.setup.ts             # D-2 seeds InMemory data for chromium-devauth
 ├── public/
 │   └── invoice-pay-status.spec.ts         # W1-4 hermetic /pay/:id status
 └── journeys/

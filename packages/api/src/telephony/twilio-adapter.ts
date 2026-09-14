@@ -47,7 +47,10 @@ import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import type { ConversationRepository } from '../conversations/conversation-service';
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
-import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
+import {
+  assembleB2bAccountContext,
+  buildAccountContextPromptSection,
+} from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
@@ -109,6 +112,7 @@ import {
   renderTtsText,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_UNSUPPORTED_LINE,
   LANGUAGE_SWITCH_CAP_LINE,
@@ -118,6 +122,7 @@ import {
   MIN_STT_CONFIDENCE,
   MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
   MAX_LANGUAGE_SWITCHES_PER_CALL,
+  DEFAULT_MAX_CALL_DURATION_MS,
 } from './media-streams/mediastream-adapter';
 import { recordVoiceError } from '../analytics/posthog';
 import {
@@ -140,6 +145,7 @@ import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
 import type { EntityResolver } from '../ai/resolution/entity-resolver';
+import type { LocationRepository } from '../locations/location';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
@@ -154,6 +160,14 @@ const logger = createLogger({
 export interface TwilioAdapterDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
+  /**
+   * U5 — absolute per-call wall-clock cap (ms), wired from
+   * `VOICE_MAX_CALL_DURATION_MS`. Gather has no timer of its own (every turn
+   * is a fresh webhook), so `_handleGatherLocked` compares the session age
+   * against this on each turn and hangs up with the wrap-up line once it is
+   * exceeded. Default {@link DEFAULT_MAX_CALL_DURATION_MS}.
+   */
+  maxCallDurationMs?: number;
   /**
    * U4 — per-turn vulnerability triage on the Gather/PSTN path. Fired
    * fire-and-forget after the deterministic safety scan, symmetric to the
@@ -179,9 +193,15 @@ export interface TwilioAdapterDeps {
    * P0 voice-safety — tenant-scoped entity resolver, spread straight into
    * `createVoiceTurnProcessor` by the constructor below. Declared here (rather
    * than relying on the untyped runtime spread from app.ts) so the Gather
-   * path's `resolveTurnEntities` call is type-checked against a real dep.
+   * path's `resolveTurnEntityEvent` call is type-checked against a real dep.
    */
   entityResolver?: EntityResolver;
+  /**
+   * #1118 — spread into the processor, which decorates `entityResolver` with
+   * the U3 customer address hint so a same-name disambiguation question can
+   * be answered by service address. Absent → phone-only hints.
+   */
+  locationRepo?: Pick<LocationRepository, 'findByCustomer'>;
   /** Used as actorId on proposal/audit rows when none is in scope. */
   systemActorId?: string;
   /** Business name used in recording disclosure copy. */
@@ -472,6 +492,15 @@ export interface TwilioAdapterDeps {
  *   3. Neither:
  *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
+ *
+ * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
+ * tenant's own `tenant_settings.business_name` — when the per-tenant
+ * persona resolver found one; the `businessName` PARAMETER (the
+ * platform-wide `TWILIO_BUSINESS_NAME` env value / literal `'our team'`
+ * fallback the caller passes in) is used only when the tenant has none on
+ * file. Without this, every tenant that completed onboarding (which
+ * captures a business name) but never wrote a custom `voice_greeting`
+ * heard the SAME platform-wide string as every other tenant.
  */
 export function buildTelephonyGreeting(
   businessName: string,
@@ -490,10 +519,12 @@ export function buildTelephonyGreeting(
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
-  // ends with a CTA (the ES CTA already ends with '?').
+  // ends with a CTA (the ES CTA already ends with '?'). #1156: the
+  // tenant's own resolved business name wins over the env-wide fallback.
+  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
-    ? t('greeting.opener_named', language, { business: businessName, agent: persona.agentName })
-    : t('greeting.opener_default', language, { business: businessName });
+    ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
+    : t('greeting.opener_default', language, { business: resolvedBusinessName });
   const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
@@ -1042,6 +1073,7 @@ export class TwilioGatherAdapter {
    * channel before Twilio finishes the connect.
    */
   async handleInboundForStream(opts: {
+    accountSid?: string;
     callSid: string;
     from: string;
     tenantId: string;
@@ -1057,7 +1089,13 @@ export class TwilioGatherAdapter {
       from: opts.from,
       tenantId: opts.tenantId,
     });
-    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+    if (opts.accountSid) {
+      if (session.twilioAccountSid && session.twilioAccountSid !== opts.accountSid) {
+        throw new Error('Twilio account mismatch on replayed call');
+      }
+      session.twilioAccountSid = opts.accountSid;
+    }
+    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid, accountSid: session.twilioAccountSid });
   }
 
   /**
@@ -1431,6 +1469,54 @@ export class TwilioGatherAdapter {
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
     await commit();
+
+    // Row 2.2 — the GRANT of implicit recording consent is a mutation
+    // (a `consent_events` row lands) and, until now, the only
+    // recording-consent transition with no `audit_events` row: the
+    // caller-initiated revocation already writes
+    // `recording_consent.revoked` through this same repository
+    // (`handleRecordingObjection` below). The ledger stays the
+    // append-only legal record; this is the operator-visible trail, so a
+    // grant and a revocation finally read the same way in the audit log.
+    //
+    // Guarded exactly like the revoked emitter: a ledger and a caller
+    // phone are what make a row possible at all (`discloseRecording`
+    // returns NO_CONSENT_LEDGER without both), so without them nothing
+    // was written and nothing is audited.
+    //
+    // DELIBERATELY SWALLOWED, unlike the dispatch-board emitter in
+    // #1040: every audit write on this path is best-effort by design —
+    // this runs mid-call from a fire-and-forget
+    // `void commitRecordingConsent(...)` in the media-streams adapter,
+    // and an audit failure must never drop a live call or, worse,
+    // unwind a consent row that was already committed.
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    if (this.deps.auditRepo && this.deps.consentEvents && callerPhone) {
+      try {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: session.tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'recording_consent.granted',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: {
+              kind: 'recording',
+              state: 'implicit',
+              source: 'voice',
+              phone: callerPhone,
+              customerId: session.customerId ?? null,
+              // Which transport's point-of-evidence committed it.
+              channel: session.channel,
+            },
+          }),
+        );
+      } catch {
+        /* audit is best-effort — see above */
+      }
+    }
   }
 
   /**
@@ -1481,14 +1567,17 @@ export class TwilioGatherAdapter {
    * `publicBaseUrl`'s host when set; otherwise emits an explicit
    * placeholder so a missing publicBaseUrl is loud at deploy time.
    */
-  buildStreamTwiML(opts: { sessionId: string; callSid: string }): string {
+  buildStreamTwiML(opts: { sessionId: string; callSid: string; accountSid?: string }): string {
     const baseRaw = this.deps.publicBaseUrl?.replace(/\/+$/, '') ?? '';
     // Translate http(s):// → ws(s):// so Twilio gets a valid ws URL even
     // when the operator only configured PUBLIC_API_URL.
     const wsBase = baseRaw
       ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
       : 'wss://media-streams-base-url-not-configured';
-    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}`;
+    // Stream URLs cannot carry query parameters. Bind the upgrade to the
+    // authenticated call via its path; the server resolves its account token.
+    const callPath = opts.accountSid ? `/${encodeURIComponent(opts.callSid)}` : '';
+    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}${callPath}`;
     return (
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
@@ -1910,15 +1999,22 @@ export class TwilioGatherAdapter {
       ];
     }
 
-    // Always append utterance to transcript first so it is captured
+    // Append the utterance to the transcript first so it is captured
     // regardless of the path below (frustration escalation or normal turn).
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      // #850 — a spoken money-approval challenge is redacted here rather than
-      // at each consumer, so every derived summary inherits it.
-      text: callerTranscriptText(session, opts.speechResult),
-      ts: Date.now(),
-    });
+    // #859 — this is the ONLY append for the utterance: the `speechTurn`
+    // delegation below is told `transcriptAppended: true`. An empty
+    // media-streams final is skipped for the same reason Gather skips it
+    // (_handleGatherLocked): an empty `caller:` line would make
+    // deriveCallOutcome read a silent call as caller speech.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        // #850 — a spoken money-approval challenge is redacted here rather than
+        // at each consumer, so every derived summary inherits it.
+        text: callerTranscriptText(session, opts.speechResult),
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — ONE shared deterministic safety scan (emergency keywords),
     // BEFORE the frustration check and BEFORE any LLM call. Shared with the
@@ -1957,6 +2053,7 @@ export class TwilioGatherAdapter {
       speechResult: opts.speechResult,
       callSid: opts.callSid,
       tenantId: opts.tenantId,
+      transcriptAppended: true,
     });
   }
 
@@ -2181,11 +2278,32 @@ export class TwilioGatherAdapter {
       return this.finalizeTwiml(session, gatherSafetyEffects, opts.sessionId);
     }
 
+    // U5 — absolute per-call duration cap. Checked after the transcript
+    // append (the utterance is never lost) and the deterministic safety scan
+    // (a life-safety utterance on the last turn still transfers), BEFORE any
+    // LLM call. Same speak-then-end shape as the low-STT-confidence ladder
+    // below: wrap-up <Say> + the builder's end_session → <Hangup/> branch,
+    // and an explicit finalize because this path never touches the FSM.
+    const maxCallDurationTwiml = await this.maybeEndForMaxCallDuration(session, opts.sessionId);
+    if (maxCallDurationTwiml) return maxCallDurationTwiml;
+
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
     // the same guard in processCallerUtterance (WS path). Runs after the
     // transcript append so the triggering utterance is always captured.
+    // PR-0b (#968/#962) — gate on the tenant's trigger_keyword_frustration
+    // toggle BEFORE dispatching, same as the media-streams path (see
+    // `triggers` in processCallerUtterance above). Without this, the FSM
+    // re-gate (transitions.ts) still no-ops a keyword match when the toggle
+    // is off (returns zero side effects), but this path unconditionally
+    // RETURNED that empty-effects TwiML — a bare <Gather> with no <Say> —
+    // silently eating the caller's turn instead of falling through to
+    // normal classification below.
     const gatherFrustration = detectFrustration(opts.speechResult);
-    if (gatherFrustration.matched) {
+    const gatherTriggers = session.machine.currentContext.escalationTriggers;
+    if (
+      gatherFrustration.matched &&
+      (!gatherTriggers || gatherTriggers.trigger_keyword_frustration)
+    ) {
       const frustrationEffects = session.machine.dispatch({
         type: 'frustration_detected',
         source: 'keyword',
@@ -2317,6 +2435,14 @@ export class TwilioGatherAdapter {
         opts.tenantId,
         session.customerId,
       );
+      // #1155 (row 2.12) — the SAME B2B/property-manager account section the
+      // media-streams turn sends (create-voice-turn-processor.ts speechTurn),
+      // from the context loadB2bAccountContext stashed at caller
+      // identification. Absent for a residential or unmatched caller, so that
+      // call's classify prompt stays byte-identical.
+      const b2bAccountPromptSection = session.b2bAccountContext
+        ? buildAccountContextPromptSection(session.b2bAccountContext)
+        : undefined;
       // #886/#887 — surface-conditional taxonomy: derived from session
       // identity (owner line / trusted channel / D-026 phone actor). Hoisted
       // so the off-surface audit below records the same profile the guard
@@ -2327,9 +2453,13 @@ export class TwilioGatherAdapter {
           opts.speechResult,
           {
             tenantId: opts.tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
             classifierProfile,
+            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
             // RV-071 — appended ONLY on verified owner sessions so every
             // other call's prompt stays byte-identical (cassette hashes).
             ...(session.machine.currentContext.ownerSession === true
@@ -2573,17 +2703,33 @@ export class TwilioGatherAdapter {
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        const refs = await this.processor.resolveTurnEntities(
-          session,
-          opts.tenantId,
-          classifierEvent.intentType,
-          classifierEvent.entities as Record<string, unknown>,
+        // #1118 — an ambiguous reference becomes entity_ambiguous: the FSM
+        // asks (rendered to <Say> text below) instead of the ambiguity being
+        // folded into entity_resolved and dropped.
+        const resolutionFx = session.machine.dispatch(
+          await this.processor.resolveTurnEntityEvent(
+            session,
+            opts.tenantId,
+            classifierEvent.intentType,
+            classifierEvent.entities as Record<string, unknown>,
+          ),
         );
-        sideEffectsAll.push(
-          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
-        );
+        this.processor.expandDisambiguationTemplate(session, resolutionFx);
+        sideEffectsAll.push(...resolutionFx);
         this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
+    } else if (currentState === 'entity_resolution') {
+      // #1118 — the caller is answering the disambiguation question; the SAME
+      // shared handler the media-streams speechTurn runs. Without this branch
+      // the answer fell to the generic `else` → confidence_low, which the
+      // entity_resolution state ignores (a bare <Gather> with no <Say>).
+      sideEffectsAll.push(
+        ...(await this.processor.handleDisambiguationTurn(
+          session,
+          opts.tenantId,
+          opts.speechResult,
+        )),
+      );
     } else if (currentState === 'ask_caller') {
       // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
       // SAME find-or-create-customer + advance-to-intake logic the media-
@@ -2635,6 +2781,48 @@ export class TwilioGatherAdapter {
    * would never fire — the manual call here is required, same pattern
    * `/dial-result`'s successful-transfer branch already uses).
    */
+  /**
+   * U5 — end a Gather call whose age (`Date.now() - session.createdAt`, the
+   * same elapsed-time basis `runSummary` uses) has passed
+   * `deps.maxCallDurationMs`. Returns the terminal TwiML, or null when the
+   * call is still within its limit.
+   */
+  private async maybeEndForMaxCallDuration(
+    session: VoiceSession,
+    sessionId: string,
+  ): Promise<string | null> {
+    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
+    const elapsedMs = Date.now() - session.createdAt.getTime();
+    if (elapsedMs < limitMs) return null;
+
+    logger.info('handleGather: max call duration reached — ending call', {
+      sessionId,
+      callSid: session.callSid,
+      elapsedMs,
+      limitMs,
+    });
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, lang) },
+      },
+      { type: 'end_session', payload: { reason: 'max_call_duration' } },
+    ];
+    const twiml = await this.finalizeTwiml(session, effects, sessionId);
+    if (!session.ended) {
+      session.ended = true;
+      this.finalizeTerminatedSession(session, effects, 'max_call_duration');
+      // PR #975 F5 — every terminal Gather branch kicks off the summary so
+      // call_summaries captures the capped call too (parity with the FSM
+      // `terminated` branches in handleInbound / _handleGatherLocked).
+      void this.processor.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+    return twiml;
+  }
+
   private async maybeHandleLowSttConfidenceGather(
     session: VoiceSession,
     opts: { sessionId: string; confidence: number | undefined },
@@ -2679,6 +2867,11 @@ export class TwilioGatherAdapter {
       if (!session.ended) {
         session.ended = true;
         this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+        // PR #975 F5 — same omission as the max-duration end: without this a
+        // ladder hand-off left no call_summaries row.
+        void this.processor.runSummary(session).catch(() => {
+          /* swallow — summary is best-effort */
+        });
       }
       recordVoiceError({
         errorKind: 'low_stt_confidence_repeated',

@@ -86,6 +86,56 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(approved.executedBy).toBe(actorId);
   });
 
+  // voice_clarification approval wedge — sweep row A49 (2026-08-30):
+  // approving a clarification card moved it to 'approved', the execution
+  // sweep then claimed it (status -> 'executing'), and `ProposalExecutor
+  // .execute` threw HANDLER_NOT_FOUND — voice_clarification is deliberately
+  // the ONE ProposalType with no execution handler (proposals/execution/
+  // handlers.ts; proposals/voice-clarification.ts's own doc comment says so
+  // in as many words). The proposal was left wedged in 'executing' through
+  // several stale-recovery retries before finally landing on
+  // 'execution_failed' — dishonest bookkeeping for a card that was never a
+  // failed action, only an unanswered question. `approveProposal` now
+  // refuses outright: a clarification is answered by the caller speaking
+  // again or dismissed (rejectProposal), never "approved".
+  it('refuses to approve a voice_clarification proposal — it is a question, not an action', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: 'voice_clarification',
+      payload: {
+        transcript: 'caller: can you move my appointment',
+        reason: 'missing_entities',
+        sessionId: 'sess-1',
+      },
+    });
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner'),
+    ).rejects.toThrow(ValidationError);
+    // Never transitioned — still sitting exactly where the operator left it,
+    // available to reject or to be superseded by the caller speaking again.
+    expect((await repo.findById(tenantId, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  // Rejecting (dismissing) a voice_clarification is the documented close
+  // action (proposal.ts's actionClass comment: "closes when the operator
+  // dismisses it or speaks again") and must keep working exactly as it does
+  // for every other proposal type — the new approve guard is approve-only.
+  it('still allows rejecting (dismissing) a voice_clarification proposal', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: 'voice_clarification',
+      payload: {
+        transcript: 'caller: can you move my appointment',
+        reason: 'missing_entities',
+        sessionId: 'sess-1',
+      },
+    });
+
+    const rejected = await rejectProposal(repo, tenantId, proposal.id, actorId, 'owner', 'dismissed');
+    expect(rejected.status).toBe('rejected');
+  });
+
   // Raised in PR review: a dispatcher holds `proposals:approve` but NOT
   // `settings:update`. Without a type-specific guard the approval queue became
   // a way around the route permission model — approving one of these cards
@@ -259,6 +309,28 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(updated.payload.phone).toBe('555-9999');
     expect(editedFields).toContain('name');
     expect(editedFields).toContain('phone');
+  });
+
+  // #1139 — the correction-lesson recorder diffs the payload AS FIRST
+  // PROPOSED against the executed payload. editProposal overwrites `payload`,
+  // so it must keep the first draft in `originalPayload` — once.
+  it('#1139 — the first edit that changes a field preserves the payload as first proposed in originalPayload; later edits keep it', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo);
+    expect(proposal.originalPayload).toBeUndefined();
+
+    // An edit that changes nothing does not stamp it.
+    const { proposal: noop } = await editProposal(repo, tenantId, proposal.id, actorId, 'owner', { name: 'John Doe' });
+    expect(noop.originalPayload).toBeUndefined();
+
+    const { proposal: first } = await editProposal(repo, tenantId, proposal.id, actorId, 'owner', { name: 'Jane Doe' });
+    expect(first.payload).toEqual({ name: 'Jane Doe' });
+    expect(first.originalPayload).toEqual({ name: 'John Doe' });
+
+    const { proposal: second } = await editProposal(repo, tenantId, proposal.id, actorId, 'owner', { name: 'Janet Doe' });
+    expect(second.payload).toEqual({ name: 'Janet Doe' });
+    expect(second.originalPayload).toEqual({ name: 'John Doe' });
+    expect((await repo.findById(tenantId, proposal.id))!.originalPayload).toEqual({ name: 'John Doe' });
   });
 
   it('validation — edit validates against typed contract', async () => {
@@ -759,6 +831,90 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
       await expect(
         undoProposal(repo, tenantId, 'nonexistent-id', actorId, 'owner')
       ).rejects.toThrow(NotFoundError);
+    });
+  });
+
+  // #1139 (row 9.9) — a correction lesson is only ever recorded AFTER its
+  // proposal executed, and 'executed' is terminal. The approval undo keeps
+  // refusing it; `{ scope: 'lessons' }` reverses the lessons (and the config
+  // each cascaded) without touching the proposal.
+  describe('undoProposal — lessons scope on an executed proposal (#1139)', () => {
+    async function executedWithLabourLesson() {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      await repo.updateStatus(tenantId, proposal.id, 'executed');
+      const auditRepo = new InMemoryAuditRepository();
+      const lessonRepo = new InMemoryCorrectionLessonRepository();
+      const ports = new FakeConfigPorts({ laborRateCents: 11500 });
+      const drafts = extractCorrectionLessons({
+        deltas: [{ type: 'price_changed', lineItemId: 'li-1', oldValue: 11500, newValue: 13500 }],
+        lineItems: [{ id: 'li-1', category: 'labor' }],
+        config: { laborRateCents: 11500, skuPriceCents: {}, bannedPhrases: [], templateWeights: {} },
+      });
+      await recordCorrectionLessons(
+        { tenantId, sourceProposalId: proposal.id, ownerId: actorId, localDate: '2026-06-14', drafts },
+        { repository: lessonRepo, ports, auditRepo },
+      );
+      expect(ports.laborRateCents).toBe(13500);
+      return { repo, proposal, auditRepo, lessonRepo, ports };
+    }
+
+    it('owner: reverses the lessons and the cascaded config; the proposal stays executed; audited as the actor role', async () => {
+      const { repo, proposal, auditRepo, lessonRepo, ports } = await executedWithLabourLesson();
+
+      const result = await undoProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo, { lessonRepo, ports }, {
+        scope: 'lessons',
+      });
+
+      expect(result.status).toBe('executed');
+      expect((await repo.findById(tenantId, proposal.id))!.status).toBe('executed');
+      expect(ports.laborRateCents).toBe(11500);
+      const linked = await lessonRepo.findBySourceProposal(tenantId, proposal.id);
+      expect(linked.map((l) => l.status)).toEqual(['reverted']);
+      const reverted = auditRepo.getAll().filter((a) => a.eventType === 'correction_lesson.reverted');
+      expect(reverted).toHaveLength(1);
+      expect(reverted[0].actorRole).toBe('owner');
+    });
+
+    it('the approval undo (no scope) still refuses an executed proposal and leaves its lessons applied', async () => {
+      const { repo, proposal, auditRepo, lessonRepo, ports } = await executedWithLabourLesson();
+
+      await expect(
+        undoProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo, { lessonRepo, ports }),
+      ).rejects.toThrow(ValidationError);
+      expect(ports.laborRateCents).toBe(13500);
+      expect((await lessonRepo.findBySourceProposal(tenantId, proposal.id)).map((l) => l.status)).toEqual(['applied']);
+    });
+
+    it('requires settings:update — a dispatcher (proposals:approve only) is refused and nothing is reverted', async () => {
+      const { repo, proposal, auditRepo, lessonRepo, ports } = await executedWithLabourLesson();
+
+      await expect(
+        undoProposal(repo, tenantId, proposal.id, actorId, 'dispatcher', auditRepo, { lessonRepo, ports }, { scope: 'lessons' }),
+      ).rejects.toThrow(ForbiddenError);
+      expect(ports.laborRateCents).toBe(13500);
+    });
+
+    it('refuses when the executed proposal recorded no lessons, or the proposal is not executed', async () => {
+      const repo = makeRepo();
+      const auditRepo = new InMemoryAuditRepository();
+      const correctionLoop = { lessonRepo: new InMemoryCorrectionLessonRepository(), ports: new FakeConfigPorts() };
+
+      const executed = await createReadyProposal(repo);
+      await repo.updateStatus(tenantId, executed.id, 'approved');
+      await repo.updateStatus(tenantId, executed.id, 'executed');
+      await expect(
+        undoProposal(repo, tenantId, executed.id, actorId, 'owner', auditRepo, correctionLoop, { scope: 'lessons' }),
+      ).rejects.toThrow(ValidationError);
+
+      const approved = await createReadyProposal(repo);
+      await approveProposal(repo, tenantId, approved.id, actorId, 'owner');
+      await expect(
+        undoProposal(repo, tenantId, approved.id, actorId, 'owner', auditRepo, correctionLoop, { scope: 'lessons' }),
+      ).rejects.toThrow(ValidationError);
+      // The approval stays in place — the lessons scope never undoes a proposal.
+      expect((await repo.findById(tenantId, approved.id))!.status).toBe('approved');
     });
   });
 });

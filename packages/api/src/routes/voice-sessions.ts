@@ -119,6 +119,10 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
         ttsAudio: result.ttsAudio ? result.ttsAudio.toString('base64') : undefined,
         proposalIds: result.proposalIds,
         ended: result.ended,
+        // R1 instrumentation — how far this turn got on the action path and,
+        // when it stopped short, why. Always present; the SSE `transition`
+        // event carries the identical object.
+        trace: result.trace,
       });
     })
   );

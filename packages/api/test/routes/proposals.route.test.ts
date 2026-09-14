@@ -23,6 +23,9 @@ import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/have
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { Role } from '../../src/auth/rbac';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryCorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
+import { FakeConfigPorts } from '../../src/learning/corrections/lesson-applicator';
+import { recordCorrectionLessons } from '../../src/learning/corrections/apply-undo';
 
 const baseInput: CreateProposalInput = {
   tenantId: TEST_TENANT_ID,
@@ -398,6 +401,80 @@ describe('POST /api/proposals/:id/undo', () => {
 
     // draft proposal cannot be undone (service throws ValidationError → 400)
     expect(res.status).toBe(400);
+  });
+
+  // #1139 (row 9.9) — body `{ scope: 'lessons' }` reverses the correction
+  // lessons an EXECUTED proposal recorded; no body keeps the approval-undo
+  // contract the post-approve toast relies on (executed → 400).
+  async function buildLessonUndoApp(role: Role) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: TEST_USER_ID, sessionId: 's', tenantId: TEST_TENANT_ID, role };
+      next();
+    });
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const lessonRepo = new InMemoryCorrectionLessonRepository();
+    const ports = new FakeConfigPorts({ laborRateCents: 11500 });
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo, undefined, { lessonRepo, ports }));
+
+    const proposal = createProposal(baseInput);
+    await proposalRepo.create(proposal);
+    await proposalRepo.updateStatus(TEST_TENANT_ID, proposal.id, 'executed');
+    await recordCorrectionLessons(
+      {
+        tenantId: TEST_TENANT_ID,
+        sourceProposalId: proposal.id,
+        ownerId: TEST_USER_ID,
+        localDate: '2026-06-14',
+        drafts: [
+          {
+            lessonType: 'labor_rate_changed',
+            summary: 'Labor rate updated',
+            payload: { kind: 'labor_rate_changed', beforeCents: 11500, afterCents: 13500 },
+          },
+        ],
+      },
+      { repository: lessonRepo, ports, auditRepo },
+    );
+    return { app, proposal, lessonRepo, ports };
+  }
+
+  it('#1139 — { scope: "lessons" } on an executed proposal reverses its lessons and returns it still executed', async () => {
+    const { app, proposal, lessonRepo, ports } = await buildLessonUndoApp('owner');
+    expect(ports.laborRateCents).toBe(13500);
+
+    const res = await request(app).post(`/api/proposals/${proposal.id}/undo`).send({ scope: 'lessons' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('executed');
+    expect(ports.laborRateCents).toBe(11500);
+    expect((await lessonRepo.findBySourceProposal(TEST_TENANT_ID, proposal.id)).map((l) => l.status)).toEqual([
+      'reverted',
+    ]);
+  });
+
+  it('#1139 — without a scope an executed proposal is still refused (400) and its lessons stay applied', async () => {
+    const { app, proposal, lessonRepo, ports } = await buildLessonUndoApp('owner');
+
+    const res = await request(app).post(`/api/proposals/${proposal.id}/undo`);
+
+    expect(res.status).toBe(400);
+    expect(ports.laborRateCents).toBe(13500);
+    expect((await lessonRepo.findBySourceProposal(TEST_TENANT_ID, proposal.id)).map((l) => l.status)).toEqual([
+      'applied',
+    ]);
+  });
+
+  it('#1139 — a dispatcher (no settings:update) gets 403 for the lessons scope; an unknown scope is a 400', async () => {
+    const { app, proposal, ports } = await buildLessonUndoApp('dispatcher');
+
+    const forbidden = await request(app).post(`/api/proposals/${proposal.id}/undo`).send({ scope: 'lessons' });
+    expect(forbidden.status).toBe(403);
+    const invalid = await request(app).post(`/api/proposals/${proposal.id}/undo`).send({ scope: 'everything' });
+    expect(invalid.status).toBe(400);
+    expect(ports.laborRateCents).toBe(13500);
   });
 });
 

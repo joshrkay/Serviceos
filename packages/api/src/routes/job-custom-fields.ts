@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { JobRepository } from '../jobs/job';
 import {
@@ -64,6 +65,7 @@ export function createJobCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    notFoundOnMalformedId('Job custom field not found', 'fieldDefId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await repo.archiveDef(req.auth!.tenantId, req.params.fieldDefId);
       if (!archived) {
@@ -79,6 +81,7 @@ export function createJobCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Job not found', 'jobId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       res.json(await listResolvedJobCustomFields(req.auth!.tenantId, req.params.jobId, repo));
     })
@@ -89,6 +92,8 @@ export function createJobCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job not found', 'jobId'),
+    notFoundOnMalformedId('Job custom field not found', 'fieldDefId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = setCustomFieldValueSchema.parse(req.body);
       // Confirm the job belongs to this tenant before writing a value — the

@@ -176,9 +176,13 @@ function jwkToJwksKey(jwk: Record<string, unknown>): JwksKey {
   if (typeof jwk.kty !== 'string') {
     throw new Error('JWK missing kty');
   }
-  // Node's createPublicKey accepts the JWK directly when format: 'jwk'.
+  // Node's createPublicKey accepts the JWK directly when format: 'jwk'. The
+  // runtime value is a parsed JSON object (Record<string, unknown>), which
+  // does not structurally overlap enough with `crypto.JsonWebKey` for a
+  // single `as` assertion under every `@types/node` resolution (#1149) — go
+  // through `unknown` since the `kty` check above is the real guard.
   const publicKey = crypto.createPublicKey({
-    key: jwk as crypto.JsonWebKey,
+    key: jwk as unknown as crypto.JsonWebKey,
     format: 'jwk',
   });
   return {

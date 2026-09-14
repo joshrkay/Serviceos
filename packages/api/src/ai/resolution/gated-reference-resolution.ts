@@ -134,6 +134,22 @@ export const GATED_REFERENCE_SOURCES: Readonly<Record<string, GatedReferenceSour
     payloadFields: ['leadReference'],
     entityFields: ['leadReference', 'customerName'],
   },
+  // #909 (live sweeps 9/10) — `update_catalog_item`'s only producer on chat
+  // (UpdateCatalogItemTaskHandler, ai/tasks/voice-extended-tasks.ts) writes
+  // the spoken/typed item name onto `payload.itemReference` when its own
+  // draft-time resolution can't confidently pick a row. `catalogItemReference`
+  // is the classifier's own extraction field for the same text (the handler
+  // builds `itemReference` FROM it), so in the ordinary case this fallback
+  // is a same-string no-op (deduped by `push()` below) — it exists as the
+  // same belt-and-braces the other entries carry: if a future producer ever
+  // set `missingFields: ['catalogItemId']` without also setting
+  // `payload.itemReference`, this is what keeps the gate resolvable instead
+  // of silently unfillable.
+  catalogItemId: {
+    kind: 'catalogItem',
+    payloadFields: ['itemReference'],
+    entityFields: ['catalogItemReference'],
+  },
 };
 
 /**
@@ -187,6 +203,20 @@ export interface GatedReferenceOutcome {
    * no reference at all). Reported for telemetry; they keep their gate.
    */
   unresolved: string[];
+  /**
+   * The subset of `unresolved` where the resolver LOOKED and there is no such
+   * record — every reference the operator gave came back `not_found`.
+   *
+   * Distinct from the rest of `unresolved` on purpose, because the honest
+   * answer differs. A field that is unresolved because there was nothing to
+   * look with, or because the best match was only `low_confidence`, is a card
+   * the operator can still finish. A field that is unresolved because THE
+   * RECORD DOES NOT EXIST cannot be finished by anyone: "cancel the Patel
+   * appointment" when there is no Patel is not a form with a blank in it, it
+   * is a miss, and gating a card on it produces a capability that can never be
+   * approved (#909). Callers use this to say so instead.
+   */
+  notFound: string[];
 }
 
 function trimmed(value: unknown): string | undefined {
@@ -234,8 +264,27 @@ export function planGatedReferenceLookups(
     };
     for (const field of source.payloadFields) push(payload[field]);
     if (entities) for (const field of source.entityFields) push(entities[field]);
-    if (references.length === 0) continue;
 
+    // A11/#909 generalization (2026-08-31 live sweep, A21 apply_late_fee) —
+    // deliberately NOT skipped when `references` is empty. This field's own
+    // doc comment already documents "no reference at all" as one of the
+    // reasons a gate lands in `unresolved` (and therefore gets the honest
+    // `buildUnresolvedPrompt` line via `buildGatedReferenceReply`), but an
+    // early `continue` here used to drop the field from `lookups` entirely
+    // whenever NEITHER `payloadFields` NOR `entityFields` produced any text
+    // — so it never reached `resolveGatedReferences`'s `outcome.unresolved`
+    // push at all, and the reply came back silent: not an ambiguity ask, not
+    // an honest can't-match line, nothing. Live evidence: apply_late_fee
+    // proposals whose utterance named neither a job nor a customer at all
+    // ("add a $25 late fee") had `payload.invoiceReference` genuinely absent
+    // (the handler has nothing to preserve when nothing was said — #935/
+    // #947's verify-or-gate fix doesn't apply; there is no reference to
+    // verify), so this exact field always hit the old early-continue. An
+    // empty `references` array here is harmless downstream:
+    // `resolveGatedReferences`'s inner `for (const reference of
+    // lookup.references)` simply doesn't iterate, `settled` stays false, and
+    // the field correctly lands in `outcome.unresolved` — no resolver call
+    // is ever attempted for text that doesn't exist.
     lookups.push({ idField, kind: source.kind, references });
   }
 
@@ -283,7 +332,7 @@ export async function resolveGatedReferences(
   proposal: Pick<Proposal, 'payload' | 'sourceContext'>,
   entities?: Record<string, unknown>,
 ): Promise<GatedReferenceOutcome> {
-  const outcome: GatedReferenceOutcome = { filled: {}, unresolved: [] };
+  const outcome: GatedReferenceOutcome = { filled: {}, unresolved: [], notFound: [] };
   if (!resolver) return outcome;
 
   const lookups = planGatedReferenceLookups(proposal, entities);
@@ -291,6 +340,11 @@ export async function resolveGatedReferences(
 
   for (const lookup of lookups) {
     let settled = false;
+    // Every reference tried for this field came back `not_found` — see
+    // `GatedReferenceOutcome.notFound`. Starts true only when there IS a
+    // reference to look with; a field with nothing to search on is unresolved,
+    // never "confirmed absent".
+    let allNotFound = lookup.references.length > 0;
 
     // Ladder: try each reference the operator gave, most specific first.
     // A `resolved` or `ambiguous` outcome settles the field; only a
@@ -308,10 +362,13 @@ export async function resolveGatedReferences(
           ...(outcome.filled.jobId ? { jobId: outcome.filled.jobId } : {}),
         });
       } catch {
-        // This reference is unusable; a sibling may still answer.
+        // This reference is unusable; a sibling may still answer. A throw is
+        // not evidence of absence.
+        allNotFound = false;
         continue;
       }
 
+      if (result.kind !== 'not_found') allNotFound = false;
       if (result.kind === 'resolved') {
         outcome.filled[lookup.idField] = result.candidate.id;
         settled = true;
@@ -334,7 +391,10 @@ export async function resolveGatedReferences(
       // taken. `not_found` / `skipped` fall through to the next reference.
     }
 
-    if (!settled) outcome.unresolved.push(lookup.idField);
+    if (!settled) {
+      outcome.unresolved.push(lookup.idField);
+      if (allNotFound) outcome.notFound.push(lookup.idField);
+    }
   }
 
   return outcome;
@@ -456,6 +516,7 @@ const pendingAmbiguitySchema = z.object({
     'pending_proposal',
     'technician',
     'lead',
+    'catalogItem',
   ]),
   reference: z.string().default(''),
   refKey: z.string().refine(isGatedReferenceField, {
@@ -633,9 +694,109 @@ function kindLabel(kind: EntityKind): string {
       return 'team member';
     case 'lead':
       return 'lead';
+    case 'catalogItem':
+      return 'catalog item';
     default:
       return 'record';
   }
+}
+
+/**
+ * Kind-appropriate "here's what would help" phrase for
+ * `buildUnresolvedPrompt` below — what a human would actually read off the
+ * record to answer with, not the schema's own field name.
+ */
+function whatToSupply(kind: EntityKind): string {
+  switch (kind) {
+    case 'invoice':
+      return 'the invoice number (e.g. "INV-1005")';
+    case 'estimate':
+      return 'the estimate number (e.g. "EST-1005")';
+    case 'customer':
+      return "the customer's name";
+    case 'job':
+      return 'the job name or number';
+    case 'catalogItem':
+      return 'the exact catalog item name';
+    case 'appointment':
+      return 'the date and time';
+    case 'technician':
+      return "the team member's name";
+    case 'lead':
+      return "the lead's name (or company)";
+    default:
+      return 'more detail';
+  }
+}
+
+/**
+ * #909 generalization (2026-08-31) — the honest line for a gated field that
+ * resolved to neither a fill nor an ambiguity: `not_found` (nothing
+ * matched) and the resolver's own overflow refusal (too many confident
+ * matches to safely offer a picker — the MAX_X_CANDIDATES escalation every
+ * kind in pg-entity-resolver.ts applies, a deliberate "escalate rather than
+ * guess" design, not a bug) both collapse to this SAME outcome shape: no
+ * candidates to list, nothing for `buildDisambiguationQuestion` to render.
+ *
+ * Originally shipped (#946) scoped to `invoiceId` only, after the identical
+ * defect reproduced live for send_payment_reminder/apply_late_fee: an
+ * unresolved gate silently degraded the chat reply to the SAME "Review and
+ * approve to proceed" text a fully-resolved draft gets, so the operator had
+ * no signal anything needed their input and D-029's answer turn never got a
+ * question to answer. That same silence reproduces for ANY kind whose
+ * candidate set can grow past its picker ceiling (estimateId did, live —
+ * send_estimate_nudge's fixture customer accumulates 'sent' estimates
+ * across sweep runs the same way the invoice fixture accumulates invoices)
+ * or that simply matches nothing — so this generalizes the fix to every
+ * kind in `GATED_REFERENCE_SOURCES` at once, rather than adding kinds
+ * one-by-one as each one's own live failure surfaces.
+ *
+ * Deliberately NOT a numbered picker — the resolver already refused to
+ * fabricate one (that is exactly what `not_found`/overflow means here); a
+ * plain-language nudge naming what would let a human resolve it themselves
+ * is the honest, safe alternative (never guesses; D-004 untouched).
+ */
+export function buildUnresolvedPrompt(kind: EntityKind): string {
+  return `I couldn't automatically match that — reply with ${whatToSupply(kind)} and I'll pick it up.`;
+}
+
+/**
+ * The ONE thing the chat surface says back after a post-draft resolution
+ * pass, given its outcome. Pure — no I/O, no proposal mutation (the caller
+ * already applied `outcome.filled`/stamped the ambiguity before calling
+ * this) — so the full "what does the operator see" decision for EVERY
+ * registered kind is unit-testable without a resolver, a proposal, or an
+ * HTTP route. Extracted from routes/assistant.ts's `resolveGatedReferencesForChat`
+ * (2026-08-31) specifically so a table-driven test could cover every kind
+ * in `GATED_REFERENCE_SOURCES` at once (D-026's "one core, thin adapters" —
+ * this IS the core; the chat route is the thin adapter that applies the
+ * outcome and calls this for the copy).
+ *
+ * Three outcomes, in priority order:
+ *   ambiguous, and this caller is asking → the ONE numbered question
+ *     (`buildDisambiguationQuestion`).
+ *   otherwise, something is still unresolved → the honest can't-match line
+ *     for the FIRST such field (`buildUnresolvedPrompt`) — covers BOTH
+ *     `not_found` (nothing matched) and the resolver's own overflow refusal
+ *     (too many confident matches to safely offer a picker): both collapse
+ *     to the identical `unresolved`-with-no-`ambiguity` shape at this
+ *     layer, so there is nothing that distinguishes them for this function
+ *     to special-case — the honest line covers both by construction.
+ *   nothing left unresolved (fully resolved, or this caller isn't asking —
+ *     the chain path passes `askClarification: false`) → undefined, the
+ *     caller's existing reply stands unchanged.
+ */
+export function buildGatedReferenceReply(
+  outcome: GatedReferenceOutcome,
+  askClarification: boolean,
+): string | undefined {
+  if (!askClarification) return undefined;
+  if (outcome.ambiguity) return buildDisambiguationQuestion(outcome.ambiguity);
+  if (outcome.unresolved.length > 0) {
+    const source = GATED_REFERENCE_SOURCES[outcome.unresolved[0]];
+    if (source) return buildUnresolvedPrompt(source.kind);
+  }
+  return undefined;
 }
 
 /** How many options a single question may list before it stops being one question. */
@@ -658,7 +819,27 @@ export function buildDisambiguationQuestion(pending: PendingEntityAmbiguity): st
   const quoted = pending.reference ? `"${pending.reference}"` : `that ${label}`;
 
   if (distinctNames.size < 2) {
-    // Same name on every candidate — listing them back is no help at all.
+    // Same name on every candidate. "Address or phone number" is a real
+    // follow-up ONLY for a person/company kind (customer, lead) — it is
+    // meaningless for a catalog item, a job, an invoice. #909 (live sweeps
+    // 9/10) — the AI-catalog sweep's own fixture reproduces this exactly:
+    // `add_catalog_item` mints a fresh, identically-named catalog row every
+    // run with nothing to quarantine the prior runs' copies, so
+    // `update_catalog_item` routinely lands here for a kind that was never
+    // going to have an address or phone. When every candidate instead
+    // carries its own DISTINCT hint (a catalog item's price, an invoice's
+    // status), that hint is the thing that actually tells them apart —
+    // list it instead of asking for a detail this kind cannot answer.
+    const distinctHints = new Set(listed.map((c) => (c.hint ?? '').trim().toLowerCase()));
+    if (distinctHints.size >= 2 && !distinctHints.has('')) {
+      const hinted = listed.map((c, i) => `${i + 1}. ${c.name} (${c.hint})`).join('\n');
+      return (
+        `I found ${pending.candidates.length} ${label}s matching ${quoted}, all under the same name. ` +
+        `Which one?\n${hinted}\n\nReply with the number.`
+      );
+    }
+    // Nothing else distinguishes them either — listing them back is no
+    // help at all.
     return (
       `I found ${pending.candidates.length} ${label}s matching ${quoted}, all under the same name. ` +
       `Which one — can you give me the address or phone number?`

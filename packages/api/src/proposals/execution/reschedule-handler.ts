@@ -177,8 +177,12 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       let trailingWarnings: FeasibilityIssue[] = [];
       if (this.feasibilityDeps) {
         // Determine the proposed technician — for in-lane reschedule, that's the current primary.
-        // Look it up via assignmentRepo if available; otherwise fall back to '' (composer skips overlap).
-        let proposedTechnicianId = '';
+        // Look it up via assignmentRepo if available; otherwise leave it
+        // absent (uuid-or-absent — #935/#947 doctrine; #909/A11 live sweep:
+        // `checkFeasibility` skips every per-technician check when this is
+        // undefined, rather than a `''` sentinel reaching a `uuid`-typed
+        // repo query as `invalid input syntax for type uuid: ""`).
+        let proposedTechnicianId: string | undefined;
         if (this.assignmentRepo) {
           const currentAssignments = await this.assignmentRepo.findByAppointment(context.tenantId, appointmentId);
           const primary = currentAssignments.find((a) => a.isPrimary);

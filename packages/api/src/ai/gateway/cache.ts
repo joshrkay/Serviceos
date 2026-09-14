@@ -4,6 +4,7 @@ import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
 import { redactMessagesForSnapshot, messagesContainImage } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
+import type { LLMTraceExporter } from './trace-exporter';
 import {
   gatewayCacheHitsTotal,
   gatewayCacheMissesTotal,
@@ -86,6 +87,7 @@ export class CachingGatewayWrapper {
   private readonly gateway: LLMGateway;
   private readonly tenantId: string;
   private readonly aiRunRepo?: AiRunRepository;
+  private readonly traceExporter?: LLMTraceExporter;
   private hits = 0;
   private misses = 0;
 
@@ -95,12 +97,14 @@ export class CachingGatewayWrapper {
     config: CacheConfig,
     tenantId: string,
     aiRunRepo?: AiRunRepository,
+    traceExporter?: LLMTraceExporter,
   ) {
     this.gateway = gateway;
     this.cacheStore = cacheStore;
     this.config = config;
     this.tenantId = tenantId;
     this.aiRunRepo = aiRunRepo;
+    this.traceExporter = traceExporter;
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -132,6 +136,9 @@ export class CachingGatewayWrapper {
         // Write AiRun row for cache hit so audit is never blind (best-effort).
         // Fire-and-forget: the function has internal try/catch so a void call is safe.
         void this.writeAiRunForCacheHit(request, cached.response);
+        // U10 — the hit never reaches gateway.complete (and so never its
+        // trace hook), so the wrapper exports it itself. Same gap, same fix.
+        this.exportTraceForCacheHit(request, cached.response);
 
         return { ...cached.response, cached: true };
       }
@@ -208,6 +215,38 @@ export class CachingGatewayWrapper {
       });
     } catch {
       // Best-effort — audit failure must not block the cached response
+    }
+  }
+
+  /**
+   * U10 — export a cache hit to the trace sink (mirrors writeAiRunForCacheHit).
+   * Best-effort: a throw is swallowed so a hit is never blocked.
+   */
+  private exportTraceForCacheHit(request: LLMRequest, cachedResponse: LLMResponse): void {
+    if (!this.traceExporter) return;
+
+    try {
+      this.traceExporter.recordCompletion({
+        correlationId: (request.metadata?.correlationId as string | undefined) ?? uuidv4(),
+        tenantId: request.tenantId || this.tenantId,
+        taskType: request.taskType,
+        sessionId: request.metadata?.sessionId as string | undefined,
+        resolvedModel: cachedResponse.model,
+        servedModel: cachedResponse.model,
+        provider: cachedResponse.provider,
+        cached: true,
+        degraded: false,
+        promptVersionId: request.metadata?.promptVersionId as string | undefined,
+        tokenUsage: cachedResponse.tokenUsage,
+        // Nothing was spent on a hit — an explicit zero, not the original call's cost.
+        costMicroCents: 0,
+        latencyMs: 0,
+        startedAt: new Date(),
+        input: request.messages,
+        output: cachedResponse.content,
+      });
+    } catch {
+      // Best-effort — trace export must not block the cached response
     }
   }
 }

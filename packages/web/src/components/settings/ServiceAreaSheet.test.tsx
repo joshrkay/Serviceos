@@ -121,6 +121,26 @@ describe('ServiceAreaSheet', () => {
     expect('businessHours' in putBody()).toBe(false);
   });
 
+  // #1158 — an unset travel buffer (GET omits jobBufferMinutes: NULL in
+  // tenant_settings) must stay unset. Echoing the 30-minute default back would
+  // turn "not configured" into an explicit buffer the owner never chose, and
+  // availability would label it 'tenant' again.
+  it('omits jobBufferMinutes from the PUT when no buffer is stored (never persists the default)', async () => {
+    const { jobBufferMinutes: _unset, ...withoutBuffer } = LOADED_SETTINGS;
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(withoutBuffer));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
+    const onClose = vi.fn();
+    render(<ServiceAreaSheet onClose={onClose} />);
+    fireEvent.change(await screen.findByLabelText(/Where you work/i), {
+      target: { value: 'Mesa, AZ' },
+    });
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const body = putBody();
+    expect(body.serviceAreaText).toBe('Mesa, AZ');
+    expect('jobBufferMinutes' in body).toBe(false);
+  });
+
   // #874 review — an explicitly emptied radius must WRITE null, not be
   // omitted: the identity upsert keeps an omitted radius, which left the
   // Settings row claiming a stale "~N mi radius" forever.

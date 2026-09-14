@@ -1,0 +1,6 @@
+                  id                  |              tenant_id               |               actor_id               |         event_type         | entity_type |              entity_id               |                                                           metadata                                                           
+--------------------------------------+--------------------------------------+--------------------------------------+----------------------------+-------------+--------------------------------------+------------------------------------------------------------------------------------------------------------------------------
+ f50b16b4-5af7-4e57-8228-ddbc45423c37 | 2c1cb377-301b-44c2-af2a-56c8fb6ea5f8 | bcf5316c-5c0e-491e-a62c-cd5f52bf9eda | job.photo.upload_requested | job         | 371cf3da-ce44-4fec-a2b3-67c0c91042ef | {"fileId": "8f1f88cd-ea0f-4683-b9fe-753bb0768665", "filename": "before.jpg", "sizeBytes": 2048, "contentType": "image/jpeg"}
+ 526c2b46-2ffd-4d10-b1d7-e7be216409ad | 2c1cb377-301b-44c2-af2a-56c8fb6ea5f8 | bcf5316c-5c0e-491e-a62c-cd5f52bf9eda | job.photo.attached         | job         | 371cf3da-ce44-4fec-a2b3-67c0c91042ef | {"fileId": "8f1f88cd-ea0f-4683-b9fe-753bb0768665", "photoId": "1364b937-c46e-4b67-a135-e0a322982657", "category": "before"}
+(2 rows)
+

@@ -47,12 +47,25 @@
  *          `add_service_location`) read it EXCLUSIVELY and need it; a FOURTH,
  *          `schedule_inspection`, is admitted too as a deliberate, tested
  *          exception (new intent, no shipped behavior to regress); but at
- *          least ten ALREADY-SHIPPED chat intents (`create_appointment`,
- *          `confirm_appointment`, `notify_delay`, `send_payment_reminder`,
- *          …) read the SAME field as an unrelated, exclusive side channel —
- *          a real calendar-hold DB write, an unsupervised appointment
- *          auto-pick — that this task must not silently activate. The fix is
- *          an explicit allowlist, not a blanket thread.
+ *          least nine ALREADY-SHIPPED chat intents (`create_appointment`,
+ *          `confirm_appointment`, `send_payment_reminder`, …) read the SAME
+ *          field as an unrelated, exclusive side channel — a real
+ *          calendar-hold DB write, an unsupervised appointment auto-pick —
+ *          that this task must not silently activate. The fix is an
+ *          explicit allowlist, not a blanket thread. `notify_delay` was a
+ *          FIFTH deliberate exception added later (A31 row of the
+ *          2026-08-29 AI-catalog sweep, fix/approve-stall-five): its
+ *          `NotifyDelayTaskHandler` customer-scoping was one of the named
+ *          byproduct risks here, left out of Task 15's allowlist as an
+ *          unrequested behavior change — but without it, chat's
+ *          `missingFields: ['appointmentId']` gate on notify_delay could
+ *          never clear (no `appointmentReference` in a "tell <customer>
+ *          we're running late" utterance, and unscoped single-active-
+ *          appointment resolution never applies once a tenant has more
+ *          than one customer on the books), so `approveProposal` refused
+ *          every notify_delay proposal chat ever drafted. See
+ *          `packages/api/test/integration/approve-stall-five.test.ts` for
+ *          the real-Postgres proof this fix closes that gate.
  *        - `existingEntities.{jobId,invoiceId,technicianId,appointmentId}`
  *          — already shared via `resolveVoiceEntityReferences` (the SAME
  *          function + membership sets the memo worker uses), confirmed
@@ -76,7 +89,8 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
 import {
   InMemoryCatalogItemRepository,
   createCatalogItem,
@@ -218,7 +232,12 @@ describe('Task 15 — dropped intents now dispatch (no special context needed)',
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(1);
     expect(persisted[0].proposalType).toBe('convert_lead');
-    expect((persisted[0].payload as Record<string, unknown>).leadReference).toBe('the Johnson lead');
+    // U5 — an owner typing one of the canonical owner commands is classified
+    // deterministically (`matchOwnerOperatorCommand`), the same way the voice
+    // session has always classified it, so the preserved reference is that
+    // matcher's `leadReference`. What this test is about — the intent is
+    // dispatched and the spoken reference rides the card — is unchanged.
+    expect((persisted[0].payload as Record<string, unknown>).leadReference).toBe('Johnson');
     expect(res.body.message.proposal).toBeTruthy();
     expect(res.body.taskType).not.toMatch(/unhandled|not_understood/);
   });
@@ -739,6 +758,137 @@ describe('C1/C2 — context.customerId is NOT threaded for already-shipped inten
     // auto-picking the resolved customer's one appointment.
     expect(payload.appointmentId).toBeUndefined();
     expect(res.body.message.proposal.missingFields).toContain('appointmentId');
+  });
+});
+
+// ───── A31 fix — notify_delay IS admitted to CHAT_CONTEXT_CUSTOMER_ID_INTENTS
+// (2026-08-29 AI-catalog sweep, fix/approve-stall-five) ─────────────────────
+//
+// Before this fix, a chat "tell <customer> we're running late" utterance
+// never resolved an appointmentId at all: no `appointmentReference` in the
+// utterance (only a customer name), and unscoped `resolveActiveAppointmentId`
+// only auto-picks when the ENTIRE TENANT has exactly one active appointment —
+// never true once a shop has more than one customer on the books. The
+// resulting proposal drafted with `missingFields: ['appointmentId']` it could
+// never clear (no edit path fills a bare appointment reference from a
+// customer name), so `approveProposal` refused it forever — a gate with no
+// lifter (the #909 class). See `CHAT_CONTEXT_CUSTOMER_ID_INTENTS`'s doc
+// comment in `routes/assistant.ts` for the full history, and
+// `packages/api/test/integration/approve-stall-five.test.ts` for the
+// real-Postgres proof of the whole draft → approve → execute chain.
+describe('A31 — notify_delay DOES auto-resolve via customer-scoped appointment lookup', () => {
+  const RESOLVED_CUSTOMER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const OTHER_CUSTOMER_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+  it('resolves the NAMED customer\'s own appointment even with a second, unrelated active appointment in the tenant, and the resulting proposal approves', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+
+    const jobForResolvedCustomer: Job = {
+      id: 'job-for-notify-delay-customer',
+      tenantId: TEST_TENANT,
+      customerId: RESOLVED_CUSTOMER_ID,
+      locationId: 'loc-1',
+      jobNumber: 'JOB-0031',
+      summary: 'Furnace repair',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const jobForOtherCustomer: Job = {
+      ...jobForResolvedCustomer,
+      id: 'job-for-other-notify-delay-customer',
+      customerId: OTHER_CUSTOMER_ID,
+      jobNumber: 'JOB-0032',
+    };
+    await jobRepo.create(jobForResolvedCustomer);
+    await jobRepo.create(jobForOtherCustomer);
+
+    // Two active appointments tenant-wide, exactly like the C2 fixture above
+    // — the negative control that proves this is customer-SCOPED resolution,
+    // not the "only one active appointment tenant-wide" fallback.
+    // A REAL uuid. `notifyDelayPayloadSchema` types `appointmentId` as
+    // `z.string().uuid()`, so a readable-but-fake id makes the drafted payload
+    // contract-INVALID — which the chat chokepoint's contract gate now
+    // (correctly) refuses to leave ungated, and which execution would have
+    // rejected in production anyway. Same lesson as the entity resolver
+    // shipping with nonexistent column names because its Pool was mocked: a
+    // fixture that does not have production's shape hides the bug it was
+    // written to catch.
+    const resolvedAppointmentId = '7f9c2b1e-3d4a-4c8b-9e17-5a6b7c8d9e01';
+    await appointmentRepo.create({
+      id: resolvedAppointmentId,
+      tenantId: TEST_TENANT,
+      jobId: jobForResolvedCustomer.id,
+      scheduledStart: new Date(Date.now() + 86_400_000),
+      scheduledEnd: new Date(Date.now() + 90_000_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+    });
+    await appointmentRepo.create({
+      id: 'appt-for-other-notify-delay-customer',
+      tenantId: TEST_TENANT,
+      jobId: jobForOtherCustomer.id,
+      scheduledStart: new Date(Date.now() + 86_400_000),
+      scheduledEnd: new Date(Date.now() + 90_000_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+    });
+
+    const resolver = resolverFor(async ({ kind }) => {
+      if (kind === 'customer') {
+        return {
+          kind: 'resolved',
+          candidate: {
+            id: RESOLVED_CUSTOMER_ID,
+            kind: 'customer',
+            label: 'qa-matrix-A-customer',
+            score: 0.95,
+          },
+        };
+      }
+      return { kind: 'skipped' };
+    });
+
+    const app = buildApp(
+      strictGateway([
+        classifierReply('notify_delay', {
+          customerName: 'qa-matrix-A-customer',
+          delayMinutes: 30,
+        }),
+      ]),
+      { proposalRepo, entityResolver: resolver, appointmentRepo, jobRepo },
+    );
+
+    const res = await chat(app, "Tell qa-matrix-A-customer we're running 30 minutes late");
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    const drafted = persisted[0];
+    expect(drafted.proposalType).toBe('notify_delay');
+    // The fix's defining assertion: customer-scoped resolution auto-picked
+    // the RIGHT appointment despite a second, unrelated one in the tenant.
+    const payload = drafted.payload as Record<string, unknown>;
+    expect(payload.appointmentId).toBe(resolvedAppointmentId);
+    expect(payload.delayMinutes).toBe(30);
+    expect(missingFieldsFor(drafted)).toEqual([]);
+
+    // The exact call that stalled at 'ready_for_review' forever in the live
+    // sweep (A31, reason `approve_no_terminal_status: ready_for_review`).
+    const approved = await approveProposal(
+      proposalRepo,
+      TEST_TENANT,
+      drafted.id,
+      TEST_USER,
+      'owner',
+    );
+    expect(approved.status).toBe('approved');
   });
 });
 
@@ -1388,6 +1538,73 @@ describe('I2 — the chain path threads intent + customerId exactly like the sin
     );
     expect((mileage!.sourceContext as Record<string, unknown>)?.chainStep).toBe(1);
     expect((message!.sourceContext as Record<string, unknown>)?.chainStep).toBe(2);
+  });
+});
+
+/**
+ * PR-0a (issues #967, #962) — chat-produced chains persist `chain_id =
+ * NULL` on the TOP-LEVEL `Proposal.chainId` column, because the chain
+ * block above only ever writes `sourceContext.chainId` — it never calls
+ * `applyChainMetadata` (proposals/chain.ts) or sets `proposal.chainId`
+ * the way the voice/memo path (workers/voice-action-router.ts) does. The
+ * web Inbox's `groupIntoFeed` groups cards on the TOP-LEVEL field, and
+ * `ProposalRepository.findByChain` queries the indexed `chain_id`
+ * column — both silently miss chat chains, which render as scattered,
+ * ungrouped cards instead of one linked chain.
+ *
+ * This test drives the real chain path (same scenario as I2 above) and
+ * asserts on the top-level column + `findByChain`, not just
+ * `sourceContext`.
+ */
+describe('PR-0a — the chain path stamps a top-level Proposal.chainId (#967, #962)', () => {
+  it('"log 32 miles to the Patel job then text the Hendersons the part arrived" shares one top-level chainId', async () => {
+    const RESOLVED_CUSTOMER_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const proposalRepo = new InMemoryProposalRepository();
+    const entityResolver = resolverFor(async ({ kind }) =>
+      kind === 'customer'
+        ? {
+            kind: 'resolved',
+            candidate: { id: RESOLVED_CUSTOMER_ID, kind: 'customer', label: 'Henderson', score: 0.95 },
+          }
+        : { kind: 'skipped' },
+    );
+    const app = buildApp(
+      strictGateway([
+        classifierReply('unknown', {}),
+        classifierReply('log_mileage', { mileageMiles: 32, jobReference: 'the Patel job' }),
+        classifierReply('send_customer_message', {
+          customerName: 'Henderson',
+          customerMessageBody: 'The part arrived',
+        }),
+        'The part arrived at our shop.',
+      ]),
+      { proposalRepo, entityResolver },
+    );
+
+    const res = await chat(app, 'Log 32 miles to the Patel job then text the Hendersons the part arrived');
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(2);
+
+    const mileage = persisted.find((p) => p.proposalType === 'log_expense');
+    const message = persisted.find((p) => p.proposalType === 'send_customer_message');
+    expect(mileage).toBeTruthy();
+    expect(message).toBeTruthy();
+
+    // The bug: this is the TOP-LEVEL column (Proposal.chainId /
+    // proposals.chain_id), the same field the Inbox's groupIntoFeed and
+    // ProposalRepository.findByChain read — NOT sourceContext.chainId,
+    // which the buggy chat path already sets correctly.
+    expect(mileage!.chainId).toBeTruthy();
+    expect(message!.chainId).toBeTruthy();
+    expect(message!.chainId).toBe(mileage!.chainId);
+
+    // findByChain is exactly what the web Inbox route would use to fetch
+    // a chain's siblings — must return both members via the top-level
+    // column, not zero.
+    const chainMembers = await proposalRepo.findByChain(TEST_TENANT, mileage!.chainId!);
+    expect(chainMembers.map((p) => p.id).sort()).toEqual([mileage!.id, message!.id].sort());
   });
 });
 

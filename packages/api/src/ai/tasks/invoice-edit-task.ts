@@ -10,6 +10,7 @@ import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
 import { groundEditActionPricing } from '../resolution/edit-action-grounding';
 import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
+import { resolvedInvoiceIdFrom } from './voice-extended-tasks';
 
 // Mirrors the execution-side check (isUuid in
 // proposals/execution/voice-extended-handlers.ts / UUID_RE in
@@ -220,15 +221,44 @@ export class InvoiceEditTaskHandler implements TaskHandler {
    * AmbiguityPicker (`candidatesForReference`'s top-5). Candidates are
    * returned alongside missingFields for the caller to stamp onto
    * `sourceContext` — they NEVER lift the gate on their own.
+   *
+   * A04 fix (2026-08-29 AI-catalog sweep) — `routerVerifiedInvoiceId` is the
+   * SAME chat-surface pre-draft resolution every other INVOICE_DOC_INTENTS
+   * handler already trusts (`resolvedInvoiceIdFrom(context)` in
+   * voice-extended-tasks.ts, fed by routes/assistant.ts's
+   * `resolveVerifiedIdsForDraft`) — a real DB lookup against
+   * `entities.jobReference`, not LLM text. This handler used to run its OWN
+   * separate ILIKE search and NEVER consult that seam, which produced a
+   * proposal that could never be approved: the free-text branch below always
+   * kept `missingFields: ['invoiceId']` while ALSO stamping `payload.invoiceId`
+   * for display — and because routes/assistant.ts's pre-draft resolution
+   * independently resolved the SAME reference and recorded it in
+   * `sourceContext.verifiedIds`, `dropUnverifiedIds` preserved that stamped
+   * payload value instead of stripping it. A payload field that already
+   * "looks filled" is exactly what `planGatedReferenceLookups`
+   * (ai/resolution/gated-reference-resolution.ts) treats as nothing left to
+   * resolve, so the #909 post-draft lifter never ran either — the gate could
+   * never clear by ANY path. Checking the router-verified seam first closes
+   * this the same way every sibling invoice-doc handler already does.
    */
   private async resolveInvoiceId(
     tenantId: string,
     payload: Record<string, unknown>,
+    routerVerifiedInvoiceId?: string,
   ): Promise<{
     missingFields: string[];
     candidates: EntityCandidate[];
     verifiedIds?: Record<string, string>;
   }> {
+    if (routerVerifiedInvoiceId) {
+      payload.invoiceId = routerVerifiedInvoiceId;
+      return {
+        missingFields: [],
+        candidates: [],
+        verifiedIds: { invoiceId: routerVerifiedInvoiceId },
+      };
+    }
+
     const reference = payload.invoiceReference;
 
     if (isUuid(reference)) {
@@ -332,7 +362,7 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // UpdateInvoiceExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
     const { missingFields: invoiceIdMissingFields, candidates, verifiedIds } =
-      await this.resolveInvoiceId(context.tenantId, payload);
+      await this.resolveInvoiceId(context.tenantId, payload, resolvedInvoiceIdFrom(context));
 
     // B3 — the invoiceId gate (B2) and the editAction catalog gates
     // (edit-action-grounding.ts) are disjoint string sets (`invoiceId` vs

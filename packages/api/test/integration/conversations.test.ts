@@ -72,6 +72,61 @@ describe('Postgres integration — conversations', () => {
     });
   });
 
+  // #909 (2026-08-31, live sweep 2026-08-31T01-33) — routes/assistant.ts's
+  // `/chat` handler mints a conversation id BEFORE drafting so a same-turn
+  // proposal's `sourceContext.conversationId` matches the id the client
+  // will be told to use next (recordAssistantTurn / conversation-service.ts
+  // honors this reserved id — see that function's doc comment). Pinned
+  // against real Postgres because the pre-fix code always called
+  // `uuidv4()` inline regardless of a caller-supplied id; a mocked Pool
+  // would happily accept either and prove nothing about which id actually
+  // landed in the row.
+  describe('caller-reserved id (#909)', () => {
+    it('createConversation uses the caller-supplied id when provided', async () => {
+      const reserved = crypto.randomUUID();
+      const conversation = await conversationRepo.createConversation({
+        tenantId: tenant.tenantId,
+        id: reserved,
+        title: 'Reserved id',
+        createdBy: tenant.userId,
+      });
+      expect(conversation.id).toBe(reserved);
+      const found = await conversationRepo.findById(tenant.tenantId, reserved);
+      expect(found).not.toBeNull();
+      expect(found!.title).toBe('Reserved id');
+    });
+
+    it('createConversation still mints its own id when none is supplied', async () => {
+      const conversation = await conversationRepo.createConversation({
+        tenantId: tenant.tenantId,
+        title: 'Unreserved',
+        createdBy: tenant.userId,
+      });
+      expect(conversation.id).toBeTruthy();
+      expect(await conversationRepo.findById(tenant.tenantId, conversation.id)).not.toBeNull();
+    });
+
+    it('createConversationWithMessages uses the caller-supplied id when provided', async () => {
+      const reserved = crypto.randomUUID();
+      const { conversation, messages } = await conversationRepo.createConversationWithMessages!(
+        { tenantId: tenant.tenantId, id: reserved, createdBy: tenant.userId, title: 'Reserved atomic' },
+        [
+          {
+            tenantId: tenant.tenantId,
+            messageType: 'text',
+            content: 'Cancel the tune-up',
+            senderId: tenant.userId,
+            senderRole: 'user',
+          },
+        ],
+      );
+      expect(conversation.id).toBe(reserved);
+      expect(messages).toHaveLength(1);
+      const persisted = await conversationRepo.getMessages(tenant.tenantId, reserved);
+      expect(persisted).toHaveLength(1);
+    });
+  });
+
   describe('tenant isolation', () => {
     it('rejects cross-tenant access', async () => {
       const otherTenant = await createTestTenant(pool);

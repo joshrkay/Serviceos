@@ -1,0 +1,5 @@
+            event_type             | count 
+-----------------------------------+-------
+ tenant.signup.bootstrap.completed |     2
+(1 row)
+

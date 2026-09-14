@@ -480,3 +480,109 @@ describe('en-route notification flow', () => {
     expect(key).toBeNull();
   });
 });
+
+// #1131 — analytics is bookkeeping about a delivery, never the delivery. A
+// failing analytics write must not flip an already-sent notice to 'failed'
+// (which would also let the next tap re-text the customer) nor throw out of
+// the handler (which makes the queue redeliver — and re-send — the message).
+describe('delay notification worker — analytics failures never affect delivery state (#1131)', () => {
+  function recordingLogger() {
+    const errors: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (message: string, meta?: Record<string, unknown>) => {
+        errors.push({ message, meta });
+      },
+      child: () => logger,
+    };
+    return { logger, errors };
+  }
+
+  function enRouteMessage(attempts = 1) {
+    return {
+      id: 'q-en-route',
+      type: DelayNotificationCoordinator.QUEUE_TYPE,
+      attempts,
+      maxAttempts: 3,
+      idempotencyKey: 'appt-9:en_route',
+      createdAt: new Date().toISOString(),
+      payload: {
+        tenantId,
+        appointmentId: 'appt-9',
+        delayVersion: 0,
+        delayMinutes: 0,
+        targetCustomerId: 'cust-9',
+        customerName: 'Robin',
+        channel: 'sms' as const,
+        destination: '+15555550199',
+        message: 'on the way',
+        idempotencyKey: 'appt-9:en_route',
+        kind: 'en_route' as const,
+        entityType: 'appointment_en_route' as const,
+      },
+    };
+  }
+
+  const failingAnalytics = {
+    recordMetric: vi.fn().mockRejectedValue(
+      new Error('new row for relation "dispatch_analytics" violates check constraint "dispatch_analytics_event_type_check"'),
+    ),
+    getMetrics: vi.fn().mockResolvedValue([]),
+    getMetricsByType: vi.fn().mockResolvedValue([]),
+  };
+
+  it('a delivered notice stays sent, the handler resolves (no redelivery), and the analytics failure is logged', async () => {
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+    const sendDelayNotice = vi.fn().mockResolvedValue({ providerMessageId: 'SM-delivered' });
+    const worker = createDelayNotificationWorker({
+      service: { sendDelayNotice },
+      stateRepo,
+      analyticsRepo: failingAnalytics,
+    });
+    const { logger, errors } = recordingLogger();
+
+    const outcome = await worker.handle(enRouteMessage(), logger).then(
+      () => 'resolved',
+      (err: Error) => `threw: ${err.message}`,
+    );
+
+    const state = await stateRepo.findByKey('appt-9:en_route');
+    expect({
+      outcome,
+      status: state?.status,
+      providerMessageId: state?.providerMessageId,
+      sends: sendDelayNotice.mock.calls.length,
+    }).toEqual({ outcome: 'resolved', status: 'sent', providerMessageId: 'SM-delivered', sends: 1 });
+    expect(errors.map((e) => e.message)).toContain('Dispatch analytics write failed');
+    expect(errors.find((e) => e.message === 'Dispatch analytics write failed')?.meta).toMatchObject({
+      appointmentId: 'appt-9',
+      eventType: 'en_route_notice_sent',
+    });
+  });
+
+  it('a permanently failed send still settles failed and resolves when its analytics write also fails', async () => {
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+    const sendDelayNotice = vi.fn().mockRejectedValue(new Error('invalid destination'));
+    const worker = createDelayNotificationWorker({
+      service: { sendDelayNotice },
+      stateRepo,
+      analyticsRepo: failingAnalytics,
+    });
+    const { logger, errors } = recordingLogger();
+
+    const outcome = await worker.handle(enRouteMessage(), logger).then(
+      () => 'resolved',
+      (err: Error) => `threw: ${err.message}`,
+    );
+
+    const state = await stateRepo.findByKey('appt-9:en_route');
+    expect({ outcome, status: state?.status, lastError: state?.lastError }).toEqual({
+      outcome: 'resolved',
+      status: 'failed',
+      lastError: 'invalid destination',
+    });
+    expect(errors.map((e) => e.message)).toContain('Dispatch analytics write failed');
+  });
+});

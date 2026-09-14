@@ -17,6 +17,10 @@ import {
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
 import { contractErrorsFrom, contractGapFields } from './task-input';
+import {
+  correctDollarScaleIfSpoken,
+  extractSpokenWholeDollarAmounts,
+} from '../resolution/price-scale-guard';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
 Given the job context, customer information, and completed work details, generate a structured invoice.
@@ -264,12 +268,26 @@ export class InvoiceTaskHandler implements TaskHandler {
     // and `normalizeDraftLineItems` (execution/handlers.ts) re-validates
     // against the enum again before the row is ever written — so nothing
     // downstream trusts this raw value on its own.
+    // #909 (2026-08-31 live sweep, INV-0022) — the LLM's dollars->cents
+    // scale is nondeterministic (same response, one line converted
+    // correctly and one didn't — see price-scale-guard.ts's own doc
+    // comment for the full live shape and why the correction is
+    // evidence-gated against the spoken utterance rather than a blind
+    // "small price -> multiply" floor). Computed once per draft, outside
+    // the per-line map below.
+    const spokenDollarAmounts = extractSpokenWholeDollarAmounts(context.message);
     if (Array.isArray(payload.lineItems)) {
       payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>).map((li, idx) => {
         const qty = Number(li.quantity ?? 1) || 1;
         const rawCents = Number(li.unitPriceCents ?? li.unitPrice);
+        const scaleCorrectedCents =
+          Number.isFinite(rawCents) && rawCents >= 0
+            ? correctDollarScaleIfSpoken(Math.round(rawCents), spokenDollarAmounts)
+            : rawCents;
         const unitPriceCents =
-          Number.isFinite(rawCents) && rawCents >= 0 ? Math.round(rawCents) : undefined;
+          Number.isFinite(scaleCorrectedCents) && scaleCorrectedCents >= 0
+            ? Math.round(scaleCorrectedCents)
+            : undefined;
         return {
           id: typeof li.id === 'string' ? li.id : `li-${idx + 1}`,
           description: typeof li.description === 'string' ? li.description : 'Service',

@@ -11,7 +11,7 @@
  * Runs only under `npm run test:integration` (vitest globalSetup starts the
  * Postgres testcontainer and sets TEST_DB_URL).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
@@ -21,6 +21,9 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { InvoiceTaskHandler } from '../../src/ai/tasks/invoice-task';
+import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import {
   createProposal,
   CreateProposalInput,
@@ -195,6 +198,158 @@ describe('Postgres integration — voice draft_invoice → approve → execute �
     const other = await createTestTenant(pool);
     const found = await invoiceRepo.findById(other.tenantId, invoiceId);
     expect(found).toBeNull();
+  });
+});
+
+/**
+ * #909 (2026-08-31 live sweep, invoice INV-0022) — the price-scale guard's
+ * correction (ai/resolution/price-scale-guard.ts) runs entirely inside
+ * `InvoiceTaskHandler.handle()`, before a proposal even exists — no SQL
+ * changed. The unit suites (test/ai/tasks/P5-003A.test.ts,
+ * test/ai/resolution/price-scale-guard.test.ts) already pin that
+ * computation directly. This closes the loop CLAUDE.md's own testing
+ * principle asks for on a money-correctness fix ("tests that mock the DB
+ * are never the only proof a query works"): the REAL `InvoiceTaskHandler`
+ * (mocked LLM gateway — the live model itself isn't reachable in CI —
+ * everything downstream is production code) drafts the exact live-shape
+ * response, and the corrected total is what actually lands in the real
+ * `invoices` / `invoice_line_items` rows after draft -> approve -> execute.
+ */
+describe('Postgres integration — draft_invoice price-scale correction persists correctly (#909)', () => {
+  let pool: Pool;
+  let invoiceRepo: PgInvoiceRepository;
+  let settingsRepo: PgSettingsRepository;
+  let auditRepo: PgAuditRepository;
+  let jobRepo: PgJobRepository;
+  let tenant: { tenantId: string; userId: string };
+  let customerId: string;
+  let jobId: string;
+
+  function mockGateway(responseContent: string): LLMGateway {
+    return {
+      complete: vi.fn().mockResolvedValue({
+        content: responseContent,
+        model: 'test-model',
+        provider: 'test-provider',
+        tokenUsage: { input: 10, output: 20, total: 30 },
+        latencyMs: 100,
+      } satisfies LLMResponse),
+    } as unknown as LLMGateway;
+  }
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    invoiceRepo = new PgInvoiceRepository(pool);
+    settingsRepo = new PgSettingsRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    jobRepo = new PgJobRepository(pool);
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+    tenant = await createTestTenant(pool);
+
+    customerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: customerId,
+      tenantId: tenant.tenantId,
+      firstName: 'Scale',
+      lastName: 'Customer',
+      displayName: 'Scale Customer',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const locationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locationId,
+      tenantId: tenant.tenantId,
+      customerId,
+      street1: '1 Scale Ave',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    jobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: jobId,
+      tenantId: tenant.tenantId,
+      customerId,
+      locationId,
+      jobNumber: 'JOB-SCALE-1',
+      summary: 'AC repair job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('the exact live shape ("450 dollars" for an uncatalogued line) persists as 45000 cents, not 450', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        lineItems: [{ description: 'AC repair', quantity: 1, unitPrice: 450, category: 'labor' }],
+        confidence_score: 0.6,
+      }),
+    );
+    const handler = new InvoiceTaskHandler(gateway); // no catalog repo — AC repair is uncatalogued
+    const context: TaskContext = {
+      tenantId: tenant.tenantId,
+      message: 'Draft an invoice for the customer for the job, 450 dollars for the AC repair',
+      userId: tenant.userId,
+      customerId,
+      existingEntities: { jobId },
+    };
+
+    const { proposal: drafted } = await handler.handle(context);
+    expect((drafted.payload.lineItems as Array<Record<string, unknown>>)[0].unitPriceCents).toBe(
+      45_000,
+    );
+
+    const registry = createExecutionHandlerRegistry({ invoiceRepo, settingsRepo, auditRepo, jobRepo });
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
+    const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
+
+    let proposal = drafted;
+    proposal = transitionProposal(proposal, 'ready_for_review', tenant.userId);
+    proposal = transitionProposal(proposal, 'approved', tenant.userId);
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    await proposalRepo.create(proposal);
+
+    const execContext: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const { result } = await executor.execute(proposal, execContext);
+    expect(result.success).toBe(true);
+    const invoiceId = result.resultEntityId as string;
+
+    const { rows: invoiceRows } = await pool.query(
+      `SELECT total_cents, amount_due_cents FROM invoices WHERE id = $1`,
+      [invoiceId],
+    );
+    expect(Number(invoiceRows[0].total_cents)).toBe(45_000);
+    expect(Number(invoiceRows[0].amount_due_cents)).toBe(45_000);
+
+    const { rows: lineRows } = await pool.query(
+      `SELECT description, unit_price_cents FROM invoice_line_items WHERE invoice_id = $1`,
+      [invoiceId],
+    );
+    expect(lineRows).toHaveLength(1);
+    expect(lineRows[0].description).toBe('AC repair');
+    expect(Number(lineRows[0].unit_price_cents)).toBe(45_000);
   });
 });
 

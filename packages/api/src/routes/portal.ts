@@ -14,6 +14,7 @@ import { requireAuth, requireTenant } from '../middleware/auth';
 import { CustomerRepository } from '../customers/customer';
 import { ContactRepository } from '../customers/contact';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { extractIp } from '../shared/extract-ip';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { PortalSessionRepository } from '../portal/portal-session';
@@ -261,7 +262,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
     });
   }));
 
-  router.delete('/:id', asyncRoute(async (req: Request, res: Response) => {
+  router.delete('/:id', notFoundOnMalformedId('Portal session not found'), asyncRoute(async (req: Request, res: Response) => {
     const auth = (req as AuthenticatedRequest).auth!;
     const session = await revokePortalSession(
       auth.tenantId,

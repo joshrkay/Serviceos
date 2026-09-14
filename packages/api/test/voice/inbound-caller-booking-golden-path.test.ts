@@ -78,6 +78,13 @@ const BUSINESS_NUMBER = '+15125550999';
 const CALLER_NUMBER = '+15125550100';
 const TENANT = 'tenant-hvac-inbound';
 const CALL_SID = 'CA-inbound-booking-1';
+// Round 4b — the caller-ID-resolved customer, threaded onto the session as
+// production would (a real customers.id lookup). Must be a genuine uuid:
+// create_appointment.customerId is now `z.string().uuid()` (sweep row A33's
+// fix tightened this schema, which this suite's own `validateProposalPayload`
+// assertion below enforces), so a human-readable placeholder like the old
+// 'cust-furnace' no longer satisfies the contract it is meant to prove.
+const CALLER_CUSTOMER_ID = '22222222-3333-4444-5555-666666666666';
 
 /** Gateway that replays one scripted JSON body per `complete()` call. */
 function gatewaySequence(contents: string[]): LLMGateway {
@@ -148,8 +155,8 @@ async function makeInboundCall(
     tenantId: resolvedTenantId,
   });
   session.machine.dispatch({ type: 'greeted_ok' });
-  session.machine.dispatch({ type: 'caller_known', customerId: 'cust-furnace' });
-  session.customerId = 'cust-furnace';
+  session.machine.dispatch({ type: 'caller_known', customerId: CALLER_CUSTOMER_ID });
+  session.customerId = CALLER_CUSTOMER_ID;
 
   // U4 — the tenant zone the spoken "Tuesday at 2pm" resolves against,
   // exactly like production (twilioAdapterDeps.settingsRepo).
@@ -260,7 +267,7 @@ describe('Inbound caller booking — golden path', () => {
 
     // WHO — the identified caller rides through as the customer the executor
     // opens the job against (session identity, never transcript content).
-    expect(payload.customerId).toBe('cust-furnace');
+    expect(payload.customerId).toBe(CALLER_CUSTOMER_ID);
 
     // WHAT — the caller's own words are still promoted flat AND preserved
     // verbatim under `entities` for the operator's review card / audit trail.

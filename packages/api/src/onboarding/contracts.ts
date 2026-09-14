@@ -23,7 +23,11 @@ export const BusinessIdentityInputSchema = z.object({
   // clear it (an emptied field in the Service-area editor), 1–500 to set.
   serviceAreaRadius: z.number().int().min(1).max(500).nullable().optional(),
   businessHours: BusinessHoursSchema,
-  jobBufferMinutes: z.number().int().min(0).max(240),
+  // #1158 — optional: omit to keep whatever is stored (NULL = not configured,
+  // the 30-minute default applies). Lets surfaces that merely echo identity
+  // fields (Settings → Service area) avoid turning an unset buffer into an
+  // explicit 30.
+  jobBufferMinutes: z.number().int().min(0).max(240).optional(),
   hourlyRateCents: z.number().int().min(100).max(100_000),
   // IANA timezone name (e.g. "America/Phoenix"). Optional — the client
   // sends browser-detected tz so the AI books at the operator's local

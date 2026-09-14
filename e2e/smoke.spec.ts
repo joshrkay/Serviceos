@@ -12,6 +12,14 @@ import { hasRealClerkPublishableKey } from './helpers/clerk-key';
  *     (main.tsx throws at module-load when the key is missing, which is
  *     the intentional P0-026 startup guard — see packages/web/src/main.tsx.)
  *
+ * NOT eligible for the chromium-devauth project (e2e/helpers/dev-auth.ts,
+ * D-2): every test in this describe block asserts either the real Clerk
+ * SignIn/SignUp widget (dev-auth's shim renders a plain placeholder div
+ * instead — see packages/web/src/dev/clerk-dev-shim.tsx) or signed-OUT
+ * behavior (landing page / redirect-to-login) — dev-auth's shim is always
+ * signed in by design, so it cannot represent a logged-out visitor at all.
+ * These stay gated on a real Clerk key or E2E_BASE_URL only.
+ *
  * If these fail, every other E2E test will also fail — fix these first.
  */
 

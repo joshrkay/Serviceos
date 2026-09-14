@@ -1,0 +1,51 @@
+# In-app 50-case register — daily hermetic run + "degradation causes" triage.
+#
+# Runs the deterministic in-app operator-voice register
+# (fixtures/voice/inapp-50-cases.json) through the REAL in-app pipeline with
+# only the LLM scripted (no API keys, no DB, ~seconds), then renders the
+# daily triage report and the trend dashboard and enforces the release gate:
+#   1. PASS === 50/50
+#   2. no critical scheduling/search/confirmations case ends intent_capture_only
+#   3. zero FAIL verdicts
+# See docs/plans/2026-09-09-inapp-50-cases-plan.md. The same gate runs on
+# every PR via packages/api/test/voice/inapp-50-register.test.ts (vitest);
+# this nightly keeps the run history that feeds the trend chart.
+name: In-app 50-case register (daily)
+
+on:
+  schedule:
+    - cron: '30 6 * * *' # 06:30 UTC daily
+  workflow_dispatch:
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run the 50-case register (hermetic, writes run artifact)
+        run: npm run inapp-50:run
+        # The runner exits non-zero when the gate fails; keep going so the
+        # triage report + dashboard are still produced and uploaded.
+        continue-on-error: true
+      - name: Daily degradation-causes triage report
+        run: npm run inapp-50:triage
+      - name: Trend dashboard
+        run: npm run inapp-50:dashboard
+      - name: Release gate
+        run: npm run check:inapp-50
+      - name: Upload register run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inapp-50-register-run
+          path: |
+            docs/verification-runs/inapp-50/latest.json
+            docs/verification-runs/inapp-50/run-*.json
+            docs/verification-runs/inapp-50/triage-*.md
+            docs/verification-runs/inapp-50/dashboard.html

@@ -825,3 +825,262 @@ a review card the honest equivalent is the card they already get. The chat pendi
 that row is already persisted, tenant-scoped and conversation-stamped — and is bounded by the
 voice constant `MAX_DISAMBIGUATION_ATTEMPTS`, so an operator who moves on loses at most two turns.
 The four `CHAT_DISPATCH_EXCLUDED_INTENTS` stay excluded and `missingFieldsFor` is not weakened.
+
+### D-030: Voice-primary is ratified; `docs/PRD-v5-as-built.md` is the canonical PRD; four founding commitments shipped dark
+**Date:** 2026-09-11
+**Initiative:** As-built PRD reconstruction (PR #994) and the product review that followed it.
+**Decision:** Three rulings, taken together by the product owner after a structured review of the
+reconstruction against the founding commitments.
+
+1. **Voice-primary is the ratified interface thesis.** `docs/PRD.md` v2.0 locked decision #1 says
+"SMS is the primary interface"; `docs/PRD-rivet-master.md` says "the voice channel *is* the
+product". The shipped system implements neither literally — it implements **voice directs, SMS
+approves**: the owner's command line, the three voice surfaces and the intent taxonomy carry
+direction, while SMS carries the approval rail (one-tap HMAC links, `Y`/`N`/`EDIT` replies, the
+digest). That synthesis is hereby the canonical thesis, and v2.0's SMS-primacy claim is superseded.
+This is a refinement of mechanism, not a change of goal: the north star ("owner hours returned per
+week") and the founding sentence are unchanged.
+
+2. **`docs/PRD-v5-as-built.md` supersedes** `docs/PRD.md` (v2.0), `docs/PRD-rivet-master.md`, and
+PRD v4 Parts E and F. `docs/PRD-execution-catalog.md` is explicitly RETAINED as the story-level
+engineering archive — v5 does not replace it. Part E's **rung ladder is retained as method**
+(0 Absent … 6 Live, where rung 4 requires a real-database proof including the audit event): it is
+the instrument that got its own two worst findings fixed, and v5 scores against it.
+
+3. **Four founding commitments shipped dark**, and for one of them that is drift rather than
+staged rollout. Verified against code, and *dark* means the same thing for all four — on a
+normally-provisioned tenant, with nobody intervening, the capability does not run:
+
+   - **The digest** (`digest_enabled`) defaults false. `PUT /api/settings` accepts
+     `digestEnabled`, but **no control in web or mobile writes it**.
+   - **The brand-voice configurator** (`brand_voice_configurator`) is seeded explicitly
+     `enabled: false`, and the settings UI is gated on it (`SettingsPage.tsx:1150`).
+   - **Dropped-call recovery** is gated per tenant. Its dedicated writer is unwired —
+     `setTenantFlag` has zero production callers and no route — but a platform admin can scope the
+     platform flag by `tenantIds` (`PUT /api/admin/feature-flags/:name`), which
+     `PgTenantFeatureFlagRepository._resolve` evaluates for the calling tenant. Admin-API-only,
+     not unreachable. See PRD §12.4.
+   - **B2B account context** is assembled onto the session and **read nowhere**:
+     `session.b2bAccountContext` is written once and has no consumer.
+
+   **The drift-over-staging reading now rests on B2B context alone.** The other three each have
+a working write path, and a flag with a ramp path is what a staged rollout and an abandoned one
+look like *alike* — the brand-voice configurator (flag + per-tenant ramp + a UI already built
+behind it) is if anything better explained as staging than as drift. B2B context is the one that
+cannot be read either way: there is no flag, because there is nothing to ramp *to*. The capability
+was never finished, so no stage of a rollout describes its current state. Remediation is a launch
+checklist rather than an architecture change for all four regardless — that part of the ruling
+does not depend on which reading is right.
+
+*— corrected twice, both on 2026-09-12, and the second correction is the instructive one. This
+clause originally named **the digest** as the distinguishing evidence, on the premise that it had
+no switch; it has one (`PUT /api/settings`), just no UI. The first correction moved the argument
+to **dropped-call recovery** on the same premise, and that premise was wrong for the same reason:
+a platform admin can ramp it by `tenantIds`. The test itself was the defect. "A capability with no
+switch cannot have been staged" cannot distinguish drift from staging for anything that **has** a
+flag, which is three of the four — it only ever identified the capability that has no flag at all.
+Stated that way the conclusion is narrower and stops moving. (Both corrections: Codex review on
+PR #994.)*
+
+**Rationale:** This log's own history is the argument. D-025 found that a posture everyone cited
+("approval is never voice-reachable") had never actually been decided, was attributed to an
+unrelated entry, and had been contradicted by shipped code for months. Two canonical PRDs asserting
+different primary interfaces is the same failure one step earlier. Recording the ratification is
+what stops the next reader inferring a posture from whichever document they opened first.
+
+**Constraints:**
+- The superseded documents are **not deleted and not moved**. They carry a superseded header
+  pointing at v5 and stay at their current paths: they have 31 inbound references across the repo
+  (13 to `docs/PRD.md` alone, including `CLAUDE.md`), and breaking those to make a filing point is a
+  worse trade than a header. Part E in particular remains the best record of how the rung ladder works.
+- v5 is **not** covered by the voice-action-catalog contract test; that test pins
+  `docs/reference/voice-action-catalog.md`. v5's capability section is a point-in-time
+  transcription and says so. On disagreement, the pinned catalog wins.
+- v5's §12 gap register is a **snapshot with a decay rate**. Two of its claims were inherited from
+  Part E and were already stale when repeated (the review-response approval UI does exist;
+  conversational onboarding does have clients). Anything in §12 older than a sprint is re-verified
+  before it is acted on or quoted.
+
+**Alternatives rejected:**
+- *Reassert SMS-primacy and treat the build as drift to correct.* Rejected: the code has
+  implemented voice-directs/SMS-approves consistently across four surfaces, three transports and a
+  78-intent taxonomy. The documentation is what drifted.
+- *Declare the two theses equivalent.* Rejected: they imply different answers to what a demo shows,
+  what "done" means for the digest, and where the next engineering hour goes.
+- *Move the superseded PRDs to `docs/archive/`.* Rejected on the reference count above; revisit as
+  its own link-fixing change if the headers prove insufficient.
+
+---
+
+## D-031 — A rung is derived from evidence, never from reading the source
+
+**Date:** 2026-09-11
+**Status:** Accepted
+**Supersedes:** nothing. Amends the status convention in `docs/PRD-v5-as-built.md` §0 and the
+verification standard in §11.
+
+**Context.** PRD v5 scored roughly 100 capabilities and 18 invariants on the 0–6 ladder Part E
+invented. Every score was assigned by reading the implementation. That is a prediction of what a
+test would find, and the repository already forbids exactly this substitution — `packages/api/test/qa/matrix.ts`
+says of its own `expected` field: *"It is NOT the pass criterion — actual pass/fail comes from
+runtime checks."* A full re-derivation against the test suite found **28 rows overclaimed and 16
+underclaimed**, with the overclaims concentrated in §8.7 Quote (7 of 12).
+
+**Decision.**
+
+1. **A rung is earned by an evidence class, not assigned by inspection.** The mapping is fixed:
+   NO EVIDENCE / CODE-ONLY → at most 2; PROVEN-UNIT (mocked or in-memory deps) → at most 3;
+   STRUCTURAL guard *with a negative control* → up to 4; real-Postgres write with an in-memory
+   audit repo → **4−**; real-Postgres write **and** audit event → 4; plus reachability → 5.
+2. **Three rules bind that mapping**, each earned by a mistake already made here:
+   - *Documentation is never evidence.* `assignment-notifications.ts:252` claims `app.ts` registers
+     a notifier; `app.ts` never imports the module.
+   - *Directory location is not evidence.* Three files in `packages/api/test/integration/` never
+     open a pool, and one was carrying a rung-5 claim on a `vi.fn()`.
+   - *A mocked dependency caps the claim at the mock.* This restates CLAUDE.md's existing rule; it
+     is what demoted the dunning cadence, the 4★ review gate and the service-credit cap.
+3. **Every rung carries a command.** Acceptance criteria, evidence classes and confirming commands
+   live inline in `docs/PRD-v5-as-built.md` §5 and §8, one falsifiable sentence per row. A rung published without a
+   command behind it is a prediction and is to be read as one.
+4. **Reachability is part of the score, and "dark by default" is not its weakest form.** **One**
+   capability is *unlit-able*: no surface can enable it at all
+   (`setTechnicianAssignmentNotifier` has zero production callers).
+   It caps at 4 regardless of test quality.
+
+   *— corrected 2026-09-12, twice. This said **four**, then **three**, and the answer is **one**.
+   Removed, in order: `digest_enabled` (→ `PUT /api/settings` accepts `digestEnabled` and
+   `PgSettingsRepository` maps it — missing a client control, not a write path); then dropped-call
+   recovery and voice vulnerability triage (→ a platform admin can scope their flag by `tenantIds`
+   via `PUT /api/admin/feature-flags/:name`, which `PgTenantFeatureFlagRepository._resolve`
+   honours — missing an owner-facing control, not a write path). Three of the four "unlit-able"
+   claims were the same mistake: **a grep proving one specific writer is unwired, read as proving
+   no writer exists.** See PRD §12.4.*
+
+**Consequences.**
+- §8 of the PRD now carries verified rungs and a per-row reason. §5 distinguishes invariants that
+  are enforced from those merely true today — **six sub-clauses** carry a universal quantifier
+  nothing proves (I1′, I3′, I5′, I8′, I9′, I13′), one (I6) has a test pinning the opposite
+  behaviour, and I18 has no enforcement at all. *— corrected 2026-09-12: six, not five. This was
+  the third copy of that count; the PRD's two were fixed first and this one was missed because the
+  sweep grepped the number rather than the concept. Enumerating the six inline so the next reader
+  can check the claim against the list instead of against another sentence.*
+- Eight named tests would close the most ground; the first, `test/ai/supervisor/review-coverage.test.ts`,
+  is the only one that changes an architecture decision rather than a score (see O-9).
+- The register is itself prose and will rot. Its defence is that every row is runnable, and the
+  `S:`-prefixed shell falsifiers are cheap enough to run as a batch — the natural next step is a
+  script that diffs them against the expectations recorded there, the same trick
+  `voice-action-catalog.contract.test.ts` plays on the capability catalog.
+
+**Alternatives rejected:**
+- *Leave the asserted rungs and add a caveat.* Rejected: a caveat on a number people quote does not
+  travel with the number.
+- *Score only what has a Docker-gated test and mark the rest unknown.* Rejected: it discards real
+  information about unit-proven and structurally-guarded behaviour, and would have hidden that
+  eleven of eighteen invariants are genuinely strong.
+- *Delete the ladder and describe capabilities in prose.* Rejected: prose is what rotted in
+  `docs/remaining-features.md`, which is why the ladder exists.
+
+---
+
+## D-032 — Definition of done is two-dimensional: an evidence class AND a tenant grade
+
+**Date:** 2026-09-12
+**Status:** Accepted
+**Amends:** D-031 (a rung is derived from evidence, never from reading the source).
+
+**Context.** D-031 fixed *how* a rung is earned but left the bar single-tenant. A rung-4 row
+means "a Docker-gated test proved the write and its audit event" — in a universe containing exactly
+one tenant. Rivet is multi-tenant and its isolation boundary is the database, not application code
+(I11), so a proof that never met a second tenant says nothing about the world the product ships
+into. Measured over `packages/api/test/integration/` on 2026-09-12 by the published lexical scan
+(PRD §11.0e): 214 of 217 files open a real pool and **at least 143 (66%) provision ≥2 tenants**
+— at least 145 (67%) after this branch adds two.
+
+*Corrected 2026-09-12.* This paragraph originally read *"140 (65%) provision ≥2 tenants, 120 (56%)
+carry a cross-tenant assertion, and 113 (52%) have both — about half the Docker-gated suite has
+never seen a neighbour."* Re-measuring with a now-published script (PRD §11.0e) reproduced four of
+five figures exactly; **≥2 tenants was 138 at the merge-base**, and the cross-tenant and "both"
+figures **could not be reproduced at all** — no command for them was ever published. They are
+withdrawn rather than restated, and the "about half" conclusion goes with them: it rested on the
+113/52% figure, not on anything this decision can still re-derive.
+
+*Corrected again, same day.* The surviving figure was reproducible and still mislabelled. "Provision
+≥2 tenants" counted files with ≥2 **literal** `createTestTenant(` call sites, so a file seeding two
+tenants through one helper counted as zero — `chat-entity-resolution.test.ts`, a genuinely
+cross-tenant test, was excluded. Widening to conventionally-named helpers recovers five files
+(138→143, 140→145), and that is still a **lower bound**, not a measurement: every figure in this
+paragraph counts strings in files. Caught in review (Codex P2). The companion audit figure, which
+D-032 does not cite, was mislabelled in the other direction — see §11.0e.
+
+The sharpest instance: seven integration files inject the tenant enumerator and **six pass exactly
+one tenant id**. Production supplies `SELECT id FROM tenants` at ten inlined call sites in
+`app.ts` — *corrected 2026-09-12: fifteen, not ten; this count came from a truncated listing and
+the error is left visible rather than silently patched* — and **no test exercises it.** `daily-digest-worker.test.ts` creates one tenant, stubs the
+enumerator to that id, and proves "skips a tenant whose `digest_enabled` is false" by toggling the
+flag on *the same tenant*. The stub replaces precisely the thing under test — the same shape as the
+entity resolver shipping with nonexistent column names because its `Pool` was mocked.
+
+**Decision.**
+
+1. **The definition of done requires a tenant grade T0–T4 alongside the rung**, defined in
+   `docs/PRD-v5-as-built.md` §8.0. It is required of any new or revised requirement, measured in
+   aggregate for the existing suite, and **published per row only where it has actually been
+   earned** — a row with no grade has an un-capped, provisional rung, and the capping rules below
+   do not apply to it until it is graded:
+   - **T0 Single** — one tenant existed; nothing about neighbours is known.
+   - **T1 Isolated** — a second tenant cannot see or touch the first's rows.
+   - **T2 Non-interfering** — a second tenant's *data* does not change the first's answer.
+   - **T3 Divergently configured** — two tenants with *different* settings each get their own
+     correct result in the same run.
+   - **T4 Really enumerated** — the production tenant selector runs (not a stub), every eligible
+     tenant is processed, and a failure on one does not abort the rest.
+2. **The tenant grade caps the rung.** Rung 4 requires T1. Rung 5 requires T2, plus T3 wherever the
+   capability reads per-tenant configuration. **Any capability that iterates tenants is capped at
+   rung 4 until T4.** Rung 6 requires T4 plus live traffic from ≥2 real tenants.
+3. **T1 and T2 are different failures and are graded separately.** A correctly tenant-scoped
+   `WHERE` gives T1 and says nothing about T2: a sweep can be perfectly scoped and still pick the
+   wrong rows, double-count, or starve a tenant. **T3 is where the Phoenix mis-booking lived** —
+   both tenants' queries were fine; the configuration was assumed shared.
+4. **Each grade is confirmed by a shell falsifier**, not by judgement. The T4 falsifier is the
+   sharpest: a single-element literal in `listTenantIds: async () => [...]` means the sweep is T0
+   whatever rung is printed beside it.
+
+**Consequences.**
+- Seven sweep-backed rows — digest (9.6), thank-you SMS (9.1), review request (9.2), hold reaper
+  (3.5), estimate nudge (7.10), Google review monitoring (9.4), weekly summary (9.7) — were **T0 and
+  capped at rung 4** until the enumerator was real in their tests.
+  **Status 2026-09-12: closed.** `listAllTenantIds` is extracted and proven, and all **eight**
+  sweep workers covering those seven rows — weekly feedback and HFCR weekly send both serve 9.7 —
+  carry fan-out coverage in `test/integration/sweep-tenant-fanout.test.ts` (16 tests). Digest and
+  weekly-feedback reach T3+T4; the rest reach T4. See PRD §11.0e for the per-sweep depth, including
+  the second sweep shape (cross-tenant query, no enumerator) that this decision did not anticipate.
+- The precondition for any T4 proof is structural: the inlined copies of `SELECT id FROM tenants`
+  become one exported, tested `listAllTenantIds(pool)`. A sweep test cannot run the production
+  selector while that selector exists only as anonymous closures in `app.ts`. **Done 2026-09-12 —
+  fifteen sites, not the ten this decision first counted; that number came from a truncated
+  listing.**
+- One shared sweep harness — 3 divergently-configured tenants, real enumerator, assert 3 outcomes
+  and that a throw on tenant 1 still processes 2 and 3. **Done 2026-09-12**, 16 tests in
+  `test/integration/sweep-tenant-fanout.test.ts`, every isolation assertion mutation-tested.
+- **Per-row T-grades are published only where earned.** As of 2026-09-12 that is the seven
+  tenant-iterating sweeps (PRD §11.0e, "Graded so far") — digest and weekly feedback at T3+T4, the
+  other five at T4, each proven against **its own production fan-out path** and mutation-tested — the
+  real enumerator for six of the eight workers, and the production cross-tenant query for thank-you
+  SMS and review request, which take no enumerator (*corrected 2026-09-12: this said "the real
+  enumerator" for all of them, flattening the two-shapes distinction PRD §11.0e exists to draw*).
+  **Those seven
+  grades do cap their rungs.** Every other row in §5 and §8 is **ungraded**, so its printed rung is
+  un-capped and provisional, and the capping rules do not apply to it until it is graded. Asserting
+  a grade on a row without running that row's falsifier would repeat the error D-031 exists to
+  correct — the aggregate scan is a keyword heuristic, sound across the suite's 219 files and not sound row by
+  row.
+
+**Alternatives rejected:**
+- *Fold multi-tenancy into the existing rungs (e.g. "rung 4 now means two tenants").* Rejected: it
+  silently redefines ~100 published numbers and conflates two independent questions — how strong the
+  evidence is, and how many tenants it covered.
+- *Rely on RLS and skip per-capability tenant proof.* Rejected: RLS gives T1 by construction and
+  nothing else. T2, T3 and T4 are behavioural and RLS cannot supply them — the digest sweep is
+  perfectly RLS-scoped and still unproven across tenants.
+- *Grade every row now from the existing scan.* Rejected: the scan is a keyword heuristic. It is
+  sound as an aggregate and not sound per row, and a wrong grade is worse than an absent one.

@@ -7,6 +7,15 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { createLogger } from '../../src/logging/logger';
 import type { FeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import {
+  GatedMessageDelivery,
+  SmsSuppressedError,
+} from '../../src/notifications/gated-message-delivery';
+import type {
+  MessageDeliveryProvider,
+  SmsMessage,
+} from '../../src/notifications/delivery-provider';
 import {
   runThankYouSmsSweep,
   type ThankYouSmsWorkerDeps,
@@ -225,9 +234,14 @@ describe('runThankYouSmsSweep', () => {
 
     expect(result).toEqual({ tenants: 1, candidates: 1, sent: 1, suppressed: 0, failed: 0 });
     expect(send).toHaveBeenCalledTimes(1);
+    // The full payload the production gate needs. This assertion used to stop
+    // at { to, body } — an exact-match on the defect, which is why no unit
+    // test flagged it (PR #994, Codex P1).
     expect(send).toHaveBeenCalledWith({
       to: '+15551234567',
       body: expect.stringContaining('Acme Plumbing'),
+      tenantId: TENANT,
+      consent: { smsConsent: true, customerId: 'cust-1' },
     });
 
     const stamped = await jobRepo.findById(TENANT, job.id);
@@ -435,6 +449,276 @@ describe('runThankYouSmsSweep', () => {
       const second = await runThankYouSmsSweep(deps([], { pool }));
       expect(second.sent).toBe(1);
       expect(send).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('#1184 — the audit claim is spent only once the audit row is written', () => {
+    const SENT = 'notification.thank_you_sms.sent';
+
+    async function seed() {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      return job;
+    }
+
+    it('a failed audit write releases the audit claim and leaves the job unstamped; the next sweep records ONE audit row without resending', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      const create = vi.spyOn(auditRepo, 'create').mockRejectedValueOnce(new Error('connection dropped'));
+
+      const first = await runThankYouSmsSweep(deps([], { pool }));
+      expect(first.failed).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(claims.get(`${TENANT}::thank_you_sms:${job.id}`)?.status).toBe('sent');
+      expect(claims.has(`${TENANT}::thank_you_sms_audit:${job.id}`)).toBe(false);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeUndefined();
+
+      const second = await runThankYouSmsSweep(deps([], { pool }));
+      expect(second.sent).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledTimes(2);
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(1);
+      expect(claims.get(`${TENANT}::thank_you_sms_audit:${job.id}`)?.status).toBe('sent');
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('with no auditRepo the sweep sends and stamps but takes no audit claim', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+
+      const result = await runThankYouSmsSweep(deps([], { pool, auditRepo: undefined }));
+
+      expect(result.sent).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(claims.has(`${TENANT}::thank_you_sms_audit:${job.id}`)).toBe(false);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('review (PR #1196): an SMS claim already "sent" skips the suppression checks — a customer now on DNC gets the sent audit, never a suppressed row', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+      await dncRepo.addToDnc(TENANT, '+15551234567', 'inbound-stop');
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.sent).toBe(1);
+      expect(result.suppressed).toBe(0);
+      expect(send).not.toHaveBeenCalled();
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(1);
+      expect(events.filter((e) => e.eventType === 'notification.thank_you_sms.suppressed')).toHaveLength(0);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('review (PR #1196): a reclaimed audit claim whose sent row already exists completes without a second row', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+      // The row committed but the claim's completion did not; the claim is past the stale window.
+      claims.set(`${TENANT}::thank_you_sms_audit:${job.id}`, {
+        status: 'claimed',
+        claimedAt: Date.now() - 20 * 60_000,
+      });
+      await auditRepo.create({
+        id: 'audit-already-written',
+        tenantId: TENANT,
+        actorId: 'system:thank_you_sms',
+        actorRole: 'system',
+        eventType: SENT,
+        entityType: 'job',
+        entityId: job.id,
+        metadata: { customerId: 'cust-1' },
+        createdAt: NOW,
+      });
+      const create = vi.spyOn(auditRepo, 'create');
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.sent).toBe(1);
+      expect(create).not.toHaveBeenCalled();
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(1);
+      expect(claims.get(`${TENANT}::thank_you_sms_audit:${job.id}`)?.status).toBe('sent');
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('an audit claim still in flight (fresh "claimed") is left to its owner — no audit row, no stamp from this sweep', async () => {
+      const job = await seed();
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+      claims.set(`${TENANT}::thank_you_sms_audit:${job.id}`, { status: 'claimed', claimedAt: Date.now() });
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.suppressed).toBe(1);
+      expect(send).not.toHaveBeenCalled();
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(events.filter((e) => e.eventType === SENT)).toHaveLength(0);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeUndefined();
+    });
+  });
+
+  /**
+   * PR #994, Codex P1 — the production wiring, not a substitute for it.
+   *
+   * `app.ts` hands this worker a `MessageDeliveryFeedbackDispatcher` wrapping
+   * the SINGLE `GatedMessageDelivery` object, and the gate tags this send
+   * customer-class. Every other test in this file (and the sweep fan-out
+   * integration test) injects a bare `{ send: vi.fn() }`, so none of them could
+   * see that the worker was calling that chain with `{ to, body }` only: the
+   * gate then failed closed with `missing_consent_context`, and because
+   * `TCPA_CONSENT_ENFORCEMENT` resolves to 'block' in prod/staging when unset,
+   * EVERY thank-you SMS was suppressed in production while the suite stayed
+   * green.
+   *
+   * These two tests compose the real adapter over the real gate. The first is
+   * the regression guard: revert the `tenantId`/`consent` arguments in
+   * `sendOneThankYou` and it fails with `missing_consent_context`.
+   */
+  describe('the production dispatch chain (gated delivery, block mode)', () => {
+    function gatedDispatcher(env?: NodeJS.ProcessEnv): {
+      dispatcher: FeedbackDispatcher;
+      sentSms: SmsMessage[];
+    } {
+      const sentSms: SmsMessage[] = [];
+      const base: MessageDeliveryProvider = {
+        sendSms: async (message) => {
+          sentSms.push(message);
+          return { id: 'sid-1', status: 'sent' } as never;
+        },
+        sendEmail: async () => ({ id: 'eid-1', status: 'sent' }) as never,
+      };
+      const gate = new GatedMessageDelivery({
+        base,
+        dnc: dncRepo,
+        auditRepo,
+        // The prod/staging default when TCPA_CONSENT_ENFORCEMENT is unset.
+        enforcement: 'block',
+        // Kill-switch seam; defaults to process.env when absent.
+        ...(env ? { env } : {}),
+      });
+      return { dispatcher: new MessageDeliveryFeedbackDispatcher(gate), sentSms };
+    }
+
+    it('a consenting customer is actually sent to through the real gate', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const { dispatcher: gated, sentSms } = gatedDispatcher();
+
+      const result = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: gated }),
+      );
+
+      expect(result.sent).toBe(1);
+      expect(result.suppressed).toBe(0);
+      // The gate let it through, so the bytes reached the base provider…
+      expect(sentSms).toHaveLength(1);
+      // …tagged customer-class, and carrying the two fields whose absence made
+      // the gate fail closed.
+      expect(sentSms[0]).toMatchObject({
+        to: '+15551234567',
+        recipientClass: 'customer',
+        tenantId: TENANT,
+        consent: { smsConsent: true, customerId: 'cust-1' },
+      });
+    });
+
+    it('a gate suppression is terminal — stamped and audited, never retried', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      // The gate's own verdict, e.g. a revocation that arrived on another
+      // channel and sits in the consent ledger this worker does not read. The
+      // local smsConsent + DNC guards both passed to get here.
+      const suppressing: FeedbackDispatcher = {
+        send: async () => {
+          throw new SmsSuppressedError('revoked');
+        },
+      };
+
+      const result = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: suppressing }),
+      );
+
+      expect(result.suppressed).toBe(1);
+      // Not counted as a transient failure — that is what would re-select this
+      // job on every tick forever.
+      expect(result.failed).toBe(0);
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toEqual(NOW);
+      const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(
+        events.some(
+          (e) =>
+            e.eventType === 'notification.thank_you_sms.suppressed' &&
+            String((e.metadata as { reason?: string } | undefined)?.reason).startsWith(
+              'consent_gate:',
+            ),
+        ),
+      ).toBe(true);
+    });
+
+    /**
+     * PR #994, Codex P1 (second) — raised against the fix for the first.
+     *
+     * The kill switch is thrown by the SAME `SmsSuppressedError` type, ahead of
+     * the owner bypass and of any consent evaluation, off an env var read per
+     * send. Catching every instance of that error as terminal meant a
+     * ten-minute `TELEPHONY_ENABLED=false` incident response permanently
+     * discarded every thank-you it touched.
+     */
+    it('the kill switch is RETRYABLE — not stamped, and sends once telephony is back', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const off = gatedDispatcher({ TELEPHONY_ENABLED: 'false' });
+
+      const during = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: off.dispatcher }),
+      );
+
+      expect(off.sentSms).toHaveLength(0);
+      // Transient, so it counts as a failure and NOT as a handled suppression.
+      expect(during.failed).toBe(1);
+      expect(during.suppressed).toBe(0);
+      // The absence of this stamp is the whole finding: with it, the job is
+      // never re-selected and the customer is never thanked.
+      const afterOutage = await jobRepo.findById(TENANT, job.id);
+      expect(afterOutage?.thankYouSmsSentAt).toBeFalsy();
+
+      // Telephony restored — the same job is still eligible and now sends.
+      const back = gatedDispatcher();
+      const after = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: back.dispatcher }),
+      );
+      expect(after.sent).toBe(1);
+      expect(back.sentSms).toHaveLength(1);
+    });
+
+    it('an unexpected missing_consent_context is retryable too, not silently consumed', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      // Only reachable via a wiring regression now that both fields are
+      // forwarded; it must surface rather than eat a customer message.
+      const broken: FeedbackDispatcher = {
+        send: async () => {
+          throw new SmsSuppressedError('missing_consent_context');
+        },
+      };
+
+      const result = await runThankYouSmsSweep(
+        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: broken }),
+      );
+
+      expect(result.failed).toBe(1);
+      expect(result.suppressed).toBe(0);
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toBeFalsy();
     });
   });
 });

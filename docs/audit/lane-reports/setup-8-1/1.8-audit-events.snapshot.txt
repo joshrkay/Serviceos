@@ -1,0 +1,5 @@
+              tenant_id               |     event_type     |   entity_type   |              entity_id               
+--------------------------------------+--------------------+-----------------+--------------------------------------
+ 7621963b-06dd-4e47-b2f4-4e325bb9ce84 | tenant.ai_verified | tenant_settings | 7621963b-06dd-4e47-b2f4-4e325bb9ce84
+(1 row)
+

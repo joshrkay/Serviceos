@@ -9,6 +9,14 @@
  * second write clobbered the first — one payment silently vanished from the
  * invoice balance. incrementAmountPaidAtomic derives the new balance from the
  * row's own value in a single UPDATE, so both credits apply.
+ *
+ * #1022 row 8.6: the credit is only half the record. Each credit's
+ * `payment.recorded` audit event is now read back through the REAL
+ * PgAuditRepository (payment.ts: "a payment with no audit record is not an
+ * acceptable committed state"), and a NEIGHBOUR tenant races its own payment in
+ * the same run — its money must never land on this tenant's balance, its
+ * payment rows must never appear in this tenant's ledger, and neither tenant
+ * may read the other's audit trail.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import crypto from 'crypto';
@@ -19,6 +27,7 @@ import { PgPaymentRepository } from '../../src/invoices/pg-payment';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { recordPayment } from '../../src/invoices/payment';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
@@ -26,36 +35,44 @@ describe('Postgres integration — concurrent distinct payments both credit the 
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let paymentRepo: PgPaymentRepository;
+  let auditRepo: PgAuditRepository;
   let tenant: { tenantId: string; userId: string };
+  let otherTenant: { tenantId: string; userId: string };
   let invoiceId: string;
 
-  beforeAll(async () => {
-    pool = await getSharedTestDb();
-    invoiceRepo = new PgInvoiceRepository(pool);
-    paymentRepo = new PgPaymentRepository(pool);
+  /**
+   * Seed one tenant's full fixture chain (customer → location → job → open
+   * invoice) and return the invoice id. Used for BOTH the tenant under test and
+   * the neighbour tenant, so the two are identical apart from tenant_id — the
+   * only variable the isolation assertions are about.
+   */
+  async function seedOpenInvoice(
+    t: { tenantId: string; userId: string },
+    label: string,
+    totalCents: number,
+  ): Promise<string> {
     const customerRepo = new PgCustomerRepository(pool);
     const locationRepo = new PgLocationRepository(pool);
     const jobRepo = new PgJobRepository(pool);
-    tenant = await createTestTenant(pool);
 
     const customerId = crypto.randomUUID();
     await customerRepo.create({
       id: customerId,
-      tenantId: tenant.tenantId,
+      tenantId: t.tenantId,
       firstName: 'Con',
       lastName: 'Current',
       displayName: 'Con Current',
       preferredChannel: 'phone',
       smsConsent: false,
       isArchived: false,
-      createdBy: tenant.userId,
+      createdBy: t.userId,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
     const locationId = crypto.randomUUID();
     await locationRepo.create({
       id: locationId,
-      tenantId: tenant.tenantId,
+      tenantId: t.tenantId,
       customerId,
       street1: '1 Race St',
       city: 'Austin',
@@ -71,35 +88,49 @@ describe('Postgres integration — concurrent distinct payments both credit the 
     const jobId = crypto.randomUUID();
     await jobRepo.create({
       id: jobId,
-      tenantId: tenant.tenantId,
+      tenantId: t.tenantId,
       customerId,
       locationId,
-      jobNumber: 'JOB-RACE-1',
+      jobNumber: `JOB-${label}`,
       summary: 'Race pay job',
       status: 'scheduled',
       priority: 'normal',
-      createdBy: tenant.userId,
+      createdBy: t.userId,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
 
-    invoiceId = crypto.randomUUID();
-    const lineItems = [buildLineItem(crypto.randomUUID(), 'Service', 1, 30000, 0, true, 'labor')];
+    const newInvoiceId = crypto.randomUUID();
+    const lineItems = [
+      buildLineItem(crypto.randomUUID(), 'Service', 1, totalCents, 0, true, 'labor'),
+    ];
     const totals = calculateDocumentTotals(lineItems, 0, 0);
     await invoiceRepo.create({
-      id: invoiceId,
-      tenantId: tenant.tenantId,
+      id: newInvoiceId,
+      tenantId: t.tenantId,
       jobId,
-      invoiceNumber: 'INV-RACE-1',
+      invoiceNumber: `INV-${label}`,
       status: 'open',
       lineItems,
       totals,
       amountPaidCents: 0,
       amountDueCents: totals.totalCents,
-      createdBy: tenant.userId,
+      createdBy: t.userId,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    return newInvoiceId;
+  }
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    invoiceRepo = new PgInvoiceRepository(pool);
+    paymentRepo = new PgPaymentRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    tenant = await createTestTenant(pool);
+    otherTenant = await createTestTenant(pool);
+
+    invoiceId = await seedOpenInvoice(tenant, 'RACE-1', 30000);
   });
 
   afterAll(async () => {
@@ -124,10 +155,12 @@ describe('Postgres integration — concurrent distinct payments both credit the 
       processedBy: 'stripe_webhook',
     };
 
-    // Fire both concurrently — they interleave at their await points.
+    // Fire both concurrently — they interleave at their await points. The real
+    // PgAuditRepository is wired (positional arg 6) so the audit leg commits to
+    // real Postgres alongside the money leg.
     await Promise.all([
-      recordPayment(cash, invoiceRepo, paymentRepo),
-      recordPayment(ach, invoiceRepo, paymentRepo),
+      recordPayment(cash, invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
+      recordPayment(ach, invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
     ]);
 
     // Both credits landed: 10000 + 15000 = 25000 (the old blind-set would leave
@@ -143,5 +176,104 @@ describe('Postgres integration — concurrent distinct payments both credit the 
       [tenant.tenantId, invoiceId],
     );
     expect(rows[0].n).toBe(2);
+
+    // …and BOTH are on the audit trail, read back through the real repo. An
+    // invoice whose balance moved with only one `payment.recorded` event is
+    // exactly the reconciliation hole the atomic credit exists to close.
+    const events = await auditRepo.findByEntity(tenant.tenantId, 'invoice', invoiceId);
+    const recorded = events.filter((e) => e.eventType === 'payment.recorded');
+    expect(recorded).toHaveLength(2);
+    expect(recorded.map((e) => e.metadata!.amountCents as number).sort((a, b) => a - b)).toEqual([
+      10000, 15000,
+    ]);
+    const paymentIds = await pool.query<{ id: string }>(
+      `SELECT id FROM payments WHERE tenant_id = $1 AND invoice_id = $2`,
+      [tenant.tenantId, invoiceId],
+    );
+    expect(new Set(recorded.map((e) => e.metadata!.paymentId as string))).toEqual(
+      new Set(paymentIds.rows.map((r) => r.id)),
+    );
+    // Every audited credit is stamped with the tenant that owns the money.
+    expect(recorded.every((e) => e.tenantId === tenant.tenantId)).toBe(true);
+  });
+
+  it("a neighbour tenant's concurrent payment never counts toward this tenant's balance", async () => {
+    // Self-contained: both invoices are seeded HERE, so this test asserts the
+    // same isolation whether the file runs whole, shuffled, or filtered down to
+    // this one case. (Reusing the suite invoice made it depend on the previous
+    // test's 25000 — xhawk-ai review on PR #1055.)
+    const mineInvoiceId = await seedOpenInvoice(tenant, `RACE-2-${crypto.randomUUID().slice(0, 8)}`, 30000);
+    const theirInvoiceId = await seedOpenInvoice(
+      otherTenant,
+      `RACE-NEIGHBOUR-${crypto.randomUUID().slice(0, 8)}`,
+      30000,
+    );
+
+    // Both tenants pay their OWN invoice at the same moment. Same code path,
+    // same pool, same instant — only tenant_id differs.
+    const mine = {
+      tenantId: tenant.tenantId,
+      invoiceId: mineInvoiceId,
+      amountCents: 5000,
+      method: 'cash' as const,
+      providerReference: `manual-cash-mine-${crypto.randomUUID().slice(0, 8)}`,
+      processedBy: 'owner',
+    };
+    const theirs = {
+      tenantId: otherTenant.tenantId,
+      invoiceId: theirInvoiceId,
+      amountCents: 22000,
+      method: 'bank_transfer' as const,
+      providerReference: `pi_ach_neighbour_${crypto.randomUUID().slice(0, 8)}`,
+      processedBy: 'stripe_webhook',
+    };
+
+    await Promise.all([
+      recordPayment(mine, invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
+      recordPayment(theirs, invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
+    ]);
+
+    // This tenant's invoice moved by ITS payment only; the neighbour's 22000 is
+    // nowhere in it.
+    const mineReloaded = await invoiceRepo.findById(tenant.tenantId, mineInvoiceId);
+    expect(mineReloaded!.amountPaidCents).toBe(5000);
+    expect(mineReloaded!.amountDueCents).toBe(25000);
+    expect(mineReloaded!.status).toBe('partially_paid');
+
+    // The neighbour's invoice moved by ITS payment only.
+    const theirsReloaded = await invoiceRepo.findById(otherTenant.tenantId, theirInvoiceId);
+    expect(theirsReloaded!.amountPaidCents).toBe(22000);
+    expect(theirsReloaded!.amountDueCents).toBe(8000);
+
+    // Ledgers stay disjoint: one row each, carrying only its own tenant's money.
+    const mineRows = await pool.query<{ n: number; total: string }>(
+      `SELECT count(*)::int AS n, COALESCE(sum(amount_cents), 0)::text AS total
+         FROM payments WHERE tenant_id = $1 AND invoice_id = $2`,
+      [tenant.tenantId, mineInvoiceId],
+    );
+    expect(mineRows.rows[0].n).toBe(1);
+    expect(Number(mineRows.rows[0].total)).toBe(5000);
+    const theirRows = await pool.query<{ n: number; total: string }>(
+      `SELECT count(*)::int AS n, COALESCE(sum(amount_cents), 0)::text AS total
+         FROM payments WHERE tenant_id = $1 AND invoice_id = $2`,
+      [otherTenant.tenantId, theirInvoiceId],
+    );
+    expect(theirRows.rows[0].n).toBe(1);
+    expect(Number(theirRows.rows[0].total)).toBe(22000);
+
+    // Audit trails stay disjoint too — the neighbour's credit is not on this
+    // tenant's invoice timeline, and this tenant cannot read the neighbour's.
+    const mineEvents = await auditRepo.findByEntity(tenant.tenantId, 'invoice', mineInvoiceId);
+    const mineRecorded = mineEvents.filter((e) => e.eventType === 'payment.recorded');
+    expect(mineRecorded).toHaveLength(1);
+    expect(mineRecorded.map((e) => e.metadata!.amountCents)).not.toContain(22000);
+    expect(await auditRepo.findByEntity(tenant.tenantId, 'invoice', theirInvoiceId)).toEqual([]);
+    const theirEvents = await auditRepo.findByEntity(
+      otherTenant.tenantId,
+      'invoice',
+      theirInvoiceId,
+    );
+    expect(theirEvents.filter((e) => e.eventType === 'payment.recorded')).toHaveLength(1);
+    expect(await auditRepo.findByEntity(otherTenant.tenantId, 'invoice', mineInvoiceId)).toEqual([]);
   });
 });

@@ -103,14 +103,74 @@ describe('UpdateCatalogItemTaskHandler', () => {
     const sourceContext = proposal.sourceContext as Record<string, unknown> | undefined;
     expect(sourceContext?.entityCandidates).toBeUndefined();
     expect(proposal.explanation).toMatch(/no catalog item matches/i);
+    // #909 root cause (live sweeps 9/10, proposal 4d370bef-...) — before the
+    // fix, an unresolved item dropped BOTH the raw reference AND the spoken
+    // price: payload.proposedUnitPriceCents was written ONLY inside
+    // `if (resolvedItem)`, and a VALID price neither pushes nor needs
+    // `missingFields: ['proposedUnitPriceCents']` (that gate is for a
+    // REFUSED price), so the $5.00 here vanished with no trace anywhere on
+    // the persisted proposal. The gated-reference loop
+    // (GATED_REFERENCE_SOURCES.catalogItemId) also has nothing to resolve
+    // without the raw text surviving on the payload.
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.itemReference).toBe('flux capacitor');
+    expect(payload.proposedUnitPriceCents).toBe(500);
+    expect(missingFieldsFor(proposal)).not.toContain('proposedUnitPriceCents');
   });
 
-  it('an absent catalogRepo gates catalogItemId (no resolution attempted)', async () => {
+  it('an ambiguous match ALSO preserves itemReference and the spoken price on the payload', async () => {
+    const catalogRepo = await seededRepo([
+      { name: 'AC tune-up', unitPriceCents: 8900 },
+      { name: 'AC tune-up deluxe', unitPriceCents: 14900 },
+    ]);
+    const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+      ctx({ existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 9900 } }),
+    );
+
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.itemReference).toBe('AC tune-up');
+    expect(payload.proposedUnitPriceCents).toBe(9900);
+    expect(payload.catalogItemId).toBeUndefined();
+  });
+
+  /**
+   * #909 root cause, pinned end to end — the exact live utterance ("Raise
+   * the QA Sweep Smart Thermostat Install price to 89 dollars", proposal
+   * 4d370bef-08a6-4745-93e0-df3140fc7638, tenant a948cc66, sweep 10) against
+   * a tenant whose catalog does not (yet, or no longer) carry that exact
+   * name — the shape the AI-catalog sweep's own fixture produces once its
+   * A44/A36 chain has drifted (a prior run's A44 item renamed/archived, or
+   * this run's A44 not yet visible to A36's read). Before the fix: payload
+   * was empty except `_meta`, `missingFields: ['catalogItemId']`, and the
+   * $89.00 the operator spoke was gone without a trace.
+   */
+  it('the exact live utterance: unresolved item still carries itemReference + the spoken price in integer cents', async () => {
+    const catalogRepo = await seededRepo([{ name: 'Water heater install', unitPriceCents: 145000 }]);
+    const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+      ctx({
+        existingEntities: {
+          catalogItemReference: 'QA Sweep Smart Thermostat Install',
+          unitPriceCents: 8900,
+        },
+      }),
+    );
+
+    expect(missingFieldsFor(proposal)).toEqual(['catalogItemId']);
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.itemReference).toBe('QA Sweep Smart Thermostat Install');
+    expect(payload.proposedUnitPriceCents).toBe(8900);
+    expect(payload.catalogItemId).toBeUndefined();
+  });
+
+  it('an absent catalogRepo gates catalogItemId (no resolution attempted) but still preserves the reference and price', async () => {
     const { proposal } = await new UpdateCatalogItemTaskHandler(undefined).handle(
       ctx({ existingEntities: { catalogItemReference: 'diagnostic fee', unitPriceCents: 8900 } }),
     );
 
     expect(missingFieldsFor(proposal)).toContain('catalogItemId');
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.itemReference).toBe('diagnostic fee');
+    expect(payload.proposedUnitPriceCents).toBe(8900);
   });
 
   it('a rename-only request (no price) resolves the item, sets an honest no-op price, and never writes payload.name to the requested value', async () => {

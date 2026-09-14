@@ -1,0 +1,11 @@
+              tenant_id               |                  id                  |               idempotency_key               | status  |              created_by              
+--------------------------------------+--------------------------------------+---------------------------------------------+---------+--------------------------------------
+ ab221636-78fc-4683-bb6c-05c685183a4e | 0a1e8508-4a2b-4fcd-ab2f-5df674f1744e | same-f39f942c-07a9-48ba-93a9-cedfeb569b15   | pending | 07d6756c-9734-44ea-9a42-fa28ba6489ba
+ ab221636-78fc-4683-bb6c-05c685183a4e | ba05d8d4-9db2-43ed-bb1c-828314e3c8e7 | audit-c2802ca4-85c8-41f0-abd6-d78f18feb81b  | pending | 07d6756c-9734-44ea-9a42-fa28ba6489ba
+ ab221636-78fc-4683-bb6c-05c685183a4e | 1589b4d0-d757-4f2d-86d3-24121f312df9 | crash-b41927aa-b4a0-4022-bfb4-885c01d10365  | pending | 07d6756c-9734-44ea-9a42-fa28ba6489ba
+ ab221636-78fc-4683-bb6c-05c685183a4e | 01742c34-7665-4067-8a28-8106e373c192 | shared-bc77a23b-2200-478d-bec0-d7e7d7a28fd1 | pending | 07d6756c-9734-44ea-9a42-fa28ba6489ba
+ 1c2fafbd-8265-4d0f-99fa-51fdd3a2d9f4 | 20b5e301-1d7f-49f9-b091-f54fea47acfa | shared-bc77a23b-2200-478d-bec0-d7e7d7a28fd1 | pending | de97155a-e18c-49b9-9209-25dda7ef7548
+ ab221636-78fc-4683-bb6c-05c685183a4e | 6077e072-62b9-4fb2-a18b-5b9d5b96b8db | diff-a-05c322f5-e82f-4208-8dc1-1539b6349ccf | pending | 07d6756c-9734-44ea-9a42-fa28ba6489ba
+ ab221636-78fc-4683-bb6c-05c685183a4e | 402a9bee-c824-488d-8934-688c45829179 | diff-b-17c1d8d4-a29b-467f-b610-d7ebffcec070 | pending | 07d6756c-9734-44ea-9a42-fa28ba6489ba
+(7 rows)
+

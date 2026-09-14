@@ -516,6 +516,128 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
   });
 
   /**
+   * #909 (2026-08-31 live sweep, invoice INV-0022) — the LLM's dollars->
+   * cents scale is nondeterministic: the SAME drafted response can convert
+   * one line correctly and another line not at all. See
+   * price-scale-guard.ts's own doc comment for the full live shape.
+   */
+  describe('price-scale guard (#909, live sweep invoice INV-0022)', () => {
+    const utterance =
+      'Draft an invoice for the customer for the job, 450 dollars for the AC repair ' +
+      'and 79 dollars for the diagnostic fee';
+
+    it('the exact live shape: an uncatalogued line priced 450 (meant $450) corrects to 45000 when "450 dollars" was spoken', async () => {
+      const { repo } = seededCatalog(); // no matching catalog item for "AC repair"
+      const gateway = createMockGateway(
+        aiOutput([{ description: 'AC repair', quantity: 1, unitPrice: 450 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle({ ...baseContext, message: utterance });
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPriceCents).toBe(45_000);
+      expect(line.totalCents).toBe(45_000);
+    });
+
+    it('a second line in the SAME draft, priced 79 (meant $79), also corrects — the bug is per-line, not per-response', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          { description: 'AC repair', quantity: 1, unitPrice: 450 },
+          { description: 'Diagnostic fee', quantity: 1, unitPrice: 79 },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle({ ...baseContext, message: utterance });
+
+      const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
+      expect(lines[0].unitPriceCents).toBe(45_000);
+      expect(lines[1].unitPriceCents).toBe(7_900);
+    });
+
+    it('a line already correctly scaled (7500 for $75.00, with "$75.00" spoken) is left unchanged — no double-correction', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([{ description: 'Filter replacement', quantity: 1, unitPrice: 7500 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle({
+        ...baseContext,
+        message: 'Draft an invoice for the job, $75.00 for the filter',
+      });
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPriceCents).toBe(7_500);
+    });
+
+    // NOTE: a negative "credit" line (live evidence: "Credit — repeat leak",
+    // -5000 cents, already correct) is NOT reachable through THIS handler's
+    // own drafting normalization at all — invoice-task.ts's PRE-EXISTING
+    // (unrelated to this fix) `rawCents >= 0` guard drops any negative
+    // drafted price outright, so that line arrives via a different path
+    // (an invoice edit, not the initial draft). The scale guard's own
+    // negative-value passthrough is pinned at the pure-function level
+    // instead (price-scale-guard.test.ts) — this handler-level suite would
+    // otherwise assert a capability draft_invoice doesn't actually have.
+
+    it('a genuine sub-dollar line with NO matching spoken figure stays sub-dollar — the guard is evidence-gated, not a blind floor', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([{ description: 'Fastener', quantity: 1, unitPrice: 79 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle({
+        ...baseContext,
+        message: 'Draft an invoice for the job for the tune-up',
+      });
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPriceCents).toBe(79);
+    });
+
+    it('confidence hygiene: a scale-corrected uncatalogued line STILL carries the uncatalogued confidence cap', async () => {
+      const { repo } = seededCatalog(); // no match for "AC repair"
+      const gateway = createMockGateway(
+        aiOutput([{ description: 'AC repair', quantity: 1, unitPrice: 450 }], 0.97),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle({ ...baseContext, message: utterance });
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPriceCents).toBe(45_000); // scale-corrected
+      expect(line.pricingSource).toBe('uncatalogued'); // still ungrounded
+      expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+      expect(proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(proposal.status).not.toBe('approved');
+    });
+
+    it('a scale-corrected line that NOW matches the catalog gets overridden by the catalog price anyway (catalog wins regardless)', async () => {
+      const { repo, heater } = seededCatalog(); // catalog price 185_000
+      const gateway = createMockGateway(
+        // LLM wrote the spoken $1,850 as raw cents (scale bug) — corrects to
+        // 185_000, which then matches the catalog exactly.
+        aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 1850 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle({
+        ...baseContext,
+        message: 'Draft an invoice for the job, 1850 dollars for the water heater install',
+      });
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPriceCents).toBe(185_000);
+      expect(line.catalogItemId).toBe(heater.id);
+      expect(line.pricingSource).toBe('catalog');
+    });
+  });
+
+  /**
    * B7.5 (AC-7) — defect found while adding C1 unit coverage
    * (voice-payload-contract.test.ts): the line-item normalization step
    * above (invoice-task.ts) reconstructed each line item from an explicit

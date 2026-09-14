@@ -4,8 +4,9 @@
  * This is the missing call-site glue between the executor's `onExecuted` seam
  * and the (already-built, integration-tested) correction-loop machinery. For a
  * SUCCEEDED execution it:
- *   1. diffs the AI's drafted payload (proposals.payload) against the
- *      as-executed payload (proposal_executions.executed_payload),
+ *   1. diffs the AI's drafted payload (proposals.original_payload when the
+ *      proposal was edited, else proposals.payload) against the as-executed
+ *      payload (proposal_executions.executed_payload),
  *   2. runs the conservative structured extractor over the typed deltas,
  *   3. records + forward-applies any lessons (recordCorrectionLessons).
  *
@@ -112,7 +113,10 @@ export async function recordCorrectionLessonsOnExecution(
   const execution = await deps.proposalExecutionRepo.findLatestByProposal(tenantId, proposalId);
   if (!execution || execution.status !== 'succeeded') return [];
 
-  const drafted = (proposal.payload ?? {}) as Record<string, unknown>;
+  // #1139 — `editProposal` overwrites `payload` with the operator's
+  // correction, so an edited proposal's draft lives in `originalPayload`.
+  // Unedited proposals have none, and their `payload` is still the draft.
+  const drafted = (proposal.originalPayload ?? proposal.payload ?? {}) as Record<string, unknown>;
   const executed = execution.executedPayload ?? {};
 
   const draftedItems = lineItemsOf(drafted);

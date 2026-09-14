@@ -42,6 +42,10 @@ import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/vo
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
+import {
+  InMemoryLocationRepository,
+  type ServiceLocation,
+} from '../../../../src/locations/location';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type {
   EntityResolver,
@@ -78,6 +82,43 @@ function stubResolver(result: EntityResolverResult): EntityResolver & {
       calls.push(input);
       return result;
     }),
+  };
+}
+
+/**
+ * U3 — the two Bob Smiths as PRODUCTION hands them over: `PgEntityResolver
+ * .resolveCustomer` puts the primary phone on the hint and nothing else.
+ *
+ * These candidates used to be written here already carrying
+ * `"555-0001 · 104 QA Cedar Avenue"`, which is the shape the adapter's own
+ * (now deleted) `service_locations` query produced — so the tests proved the
+ * FSM could read a hint somebody had typed into the fixture, not that the
+ * pipeline ever builds one. The address now comes from the shipped decorator
+ * over `locationRepo`, which is what BOTH in-app surfaces run.
+ */
+const AMBIGUOUS_BOBS: EntityResolverResult = {
+  kind: 'ambiguous',
+  candidates: [
+    { id: 'bob-old', kind: 'customer', label: 'Bob Smith', hint: '555-0001', score: 0.91 },
+    { id: 'bob-new', kind: 'customer', label: 'Bob Smith', hint: '555-0002', score: 0.9 },
+  ],
+};
+
+function bobLocation(customerId: string, street1: string): ServiceLocation {
+  return {
+    id: `loc-${customerId}`,
+    tenantId: TENANT,
+    customerId,
+    street1,
+    city: 'Phoenix',
+    state: 'AZ',
+    postalCode: '85001',
+    country: 'US',
+    isPrimary: true,
+    addressType: 'service',
+    isArchived: false,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
 }
 
@@ -125,14 +166,18 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
   let proposalRepo: InMemoryProposalRepository;
   let auditRepo: InMemoryAuditRepository;
   let onCallRepo: InMemoryOnCallRepository;
+  let locationRepo: InMemoryLocationRepository;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     store = new VoiceSessionStore({ startInterval: false });
     proposalRepo = new InMemoryProposalRepository();
     auditRepo = new InMemoryAuditRepository();
     onCallRepo = new InMemoryOnCallRepository(
       new Map([[TENANT, [{ id: 'r1', userId: 'dispatcher-1', orderIndex: 0 }]]]),
     );
+    locationRepo = new InMemoryLocationRepository();
+    await locationRepo.create(bobLocation('bob-old', '104 QA Cedar Avenue'));
+    await locationRepo.create(bobLocation('bob-new', '105 QA Cedar Avenue'));
   });
 
   afterEach(() => store.dispose());
@@ -147,6 +192,10 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
       proposalRepo,
       auditRepo,
       onCallRepo,
+      // U3 — the same repo app.ts wires. The adapter wraps its resolver in
+      // `withCustomerAddressHints` when this is present, so the address in the
+      // spoken question and in the "104 Cedar" match is the shipped one.
+      locationRepo,
       entityResolver,
     });
   }
@@ -192,25 +241,7 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
 
   // ── (b) two candidates → entity_ambiguous WITH candidates, no silent pick ──
   it('two candidates → entity_ambiguous with the candidate set, NEVER a silent newest-match pick', async () => {
-    const resolver = stubResolver({
-      kind: 'ambiguous',
-      candidates: [
-        {
-          id: 'bob-old',
-          kind: 'customer',
-          label: 'Bob Smith',
-          hint: '555-0001 · 104 QA Cedar Avenue',
-          score: 0.91,
-        },
-        {
-          id: 'bob-new',
-          kind: 'customer',
-          label: 'Bob Smith',
-          hint: '555-0002 · 105 QA Cedar Avenue',
-          score: 0.9,
-        },
-      ],
-    });
+    const resolver = stubResolver(AMBIGUOUS_BOBS);
     const adapter = makeAdapter(resolver);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
@@ -227,11 +258,23 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
       (e) => e.type === 'tts_play' && e.payload.template === 'disambiguate',
     );
     expect(disambig).toBeDefined();
-    const candidates = disambig?.payload.candidates as Array<{ id: string; name: string }>;
+    const candidates = disambig?.payload.candidates as Array<{
+      id: string;
+      name: string;
+      hint?: string;
+    }>;
     expect(candidates).toHaveLength(2);
     expect(candidates.map((c) => c.id).sort()).toEqual(['bob-new', 'bob-old']);
     // label → name mapping for the FSM's readback.
     expect(candidates.every((c) => c.name === 'Bob Smith')).toBe(true);
+    // U3 — the resolver handed over phone-only hints; the ADDRESS on each
+    // candidate is the shipped `withCustomerAddressHints` decorator reading
+    // `locationRepo`, not something the fixture pre-baked. Two identically
+    // named Bobs are only tellable apart by it.
+    expect(candidates.map((c) => c.hint).sort()).toEqual([
+      '555-0001 · 104 QA Cedar Avenue, Phoenix',
+      '555-0002 · 105 QA Cedar Avenue, Phoenix',
+    ]);
 
     const audits = auditRepo.getAll();
     const ambiguous = audits.find(
@@ -242,25 +285,7 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
   });
 
   it('address follow-up resolves ambiguity, then confirmation drafts the proposal', async () => {
-    const resolver = stubResolver({
-      kind: 'ambiguous',
-      candidates: [
-        {
-          id: 'bob-old',
-          kind: 'customer',
-          label: 'Bob Smith',
-          hint: '555-0001 · 104 QA Cedar Avenue',
-          score: 0.91,
-        },
-        {
-          id: 'bob-new',
-          kind: 'customer',
-          label: 'Bob Smith',
-          hint: '555-0002 · 105 QA Cedar Avenue',
-          score: 0.9,
-        },
-      ],
-    });
+    const resolver = stubResolver(AMBIGUOUS_BOBS);
     const adapter = makeAdapter(resolver);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
@@ -282,33 +307,37 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     );
   });
 
+  it('with no locationRepo wired, the question is the phone-only one — degraded, never broken', async () => {
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([SCHEDULING_CLASSIFIER]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      entityResolver: stubResolver(AMBIGUOUS_BOBS),
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+
+    expect(turn1.state).toBe('entity_resolution');
+    const disambig = turn1.sideEffects.find(
+      (e) => e.type === 'tts_play' && e.payload.template === 'disambiguate',
+    );
+    const candidates = disambig?.payload.candidates as Array<{ hint?: string }>;
+    expect(candidates.map((c) => c.hint).sort()).toEqual(['555-0001', '555-0002']);
+  });
+
   it('does not call the classifier again on an entity_resolution disambiguation follow-up', async () => {
     const gateway = scriptedGateway([SCHEDULING_CLASSIFIER]);
-    const resolver = stubResolver({
-      kind: 'ambiguous',
-      candidates: [
-        {
-          id: 'bob-old',
-          kind: 'customer',
-          label: 'Bob Smith',
-          hint: '555-0001 · 104 QA Cedar Avenue',
-          score: 0.91,
-        },
-        {
-          id: 'bob-new',
-          kind: 'customer',
-          label: 'Bob Smith',
-          hint: '555-0002 · 105 QA Cedar Avenue',
-          score: 0.9,
-        },
-      ],
-    });
+    const resolver = stubResolver(AMBIGUOUS_BOBS);
     const adapter = new InAppVoiceAdapter({
       store,
       gateway,
       proposalRepo,
       auditRepo,
       onCallRepo,
+      locationRepo,
       entityResolver: resolver,
     });
     const { sessionId } = await adapter.startSession(TENANT, USER);
@@ -330,29 +359,36 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
 
     const turn1 = await adapter.handleInput(sessionId, 'send the estimate to Bob Smith');
 
-    expect(turn1.state).toBe('escalating');
+    // SCH-D3 — on THIS surface (in-app, an authenticated operator) the
+    // not_found is answered honestly and the session stays in the operator's
+    // hands instead of paging on-call for their own miss. What 46a954e1
+    // actually fixed is preserved exactly: a not_found never masquerades as
+    // an `entity_resolved` success, and no proposal is minted.
+    expect(turn1.state).toBe('intent_capture');
     expect(turn1.proposalIds.length).toBe(0);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
-    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
+    expect(turn1.ttsText).toMatch(/couldn't find a matching customer for Bob Smith/i);
     expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
-      'agent.calling.entity_resolution.entity_not_found',
+      'agent.calling.entity_resolution.entity_not_found_operator',
     );
     expect(auditRepo.getAll().map((e) => e.eventType)).not.toContain(
       'agent.calling.entity_resolution.entity_resolved',
     );
   });
 
-  it('zero matches on record_payment also escalates (record-operating family, not just estimates)', async () => {
+  it('zero matches on record_payment behaves the same (record-operating family, not just estimates)', async () => {
     const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });
     const adapter = makeAdapter(resolver, RECORD_PAYMENT_CLASSIFIER);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
     const turn1 = await adapter.handleInput(sessionId, 'record a payment from Bob Smith');
 
-    expect(turn1.state).toBe('escalating');
-    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(turn1.state).toBe('intent_capture');
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
     expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
-      'agent.calling.entity_resolution.entity_not_found',
+      'agent.calling.entity_resolution.entity_not_found_operator',
     );
   });
 
@@ -436,10 +472,11 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     );
   });
 
-  it('SCH-03 — the escalation guard still fires: nothing to cancel still escalates to on-call', async () => {
+  it('SCH-03 — the not_found guard still fires: nothing to cancel is answered, never softened into a success', async () => {
     // Regression fence for 46a954e1. cancel_appointment is record-operating,
     // so a genuine not_found must NOT be softened into entity_resolved by the
-    // new fallback.
+    // new fallback. (SCH-D3 changed WHO recovers on this surface — the
+    // operator, not on-call — not whether the miss is detected.)
     const resolver = stubResolver({
       kind: 'not_found',
       reference: 'the upcoming appointment for that job',
@@ -452,12 +489,15 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
       'Cancel the upcoming appointment for that job',
     );
 
-    expect(turn1.state).toBe('escalating');
+    expect(turn1.state).toBe('intent_capture');
     expect(turn1.proposalIds.length).toBe(0);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
-    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
     expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
-      'agent.calling.entity_resolution.entity_not_found',
+      'agent.calling.entity_resolution.entity_not_found_operator',
+    );
+    expect(auditRepo.getAll().map((e) => e.eventType)).not.toContain(
+      'agent.calling.entity_resolution.entity_resolved',
     );
   });
 
@@ -517,7 +557,7 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('cust-7');
   });
 
-  it('a middle-confidence candidate → entity_confirm; a decline escalates like entity_not_found', async () => {
+  it('a middle-confidence candidate → entity_confirm; a decline answers honestly like entity_not_found', async () => {
     const resolver = stubResolver({
       kind: 'low_confidence',
       candidate: { id: 'cust-7', kind: 'customer', label: 'Bob Smith', score: 0.7 },
@@ -528,12 +568,16 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
     const turn2 = await adapter.handleInput(sessionId, 'no, not them');
 
-    expect(turn2.state).toBe('escalating');
+    // SCH-D3 — the candidate we offered was wrong, not the session: the
+    // operator is told so and can name someone else. Still no proposal, and
+    // still nobody paged.
+    expect(turn2.state).toBe('intent_capture');
     expect(turn2.proposalIds.length).toBe(0);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
-    expect(turn2.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(turn2.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
+    expect(turn2.ttsText).toMatch(/couldn't find a matching customer for Bob Smith/i);
     expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
-      'agent.calling.entity_confirm.entity_confirm_declined',
+      'agent.calling.entity_confirm.entity_not_found_operator',
     );
   });
 

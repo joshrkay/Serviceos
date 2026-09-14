@@ -72,6 +72,18 @@ import { z } from 'zod';
 export const updateCatalogItemPayloadSchema = z.object({
   /** Catalog item whose unit price the proposal would update. */
   catalogItemId: z.string().uuid(),
+  /**
+   * #909 — the spoken/typed catalog item reference, preserved when
+   * `catalogItemId` did NOT resolve (mirrors `jobReference` on the
+   * appointment/job contracts). Read by `GATED_REFERENCE_SOURCES.
+   * catalogItemId` (ai/resolution/gated-reference-resolution.ts) so the
+   * post-draft chat resolver can still fill the gate later — a gate on an
+   * id the drafting handler never resolved must have a resolver behind it,
+   * never a payload with nothing on it to act from (PR #935's A33
+   * verify-or-gate pattern). Optional: absent once `catalogItemId` is
+   * filled in (resolved at draft time, or lifted by the resolver/an edit).
+   */
+  itemReference: z.string().min(1).optional(),
   /** SKU label, when the corrected lines carried one (informational). */
   sku: z.string().min(1).optional(),
   /** Catalog item name at proposal time (informational; for the summary/UI). */

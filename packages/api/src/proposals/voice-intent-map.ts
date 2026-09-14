@@ -69,8 +69,13 @@ import type { ProposalType } from './proposal';
  * handleEnRouteVoiceIntent wrapper), ai/voice-turn/phone-en-route-surface.ts
  * (BOTH live phone transports: the Gather branch in
  * telephony/twilio-adapter.ts and media-streams finals via speechTurn in
- * create-voice-turn-processor.ts), and routes/assistant.ts (the chat branch,
- * before the unmapped-capability refusal). The SMS OMW keyword
+ * create-voice-turn-processor.ts), routes/assistant.ts (the chat branch,
+ * before the unmapped-capability refusal), and
+ * ai/voice-turn/inapp-en-route-surface.ts (in-app voice, called from
+ * `InAppVoiceAdapter.handleAdapterAct` before the FSM — SCH-D4; until it
+ * landed, in-app was the one live surface with no branch and produced
+ * exactly the dead clarification card this comment predicts). The SMS OMW
+ * keyword
  * (sms/tech-status/en-route-keyword.ts) fires the SAME audited
  * `triggerEnRoute` act but predates the core and still resolves inline —
  * folding it in is a filed follow-up, so don't read it as a caller here.
@@ -105,9 +110,14 @@ import type { ProposalType } from './proposal';
  *     CONFIRM_NOTHING_PENDING_LINE), never a clarification card.
  *   - `language_switch` — per-transport adapter branches (the FSM is pure
  *     and cannot mutate session.language): media-streams'
- *     `switchLanguage`/pre-scan, and the Gather adapter's
+ *     `switchLanguage`/pre-scan, the Gather adapter's
  *     `handleLanguageSwitchGather` (#846 — before it, this one was real: the
- *     Gather production path had NO branch and degraded to a clarification).
+ *     Gather production path had NO branch and degraded to a clarification),
+ *     and the in-app adapter's `switchSessionLanguage`. In-app was the LAST
+ *     live surface missing a branch, and it degraded exactly as predicted
+ *     here — see `handleAdapterAct` in `inapp-adapter.ts` for the live
+ *     evidence (sweep rows C03/C05/C07) and the same-shaped out-of-FSM
+ *     routing it now uses for approve/reject/edit_proposal.
  *   - The eval harness (`text-mode-driver.ts` `evaluateTurn`) additionally
  *     intercepts `confirm`/`language_switch` → `{kind:'noop'}` and
  *     `operator_request` → `{kind:'escalate'}` before dispatching through

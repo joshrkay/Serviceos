@@ -73,7 +73,18 @@ export type CallingAgentEvent =
       /** True when the caller's follow-up did not resolve the ambiguity. */
       retry?: boolean;
     }
-  | { type: 'entity_not_found' }
+  /**
+   * A free-text entity reference resolved to nothing.
+   *
+   * `entityKind`/`reference` are OPTIONAL and carry WHAT was not found, so
+   * an authenticated operator surface can say it out loud ("I couldn't find
+   * a matching customer for Patel") instead of the generic caller-facing
+   * escalation line. Optional because producers that have no
+   * resolution detail in hand (fixtures, legacy dispatchers) still dispatch
+   * this event; the copy falls back to the generic noun in that case, and
+   * the TELEPHONY escalation path never reads either field.
+   */
+  | { type: 'entity_not_found'; entityKind?: string; reference?: string }
   /**
    * A free-text entity reference resolved to exactly one candidate in the
    * middle confidence band [τ_ent_confirm_low, τ_ent) — probably right, but
@@ -146,6 +157,27 @@ export type CallingAgentEvent =
   | { type: 'system_failure'; reason: string }
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }
+  /**
+   * D01 — the caller answered the `intent_confirm` readback with MORE DETAIL
+   * for the request already captured ("Jordan Lee, 480-555-0199, next
+   * Tuesday morning works") instead of a yes/no. Before this event the only
+   * non-affirmative outcome was `correction`, which clears `currentIntent`
+   * AND `extractedEntities` — so a booking that took three turns to describe
+   * threw away turn 1 on turn 2 and turn 2 on turn 3, and the caller ended
+   * back in `intent_capture` hearing the low-confidence reprompt with
+   * nothing drafted (live evidence, sweep row D01).
+   *
+   * Merges the newly extracted slots into `extractedEntities` and re-enters
+   * `entity_resolution`, so the accumulated references go through the SAME
+   * resolver the first turn used — a customer that DOES exist still gets a
+   * verified id, an ambiguous one still asks, and a genuinely new one still
+   * lands as a gated draft. Never a silent guess (CLAUDE.md invariant).
+   *
+   * Emitted only by an adapter that has re-classified the confirm turn and
+   * satisfied itself the caller is still describing the SAME request — see
+   * `InAppVoiceAdapter.confirmTurnSlotFillEvent`.
+   */
+  | { type: 'intent_details_supplied'; entities: Record<string, unknown> }
   | { type: 'closed' }
   | { type: 'second_intent' }
   | {
@@ -217,6 +249,28 @@ export interface CallingAgentContext {
    * then leaves ai_run_id null rather than fabricating one.
    */
   lastAiRunId?: string;
+  /**
+   * The caller's RAW WORDS for the turn that produced `currentIntent`
+   * (`intent_classified.utterance`). Captured alongside `lastAiRunId` and
+   * threaded into the eventual `create_proposal` side effect, because a
+   * proposal is minted on the CONFIRM turn — by then the last transcript line
+   * is "yes", and the original request is gone from every other channel the
+   * proposal builder can see.
+   *
+   * Needed because some contracts' required fields exist ONLY in the
+   * transcript: `update_job`'s classifier entity set is `jobReference` alone,
+   * so the spoken status ("... to in progress") reaches
+   * `buildVoiceProposalPayload` nowhere else and the proposal was minted with
+   * no change in it at all (register case job-02). Read for exactly that, and
+   * never as an entity reference — a raw utterance is untrusted text and
+   * resolves to nothing on its own.
+   *
+   * Set UNCONDITIONALLY at intent_classified, for the same reason
+   * `lastAiRunId` is: a re-classification whose event carries no utterance
+   * must CLEAR the previous turn's words rather than let the `...context`
+   * spread leak them into a different request.
+   */
+  lastUtterance?: string;
   customerName?: string;
   currentIntent?: string;
   extractedEntities?: Record<string, unknown>;
@@ -240,6 +294,16 @@ export interface CallingAgentContext {
     partialRefs: Record<string, string>;
   };
   pendingProposalId?: string;
+  /**
+   * Train-7 — consecutive `intent_confirm` turns that were answered with
+   * neither a yes/no nor any usable slot. Bounds the non-destructive
+   * "ask again" path (`intent_details_supplied` with empty entities) so an
+   * unparseable conversation cannot park the caller in `intent_confirm`
+   * forever; the adapter falls back to `correction` once it reaches
+   * `MAX_CONFIRM_DETAIL_RETRIES`. Reset by any productive detail turn and by
+   * the correction/confirm exits out of `intent_confirm`.
+   */
+  confirmDetailRetryCount?: number;
   retryCount: number;
   /**
    * Per-session reprompt counter for empty / low-confidence Gather turns

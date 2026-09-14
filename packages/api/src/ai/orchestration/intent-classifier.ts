@@ -1070,6 +1070,18 @@ export interface ClassifyContext {
    */
   planPromptSection?: string;
   /**
+   * 2.12 — B2B/property-manager account context, produced by
+   * `buildAccountContextPromptSection(ctx)` in
+   * `packages/api/src/ai/agents/customer-calling/b2b-account-context.ts` from
+   * the session's `b2bAccountContext` (assembled once, on caller
+   * identification, by the twilio adapter). When supplied, tells the model
+   * this call is a business/property-management account so it prioritizes
+   * and (for a managed sub-account) names the parent portfolio. Optional —
+   * a residential or unmatched caller never sets `b2bAccountContext`, so the
+   * session omits this field and the prompt is byte-identical to today.
+   */
+  b2bAccountPromptSection?: string;
+  /**
    * True when the inbound caller has already been resolved to an
    * existing customer (e.g. by caller-ID). Suppresses the deterministic
    * "sign up" → create_customer override: an established customer who
@@ -1121,6 +1133,16 @@ export interface ClassifyContext {
    * from transcript content.
    */
   classifierProfile?: ClassifierProfile;
+  /**
+   * U10 — trace-session grouping for LLM trace export (the Langfuse
+   * sessionId). Voice surfaces pass the voice session id (+ the Twilio
+   * CallSid when present); chat passes the conversation id; the memo router
+   * passes its conversation id. Carried in `request.metadata` ONLY — never
+   * in the prompt — so voice-quality cassette hashes and gateway cache keys
+   * are unaffected.
+   */
+  sessionId?: string;
+  callSid?: string;
 }
 
 /**
@@ -1294,6 +1316,17 @@ interface OwnerOperatorCommandPattern {
 }
 
 /**
+ * Does this free text NAME AN EXISTING JOB, rather than describe work?
+ *
+ * Deliberately conservative — a trailing "job"/"jobs" or an explicit
+ * JOB-NNNN number, nothing else. Everything the operator says after "quote X
+ * for …" is work to be priced unless they said the word "job", and a WRONG
+ * job link is worse than none: the estimate silently attaches to whatever a
+ * trigram happened to match.
+ */
+const EXISTING_JOB_REFERENCE_RE = /\bjobs?\b\s*$|JOB-\d/i;
+
+/**
  * U2 — narrow, deterministic coverage for the operator corpus commands that
  * repeatedly fail closed when the provider is degraded. These patterns are
  * consulted only on an authenticated owner session. They are anchored and
@@ -1359,13 +1392,36 @@ const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern
     }),
   },
   {
+    // "Quote Khan for a three-ton condenser replacement" — match[2] is the
+    // WORK the operator wants priced, so it is a LINE ITEM, not a reference
+    // to an existing job. Emitting it only as `jobReference` (what this entry
+    // did originally) threw the whole request away: `draft_estimate`'s
+    // contract requires `lineItems`, `jobReference` never becomes one, and
+    // the card minted with `missingFields: ['lineItems']` — an estimate for
+    // nothing — even when the tenant's price book held the exact item
+    // (register case est-01). `lineItemDescriptions` is what
+    // `buildVoiceProposalPayload` grounds against the catalog
+    // (ai/resolution/catalog-resolver.ts), mirroring this table's own
+    // `update_invoice` line-item entries above.
+    //
+    // `jobReference` is KEPT only when the tail actually looks like an
+    // existing job ("for the Patel job", "for JOB-0012") — `draft_estimate`
+    // is a JOB_REF_INTENTS member, so a real job reference must still
+    // resolve. Otherwise it is dropped rather than sent to the job resolver,
+    // which would otherwise trigram-match spoken WORK against job summaries
+    // and link the estimate to whatever job happened to score
+    // ("three-ton condenser replacement" matched Khan's install job live).
     intentType: 'draft_estimate',
     pattern:
       /^\s*quote\s+([a-z][a-z .'-]{0,58}?)\s+for\s+(?:a\s+)?(.{3,120}?)\s*[.!?]?\s*$/i,
-    extract: (match) => ({
-      customerName: match[1].trim(),
-      jobReference: match[2].trim(),
-    }),
+    extract: (match) => {
+      const work = match[2].trim();
+      return {
+        customerName: match[1].trim(),
+        lineItemDescriptions: [work.replace(/^(?:a|an|the)\s+/i, '')],
+        ...(EXISTING_JOB_REFERENCE_RE.test(work) ? { jobReference: work } : {}),
+      };
+    },
   },
   {
     intentType: 'update_invoice',
@@ -1377,10 +1433,24 @@ const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern
     }),
   },
   {
+    // "Text Smith the invoice link". BOTH alternations of the verb — "sms"
+    // and "text" — name the SMS channel, and the operator naming a channel is
+    // the whole difference between this and "email Smith the invoice link".
+    //
+    // U5 (owner-command parity audit): this extract used to emit only
+    // `customerName`, which was harmless while the pattern was reachable on
+    // the voice session alone (buildVoiceProposalPayload gates `channel` and
+    // the operator picks it on the card). Reached from chat it is not:
+    // `SendInvoiceTaskHandler` reads `ee.sendChannel ?? 'email'`, so dropping
+    // the channel silently turned "TEXT Smith the invoice link" into an
+    // EMAIL — a deterministic path producing a worse payload than the LLM it
+    // short-circuits. The register (inv-05) scripts `sendChannel: 'sms'` for
+    // this exact sentence; the pattern now agrees with it rather than the
+    // register being edited down to the pattern.
     intentType: 'send_invoice',
     pattern:
       /^\s*(?:sms|text)\s+([a-z][a-z .'-]{0,58}?)\s+(?:the\s+)?invoice\s+link\s*[.!?]?\s*$/i,
-    extract: (match) => ({ customerName: match[1].trim() }),
+    extract: (match) => ({ customerName: match[1].trim(), sendChannel: 'sms' }),
   },
 ];
 
@@ -1415,7 +1485,8 @@ function matchOwnerOperatorCommand(transcript: string): IntentClassification | n
  * (EXTENDED_INTENTS_PROMPT_SECTION) owns classification + entity
  * extraction for all non-read-only extended intents.
  * Permitted phrase-match intents: lookup_day_overview, lookup_digest,
- * lookup_pending_items, lookup_revenue, lookup_my_day, lookup_leads.
+ * lookup_pending_items, lookup_revenue, lookup_my_day, lookup_leads,
+ * lookup_materials, lookup_catalog.
  *
  * #910 — lookup_revenue / lookup_my_day / lookup_leads added: the 2026-08-29
  * live sweep found these stereotyped, entity-free lookup phrasings answered
@@ -1432,6 +1503,34 @@ function matchOwnerOperatorCommand(transcript: string): IntentClassification | n
  * entity-free contract exactly like lookup_day_overview/digest/
  * pending_items — this closes the same non-determinism gap the P18-001
  * short-circuit already closed for those three.
+ *
+ * #910 completion (2026-08-29 follow-up sweep) — the SAME class of
+ * classifier flakiness recurred on L20 (`lookup_materials`, "What's on the
+ * shopping list?") post-#916, so the audit was widened to every OTHER
+ * lookup-skill member whose `executeLookupAnswer` case (workers/voice-
+ * lookup-answer.ts) never reads a customer/job/technician id off the input
+ * at all:
+ *   - `lookup_materials` — the BARE ask ("what's on the shopping list?",
+ *     no job named) is genuinely entity-free; the job-scoped phrasing
+ *     ("what materials are open on the Patel job?") still falls through to
+ *     the LLM unchanged, since only the anchored no-job pattern is listed
+ *     below — a spoken job reference is exactly the "produces entities"
+ *     case this table's RULE excludes.
+ *   - `lookup_catalog` — never takes an entity at all (tenant-wide price
+ *     book); "Show the price book" is the exact phrasing R04/L12 already
+ *     exercise live, so short-circuiting it is pure belt-and-braces against
+ *     the same gpt-4o-mini non-determinism, not a response to an observed
+ *     failure.
+ * `lookup_availability` was deliberately NOT added here: the live sweep
+ * (L09, "Who's free Thursday?") shows that phrasing legitimately resolving
+ * to `lookup_crew_schedule` today — it does not "unambiguously map" to
+ * `lookup_availability`, so hard-coding it would overrule a currently-
+ * correct LLM classification rather than fix a bug. `lookup_crew_schedule`
+ * / `lookup_timesheets` were also left alone: both take an OPTIONAL
+ * technician reference and are not evidenced as flaky on their bare
+ * phrasing — see CLAUDE.md's "ambiguity becomes a clarification, never a
+ * silent guess" posture for why an unevidenced, optional-entity intent
+ * doesn't get a preemptive short-circuit here.
  */
 const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: ReadonlyArray<RegExp> }> = [
   {
@@ -1492,6 +1591,19 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /^\s*any\s+new\s+leads\s*[?.!]?\s*$/i,
       /^\s*how\s+many\s+(?:open\s+)?leads\s+(?:do\s+we\s+have|are\s+there)\s*[?.!]?\s*$/i,
     ],
+  },
+  {
+    // #910 completion / L20 — "What's on the shopping list?" The BARE ask
+    // only — no job name captured (a job-scoped ask keeps its own entity
+    // and stays LLM-routed; see the table's doc comment above).
+    intent: 'lookup_materials',
+    patterns: [/^\s*what(?:'s| is)\s+on\s+the\s+shopping\s+list\s*[?.!]?\s*$/i],
+  },
+  {
+    // #910 completion — "Show the price book" (the exact live phrasing
+    // R04/L12 already exercise). Tenant-wide, never entity-bearing.
+    intent: 'lookup_catalog',
+    patterns: [/^\s*show\s+(?:me\s+)?the\s+price\s+book\s*[?.!]?\s*$/i],
   },
 ];
 
@@ -1560,6 +1672,493 @@ export function matchLookupEstimatesPhrase(
   const customerName = match[1].trim();
   if (!customerName) return null;
   return { customerName };
+}
+
+/**
+ * A02 (2026-08-29 live sweep) — deterministic short-circuit for the
+ * canonical dictated `draft_estimate` phrasing: an explicit "draft/create/
+ * write/prepare/generate an estimate for <customer>: <line items>"
+ * imperative. Colon-delimited `customerName` capture, same shape as
+ * `matchLookupEstimatesPhrase` immediately above.
+ *
+ * WHY THIS EXISTS: routes/assistant.ts's chat surface dispatches a
+ * classified `draft_estimate` straight to the real `EstimateTaskHandler`
+ * (CHAT_INTENT_TO_REGISTRY_KEY) with no confidence gate of its own — so
+ * dispatch was never the seam. The seam was upstream, exactly like #910's
+ * lookup rows: `classify_intent` intermittently missed the mapped
+ * `draft_estimate` intent for this stereotyped two-price phrasing (low
+ * confidence, or an outright wrong pick), which dropped the turn past
+ * BOTH registry maps to routes/assistant.ts's generic LLM fallback — a
+ * path with no database and no tools that fabricated a whole proposal
+ * card (id `estimate-001`, invalid-UUID, 404s on approve) because nothing
+ * upstream of it verified the model's self-reported "I drafted this"
+ * claim. See ai/orchestration/assistant-honesty-guard.ts for the
+ * companion fix that makes that fallback structurally incapable of
+ * emitting a proposal at all, regardless of classification.
+ *
+ * Safe to bypass the LLM here for the same reason `matchLookupEstimatesPhrase`
+ * is, despite `draft_estimate` being a write (unlike that read-only intent):
+ * D-004 — a drafted estimate is proposal-first, never auto-executed, and an
+ * unresolved/ambiguous `customerName` still goes through the SAME
+ * EntityResolver (resolveVerifiedIdsForDraft) the LLM-classified path uses
+ * — unambiguous fills the id, ambiguous asks ONE clarifying question,
+ * not-found lands in `missingFields` and forces 'draft'. A misfire here at
+ * worst drafts an estimate nobody asked for, sitting unapproved; it can
+ * never silently execute or move money.
+ */
+const DRAFT_ESTIMATE_PATTERN =
+  /^\s*(?:draft|create|write|prepare|generate)\s+(?:an?\s+)?estimate\s+for\s+(.{1,80}?)\s*:\s*\S/i;
+
+export function matchDraftEstimatePhrase(
+  transcript: string,
+): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = DRAFT_ESTIMATE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
+/**
+ * #910 completion / L03 — deterministic short-circuit for the stereotyped
+ * `lookup_balance` phrasing ("What does X owe me?") — the exact copy
+ * `lookup-dispatch.ts`'s own `noCustomerReferenceReply` already suggests
+ * back to an operator who asked with no customer named
+ * ("what does Henderson owe me?"). Same posture as
+ * `matchLookupEstimatesPhrase`: extracts `customerName`, resolved
+ * downstream through the SAME `EntityResolver` the LLM-classified path
+ * already uses for `CUSTOMER_SCOPED_LOOKUP_INTENTS` (voice-lookup-
+ * answer.ts) — an unambiguous match fills the id, ambiguous asks "which
+ * one?", not-found refuses honestly. Anchored so a request that names a
+ * balance for something OTHER than the caller ("what does he owe for the
+ * Henderson job?") does not match — it falls through to the LLM unchanged.
+ */
+const LOOKUP_BALANCE_PATTERN = /^\s*what\s+does\s+(.{1,80}?)\s+owe\s+me\s*[?.!]?\s*$/i;
+
+export function matchLookupBalancePhrase(transcript: string): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_BALANCE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
+/**
+ * #910 completion / L06 — deterministic short-circuit for the stereotyped
+ * `lookup_account_summary` phrasing ("Give me an account summary for X").
+ * Same posture as `matchLookupEstimatesPhrase` / `matchLookupBalancePhrase`
+ * — extracts `customerName`, resolved downstream through the same
+ * `EntityResolver`.
+ */
+const LOOKUP_ACCOUNT_SUMMARY_PATTERN =
+  /^\s*give\s+me\s+an?\s+account\s+summary\s+for\s+(.{1,80}?)\s*[?.!]?\s*$/i;
+
+export function matchLookupAccountSummaryPhrase(
+  transcript: string,
+): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_ACCOUNT_SUMMARY_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
+/**
+ * #910 completion / L13 — deterministic short-circuit for the stereotyped
+ * `lookup_job_profit` phrasing ("Did I make money on the X job?") — the
+ * exact copy `voice-lookup-answer.ts`'s own job-profit "no job named" reply
+ * already suggests back ("Say which job you mean — for example, 'Did I
+ * make money on the Miller job?'"). Unlike `matchLookupEstimatesPhrase`
+ * this extracts `jobReference` (not `customerName`) — resolved downstream
+ * through the SAME `EntityResolver`, `kind: 'job'`, that the LLM-classified
+ * path already uses for `lookup_job_profit` (see `IntentType`'s own doc
+ * comment on the field). Deliberately narrow: only THIS exact stereotyped
+ * phrasing short-circuits — the other job-profit phrasings already covered
+ * by the "routes 5+ distinct profit phrasings" test ("What's my margin on
+ * the Johnson install?", "How'd we do on the Smith water heater?", etc.)
+ * keep going through the LLM unchanged, since they aren't evidenced as
+ * flaky and aren't as unambiguously anchorable as this one.
+ */
+const LOOKUP_JOB_PROFIT_PATTERN =
+  /^\s*did\s+i\s+make\s+money\s+on\s+the\s+(.{1,80}?)\s+job\s*[?.!]?\s*$/i;
+
+export function matchLookupJobProfitPhrase(transcript: string): { jobReference: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_JOB_PROFIT_PATTERN.exec(transcript);
+  if (!match) return null;
+  const jobReference = match[1].trim();
+  if (!jobReference) return null;
+  return { jobReference };
+}
+
+/**
+ * D01 (2026-08-30 live sweep) — deterministic short-circuit for the OPENING
+ * turn of a booking a caller/operator starts before naming anybody: "I'd
+ * like to book a new customer for a diagnostic visit", "book a diagnostic
+ * visit", "set up a new customer appointment".
+ *
+ * WHY THIS EXISTS: on the in-app voice session this opening turn was the
+ * point the whole D01 flow died. Two things went wrong on it, and this
+ * matcher closes both by never reaching them:
+ *  1. the P18-001 sign-up override (`isCreateCustomerSignupPhrasing`) fires
+ *     on the bare `\bnew customer\b` pattern and REWRITES the LLM's correct
+ *     `create_appointment` into `create_customer` at a forced 0.85 — a
+ *     booking that merely MENTIONS a new customer is not a sign-up (see
+ *     that function's own booking guard, added alongside this matcher for
+ *     the phrasings too rich to anchor here);
+ *  2. absent the override, gpt-4o-mini is non-deterministic on this
+ *     entity-free shape — the same three turns produced `intent_capture`
+ *     reprompts on one live run and an `entity_not_found` escalation on
+ *     another.
+ *
+ * ANCHORED, AND ENTITY-FREE BY CONSTRUCTION. Both patterns are `^…$`, so
+ * the instant the utterance carries a real slot — a customer name, a date,
+ * a job ("schedule an appointment for Jordan Lee next Tuesday") — they stop
+ * matching and it falls through to the LLM exactly as today, with its
+ * entity extraction intact. That is the same rule `EXTENDED_INTENT_PHRASES`
+ * documents for itself: a short-circuit may not cost us entities.
+ *
+ * NOT gated on `extendedIntents` (unlike the owner lookups above), because
+ * `create_appointment` is a member of EVERY `PROFILE_INTENTS` set —
+ * caller, field_tech, owner_line and operator all advertise it, so there is
+ * no surface on which this could mint an off-surface intent.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons
+ * `matchDraftEstimatePhrase` is: D-004 (proposal-first, never auto-executed)
+ * plus `create_appointment`'s own draft-time gate — a booking with no
+ * resolvable customerId/jobId is persisted with `missingFields:
+ * ['customerId']` and cannot be approved until an operator resolves the
+ * customer (voice-payload.ts `contractGapFields`; inapp-adapter.ts's D01
+ * gate). A misfire here at worst leaves an unapproved, gated booking draft
+ * in the review queue.
+ */
+const NEW_BOOKING_LEAD =
+  String.raw`(?:i(?:'d|\s+would)\s+like\s+to\s+|i\s+(?:want|need)\s+to\s+|we\s+need\s+to\s+|(?:can|could)\s+(?:you|we)\s+|let'?s\s+|please\s+)?`;
+
+const NEW_BOOKING_PHRASES: ReadonlyArray<RegExp> = [
+  // "(I'd like to) book|schedule|set up a new customer (for a diagnostic visit)"
+  new RegExp(
+    String.raw`^\s*${NEW_BOOKING_LEAD}(?:book|schedule|set\s+up)\s+(?:an?\s+)?new\s+customer` +
+      String.raw`(?:\s+(?:for|with)\s+(?:an?\s+)?[a-z][a-z\s-]{0,40})?\s*[?.!]?\s*$`,
+    'i',
+  ),
+  // "(I'd like to) book|schedule|set up a <qualifier> visit|appointment|…"
+  // — "book a diagnostic visit", "set up a new customer appointment".
+  //
+  // The qualifier is REQUIRED, which is what keeps the bare, unqualified
+  // "schedule an appointment" / "schedule a visit" on the LLM path exactly
+  // as today. Per this file's standing rule, a short-circuit is for
+  // phrasings evidenced as flaky, not a pre-emptive land-grab over every
+  // phrasing the classifier already gets right.
+  new RegExp(
+    String.raw`^\s*${NEW_BOOKING_LEAD}(?:book|schedule|set\s+up)\s+(?:an?\s+)?` +
+      String.raw`(?:(?!(?:an?|the)\s)[a-z][a-z-]{1,20}\s+){1,3}(?:appointment|visit|booking|inspection|service\s+call)\s*[?.!]?\s*$`,
+    'i',
+  ),
+];
+
+/**
+ * True when the transcript is one of the anchored, entity-free new-booking
+ * openings above. `create_appointment` carries no extracted entities out of
+ * this matcher — by design (see the doc comment): the slots arrive on the
+ * following turns.
+ */
+export function matchNewBookingPhrase(transcript: string): boolean {
+  if (!transcript) return false;
+  return NEW_BOOKING_PHRASES.some((rx) => rx.test(transcript));
+}
+
+/**
+ * A06 (2026-08-30 live sweep, sweep-10) — deterministic short-circuit for the
+ * canonical dictated `issue_invoice` phrasing: "Issue invoice INV-0010" /
+ * "Issue the invoice INV-0010". Anchored, doc-number-shaped capture, same
+ * idiom as `matchLookupJobProfitPhrase` / `matchDraftEstimatePhrase`.
+ *
+ * WHY THIS EXISTS: the exact sweep utterance — "Issue invoice INV-0010" —
+ * fell through to the generic-LLM reply path with NO proposal drafted at
+ * all ("I have not issued invoice INV-0010. Please contact your billing
+ * department...", a hallucination-shaped deflection from a path with no
+ * database and no tools; see ai/orchestration/assistant-honesty-guard.ts's
+ * companion fix for why that fallback can never itself fabricate a
+ * proposal). `classify_intent` intermittently missed the mapped
+ * `issue_invoice` intent for this stereotyped, entity-bearing phrasing —
+ * the same class of non-determinism `matchDraftEstimatePhrase` and the
+ * #910 lookup matchers close for their own intents.
+ *
+ * FIELD CHOICE: extracts into `jobReference`, not a bespoke
+ * `invoiceReference` — `IssueInvoiceTaskHandler` (ai/orchestration/
+ * task-router.ts) reads `existingEntities.invoiceReference ??
+ * existingEntities.jobReference`, and there is no `invoiceReference`
+ * extraction field anywhere in the classifier taxonomy (every invoice-doc
+ * intent reuses `jobReference`/`jobTitle` — see INVOICE_DOC_INTENTS's own
+ * comment, ai/agents/customer-calling/entity-resolution.ts). Because
+ * `issue_invoice` is a member of `INVOICE_DOC_INTENTS`,
+ * `documentKindForReference` there also routes this `jobReference` through
+ * `kind: 'invoice'` pre-draft resolution — an exact document number clears
+ * `resolveExactDocumentNumber`'s fast path deterministically, so the SAME
+ * extraction this matcher performs already flows through the resolver the
+ * LLM-classified path uses; nothing downstream needed to change.
+ *
+ * ANCHORED to an "INV-<digits>" document number specifically (not free
+ * text): a captured token that isn't shaped like a real invoice number
+ * would only ever hand `IssueInvoiceTaskHandler` a reference its own Rung 1
+ * (`looksLikeResolvedInvoiceRef`) rejects anyway, so requiring the shape
+ * here keeps the pattern from firing on phrasings ("issue the invoice we
+ * just drafted") this matcher was never meant to answer — those still fall
+ * through to the LLM/Rung-2 conversation-context resolution unchanged.
+ *
+ * NOT gated on `extendedIntents` (unlike the owner-lookup matchers above),
+ * for the same reason `matchNewBookingPhrase` isn't: the live A06 failure
+ * was on `surface: "chat"`, which never sets that flag (D-028 — chat is the
+ * broad, ungated taxonomy for every authenticated caller), so a
+ * `extendedIntents`-gated matcher would never have run for the exact
+ * utterance this exists to fix.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons
+ * `matchDraftEstimatePhrase` is: D-004 (proposal-first, never
+ * auto-executed) plus `IssueInvoiceTaskHandler`'s own draft-time gate — an
+ * unresolvable reference is persisted with `missingFields: ['invoiceId']`
+ * and a candidate picker, never silently issued. A misfire here at worst
+ * drafts an issue_invoice proposal nobody asked for, sitting unapproved.
+ */
+const ISSUE_INVOICE_PATTERN =
+  /^\s*issue\s+(?:the\s+)?invoice\s+(INV-\d+)\s*[.!]?\s*$/i;
+
+export function matchIssueInvoicePhrase(
+  transcript: string,
+): { jobReference: string } | null {
+  if (!transcript) return null;
+  const match = ISSUE_INVOICE_PATTERN.exec(transcript);
+  if (!match) return null;
+  return { jobReference: match[1].toUpperCase() };
+}
+
+/**
+ * A10 (2026-08-31 live sweep) — deterministic short-circuit for the
+ * canonical dictated `update_job` priority-change imperative: "Mark the
+ * <job> job as <priority> priority". Same idiom as `matchIssueInvoicePhrase`
+ * immediately above (A06) — this file's standing pattern for a stereotyped,
+ * entity-bearing phrasing that `classify_intent` has been caught missing.
+ *
+ * WHY THIS EXISTS: the live utterance — "Mark the QA Sweep Furnace
+ * Inspection job as high priority" — fell through to the generic-LLM reply
+ * path with no proposal drafted at all ("I have NOT marked... please
+ * contact your supervisor", a hallucination-shaped deflection; see
+ * ai/orchestration/assistant-honesty-guard.ts's companion fix for why that
+ * fallback can never itself fabricate a proposal). It's the SAME class of
+ * intermittent miss `matchDraftEstimatePhrase` / `matchIssueInvoicePhrase` /
+ * the #910 lookup matchers close for their own intents — the sweep report
+ * that caught it noted the identical utterance SHAPE had passed on many
+ * prior sweeps, so this is non-determinism in the LLM call, not a taxonomy
+ * gap (`update_job` and the priority-edit shape are both already
+ * documented in `JOB_EDIT_SYSTEM_PROMPT`, job-edit-task.ts).
+ *
+ * FIELD CHOICE: extracts only `jobReference`. Unlike `UpdateJobTaskHandler`
+ * (job-edit-task.ts), the CLASSIFIER's own `ExtractedEntities` taxonomy has
+ * no `priority`/`status`/`title`/`description` fields at all — those are
+ * extracted downstream by that handler's OWN LLM call
+ * (`JOB_EDIT_SYSTEM_PROMPT`) against the full raw transcript, not from
+ * `classification.extractedEntities`. So this matcher's only job is
+ * routing: get the turn to `update_job` (with a job reference an operator
+ * can resolve) at all, instead of past both registry maps into the generic
+ * fallback — the priority itself is re-extracted correctly once
+ * `UpdateJobTaskHandler.handle` actually runs. `jobReference` matches
+ * `job-edit-task.ts`'s own field name, and `update_job` is already a
+ * `JOB_REF_INTENTS` member (ai/agents/customer-calling/entity-resolution.ts),
+ * so the SAME pre-draft resolver traversal the LLM-classified path uses
+ * picks this reference up unchanged.
+ *
+ * NOT gated on `extendedIntents`, for the same reason `matchIssueInvoicePhrase`
+ * isn't: the live A10 failure was on `surface: "chat"`, which never sets
+ * that flag (D-028 — chat is the broad, ungated taxonomy for every
+ * authenticated caller).
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons
+ * `matchIssueInvoicePhrase` is: D-004 (proposal-first, never
+ * auto-executed) plus `UpdateJobTaskHandler`'s own draft-time gate — an
+ * unresolvable/ambiguous job reference is persisted with `missingFields:
+ * ['jobId']` (or a clarification question), never silently applied. A
+ * misfire here at worst drafts an update_job proposal nobody asked for,
+ * sitting unapproved — capture-class, always human-approved regardless.
+ *
+ * ANCHORED to "mark ... job (as) <priority> priority" specifically — the
+ * one phrasing evidenced as flaky. Status/title/description edits, and any
+ * other priority phrasing ("set the X job's priority to urgent"), stay on
+ * the LLM path unchanged, per this file's standing rule against pre-emptive
+ * land-grabs over phrasings the classifier already gets right.
+ */
+const UPDATE_JOB_PRIORITY_PATTERN =
+  /^\s*mark\s+(?:the\s+)?(.{1,80}?)\s+job\s+(?:as\s+)?(?:low|normal|high|urgent)\s+priority\s*[.!]?\s*$/i;
+
+export function matchUpdateJobPriorityPhrase(
+  transcript: string,
+): { jobReference: string } | null {
+  if (!transcript) return null;
+  const match = UPDATE_JOB_PRIORITY_PATTERN.exec(transcript);
+  if (!match) return null;
+  const jobReference = match[1].trim();
+  if (!jobReference) return null;
+  return { jobReference };
+}
+
+/**
+ * A14 (2026-08-31 live sweep) — deterministic short-circuit for the
+ * canonical dictated `add_crew_member` imperative: "Add <technician> to
+ * <appointment reference>('s) appointment as a(nother) <second/additional>
+ * technician". Same idiom as `matchUpdateJobPriorityPhrase` (A10) /
+ * `matchIssueInvoicePhrase` (A06) — this file's standing pattern for a
+ * stereotyped, entity-bearing phrasing `classify_intent` has been caught
+ * intermittently missing (passed sweeps 13-14, missed sweep 15).
+ *
+ * WHY THIS EXISTS: the live utterance — "Add Alex Rivera to qa-matrix-A-
+ * customer's appointment as a second technician" — fell through to the
+ * generic-LLM reply path with no proposal drafted at all ("I have NOT
+ * added Alex Rivera to the appointment. Please contact the field-service
+ * team...", a hallucination-shaped deflection; see ai/orchestration/
+ * assistant-honesty-guard.ts's companion fix for why that fallback can
+ * never itself fabricate a proposal). Same class of intermittent LLM miss
+ * `matchIssueInvoicePhrase` / `matchUpdateJobPriorityPhrase` / the #910
+ * lookup matchers close for their own intents — not a taxonomy gap
+ * (`add_crew_member`, `targetTechnicianName`, and `appointmentReference`
+ * are all already documented in the taxonomy).
+ *
+ * FIELD CHOICE: extracts `targetTechnicianName` and `appointmentReference`
+ * — the exact two fields `AddCrewMemberTaskHandler` reads
+ * (voice-extended-tasks.ts), and `add_crew_member` is already a member of
+ * BOTH `TECHNICIAN_REF_INTENTS` and `APPOINTMENT_REF_INTENTS`
+ * (ai/agents/customer-calling/entity-resolution.ts), so the SAME pre-draft
+ * resolvers (`existingEntities.technicianId` / `.appointmentId`) the
+ * LLM-classified path uses already pick these fields up unchanged — no
+ * downstream code needed to change. `appointmentReference` captures the
+ * bare customer-name form ("qa-matrix-A-customer", not "...'s
+ * appointment") — `resolveAppointment`'s named branch (pg-entity-
+ * resolver.ts) already resolves a bare customer name exactly as well as a
+ * fuller phrase (A11, #954/#956).
+ *
+ * ANCHORED to the FULL evidenced shape, trailing technician-role clause
+ * REQUIRED (not optional): "add <X> to <Y>'s appointment" ALONE, with no
+ * "as a(nother) technician" qualifier, is genuinely ambiguous with
+ * add_note ("add a note to the customer's appointment") and other
+ * "add ... to ..." phrasings — requiring the trailing clause is what
+ * keeps this pattern from false-firing on those, per this file's standing
+ * rule against pre-emptive land-grabs over phrasings the classifier
+ * already gets right.
+ *
+ * NOT gated on `extendedIntents`, for the same reason `matchIssueInvoicePhrase`
+ * / `matchUpdateJobPriorityPhrase` aren't: the live A14 failure was on
+ * `surface: "chat"`, which never sets that flag.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons those
+ * matchers are: D-004 (proposal-first, never auto-executed) plus
+ * `AddCrewMemberTaskHandler`'s own draft-time gate — an unresolved
+ * technician name or appointment reference is persisted with
+ * `missingFields` set, never silently applied. A misfire here at worst
+ * drafts an add_crew_member proposal nobody asked for, sitting unapproved
+ * — capture-class, always human-approved regardless.
+ */
+const ADD_CREW_MEMBER_PATTERN =
+  /^\s*add\s+(.{1,60}?)\s+to\s+(.{1,80}?)(?:'s)?\s+appointment\s+as\s+(?:an?\s+)?(?:second|another|additional|extra)\s+technician\s*[.!]?\s*$/i;
+
+export function matchAddCrewMemberPhrase(
+  transcript: string,
+): { targetTechnicianName: string; appointmentReference: string } | null {
+  if (!transcript) return null;
+  const match = ADD_CREW_MEMBER_PATTERN.exec(transcript);
+  if (!match) return null;
+  const targetTechnicianName = match[1].trim();
+  const appointmentReference = match[2].trim();
+  if (!targetTechnicianName || !appointmentReference) return null;
+  return { targetTechnicianName, appointmentReference };
+}
+
+/** "$1,234.5" -> 123450 integer cents via string math (no float drift, per
+ *  CLAUDE.md "all money: integer cents"). Mirrors invoices/milestone-
+ *  sentence-parser.ts's private `dollarsToCents` — not imported from there
+ *  (that module's helper is unexported and scoped to its own parser), kept
+ *  local here for the identical reason every matcher in this file is
+ *  self-contained. */
+function parseDollarsToCents(raw: string): number | null {
+  const cleaned = raw.replace(/,/g, '');
+  const m = cleaned.match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  if (!m) return null;
+  const cents = Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0') || '0');
+  return Number.isSafeInteger(cents) ? cents : null;
+}
+
+/**
+ * A21 (2026-08-31 live sweep) — deterministic short-circuit for the
+ * canonical dictated `apply_late_fee` imperative: "Apply a $<amount> late
+ * fee to <customer reference>('s) (overdue/unpaid/...) invoice". Same
+ * idiom as `matchAddCrewMemberPhrase` (A14) / `matchUpdateJobPriorityPhrase`
+ * (A10) — this file's standing pattern for a stereotyped, entity-bearing
+ * phrasing `classify_intent` has been caught missing (this is now the
+ * deterministic case, not intermittent — see the class comment below).
+ *
+ * WHY THIS EXISTS: the live utterance — "Apply a $25 late fee to
+ * qa-matrix-A-customer's overdue invoice" — draws NO reference field at
+ * all and no entities in sourceContext from the classifier: `amount`
+ * extracts fine (feeCents:2500 on the resulting payload), but neither
+ * `customerName` nor `jobReference` comes back, so `ApplyLateFeeTaskHandler`
+ * (ee.jobReference ?? ee.customerName) has nothing to write to
+ * `invoiceReference`, and the #954 honest-line fix (gated-reference-
+ * resolution.ts) correctly reports "I couldn't automatically match that"
+ * for a gate with genuinely no reference text anywhere — working as
+ * designed, but the gate can never lift either way. This is #931's known
+ * few-shot territory for this exact phrasing; the campaign convention
+ * (per #946/#951/#954/#956) is to close a known LLM-extraction gap
+ * deterministically for the evidenced phrasing rather than touch the
+ * pinned classifier prompt.
+ *
+ * FIELD CHOICE: extracts `customerName` (mirrors `matchLookupBalancePhrase`
+ * / `matchLookupAccountSummaryPhrase` — a spoken possessive customer
+ * reference, not a document number) and `amount` (integer cents — the
+ * taxonomy's own field, `ExtractedEntities.amount`; `ApplyLateFeeTaskHandler`
+ * already reads `ee.amount` into `payload.feeCents` unchanged, so this
+ * does not duplicate anything the handler computes — it only supplies the
+ * classifier-contract field the handler already expects). No dedicated
+ * `invoiceReference` extraction field exists anywhere in the taxonomy
+ * (confirmed: every invoice-doc intent reuses `jobReference`/`customerName`
+ * — INVOICE_DOC_INTENTS' own comment, ai/agents/customer-calling/
+ * entity-resolution.ts) — `apply_late_fee` is a CUSTOMER_REF_INTENTS
+ * member, so `customerName` resolves to `existingEntities.customerId`
+ * pre-draft the same way it does for the LLM-classified path, and the
+ * generic post-draft gated-reference loop's `entityFields` fallback
+ * (GATED_REFERENCE_SOURCES.invoiceId) also reads raw `customerName` when
+ * `payload.invoiceReference` alone doesn't resolve.
+ *
+ * ANCHORED to "apply a $<amount> late fee to <reference>('s) invoice" —
+ * the "late fee" phrase pair is specific enough that no other intent's
+ * ordinary phrasing collides with it.
+ *
+ * NOT gated on `extendedIntents`, for the same reason the other write-intent
+ * matchers in this file aren't: the live A21 failure was on `surface:
+ * "chat"`, which never sets that flag.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons those
+ * matchers are: D-004 (proposal-first, never auto-executed) plus
+ * `ApplyLateFeeTaskHandler`'s own draft-time gate — an unresolved customer
+ * reference is persisted with `missingFields: ['invoiceId']` and the honest
+ * can't-match reply, never silently applied. A misfire here at worst
+ * drafts an apply_late_fee proposal nobody asked for, sitting unapproved —
+ * money-class, never auto-approves regardless.
+ */
+const APPLY_LATE_FEE_PATTERN =
+  /^\s*apply\s+(?:an?\s+)?\$?(\d+(?:\.\d{1,2})?)\s*(?:dollars?\s+)?late\s+fee\s+to\s+(.{1,80}?)(?:'s)?\s+(?:(?:overdue|unpaid|outstanding|past\s+due|delinquent)\s+)?invoice\s*[.!]?\s*$/i;
+
+export function matchApplyLateFeePhrase(
+  transcript: string,
+): { customerName: string; amount: number } | null {
+  if (!transcript) return null;
+  const match = APPLY_LATE_FEE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[2].trim();
+  if (!customerName) return null;
+  const amount = parseDollarsToCents(match[1]);
+  if (amount === null || amount <= 0) return null;
+  return { customerName, amount };
 }
 
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
@@ -1875,8 +2474,29 @@ const CREATE_CUSTOMER_SIGNUP_PATTERNS: ReadonlyArray<RegExp> = [
   /\bnuevo\s+cliente\b/i,
 ];
 
+/**
+ * D01 (2026-08-30 live sweep) — the `\bnew customer\b` pattern above has no
+ * notion of what the sentence is ASKING FOR, so "I'd like to book a new
+ * customer for a diagnostic visit" took the P18-001 rescue and was rewritten
+ * from the LLM's correct `create_appointment` into `create_customer` at a
+ * forced 0.85. That is the SAME defect PR #265 fixed for the "set up an
+ * account" / "open an account" patterns with their `(?!.*\b(?:appointment|
+ * schedule)\b)` lookaheads; a lookahead cannot fix this one because the
+ * booking verb sits BEFORE the phrase, so it gets its own guard.
+ *
+ * Deliberately anchored to the booking verb DIRECTLY governing "new
+ * customer" — the third-person shape, an operator booking work FOR someone.
+ * P18-001 exists for a CALLER announcing THEMSELVES ("I'm a new customer",
+ * "first time calling"), and those keep the rescue unchanged even when the
+ * same sentence goes on to ask for an appointment ("I'm a new customer and
+ * I'd like to schedule an appointment" is still create_customer).
+ */
+const CREATE_CUSTOMER_SIGNUP_BOOKING_GUARD =
+  /\b(?:book|booking|schedule|scheduling|set\s+up)\s+(?:an?\s+)?new\s+customer\b/i;
+
 export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
   if (!transcript) return false;
+  if (CREATE_CUSTOMER_SIGNUP_BOOKING_GUARD.test(transcript)) return false;
   return CREATE_CUSTOMER_SIGNUP_PATTERNS.some((rx) => rx.test(transcript));
 }
 
@@ -1956,6 +2576,38 @@ async function classifyIntentRaw(
         extractedEntities: { customerName: lookupEstimatesMatch.customerName },
       };
     }
+
+    // #910 completion — same extendedIntents-gated, pre-LLM slot, closing the
+    // same non-determinism gap for the remaining entity-bearing lookups the
+    // 2026-08-29 follow-up sweep caught (L03/L06/L13) — see each matcher's
+    // own doc comment for its downstream resolution.
+    const lookupBalanceMatch = matchLookupBalancePhrase(transcript);
+    if (lookupBalanceMatch) {
+      return {
+        intentType: 'lookup_balance',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_balance phrasing',
+        extractedEntities: { customerName: lookupBalanceMatch.customerName },
+      };
+    }
+    const lookupAccountSummaryMatch = matchLookupAccountSummaryPhrase(transcript);
+    if (lookupAccountSummaryMatch) {
+      return {
+        intentType: 'lookup_account_summary',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_account_summary phrasing',
+        extractedEntities: { customerName: lookupAccountSummaryMatch.customerName },
+      };
+    }
+    const lookupJobProfitMatch = matchLookupJobProfitPhrase(transcript);
+    if (lookupJobProfitMatch) {
+      return {
+        intentType: 'lookup_job_profit',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_job_profit phrasing',
+        extractedEntities: { jobReference: lookupJobProfitMatch.jobReference },
+      };
+    }
     if (matchEnRoutePhrase(transcript)) {
       return {
         intentType: 'en_route',
@@ -1963,6 +2615,104 @@ async function classifyIntentRaw(
         reasoning: 'matched deterministic en_route phrasing',
       };
     }
+
+    // A02 (2026-08-29 live sweep) — same extendedIntents-gated, pre-LLM slot;
+    // see matchDraftEstimatePhrase's doc comment for why this write intent
+    // is still safe to short-circuit deterministically.
+    const draftEstimateMatch = matchDraftEstimatePhrase(transcript);
+    if (draftEstimateMatch) {
+      return {
+        intentType: 'draft_estimate',
+        confidence: 0.95,
+        reasoning: 'matched deterministic draft_estimate phrasing',
+        extractedEntities: { customerName: draftEstimateMatch.customerName },
+      };
+    }
+  }
+
+  // D01 (2026-08-30 live sweep) — the anchored, entity-free new-booking
+  // opening. Deliberately OUTSIDE the `extendedIntents` block above: unlike
+  // the owner lookups, `create_appointment` is a member of every
+  // PROFILE_INTENTS set, so there is no surface this could route
+  // off-surface. See matchNewBookingPhrase's doc comment for why an
+  // anchored write-intent short-circuit is safe here.
+  if (matchNewBookingPhrase(transcript)) {
+    return {
+      intentType: 'create_appointment',
+      confidence: 0.95,
+      reasoning: 'matched deterministic new-booking phrasing',
+    };
+  }
+
+  // A06 (2026-08-30 live sweep, sweep-10) — the anchored "issue invoice
+  // INV-####" imperative. Deliberately OUTSIDE the `extendedIntents` block
+  // above, same reasoning as `matchNewBookingPhrase` immediately above: the
+  // live miss was on `surface: "chat"`, which never sets that flag. See
+  // matchIssueInvoicePhrase's doc comment for the full story and why an
+  // anchored write-intent short-circuit is safe here.
+  const issueInvoiceMatch = matchIssueInvoicePhrase(transcript);
+  if (issueInvoiceMatch) {
+    return {
+      intentType: 'issue_invoice',
+      confidence: 0.95,
+      reasoning: 'matched deterministic issue_invoice phrasing',
+      extractedEntities: { jobReference: issueInvoiceMatch.jobReference },
+    };
+  }
+
+  // A10 (2026-08-31 live sweep) — the anchored "mark the X job as
+  // <priority> priority" imperative. Deliberately OUTSIDE the
+  // `extendedIntents` block above, same reasoning as `matchIssueInvoicePhrase`
+  // immediately above: the live miss was on `surface: "chat"`, which never
+  // sets that flag. See matchUpdateJobPriorityPhrase's doc comment for the
+  // full story and why an anchored write-intent short-circuit is safe here.
+  const updateJobPriorityMatch = matchUpdateJobPriorityPhrase(transcript);
+  if (updateJobPriorityMatch) {
+    return {
+      intentType: 'update_job',
+      confidence: 0.95,
+      reasoning: 'matched deterministic update_job priority phrasing',
+      extractedEntities: { jobReference: updateJobPriorityMatch.jobReference },
+    };
+  }
+
+  // A14 (2026-08-31 live sweep) — the anchored "add <technician> to
+  // <reference>'s appointment as a(nother) technician" imperative.
+  // Deliberately OUTSIDE the `extendedIntents` block above, same reasoning
+  // as `matchUpdateJobPriorityPhrase` immediately above: the live miss was
+  // on `surface: "chat"`, which never sets that flag. See
+  // matchAddCrewMemberPhrase's doc comment for the full story and why an
+  // anchored write-intent short-circuit is safe here.
+  const addCrewMemberMatch = matchAddCrewMemberPhrase(transcript);
+  if (addCrewMemberMatch) {
+    return {
+      intentType: 'add_crew_member',
+      confidence: 0.95,
+      reasoning: 'matched deterministic add_crew_member phrasing',
+      extractedEntities: {
+        targetTechnicianName: addCrewMemberMatch.targetTechnicianName,
+        appointmentReference: addCrewMemberMatch.appointmentReference,
+      },
+    };
+  }
+
+  // A21 (2026-08-31 live sweep) — the anchored "apply a $<amount> late fee
+  // to <reference>('s) invoice" imperative. Deliberately OUTSIDE the
+  // `extendedIntents` block above, same reasoning as the matchers
+  // immediately above: the live miss was on `surface: "chat"`, which never
+  // sets that flag. See matchApplyLateFeePhrase's doc comment for the full
+  // story and why an anchored write-intent short-circuit is safe here.
+  const applyLateFeeMatch = matchApplyLateFeePhrase(transcript);
+  if (applyLateFeeMatch) {
+    return {
+      intentType: 'apply_late_fee',
+      confidence: 0.95,
+      reasoning: 'matched deterministic apply_late_fee phrasing',
+      extractedEntities: {
+        customerName: applyLateFeeMatch.customerName,
+        amount: applyLateFeeMatch.amount,
+      },
+    };
   }
 
   // Compose the system prompt: base classifier rules + (optional)
@@ -1987,6 +2737,17 @@ async function classifyIntentRaw(
     systemMessages.push({
       role: 'system',
       content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
+    });
+  }
+  // 2.12 — B2B/property-manager account context (see ClassifyContext doc
+  // comment). Same treatment as vertical/plan above: a separate, clearly
+  // labeled system message — never merged into the untrusted transcript slot
+  // the caller's own words occupy below (R14/R19: trusted context lives in
+  // the system role; caller speech is data, never instruction).
+  if (context.b2bAccountPromptSection && context.b2bAccountPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Caller account context (use to prioritize and inform tone; do not change the JSON output schema):\n${context.b2bAccountPromptSection}`,
     });
   }
   // RV-071 — owner-approval intents are documented to the model ONLY on a
@@ -2040,7 +2801,12 @@ async function classifyIntentRaw(
     // Kept in metadata too: some downstream logging/consumers still read
     // tenantId from here (see gateway.ts correlationId/promptVersionId
     // metadata reads for the pattern this follows).
-    metadata: { tenantId: context.tenantId },
+    // U10 — session identifiers ride in metadata only (trace grouping).
+    metadata: {
+      tenantId: context.tenantId,
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+      ...(context.callSid ? { callSid: context.callSid } : {}),
+    },
   });
 
   const tokenUsage = response.tokenUsage

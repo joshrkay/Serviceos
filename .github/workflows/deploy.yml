@@ -3,6 +3,14 @@ on:
   push:
     branches: [main]
 
+# Serial pipeline: never cancel an in-flight deploy for a race to start a
+# new one. cancel-in-progress: false so a fast second push queues behind the
+# first instead of tearing down a deploy already underway (a cancelled
+# `railway up` mid-flight is a bad place to leave a service).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,6 +21,8 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
+      - name: Deployment helper regression tests
+        run: bash scripts/ci/test/run-tests.sh
 
       - name: Type check API (build config)
         run: npx tsc --project tsconfig.build.json --noEmit
@@ -109,35 +119,52 @@ jobs:
       # npm ci is needed for the post-deploy smoke script (scripts/smoke-test.ts
       # runs via ts-node) — the health poll below only needs curl.
       - run: npm ci
+      # Pinned to the verified interface (deployment-tracking fix,
+      # 2026-09-08): `railway up --json --detach` prints
+      # {"deploymentId":...} and `railway deployment list --json` returns
+      # `id`/`status`/`createdAt` per entry — both confirmed against
+      # @railway/cli v5.49.6 source. See
+      # docs/plans/2026-09-08-deployment-tracking.md.
       - name: Install Railway CLI
-        run: npm install -g @railway/cli
-      # Migrations run inside Railway via `preDeployCommand` in railway.toml.
-      # `--ci` (not `--detach`, PR #669 review): streams build logs and fails
-      # this step on a build failure instead of returning at upload time.
+        run: npm install -g @railway/cli@5.49.6
+      # railway-deploy.sh runs `railway up --json --detach` and prints ONLY
+      # the exact deployment ID Railway assigned this invocation — never the
+      # "newest" deployment for the service, which can belong to an
+      # unrelated deploy (e.g. this service's own GitHub auto-deploy
+      # integration reacting to the same push). Fails closed if no unique
+      # ID comes back.
       - name: Deploy API to Railway (Development)
-        run: railway up --service "@serviceos/api" --environment Development --ci
+        id: deploy-dev-api
+        run: |
+          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/api" Development)"
+          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (Development)
-        run: railway up --service "@serviceos/web" --environment Development --ci
+        id: deploy-dev-web
+        run: |
+          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/web" Development)"
+          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
       # --- Post-deploy verification (WS7) --------------------------------
-      # `railway up --ci` exits after the BUILD; the rollout (preDeployCommand
-      # migration + container swap + Railway healthcheck) continues in the
-      # background, and on failure Railway keeps the OLD container serving —
-      # so a public-URL poll alone can green against the previous deploy.
-      # wait-for-deployment.sh closes that race by polling the service's
-      # newest deployment status until SUCCESS (hard-fail on FAILED/CRASHED);
-      # only then do the health poll + smoke verify the new deploy is serving.
+      # `railway up --detach` returns at upload time; the build, the rollout
+      # (preDeployCommand migration + container swap) and Railway's own
+      # healthcheck all continue afterward, and on failure Railway keeps the
+      # OLD container serving — so a public-URL poll alone can green against
+      # the previous deploy. wait-for-deployment.sh closes that race by
+      # polling the EXACT deployment id captured above until it reaches a
+      # terminal status (hard-fail on FAILED/CRASHED/REMOVED, including a
+      # build failure); only then do the health poll + smoke verify the new
+      # deploy is serving.
       #
       - name: Wait for dev API deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" Development
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" Development "${{ steps.deploy-dev-api.outputs.deployment_id }}"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Wait for dev Web deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" Development
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" Development "${{ steps.deploy-dev-web.outputs.deployment_id }}"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       #
@@ -185,28 +212,37 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
+      # Pinned to the verified interface — see the dev job's install step
+      # above and docs/plans/2026-09-08-deployment-tracking.md.
       - name: Install Railway CLI
-        run: npm install -g @railway/cli
+        run: npm install -g @railway/cli@5.49.6
       - name: Deploy API to Railway (production)
-        run: railway up --service "@serviceos/api" --environment production --ci
+        id: deploy-prod-api
+        run: |
+          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/api" production)"
+          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (production)
-        run: railway up --service "@serviceos/web" --environment production --ci
+        id: deploy-prod-web
+        run: |
+          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/web" production)"
+          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
       # --- Post-deploy verification (WS7) --------------------------------
-      # Same rationale as dev: wait for the actual deployments to reach
-      # SUCCESS (a public-URL poll alone can green against the old container),
-      # then verify health + smoke. PROD_HEALTHCHECK_URL must be the prod API
-      # base URL; unset ⇒ hard fail (no false green).
+      # Same rationale as dev: wait for the EXACT deployment captured above
+      # to reach a terminal status (a public-URL poll alone can green
+      # against the old container; "newest deployment" can be an unrelated
+      # one), then verify health + smoke. PROD_HEALTHCHECK_URL must be the
+      # prod API base URL; unset ⇒ hard fail (no false green).
       - name: Wait for prod API deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" production
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" production "${{ steps.deploy-prod-api.outputs.deployment_id }}"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Wait for prod Web deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" production
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" production "${{ steps.deploy-prod-web.outputs.deployment_id }}"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Verify PROD_HEALTHCHECK_URL is configured

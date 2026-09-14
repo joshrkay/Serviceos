@@ -68,6 +68,7 @@ import { lookupExecutedEvent } from '../voice-quality/events';
 import {
   CUSTOMER_SCOPED_LOOKUP_INTENTS,
   executeLookupAnswer,
+  LOOKUP_UNAVAILABLE_LINE,
   refusalSummary,
   type SharedLookupRepos,
   type VoiceLookupAnswerDeps,
@@ -92,9 +93,15 @@ export interface PhoneLookupInput {
   entities?: Record<string, unknown>;
 }
 
-/** Spoken when the skill failed, the deployment lacks the repos, or no bundle is wired. Unchanged from the old runner. */
-export const LOOKUP_UNAVAILABLE_LINE =
-  "I'm having trouble pulling that up right now. Let me get a person to help.";
+/**
+ * Spoken when the skill failed, the deployment lacks the repos, or no bundle
+ * is wired. Unchanged from the old runner — but it now lives next to the
+ * shared switch (`workers/voice-lookup-answer.ts`), because the in-app voice
+ * surface speaks the identical line and two copies of failure copy is how
+ * surfaces drift. Re-exported here so existing importers of this module are
+ * unchanged.
+ */
+export { LOOKUP_UNAVAILABLE_LINE } from '../../workers/voice-lookup-answer';
 /** Spoken for a customer-scoped ask from a caller identification never resolved. Unchanged from the old runner. */
 export const UNIDENTIFIED_CALLER_LINE =
   "I can't pull up your account without identifying you first. Let me get a person to help.";

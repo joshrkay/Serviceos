@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { uuidSchema } from '../shared/validation';
 
 export type ConversationStatus = 'open' | 'closed' | 'archived';
 export type MessageType = 'text' | 'transcript' | 'system_event' | 'note' | 'clarification' | 'proposal';
@@ -45,6 +46,16 @@ export interface LatestInbound {
 
 export interface CreateConversationInput {
   tenantId: string;
+  /**
+   * #909 (2026-08-31) — optional caller-reserved id. When present, the repo
+   * creates the row WITH this id instead of minting its own. Lets a caller
+   * that already committed to an id BEFORE the conversation row exists
+   * (routes/assistant.ts mints one up front so a proposal drafted this same
+   * turn can be stamped with the id the client will use on the next turn —
+   * see `recordAssistantTurn`'s doc comment) end up with a conversation row
+   * matching that exact id, rather than a silently different one.
+   */
+  id?: string;
   title?: string;
   entityType?: string;
   entityId?: string;
@@ -166,6 +177,31 @@ export interface ConversationRepository {
  * one titled from the first message. Returns the conversation id so the client
  * can pin it for subsequent turns. The agent reply is only written when present
  * (a clarifying/empty reply still records the operator's turn).
+ *
+ * #909 (2026-08-31) — when opening a NEW thread, a well-formed-UUID
+ * `input.conversationId` that simply doesn't exist yet is now used AS the
+ * new conversation's id (via `CreateConversationInput.id`), rather than
+ * always minting an unrelated fresh one. This is what lets
+ * routes/assistant.ts's `/chat` handler mint the conversation id BEFORE
+ * drafting (so a same-turn proposal's `sourceContext.conversationId` — see
+ * `ai/tasks/task-input.ts`'s `baseSourceContext` — is stamped with the
+ * EXACT id this call will persist under) instead of discovering the real id
+ * only after the fact. Live defect this closes: a chat turn that both
+ * opens a brand-new conversation AND drafts a gated proposal (a D-029
+ * clarification ask) previously stamped the proposal with NO conversation
+ * id at all — `recordAssistantTurn` minted its own, different one
+ * afterward, returned THAT to the client, and the next turn's plain-text
+ * answer ("the tune-up one") could never find the proposal it was
+ * answering (`findPendingClarification`/`ProposalRepository.
+ * findByConversation`, routes/assistant.ts, key on this same field) and
+ * fell through to a fresh, unrelated classification instead.
+ *
+ * A NON-UUID `input.conversationId` (garbage, or the empty-string/absent
+ * case) still gets a repo-minted fresh id, exactly as before — reusing an
+ * arbitrary caller-supplied string as a primary-key value is never safe,
+ * and nothing upstream of this call should ever hand one in (routes/
+ * assistant.ts always resolves to either the client's own previously-real
+ * id or a freshly-minted `uuidv4()` before calling this).
  */
 export async function recordAssistantTurn(
   repository: ConversationRepository,
@@ -218,9 +254,19 @@ export async function recordAssistantTurn(
   // New thread: create the conversation and its first messages ATOMICALLY when
   // the repo supports it, so a failed message insert can't orphan an empty
   // conversation. Fall back to sequential create + addMessage otherwise.
+  //
+  // #909 — reuse `input.conversationId` as the new row's id IFF it is
+  // UUID-shaped (see this function's doc comment). A present-but-invalid
+  // string (never a valid primary key) still falls through to a
+  // repo-minted id, unchanged from before.
+  const reservedId =
+    input.conversationId && uuidSchema.safeParse(input.conversationId).success
+      ? input.conversationId
+      : undefined;
   const conversationInput: CreateConversationInput = {
     tenantId: input.tenantId,
     createdBy: input.userId,
+    ...(reservedId ? { id: reservedId } : {}),
     ...(input.userText ? { title: input.userText.slice(0, 80) } : {}),
   };
 
@@ -381,7 +427,7 @@ export class InMemoryConversationRepository implements ConversationRepository {
 
   async createConversation(input: CreateConversationInput): Promise<Conversation> {
     const conv: Conversation = {
-      id: uuidv4(),
+      id: input.id ?? uuidv4(),
       tenantId: input.tenantId,
       title: input.title,
       entityType: input.entityType,

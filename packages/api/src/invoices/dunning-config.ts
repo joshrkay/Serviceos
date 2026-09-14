@@ -16,6 +16,7 @@
  *    in tests and production — exactly like service_agreement_runs.
  */
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
 
 export type DunningChannel = 'sms' | 'email';
 export type LateFeeType = 'none' | 'flat' | 'percent';
@@ -153,6 +154,90 @@ export function defaultDunningConfig(tenantId: string, now: Date = new Date()): 
     lateFeeGraceDays: 0,
     lateFeeMaxCents: undefined,
     createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * #1143 — the owner-editable slice of a tenant's DunningConfig: the late-fee
+ * policy, and nothing else. `PUT /api/settings/dunning` (routes/settings.ts)
+ * is its only writer; `enabled` and `reminderSteps` are NOT writable there, so
+ * this surface cannot switch dunning off or rewrite the reminder cadence.
+ *
+ * Validation mirrors the settings contract's money conventions
+ * (shared/contracts.ts deposit/discount fields): integer cents >= 0, basis
+ * points 0-10000, whole days >= 0. A charging policy (flat / percent) needs a
+ * positive value — `computeLateFeeCents` treats <= 0 as "no fee", so a zero
+ * would be a silently-dead policy. `.strict()` refuses any other key.
+ *
+ * No fee math lives here: grace, the cap and the percent rounding are applied
+ * by `computeLateFeeCents` (invoices/late-fee.ts) exactly as before.
+ */
+export const lateFeePolicyUpdateSchema = z
+  .object({
+    lateFeeType: z.enum(['none', 'flat', 'percent']),
+    /** flat: integer cents; percent: basis points of amount due. */
+    lateFeeValueCents: z.number().int().min(0).optional(),
+    lateFeeGraceDays: z.number().int().nonnegative().optional(),
+    /** Null or omitted = uncapped. */
+    lateFeeMaxCents: z.number().int().min(0).nullable().optional(),
+  })
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.lateFeeType === 'none') return;
+    if (val.lateFeeValueCents === undefined || val.lateFeeValueCents <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `lateFeeValueCents must be a positive integer when lateFeeType is "${val.lateFeeType}"`,
+        path: ['lateFeeValueCents'],
+      });
+    } else if (val.lateFeeType === 'percent' && val.lateFeeValueCents > 10000) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'lateFeeValueCents is basis points for a percent fee and must be at most 10000 (100%)',
+        path: ['lateFeeValueCents'],
+      });
+    }
+  });
+
+export type LateFeePolicyUpdate = z.infer<typeof lateFeePolicyUpdateSchema>;
+
+/** The late-fee slice as the API and the audit trail show it (uncapped = null). */
+export interface LateFeePolicy {
+  lateFeeType: LateFeeType;
+  lateFeeValueCents: number;
+  lateFeeGraceDays: number;
+  lateFeeMaxCents: number | null;
+}
+
+export function lateFeePolicyOf(config: DunningConfig): LateFeePolicy {
+  return {
+    lateFeeType: config.lateFeeType,
+    lateFeeValueCents: config.lateFeeValueCents,
+    lateFeeGraceDays: config.lateFeeGraceDays,
+    lateFeeMaxCents: config.lateFeeMaxCents ?? null,
+  };
+}
+
+/**
+ * Replace the late-fee policy on `current` (the stored row, or
+ * `defaultDunningConfig` for a tenant that has none), preserving its id,
+ * tenant, enabled flag, reminder cadence and createdAt. Pure. `'none'` clears
+ * the amount, grace and cap, matching the default config's shape.
+ */
+export function applyLateFeePolicy(
+  current: DunningConfig,
+  update: LateFeePolicyUpdate,
+  now: Date,
+): DunningConfig {
+  const charging = update.lateFeeType !== 'none';
+  return {
+    ...current,
+    reminderSteps: current.reminderSteps.map((s) => ({ ...s })),
+    lateFeeType: update.lateFeeType,
+    lateFeeValueCents: charging ? (update.lateFeeValueCents ?? 0) : 0,
+    lateFeeGraceDays: charging ? (update.lateFeeGraceDays ?? 0) : 0,
+    lateFeeMaxCents: charging ? (update.lateFeeMaxCents ?? undefined) : undefined,
     updatedAt: now,
   };
 }

@@ -29,6 +29,7 @@ import { createVoiceRouter } from '../../src/routes/voice';
 import { PgVoiceRepository } from '../../src/voice/pg-voice';
 import { createVoiceRecording } from '../../src/voice/voice-service';
 import { InMemoryQueue } from '../../src/queues/queue';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 interface TestApp {
   app: express.Express;
@@ -49,7 +50,12 @@ function buildApp(pool: Pool, tenantId: string, userId: string): TestApp {
     } as AuthenticatedRequest['auth'];
     next();
   });
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  // Real PgAuditRepository (not InMemoryAuditRepository) — matches how
+  // app.ts wires createVoiceRouter(pool-backed voiceRepo, queue,
+  // transcribeAudio, auditRepo, ...) in production, so the idempotency
+  // proof below exercises the actual audit wiring, not a stub.
+  const auditRepo = new PgAuditRepository(pool);
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, undefined, auditRepo));
   return { app, queue };
 }
 
@@ -102,6 +108,39 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
     // The re-send under the same stable create dedupe key is absorbed by the
     // queue while the first job is still pending → one effective job.
     expect(queue.size()).toBe(1);
+  });
+
+  it('audit trail: the replay does not duplicate whatever audit row(s) the create produced (PgAuditRepository.findByEntity)', async () => {
+    // G1 (#1006): this file proved row dedupe but never read the audit
+    // trail back through a real PgAuditRepository — added here per #1018
+    // row 5.4.
+    const auditRepo = new PgAuditRepository(pool);
+    const { app } = buildApp(pool, tenant.tenantId, tenant.userId);
+    const key = `audit-${crypto.randomUUID()}`;
+
+    const first = await request(app).post('/api/voice/recordings').send(body(key));
+    expect(first.status).toBe(202);
+    const recordingId = first.body.recording.id as string;
+
+    const afterCreate = await auditRepo.findByEntity(tenant.tenantId, 'voice_recording', recordingId);
+    // KNOWN GAP (#1018 row 5.4, surfaced not fixed — see lane report):
+    // POST /api/voice/recordings never calls auditRepo.create (only
+    // /stream-token and /transcribe do — routes/voice.ts:155,258).
+    // CLAUDE.md's "All mutations emit audit events" is violated by this
+    // route today. Fixing it is a product-code change to
+    // packages/api/src/routes/voice.ts, out of scope for this test-only
+    // lane — pinned here at its CURRENT (non-compliant) count so a future
+    // fix trips this assertion instead of going unnoticed.
+    expect(afterCreate).toHaveLength(0);
+
+    const replay = await request(app).post('/api/voice/recordings').send(body(key));
+    expect(replay.status).toBe(202);
+    expect(replay.body.recording.id).toBe(recordingId);
+
+    const afterReplay = await auditRepo.findByEntity(tenant.tenantId, 'voice_recording', recordingId);
+    // Whatever the count, the replay must never grow it — the idempotency
+    // guarantee has to extend to the audit trail once one exists.
+    expect(afterReplay).toHaveLength(afterCreate.length);
   });
 
   it('create-then-crash replay (row exists, no job) re-enqueues so the recording can complete', async () => {

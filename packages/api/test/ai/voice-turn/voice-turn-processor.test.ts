@@ -15,7 +15,11 @@ import {
 } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
-import { InMemoryProposalRepository, createProposal } from '../../../src/proposals/proposal';
+import {
+  InMemoryProposalRepository,
+  createProposal,
+  missingFieldsFor,
+} from '../../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
 import { InMemoryCallMeBackRepository } from '../../../src/voice/call-me-back/call-me-back';
 import { InMemoryDeviceTokenRepository } from '../../../src/push/device-token-service';
@@ -33,6 +37,7 @@ import {
   type SettingsRepository,
 } from '../../../src/settings/settings';
 import type { CurrentQuoteResolver } from '../../../src/conversations/negotiation/current-quote-resolver';
+import type { TaskHandler } from '../../../src/ai/tasks/task-handlers';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -112,6 +117,8 @@ function makeCtx(opts: {
    * pin that intent→proposal mapping run with `ownerSession: true`.
    */
   ownerSession?: boolean;
+  /** A46 — respond_to_review's drafting dep. */
+  respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
 } = {
   gateway: makeGatewayReturning('{}'),
   withRepos: true,
@@ -153,6 +160,9 @@ function makeCtx(opts: {
       : {}),
     ...(opts.negotiationQuoteResolver
       ? { negotiationQuoteResolver: opts.negotiationQuoteResolver }
+      : {}),
+    ...(opts.respondToReviewTaskHandler
+      ? { respondToReviewTaskHandler: opts.respondToReviewTaskHandler }
       : {}),
   });
 
@@ -772,6 +782,303 @@ describe('createVoiceTurnProcessor.recordCost', () => {
     const { processor, session } = makeCtx();
     expect(processor.recordCost(session, undefined)).toBe(false);
   });
+
+  it('#1204 — returns true exactly once when the cap was already crossed by usage recorded outside the turn', () => {
+    const { processor, session } = makeCtx();
+    // A classifier's recordUsage crossed the output cap; its events were discarded.
+    session.costTracker.recordUsage({ inputTokens: 10, outputTokens: 1600, costMicroCents: 1 });
+    expect(processor.recordCost(session, { input: 1, output: 1 })).toBe(true);
+    // Never a second end for the same session, with or without usage.
+    expect(processor.recordCost(session, { input: 1, output: 1 })).toBe(false);
+    expect(processor.recordCost(session, undefined)).toBe(false);
+  });
+
+  it('#1204 — the event path still returns true once, then never again', () => {
+    const { processor, session } = makeCtx();
+    expect(processor.recordCost(session, { input: 10, output: 1600 })).toBe(true);
+    expect(processor.recordCost(session, { input: 10, output: 10 })).toBe(false);
+  });
+});
+
+// ─── #1204: token cap is level-triggered across classifier usage ────────────
+
+describe('createVoiceTurnProcessor — #1204 token cap crossed between turns', () => {
+  const LOW_CONFIDENCE_UNKNOWN = JSON.stringify({
+    intentType: 'unknown',
+    confidence: 0.1,
+    reasoning: 'unclear',
+    extractedEntities: {},
+  });
+  // An S1-allowed intent (the default makeCtx session is untrusted telephony).
+  const DRAFT_ESTIMATE = JSON.stringify({
+    intentType: 'draft_estimate',
+    confidence: 0.95,
+    reasoning: 'wants a quote',
+    extractedEntities: { customerName: 'Acme' },
+  });
+  const CONFIRM_YES = JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' });
+  const CAP_WRAP_UP = "I'm connecting you with a team member who can assist you further.";
+
+  /** One gateway completion per step, each with its own output-token count. */
+  function makeGatewayScript(steps: Array<{ content: string; output: number }>): LLMGateway {
+    let i = 0;
+    return {
+      complete: vi.fn().mockImplementation(async () => {
+        const step = steps[Math.min(i, steps.length - 1)]!;
+        i += 1;
+        const response: LLMResponse = {
+          content: step.content,
+          model: 'mock-model',
+          provider: 'mock',
+          tokenUsage: { input: 500, output: step.output, total: 500 + step.output },
+          latencyMs: 1,
+        };
+        return response;
+      }),
+    } as unknown as LLMGateway;
+  }
+
+  /** The real sentiment classifier, recording its own usage on the session tracker. */
+  async function runSentimentClassifier(
+    session: BuiltCtx['session'],
+    outputTokens: number,
+  ): Promise<void> {
+    const { classifyTurnSentiment } = await import(
+      '../../../src/ai/agents/customer-calling/sentiment-classifier'
+    );
+    await classifyTurnSentiment(
+      { transcript: 'hello?', priorTurns: [], intent: 'unknown', tenantId: 'tenant-abc' },
+      {
+        llm: {
+          complete: async () => ({
+            text: '{"frustrationScore":0.1}',
+            tokenUsage: { input: 200, output: outputTokens },
+            model: 'mock-model',
+          }),
+        },
+        costTracker: session.costTracker,
+        sessionCostCapCents: session.costTracker.costCapCents,
+        maxSentimentBudgetRatio: 0.8,
+      },
+    );
+  }
+
+  function watchTerminations(session: BuiltCtx['session']): { count: () => number } {
+    let n = 0;
+    session.events.on('voice-event', (ev: { type: string; cause?: string }) => {
+      if (ev.type === 'session_terminated' && ev.cause === 'cap_exceeded') n += 1;
+    });
+    return { count: () => n };
+  }
+
+  function capOutcome(
+    ctx: BuiltCtx,
+    sideEffects: SideEffect[],
+    terminations: { count: () => number },
+  ) {
+    return {
+      state: ctx.session.machine.currentState,
+      escalationReason: ctx.session.machine.currentContext.escalationReason,
+      tts: sideEffects.filter((fx) => fx.type === 'tts_play').map((fx) => fx.payload.text),
+      notifyReasons: sideEffects
+        .filter((fx) => fx.type === 'notify_oncall')
+        .map((fx) => fx.payload.reason),
+      capAudits: ctx.auditRepo
+        .getAll()
+        .filter((a) => a.eventType.endsWith('.cost_cap_exceeded'))
+        .map((a) => a.eventType),
+      capTerminations: terminations.count(),
+    };
+  }
+
+  const turn = (ctx: BuiltCtx, speechResult: string) =>
+    ctx.processor.speechTurn({
+      session: ctx.session,
+      speechResult,
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+  it('classify branch: a classifier that crosses the output-token cap between turns — the next turn ends the call', async () => {
+    // Turn 1 = 1,450 output tokens (under the 1,500 cap), unclear → repair.
+    // Turn 2 = a clear intent costing 1 output token.
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+
+    await turn(ctx, 'um I have a question');
+    expect(ctx.session.machine.currentState).toBe('intent_capture');
+    expect(ctx.session.costTracker.isExceeded).toBe(false);
+
+    // The fire-and-forget classifier adds 60 output tokens → 1,510 ≥ 1,500.
+    // Its recordUsage returns cost_cap_exceeded:tokens and discards it.
+    await runSentimentClassifier(ctx.session, 60);
+    expect(ctx.session.costTracker.isExceeded).toBe(true);
+
+    const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+    expect(capOutcome(ctx, fx, terminations)).toEqual({
+      state: 'escalating',
+      escalationReason: 'cost_cap_exceeded',
+      tts: [CAP_WRAP_UP],
+      notifyReasons: ['cost_cap_exceeded'],
+      capAudits: ['agent.calling.intent_capture.cost_cap_exceeded'],
+      capTerminations: 1,
+    });
+  });
+
+  it('confirm branch: a classifier that crosses the cap while the readback is pending — the caller\'s yes ends the call', async () => {
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: DRAFT_ESTIMATE, output: 1450 },
+        { content: CONFIRM_YES, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+
+    await turn(ctx, 'I would like a quote for a water heater');
+    expect(ctx.session.machine.currentState).toBe('intent_confirm');
+    await runSentimentClassifier(ctx.session, 60);
+
+    const fx = await turn(ctx, 'yes that is right');
+
+    expect(capOutcome(ctx, fx, terminations)).toEqual({
+      state: 'escalating',
+      escalationReason: 'cost_cap_exceeded',
+      tts: [CAP_WRAP_UP],
+      notifyReasons: ['cost_cap_exceeded'],
+      capAudits: ['agent.calling.intent_confirm.cost_cap_exceeded'],
+      capTerminations: 1,
+    });
+    // Nothing was drafted on the turn the call ended.
+    expect(await ctx.proposalRepo.findByTenant('tenant-abc')).toEqual([]);
+  });
+
+  it('the level-triggered end produces the same wrap-up, notify, audit and termination event as the event path', async () => {
+    // Level path: the classifier crossed the cap between turns.
+    const level = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const levelTerminations = watchTerminations(level.session);
+    await turn(level, 'um I have a question');
+    await runSentimentClassifier(level.session, 60);
+    const levelFx = await turn(level, 'I would like a quote for a water heater');
+
+    // Event path: the turn's OWN usage crosses the cap (today's behaviour).
+    const event = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 60 },
+      ]),
+      withRepos: true,
+    });
+    const eventTerminations = watchTerminations(event.session);
+    await turn(event, 'um I have a question');
+    const eventFx = await turn(event, 'I would like a quote for a water heater');
+
+    expect(capOutcome(event, eventFx, eventTerminations).escalationReason).toBe('cost_cap_exceeded');
+    expect(capOutcome(level, levelFx, levelTerminations)).toEqual(
+      capOutcome(event, eventFx, eventTerminations),
+    );
+  });
+
+  it('never ends the call twice: a later classify turn after the level-triggered end does not re-escalate', async () => {
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+    await turn(ctx, 'um I have a question');
+    await runSentimentClassifier(ctx.session, 60);
+    await turn(ctx, 'I would like a quote for a water heater');
+    expect(ctx.session.machine.currentState).toBe('escalating');
+
+    // escalating → closing (proposal_queued) puts the FSM back on a classify
+    // branch that consults the cap again; the tracker is still over it.
+    ctx.session.machine.dispatch({ type: 'proposal_queued', proposalId: 'p-1' });
+    expect(ctx.session.machine.currentState).toBe('closing');
+    const fx = await turn(ctx, 'and one more thing, a quote for a furnace');
+
+    const outcome = capOutcome(ctx, fx, terminations);
+    expect(outcome.notifyReasons).not.toContain('cost_cap_exceeded');
+    expect(outcome.tts).not.toContain(CAP_WRAP_UP);
+    expect(outcome.capAudits).toHaveLength(1);
+    expect(outcome.capTerminations).toBe(1);
+  });
+
+  it('a consent-capture turn whose own usage crosses the cap does not swallow the end: the next turn ends the call', async () => {
+    // Turn 1 = 1,450 output tokens. Turn 2 answers a pending SMS-consent
+    // question; its confirmIntent costs 60 tokens and crosses the cap on a
+    // path that never ends the call. Turn 3 = a clear intent.
+    const ctx = makeCtx({
+      gateway: makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: CONFIRM_YES, output: 60 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]),
+      withRepos: true,
+    });
+    const terminations = watchTerminations(ctx.session);
+    await turn(ctx, 'um I have a question');
+    ctx.session.pendingConsentCapture = { customerId: 'cust-1', phone: '+15125550100' };
+
+    const consentFx = await turn(ctx, 'yes you can text me');
+    expect(ctx.session.costTracker.isExceeded).toBe(true);
+    expect(ctx.session.pendingConsentCapture).toBeUndefined();
+    expect(consentFx.some((f) => f.type === 'audit_log')).toBe(true);
+
+    const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+    expect(capOutcome(ctx, fx, terminations)).toEqual({
+      state: 'escalating',
+      escalationReason: 'cost_cap_exceeded',
+      tts: [CAP_WRAP_UP],
+      notifyReasons: ['cost_cap_exceeded'],
+      capAudits: ['agent.calling.intent_capture.cost_cap_exceeded'],
+      capTerminations: 1,
+    });
+  });
+
+  it('a call whose classifier stays under the cap is unaffected', async () => {
+    const script = () =>
+      makeGatewayScript([
+        { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+        { content: DRAFT_ESTIMATE, output: 1 },
+      ]);
+    // Control: no classifier between turns.
+    const control = makeCtx({ gateway: script(), withRepos: true });
+    const controlTerminations = watchTerminations(control.session);
+    await turn(control, 'um I have a question');
+    const controlFx = await turn(control, 'I would like a quote for a water heater');
+
+    // Classifier adds 10 output tokens → 1,461 < 1,500.
+    const ctx = makeCtx({ gateway: script(), withRepos: true });
+    const terminations = watchTerminations(ctx.session);
+    await turn(ctx, 'um I have a question');
+    await runSentimentClassifier(ctx.session, 10);
+    expect(ctx.session.costTracker.isExceeded).toBe(false);
+    const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+    const outcome = capOutcome(ctx, fx, terminations);
+    expect(outcome.state).toBe('intent_confirm');
+    expect(outcome.capAudits).toEqual([]);
+    expect(outcome.capTerminations).toBe(0);
+    expect(outcome).toEqual(capOutcome(control, controlFx, controlTerminations));
+  });
 });
 
 // ─── expandIntentConfirmTemplate ────────────────────────────────────────────
@@ -1170,6 +1477,184 @@ describe('createVoiceTurnProcessor — negotiation guardrail (N-003)', () => {
     );
     expect(vc).toBeDefined();
     expect(vc!.payload.reason).toBe('ambiguous_discount_target');
+  });
+});
+
+// ─── A46 — respond_to_review shares the memo on-ramp's drafting path ────────
+
+describe('createVoiceTurnProcessor — respond_to_review (A46)', () => {
+  it('S2 owner session: drafts the SAME review_response_proposal the task handler returns, with publicResponse populated', async () => {
+    const respondToReviewTaskHandler: Pick<TaskHandler, 'handle'> = {
+      handle: vi.fn(async () => ({
+        proposal: createProposal({
+          tenantId: 'tenant-abc',
+          proposalType: 'review_response_proposal',
+          payload: {
+            reviewId: 'review-1',
+            classification: 'vague_complaint',
+            publicResponse: { text: 'Sorry to hear this — please reach out.', approved: false },
+            privateFollowUp: null,
+            serviceCredit: null,
+          },
+          summary: 'Respond to 1★ review from Maria',
+          createdBy: 'test-actor',
+        }),
+        taskType: 'review_response_proposal',
+      })),
+    };
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+      respondToReviewTaskHandler,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'respond_to_review',
+            entities: { reviewReference: 'the 1-star review from yesterday' },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    expect(respondToReviewTaskHandler.handle).toHaveBeenCalledOnce();
+    const stored = (await proposalRepo.findByTenant('tenant-abc')).find(
+      (p) => p.proposalType === 'review_response_proposal',
+    );
+    expect(stored).toBeDefined();
+    expect(
+      (stored!.payload as { publicResponse: { text: string } }).publicResponse.text,
+    ).toBe('Sorry to hear this — please reach out.');
+  });
+
+  it('S1 (unauthenticated caller): never reaches the drafting handler — review_response_proposal is not S1-allowed, coerced to voice_clarification (I6 defense-in-depth)', async () => {
+    const respondToReviewTaskHandler: Pick<TaskHandler, 'handle'> = {
+      handle: vi.fn(async () => {
+        throw new Error('must not be called for an S1 caller');
+      }),
+    };
+    // The default makeCtx session is caller-known but NOT ownerSession — S1,
+    // same setup as the send_invoice coercion test above.
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      respondToReviewTaskHandler,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'respond_to_review',
+            entities: { reviewReference: 'the 1-star review from yesterday' },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    expect(respondToReviewTaskHandler.handle).not.toHaveBeenCalled();
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('voice_clarification');
+    expect((proposals[0]!.sourceContext as Record<string, unknown>).surface).toBe('S1');
+    const audits = auditRepo.getAll();
+    expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(true);
+  });
+});
+
+// ─── D01 — create_appointment's missing-customer gap ─────────────────────────
+
+describe('createVoiceTurnProcessor — create_appointment missing-customer gap (D01)', () => {
+  it('a new-caller booking (free-text customerName, no jobId/linkedJobId/customerId) gates on missingFields: ["customerId"] instead of degrading to a bare voice_clarification', async () => {
+    // Before this fix, createAppointmentPayloadSchema's whole-object refine
+    // ("requires jobId ... or a customerId") had no Zod field path, so
+    // `built.missingFieldPaths` came back empty and `gateable` was false —
+    // this fell to the degrade-to-clarification branch. Fixed: the gap is
+    // now named 'customerId' (voice-payload.ts), so this DOES gate.
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+    });
+    // makeCtx's default fixture dispatches `caller_known` with a fallback
+    // customerId ('cust-1') — the normal S1 shape, where the caller's OWN
+    // caller-ID identity always backstops `customerId`. This gap is about a
+    // booking for someone OTHER than the identified session (matching D01's
+    // real, S2/in-app shape — see corpus.json's own note on why this is
+    // scored draft_gated rather than executes): clear it so the payload has
+    // no fallback, same as a session whose caller identity never resolved.
+    session.customerId = undefined;
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'create_appointment',
+            entities: {
+              customerName: 'Jordan Lee',
+              customerPhone: '480-555-0199',
+              scheduledStart: '2026-09-08T12:00:00.000Z',
+              scheduledEnd: '2026-09-08T13:00:00.000Z',
+              jobTitle: 'Furnace diagnostic inspection',
+            },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('create_appointment');
+    expect(missingFieldsFor(proposals[0]!)).toContain('customerId');
+    const audits = auditRepo.getAll();
+    const contractAudit = audits.find((a) => a.eventType === 'voice.payload_contract_failed');
+    expect((contractAudit?.metadata as Record<string, unknown> | undefined)?.outcome).toBe(
+      'gated_with_missing_fields',
+    );
+  });
+
+  it('a resolved customerId clears the gap and the appointment is NOT missingFields-gated', async () => {
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'create_appointment',
+            entities: {
+              customerId: '11111111-1111-1111-1111-111111111111',
+              scheduledStart: '2026-09-08T12:00:00.000Z',
+              scheduledEnd: '2026-09-08T13:00:00.000Z',
+              jobTitle: 'Furnace diagnostic inspection',
+            },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('create_appointment');
+    expect(missingFieldsFor(proposals[0]!)).toEqual([]);
   });
 });
 
@@ -1882,5 +2367,59 @@ describe('#850 — speechTurn redacts the spoken approval challenge', () => {
     });
 
     expect(store.get(session.id)!.transcript.join('\n')).toContain('boiler');
+  });
+});
+
+// ─── B2B account context prompt wiring (2.12) ───────────────────────────────
+
+describe('createVoiceTurnProcessor.speechTurn — B2B account context wiring (2.12)', () => {
+  it("threads the session's b2bAccountContext into the classify prompt as an account-context system section", async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.2, reasoning: 'n/a' }),
+    );
+    const { processor, session } = makeCtx({ gateway });
+    // Twilio adapter stashes this at session establishment
+    // (twilio-adapter.ts:953) for a resolved business/property-manager
+    // caller — set directly here since assembling it is out of scope for
+    // this unit (assembleB2bAccountContext already has its own coverage).
+    session.b2bAccountContext = {
+      customerId: 'cust-1',
+      accountType: 'property_manager',
+      priority: true,
+      parentMissing: false,
+      subAccounts: [],
+    };
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'my tenant says the water heater is leaking',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const call = (gateway.complete as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0];
+    const serialized = JSON.stringify((call as { messages?: unknown })?.messages ?? call);
+    expect(serialized).toContain('property-management account');
+    expect(serialized).toContain('PRIORITY');
+  });
+
+  it('sends no account-context section for a residential session (no b2bAccountContext set)', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.2, reasoning: 'n/a' }),
+    );
+    const { processor, session } = makeCtx({ gateway });
+    // session.b2bAccountContext left unset — the residential/default case.
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'my sink is leaking',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const call = (gateway.complete as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0];
+    const serialized = JSON.stringify((call as { messages?: unknown })?.messages ?? call);
+    expect(serialized).not.toContain('property-management account');
+    expect(serialized).not.toContain('business account');
   });
 });

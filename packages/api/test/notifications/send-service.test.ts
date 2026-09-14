@@ -525,9 +525,14 @@ describe('SendService — failure audit and idempotency', () => {
     });
 
     expect(result.channelsSent[0].channel).toBe('sms');
-    // The InMemoryDeliveryProvider records the message; we expect an idempotency key set.
+    // The InMemoryDeliveryProvider records the message; we expect an
+    // idempotency key set. #1145 — the key now also carries the recipient
+    // and a caller context (defaults to 'default' when the caller — like
+    // this one — doesn't distinguish sends) so an unrelated concurrent send
+    // for the same entity+channel can't collide with this one just because
+    // both land in the same minute.
     expect(h.delivery.sentSms[0].idempotencyKey).toMatch(
-      new RegExp(`^estimate:${est.id}:sms:\\d+$`)
+      new RegExp(`^estimate:${est.id}:sms:\\+15555550199:default:\\d+$`)
     );
   });
 });

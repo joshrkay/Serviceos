@@ -22,6 +22,17 @@
  * adapter's `runLookupSkill` switch in here is exactly the mistake that
  * produced three drifted copies of `intentToProposalType`.
  *
+ * IN-APP VOICE CALLS THIS FUNCTION, not `executeLookupAnswer` directly
+ * (`ai/voice-turn/inapp-lookup-surface.ts`). Both in-app seams — the mic on
+ * the assistant page and the voice session at /api/voice/sessions — have the
+ * SAME identity model (an authenticated OPERATOR asking ABOUT a customer by
+ * name) and therefore need the same free-text resolution, the same "which
+ * one?" / "which customer?" questions and the same honest not-found copy.
+ * The only thing the voice surface adds is speech: it reads
+ * `message.content` aloud and reports `outcome` on the session event bus.
+ * The live phone is the one surface that goes to `executeLookupAnswer`
+ * directly, because its caller IS the customer (see phone-lookup-surface.ts).
+ *
  * What lives here (and ONLY here) is genuinely surface-specific:
  *   1. Reference resolution. The phone path gets `session.customerId` free
  *      from caller-ID: the caller IS the customer. Chat has no caller — the
@@ -80,6 +91,33 @@ export interface AssistantLookupDeps {
   now?: () => Date;
 }
 
+/**
+ * What the dispatch actually DID, as a value rather than a sentence the
+ * caller would have to string-match. `message.content` is written for a
+ * human; a surface that reports telemetry (`lookup_executed`) or decides
+ * follow-up copy needs the outcome itself.
+ *
+ * Chat ignores it — it renders `message.content` either way. The in-app
+ * VOICE surface (`ai/voice-turn/inapp-lookup-surface.ts`) needs it: emitting
+ * `success: true` for a refusal or a "which one?" question would mark an
+ * UNANSWERED question as answered, and `graders/floor.ts#noPiiLeak` treats a
+ * successful identity-resolving lookup as the point after which customer
+ * details may be spoken.
+ */
+export type AssistantLookupOutcome =
+  /** A data-derived answer, including a legitimately empty one ("no invoices on file"). */
+  | 'answered'
+  /** A named customer / job / crew reference matched no record — the question went unanswered. */
+  | 'not_found'
+  /** The reference matched several records — we asked which one, never guessed. */
+  | 'ambiguous'
+  /** A customer-scoped ask with no customer named — we asked which customer. */
+  | 'no_reference'
+  /** The RBAC gate refused (`LOOKUP_REQUIRED_PERMISSION`) — refusal copy, never data. */
+  | 'refused'
+  /** The skill (or a resolver / timezone read) failed — honest failure copy. */
+  | 'failed';
+
 /** The assistant-chat reply envelope (same shape the route's other paths return). */
 export interface AssistantLookupReply {
   taskType: string;
@@ -88,6 +126,27 @@ export interface AssistantLookupReply {
   degraded?: boolean;
   fallbackStage?: string;
   message: { role: 'assistant'; content: string; reasoning?: string };
+  /**
+   * Structured outcome for surfaces that report on it. Optional so
+   * `AssistantHonestReply` (assistant-honesty-guard.ts) can keep building
+   * replies without one; treat an absent value as 'answered' unless
+   * `degraded` is set.
+   */
+  outcome?: AssistantLookupOutcome;
+  /**
+   * The customer this answer is ABOUT, when a free-text reference resolved to
+   * one. Present only on an answered reply.
+   *
+   * Chat ignores it — the operator can see the name they typed. A SPOKEN
+   * surface cannot: the skills' summaries are written in the second person
+   * for a caller who IS the customer ("You have one open invoice"), and an
+   * operator asking "what does Khan owe us?" must hear "Khan Household has
+   * one open invoice" instead — both because the second person is addressed
+   * to the wrong party and because naming the record is the operator's only
+   * confirmation that the right one was read. See
+   * `ai/voice-turn/inapp-lookup-surface.ts#speakForOperator`.
+   */
+  resolvedCustomer?: { id: string; label?: string };
 }
 
 /**
@@ -129,6 +188,7 @@ function noCustomerReferenceReply(intent: IntentType): AssistantLookupReply {
     taskType: lookupTaskType(intent),
     model: LOOKUP_MODEL,
     usage: { input: 0, output: 0, total: 0 },
+    outcome: 'no_reference',
     message: {
       role: 'assistant',
       content:
@@ -149,6 +209,7 @@ function ambiguousReply(
     taskType: lookupTaskType(intent),
     model: LOOKUP_MODEL,
     usage: { input: 0, output: 0, total: 0 },
+    outcome: 'ambiguous',
     message: {
       role: 'assistant',
       content: ambiguousReferenceLine(reference, candidates),
@@ -219,7 +280,17 @@ export async function dispatchAssistantLookup(
       return noCustomerReferenceReply(intent);
     }
 
+    /**
+     * A reference the operator NAMED that matched no record. The skills below
+     * still answer honestly ("I couldn't find a customer matching …"), but
+     * the question was not answered, so the reply says so in `outcome` for
+     * surfaces that report on it.
+     */
+    let unresolvedReference = false;
+
     let customerId: string | undefined;
+    /** The matched customer's own display text — see `resolvedCustomer`. */
+    let customerLabel: string | undefined;
     if (customerReference) {
       const resolved = await resolveLookupReference(
         deps.entityResolver,
@@ -230,7 +301,10 @@ export async function dispatchAssistantLookup(
       if (resolved.kind === 'ambiguous') {
         return ambiguousReply(intent, customerReference, resolved.candidates);
       }
-      if (resolved.kind === 'resolved') customerId = resolved.id;
+      if (resolved.kind === 'resolved') {
+        customerId = resolved.id;
+        customerLabel = resolved.label;
+      } else unresolvedReference = true;
     }
 
     let jobId: string | undefined;
@@ -240,6 +314,7 @@ export async function dispatchAssistantLookup(
         return ambiguousReply(intent, jobReference, resolved.candidates);
       }
       if (resolved.kind === 'resolved') jobId = resolved.id;
+      else unresolvedReference = true;
     }
 
     let technicianId: string | undefined;
@@ -254,6 +329,7 @@ export async function dispatchAssistantLookup(
         return ambiguousReply(intent, technicianReference, resolved.candidates);
       }
       if (resolved.kind === 'resolved') technicianId = resolved.id;
+      else unresolvedReference = true;
     }
 
     const timezone = deps.tenantTimezoneResolver
@@ -296,6 +372,17 @@ export async function dispatchAssistantLookup(
       taskType: lookupTaskType(intent),
       model: LOOKUP_MODEL,
       usage: { input: 0, output: 0, total: 0 },
+      outcome:
+        execution.answer.result === 'refused'
+          ? 'refused'
+          : unresolvedReference
+            ? 'not_found'
+            : 'answered',
+      // Only on a real answer: a refusal is about the ASKER's permissions and
+      // must not be re-pointed at the customer.
+      ...(customerId && execution.answer.result !== 'refused'
+        ? { resolvedCustomer: { id: customerId, ...(customerLabel ? { label: customerLabel } : {}) } }
+        : {}),
       message: {
         role: 'assistant',
         content: execution.answer.summary,
@@ -328,6 +415,7 @@ export function failureReply(intent: IntentType, error: string): AssistantLookup
     usage: { input: 0, output: 0, total: 0 },
     degraded: true,
     fallbackStage: 'lookup-failed',
+    outcome: 'failed',
     message: {
       role: 'assistant',
       content: `I couldn't pull up your ${subject} just now — that lookup failed. Try again in a moment, and if it keeps failing let support know.`,

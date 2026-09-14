@@ -17,9 +17,12 @@ import {
   pendingAmbiguityOf,
   clearPendingAmbiguity,
   buildDisambiguationQuestion,
+  buildUnresolvedPrompt,
+  buildGatedReferenceReply,
   isDisambiguationAnswer,
   GATED_REFERENCE_SOURCES,
 } from '../../../src/ai/resolution/gated-reference-resolution';
+import type { EntityKind } from '../../../src/ai/resolution/entity-resolver';
 import type { Proposal } from '../../../src/proposals/proposal';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 
@@ -128,8 +131,21 @@ describe('#909 planGatedReferenceLookups — gate ↔ free-text pairing', () => 
     expect(plan).toEqual([]);
   });
 
-  it('plans nothing when there is no free text to resolve from', () => {
-    expect(planGatedReferenceLookups(draft({}, ['leadId']))).toEqual([]);
+  it('A21/#909 (2026-08-31 live sweep) — a gated field with NO free text anywhere still plans a lookup, with an empty references list, so it can still land in `unresolved`', () => {
+    // Root cause of the A21 apply_late_fee silent card: this used to
+    // `continue` (skip the field from the plan entirely) whenever neither
+    // `payloadFields` nor `entityFields` produced any text — e.g. "add a
+    // $25 late fee" names no invoice at all, so the handler has nothing to
+    // write to `invoiceReference` (there is no reference to preserve).
+    // Skipping the field meant it never reached `resolveGatedReferences`'s
+    // `outcome.unresolved` push, so `buildGatedReferenceReply` had nothing
+    // to say — not an ambiguity ask, not the honest can't-match line,
+    // silence. This field's own `unresolved` doc comment already names "no
+    // reference at all" as a legitimate reason to land there; the fix
+    // makes the implementation match that contract instead of short-
+    // circuiting past it.
+    const plan = planGatedReferenceLookups(draft({}, ['leadId']));
+    expect(plan).toEqual([{ idField: 'leadId', kind: 'lead', references: [] }]);
   });
 
   it('every source entry names a payload field and at least one entity fallback', () => {
@@ -314,13 +330,87 @@ describe('#909 resolveGatedReferences — outcomes', () => {
     expect(outcome.filled).toEqual({});
   });
 
+  it('A21/#909 (2026-08-31 live sweep) — a gate with literally NO reference anywhere (not payload, not entities) is reported unresolved, not silently dropped', async () => {
+    // Live shape: an apply_late_fee utterance that names neither a job nor
+    // a customer ("add a $25 late fee") — the handler correctly has
+    // nothing to write to `invoiceReference` (there is nothing spoken to
+    // preserve), so the payload carries no reference field at all, exactly
+    // as `payload has NO reference field at all` was reported live. The
+    // resolver is never even called (nothing to resolve against), and the
+    // field must still surface as `unresolved` so the reply layer can give
+    // the honest "reply with the invoice number" line instead of silence.
+    const resolver = resolverFor(() => {
+      throw new Error('must not be called — there is no reference to resolve');
+    });
+    const outcome = await resolveGatedReferences(
+      resolver,
+      TENANT,
+      draft({ stepKey: 'manual', feeCents: 2500 }, ['invoiceId']),
+      {},
+    );
+    expect(outcome.unresolved).toEqual(['invoiceId']);
+    expect(outcome.filled).toEqual({});
+    expect(outcome.ambiguity).toBeUndefined();
+    expect(resolver.resolve).not.toHaveBeenCalled();
+
+    // And the reply layer turns that into the honest line, never silence.
+    const reply = buildGatedReferenceReply(outcome, true);
+    expect(reply).toMatch(/^I couldn't automatically match that — reply with the invoice number/);
+  });
+
   it('is a no-op without a resolver wired', async () => {
     const outcome = await resolveGatedReferences(
       undefined,
       TENANT,
       draft({ customerReference: 'Bob' }, ['customerId']),
     );
-    expect(outcome).toEqual({ filled: {}, unresolved: [] });
+    // `notFound` is empty, not populated: with no resolver wired nothing was
+    // LOOKED FOR, and "we never looked" must never read as "it isn't there".
+    expect(outcome).toEqual({ filled: {}, unresolved: [], notFound: [] });
+  });
+
+  /**
+   * `notFound` is the subset of `unresolved` the caller may act on.
+   *
+   * An unresolved gate is usually a blank on a form the operator can still
+   * fill. A gate that is unresolved because THE RECORD DOES NOT EXIST is not:
+   * "cancel the Patel appointment" with no Patel on the books can never be
+   * approved by anyone, so the surface has to say so rather than persist a card
+   * (routes/assistant.ts reads this to answer honestly). The three cases below
+   * are the distinction, and the reason it cannot just be "unresolved".
+   */
+  describe('notFound — looked, and it is not there', () => {
+    it('reports a gate whose every reference came back not_found', async () => {
+      const outcome = await resolveGatedReferences(
+        resolverFor(({ reference }) => ({ kind: 'not_found', reference })),
+        TENANT,
+        draft({ appointmentReference: 'the Patel appointment' }, ['appointmentId']),
+      );
+      expect(outcome.unresolved).toEqual(['appointmentId']);
+      expect(outcome.notFound).toEqual(['appointmentId']);
+    });
+
+    it('does NOT report a gate with no reference to look with', async () => {
+      const outcome = await resolveGatedReferences(
+        resolverFor(({ reference }) => ({ kind: 'not_found', reference })),
+        TENANT,
+        draft({}, ['appointmentId']),
+      );
+      expect(outcome.notFound).toEqual([]);
+    });
+
+    it('does NOT report a low-confidence near-match as absent', async () => {
+      const outcome = await resolveGatedReferences(
+        resolverFor(() => ({
+          kind: 'low_confidence',
+          candidate: { id: 'a1', kind: 'appointment' as EntityKind, label: 'Maybe', score: 0.7 },
+        })),
+        TENANT,
+        draft({ appointmentReference: "Garcia's visit" }, ['appointmentId']),
+      );
+      expect(outcome.unresolved).toEqual(['appointmentId']);
+      expect(outcome.notFound).toEqual([]);
+    });
   });
 
   it('anchors a later appointment lookup on a job resolved earlier in the same pass', async () => {
@@ -649,5 +739,175 @@ describe('#909 buildDisambiguationQuestion — ONE question', () => {
     });
     expect(q).toContain('all under the same name');
     expect(q).toMatch(/address or phone/i);
+  });
+
+  // #909 (live sweeps 9/10) — "address or phone number" is nonsensical for
+  // a catalog item (the AI-catalog sweep's own fixture: `add_catalog_item`
+  // mints a fresh, identically-named row every run). When candidates share
+  // a name but carry their own DISTINCT hint (price, for catalogItem), that
+  // hint is what actually tells them apart — list it instead.
+  it('lists numbered options with hints when every candidate shares a name but hints differ', () => {
+    const q = buildDisambiguationQuestion({
+      entityKind: 'catalogItem',
+      reference: 'QA Sweep Smart Thermostat Install',
+      refKey: 'catalogItemId',
+      candidates: [
+        { id: 'ci-1', name: 'QA Sweep Smart Thermostat Install', score: 1.0, hint: '$385.00' },
+        { id: 'ci-2', name: 'QA Sweep Smart Thermostat Install', score: 1.0, hint: '$89.00' },
+      ],
+      partialRefs: {},
+      attemptCount: 0,
+    });
+    expect(q).toContain('all under the same name');
+    expect(q).not.toMatch(/address or phone/i);
+    expect(q).toContain('1. QA Sweep Smart Thermostat Install ($385.00)');
+    expect(q).toContain('2. QA Sweep Smart Thermostat Install ($89.00)');
+    expect(q).toMatch(/reply with the number/i);
+  });
+
+  // Same-name AND same-hint (or no hint at all) is exactly as unhelpful as
+  // no hint — must still fall back to the generic prompt rather than list
+  // two visually-identical options with nothing to tell them apart.
+  it('still falls back to the generic prompt when same-name candidates ALSO share the same hint', () => {
+    const q = buildDisambiguationQuestion({
+      entityKind: 'catalogItem',
+      reference: 'AC tune-up',
+      refKey: 'catalogItemId',
+      candidates: [
+        { id: 'ci-1', name: 'AC tune-up', score: 1.0, hint: '$89.00' },
+        { id: 'ci-2', name: 'AC tune-up', score: 1.0, hint: '$89.00' },
+      ],
+      partialRefs: {},
+      attemptCount: 0,
+    });
+    expect(q).toContain('all under the same name');
+    expect(q).toMatch(/address or phone/i);
+  });
+});
+
+// #909 generalization (2026-08-31) — buildUnresolvedPrompt is the honest
+// "not_found or overflow, no ambiguity to ask about" line for EVERY kind in
+// GATED_REFERENCE_SOURCES, not just invoiceId (#946's original, narrower
+// scope). Table-driven over the REGISTERED kinds so a future kind added to
+// GATED_REFERENCE_SOURCES is covered automatically — the whole point of
+// generalizing rather than hand-adding one kind at a time.
+describe('buildUnresolvedPrompt — every registered kind gets an honest line, never silence', () => {
+  const registeredKinds = [...new Set(Object.values(GATED_REFERENCE_SOURCES).map((s) => s.kind))];
+
+  it('every kind actually registered in GATED_REFERENCE_SOURCES is covered by this test table', () => {
+    // Guards the table below from silently going stale if a new kind is
+    // ever added to the source map without a matching row here.
+    expect(registeredKinds.sort()).toEqual(
+      ['appointment', 'catalogItem', 'customer', 'estimate', 'invoice', 'job', 'lead', 'technician'].sort(),
+    );
+  });
+
+  it.each(registeredKinds)('%s: names something concrete to supply, never a bare apology', (kind) => {
+    const prompt = buildUnresolvedPrompt(kind);
+    expect(prompt).toMatch(/^I couldn't automatically match that — reply with .+ and I'll pick it up\.$/);
+    // Never the vestigial "more detail" fallback for a kind this table
+    // actually knows about — that fallback exists only for an EntityKind
+    // with no GATED_REFERENCE_SOURCES entry at all (pending_proposal).
+    expect(prompt).not.toContain('more detail');
+  });
+
+  it('invoice and estimate ask for the document number specifically', () => {
+    expect(buildUnresolvedPrompt('invoice')).toMatch(/invoice number/i);
+    expect(buildUnresolvedPrompt('estimate')).toMatch(/estimate number/i);
+  });
+
+  it('customer, job, catalogItem, technician, and lead ask for a name', () => {
+    expect(buildUnresolvedPrompt('customer')).toMatch(/name/i);
+    expect(buildUnresolvedPrompt('job')).toMatch(/name|number/i);
+    expect(buildUnresolvedPrompt('catalogItem')).toMatch(/name/i);
+    expect(buildUnresolvedPrompt('technician')).toMatch(/name/i);
+    expect(buildUnresolvedPrompt('lead')).toMatch(/name/i);
+  });
+
+  it('appointment asks for a date/time, not a name', () => {
+    expect(buildUnresolvedPrompt('appointment')).toMatch(/date.*time|time.*date/i);
+  });
+
+  it('an EntityKind with no GATED_REFERENCE_SOURCES entry degrades to a generic (but still non-silent) line', () => {
+    const prompt = buildUnresolvedPrompt('pending_proposal' as EntityKind);
+    expect(prompt).toContain('more detail');
+    expect(prompt).not.toBe('');
+  });
+});
+
+// #909 generalization (2026-08-31, TASK 1) — end-to-end, table-driven over
+// EVERY key registered in GATED_REFERENCE_SOURCES: a gated field whose
+// resolution ends not_found OR overflow (the two collapse to the identical
+// outcome shape — see `buildGatedReferenceReply`'s own doc comment) must
+// produce the honest can't-match line, never silence; a field that ends
+// ambiguous must produce the ONE numbered question. This is the exact
+// decision `routes/assistant.ts`'s `/chat` handler makes after every draft
+// (`resolveGatedReferencesForChat` now just calls `buildGatedReferenceReply`
+// with the real resolver's outcome) — reproduced here without a resolver,
+// a proposal, or an HTTP route, over `resolveGatedReferences`'s real
+// planning/ladder logic so a future gated field is covered automatically.
+describe('buildGatedReferenceReply — every registered kind, not_found/overflow and ambiguous', () => {
+  const registeredFields = Object.keys(GATED_REFERENCE_SOURCES);
+
+  it.each(registeredFields)(
+    '%s: not_found (or overflow — same outcome shape) never goes silent',
+    async (idField) => {
+      const source = GATED_REFERENCE_SOURCES[idField];
+      const referenceField = source.payloadFields[0];
+      const proposal = draft({ [referenceField]: 'something unmatchable' }, [idField]);
+      const resolver = resolverFor(() => ({ kind: 'not_found', reference: 'something unmatchable' }));
+
+      const outcome = await resolveGatedReferences(resolver, TENANT, proposal);
+      // This is the LIVE-BROKEN behavior before #946/this generalization:
+      // `askClarification: true` reaching a silent `undefined` (the caller
+      // then falls back to the generic "Review and approve to proceed"
+      // text a fully-resolved draft gets, with zero signal anything needs
+      // the operator's input).
+      const reply = buildGatedReferenceReply(outcome, true);
+      expect(reply, `${idField} must not go silent on not_found/overflow`).toBeTruthy();
+      expect(reply).toMatch(/^I couldn't automatically match that/);
+    },
+  );
+
+  it.each(registeredFields)('%s: ambiguous asks the ONE numbered question', async (idField) => {
+    const source = GATED_REFERENCE_SOURCES[idField];
+    const referenceField = source.payloadFields[0];
+    const proposal = draft({ [referenceField]: 'Smith' }, [idField]);
+    const resolver = resolverFor(() => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'c1', kind: source.kind, label: 'Smith A', score: 0.9 },
+        { id: 'c2', kind: source.kind, label: 'Smith B', score: 0.85 },
+      ],
+    }));
+
+    const outcome = await resolveGatedReferences(resolver, TENANT, proposal);
+    const reply = buildGatedReferenceReply(outcome, true);
+    expect(reply, `${idField} must ask on ambiguity`).toBeTruthy();
+    expect(reply).toMatch(/^Which .+ did you mean by/);
+  });
+
+  it('askClarification:false (the chain path) never speaks, regardless of outcome', async () => {
+    const proposal = draft({ invoiceReference: 'x' }, ['invoiceId']);
+    const notFoundResolver = resolverFor(() => ({ kind: 'not_found', reference: 'x' }));
+    const notFoundOutcome = await resolveGatedReferences(notFoundResolver, TENANT, proposal);
+    expect(buildGatedReferenceReply(notFoundOutcome, false)).toBeUndefined();
+
+    const ambiguousResolver = resolverFor(() => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'c1', kind: 'invoice', label: 'INV-1', score: 0.9 },
+        { id: 'c2', kind: 'invoice', label: 'INV-2', score: 0.85 },
+      ],
+    }));
+    const ambiguousOutcome = await resolveGatedReferences(ambiguousResolver, TENANT, proposal);
+    expect(buildGatedReferenceReply(ambiguousOutcome, false)).toBeUndefined();
+  });
+
+  it('a fully-resolved outcome says nothing (the caller\'s existing reply stands)', async () => {
+    const proposal = draft({ invoiceReference: 'INV-0001' }, ['invoiceId']);
+    const resolver = resolverFor(() => resolvedAs('inv-1', 'invoice'));
+    const outcome = await resolveGatedReferences(resolver, TENANT, proposal);
+    expect(buildGatedReferenceReply(outcome, true)).toBeUndefined();
   });
 });

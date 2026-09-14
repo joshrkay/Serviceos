@@ -111,6 +111,97 @@ function clampDuration(min: number): number {
   return Math.min(min, MAX_DURATION_MIN);
 }
 
+/**
+ * SPOKEN clock hours written as WORDS: "Tuesday two o'clock", "Tuesday at two".
+ *
+ * chrono reads "2 o'clock" / "at 2" as a certain hour but ignores the word
+ * forms entirely, so the phrase parsed as a bare date and came back
+ * `ambiguous_no_time` — the caller was asked "what time on Tuesday?" for a
+ * sentence that stated the time out loud. That is a VOICE-shaped failure: an
+ * operator dictating a booking says "two o'clock", they do not say "2", and a
+ * speech-to-text transcript of "Tuesday at 2" is the string "Tuesday at two".
+ * Without this, the SAME sentence resolved when typed and asked a pointless
+ * question when spoken into the mic — register cases book-01/book-02 (digits,
+ * "o'clock") passed while book-03 ("Tuesday at two") did not.
+ *
+ * Strictly additive by construction. The substitution is ANCHORED — to the
+ * `o'clock` token (straight or curly apostrophe, or the bare "oclock"
+ * spelling) that FOLLOWS the number word, or to the temporal preposition `at`
+ * that PRECEDES it — and only ever rewrites the number word itself, so:
+ *   - no phrase that resolves today can change (they contain no "<word>
+ *     o'clock" or "at <word>" pair — if they did, they would be failing
+ *     today);
+ *   - a stray "two" with neither anchor is untouched, because a bare word
+ *     number is genuinely ambiguous ("two hours", "two of them", "two of the
+ *     filters") and guessing at it is exactly what this module refuses to do;
+ *   - an `at`-anchored hour followed by a MINUTE word ("at two thirty", "at
+ *     two fifteen") is also untouched: rewriting it to "at 2 thirty" would
+ *     let chrono read the hour and drop the minutes, silently booking 2:00
+ *     for a caller who said 2:30. An incomplete time still asks.
+ * Nothing else about parsing, the meridiem bias, or the ambiguity report
+ * changes — an hour that is still unstated still asks.
+ */
+const SPOKEN_HOUR_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+  eleven: '11',
+  twelve: '12',
+};
+
+const SPOKEN_HOUR_ALTERNATION = Object.keys(SPOKEN_HOUR_WORDS).join('|');
+
+const SPOKEN_OCLOCK_RE = new RegExp(
+  `\\b(${SPOKEN_HOUR_ALTERNATION})\\b(\\s+o[’']?clock\\b)`,
+  'gi',
+);
+
+/**
+ * Minute words that turn an `at`-anchored hour into an INCOMPLETE time. Listed
+ * rather than inferred: these are the only ways English states minutes in
+ * words, and anything outside the list ("at two pm", "at two on Tuesday") is a
+ * complete hour that chrono can read once the word becomes a digit.
+ */
+const SPOKEN_MINUTE_WORDS = [
+  'oh',
+  'o',
+  'five',
+  'ten',
+  'fifteen',
+  'twenty',
+  'twenty-five',
+  'thirty',
+  'thirty-five',
+  'forty',
+  'forty-five',
+  'fifty',
+  'fifty-five',
+];
+
+const SPOKEN_AT_HOUR_RE = new RegExp(
+  `(\\bat\\s+)(${SPOKEN_HOUR_ALTERNATION})\\b(?!\\s+(?:${SPOKEN_MINUTE_WORDS.join('|')})\\b)`,
+  'gi',
+);
+
+function normalizeSpokenClockWords(text: string): string {
+  return text
+    .replace(
+      SPOKEN_OCLOCK_RE,
+      (_match, word: string, tail: string) => `${SPOKEN_HOUR_WORDS[word.toLowerCase()]}${tail}`,
+    )
+    .replace(
+      SPOKEN_AT_HOUR_RE,
+      (_match, head: string, word: string) => `${head}${SPOKEN_HOUR_WORDS[word.toLowerCase()]}`,
+    );
+}
+
 /** Detect an explicit daypart word so "tomorrow morning" resolves to a window. */
 function detectDaypart(text: string): keyof typeof DAYPARTS | undefined {
   const lower = text.toLowerCase();
@@ -162,7 +253,10 @@ export function resolveDateTime(
   const now = opts.now ?? new Date();
   const durationMin = clampDuration(opts.defaultDurationMin ?? DEFAULT_DURATION_MIN);
 
-  const text = (phrase ?? '').trim();
+  // A spoken "two o'clock" is normalized to "2 o'clock" before chrono sees
+  // it — see normalizeSpokenClockWords for why this cannot change any phrase
+  // that resolves today.
+  const text = normalizeSpokenClockWords((phrase ?? '').trim());
   if (!text) return { ok: false, reason: 'empty' };
 
   // chrono is timezone-naive: feed it a reference Date whose LOCAL fields

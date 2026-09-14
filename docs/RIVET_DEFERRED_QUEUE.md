@@ -6,14 +6,20 @@ Each entry carries the evidence needed to pick it up cold. Source evidence:
 five parallel discovery tracks (mobile, backend, voice, data, submission);
 class arbitration recorded in the shipgate session.
 
-## C-1 — Unmatched `/api/*` GETs return 200 + SPA HTML shell (downgraded from A)
+## C-1 — ~~Unmatched `/api/*` GETs return 200 + SPA HTML shell~~ FIXED (P1-1)
 `packages/api/src/app.ts:6728` catch-all. With `web/dist` present (production
-layout), an authenticated GET to a nonexistent `/api/...` route returns
+layout), an authenticated GET to a nonexistent `/api/...` route returned
 `200 text/html` (the SPA shell). Mobile hooks do `if (!res.ok) throw` →
 `res.json()` → SyntaxError → "Unknown error" states. Reproduced live.
-Triggers only on version skew or removed routes — absent under review
-conditions. **Fix:** JSON 404 middleware for `/api/*` mounted before the SPA
-catch-all.
+Fixed by mounting a JSON 404 (`{ error: 'NOT_FOUND', message: 'Route not
+found' }`) on `/api`, `/public`, and `/webhooks` immediately before the SPA
+catch-all in `createApp()` — every unmatched method/path under those three
+prefixes now gets the JSON envelope instead of falling through to
+index.html (or its "Frontend assets unavailable" 500 when dist isn't
+built). `/api-docs` (Swagger UI) is unaffected — Express's mount-path
+boundary rule means `/api` doesn't match `/api-docs`. Non-API SPA routes
+(e.g. `/customers/123`) still reach the unmodified catch-all. Covered by
+`packages/api/test/app/api-404.route.test.ts`.
 
 ## C-2 — Three Stripe modules lack request timeouts (downgraded from A)
 `stripe-payment-intent.ts:105`, `stripe-saved-card.ts` (4 calls),

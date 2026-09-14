@@ -26,19 +26,16 @@ export type DispatchEntityType =
   // U6 (CRM Jobber parity, Phase 2) — owner-authored conversation reply
   // (free-text SMS/email from the unified inbox; entity_id = conversations.id).
   | 'conversation_reply'
-  // Customer-portal link delivery (entity_id = portal_sessions.id). NOTE:
-  // the message_dispatches entity_type CHECK (last widened in migration
-  // 190) does not include this value yet — db/schema.ts was frozen for the
-  // change that introduced it, so a follow-up migration mirroring 092/125/
-  // 164/190 must add 'portal_session' to the CHECK before Pg-backed
-  // deployments can record these rows.
+  // Customer-portal link delivery (entity_id = portal_sessions.id). Added
+  // to the message_dispatches entity_type CHECK in migration
+  // 269_dispatch_entity_portal_session (db/schema.ts).
   | 'portal_session'
   // Tradesperson wave 1, Task 5 — a free-form owner-approved customer
   // message (send_customer_message proposal; entity_id = customers.id).
-  // Added to the message_dispatches entity_type CHECK constraint in the
-  // SAME migration that introduces this value (270_dispatch_entity_custom_
-  // message, db/schema.ts) — unlike 'portal_session' above, there is no
-  // follow-up-migration gap here.
+  // Added to the message_dispatches entity_type CHECK in migration
+  // 270_dispatch_entity_custom_message (db/schema.ts) — the current final
+  // widening; test/db/dispatch-entity-type-vocabulary.test.ts pins this
+  // union against the CHECK constraint's effective value list.
   | 'custom_message';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';

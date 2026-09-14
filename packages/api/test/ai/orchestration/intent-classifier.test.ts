@@ -248,6 +248,40 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
+  // U10 — session grouping for LLM trace export (the Langfuse sessionId).
+  // Carried in request.metadata ONLY, never in the prompt, so voice-quality
+  // cassette hashes and gateway cache keys are unaffected.
+  it('passes sessionId and callSid to the gateway in request metadata when the context supplies them', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent(
+      'create an invoice',
+      { tenantId: 'tenant-xyz', sessionId: 'voice-sess-1', callSid: 'CA0123456789' },
+      gateway,
+    );
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.metadata).toEqual({
+      tenantId: 'tenant-xyz',
+      sessionId: 'voice-sess-1',
+      callSid: 'CA0123456789',
+    });
+  });
+
+  it('session identifiers never change the prompt messages (cassette hashes / cache keys stable)', async () => {
+    const plain = mockGateway(JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }));
+    const withSession = mockGateway(JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }));
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, plain);
+    await classifyIntent(
+      'create an invoice',
+      { tenantId: 'tenant-xyz', sessionId: 'voice-sess-1', callSid: 'CA0123456789' },
+      withSession,
+    );
+    const plainCall = (plain.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const sessionCall = (withSession.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(sessionCall.messages).toEqual(plainCall.messages);
+  });
+
   it('uses the dedicated voice-safe classifier deadline instead of the lightweight tier deadline', async () => {
     const gateway = mockGateway(
       JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
@@ -654,11 +688,17 @@ describe('U2 — deterministic owner operator commands', () => {
       },
     },
     {
+      // est-01 — the spoken WORK is what gets priced, so it must arrive as a
+      // LINE ITEM. Emitting it as `jobReference` alone (what this entry
+      // asserted originally) meant `draft_estimate`'s required `lineItems`
+      // was never populated: the card minted gated on `lineItems` — an
+      // estimate for nothing — even with the exact item in the price book.
+      // The leading article is stripped so it grounds against the catalog.
       transcript: 'Quote Khan for a three-ton condenser replacement',
       intentType: 'draft_estimate',
       entities: {
         customerName: 'Khan',
-        jobReference: 'three-ton condenser replacement',
+        lineItemDescriptions: ['three-ton condenser replacement'],
       },
     },
     {
@@ -723,6 +763,42 @@ describe('U2 — deterministic owner operator commands', () => {
 
     expect(result.intentType).toBe('unknown');
     expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  // est-01 — "quote X for Y": Y is WORK TO PRICE, not a reference to an
+  // existing job. Keeping it as `jobReference` was doubly wrong: the estimate
+  // got no line item AND `draft_estimate` is a JOB_REF_INTENTS member, so the
+  // spoken work was handed to the job resolver, which trigram-matched it
+  // against job summaries and linked the estimate to whatever scored.
+  describe('draft_estimate "quote X for Y" — Y is a line item, not a job', () => {
+    async function quote(transcript: string) {
+      const gateway = mockGateway(sinkResponse);
+      const result = await classifyIntent(transcript, { tenantId, ownerSession: true }, gateway);
+      expect(gateway.complete).not.toHaveBeenCalled();
+      return result.extractedEntities as Record<string, unknown>;
+    }
+
+    it('spoken WORK becomes a line item and is NOT sent to the job resolver', async () => {
+      const entities = await quote('Quote Khan for a three-ton condenser replacement');
+      expect(entities.lineItemDescriptions).toEqual(['three-ton condenser replacement']);
+      expect(entities.jobReference).toBeUndefined();
+    });
+
+    it.each([
+      ['Quote Garcia for the Patel job', 'the Patel job'],
+      ['Quote Garcia for JOB-0012', 'JOB-0012'],
+    ])('%s keeps jobReference — it names an existing job', async (transcript, reference) => {
+      const entities = await quote(transcript);
+      expect(entities.jobReference).toBe(reference);
+      // Still offered as a line item too: the payload builder grounds it and
+      // an unmatched description is a reviewable line, never a silent drop.
+      expect(entities.lineItemDescriptions).toHaveLength(1);
+    });
+
+    it('strips a leading article so the description grounds against the catalog', async () => {
+      const entities = await quote('Quote Khan for the duct sealing');
+      expect(entities.lineItemDescriptions).toEqual(['duct sealing']);
+    });
   });
 });
 
@@ -880,6 +956,12 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
     'lookup_revenue',
     'lookup_my_day',
     'lookup_leads',
+    // #910 completion — lookup_materials (bare, no-job phrasing only) and
+    // lookup_catalog (never entity-bearing) added; see the table's doc
+    // comment for why lookup_availability/lookup_crew_schedule/
+    // lookup_timesheets were deliberately left out.
+    'lookup_materials',
+    'lookup_catalog',
   ]);
 
   // Extract quoted intent names from EXTENDED_INTENTS_PROMPT_SECTION.
@@ -932,6 +1014,8 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
       lookup_revenue: ['What did we sell last month?', 'How much did we make this month?'],
       lookup_my_day: ["What's on my schedule today?", "What's my next job?"],
       lookup_leads: ['Any new leads?', 'How many open leads do we have?'],
+      lookup_materials: ["What's on the shopping list?"],
+      lookup_catalog: ['Show the price book'],
     };
     for (const [intent, transcripts] of Object.entries(triggersByIntent)) {
       expect(PHRASE_MATCH_ALLOWLIST.has(intent), `"${intent}" must be in the phrase-match allowlist`).toBe(true);
@@ -1228,6 +1312,810 @@ describe('#910 — lookup routing determinism (corpus rows L08/L11/L19/C02/R03)'
     expect(matchEnRoutePhrase('')).toBe(false);
     expect(matchEnRoutePhrase('On my way to the Garcia job')).toBe(false);
     expect(matchEnRoutePhrase("I'm running 20 minutes late")).toBe(false);
+  });
+});
+
+// ─── #910 completion — remaining lookup routing determinism ────────────────
+//
+// The 2026-08-29 FOLLOW-UP live sweep (post-#916) found the SAME
+// generic-LLM-fallthrough failure mode recurring, non-deterministically, on
+// four rows #916 hadn't covered: L03 (lookup_balance), L06
+// (lookup_account_summary), L13 (lookup_job_profit) and L20
+// (lookup_materials) — each scored `lookup_answer_not_confirmed` with a
+// reply from `assistant.general` after passing on an earlier run. Same root
+// cause, same fix shape as #916: a narrow, anchored pre-scan consulted
+// BEFORE the LLM call. Plus a systematic extension to `lookup_catalog`
+// (never entity-bearing) as belt-and-braces against the same class of
+// flakiness, even though it isn't itself evidenced as flaky in this sweep.
+describe('#910 completion — lookup routing determinism (corpus rows L03/L06/L13/L20)', () => {
+  const chatContext = { tenantId: 't1', extendedIntents: true };
+
+  it('L03 — "What does {{FIXTURE_CUSTOMER}} owe me?" routes to lookup_balance with customerName extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('What does Henderson owe me?', chatContext, gateway);
+    expect(result.intentType).toBe('lookup_balance');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('L06 — "Give me an account summary for {{FIXTURE_CUSTOMER}}" routes to lookup_account_summary with customerName extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'Give me an account summary for Henderson',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_account_summary');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('L13 — "Did I make money on the {{FIXTURE_JOB}} job?" routes to lookup_job_profit with jobReference extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'Did I make money on the Miller job?',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_job_profit');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.jobReference).toBe('Miller');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it("L20 — \"What's on the shopping list?\" routes to lookup_materials, no LLM call, no extractedEntities", async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent("What's on the shopping list?", chatContext, gateway);
+    expect(result.intentType).toBe('lookup_materials');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities).toBeUndefined();
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('systematic extension — "Show the price book" routes to lookup_catalog, no LLM call (not evidenced as flaky; belt-and-braces)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('Show the price book', chatContext, gateway);
+    expect(result.intentType).toBe('lookup_catalog');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('negative control: a job-scoped materials ask still reaches the LLM unchanged (entities stay LLM-routed)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'lookup_materials',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Patel job' },
+      }),
+    );
+    const result = await classifyIntent(
+      'What materials are open on the Patel job?',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_materials');
+    expect(result.extractedEntities?.jobReference).toBe('the Patel job');
+  });
+
+  it('negative control: "who\'s free Thursday?" is NOT hard-coded to lookup_availability — stays LLM-routed (matches the live sweep\'s legitimate lookup_crew_schedule classification)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'lookup_crew_schedule', confidence: 0.88 }),
+    );
+    const result = await classifyIntent("Who's free Thursday?", chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_crew_schedule');
+  });
+
+  it('negative control: a balance ask naming a DIFFERENT subject than "me" is not captured ("what does he owe for the Henderson job?")', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'lookup_balance', confidence: 0.85, extractedEntities: {} }),
+    );
+    const result = await classifyIntent(
+      'What does he owe for the Henderson job?',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_balance');
+  });
+
+  it('negative control: the other job-profit phrasings stay LLM-routed (only the exact "did I make money" stereotype short-circuits)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'lookup_job_profit',
+        confidence: 0.9,
+        extractedEntities: { jobReference: "the Johnson install" },
+      }),
+    );
+    const result = await classifyIntent(
+      "What's my margin on the Johnson install?",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_job_profit');
+  });
+
+  it('negative control: ordinary non-lookup utterances still reach the LLM unchanged', async () => {
+    const gateway = mockGateway('{"intentType":"create_invoice","confidence":0.9}');
+    const result = await classifyIntent(
+      'Create an invoice for Acme for 450 dollars',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('create_invoice');
+  });
+
+  it('negative control: without extendedIntents, none of the new short-circuits fire (byte-identical legacy behavior)', async () => {
+    for (const transcript of [
+      'What does Henderson owe me?',
+      'Give me an account summary for Henderson',
+      'Did I make money on the Miller job?',
+      "What's on the shopping list?",
+      'Show the price book',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+      const result = await classifyIntent(transcript, { tenantId: 't1' }, gateway);
+      expect(
+        gateway.complete,
+        `"${transcript}" without extendedIntents should still call the LLM`,
+      ).toHaveBeenCalledTimes(1);
+      expect(result.intentType).toBe('unknown');
+    }
+  });
+
+  it('matchLookupBalancePhrase / matchLookupAccountSummaryPhrase / matchLookupJobProfitPhrase unit-level: exact corpus utterances match, empty/unrelated text does not', async () => {
+    const {
+      matchLookupBalancePhrase,
+      matchLookupAccountSummaryPhrase,
+      matchLookupJobProfitPhrase,
+    } = await import('../../../src/ai/orchestration/intent-classifier');
+
+    expect(matchLookupBalancePhrase('What does Henderson owe me?')).toEqual({
+      customerName: 'Henderson',
+    });
+    expect(matchLookupBalancePhrase('')).toBeNull();
+    expect(matchLookupBalancePhrase('What does he owe for the Henderson job?')).toBeNull();
+
+    expect(
+      matchLookupAccountSummaryPhrase('Give me an account summary for Henderson'),
+    ).toEqual({ customerName: 'Henderson' });
+    expect(matchLookupAccountSummaryPhrase('')).toBeNull();
+    expect(matchLookupAccountSummaryPhrase('Give me the Henderson invoice')).toBeNull();
+
+    expect(matchLookupJobProfitPhrase('Did I make money on the Miller job?')).toEqual({
+      jobReference: 'Miller',
+    });
+    expect(matchLookupJobProfitPhrase('')).toBeNull();
+    expect(
+      matchLookupJobProfitPhrase("What's my margin on the Johnson install?"),
+    ).toBeNull();
+  });
+});
+
+describe('A02 — draft_estimate routing determinism (2026-08-29 live sweep)', () => {
+  const chatContext = { tenantId: 't1', extendedIntents: true };
+
+  it('A02 — the exact sweep utterance routes to draft_estimate with customerName extracted, no LLM call', async () => {
+    // Same shape production's classify_intent missed for this utterance
+    // (a low-confidence 'unknown') — the deterministic match must not even
+    // consult it.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars, plus a permit fee for 150 dollars',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('draft_estimate');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('qa-matrix-A-customer');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('draft_estimate phrase variants also short-circuit: create/write/prepare/generate, "an"/"a" estimate', async () => {
+    for (const transcript of [
+      'Create an estimate for Bob Jones: new water heater for 1800 dollars',
+      'Write an estimate for Bob Jones: new water heater for 1800 dollars',
+      'Prepare an estimate for Bob Jones: new water heater for 1800 dollars',
+      'Generate a estimate for Bob Jones: new water heater for 1800 dollars',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to draft_estimate`).toBe(
+        'draft_estimate',
+      );
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: without extendedIntents, the short-circuit does not fire (byte-identical legacy behavior)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const result = await classifyIntent(
+      'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars',
+      { tenantId: 't1' },
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('unknown');
+  });
+
+  it('negative control: an estimate mentioned mid-sentence, without the "draft/create/… estimate for X:" imperative shape, stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"update_estimate","confidence":0.9}');
+    const result = await classifyIntent(
+      'Can you check on the estimate for Bob Jones?',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('update_estimate');
+  });
+
+  it('negative control: no colon after the customer name stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"draft_estimate","confidence":0.9}');
+    const result = await classifyIntent(
+      'Draft an estimate for Bob Jones for a water heater replacement',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('draft_estimate');
+  });
+
+  it('matchDraftEstimatePhrase unit-level: exact corpus utterance matches, empty/unrelated/no-colon text does not', async () => {
+    const { matchDraftEstimatePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchDraftEstimatePhrase(
+        'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars, plus a permit fee for 150 dollars',
+      ),
+    ).toEqual({ customerName: 'qa-matrix-A-customer' });
+    expect(matchDraftEstimatePhrase('')).toBeNull();
+    expect(matchDraftEstimatePhrase('What estimates does Jane Doe have?')).toBeNull();
+    expect(matchDraftEstimatePhrase('Draft an estimate for Bob Jones for a water heater')).toBeNull();
+    expect(matchDraftEstimatePhrase('Can you check on the estimate for Bob Jones?')).toBeNull();
+  });
+});
+
+describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () => {
+  const inappContext = { tenantId: 't1' };
+
+  it('the exact D01 opening utterance routes to create_appointment with NO LLM call', async () => {
+    // Live evidence: this turn either took the sign-up override into
+    // create_customer, or came back low-confidence, which left the whole
+    // three-turn booking stuck in intent_capture ("I want to make sure I
+    // got that right — can you say that again?").
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      "I'd like to book a new customer for a diagnostic visit",
+      inappContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('create_appointment');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — create_appointment is on every classifier profile', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+      { tenantId: 't1', classifierProfile: 'caller' as const },
+      { tenantId: 't1', classifierProfile: 'field_tech' as const },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent('Book a diagnostic visit', context, gateway);
+      expect(result.intentType).toBe('create_appointment');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('booking phrase variants short-circuit: book/schedule/set up × new customer/visit/appointment', async () => {
+    for (const transcript of [
+      'Book a new customer',
+      'set up a new customer appointment',
+      'Schedule a new customer visit',
+      "Let's set up a new customer for a maintenance visit",
+      'I need to book a diagnostic inspection',
+      'Can you schedule a maintenance visit?',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, inappContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to create_appointment`).toBe(
+        'create_appointment',
+      );
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: an utterance carrying real slots stays LLM-routed so entity extraction survives', async () => {
+    // The whole point of anchoring the patterns: a booking that names a
+    // customer or a date must keep the LLM's extractedEntities.
+    for (const transcript of [
+      'Schedule an appointment for Jordan Lee next Tuesday',
+      'book Jordan Lee for Tuesday morning',
+      'schedule a follow-up visit for the Miller job',
+    ]) {
+      const gateway = mockGateway(
+        '{"intentType":"create_appointment","confidence":0.9,"extractedEntities":{"customerName":"Jordan Lee"}}',
+      );
+      const result = await classifyIntent(transcript, inappContext, gateway);
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+      expect(result.extractedEntities?.customerName).toBe('Jordan Lee');
+    }
+  });
+
+  it('negative control: reschedule / cancel / lookup phrasings never match', async () => {
+    for (const transcript of [
+      'I need to reschedule my appointment',
+      'Cancel the appointment for the Miller job',
+      'Move my appointment to Thursday',
+      'What appointments are scheduled today?',
+    ]) {
+      const gateway = mockGateway('{"intentType":"reschedule_appointment","confidence":0.9}');
+      await classifyIntent(transcript, inappContext, gateway);
+      expect(gateway.complete, `"${transcript}" must stay LLM-routed`).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('matchNewBookingPhrase unit-level: anchored booking openings only', async () => {
+    const { matchNewBookingPhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(matchNewBookingPhrase("I'd like to book a new customer for a diagnostic visit")).toBe(
+      true,
+    );
+    expect(matchNewBookingPhrase('Book a diagnostic visit')).toBe(true);
+    expect(matchNewBookingPhrase('set up a new customer appointment')).toBe(true);
+    expect(matchNewBookingPhrase('')).toBe(false);
+    expect(matchNewBookingPhrase('Jordan Lee, 480-555-0199, next Tuesday morning works')).toBe(
+      false,
+    );
+    expect(matchNewBookingPhrase("It's for a furnace diagnostic inspection at their home")).toBe(
+      false,
+    );
+    expect(matchNewBookingPhrase('Schedule an appointment for Jordan Lee next Tuesday')).toBe(
+      false,
+    );
+    expect(matchNewBookingPhrase('I need to reschedule my appointment')).toBe(false);
+    // The qualifier is required — a bare, unqualified booking ask is one
+    // the classifier already gets right and stays LLM-routed.
+    expect(matchNewBookingPhrase('schedule an appointment')).toBe(false);
+    expect(matchNewBookingPhrase('schedule a visit')).toBe(false);
+  });
+
+  it('the P18-001 sign-up override no longer hijacks a booking that mentions a new customer', async () => {
+    const { isCreateCustomerSignupPhrasing } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    // The D01 shapes: an operator booking work FOR a new customer.
+    expect(isCreateCustomerSignupPhrasing("I'd like to book a new customer for a diagnostic visit"))
+      .toBe(false);
+    expect(
+      isCreateCustomerSignupPhrasing(
+        'Book a new customer, Jordan Lee, for a diagnostic visit next Tuesday',
+      ),
+    ).toBe(false);
+    expect(isCreateCustomerSignupPhrasing('set up a new customer appointment')).toBe(false);
+
+    // …and the P18-001 rescue itself is untouched, including a caller who
+    // announces themselves AND asks for an appointment in one breath.
+    for (const phrasing of [
+      "I'd like to sign up as a new customer",
+      "I'm a new customer",
+      'Can you set up an account for me?',
+      'I want to become a customer',
+      'first time calling, please add me',
+      "I'm a new customer and I'd like to schedule an appointment",
+      'Add a new customer, Jordan Lee, 480-555-0199',
+    ]) {
+      expect(isCreateCustomerSignupPhrasing(phrasing), `"${phrasing}"`).toBe(true);
+    }
+  });
+
+  it('a richer booking that mentions a new customer reaches the LLM and KEEPS create_appointment', async () => {
+    // Too rich for the anchored matcher (it names a customer), so it goes
+    // through the LLM — and the sign-up override must no longer rewrite it.
+    const gateway = mockGateway(
+      '{"intentType":"create_appointment","confidence":0.9,"extractedEntities":{"customerName":"Jordan Lee"}}',
+    );
+    const result = await classifyIntent(
+      'Book a new customer, Jordan Lee, for a diagnostic visit next Tuesday',
+      inappContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('create_appointment');
+    expect(result.extractedEntities?.customerName).toBe('Jordan Lee');
+  });
+});
+
+describe('A06 — issue_invoice routing determinism (2026-08-30 live sweep, sweep-10)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep-10 utterance routes to issue_invoice with jobReference extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance fell through to the generic-LLM
+    // reply path with no proposal drafted — "I have not issued invoice
+    // INV-0010. Please contact your billing department..." — a
+    // hallucination-shaped deflection, not an honest refusal.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent('Issue invoice INV-0010', chatContext, gateway);
+    expect(result.intentType).toBe('issue_invoice');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.jobReference).toBe('INV-0010');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent('Issue invoice INV-0042', context, gateway);
+      expect(result.intentType).toBe('issue_invoice');
+      expect(result.extractedEntities?.jobReference).toBe('INV-0042');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: "the invoice", lowercase document number, trailing punctuation', async () => {
+    for (const [transcript, expected] of [
+      ['Issue the invoice INV-0010', 'INV-0010'],
+      ['issue invoice inv-0010.', 'INV-0010'],
+      ['Issue invoice INV-1234!', 'INV-1234'],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to issue_invoice`).toBe(
+        'issue_invoice',
+      );
+      expect(result.extractedEntities?.jobReference).toBe(expected);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: no document number ("issue the invoice we just drafted") stays LLM-routed', async () => {
+    // Not anchored to a document number, so Rung 2's conversation-context
+    // resolution (IssueInvoiceTaskHandler) — not this matcher — is what
+    // must answer it. Falling through to the LLM keeps that path intact.
+    const gateway = mockGateway('{"intentType":"issue_invoice","confidence":0.9}');
+    const result = await classifyIntent('Issue the invoice we just drafted', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('issue_invoice');
+  });
+
+  it('negative control: a customer-named reference stays LLM-routed so entity extraction survives', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"issue_invoice","confidence":0.9,"extractedEntities":{"customerName":"Bob Jones"}}',
+    );
+    const result = await classifyIntent('Issue the Bob Jones invoice', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.customerName).toBe('Bob Jones');
+  });
+
+  it('negative control: mentions an invoice mid-sentence without the imperative shape stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"update_invoice","confidence":0.9}');
+    const result = await classifyIntent(
+      'Add a line item to invoice INV-0010',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('update_invoice');
+  });
+
+  it('matchIssueInvoicePhrase unit-level: exact corpus utterance matches, empty/unrelated/no-number text does not', async () => {
+    const { matchIssueInvoicePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(matchIssueInvoicePhrase('Issue invoice INV-0010')).toEqual({
+      jobReference: 'INV-0010',
+    });
+    expect(matchIssueInvoicePhrase('Issue the invoice INV-0010')).toEqual({
+      jobReference: 'INV-0010',
+    });
+    expect(matchIssueInvoicePhrase('')).toBeNull();
+    expect(matchIssueInvoicePhrase('Issue the invoice we just drafted')).toBeNull();
+    expect(matchIssueInvoicePhrase('Issue the Bob Jones invoice')).toBeNull();
+    expect(matchIssueInvoicePhrase('Add a line item to invoice INV-0010')).toBeNull();
+    expect(matchIssueInvoicePhrase('What invoices does Bob Jones have?')).toBeNull();
+  });
+});
+
+describe('A10 — update_job priority routing determinism (2026-08-31 live sweep)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep utterance routes to update_job with jobReference extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance fell through to the generic-LLM
+    // reply path with no proposal drafted — "I have NOT marked... please
+    // contact your supervisor" — a hallucination-shaped deflection, not an
+    // honest refusal. The identical utterance shape had passed on many
+    // prior sweeps, so this is non-determinism in the LLM call, not a
+    // taxonomy gap.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      'Mark the QA Sweep Furnace Inspection job as high priority',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('update_job');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.jobReference).toBe('QA Sweep Furnace Inspection');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        'Mark the Henderson job as urgent priority',
+        context,
+        gateway,
+      );
+      expect(result.intentType).toBe('update_job');
+      expect(result.extractedEntities?.jobReference).toBe('Henderson');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: no "as", every priority value, trailing punctuation', async () => {
+    for (const [transcript, expected] of [
+      ['Mark the Henderson job high priority', 'Henderson'],
+      ['mark the Garcia job as low priority.', 'Garcia'],
+      ['Mark the water heater install job as normal priority!', 'water heater install'],
+      ['Mark the Smith job as urgent priority', 'Smith'],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to update_job`).toBe('update_job');
+      expect(result.extractedEntities?.jobReference).toBe(expected);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: status/title/description edits stay LLM-routed (not this matcher\'s shape)', async () => {
+    const gateway = mockGateway('{"intentType":"update_job","confidence":0.9}');
+    const result = await classifyIntent('Mark the Henderson job in progress', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('update_job');
+  });
+
+  it('negative control: a differently-phrased priority command stays LLM-routed', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"update_job","confidence":0.9,"extractedEntities":{"jobReference":"Henderson"}}',
+    );
+    const result = await classifyIntent(
+      "Set the Henderson job's priority to urgent",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.jobReference).toBe('Henderson');
+  });
+
+  it('matchUpdateJobPriorityPhrase unit-level: exact corpus utterance matches, empty/unrelated/no-priority text does not', async () => {
+    const { matchUpdateJobPriorityPhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchUpdateJobPriorityPhrase('Mark the QA Sweep Furnace Inspection job as high priority'),
+    ).toEqual({ jobReference: 'QA Sweep Furnace Inspection' });
+    expect(matchUpdateJobPriorityPhrase('Mark the Henderson job high priority')).toEqual({
+      jobReference: 'Henderson',
+    });
+    expect(matchUpdateJobPriorityPhrase('')).toBeNull();
+    expect(matchUpdateJobPriorityPhrase('Mark the Henderson job in progress')).toBeNull();
+    expect(matchUpdateJobPriorityPhrase("Set the Henderson job's priority to urgent")).toBeNull();
+    expect(matchUpdateJobPriorityPhrase('Rename the Henderson job')).toBeNull();
+    expect(matchUpdateJobPriorityPhrase('Mark the invoice INV-0010 as paid')).toBeNull();
+  });
+});
+
+describe('A14 — add_crew_member routing determinism (2026-08-31 live sweep)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep utterance routes to add_crew_member with targetTechnicianName + appointmentReference extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance fell through to the generic-LLM
+    // reply path with no proposal drafted — "I have NOT added Alex Rivera
+    // to the appointment. Please contact the field-service team..." — a
+    // hallucination-shaped deflection, not an honest refusal. The
+    // identical utterance shape had passed sweeps 13-14, so this is
+    // non-determinism in the LLM call, not a taxonomy gap.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      "Add Alex Rivera to qa-matrix-A-customer's appointment as a second technician",
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('add_crew_member');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.targetTechnicianName).toBe('Alex Rivera');
+    expect(result.extractedEntities?.appointmentReference).toBe('qa-matrix-A-customer');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        "Add Priya Shah to the Henderson job's appointment as another technician",
+        context,
+        gateway,
+      );
+      expect(result.intentType).toBe('add_crew_member');
+      expect(result.extractedEntities?.targetTechnicianName).toBe('Priya Shah');
+      expect(result.extractedEntities?.appointmentReference).toBe('the Henderson job');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: no possessive, "additional"/"extra" technician, trailing punctuation', async () => {
+    for (const [transcript, tech, ref] of [
+      ['Add Carlos Vega to Henderson appointment as an additional technician', 'Carlos Vega', 'Henderson'],
+      ['add tom baker to the garcia appointment as extra technician.', 'tom baker', 'the garcia'],
+      ['Add Alex Rivera to qa-matrix-A-customer\'s appointment as a second technician!', 'Alex Rivera', 'qa-matrix-A-customer'],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to add_crew_member`).toBe(
+        'add_crew_member',
+      );
+      expect(result.extractedEntities?.targetTechnicianName).toBe(tech);
+      expect(result.extractedEntities?.appointmentReference).toBe(ref);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: "add ... to ...\'s appointment" with NO technician-role qualifier stays LLM-routed (collides with add_note otherwise)', async () => {
+    const gateway = mockGateway('{"intentType":"add_note","confidence":0.9}');
+    const result = await classifyIntent(
+      "Add a note to qa-matrix-A-customer's appointment",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('add_note');
+  });
+
+  it('negative control: a differently-phrased crew-add command stays LLM-routed', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"add_crew_member","confidence":0.9,"extractedEntities":{"targetTechnicianName":"Alex Rivera"}}',
+    );
+    const result = await classifyIntent(
+      'Put Alex Rivera on the qa-matrix-A-customer job as backup',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.targetTechnicianName).toBe('Alex Rivera');
+  });
+
+  it('matchAddCrewMemberPhrase unit-level: exact corpus utterance matches, empty/unrelated/unqualified text does not', async () => {
+    const { matchAddCrewMemberPhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchAddCrewMemberPhrase(
+        "Add Alex Rivera to qa-matrix-A-customer's appointment as a second technician",
+      ),
+    ).toEqual({ targetTechnicianName: 'Alex Rivera', appointmentReference: 'qa-matrix-A-customer' });
+    expect(matchAddCrewMemberPhrase('')).toBeNull();
+    expect(matchAddCrewMemberPhrase("Add a note to qa-matrix-A-customer's appointment")).toBeNull();
+    expect(matchAddCrewMemberPhrase('Put Alex Rivera on the job as backup')).toBeNull();
+    expect(matchAddCrewMemberPhrase('Remove Alex Rivera from the appointment')).toBeNull();
+  });
+});
+
+describe('A21 — apply_late_fee routing determinism (2026-08-31 live sweep)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep utterance routes to apply_late_fee with customerName + amount extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance drew NO reference field at all
+    // and no entities in sourceContext from the classifier — amount
+    // extraction alone worked (feeCents:2500 on the resulting payload),
+    // but with neither customerName nor jobReference, ApplyLateFeeTaskHandler
+    // has nothing to write to invoiceReference, so the gate can never
+    // lift. Unlike A10/A14 this reproduces on every run (#931's known
+    // few-shot territory), not intermittently.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      "Apply a $25 late fee to qa-matrix-A-customer's overdue invoice",
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('apply_late_fee');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.customerName).toBe('qa-matrix-A-customer');
+    expect(result.extractedEntities?.amount).toBe(2500);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        "Apply a $50 late fee to Henderson's invoice",
+        context,
+        gateway,
+      );
+      expect(result.intentType).toBe('apply_late_fee');
+      expect(result.extractedEntities?.customerName).toBe('Henderson');
+      expect(result.extractedEntities?.amount).toBe(5000);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: no possessive, no "$", cents, status-descriptor words, trailing punctuation', async () => {
+    for (const [transcript, name, cents] of [
+      ['Apply a $25 late fee to Henderson invoice', 'Henderson', 2500],
+      ['apply a 25 dollar late fee to garcia unpaid invoice.', 'garcia', 2500],
+      ["Apply a $12.50 late fee to qa-matrix-A-customer's outstanding invoice!", 'qa-matrix-A-customer', 1250],
+      ["Apply a $25 late fee to qa-matrix-A-customer's past due invoice", 'qa-matrix-A-customer', 2500],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to apply_late_fee`).toBe(
+        'apply_late_fee',
+      );
+      expect(result.extractedEntities?.customerName).toBe(name);
+      expect(result.extractedEntities?.amount).toBe(cents);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: a differently-phrased late-fee command stays LLM-routed', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"apply_late_fee","confidence":0.9,"extractedEntities":{"customerName":"Henderson","amount":2500}}',
+    );
+    const result = await classifyIntent(
+      "Tack a $25 late charge onto Henderson's account",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
+  });
+
+  it('negative control: send_payment_reminder (no "late fee" phrase) stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"send_payment_reminder","confidence":0.9}');
+    const result = await classifyIntent(
+      "Send qa-matrix-A-customer a payment reminder on their overdue invoice",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('send_payment_reminder');
+  });
+
+  it('matchApplyLateFeePhrase unit-level: exact corpus utterance matches, empty/unrelated/zero-amount text does not', async () => {
+    const { matchApplyLateFeePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchApplyLateFeePhrase("Apply a $25 late fee to qa-matrix-A-customer's overdue invoice"),
+    ).toEqual({ customerName: 'qa-matrix-A-customer', amount: 2500 });
+    expect(matchApplyLateFeePhrase('Apply a $12.50 late fee to Henderson invoice')).toEqual({
+      customerName: 'Henderson',
+      amount: 1250,
+    });
+    expect(matchApplyLateFeePhrase('')).toBeNull();
+    expect(matchApplyLateFeePhrase("Send Henderson a payment reminder on their invoice")).toBeNull();
+    expect(matchApplyLateFeePhrase("Tack a $25 late charge onto Henderson's account")).toBeNull();
+    expect(matchApplyLateFeePhrase('Apply a late fee to the invoice')).toBeNull();
   });
 });
 

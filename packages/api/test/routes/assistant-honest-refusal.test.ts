@@ -153,6 +153,114 @@ describe('the two Development fabrications must never reproduce', () => {
   });
 });
 
+// ─── A02 (2026-08-29 live sweep) — the third fabrication ────────────────────
+//
+// "Draft an estimate for {customer}: two lines…" reached this same generic
+// fallback (taskType inferred as 'assistant.estimate') and came back with a
+// whole fabricated proposal card — id "estimate-001", an invalid UUID that
+// 404'd on `POST /api/proposals/:id/approve`. Unlike the two cases above,
+// this one carried a `proposal` object, which the OLD layer 3
+// (`parsed.proposal ? null : detectFabricatedActionClaim(...)`) treated as
+// proof the reply was honest. It wasn't: nothing on this path ever calls
+// `proposalRepo.create`.
+//
+// Two things must now both be true: (1) the exact A02 utterance never even
+// reaches this fallback — a real `draft_estimate` intent routes to
+// `EstimateTaskHandler` and persists a real, DB-backed proposal; (2) even if
+// SOMETHING did reach this fallback with a self-invented proposal riding
+// along, it can never leave the route.
+
+describe('A02 — "Draft an estimate for {customer}: two lines…" must route to the real handler, not fabricate one', () => {
+  it('the exact A02 sweep utterance routes to EstimateTaskHandler and persists a real, DB-backed draft_estimate proposal — no classify_intent LLM call needed', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    // Only ONE scripted response: the deterministic draft_estimate phrase
+    // match (intent-classifier.ts's matchDraftEstimatePhrase) short-circuits
+    // classify_intent entirely — see the #910-style pin in
+    // test/ai/orchestration/intent-classifier.test.ts. This one response is
+    // EstimateTaskHandler's OWN drafting LLM call.
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        lineItems: [
+          { description: 'Water heater replacement', quantity: 1, unitPrice: 220000 },
+          { description: 'Permit fee', quantity: 1, unitPrice: 15000 },
+        ],
+        notes: 'Water heater replacement plus permit fee.',
+        confidence_score: 0.9,
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars, plus a permit fee for 150 dollars',
+          },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // A REAL handler ran — never the generic fallback.
+    expect(res.body.taskType).toBe('assistant.draft_estimate');
+    expect(res.body.model).toBe('intent-classifier');
+    expect(res.body.message.proposal).toBeTruthy();
+    // And it is genuinely persisted — not a JSON card the model invented.
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('draft_estimate');
+    expect(persisted[0].id).toBe(res.body.message.proposal.id);
+    // The id round-trips to a real row — unlike production's "estimate-001",
+    // which 404'd because it was never written anywhere.
+    expect(await proposalRepo.findById(TEST_TENANT, res.body.message.proposal.id)).toBeTruthy();
+  });
+
+  it('negative pin: the generic fallback can NEVER carry a proposal id — even when the model fabricates one exactly like production did', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    // A phrasing the deterministic draft_estimate matcher does NOT recognize
+    // (no imperative "draft/create/write/prepare/generate ... estimate for
+    // X:" shape), so classify_intent genuinely runs and — as production's
+    // classifier did for A02 — comes back unknown. The fallback LLM then
+    // does exactly what the live one did: answers in prose AND hands back a
+    // full proposal object, id "estimate-001" included.
+    const gateway = scriptedGateway([
+      classifierReply('unknown', 0.3),
+      llmReply(
+        'Here is a draft estimate for the water heater replacement: $2,350.00 total.',
+        {
+          id: 'estimate-001',
+          title: 'Estimate for Water Heater Replacement',
+          summary: '$2,350.00 total',
+          explanation: 'Water heater replacement plus permit fee.',
+          confidence: 'High',
+          type: 'Estimate',
+          status: 'Pending',
+        },
+      ),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: 'What do you think about the water heater situation?' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // The fabricated card never reaches the operator...
+    expect(res.body.message.proposal ?? null).toBeNull();
+    // ...and nothing was ever written for it to reference.
+    expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
+    // Honest failure, not a silent downgrade of a lie into a "success".
+    expect(res.body.taskType).toBe('assistant.not_understood');
+    expect(res.body.message.content).toMatch(/haven't scheduled, logged, or changed anything/i);
+  });
+});
+
 // ─── Three failures, three experiences ───────────────────────────────────────
 
 describe('the three no-proposal outcomes are distinguishable', () => {

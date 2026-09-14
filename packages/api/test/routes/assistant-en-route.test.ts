@@ -135,7 +135,7 @@ describe('#847 — en_route from chat', () => {
     expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
   });
 
-  it('a non-technician account is refused honestly and the act never fires', async () => {
+  it('an account with no assignment today hears the honest answer and the act never fires', async () => {
     const bundle = enRouteBundle({
       userRepo: {
         findByTenant: async () =>
@@ -157,6 +157,49 @@ describe('#847 — en_route from chat', () => {
     expect(res.status).toBe(200);
     expect(res.body.message.content).toContain('nothing was sent');
     expect(bundle.coordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The scope guard is the ASSIGNMENT, not the role string.
+   *
+   * This route used to refuse anyone whose canonical row was not
+   * `role: 'technician'`, citing the SMS keyword leg's anti-spoofing rule. That
+   * rule belongs to the surfaces that identify the actor by a caller-ID /
+   * sender number an attacker can forge; this one is an authenticated Clerk
+   * session, and the in-app VOICE surface (`ai/voice-turn/inapp-en-route-surface.ts`)
+   * had already reasoned it through and deliberately shipped WITHOUT the gate.
+   * The two in-app surfaces therefore disagreed about the same act performed by
+   * the same person — spoken it fired, typed it was refused — which is what the
+   * in-app 50-case register's `dispatch-03` caught on the chat surfaces.
+   *
+   * Small shops run exactly this way: the owner drives the truck.
+   */
+  it('an OWNER who is genuinely assigned to the visit fires the same audited act', async () => {
+    const bundle = enRouteBundle({
+      userRepo: {
+        findByTenant: async () =>
+          [
+            {
+              id: TECH_ID,
+              tenantId: TEST_TENANT,
+              clerkUserId: TECH_CLERK_ID,
+              email: 'owner@x.com',
+              role: 'owner',
+              firstName: 'Dana',
+              lastName: 'Owner',
+            },
+          ] as never,
+      },
+    });
+    const { app, proposalRepo } = buildApp({ enRoute: bundle, role: 'owner' });
+
+    const res = await chat(app, "I'm on my way");
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.en_route');
+    expect(bundle.coordinator.enqueueEnRouteNotice).toHaveBeenCalledTimes(1);
+    // A direct act, never a proposal.
+    expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
   });
 
   it('no tenant timezone → an honest cannot-answer, never a UTC-guessed day', async () => {
