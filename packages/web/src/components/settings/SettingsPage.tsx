@@ -28,6 +28,7 @@ import { BrandVoiceSheet } from './BrandVoiceSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
+import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { GoogleBusinessSheet } from './GoogleBusinessSheet';
@@ -560,6 +561,7 @@ export function SettingsPage() {
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
+  const [lateFeesOpen, setLateFeesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [googleBusinessOpen, setGoogleBusinessOpen] = useState(false);
@@ -890,6 +892,9 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
+        // #1143 (row 8.10) — the only surface that sets the tenant's late-fee
+        // policy; the overdue sweep drafts each fee for owner approval.
+        { icon: FileText,   label: 'Late fees',              description: 'Fee on invoices still unpaid after a grace period', action: () => setLateFeesOpen(true) },
         // 8.3/8.11 — already-accepted PUT /api/settings booleans, no client
         // control before this. UI + persistence only — none of these four
         // change what the underlying automation does.
@@ -1603,6 +1608,11 @@ export function SettingsPage() {
       {/* Discount policy sheet — AI auto-propose cap + floor + catalog grounding. */}
       {discountPolicyOpen && (
         <DiscountPolicySheet onClose={() => setDiscountPolicyOpen(false)} />
+      )}
+
+      {/* Late fees sheet — dunning late-fee policy (type, amount, grace, cap). */}
+      {lateFeesOpen && (
+        <DunningLateFeeSheet onClose={() => setLateFeesOpen(false)} />
       )}
 
       {/* Deposit rules sheet — strategy + amount + optional threshold. */}

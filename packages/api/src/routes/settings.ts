@@ -22,6 +22,14 @@ import {
   validateTerminologyPreferences,
 } from '../settings/settings';
 import {
+  DunningConfig,
+  DunningConfigRepository,
+  applyLateFeePolicy,
+  defaultDunningConfig,
+  lateFeePolicyOf,
+  lateFeePolicyUpdateSchema,
+} from '../invoices/dunning-config';
+import {
   isEnrollablePin,
   normalizeEnrollmentPin,
   hashVoiceApprovalPin,
@@ -220,11 +228,31 @@ function isPlatformFrozen(platformFlag: { enabled: boolean } | null): boolean {
   return platformFlag !== null && platformFlag.enabled === false;
 }
 
+/** #1143 — the tenant's dunning config store (Pg in production, in-memory without a pool). */
+export interface SettingsDunningDependencies {
+  dunningConfigRepo: DunningConfigRepository;
+}
+
+/**
+ * #1143 — what `GET/PUT /api/settings/dunning` return: the config the overdue
+ * sweep would use for this tenant right now, and whether the owner has ever
+ * saved one (`configured: false` = the sweep is running `defaultDunningConfig`).
+ */
+function projectDunningConfig(config: DunningConfig, configured: boolean) {
+  return {
+    configured,
+    enabled: config.enabled,
+    reminderSteps: config.reminderSteps,
+    ...lateFeePolicyOf(config),
+  };
+}
+
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
   deps?: SettingsRouterDependencies,
   auditRepo?: AuditRepository,
   capabilityDeps?: SettingsCapabilityDependencies,
+  dunningDeps?: SettingsDunningDependencies,
 ): Router {
   const router = Router();
 
@@ -753,6 +781,89 @@ export function createSettingsRouter(
         // override and the reader is `isEnabledForTenant`.
         const resolved = await readCapability(capabilityDeps, tenantId, key.data);
         res.json({ key: key.data, ...resolved });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // ── #1143 — the tenant's dunning late-fee policy (row 8.10) ─────────────
+  //
+  // `DunningConfigRepository.upsert` shipped with ZERO product callers, so
+  // every tenant ran `defaultDunningConfig()` (`lateFeeType: 'none'`) and the
+  // overdue sweep could never propose `apply_late_fee`. These two routes are
+  // the owner's write path for the late-fee policy ONLY: `enabled` and the
+  // reminder cadence are preserved from the stored row (or the default) and
+  // are not writable here (the schema is strict). Every fee the sweep derives
+  // from this policy is still an owner-approved money-class proposal.
+
+  router.get(
+    '/dunning',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!dunningDeps) {
+          res.status(503).json({
+            error: 'DUNNING_NOT_CONFIGURED',
+            message: 'Dunning settings are not available on this deployment',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const stored = await dunningDeps.dunningConfigRepo.findByTenant(tenantId);
+        res.json(projectDunningConfig(stored ?? defaultDunningConfig(tenantId), stored !== null));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.put(
+    '/dunning',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!dunningDeps) {
+          res.status(503).json({
+            error: 'DUNNING_NOT_CONFIGURED',
+            message: 'Dunning settings are not available on this deployment',
+          });
+          return;
+        }
+        const update = lateFeePolicyUpdateSchema.parse(req.body ?? {});
+        // The tenant comes from the session, never the body (strict schema).
+        const tenantId = req.auth!.tenantId;
+        const now = new Date();
+        const current =
+          (await dunningDeps.dunningConfigRepo.findByTenant(tenantId)) ??
+          defaultDunningConfig(tenantId, now);
+        const saved = await dunningDeps.dunningConfigRepo.upsert(
+          applyLateFeePolicy(current, update, now),
+        );
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.dunning.updated',
+              entityType: 'invoice_dunning_config',
+              entityId: saved.id,
+              // Policy values only (no PII) — the diff an owner or support
+              // needs to explain a late fee on a customer's invoice.
+              metadata: { previous: lateFeePolicyOf(current), next: lateFeePolicyOf(saved) },
+            }),
+          );
+        }
+
+        res.json(projectDunningConfig(saved, true));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
