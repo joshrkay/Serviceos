@@ -935,6 +935,12 @@ export function createEstimateRouter(
           tenantId: req.auth!.tenantId,
           estimateId: req.params.id,
           ...parsed.data,
+          // #1145 — distinguishes this owner-triggered manual send from an
+          // unrelated automatic reminder (estimate-nudge.ts) or proposal-
+          // execution send (estimate-delivery-adapter.ts) landing in the
+          // same wall-clock minute, so the two don't collide on
+          // idx_dispatches_idempotency.
+          idempotencyContext: 'owner',
         });
         // §6 Time-to-Cash. sendEstimate transitions the estimate to
         // 'sent' inside SendService (not via transitionEstimateStatus),
