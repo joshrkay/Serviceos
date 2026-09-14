@@ -448,7 +448,9 @@ test.describe('on-my-way tap (4.5) — real Postgres, no DEV_AUTH_BYPASS (issue 
     expect(stateRow, 'A: a delay_notice_state row must exist for the en-route notice').toBeTruthy();
     const [stateA, lastErrorA] = (stateRow ?? '\t').split('\t');
     expect(stateA, `A: delay_notice_state status -> ${stateA} (last_error: ${lastErrorA})`).toBe('sent');
-    expect(lastErrorA, 'A: a delivered notice carries no last_error').toBe('');
+    // queryOne trims its output, so an empty trailing last_error column drops
+    // the tab entirely — undefined and '' both mean "no last_error".
+    expect(lastErrorA ?? '', 'A: a delivered notice carries no last_error').toBe('');
     expect(
       analyticsEventsFor(fixtureA.owner.tenantId, fixtureA.appointment.id),
       'A: exactly one en_route_notice_sent analytics row for its own appointment',
