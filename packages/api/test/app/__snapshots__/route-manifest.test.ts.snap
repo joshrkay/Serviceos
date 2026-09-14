@@ -364,10 +364,12 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ DELETE /voice-approval-pin
          └─ GET /
          └─ GET /capabilities
+         └─ GET /dunning
          └─ GET /language
          └─ PATCH /language
          └─ PUT /
          └─ PUT /capabilities/:key
+         └─ PUT /dunning
          └─ PUT /voice-approval-pin
 089  authenticated use    /api/settings/brand-voice    [router: router]
          └─ GET /
