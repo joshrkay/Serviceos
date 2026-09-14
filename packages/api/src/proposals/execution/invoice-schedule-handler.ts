@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Proposal, ProposalType } from '../proposal';
+import { Proposal, ProposalRepository, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { createInvoiceWithNextNumber, InvoiceRepository } from '../../invoices/invoice';
 import { SettingsRepository } from '../../settings/settings';
@@ -8,12 +8,11 @@ import {
   InvoiceMilestone,
   InvoiceScheduleRepository,
   buildInvoiceSchedule,
-  estimateAlreadyInvoicedReason,
-  invoiceOutsideSchedule,
   isDuplicateMilestoneError,
   milestoneEstimateLink,
   splitMilestones,
 } from '../../invoices/invoice-schedule';
+import { findMilestoneBillingConflict } from '../../invoices/milestone-billing-guard';
 import { buildLineItem } from '../../shared/billing-engine';
 
 /**
@@ -59,6 +58,8 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
     private readonly invoiceRepo?: InvoiceRepository,
     private readonly settingsRepo?: SettingsRepository,
     private readonly estimateRepo?: EstimateRepository,
+    // #1203 — lets the billing guard see a waiting auto-drafted invoice.
+    private readonly proposalRepo?: ProposalRepository,
   ) {}
 
   // U8 — degrades to a synthetic-id passthrough (schedules nothing) without
@@ -95,18 +96,29 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
     const estimateId = typeof payload.estimateId === 'string' ? payload.estimateId : undefined;
 
     try {
+      const estimate =
+        estimateId && this.estimateRepo
+          ? await this.estimateRepo.findById(context.tenantId, estimateId)
+          : null;
+      // #1203: the plan bills payload.jobId. An estimate from another job
+      // would be stamped on this job's first milestone invoice, and the
+      // already-invoiced check below would look at the wrong estimate.
+      if (estimate && estimate.jobId !== payload.jobId) {
+        return {
+          success: false,
+          error: 'That estimate belongs to a different job. No invoice schedule was created.',
+        };
+      }
+
       // Resolve the schedule total: explicit payload value, else derive from
       // the accepted estimate's billed line items.
       let totalCents =
         typeof payload.totalAmountCents === 'number' ? payload.totalAmountCents : undefined;
-      if (totalCents === undefined && estimateId && this.estimateRepo) {
-        const estimate = await this.estimateRepo.findById(context.tenantId, estimateId);
-        if (estimate) {
-          // Use the accepted estimate's persisted totals (tax + discount + the
-          // accepted good/better/best selection already applied) so milestones
-          // are allocated from the amount the customer actually accepted.
-          totalCents = estimate.totals.totalCents;
-        }
+      if (totalCents === undefined && estimate) {
+        // Use the accepted estimate's persisted totals (tax + discount + the
+        // accepted good/better/best selection already applied) so milestones
+        // are allocated from the amount the customer actually accepted.
+        totalCents = estimate.totals.totalCents;
       }
       if (totalCents === undefined) {
         return {
@@ -168,15 +180,22 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
         });
       }
 
-      // #1203: never bill an estimate twice. If the estimate already has an
-      // invoice that is not one of THIS schedule's milestones (e.g. it was
-      // converted to a plain invoice), refuse before the schedule row or any
-      // milestone invoice is written. The schedule's own milestones (a retry)
-      // are recognised by schedule_id and do not refuse.
+      // #1203: never bill an estimate twice. Refuse, before the schedule row or
+      // any milestone invoice is written, when the job's estimate is already
+      // billed another way: an invoice that is not one of THIS schedule's
+      // milestones (e.g. it was converted to a plain invoice), or an invoice
+      // auto-drafted at completion that is still waiting for approval. The
+      // schedule's own milestones (a retry) are recognised by schedule_id.
       const jobInvoices = await this.invoiceRepo.findByJob(context.tenantId, payload.jobId);
-      const alreadyInvoiced = invoiceOutsideSchedule(schedule, jobInvoices);
-      if (alreadyInvoiced) {
-        return { success: false, error: estimateAlreadyInvoicedReason(alreadyInvoiced.invoiceNumber) };
+      const conflict = await findMilestoneBillingConflict({
+        tenantId: context.tenantId,
+        jobId: payload.jobId,
+        schedule,
+        jobInvoices,
+        proposalRepo: this.proposalRepo,
+      });
+      if (conflict) {
+        return { success: false, error: conflict.reason };
       }
       if (existingForJob.length === 0) {
         await this.scheduleRepo.create(schedule);

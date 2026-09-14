@@ -10,6 +10,7 @@ import {
 } from '../../src/invoices/invoice-schedule';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { Job } from '../../src/jobs/job';
 
@@ -175,11 +176,8 @@ describe('mintCompletionMilestones', () => {
 
   // #1203: the estimate was converted to a plain invoice outside the schedule.
   // Minting the balance next to it would bill the estimate twice.
-  it('refuses to mint when the estimate was already invoiced outside the schedule', async () => {
-    const job = makeJob();
-    const estimateId = uuidv4();
-    await seedScheduleWithDeposit(job, { estimateId, depositCarriesEstimate: false });
-    await createInvoice(
+  async function seedConvertedInvoice(job: Job, estimateId: string, overrides: { status?: 'canceled' | 'void'; amountPaidCents?: number } = {}) {
+    const converted = await createInvoice(
       {
         tenantId: TENANT,
         jobId: job.id,
@@ -190,6 +188,20 @@ describe('mintCompletionMilestones', () => {
       },
       invoiceRepo,
     );
+    if (overrides.status || overrides.amountPaidCents) {
+      await invoiceRepo.update(TENANT, converted.id, {
+        ...(overrides.status ? { status: overrides.status } : {}),
+        ...(overrides.amountPaidCents ? { amountPaidCents: overrides.amountPaidCents } : {}),
+      });
+    }
+    return converted;
+  }
+
+  it('refuses to mint when the estimate was already invoiced outside the schedule, and audits the refusal for the owner', async () => {
+    const job = makeJob();
+    const estimateId = uuidv4();
+    const schedule = await seedScheduleWithDeposit(job, { estimateId, depositCarriesEstimate: false });
+    const converted = await seedConvertedInvoice(job, estimateId);
 
     await expect(mintCompletionMilestones(deps(), job)).rejects.toMatchObject({
       name: 'ConflictError',
@@ -197,6 +209,92 @@ describe('mintCompletionMilestones', () => {
     });
     // Only the legacy deposit and the converted invoice: no balance was minted.
     expect(await invoiceRepo.findByJob(TENANT, job.id)).toHaveLength(2);
+    const refused = auditRepo.getAll().filter((e) => e.eventType === 'invoice.milestone_mint_refused');
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ entityType: 'job', entityId: job.id, actorRole: 'system' });
+    expect(refused[0].metadata).toMatchObject({
+      scheduleId: schedule.id,
+      blockingInvoiceId: converted.id,
+      blockingInvoiceNumber: 'INV-CONVERTED',
+    });
+  });
+
+  it('refuses a voice-shaped schedule (no estimateId) when an estimate on the job was already invoiced', async () => {
+    const job = makeJob();
+    await seedScheduleWithDeposit(job); // CreateInvoiceScheduleTaskHandler never sets estimateId
+    await seedConvertedInvoice(job, uuidv4());
+
+    await expect(mintCompletionMilestones(deps(), job)).rejects.toThrow(/already invoiced as INV-CONVERTED/);
+    expect(await invoiceRepo.findByJob(TENANT, job.id)).toHaveLength(2);
+  });
+
+  it('mints when the converted invoice was canceled, or voided with no payment', async () => {
+    for (const status of ['canceled', 'void'] as const) {
+      const job = makeJob();
+      await seedScheduleWithDeposit(job);
+      await seedConvertedInvoice(job, uuidv4(), { status });
+
+      const created = await mintCompletionMilestones(deps(), job);
+      expect(created.map((i) => i.milestoneIndex)).toEqual([1]);
+    }
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'invoice.milestone_mint_refused')).toEqual([]);
+  });
+
+  it('still refuses when the voided converted invoice carries a payment', async () => {
+    const job = makeJob();
+    await seedScheduleWithDeposit(job);
+    await seedConvertedInvoice(job, uuidv4(), { status: 'void', amountPaidCents: 5000 });
+
+    await expect(mintCompletionMilestones(deps(), job)).rejects.toThrow(/already invoiced as INV-CONVERTED/);
+  });
+
+  it('does not refuse (or audit) a schedule that has nothing left to mint', async () => {
+    const job = makeJob();
+    const schedule = await seedScheduleWithDeposit(job);
+    // The balance was already minted on an earlier completion…
+    await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        invoiceNumber: 'INV-2',
+        lineItems: [buildLineItem('b1', 'Balance', 1, 10000, 0, true)],
+        scheduleId: schedule.id,
+        milestoneIndex: 1,
+        createdBy: 'u1',
+      },
+      invoiceRepo,
+    );
+    // …and an estimate invoice appeared afterwards. Re-completion has nothing to mint.
+    await seedConvertedInvoice(job, uuidv4());
+
+    expect(await mintCompletionMilestones(deps(), job)).toEqual([]);
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'invoice.milestone_mint_refused')).toEqual([]);
+  });
+
+  it('refuses while an invoice auto-drafted at an earlier completion is waiting for approval', async () => {
+    const job = makeJob();
+    await seedScheduleWithDeposit(job);
+    const proposalRepo = new InMemoryProposalRepository();
+    const autoDraft = await proposalRepo.create(
+      createProposal({
+        tenantId: TENANT,
+        proposalType: 'draft_invoice',
+        payload: { jobId: job.id, customerId: job.customerId, lineItems: [] },
+        summary: 'Draft invoice for completed job',
+        idempotencyKey: `auto_invoice:${job.id}`,
+        createdBy: 'system:auto_invoice',
+      }),
+    );
+
+    await expect(mintCompletionMilestones({ ...deps(), proposalRepo }, job)).rejects.toThrow(/auto-drafted/i);
+    expect(await invoiceRepo.findByJob(TENANT, job.id)).toHaveLength(1);
+    const refused = auditRepo.getAll().filter((e) => e.eventType === 'invoice.milestone_mint_refused');
+    expect(refused[0].metadata).toMatchObject({ pendingProposalId: autoDraft.id });
+
+    // Once the owner rejects that draft, the plan bills again.
+    await proposalRepo.updateStatus(TENANT, autoDraft.id, 'rejected');
+    const created = await mintCompletionMilestones({ ...deps(), proposalRepo }, job);
+    expect(created.map((i) => i.milestoneIndex)).toEqual([1]);
   });
 
   it('treats a duplicate on the (schedule, milestone) index as already minted', async () => {

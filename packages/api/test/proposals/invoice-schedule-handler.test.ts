@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { CreateInvoiceScheduleExecutionHandler } from '../../src/proposals/execution/invoice-schedule-handler';
-import { actionClassForProposalType, Proposal } from '../../src/proposals/proposal';
+import {
+  actionClassForProposalType,
+  createProposal,
+  InMemoryProposalRepository,
+  Proposal,
+} from '../../src/proposals/proposal';
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { createInvoiceSchedulePayloadSchema } from '../../src/proposals/contracts/create-invoice-schedule';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
@@ -355,6 +360,86 @@ describe('P21-002 — create_invoice_schedule', () => {
       expect(result.error).toMatch(/already invoiced as INV-0001/);
       expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(0);
       expect((await invoiceRepo.findByJob(TENANT, jobId)).map((i) => i.invoiceNumber)).toEqual(['INV-0001']);
+    });
+
+    // The production shape: CreateInvoiceScheduleTaskHandler (voice) never sets estimateId.
+    it('refuses a voice-shaped schedule (no estimateId) when the job estimate was already converted (#1203)', async () => {
+      const jobId = uuidv4();
+      const est = await createEstimate(
+        { tenantId: TENANT, jobId, estimateNumber: 'EST-1203V', lineItems: [buildLineItem('i1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
+        estimateRepo,
+      );
+      await createInvoice(
+        { tenantId: TENANT, jobId, estimateId: est.id, invoiceNumber: 'INV-0001', lineItems: [buildLineItem('c1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
+        invoiceRepo,
+      );
+
+      const result = await handler.execute(
+        makeProposal({ jobId, jobReference: 'the roof job', scheduleDescription: '50% deposit, 50% on completion', totalAmountCents: 100000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/already invoiced as INV-0001/);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(0);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+    });
+
+    it('does not refuse when the converted invoice was canceled', async () => {
+      const jobId = uuidv4();
+      const canceled = await createInvoice(
+        { tenantId: TENANT, jobId, estimateId: uuidv4(), invoiceNumber: 'INV-0001', lineItems: [buildLineItem('c1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
+        invoiceRepo,
+      );
+      await invoiceRepo.update(TENANT, canceled.id, { status: 'canceled' });
+
+      const result = await handler.execute(
+        makeProposal({ jobId, totalAmountCents: 100000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(true);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(2);
+    });
+
+    it('refuses a schedule whose estimateId belongs to a different job', async () => {
+      const jobId = uuidv4();
+      const otherJobEstimate = await createEstimate(
+        { tenantId: TENANT, jobId: uuidv4(), estimateNumber: 'EST-OTHER', lineItems: [buildLineItem('i1', 'Roof', 1, 100000, 0, true)], createdBy: 'u1' },
+        estimateRepo,
+      );
+
+      const result = await handler.execute(
+        makeProposal({ jobId, estimateId: otherJobEstimate.id, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/different job/i);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(0);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(0);
+    });
+
+    it('refuses while an invoice auto-drafted at completion is waiting for approval', async () => {
+      const jobId = uuidv4();
+      const proposalRepo = new InMemoryProposalRepository();
+      await proposalRepo.create(
+        createProposal({
+          tenantId: TENANT,
+          proposalType: 'draft_invoice',
+          payload: { jobId, customerId: uuidv4(), lineItems: [] },
+          summary: 'Draft invoice for completed job',
+          idempotencyKey: `auto_invoice:${jobId}`,
+          createdBy: 'system:auto_invoice',
+        }),
+      );
+      const guarded = new CreateInvoiceScheduleExecutionHandler(scheduleRepo, invoiceRepo, settingsRepo, estimateRepo, proposalRepo);
+
+      const result = await guarded.execute(
+        makeProposal({ jobId, totalAmountCents: 100000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/auto-drafted/i);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(0);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(0);
     });
 
     it('does not mint an invoice up front when no milestone is on_accept', async () => {

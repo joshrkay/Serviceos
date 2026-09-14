@@ -22,8 +22,34 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { resolveSelectedLineItems } from '../shared/billing-engine';
 import { TimeEntryRepository } from '../time-tracking/time-entry';
 import { recalculateLaborFromTimeEntries } from './labor-from-time-entries';
+import type { InvoiceScheduleRepository } from './invoice-schedule';
 
 const AUTO_INVOICE_ACTOR = 'system:auto_invoice';
+
+/** One auto-drafted invoice proposal per job, ever (DB-unique per tenant). */
+export function autoInvoiceIdempotencyKey(jobId: string): string {
+  return `auto_invoice:${jobId}`;
+}
+
+/** Proposal states in which an auto-drafted invoice can still become an invoice. */
+const WAITING_STATUSES: ReadonlyArray<Proposal['status']> = ['draft', 'ready_for_review', 'approved', 'executing'];
+
+/**
+ * #1203: the job's auto-drafted invoice proposal while it can still become an
+ * invoice, else null. Once it executes, the invoice itself carries the
+ * estimate; once rejected/expired/undone it will never bill. Milestone
+ * minting refuses while one is waiting, so the owner approving it later
+ * cannot bill the whole estimate on top of the milestones.
+ */
+export async function findWaitingAutoInvoiceProposal(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  jobId: string,
+): Promise<Proposal | null> {
+  if (!proposalRepo.findByIdempotencyKey) return null;
+  const proposal = await proposalRepo.findByIdempotencyKey(tenantId, autoInvoiceIdempotencyKey(jobId));
+  return proposal && WAITING_STATUSES.includes(proposal.status) ? proposal : null;
+}
 
 /** Only auto-invoice jobs that have something to bill and aren't paid yet. */
 const ELIGIBLE_MONEY_STATES: JobMoneyState[] = ['estimate_accepted', 'no_estimate'];
@@ -45,6 +71,11 @@ export interface AutoInvoiceOnCompletionDeps {
    * time before the draft is raised.
    */
   timeEntryRepo?: TimeEntryRepository;
+  /**
+   * #1203 — when present, a job with an invoice schedule is left to its
+   * milestone plan: no whole-estimate draft is raised on top of it.
+   */
+  scheduleRepo?: InvoiceScheduleRepository;
 }
 
 /**
@@ -68,6 +99,15 @@ export async function maybeAutoInvoiceOnCompletion(
   //    invoiced (a draft/open/paid invoice exists from a prior run).
   const existingInvoices = await deps.invoiceRepo.findByJob(job.tenantId, job.id);
   if (existingInvoices.some((inv) => isLiveInvoice(inv.status))) return null;
+
+  // 3b. #1203: a job with a milestone plan is billed by that plan. Drafting the
+  //     whole accepted estimate as well would bill the job twice (the
+  //     completion hook mints the plan's on_completion milestones right after
+  //     this). Holds even while milestone billing is switched off: the kill
+  //     switch halts billing, it does not turn a plan into a whole invoice.
+  if (deps.scheduleRepo && (await deps.scheduleRepo.findByJob(job.tenantId, job.id)).length > 0) {
+    return null;
+  }
 
   // 4. Build line items from the accepted estimate's billed selection
   //    (tiers + add-ons the customer actually chose). No estimate / no
@@ -129,7 +169,7 @@ export async function maybeAutoInvoiceOnCompletion(
     sourceContext: { source: 'auto_invoice_on_completion', jobId: job.id },
     targetEntityType: 'job',
     targetEntityId: job.id,
-    idempotencyKey: `auto_invoice:${job.id}`,
+    idempotencyKey: autoInvoiceIdempotencyKey(job.id),
     createdBy: AUTO_INVOICE_ACTOR,
   });
   const persisted = await deps.proposalRepo.create(proposal);

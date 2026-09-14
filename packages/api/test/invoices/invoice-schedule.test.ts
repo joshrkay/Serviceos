@@ -6,6 +6,7 @@ import {
   InvoiceMilestone,
   InMemoryInvoiceScheduleRepository,
   invoiceOutsideSchedule,
+  invoiceStillBills,
   estimateAlreadyInvoicedReason,
 } from '../../src/invoices/invoice-schedule';
 
@@ -161,35 +162,65 @@ describe('buildInvoiceSchedule + InMemoryInvoiceScheduleRepository', () => {
 });
 
 describe('invoiceOutsideSchedule (#1203 — never bill an estimate twice)', () => {
-  const schedule = { id: 'sched-1', estimateId: 'est-1' };
+  type Inv = { invoiceNumber: string; estimateId?: string; scheduleId?: string; status: string; amountPaidCents: number };
+  const inv = (overrides: Partial<Inv> & { invoiceNumber: string }): Inv => ({
+    status: 'draft',
+    amountPaidCents: 0,
+    ...overrides,
+  });
+  const explicit = { id: 'sched-1', estimateId: 'est-1' };
+  // The shape CreateInvoiceScheduleTaskHandler (voice) produces: no estimate id.
+  const voice = { id: 'sched-1' };
 
   it('finds a converted invoice that carries the estimate id but no schedule', () => {
-    const converted = { invoiceNumber: 'INV-0001', estimateId: 'est-1' };
-    expect(invoiceOutsideSchedule(schedule, [converted])).toBe(converted);
+    const converted = inv({ invoiceNumber: 'INV-0001', estimateId: 'est-1' });
+    expect(invoiceOutsideSchedule(explicit, [converted])).toBe(converted);
+    expect(invoiceOutsideSchedule(voice, [converted])).toBe(converted);
   });
 
   it("does not count the schedule's own milestones, including the one that carries the estimate link", () => {
     const invoices = [
-      { invoiceNumber: 'INV-0001', estimateId: 'est-1', scheduleId: 'sched-1' },
-      { invoiceNumber: 'INV-0002', scheduleId: 'sched-1' },
+      inv({ invoiceNumber: 'INV-0001', estimateId: 'est-1', scheduleId: 'sched-1' }),
+      inv({ invoiceNumber: 'INV-0002', scheduleId: 'sched-1' }),
     ];
-    expect(invoiceOutsideSchedule(schedule, invoices)).toBeUndefined();
+    expect(invoiceOutsideSchedule(explicit, invoices)).toBeUndefined();
+    expect(invoiceOutsideSchedule(voice, invoices)).toBeUndefined();
   });
 
   it("counts another schedule's milestone that carries the same estimate id", () => {
-    const other = { invoiceNumber: 'INV-0009', estimateId: 'est-1', scheduleId: 'sched-OTHER' };
-    expect(invoiceOutsideSchedule(schedule, [other])).toBe(other);
+    const other = inv({ invoiceNumber: 'INV-0009', estimateId: 'est-1', scheduleId: 'sched-OTHER' });
+    expect(invoiceOutsideSchedule(explicit, [other])).toBe(other);
   });
 
-  it('ignores job invoices for other estimates or no estimate, and schedules without an estimate', () => {
-    const invoices = [
-      { invoiceNumber: 'INV-0003', estimateId: 'est-2' },
-      { invoiceNumber: 'INV-0004' },
+  it('ignores job invoices that carry no estimate id', () => {
+    const plain = [inv({ invoiceNumber: 'INV-0004' })];
+    expect(invoiceOutsideSchedule(explicit, plain)).toBeUndefined();
+    expect(invoiceOutsideSchedule(voice, plain)).toBeUndefined();
+  });
+
+  it('a plan for a named estimate ignores invoices for another estimate; a plan with no estimate counts any estimate invoice on the job', () => {
+    const otherEstimate = inv({ invoiceNumber: 'INV-0003', estimateId: 'est-2' });
+    expect(invoiceOutsideSchedule(explicit, [otherEstimate])).toBeUndefined();
+    // Fail closed: the plan cannot say which estimate it bills.
+    expect(invoiceOutsideSchedule(voice, [otherEstimate])).toBe(otherEstimate);
+  });
+
+  it('a canceled invoice, or a void one with no payment, no longer bills the estimate (matches auto-invoice)', () => {
+    const dead = [
+      inv({ invoiceNumber: 'INV-0001', estimateId: 'est-1', status: 'canceled' }),
+      inv({ invoiceNumber: 'INV-0002', estimateId: 'est-1', status: 'void' }),
     ];
-    expect(invoiceOutsideSchedule(schedule, invoices)).toBeUndefined();
-    expect(
-      invoiceOutsideSchedule({ id: 'sched-2' }, [{ invoiceNumber: 'INV-0005', estimateId: 'est-1' }]),
-    ).toBeUndefined();
+    expect(invoiceOutsideSchedule(explicit, dead)).toBeUndefined();
+    expect(invoiceOutsideSchedule(voice, dead)).toBeUndefined();
+  });
+
+  it('a void invoice that carries a payment still bills the estimate', () => {
+    const voidPaid = inv({ invoiceNumber: 'INV-0001', estimateId: 'est-1', status: 'void', amountPaidCents: 20000 });
+    expect(invoiceOutsideSchedule(explicit, [voidPaid])).toBe(voidPaid);
+    expect(invoiceStillBills(voidPaid)).toBe(true);
+    for (const status of ['draft', 'open', 'partially_paid', 'paid']) {
+      expect(invoiceStillBills({ status, amountPaidCents: 0 })).toBe(true);
+    }
   });
 
   it('gives an owner-facing reason that names the existing invoice', () => {

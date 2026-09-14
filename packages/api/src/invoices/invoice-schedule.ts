@@ -187,6 +187,18 @@ export function milestoneEstimateLink(
 }
 
 /**
+ * #1203: whether an invoice still bills its estimate. Matches auto-invoice's
+ * isLiveInvoice (a canceled or void invoice means "not invoiced"), with one
+ * exception: a void invoice that carries a payment still counts, because
+ * money was taken against the estimate.
+ */
+export function invoiceStillBills(inv: { status: string; amountPaidCents: number }): boolean {
+  if (inv.status === 'canceled') return false;
+  if (inv.status === 'void') return inv.amountPaidCents > 0;
+  return true;
+}
+
+/**
  * #1203: the invoice that already bills the schedule's estimate from OUTSIDE
  * the schedule, or undefined. The usual case is the plain invoice written by
  * POST /estimates/:id/convert-to-invoice. Minting milestones next to it bills
@@ -196,25 +208,34 @@ export function milestoneEstimateLink(
  *
  * Membership comes from the schedule linkage (invoices.schedule_id), never
  * from estimate_id alone: the schedule's own first milestone carries the
- * estimate id and must not block the later milestones. Every status counts,
- * so a voided converted invoice still refuses. Job invoices that do not carry
- * the estimate id are not billing this estimate and are ignored.
+ * estimate id and must not block the later milestones.
+ *
+ * Which estimate: a schedule that names one (payload estimateId) is checked
+ * against that estimate only. A schedule that names none (the only shape
+ * CreateInvoiceScheduleTaskHandler, the voice on-ramp, produces) is checked
+ * against the job's converted estimates, identified by the invoices that
+ * carry an estimate id. With exactly one such estimate that is the job's
+ * estimate; with more than one the plan cannot say which it bills, so it
+ * fails closed. Invoices with no estimate id, and ones that no longer bill
+ * (invoiceStillBills), are ignored.
  */
-export function invoiceOutsideSchedule<I extends { estimateId?: string; scheduleId?: string }>(
-  schedule: { id: string; estimateId?: string },
-  jobInvoices: ReadonlyArray<I>,
-): I | undefined {
-  if (!schedule.estimateId) return undefined;
+export function invoiceOutsideSchedule<
+  I extends { estimateId?: string; scheduleId?: string; status: string; amountPaidCents: number },
+>(schedule: { id: string; estimateId?: string }, jobInvoices: ReadonlyArray<I>): I | undefined {
   return jobInvoices.find(
-    (inv) => inv.estimateId === schedule.estimateId && inv.scheduleId !== schedule.id,
+    (inv) =>
+      inv.estimateId !== undefined &&
+      (schedule.estimateId === undefined || inv.estimateId === schedule.estimateId) &&
+      inv.scheduleId !== schedule.id &&
+      invoiceStillBills(inv),
   );
 }
 
 /** Owner-facing reason both mint paths give when invoiceOutsideSchedule refuses. */
 export function estimateAlreadyInvoicedReason(invoiceNumber: string): string {
   return (
-    `This estimate was already invoiced as ${invoiceNumber}. No milestone invoices were ` +
-    'created for it, because they would bill the same estimate a second time.'
+    `This job's estimate was already invoiced as ${invoiceNumber}. No milestone invoices were ` +
+    'created, because they would bill the same work a second time.'
   );
 }
 

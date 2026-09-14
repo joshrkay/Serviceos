@@ -2,8 +2,10 @@
  * Shared job-completion side effects (Time-to-Cash).
  *
  * The (… → completed) transition fires irreversible, money-touching effects:
- *   1. auto-draft an invoice proposal (P20-001, opt-in, gated inside)
- *   2. mint on_completion schedule milestones (P21, opt-in, gated inside)
+ *   1. auto-draft an invoice proposal (P20-001, opt-in, gated inside; skipped
+ *      when the job has an invoice schedule, #1203)
+ *   2. mint on_completion schedule milestones (P21, opt-in, gated inside;
+ *      refused when the job's estimate is already billed another way, #1203)
  * (The 24h thank-you / review-request asks are driven off `completedAt` by
  *  the leader-locked sweeps — no per-transition work here.)
  *
@@ -72,6 +74,7 @@ export async function runJobCompletionEffects(
           invoiceRepo: deps.invoiceRepo,
           settingsRepo: deps.settingsRepo,
           auditRepo: deps.auditRepo,
+          proposalRepo: deps.proposalRepo,
         },
         job,
       );

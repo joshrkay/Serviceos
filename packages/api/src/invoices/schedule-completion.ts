@@ -11,22 +11,23 @@
  * Idempotent — a milestone already minted (an invoice with this schedule_id +
  * milestone_index) is skipped, so re-entry never double-bills. `manual`
  * milestones are left for an explicit action; zero-amount milestones are
- * skipped rather than minting a $0 invoice. A schedule whose estimate was
- * already invoiced outside the schedule (e.g. converted to a plain invoice)
- * mints nothing: the run throws a ConflictError before any insert (#1203).
+ * skipped rather than minting a $0 invoice. A job whose estimate is already
+ * billed another way (a converted invoice, or an auto-drafted invoice waiting
+ * for approval) mints nothing: the run audits the refusal and throws a
+ * ConflictError before any insert (#1203, milestone-billing-guard.ts).
  */
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
 import {
   InvoiceScheduleRepository,
-  estimateAlreadyInvoicedReason,
-  invoiceOutsideSchedule,
   isDuplicateMilestoneError,
   milestoneEstimateLink,
   splitMilestones,
 } from './invoice-schedule';
+import { findMilestoneBillingConflict } from './milestone-billing-guard';
 import { ConflictError } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
+import { ProposalRepository } from '../proposals/proposal';
 import { withRequestSavepoint } from '../middleware/tenant-context';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { buildLineItem } from '../shared/billing-engine';
@@ -39,6 +40,8 @@ export interface ScheduleCompletionDeps {
   invoiceRepo: InvoiceRepository;
   settingsRepo: SettingsRepository;
   auditRepo?: AuditRepository;
+  /** #1203 — lets the guard see a waiting auto-drafted invoice for the job. */
+  proposalRepo?: ProposalRepository;
 }
 
 /**
@@ -63,24 +66,51 @@ export async function mintCompletionMilestones(
   // Which (schedule, milestone) pairs are already invoiced — covers the
   // on_accept milestone minted at approval and any prior completion run.
   const existing = await deps.invoiceRepo.findByJob(job.tenantId, job.id);
-
-  // #1203: never bill an estimate twice. A schedule approved before its
-  // estimate was converted (or written before this guard existed) must not
-  // mint over the converted invoice. Checked for every schedule before the
-  // first insert, so a refusal writes no invoice row. The caller
-  // (runJobCompletionEffects) logs the error without failing the completion.
-  for (const schedule of schedules) {
-    const alreadyInvoiced = invoiceOutsideSchedule(schedule, existing);
-    if (alreadyInvoiced) {
-      throw new ConflictError(estimateAlreadyInvoicedReason(alreadyInvoiced.invoiceNumber));
-    }
-  }
-
   const minted = new Set(
     existing
       .filter((inv) => inv.scheduleId !== undefined && inv.milestoneIndex !== undefined)
       .map((inv) => `${inv.scheduleId}:${inv.milestoneIndex}`),
   );
+
+  // #1203: never bill an estimate twice. A plan approved before its estimate
+  // was converted, or written before this guard existed, must not mint over
+  // the converted invoice or next to a waiting auto-drafted one. Every
+  // schedule that still has a milestone to mint is checked before the first
+  // insert, so a refusal writes no invoice row; one with nothing left to mint
+  // is not checked, so re-completing a fully billed job stays quiet. The
+  // refusal is audited on the job (the owner's activity feed shows it) and
+  // then thrown; runJobCompletionEffects logs it without failing the completion.
+  for (const schedule of schedules) {
+    const hasMilestoneToMint = splitMilestones(schedule.totalAmountCents, schedule.milestones).some(
+      (alloc) =>
+        alloc.trigger === 'on_completion' &&
+        alloc.amountCents > 0 &&
+        !minted.has(`${schedule.id}:${alloc.index}`),
+    );
+    if (!hasMilestoneToMint) continue;
+    const conflict = await findMilestoneBillingConflict({
+      tenantId: job.tenantId,
+      jobId: job.id,
+      schedule,
+      jobInvoices: existing,
+      proposalRepo: deps.proposalRepo,
+    });
+    if (!conflict) continue;
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: job.tenantId,
+          actorId: COMPLETION_ACTOR,
+          actorRole: 'system',
+          eventType: 'invoice.milestone_mint_refused',
+          entityType: 'job',
+          entityId: job.id,
+          metadata: { scheduleId: schedule.id, ...conflict },
+        }),
+      );
+    }
+    throw new ConflictError(conflict.reason);
+  }
 
   const created: Invoice[] = [];
   for (const schedule of schedules) {

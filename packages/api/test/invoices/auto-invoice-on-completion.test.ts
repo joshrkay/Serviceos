@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { maybeAutoInvoiceOnCompletion } from '../../src/invoices/auto-invoice-on-completion';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
+import { InMemoryInvoiceScheduleRepository, buildInvoiceSchedule } from '../../src/invoices/invoice-schedule';
 import { InMemoryEstimateRepository, createEstimate, Estimate } from '../../src/estimates/estimate';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
@@ -165,6 +166,30 @@ describe('maybeAutoInvoiceOnCompletion', () => {
     const job = makeJob({ moneyState: 'no_estimate' });
 
     expect(await maybeAutoInvoiceOnCompletion(deps(), job)).toBeNull();
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  // #1203: a job with a milestone plan is billed by its plan. Drafting the
+  // whole accepted estimate as well would bill the job twice.
+  it('no-ops when the job has an invoice schedule, even before any milestone is minted', async () => {
+    await settingsRepo.create(makeSettings(true));
+    const job = makeJob();
+    await seedAcceptedEstimate(job.id, [buildLineItem('i1', 'Repair', 1, 20000, 0, true)]);
+    const scheduleRepo = new InMemoryInvoiceScheduleRepository();
+    await scheduleRepo.create(
+      buildInvoiceSchedule({
+        tenantId: TENANT,
+        jobId: job.id,
+        totalAmountCents: 20000,
+        milestones: [
+          { label: 'Rough-in', type: 'percent', value: 5000, trigger: 'on_completion' },
+          { label: 'Final', type: 'remainder', value: 0, trigger: 'on_completion' },
+        ],
+        createdBy: 'u1',
+      }),
+    );
+
+    expect(await maybeAutoInvoiceOnCompletion({ ...deps(), scheduleRepo }, job)).toBeNull();
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 });
