@@ -121,8 +121,12 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     });
 
     it('tenant-wide sweeps are wrapped in runAsLeader with a pg advisory lock', () => {
-      expect(src).toMatch(/pg_try_advisory_lock/);
-      expect(src).toMatch(/pg_advisory_unlock/);
+      // #1125 — the lock/unlock pair moved into workers/leader-tick.ts, which
+      // app.ts's runLeaderTick delegates to.
+      const leaderTickSrc = readFileSync(resolve(__dirname, '../../src/workers/leader-tick.ts'), 'utf8');
+      expect(src).toMatch(/runLeaderGatedTick\(directPool \?\? pool, lockKey, work/);
+      expect(leaderTickSrc).toMatch(/pg_try_advisory_lock/);
+      expect(leaderTickSrc).toMatch(/pg_advisory_unlock/);
       // Each of the six tenant-wide sweeps is gated by a distinct lock key.
       for (const key of [
         'recurringAgreements',

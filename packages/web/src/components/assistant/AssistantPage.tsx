@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
-import { useNavigate, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { UndoToast } from '../common/UndoToast';
@@ -22,7 +22,6 @@ import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } fr
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
 import { track } from '../../lib/analytics';
-import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 
 interface ApiMessage {
   id: string;
@@ -71,6 +70,12 @@ async function sendToConversationAPI(
   text: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
   inputMode?: 'voice',
+  // #1144 — the fileId(s) of any photo already uploaded through
+  // POST /api/files/upload-url for this turn. Additive on the wire
+  // (assistantChatRequestSchema.attachments); no chat-reachable skill
+  // consumes it yet — see the doc comment on that schema field and
+  // packages/api/test/routes/assistant-chat-attachments.test.ts.
+  attachments?: Array<{ fileId: string }>,
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
   try {
     // AST-01b: chat → /api/assistant/chat. The server runs intent
@@ -88,6 +93,7 @@ async function sendToConversationAPI(
         messages: [...history, { role: 'user', content: text }],
         ...(conversationId ? { conversationId } : {}),
         ...(inputMode ? { inputMode } : {}),
+        ...(attachments?.length ? { attachments } : {}),
       }),
     });
 
@@ -454,6 +460,57 @@ async function createSignedAudioUpload(blob: Blob) {
   return { fileId, audioUrl: audioUrl ?? uploadUrl.split('?')[0] };
 }
 
+// #1144 — mirrors createSignedAudioUpload above, for a chat photo attachment
+// instead of a voice recording. Same two-step contract
+// (POST /api/files/upload-url → PUT the bytes to the returned URL) that
+// packages/web/src/api/job-photos.ts already proves against a job-scoped
+// presign endpoint; this one goes through the generic files route per
+// #1144's fix (no job/entity to scope the upload to from the Assistant).
+async function createSignedPhotoUpload(file: File): Promise<{ fileId: string; downloadUrl?: string }> {
+  const contentType = file.type || 'application/octet-stream';
+  const body = JSON.stringify({
+    filename: file.name || `photo-${Date.now()}.jpg`,
+    contentType,
+    sizeBytes: file.size,
+    entityType: 'assistant_chat_photo',
+  });
+
+  const requestSigned = async (url: string) => apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+
+  let response = await requestSigned('/api/files/upload-url');
+  if (!response.ok) {
+    response = await requestSigned('/api/files/upload');
+  }
+  if (!response.ok) {
+    throw new Error('Unable to get a signed upload URL.');
+  }
+
+  const payload = await response.json();
+  const fileId = payload.fileId ?? payload.fileRecord?.id;
+  const uploadUrl = payload.uploadUrl;
+  const downloadUrl = payload.downloadUrl ?? payload.fileUrl;
+
+  if (!fileId || !uploadUrl) {
+    throw new Error('Upload URL response is missing required fields.');
+  }
+
+  const uploadResult = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': contentType },
+    body: file,
+  });
+
+  if (!uploadResult.ok) {
+    throw new Error('Photo upload failed. Please retry.');
+  }
+
+  return { fileId, downloadUrl };
+}
+
 async function pollRecordingUntilDone(recordingId: string) {
   const startedAt = Date.now();
 
@@ -790,6 +847,13 @@ export function AssistantPage() {
   const [liveSessionOpen, setLiveSessionOpen] = useState(false);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
+  // #1144 — the photo picker used to fake `pendingAttachment` with no real
+  // file at all (no camera capture, no upload). photoInputRef drives a real
+  // <input type="file" accept="image/*">; the upload itself runs through
+  // createSignedPhotoUpload (POST /api/files/upload-url → PUT → fileId).
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoUploadError, setPhotoUploadError] = useState<string | null>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   // Story 3.12 — when a turn fails (model/tool/network), keep the failed input
   // so the operator can RETRY in one tap instead of re-typing. Cleared on the
@@ -837,7 +901,6 @@ export function AssistantPage() {
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
@@ -931,20 +994,29 @@ export function AssistantPage() {
     setPendingAttachment([]);
     setFailedSend(null); // a fresh attempt clears any prior retry affordance
 
-    const command = opts?.attachments?.length ? null : matchVoiceCommand(text);
-    if (command) {
-      setMessages(prev => [...prev, {
-        id: uid(),
-        role: 'assistant',
-        content: `${command.label}.`,
-        time: now(),
-      }]);
-      navigate(command.route);
-      return;
-    }
-
+    // #1153 — this composer used to run every turn (typed OR dictated)
+    // through matchVoiceCommand (useVoiceCommands.ts) and navigate away
+    // on a match — e.g. "Add a new customer, Mario Delingo, 412 Oak
+    // Street" hijacked into a bare `/customers/new` navigation, dropping
+    // everything after "customer" and making the server's deterministic
+    // create_customer classifier (intent-classifier.ts) unreachable from
+    // chat. The Assistant composer is a chat surface: every turn — bare
+    // or not — must always reach the conversation API, which has its own
+    // intent handling. The global voice-nav surface (VoiceBar.tsx) still
+    // applies matchVoiceCommand for its own bare spoken commands; this
+    // page no longer does.
     setTyping(true);
     setTypingReason('Thinking…');
+
+    // #1144 — only attachments that actually finished a real upload (and so
+    // carry a fileId) go out on the wire; a fake/unfinished 'document'
+    // placeholder (handleAttachSelect's other branch, unchanged/out of scope
+    // for this fix) has none and is silently omitted rather than sent as
+    // garbage.
+    const wireAttachments = (opts?.attachments ?? [])
+      .map((att) => att.fileId)
+      .filter((fileId): fileId is string => Boolean(fileId))
+      .map((fileId) => ({ fileId }));
 
     try {
       const reply = await sendToConversationAPI(
@@ -952,6 +1024,7 @@ export function AssistantPage() {
         text,
         history,
         opts?.inputMode === 'voice' ? 'voice' : undefined,
+        wireAttachments.length ? wireAttachments : undefined,
       );
 
       // Story 3.11 — pin the server's conversation id so the next turn appends
@@ -1029,7 +1102,7 @@ export function AssistantPage() {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId, navigate, ttsEnabled, speak, startUndo]);
+  }, [conversationId, ttsEnabled, speak, startUndo]);
 
   // UB-B2 — conversational voice session: continuous STT, per-utterance
   // auto-submit through the SAME chat path as typed input (inputMode: 'voice'
@@ -1063,10 +1136,35 @@ export function AssistantPage() {
   }
 
   function handleAttachSelect(type: 'photo' | 'document') {
-    setPendingAttachment([{
-      type,
-      name: type === 'document' ? 'Work order #1042.pdf' : undefined,
-    }]);
+    if (type === 'photo') {
+      // #1144 — open the real file/camera picker instead of faking an
+      // attachment with no bytes behind it. handlePhotoFileChange does the
+      // actual upload once a file is chosen.
+      setPhotoUploadError(null);
+      photoInputRef.current?.click();
+      return;
+    }
+    // 'document' is unchanged — out of scope for #1144 (ticket is the photo
+    // leg specifically); still a local-only placeholder.
+    setPendingAttachment([{ type, name: 'Work order #1042.pdf' }]);
+  }
+
+  async function handlePhotoFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset so selecting the SAME file again still fires a change event.
+    e.target.value = '';
+    if (!file) return;
+
+    setPhotoUploadError(null);
+    setPhotoUploading(true);
+    try {
+      const { fileId, downloadUrl } = await createSignedPhotoUpload(file);
+      setPendingAttachment([{ type: 'photo', fileId, url: downloadUrl, name: file.name }]);
+    } catch (err) {
+      setPhotoUploadError(err instanceof Error ? err.message : 'Photo upload failed. Please retry.');
+    } finally {
+      setPhotoUploading(false);
+    }
   }
 
   function handleVoiceSend(transcript: string, duration: number) {
@@ -1074,7 +1172,7 @@ export function AssistantPage() {
     send(transcript, { inputMode: 'voice', voiceDuration: duration });
   }
 
-  const canSend = input.trim().length > 0 || (pendingAttachment?.length ?? 0) > 0;
+  const canSend = (input.trim().length > 0 || (pendingAttachment?.length ?? 0) > 0) && !photoUploading;
 
   return (
     <div className="flex flex-col h-full bg-slate-50">
@@ -1264,6 +1362,34 @@ export function AssistantPage() {
               </p>
             )}
 
+            {/* #1144 — real file/camera picker; handlePhotoFileChange uploads
+                through POST /api/files/upload-url and only THEN sets
+                pendingAttachment (with the real fileId). */}
+            <input
+              ref={photoInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              data-testid="assistant-photo-input"
+              onChange={(e) => void handlePhotoFileChange(e)}
+            />
+
+            {photoUploading && (
+              <p className="mb-2 text-xs text-slate-500" data-testid="assistant-photo-uploading">
+                Uploading photo…
+              </p>
+            )}
+            {photoUploadError && (
+              <p
+                role="alert"
+                data-testid="assistant-photo-upload-error"
+                className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+              >
+                {photoUploadError}
+              </p>
+            )}
+
             {/* Pending attachment preview */}
             {pendingAttachment && pendingAttachment.length > 0 && (
               <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -1291,6 +1417,7 @@ export function AssistantPage() {
               <div className="relative shrink-0">
                 <button
                   onClick={() => setAttachPickerOpen(v => !v)}
+                  aria-label="Attach"
                   className={`flex size-10 items-center justify-center rounded-xl border transition-colors ${
                     attachPickerOpen
                       ? 'border-blue-300 bg-blue-50 text-blue-600'
