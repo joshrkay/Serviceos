@@ -23,21 +23,15 @@
  * `gateway.complete` and inspects the REAL system messages
  * `classifyIntent` built, not a re-implementation.
  *
- * IMPORTANT — production gap found while fixing this (not introduced by
- * lane A, out of scope to fix under this test-only lane): the classic
- * `<Gather>`/PSTN transport has its OWN, separate inline `classifyIntent`
- * call site in `twilio-adapter.ts`'s private `_handleGatherLocked` (~line
- * 2348, reached via `handleGather`, which is what `routes/telephony.ts`'s
- * `/gather` webhook — the production entry for every classic (non-media-
- * streams) inbound phone call — calls at line 650). That call site NEVER
- * reads `session.b2bAccountContext` and never builds a
- * `b2bAccountPromptSection` at all. PR #1029 only wired the media-streams
- * `speechTurn` path (create-voice-turn-processor.ts). So today, a REAL
- * property-manager caller on a classic Gather/PSTN call gets NO account
- * context in their classify prompt — only a media-streams call does. The
- * second test below drives `handleGather` on the identical PM session to
- * prove this negative at real Postgres rather than leaving it as an
- * assertion in a code comment; see the PR body for the flag to Josh/Fable.
+ * The classic `<Gather>`/PSTN transport has its OWN inline `classifyIntent`
+ * call site in `twilio-adapter.ts`'s private `_handleGatherLocked` (reached
+ * via `handleGather`, which `routes/telephony.ts`'s `/gather` webhook calls
+ * for every classic inbound phone call). It used to never read
+ * `session.b2bAccountContext` (the gap this file's second test pinned);
+ * #1155 threads the same section into it. The second test below drives
+ * `handleGather` on a PM session and proves the section now arrives there
+ * too; b2b-account-context-gather.test.ts covers the Gather transport's
+ * full T3 (residential + tenant B + the proposal row).
  *
  * T3, one run: tenant A's property-manager caller gets a PRIORITY section
  * naming its managed properties; tenant A's ordinary residential caller
@@ -252,19 +246,14 @@ describe('Postgres integration — B2B/property-manager account context reaches 
   });
 
   /**
-   * Documents a real production gap discovered while fixing the Codex
-   * finding above (out of scope to fix under this test-only lane — see file
-   * header and the PR body). The classic `<Gather>`/PSTN transport
+   * #1155 — formerly pinned the gap: the classic `<Gather>`/PSTN transport
    * (`routes/telephony.ts` `/gather` → `TwilioGatherAdapter.handleGather` →
-   * private `_handleGatherLocked`, twilio-adapter.ts ~line 2348) has its OWN
-   * inline `classifyIntent` call that never reads `session.b2bAccountContext`
-   * and never builds a `b2bAccountPromptSection` — unlike
-   * `processCallerUtterance` (the media-streams path proven above). This
-   * test drives the SAME property-manager session through `handleGather`
-   * instead and proves the account-context section is absent there too,
-   * at real Postgres — a negative result that IS the finding.
+   * private `_handleGatherLocked`) had its own inline `classifyIntent` call
+   * that never read `session.b2bAccountContext`. Flipped: the SAME
+   * property-manager session driven through `handleGather` now sends the
+   * same account-context section the media-streams turn sends.
    */
-  it('a REAL Gather/PSTN turn on the SAME property-manager session gets NO account-context section — a live production gap, not fixed here', async () => {
+  it('a REAL Gather/PSTN turn on a property-manager session carries the SAME account-context section (#1155, formerly a pinned gap)', async () => {
     const pmId = crypto.randomUUID();
     await customerRepo.create({
       id: pmId,
@@ -310,9 +299,10 @@ describe('Postgres integration — B2B/property-manager account context reaches 
     });
 
     const gatherPromptText = systemMessageText(gatherPm.gateway);
-    // The real, Postgres-loaded B2B context exists on the session (proven
-    // above) but never reaches this transport's classify call.
-    expect(gatherPromptText).not.toMatch(/Caller account context/);
-    expect(gatherPromptText).not.toMatch(/Cedar Lane/);
+    // The real, Postgres-loaded B2B context on the session now reaches this
+    // transport's classify call, exactly as on media-streams.
+    expect(gatherPromptText).toMatch(/Caller account context/);
+    expect(gatherPromptText).toMatch(/PRIORITY/);
+    expect(gatherPromptText).toMatch(/Cedar Lane/);
   });
 });

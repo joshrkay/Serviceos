@@ -5,17 +5,45 @@
  */
 import express from 'express';
 import request from 'supertest';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 
 import { createWebhookRouter, WebhookRouterDeps } from '../../src/webhooks/routes';
 import { createWebhookSignature } from '../../src/webhooks/webhook-handler';
 import { InMemoryCustomerPaymentMethodRepository } from '../../src/payments/customer-payment-method';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { StripeFetch } from '../../src/payments/stripe-payment-intent';
 
 const STRIPE_SECRET = 'whsec_test_setup_intent';
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const CUSTOMER = '22222222-2222-2222-2222-222222222222';
+/** #1177 — a neighbour tenant and ITS customer. */
+const OTHER_TENANT = '33333333-3333-3333-3333-333333333333';
+const FOREIGN_CUSTOMER = '44444444-4444-4444-4444-444444444444';
+
+/** The tenant-scoped customer lookup, holding TENANT's CUSTOMER and OTHER_TENANT's FOREIGN_CUSTOMER. */
+async function seededCustomerRepo(): Promise<InMemoryCustomerRepository> {
+  const repo = new InMemoryCustomerRepository();
+  for (const [id, tenantId] of [
+    [CUSTOMER, TENANT],
+    [FOREIGN_CUSTOMER, OTHER_TENANT],
+  ]) {
+    await repo.create({
+      id,
+      tenantId,
+      firstName: 'Card',
+      lastName: 'Holder',
+      displayName: 'Card Holder',
+      preferredChannel: 'sms',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: 'test',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+  return repo;
+}
 
 function jsonRes(ok: boolean, status: number, body: unknown) {
   return { ok, status, text: async () => JSON.stringify(body), json: async () => body };
@@ -27,7 +55,8 @@ function jsonRes(ok: boolean, status: number, body: unknown) {
  * production: a resolver under which TENANT owns `acct_tenant` (the account
  * the fixture events come from). A test can override it.
  */
-function buildApp(deps: WebhookRouterDeps) {
+async function buildApp(deps: WebhookRouterDeps) {
+  const customerRepo = await seededCustomerRepo();
   const app = express();
   app.use('/webhooks/stripe', express.raw({ type: '*/*' }));
   app.use(
@@ -37,6 +66,7 @@ function buildApp(deps: WebhookRouterDeps) {
         resolveTenantConnectAccount: async (tenantId: string) =>
           tenantId === TENANT ? { accountId: 'acct_tenant', chargesEnabled: true } : null,
       },
+      customerRepo,
       ...deps,
     }),
   );
@@ -78,7 +108,7 @@ describe('webhook: setup_intent.succeeded', () => {
         id: 'pm_123',
         card: { brand: 'visa', last4: '4242', exp_month: 9, exp_year: 2030 },
       });
-    const app = buildApp({
+    const app = await buildApp({
       stripeWebhookSecret: STRIPE_SECRET,
       customerPaymentMethodRepo: cpmRepo,
       stripeConfig: { apiKey: 'sk_test' },
@@ -103,7 +133,7 @@ describe('webhook: setup_intent.succeeded', () => {
     const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
     const stripeFetch: StripeFetch = async () =>
       jsonRes(true, 200, { id: 'pm_dup', card: { brand: 'visa', last4: '4242' } });
-    const app = buildApp({
+    const app = await buildApp({
       stripeWebhookSecret: STRIPE_SECRET,
       customerPaymentMethodRepo: cpmRepo,
       stripeConfig: { apiKey: 'sk' },
@@ -116,7 +146,7 @@ describe('webhook: setup_intent.succeeded', () => {
 
   it('skips when the setup intent has no tenant/customer metadata', async () => {
     const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
-    const app = buildApp({
+    const app = await buildApp({
       stripeWebhookSecret: STRIPE_SECRET,
       customerPaymentMethodRepo: cpmRepo,
       stripeConfig: { apiKey: 'sk' },
@@ -130,7 +160,7 @@ describe('webhook: setup_intent.succeeded', () => {
   it('still stores the card (ids only) when the metadata retrieve fails', async () => {
     const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
     const stripeFetch: StripeFetch = async () => jsonRes(false, 500, { error: { message: 'boom' } });
-    const app = buildApp({
+    const app = await buildApp({
       stripeWebhookSecret: STRIPE_SECRET,
       customerPaymentMethodRepo: cpmRepo,
       stripeConfig: { apiKey: 'sk' },
@@ -146,7 +176,7 @@ describe('webhook: setup_intent.succeeded', () => {
 
   it('#1109 — refuses (403, nothing stored) a card saved on a connected account the tenant does not own', async () => {
     const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
-    const app = buildApp({
+    const app = await buildApp({
       stripeWebhookSecret: STRIPE_SECRET,
       customerPaymentMethodRepo: cpmRepo,
       stripeConfig: { apiKey: 'sk' },
@@ -159,5 +189,45 @@ describe('webhook: setup_intent.succeeded', () => {
     expect(res.status).toBe(403);
     expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_account_mismatch' });
     expect(await cpmRepo.findByCustomer(TENANT, CUSTOMER)).toHaveLength(0);
+  });
+
+  it('#1177 — refuses (403, nothing stored) when the metadata names TENANT but a customer_id of another tenant', async () => {
+    const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
+    const stripeFetch = vi.fn<StripeFetch>(async () => jsonRes(true, 200, { id: 'pm_foreign', card: { brand: 'visa' } }));
+    const app = await buildApp({
+      stripeWebhookSecret: STRIPE_SECRET,
+      customerPaymentMethodRepo: cpmRepo,
+      stripeConfig: { apiKey: 'sk' },
+      stripeFetch,
+    });
+    const res = await postSigned(
+      app,
+      setupIntentSucceeded({
+        paymentMethod: 'pm_foreign',
+        metadata: { tenant_id: TENANT, customer_id: FOREIGN_CUSTOMER },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_customer_tenant_mismatch' });
+    expect(await cpmRepo.findByCustomer(TENANT, FOREIGN_CUSTOMER)).toHaveLength(0);
+    expect(await cpmRepo.findByCustomer(OTHER_TENANT, FOREIGN_CUSTOMER)).toHaveLength(0);
+    // Refused before any Stripe call is made for the card's display metadata.
+    expect(stripeFetch).not.toHaveBeenCalled();
+  });
+
+  it('#1177 — refuses a malformed customer_id without querying (403, not a 500 Stripe would retry)', async () => {
+    const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
+    const app = await buildApp({
+      stripeWebhookSecret: STRIPE_SECRET,
+      customerPaymentMethodRepo: cpmRepo,
+      stripeConfig: { apiKey: 'sk' },
+      stripeFetch: async () => jsonRes(true, 200, {}),
+    });
+    const res = await postSigned(
+      app,
+      setupIntentSucceeded({ metadata: { tenant_id: TENANT, customer_id: 'not-a-uuid' } }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_customer_tenant_mismatch' });
   });
 });

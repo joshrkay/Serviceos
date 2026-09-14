@@ -151,6 +151,19 @@ export function dayWindowFor(
   return { openMinutes: pair.openHour * 60, closeMinutes: pair.closeHour * 60 };
 }
 
+/** The travel buffer applied when a tenant has not configured one (#1158). */
+export const DEFAULT_BUFFER_MINUTES = DEFAULT_BUFFER_MS / 60000;
+
+/**
+ * #1158 — the buffer a slot computation actually applies. A tenant's
+ * `job_buffer_minutes` is NULL until the owner sets it (migration 277); every
+ * reader that turns it into slot adjacency applies this default so an unset
+ * buffer behaves exactly like the stored 30 it replaced.
+ */
+export function effectiveBufferMinutes(bufferMinutes: number | null | undefined): number {
+  return bufferMinutes != null && bufferMinutes >= 0 ? bufferMinutes : DEFAULT_BUFFER_MINUTES;
+}
+
 /**
  * Scheduling-relevant tenant configuration, extracted once so every caller
  * (dispatch route, public booking, portal, voice skill) consumes settings
@@ -303,10 +316,7 @@ export async function findBookableSlotsDetailed(
   const durationMs = input.durationMin * 60 * 1000;
   const weeklyConfigured = hasConfiguredWeeklyHours(input.weeklyHours);
   const pair = input.businessHours ?? DEFAULT_BUSINESS_HOURS;
-  const bufferMs =
-    input.bufferMinutes != null && input.bufferMinutes >= 0
-      ? input.bufferMinutes * 60 * 1000
-      : DEFAULT_BUFFER_MS;
+  const bufferMs = effectiveBufferMinutes(input.bufferMinutes) * 60 * 1000;
 
   const config: BookableSlotsConfigMeta = {
     businessHoursSource:

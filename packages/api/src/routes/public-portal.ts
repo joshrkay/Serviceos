@@ -39,6 +39,7 @@ import {
   isWithinBusinessHours,
   WeeklyBusinessHours,
   schedulingConfigFromSettings,
+  effectiveBufferMinutes,
   isSlotFree,
   clampBookingHorizon,
   STANDARD_BOOKING_HORIZON_DAYS,
@@ -741,8 +742,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           start: slotStart,
           end: slotEnd,
           // Tenant travel buffer — a crafted POST must not land a slot the
-          // buffered availability (GET) would never have offered.
-          bufferMinutes: scheduling.bufferMinutes,
+          // buffered availability (GET) would never have offered. #1158 —
+          // an unset (NULL) buffer applies the same default GET applies.
+          bufferMinutes: effectiveBufferMinutes(scheduling.bufferMinutes),
         });
         if (!stillFree) {
           return { ok: false as const };
@@ -936,9 +938,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         tenantId,
         start: slotStart,
         end: slotEnd,
-        // Buffered like GET availability, but the appointment being moved
-        // must not block its own target slot.
-        bufferMinutes: scheduling.bufferMinutes,
+        // Buffered like GET availability (#1158: unset → the same default),
+        // but the appointment being moved must not block its own target slot.
+        bufferMinutes: effectiveBufferMinutes(scheduling.bufferMinutes),
         excludeAppointmentIds: [owned.id],
       });
       if (!free) {

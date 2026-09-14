@@ -8,6 +8,8 @@ import {
   InvoiceMilestone,
   InvoiceScheduleRepository,
   buildInvoiceSchedule,
+  isDuplicateMilestoneError,
+  milestoneEstimateLink,
   splitMilestones,
 } from '../../invoices/invoice-schedule';
 import { buildLineItem } from '../../shared/billing-engine';
@@ -183,6 +185,10 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
             .filter((inv) => inv.scheduleId === schedule.id && inv.milestoneIndex !== undefined)
             .map((inv) => inv.milestoneIndex),
         );
+        // uq_invoices_estimate allows ONE invoice per estimate: the first
+        // milestone drafted carries the link, later ones (a permit fee, the
+        // balance at completion) reach the estimate through the schedule row.
+        let estimateLink = milestoneEstimateLink(estimateId, jobInvoices);
         for (const onAccept of onAcceptAllocations) {
           if (onAccept.amountCents <= 0) continue; // never draft a $0 invoice
           if (drafted.has(onAccept.index)) continue;
@@ -191,7 +197,7 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
               {
                 tenantId: context.tenantId,
                 jobId: payload.jobId,
-                estimateId,
+                estimateId: estimateLink,
                 lineItems: [buildLineItem(uuidv4(), onAccept.label, 1, onAccept.amountCents, 0, true)],
                 createdBy: context.executedBy,
                 scheduleId: schedule.id,
@@ -202,14 +208,18 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
             );
           } catch (err) {
             // Partial unique index (schedule_id, milestone_index) rejected a
-            // concurrent/retried mint of this milestone — already drafted.
-            if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+            // concurrent/retried mint of this milestone — already drafted (the
+            // other run owns the estimate link too). A 23505 from any other
+            // index is a real failure and fails the execution loudly.
+            if (isDuplicateMilestoneError(err)) {
               drafted.add(onAccept.index);
+              estimateLink = undefined;
               continue;
             }
             throw err;
           }
           drafted.add(onAccept.index);
+          estimateLink = undefined;
         }
       }
 

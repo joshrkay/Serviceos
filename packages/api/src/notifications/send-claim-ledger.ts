@@ -108,36 +108,6 @@ export async function markSendClaimSending(
 }
 
 /**
- * #1140 — atomic "exactly once, ever" gate for a bookkeeping side effect
- * (e.g. writing a completion audit row) rather than the claimed → sending →
- * sent PROVIDER-call lifecycle the rest of this module models. Reuses the
- * same `send_claims` table and its `UNIQUE (tenant_id, claim_key)`
- * constraint under a caller-chosen, DISTINCT claim_key namespace — no new
- * table or migration needed. Returns true only for the very first caller,
- * ever, for this (tenantId, claimKey) pair; every other caller — concurrent
- * or arbitrarily later — gets false and must skip the side effect.
- *
- * Unlike `claimSend`, this claim is NEVER reclaimable (no stale-timeout
- * path): the side effect it's guarding either already happened (this row
- * exists) or it hasn't (row absent) — there's no "abandoned mid-flight"
- * state to recover from, so nothing should ever delete or reset this row.
- */
-export async function claimOnce(
-  pool: Pool,
-  tenantId: string,
-  claimKey: string,
-): Promise<boolean> {
-  const res = await pool.query(
-    `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
-     VALUES ($1, $2, 'sent', NOW(), NOW())
-     ON CONFLICT (tenant_id, claim_key) DO NOTHING
-     RETURNING claim_key`,
-    [tenantId, claimKey],
-  );
-  return (res.rowCount ?? 0) > 0;
-}
-
-/**
  * Permanently finalize a claim as sent. Idempotent; once a row is `'sent'`,
  * `claimSend`'s guard means it is never matched again for this key.
  */
@@ -254,8 +224,32 @@ export interface WithSendClaimOptions {
    * preparation and only flips to `'sending'` for the brief window around the
    * provider call itself. `sendFn`s that are ONLY the provider call don't need
    * this and should leave it unset.
+   *
+   * #1184 — a `sendFn` with NO provider call at all (a bookkeeping write such as
+   * the thank-you worker's completion audit row) sets this and never calls
+   * `markProviderStarting()`: the claim stays `'claimed'` (stale-reclaimable)
+   * until `sendFn` resolves, then becomes `'sent'`; a throw releases it.
    */
   deferSendingUntilProviderStart?: boolean;
+}
+
+/**
+ * The current status of a claim, or null when no row exists. A read only —
+ * never a claim. #1184 review: lets a caller learn that a provider send
+ * already completed (`'sent'`) BEFORE running checks that would otherwise
+ * treat the occasion as never sent.
+ */
+export async function readSendClaimStatus(
+  pool: Pool,
+  tenantId: string,
+  claimKey: string,
+): Promise<'claimed' | 'sending' | 'sent' | null> {
+  const res = await pool.query(
+    `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+    [tenantId, claimKey],
+  );
+  const status = res.rows[0]?.status;
+  return status === 'sent' || status === 'claimed' || status === 'sending' ? status : null;
 }
 
 /** Read the losing claim's current status and shape it into a duplicate outcome. */
@@ -264,16 +258,8 @@ async function duplicateOutcome<T>(
   tenantId: string,
   claimKey: string,
 ): Promise<SendClaimOutcome<T>> {
-  const res = await pool.query(
-    `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
-    [tenantId, claimKey],
-  );
-  const status = res.rows[0]?.status;
-  return {
-    outcome: 'duplicate',
-    priorStatus:
-      status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
-  };
+  const status = await readSendClaimStatus(pool, tenantId, claimKey);
+  return { outcome: 'duplicate', priorStatus: status ?? 'unknown' };
 }
 
 /**
