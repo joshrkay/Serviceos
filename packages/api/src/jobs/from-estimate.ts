@@ -37,6 +37,7 @@ import { UserRepository, User } from '../users/user';
 import { InvoiceRepository } from '../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from './job-money-state';
 import {
+  effectiveBufferMinutes,
   findBookableSlots,
   isSlotFree,
   schedulingConfigFromSettings,
@@ -163,7 +164,8 @@ async function chooseTechnicianAndSlot(
     for (const tech of candidates) {
       const free = await isSlotFree(slotDeps, {
         tenantId, start: scheduledStart, end: scheduledEnd, technicianId: tech.id,
-        bufferMinutes: schedulingConfig.bufferMinutes,
+        // #1158 — NULL (unset) buffer → the same default GET availability applies.
+        bufferMinutes: effectiveBufferMinutes(schedulingConfig.bufferMinutes),
       });
       if (!free) continue;
       // isSlotFree covers calendar conflicts only — screen the candidate's

@@ -384,6 +384,45 @@ describe('schedulingConfigFromSettings — the single settings→scheduling seam
   });
 });
 
+describe('effectiveBufferMinutes — unset buffer applies the default (#1158)', () => {
+  it('maps null / undefined / negative to the 30-minute default and keeps a configured value (including 0)', async () => {
+    const { effectiveBufferMinutes, DEFAULT_BUFFER_MINUTES } = await import(
+      '../../src/scheduling/booking-availability'
+    );
+    expect(DEFAULT_BUFFER_MINUTES).toBe(30);
+    expect([null, undefined, -5, 0, 45].map((m) => effectiveBufferMinutes(m))).toEqual([30, 30, 30, 0, 45]);
+  });
+
+  it('an unset buffer produces the same slots — and a default label — as the stored 30 it replaced', async () => {
+    const run = async (bufferMinutes: number | null) => {
+      const deps = makeDeps();
+      await deps.appointmentRepo.create(
+        appt({
+          scheduledStart: new Date('2026-06-15T14:00:00Z'),
+          scheduledEnd: new Date('2026-06-15T15:00:00Z'),
+        }),
+      );
+      return findBookableSlotsDetailed(deps, {
+        tenantId: TENANT,
+        fromDate: '2026-06-15',
+        toDate: '2026-06-15',
+        timezone: 'UTC',
+        durationMin: 60,
+        bufferMinutes,
+        maxSlots: 20,
+        now: NOW,
+      });
+    };
+    const unset = await run(null);
+    const explicit30 = await run(30);
+    expect(unset.slots.map((s) => s.start.toISOString())).toEqual(
+      explicit30.slots.map((s) => s.start.toISOString()),
+    );
+    expect([unset.config.bufferSource, unset.config.bufferMinutes]).toEqual(['default', 30]);
+    expect([explicit30.config.bufferSource, explicit30.config.bufferMinutes]).toEqual(['tenant', 30]);
+  });
+});
+
 describe('isSlotFree — trailing-buffer fetch horizon (Codex P1)', () => {
   async function freeWithBuffer(bufferMinutes: number) {
     const deps = makeDeps();

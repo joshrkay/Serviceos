@@ -12,10 +12,11 @@
  * a settings-surface PUT of those fields would 200 and write nothing
  * (the schema documents this exact failure mode for businessHours).
  * PUT /api/onboarding/identity accepts all three service-area fields
- * today, so no API change is needed. That route REQUIRES businessName,
- * jobBufferMinutes and hourlyRateCents (businessHours defaults to {}),
- * so we echo those back exactly as loaded; its upsert COALESCEs every
- * field, leaving anything we echo untouched.
+ * today, so no API change is needed. That route REQUIRES businessName
+ * and hourlyRateCents (businessHours defaults to {}), so we echo those back
+ * exactly as loaded; its upsert COALESCEs every field, leaving anything we
+ * echo untouched. jobBufferMinutes is echoed only when one is stored: an
+ * unset buffer (#1158) must stay unset, not become an explicit 30.
  */
 import { useEffect, useState } from 'react';
 import { X, MapPin } from 'lucide-react';
@@ -32,7 +33,8 @@ export interface ServiceAreaFields {
 interface IdentityEcho {
   businessName: string;
   businessHours: Record<string, { open: string; close: string } | null> | null;
-  jobBufferMinutes: number;
+  /** null = no buffer configured (#1158) — omitted from the PUT. */
+  jobBufferMinutes: number | null;
   hourlyRateCents: number | null;
 }
 
@@ -87,7 +89,7 @@ export function ServiceAreaSheet({ onClose, onSaved }: ServiceAreaSheetProps) {
           businessName: (data.businessName ?? '').trim(),
           businessHours: data.businessHours ?? null,
           jobBufferMinutes:
-            typeof data.jobBufferMinutes === 'number' ? data.jobBufferMinutes : 30,
+            typeof data.jobBufferMinutes === 'number' ? data.jobBufferMinutes : null,
           hourlyRateCents:
             typeof data.hourlyRateCents === 'number' ? data.hourlyRateCents : null,
         });
@@ -134,8 +136,10 @@ export function ServiceAreaSheet({ onClose, onSaved }: ServiceAreaSheetProps) {
           // Echoes — the route requires these; the upsert COALESCEs them
           // so sending the loaded values leaves them untouched.
           businessName: echo.businessName,
-          jobBufferMinutes: echo.jobBufferMinutes,
           hourlyRateCents: echo.hourlyRateCents,
+          // #1158 — a stored buffer is echoed; an unset one stays unset (the
+          // route keeps the stored NULL when the key is omitted).
+          ...(echo.jobBufferMinutes !== null ? { jobBufferMinutes: echo.jobBufferMinutes } : {}),
           // Omit unset hours: the schema defaults to {} which, like the
           // stored NULL, reads as "not configured" downstream — but a
           // stored schedule must be echoed or {} would overwrite it.
