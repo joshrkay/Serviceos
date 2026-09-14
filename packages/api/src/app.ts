@@ -5470,6 +5470,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       tenantFeatureFlags
         ? { tenantFlags: tenantFeatureFlags, platformFlags: featureFlagRepo, userRepo }
         : undefined,
+      // #1143 — the owner's write path for the late-fee policy
+      // (GET/PUT /api/settings/dunning): the FIRST product caller of
+      // DunningConfigRepository.upsert. Same repo instance the overdue sweep
+      // reads, so a saved policy applies on the next sweep tick.
+      { dunningConfigRepo },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
