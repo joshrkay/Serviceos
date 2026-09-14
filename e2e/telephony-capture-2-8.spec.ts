@@ -194,23 +194,42 @@ test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real w
       [tenantA.tenantId, customers[0]!.id],
     );
     expect(files).toHaveLength(1);
+
+    // #1133-adjacent workaround: the vision-drafting call itself runs
+    // asynchronously off the mms_ingest queue job, AFTER this webhook's HTTP
+    // response already returned 200. Now that #1154's mock fix makes this
+    // draft succeed (previously it always failed hermetically), wait for
+    // its own audit row to land before this test returns — otherwise the
+    // next test's "no NEW draft fired" snapshot (`before = auditRows(...)`)
+    // can race this test's still-in-flight async draft and undercount it.
+    await pollFor(
+      pool,
+      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'customer_mms.estimate_drafted'`,
+      [tenantA.tenantId],
+    );
   });
 
   test(
     'the stored photo drafts a catalog-grounded draft_estimate proposal, audited (#1154 item 1 fixed)',
     async ({ request }) => {
       const from = '+15125558804';
+      const messageSid = `SM${crypto.randomUUID().replace(/-/g, '')}`;
       const res = await signedMmsPost(request, tenantA, {
         from,
         body: 'My water heater is leaking, can you give me a quote',
         mediaUrl: media.url,
+        messageSid,
       });
       expect(res.status()).toBe(200);
 
-      const events = await pollFor(
+      // Scoped to THIS post's own messageSid, not just tenantA broadly — the
+      // prior test's own MMS post also now drafts successfully (#1154), so
+      // an unscoped "most recent" query could race and pick up its row
+      // instead of this one.
+      const events = await pollFor<{ id: string; entity_id: string }>(
         pool,
-        `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'customer_mms.estimate_drafted'`,
-        [tenantA.tenantId],
+        `SELECT id, entity_id FROM audit_events WHERE tenant_id = $1 AND event_type = 'customer_mms.estimate_drafted' AND metadata->>'messageSid' = $2`,
+        [tenantA.tenantId, messageSid],
         { timeoutMs: 5_000 },
       );
       expect(events.length, 'a draft_estimate should have been audited').toBeGreaterThan(0);
@@ -220,8 +239,8 @@ test.describe('#1014 row 2.8 — an MMS photo resolves/stores through the real w
       // the persisted line item must carry no `catalogItemId: null` (the
       // mock no longer emits the key at all, matching a real model).
       const proposals = await pool.query<{ payload: { lineItems: Array<Record<string, unknown>> } }>(
-        `SELECT payload FROM proposals WHERE tenant_id = $1 AND proposal_type = 'draft_estimate' ORDER BY created_at DESC LIMIT 1`,
-        [tenantA.tenantId],
+        `SELECT payload FROM proposals WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, events[0]!.entity_id],
       );
       expect(proposals.rows).toHaveLength(1);
       const line = proposals.rows[0]!.payload.lineItems[0]!;
