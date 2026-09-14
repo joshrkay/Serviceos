@@ -204,6 +204,9 @@ describe('SendEstimateNudgeExecutionHandler', () => {
       estimateId: ESTIMATE_ID,
       channel: 'sms',
       customMessage: 'Any questions?',
+      // #1145 — the nudge is claimed per occurrence (estimate, version,
+      // reminderCount + 1), so a retried first nudge dedupes and a later one does not.
+      idempotencyContext: `estimate_nudge:${ESTIMATE_ID}:v1:1`,
     });
 
     const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
