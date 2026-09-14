@@ -190,6 +190,31 @@ describe('public-booking route', () => {
       expect(Array.isArray(second.body.alternatives)).toBe(true);
     });
 
+    // #1158 — job_buffer_minutes is NULL until the owner sets one (this
+    // tenant's settings row carries no buffer). The WRITE side must apply the
+    // same 30-minute default GET availability applies, so a crafted POST that
+    // abuts an existing booking is refused — never offered by GET, never
+    // accepted by POST.
+    it('applies the default 30-minute buffer to a POST when the tenant never set one (#1158)', async () => {
+      const slot = await firstSlot();
+      const first = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(slot.start, slot.end));
+      expect(first.status).toBe(201);
+
+      const abutStart = slot.end;
+      const abutEnd = new Date(new Date(slot.end).getTime() + 3_600_000).toISOString();
+      const offered = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: slot.start.slice(0, 10), to: slot.start.slice(0, 10), durationMin: 60 });
+      expect(offered.body.slots.map((s: { start: string }) => s.start)).not.toContain(abutStart);
+
+      const abutting = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(abutStart, abutEnd));
+      expect(abutting.status).toBe(409);
+    });
+
     it('rejects a slot in the past', async () => {
       const start = new Date(Date.now() - 2 * 3_600_000).toISOString();
       const end = new Date(Date.now() - 3_600_000).toISOString();

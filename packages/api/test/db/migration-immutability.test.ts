@@ -534,6 +534,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // #1139 — proposals.original_payload (payload as first proposed). NEW
   // migration; nothing above was edited.
   ['275_proposals_original_payload', 'b21fd09557ecd2dced85a5ebf9955200743260790cbcf7bd9c82bb8110057331'],
+  // #1158 — tenant_settings.job_buffer_minutes nullable (NEW migration). Key
+  // 277: 275 is on main and #1131's PR (#1186) holds 276.
+  ['277_tenant_settings_job_buffer_nullable', 'de82e5365dc6ec62f15cecd4148b8f907e83be0d18c9fcf764956f3212f2e38d'],
 ];
 
 function hashMigration(value: string): string {

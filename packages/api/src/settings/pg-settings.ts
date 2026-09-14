@@ -638,7 +638,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
            $3,
            $4,
            COALESCE($5::jsonb, '{}'::jsonb),
-           COALESCE($6, 30),
+           -- #1158 — NULL = buffer not configured (migration 277); readers
+           -- apply the 30-minute default, so a first write that omits the
+           -- buffer must not store a 30 indistinguishable from a chosen one.
+           $6,
            $7,
            -- NO fallback zone on first insert either — see
            -- TenantIdentityUpsertFields.timezone / migration 263.

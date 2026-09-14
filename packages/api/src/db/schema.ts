@@ -6781,6 +6781,76 @@ export const MIGRATIONS = {
   '275_proposals_original_payload': `
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
   `,
+  // #1158 — make "this tenant never chose a travel buffer" REPRESENTABLE, the
+  // same move 263 made for timezone. 098 added job_buffer_minutes as
+  // `INT NOT NULL DEFAULT 30` and every signup writes a settings row, so an
+  // untouched tenant read back a stored 30 and availability labelled it
+  // `bufferSource: 'tenant'` — the owner was told they had configured a
+  // buffer they never set. NULL now means "not configured"; every reader
+  // applies the 30-minute default in code (effectiveBufferMinutes in
+  // scheduling/booking-availability.ts, onboarding/load-facts.ts), so the
+  // EFFECTIVE buffer — and therefore every offered/accepted slot — is
+  // unchanged.
+  //
+  // Backfill: a stored 30 becomes NULL only when the audit trail shows no
+  // write that carried a buffer for that tenant. The writes that carry one:
+  //   - PUT /api/onboarding/identity (the route REQUIRED jobBufferMinutes up
+  //     to this change) → 'tenant.identity_set' with metadata.hourlyRateCents;
+  //   - the conversational onboarding_tenant_settings handler (writes 30) →
+  //     'tenant.identity_set' with metadata.jobBufferMinutes;
+  //   - PUT /api/settings → 'settings.tenant.updated' whose
+  //     metadata.changedKeys contains 'jobBufferMinutes'.
+  // ('tenant.identity_set' from the onboarding_schedule handler carries only
+  // businessHours and is NOT evidence.) ASSUMPTION: a buffer write that
+  // predates those audit shapes leaves no trace, so such a tenant is
+  // relabelled 'default' — its effective buffer stays 30 either way.
+  //
+  // One-shot: the runner has no ledger and re-runs every migration on each
+  // boot, so the whole block is guarded on the column still being NOT NULL.
+  // After the first successful run the column is nullable and the backfill
+  // never runs again (it must not: a later NULL is a genuine "unset").
+  // The migrate role bypasses RLS (see 119), so the UPDATE and the audit
+  // lookup see every tenant.
+  //
+  // Pre-flight (run before deploy; informational — the block cannot fail on
+  // existing data):
+  //   SELECT count(*) FILTER (WHERE job_buffer_minutes = 30) AS stored_30,
+  //          count(*) FILTER (WHERE job_buffer_minutes = 30 AND NOT EXISTS (
+  //            SELECT 1 FROM audit_events ae WHERE ae.tenant_id = ts.tenant_id AND (
+  //              (ae.event_type = 'tenant.identity_set'
+  //                AND (ae.metadata ? 'jobBufferMinutes' OR ae.metadata ? 'hourlyRateCents'))
+  //              OR (ae.event_type = 'settings.tenant.updated'
+  //                AND ae.metadata -> 'changedKeys' ? 'jobBufferMinutes')))) AS becomes_null,
+  //          count(*) FILTER (WHERE job_buffer_minutes <> 30) AS custom_kept
+  //     FROM tenant_settings ts;
+  '277_tenant_settings_job_buffer_nullable': `
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'tenant_settings'
+           AND column_name = 'job_buffer_minutes'
+           AND is_nullable = 'NO'
+      ) THEN
+        ALTER TABLE tenant_settings ALTER COLUMN job_buffer_minutes DROP DEFAULT;
+        ALTER TABLE tenant_settings ALTER COLUMN job_buffer_minutes DROP NOT NULL;
+        UPDATE tenant_settings ts
+           SET job_buffer_minutes = NULL
+         WHERE ts.job_buffer_minutes = 30
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_events ae
+              WHERE ae.tenant_id = ts.tenant_id
+                AND (
+                  (ae.event_type = 'tenant.identity_set'
+                    AND (ae.metadata ? 'jobBufferMinutes' OR ae.metadata ? 'hourlyRateCents'))
+                  OR (ae.event_type = 'settings.tenant.updated'
+                    AND ae.metadata -> 'changedKeys' ? 'jobBufferMinutes')
+                )
+           );
+      END IF;
+    END $$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
