@@ -844,103 +844,66 @@ describe('auto-approved proposal — undo parity', () => {
   });
 });
 
-// ─── #1144 — the customer-photo leg must actually leave the Assistant chat ──
-// Previously "Photo from camera" faked `pendingAttachment` with no real file
-// at all (no upload, no bytes) and `sendToConversationAPI` posted only
-// `{ messages, conversationId, inputMode }` — a photo turn's attachment
-// never reached the server. Fix: a real <input type="file"> uploads through
-// POST /api/files/upload-url → PUT, and the resulting fileId rides the chat
-// turn as an additive `attachments: [{ fileId }]` field.
-describe('#1144 — a photo attachment is uploaded and its fileId reaches POST /api/assistant/chat', () => {
-  function makePhotoFile(): File {
-    return new File(['fake-bytes'], 'issue.jpg', { type: 'image/jpeg' });
-  }
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('uploads the selected photo and sends its fileId on the chat turn', async () => {
-    // The signed-upload POST goes through the mocked apiFetch (same client
-    // every other /api/* call in this file uses); the raw PUT of the bytes
-    // goes through global fetch (mirrors createSignedAudioUpload's PUT).
-    mockedApiFetch.mockImplementation(async (url: RequestInfo | URL) => {
-      const u = String(url);
-      if (u === '/api/files/upload-url') {
-        return jsonResponse({ fileId: 'file-photo-1', uploadUrl: 'https://storage.example/put', downloadUrl: 'https://cdn.example/issue.jpg' });
-      }
-      if (u === '/api/assistant/chat') {
-        return jsonResponse({ message: { content: 'That looks like a cracked coil.' }, conversationId: 'c-1144' });
-      }
-      return jsonResponse({});
-    });
-    const putSpy = vi.fn(async () => new Response(null, { status: 200 }));
-    vi.stubGlobal('fetch', putSpy);
-
+// ─── #1153 — the voice-command nav shortcut must never hijack an Assistant
+// composer turn. matchVoiceCommand's `\b(new|create|add)\s+…(customer|client)\b`
+// pattern used to run over EVERY chat turn (typed or dictated) before it
+// reached the conversation API, so a full sentence like "Add a new
+// customer, Mario Delingo, 412 Oak Street" navigated straight to
+// /customers/new and dropped the name/address — the server's deterministic
+// create_customer classifier (intent-classifier.ts) was unreachable from
+// chat. Fix: the Assistant composer no longer applies navigation shortcuts
+// at all — every turn always reaches POST /api/assistant/chat. The global
+// voice-nav surface (VoiceBar.tsx, and matchVoiceCommand's own unit tests)
+// is untouched and keeps navigating on a bare "new customer" utterance.
+describe('#1153 — voice-command nav shortcut does not hijack the Assistant composer', () => {
+  it('sends a full "Add a new customer, …" turn to the conversation API instead of navigating away', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: "Got it — I've added Mario Delingo." }, conversationId: 'c-1153' }),
+    );
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Attach' }));
-    fireEvent.click(screen.getByText('Photo from camera'));
-
-    const fileInput = screen.getByTestId('assistant-photo-input') as HTMLInputElement;
-    const file = makePhotoFile();
-    fireEvent.change(fileInput, { target: { files: [file] } });
-
-    // The upload completes (PUT to the signed URL) before Send is usable.
-    await waitFor(() => expect(putSpy).toHaveBeenCalledWith('https://storage.example/put', expect.objectContaining({ method: 'PUT' })));
-    await waitFor(() => expect(screen.queryByTestId('assistant-photo-uploading')).not.toBeInTheDocument());
-
-    const input = screen.getByPlaceholderText(/Add a note about this attachment|Ask anything/);
-    fireEvent.change(input, { target: { value: 'What is wrong here?' } });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    const text = 'Add a new customer, Mario Delingo, 412 Oak Street';
+    fireEvent.change(input, { target: { value: text } });
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
 
+    // The full turn — name and address included — reaches the chat API.
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/api/assistant/chat',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining(text),
+      }),
+    ));
+    // The user's own message renders verbatim in the transcript — not
+    // replaced by a synthetic "Adding new customer." label.
+    expect(screen.getByText(text)).toBeInTheDocument();
+    // The reply that actually answers the request is shown.
     await waitFor(() =>
-      expect(mockedApiFetch).toHaveBeenCalledWith(
-        '/api/assistant/chat',
-        expect.objectContaining({
-          method: 'POST',
-          body: expect.stringContaining('"attachments":[{"fileId":"file-photo-1"}]'),
-        }),
-      ),
-    );
-    await waitFor(() =>
-      expect(screen.getByText('That looks like a cracked coil.')).toBeInTheDocument(),
+      expect(screen.getByText("Got it — I've added Mario Delingo.")).toBeInTheDocument(),
     );
   });
 
-  it('surfaces a visible error and sends nothing when the upload fails', async () => {
-    mockedApiFetch.mockImplementation(async (url: RequestInfo | URL) => {
-      const u = String(url);
-      if (u === '/api/files/upload-url') {
-        return new Response('Service Unavailable', { status: 503 });
-      }
-      if (u === '/api/files/upload') {
-        return new Response('Service Unavailable', { status: 503 });
-      }
-      return jsonResponse({});
-    });
-
+  it('sends a bare "new customer" typed in the composer too — the composer never navigates locally', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: 'Sure — what\'s their name?' }, conversationId: 'c-1153b' }),
+    );
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Attach' }));
-    fireEvent.click(screen.getByText('Photo from camera'));
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'new customer' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
 
-    const fileInput = screen.getByTestId('assistant-photo-input') as HTMLInputElement;
-    fireEvent.change(fileInput, { target: { files: [makePhotoFile()] } });
-
-    await waitFor(() =>
-      expect(screen.getByTestId('assistant-photo-upload-error')).toHaveTextContent(
-        'Unable to get a signed upload URL.',
-      ),
-    );
-    expect(
-      mockedApiFetch.mock.calls.some(([p]) => String(p) === '/api/assistant/chat'),
-    ).toBe(false);
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/api/assistant/chat',
+      expect.objectContaining({ method: 'POST' }),
+    ));
+    expect(screen.getByText("Sure — what's their name?")).toBeInTheDocument();
   });
 });

@@ -1,6 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { applyTenantContext, applyCrossTenantRole, clearTenantContext } from './rls-runtime-role';
 import { tenantContextStore } from '../middleware/tenant-context';
+import { assertAmbientSessionLeaseHeld } from './session-lease';
 
 /**
  * Base class for all Postgres-backed repositories.
@@ -61,6 +62,9 @@ export class PgBaseRepository {
    * still do the full BEGIN/COMMIT/ROLLBACK on a fresh connection.
    */
   protected async withTenantTransaction<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    // #1125 — inside work protected by a session advisory lock (a leader-gated
+    // sweep tick, a proposal execution), refuse once that lock is gone.
+    assertAmbientSessionLeaseHeld();
     const ctx = tenantContextStore.getStore();
     if (ctx && ctx.tenantId === tenantId) {
       return fn(ctx.client);
@@ -94,6 +98,7 @@ export class PgBaseRepository {
    * Execute a query without tenant context (for global tables like vertical_packs).
    */
   protected async withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    assertAmbientSessionLeaseHeld(); // #1125 — see withTenantTransaction
     const client = await this.pool.connect();
     try {
       return await fn(client);
@@ -118,6 +123,7 @@ export class PgBaseRepository {
     // backends), mirroring withTenantTransaction. applyCrossTenantRole is a
     // graceful no-op when the flag is off or the role is unprovisioned, so this
     // is byte-equivalent to withClient in those cases (just wrapped in a txn).
+    assertAmbientSessionLeaseHeld(); // #1125 — see withTenantTransaction
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

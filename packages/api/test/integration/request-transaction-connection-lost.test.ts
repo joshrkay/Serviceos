@@ -26,6 +26,8 @@ import type { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { createPool } from '../../src/db/pool';
+import { asyncRoute } from '../../src/middleware/async-route';
+import { toErrorResponse } from '../../src/shared/errors';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -79,6 +81,64 @@ async function startHarness(
     })();
   });
 
+  return listen(app);
+}
+
+/**
+ * The second shape, from the Codex review: a query IS in flight when the
+ * backend dies. `pg` then raises BOTH ways at once — `_errorAllQueries`
+ * rejects the handler's await (which flows through the real `asyncRoute` into
+ * the error pipeline) AND the client 'error' event fires. The caller must end
+ * up with exactly ONE complete response.
+ *
+ * The route is wrapped in the production `asyncRoute`, and the app carries a
+ * replica of app.ts's global error handler WITHOUT its `headersSent` guard —
+ * deliberately the adversarial version, so this proves the middleware alone
+ * keeps the pipeline single-writer rather than leaning on that guard.
+ *
+ * What is asserted is the server-side symptom, because the client-side one is
+ * invisible here: a second write into a committed response throws
+ * ERR_HTTP_HEADERS_SENT, and Express answers that by destroying the socket —
+ * but a 500 body this small is already flushed, so `fetch` still resolves. The
+ * trailing error handler records whatever the replica throws.
+ */
+async function startInFlightHarness(
+  pool: Pool,
+  tenantId: string,
+  serverErrors: unknown[],
+): Promise<Harness> {
+  const app = express();
+  app.use((req, _res, next) => {
+    (req as unknown as { auth: { tenantId: string } }).auth = { tenantId };
+    next();
+  });
+  app.use('/api', tenantContext.withTenantTransaction(pool));
+  app.post(
+    '/api/in-flight',
+    asyncRoute(async (_req, res) => {
+      const ctx = tenantContext.currentTenantContext();
+      // Still running when the backend is terminated below.
+      await ctx!.client.query('SELECT pg_sleep(5)');
+      res.status(200).json({ ok: true });
+    }),
+  );
+  app.use(
+    (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    },
+  );
+  // Express routes a throw from the handler above into the NEXT error handler,
+  // so this is where a second write into a committed response shows up.
+  app.use(
+    (err: Error, _req: express.Request, _res: express.Response, _next: express.NextFunction) => {
+      serverErrors.push(err);
+    },
+  );
+  return listen(app);
+}
+
+async function listen(app: express.Express): Promise<Harness> {
   const server: Server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -162,6 +222,43 @@ describe('#1090 — a killed request transaction must not report success', () =>
       // …and the response must not claim success.
       expect(res.status).toBeGreaterThanOrEqual(500);
     } finally {
+      await harness.close();
+      await pool.end().catch(() => undefined);
+    }
+  });
+
+  it('answers exactly once when a query is in flight as the backend dies', async () => {
+    const pool = appPool(baseUrl);
+    const serverErrors: unknown[] = [];
+    const harness = await startInFlightHarness(pool, tenantId, serverErrors);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const pending = fetch(`${harness.url}/api/in-flight`, { method: 'POST' });
+      // Let the request open its transaction and get pg_sleep running.
+      await sleep(500);
+      await harnessPool.query(
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1',
+        ['rivet_1090_reqtxn'],
+      );
+
+      const res = await pending;
+      expect(res.status).toBeGreaterThanOrEqual(500);
+      await expect(res.json()).resolves.toBeTruthy();
+
+      await sleep(300);
+      // Exactly one writer reached the response. A second one throws
+      // ERR_HTTP_HEADERS_SENT and Express destroys the socket to answer it.
+      expect(
+        (serverErrors as Array<{ code?: string }>).map((e) => e?.code ?? String(e)),
+      ).toEqual([]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
       await harness.close();
       await pool.end().catch(() => undefined);
     }
