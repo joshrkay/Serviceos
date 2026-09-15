@@ -1,8 +1,11 @@
 name: Voice smoke (real call, daily)
 
 on:
-  schedule:
-    - cron: '0 9 * * *'  # 09:00 UTC daily
+  # Daily schedule PAUSED 2026-09-15 (#1226): TWILIO_* / STAGING_* secrets and a
+  # real test number (#905) do not exist yet, so every scheduled run failed at
+  # the secret preflight. Re-enable once they are set:
+  # schedule:
+  #   - cron: '0 9 * * *'  # 09:00 UTC daily
   workflow_dispatch: {}
 
 # `contents: read` is mandatory: a permissions block drops every unlisted

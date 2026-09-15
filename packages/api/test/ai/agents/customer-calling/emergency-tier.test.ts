@@ -548,6 +548,141 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
   });
 });
 
+// ─── #1221 — Spanish injury and medical emergencies are E1 ──────────────────
+
+describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
+  const SPANISH_INJURY_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // Unconscious / unresponsive (English: unconscious, unresponsive, passed out, won't wake up)
+    ['E1', 'mi papá está inconsciente', 'unconscious'],
+    ['E1', 'mi esposa está desmayada', 'passed out'],
+    ['E1', 'mi hijo se desmayó', 'passed out'],
+    ['E1', 'mi abuela no responde', 'unresponsive, person subject'],
+    // Not breathing (English: not breathing, stopped breathing)
+    ['E1', 'mi bebé no respira', 'not breathing'],
+    ['E1', 'mi mamá no puede respirar', 'cannot breathe'],
+    ['E1', 'no puedo respirar', 'cannot breathe (was E2 via the backstop)'],
+    ['E1', 'no no puede respirar', 'a leading "no" does not negate it'],
+    ['E1', 'dejó de respirar', 'stopped breathing'],
+    // Chest pain / heart attack
+    ['E1', 'tiene dolor en el pecho', 'chest pain'],
+    ['E1', 'me duele mucho el pecho', 'chest pain'],
+    ['E1', 'creo que le está dando un infarto', 'heart attack'],
+    ['E1', 'le dio un ataque al corazón', 'heart attack'],
+    // Severe bleeding
+    ['E1', 'sangra mucho de la cabeza', 'severe bleeding'],
+    ['E1', 'hay mucha sangre', 'severe bleeding'],
+    ['E1', 'está sangrando mucho', 'severe bleeding'],
+    // Electrocution / shock (English: electrocuted, got shocked, electric shock)
+    ['E1', 'el electricista se electrocutó', 'electrocuted'],
+    ['E1', 'le dio la corriente', 'electric shock'],
+    ['E1', 'me dio un toque el enchufe', 'got shocked'],
+    // Seizure
+    ['E1', 'le está dando una convulsión', 'seizure'],
+    ['E1', 'está convulsionando', 'seizure'],
+    // Choking
+    ['E1', 'mi hijo se está ahogando', 'choking / drowning'],
+    ['E1', 'la niña está atragantada', 'choking'],
+    // Overdose, stroke
+    ['E1', 'creo que es una sobredosis', 'overdose'],
+    ['E1', 'le dio un derrame cerebral', 'stroke'],
+    // Fell and cannot move
+    ['E1', 'se cayó y no se puede mover', 'fell, cannot move'],
+    ['E1', 'mi papá se cayó de la escalera y no se puede mover', 'fell from a ladder, cannot move'],
+    ['E1', 'ayer se cayó y todavía no se puede mover', 'past fall, present urgency'],
+    // Burned (injury sense; English: badly burned, severe burn)
+    ['E1', 'se quemó la mano con aceite', 'burned hand'],
+    ['E1', 'se me quemó el brazo con agua hirviendo', 'scalded arm'],
+    ['E1', 'tiene quemaduras graves', 'severe burns'],
+    // Someone hurt (English: someone is hurt / injured)
+    ['E1', 'alguien está herido', 'someone is hurt'],
+    // Negations
+    ['not-E1', 'no está inconsciente', 'negated'],
+    ['not-E1', 'ya respira bien', 'breathing again'],
+    ['not-E1', 'no se desmayó', 'negated'],
+    ['not-E1', 'no tiene dolor en el pecho', 'negated'],
+    ['not-E1', 'no sangra mucho', 'negated'],
+    ['not-E1', 'no está convulsionando', 'negated'],
+    // Routine controls
+    ['not-E1', 'el técnico se cayó de la lista', 'fell off the list'],
+    ['not-E1', 'me duele el pecho de risa', 'laughing'],
+    ['not-E1', 'necesito un electricista porque me dio un toque el enchufe ayer', 'past, resolved shock'],
+    ['not-E1', 'el agua está hirviendo', 'boiling water'],
+    ['not-E1', 'se me quemó la comida', 'burned food'],
+    ['not-E1', 'el técnico no responde mis mensajes', 'an unresponsive technician'],
+    ['not-E1', 'el pintor le dio un toque final a la pared', 'finishing touch'],
+    ['not-E1', 'el drenaje no respira', 'plumbing vent'],
+    ['not-E1', 'se ahoga el motor de la planta', 'engine flooding'],
+    ['not-E1', 'se desmayó hace dos años', 'clearly past'],
+    // #1245 review, finding 1 — a present symptom is never downgraded by a
+    // past or hypothetical marker elsewhere; "desde ayer" is ongoing.
+    ['E1', 'mi papá está inconsciente, ayer estaba bien', 'present state + past elsewhere'],
+    ['E1', 'mi papá no responde desde ayer', '"desde ayer" is ongoing'],
+    ['E1', 'tiene dolor en el pecho desde ayer', '"desde ayer" is ongoing'],
+    ['E1', 'mi abuela se cayó anoche y no se puede levantar', 'past fall, present state'],
+    ['E1', 'mi hijo no respira, no sé si alguien puede venir', '"si alguien" is not hypothetical here'],
+    ['E1', 'mi hijo está convulsionando, de chico tenía epilepsia', 'present state + history'],
+    ['E1', 'ayer se desmayo y otra vez no responde', 'no accent; present state'],
+    // Finding 2 — the E2 fallback never wins over a present symptom.
+    ['E1', 'se electrocutó ayer y está inconsciente', 'past shock, present unconsciousness'],
+    // Finding 3 — missed phrasings.
+    ['E1', 'tomó muchas pastillas', 'overdose'],
+    ['E1', 'se le paralizó la cara', 'stroke sign'],
+    ['E1', 'se cayó de la escalera y no se mueve', 'fell, not moving'],
+    ['E1', 'se cayó de la escalera y no se levanta', 'fell, cannot get up'],
+    ['E1', 'está desangrándose', 'enclitic'],
+    ['E1', 'no sé qué le pasa, no responde', 'unresponsive, no named subject'],
+    ['E1', 'se golpeó la cabeza y no responde', 'head injury, unresponsive'],
+    ['E1', 'mi hijo está herido', 'hurt'],
+    ['E1', 'no tiene pulso', 'no pulse'],
+    ['E1', 'me electrocuté', 'first-person electrocution'],
+    ['E1', 'le dio un derrame', 'stroke'],
+    // Finding 4 — idioms with no person or symptom.
+    ['not-E1', 'el precio es un infarto', 'price idiom'],
+    ['not-E1', 'los precios están de infarto', 'price idiom'],
+    ['not-E1', 'tengo convulsiones de risa', 'laughing'],
+    ['not-E1', 'sobredosis de café', 'too much coffee'],
+    ['not-E1', 'la bomba se ahogó', 'pump flooded'],
+    ['not-E1', 'el calentador se ahoga', 'heater flooding'],
+    ['E1', 'a mi papá le dio un infarto', 'the idiom word with a person'],
+    ['not-E1', 'el control remoto no responde', 'a device, not a person'],
+    // Idiom readings must never swallow how someone got hurt, or reach across
+    // a clause into a separate price remark.
+    ['E1', 'tocó el enchufe y no responde', 'touched a live outlet, unresponsive'],
+    ['E1', 'le dio un infarto y la cuenta del hospital es cara', 'heart attack + a separate price remark'],
+    ['not-E1', 'el foco no responde', 'a light bulb'],
+  ];
+
+  it.each(SPANISH_INJURY_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+      expect(r.language).toBe('es');
+    } else {
+      expect(r.tier).not.toBe('E1');
+    }
+  });
+
+  // A shock yesterday is not a life-safety call any more, but the outlet that
+  // shocked the caller is still live: urgent same-day dispatch (E2), not a
+  // routine booking.
+  it('a past, resolved shock is E2: the caller is fine, the outlet is still a hazard', () => {
+    expect(
+      classifyCallerSafety('necesito un electricista porque me dio un toque el enchufe ayer', {}).tier,
+    ).toBe('E2');
+  });
+
+  // #1245 review, finding 5 — the recent-shock E2 fallback is for ayer /
+  // anteayer / anoche / hace N días (N ≤ 7) only.
+  it('an old shock ("hace años le dio una descarga el panel") is routine E3, not E2', () => {
+    expect(classifyCallerSafety('hace años le dio una descarga el panel', {}).tier).toBe('E3');
+  });
+
+  it('decomposed accents still classify E1: "se desmayó" in NFD', () => {
+    expect(classifyCallerSafety('mi hijo se desmayó'.normalize('NFD'), {}).tier).toBe('E1');
+  });
+});
+
 // ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
 
 describe('e1ScriptReadiness (boot gate)', () => {
