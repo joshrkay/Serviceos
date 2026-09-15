@@ -490,5 +490,37 @@ describe('#1212 — an emergency outcome wins over the token-cap end', () => {
       expect(call.capAudits()).toEqual([]);
       expect(call.capTerminations()).toBe(1);
     });
+
+    // Review finding (PR #1216): an immediate Dial with no one to transfer to
+    // returned without touching the FSM, leaving the capped call open in
+    // intent_capture with its one cap end already spent.
+    it('unsupervised tenant, no reachable on-call phone: the capped turn still escalates as emergency_dispatch instead of staying in intent_capture', async () => {
+      setSupervisorPresenceLoader(async () => false);
+      const call = await startCall(emergencyScript(), 'CA-1212-ms-nodial', {
+        onCallRepo: new InMemoryOnCallRepository(
+          new Map([[TENANT, [{ id: 'rot-1', userId: 'u-no-phone', orderIndex: 0 }]]]),
+        ),
+        dispatcherPhoneResolver: async () => null as unknown as string,
+      });
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      expect(call.session.costTracker.isExceeded).toBe(true);
+
+      const fx = await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+
+      const dial = call.auditRepo.getAll().find((a) => a.eventType === 'emergency_immediate_dial');
+      expect(dial?.metadata).toMatchObject({ escalated: false, transferInitiated: false });
+      expect(call.session.machine.currentState).toBe('escalating');
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      expect(fx.filter((f) => f.type === 'tts_play').map((f) => f.payload.text)).toEqual([
+        EMERGENCY_SAFETY_LINE,
+        EMERGENCY_HANDOFF_LINE,
+      ]);
+      expect(fx.filter((f) => f.type === 'notify_oncall').map((f) => f.payload.reason)).toEqual([
+        'emergency_dispatch',
+      ]);
+      expect(call.capAudits()).toEqual([]);
+      expect(call.capTerminations()).toBe(1);
+    });
   });
 });
