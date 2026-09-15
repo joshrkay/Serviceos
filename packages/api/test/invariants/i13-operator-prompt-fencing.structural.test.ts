@@ -237,6 +237,15 @@ type Classification =
  * neither half of that. These are listed rather than filtered out so that the
  * day one of them starts carrying customer speech, the entry has to be
  * revisited by hand.
+ *
+ * KNOWN CAVEAT (#894 review): that day has come for the drafting family on ONE
+ * path. voice-action-router.ts hands `TaskContext.message: segmentText` to the
+ * drafting handlers for `sourceChannel: 'voicemail'` jobs too — a caller's
+ * voicemail, enqueued only because its (spoofable) caller-ID matched the
+ * owner line. The classifier and decomposer fence that text; the drafting
+ * handlers below still receive it raw. The effect is bounded by U9
+ * (holdIfUntrustedSource: every voicemail proposal is held for human review),
+ * but the "owner-authored" label is only true for non-voicemail memos.
  */
 const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string }> = [
   {
@@ -322,12 +331,12 @@ const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string 
   {
     file: 'src/ai/orchestration/intent-classifier.ts',
     as: 'fenced',
-    why: "#894 — on the S1 profiles ('caller', 'field_tech') classifierUserContent wraps the caller's utterance in buildUntrustedContentSection (neutralized first) and CALLER_UTTERANCE_FENCE_PROMPT_SECTION states the data-not-instructions rule. Owner surfaces ('operator', 'owner_line') still send the owner's own command raw — owner-authored input, byte-identical.",
+    why: "CONDITIONALLY fenced, per request — never per file. classifierUserContent wraps the utterance in buildUntrustedContentSection (neutralized first) and CALLER_UTTERANCE_FENCE_PROMPT_SECTION adds the rule ONLY when isUntrustedClassifierInput is true: an S1 profile ('caller', 'field_tech', set by classifierProfileForSession on live telephony) or ClassifyContext.untrustedTranscript (set by voice-action-router.ts for sourceChannel 'voicemail', #894 review). Every other caller sends the raw transcript: in-app memos, chat/assistant, the text-mode eval driver, the verified owner line — owner-authored by surface identity. A NEW caller that passes caller-authored text without a profile or the flag is unfenced, and this entry cannot see it.",
   },
   {
     file: 'src/ai/orchestration/transcript-decomposer.ts',
-    as: 'owner-authored-input',
-    why: 'Splits the OPERATOR\'s multi-action utterance ("create a customer AND book an appointment") into separate intents.',
+    as: 'fenced',
+    why: "CONDITIONALLY fenced (#894 review): DecomposeContext.untrustedTranscript — set by voice-action-router.ts for a voicemail — wraps the transcript in buildUntrustedContentSection with DECOMPOSER_UNTRUSTED_TRANSCRIPT_RULE. Without the flag it splits the OPERATOR's own multi-action memo raw (owner-authored input).",
   },
   {
     file: 'src/ai/voice-quality/graders/caller-experience.ts',
@@ -639,8 +648,9 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
       expect(entry.file, entry.file).toMatch(/^src\/.+\.ts$/);
     }
     // Stated as a measurement so a silent reclassification shows up in review.
-    // 13 since #894 moved intent-classifier.ts from owner-authored-input to fenced.
+    // 12 since #894 moved intent-classifier.ts and transcript-decomposer.ts
+    // from owner-authored-input to (conditionally) fenced.
     const ownerAuthored = CLASSIFIED.filter((c) => c.as === 'owner-authored-input');
-    expect(ownerAuthored.length).toBe(13);
+    expect(ownerAuthored.length).toBe(12);
   });
 });

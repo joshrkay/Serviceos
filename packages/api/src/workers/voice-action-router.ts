@@ -1192,6 +1192,10 @@ async function processSegment(
       // Customer protection — on when the surface opted in (live telephony
       // / operator router always pass true).
       ...(params.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
+      // #894 (review) — a voicemail transcript is caller-authored: the owner
+      // caller-ID only gated the enqueue (U9, spoofable). Fence it and add the
+      // data-not-instructions rule; the operator taxonomy is kept.
+      ...(params.sourceChannel === 'voicemail' ? { untrustedTranscript: true } : {}),
     },
     deps.gateway,
   );
@@ -2359,7 +2363,8 @@ export function createVoiceActionRouterWorker(
         try {
           decomposition = await decomposeTranscript(
             effectiveTranscript,
-            { tenantId },
+            // #894 (review) — voicemail text is caller-authored: fence it.
+            { tenantId, ...(sourceChannel === 'voicemail' ? { untrustedTranscript: true } : {}) },
             deps.gateway,
           );
         } catch (err) {

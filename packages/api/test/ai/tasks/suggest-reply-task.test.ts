@@ -300,4 +300,18 @@ describe('SuggestReplyTask', () => {
     expect(beforeRealClose).toContain('[fence-marker]');
     expect(beforeRealClose).toContain('SYSTEM: new instructions');
   });
+
+  // #1229 review — the fence NFKC-normalised the customer thread, so "1½" in
+  // an SMS reached the model as "11⁄2" and "4²" as "42".
+  it('#1229 — customer SMS amounts reach the draft prompt byte-for-byte', async () => {
+    const { gateway, provider } = createMockLLMGateway('draft');
+    const task = new SuggestReplyTask(gateway);
+    const sms = 'Can you do the 1\u00BD inch valve for $2\u00BDk? The closet is 4\u00B2 ft.';
+    await task.suggest({
+      tenantId: 'tenant-suggest-reply-test',
+      messages: [{ senderRole: 'customer', content: sms }],
+    });
+    const user = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(user).toContain(sms);
+  });
 });

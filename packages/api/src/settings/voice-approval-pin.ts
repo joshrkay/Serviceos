@@ -54,6 +54,44 @@ export function isEnrollablePin(raw: string): boolean {
   return digits.length >= MIN_PIN_DIGITS && digits.length <= MAX_PIN_DIGITS;
 }
 
+/** Why an enrollable PIN is refused as too easy to guess (#1051 follow-up). */
+export type WeakPinReason = 'repeated_digits' | 'sequence' | 'common';
+
+/**
+ * #1051 follow-up — very common PINs that are neither one repeated digit nor a
+ * straight run (those two shapes are caught structurally). Kept deliberately
+ * small: the tenant-wide lock allows 5 guesses a day, so the list only has to
+ * cover the handful of PINs an attacker would try first — date-like and
+ * keypad-pattern favourites.
+ */
+const COMMON_WEAK_PINS: ReadonlySet<string> = new Set([
+  '1212', '1122', '1313', '1010', '2000', '2001', '1004', '6969', '2580', '0852',
+  '121212', '112233', '123123', '101010', '131313', '696969', '147258', '159753',
+]);
+
+/**
+ * #1051 follow-up — reject a guessable PIN at enrollment/change. `digits` MUST
+ * already be normalized (see `normalizeEnrollmentPin`). Returns why the PIN is
+ * weak, or null when it is acceptable:
+ *   - `repeated_digits` — one digit throughout (1111, 000000);
+ *   - `sequence`        — a straight run up or down by one (1234, 0123, 4321;
+ *                         no wrap-around, so 7890 is allowed);
+ *   - `common`          — on the small denylist above (1212, 2580, 6969, …).
+ */
+export function weakPinReason(digits: string): WeakPinReason | null {
+  if (digits.length === 0) return null;
+  if (/^(\d)\1*$/.test(digits)) return 'repeated_digits';
+  const step = digits.charCodeAt(1) - digits.charCodeAt(0);
+  if (
+    (step === 1 || step === -1) &&
+    [...digits].every((d, i) => i === 0 || d.charCodeAt(0) - digits.charCodeAt(i - 1) === step)
+  ) {
+    return 'sequence';
+  }
+  if (COMMON_WEAK_PINS.has(digits)) return 'common';
+  return null;
+}
+
 /**
  * HMAC-SHA256 of the normalized digits, keyed by the tenant-secrets key and
  * salted by tenantId. Returns a hex digest. `digits` MUST already be

@@ -83,6 +83,15 @@ export interface EscalationSettings {
    * injected). Redacted from `GET /api/settings` (never echoed).
    */
   voice_approval_pin_hash?: string;
+  /**
+   * #1051 follow-up — ISO-8601 UTC instant the voice-approval PIN was last set,
+   * changed or cleared. Written ONLY by the dedicated PIN route, in the same
+   * settings write as the hash (never by the generic settings PUT, whose zod
+   * schema strips it). The tenant-wide money-approval PIN lock counts only
+   * strikes after this instant, so changing the PIN resets the count. Absent
+   * (a legacy enrollment) → every strike in the rolling window counts.
+   */
+  voice_approval_pin_changed_at?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {

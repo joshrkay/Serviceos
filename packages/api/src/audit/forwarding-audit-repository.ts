@@ -84,6 +84,10 @@ export class ForwardingAuditRepository implements AuditRepository {
     return this.inner.findByCorrelation(tenantId, correlationId);
   }
 
+  findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]> {
+    return this.inner.findVoiceApprovalPinLockEvents(tenantId, since);
+  }
+
   // Assigned in the constructor only when the inner repo supports it, so the
   // decorator advertises the same optional capability as what it wraps.
   findRecentByTenant?: (
