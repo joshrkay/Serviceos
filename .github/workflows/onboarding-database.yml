@@ -1,0 +1,70 @@
+name: Onboarding database verification
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  onboarding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: serviceos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d serviceos_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: '1'
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/serviceos_test
+      DB_SSL: 'false'
+      E2E_USE_TEST_DB: 'true'
+      E2E_DEV_AUTH: '0'
+      VITE_CLERK_PUBLISHABLE_KEY: pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA==
+      # Synthetic fixtures only. No Clerk cloud, Stripe request or phone purchase.
+      STRIPE_SECRET_KEY: sk_test_hermetic_release
+      STRIPE_WEBHOOK_SECRET: whsec_hermetic_release
+      TELEPHONY_ENABLED: 'false'
+      EMAIL_ENABLED: 'false'
+      PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/onboarding-results.json
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - name: Verification policy regressions
+        run: node --test scripts/release/*.test.mjs
+      - name: Install browser and database client
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          npx playwright install --with-deps chromium
+      - name: Migrate before API webServer starts
+        run: npx tsx e2e/fixtures/setup-test-db.ts
+      - name: Onboarding against real Postgres
+        run: >-
+          npx playwright test --project=chromium --retries=0 --reporter=list,json
+          e2e/journeys/signup-to-first-estimate.hermetic.spec.ts
+          e2e/journeys/onboarding-signup-webhook.spec.ts
+          e2e/journeys/onboarding-identity.spec.ts
+      - name: Require every selected journey to execute and pass
+        if: always()
+        run: node scripts/release/verify.mjs test-results/onboarding-results.json
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: onboarding-database-results
+          path: test-results/onboarding-results.json
+          retention-days: 7

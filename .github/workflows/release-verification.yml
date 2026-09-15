@@ -1,0 +1,35 @@
+name: Release verification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  development-onboarding:
+    if: github.event_name == 'workflow_dispatch'
+    environment: dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - name: Install browser
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
+          npx playwright install --with-deps chromium
+      - name: Load Development Clerk test keys through existing Railway access
+        run: node scripts/release/load-development-clerk.mjs
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Require real development credentials
+        run: node scripts/release/verify.mjs --credentials
+      - name: Real Development signup and first draft estimate
+        run: npx playwright test --config playwright.release.config.ts
+      - name: Refuse skipped or empty release evidence
+        if: always()
+        run: node scripts/release/verify.mjs test-results/release-results.json
+      # No traces or raw provider/session artifacts uploaded. The default
+      # report may contain test identities; keep it in the private run logs.
