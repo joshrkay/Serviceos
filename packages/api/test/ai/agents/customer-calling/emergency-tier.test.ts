@@ -613,6 +613,38 @@ describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
     ['not-E1', 'el drenaje no respira', 'plumbing vent'],
     ['not-E1', 'se ahoga el motor de la planta', 'engine flooding'],
     ['not-E1', 'se desmayó hace dos años', 'clearly past'],
+    // #1245 review, finding 1 — a present symptom is never downgraded by a
+    // past or hypothetical marker elsewhere; "desde ayer" is ongoing.
+    ['E1', 'mi papá está inconsciente, ayer estaba bien', 'present state + past elsewhere'],
+    ['E1', 'mi papá no responde desde ayer', '"desde ayer" is ongoing'],
+    ['E1', 'tiene dolor en el pecho desde ayer', '"desde ayer" is ongoing'],
+    ['E1', 'mi abuela se cayó anoche y no se puede levantar', 'past fall, present state'],
+    ['E1', 'mi hijo no respira, no sé si alguien puede venir', '"si alguien" is not hypothetical here'],
+    ['E1', 'mi hijo está convulsionando, de chico tenía epilepsia', 'present state + history'],
+    ['E1', 'ayer se desmayo y otra vez no responde', 'no accent; present state'],
+    // Finding 2 — the E2 fallback never wins over a present symptom.
+    ['E1', 'se electrocutó ayer y está inconsciente', 'past shock, present unconsciousness'],
+    // Finding 3 — missed phrasings.
+    ['E1', 'tomó muchas pastillas', 'overdose'],
+    ['E1', 'se le paralizó la cara', 'stroke sign'],
+    ['E1', 'se cayó de la escalera y no se mueve', 'fell, not moving'],
+    ['E1', 'se cayó de la escalera y no se levanta', 'fell, cannot get up'],
+    ['E1', 'está desangrándose', 'enclitic'],
+    ['E1', 'no sé qué le pasa, no responde', 'unresponsive, no named subject'],
+    ['E1', 'se golpeó la cabeza y no responde', 'head injury, unresponsive'],
+    ['E1', 'mi hijo está herido', 'hurt'],
+    ['E1', 'no tiene pulso', 'no pulse'],
+    ['E1', 'me electrocuté', 'first-person electrocution'],
+    ['E1', 'le dio un derrame', 'stroke'],
+    // Finding 4 — idioms with no person or symptom.
+    ['not-E1', 'el precio es un infarto', 'price idiom'],
+    ['not-E1', 'los precios están de infarto', 'price idiom'],
+    ['not-E1', 'tengo convulsiones de risa', 'laughing'],
+    ['not-E1', 'sobredosis de café', 'too much coffee'],
+    ['not-E1', 'la bomba se ahogó', 'pump flooded'],
+    ['not-E1', 'el calentador se ahoga', 'heater flooding'],
+    ['E1', 'a mi papá le dio un infarto', 'the idiom word with a person'],
+    ['not-E1', 'el control remoto no responde', 'a device, not a person'],
   ];
 
   it.each(SPANISH_INJURY_TABLE)('%s: %j (%s)', (bucket, utterance) => {
@@ -633,6 +665,12 @@ describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
     expect(
       classifyCallerSafety('necesito un electricista porque me dio un toque el enchufe ayer', {}).tier,
     ).toBe('E2');
+  });
+
+  // #1245 review, finding 5 — the recent-shock E2 fallback is for ayer /
+  // anteayer / anoche / hace N días (N ≤ 7) only.
+  it('an old shock ("hace años le dio una descarga el panel") is routine E3, not E2', () => {
+    expect(classifyCallerSafety('hace años le dio una descarga el panel', {}).tier).toBe('E3');
   });
 
   it('decomposed accents still classify E1: "se desmayó" in NFD', () => {

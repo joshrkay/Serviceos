@@ -501,6 +501,14 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     await expectSpanishE1(c, twiml, 'no puedo respirar');
   });
 
+  it('#1245 SPANISH SESSION: "mi papá está inconsciente, ayer estaba bien" is E1 — a past marker never downgrades a present symptom', async () => {
+    const c = await inboundCall(tenantB.tenantId);
+    c.session.language = 'es';
+    const phrase = 'mi papá está inconsciente, ayer estaba bien';
+    const twiml = await turn(c, phrase);
+    await expectSpanishE1(c, twiml, phrase);
+  });
+
   it('#1221 control: "se me quemó la comida" is not E1 — no emergency row, no hang-up', async () => {
     const c = await inboundCall(tenantB.tenantId);
     const twiml = await turn(c, 'se me quemó la comida');

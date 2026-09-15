@@ -1,7 +1,7 @@
 # #1239 review — Spanish E1 monotonicity corpus. One row per phrase: origin/main tier, TAB, phrase.
 # Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv;
 # third review: r1239b/corpus.txt and newprobes.txt; #1221: Spanish injury/medical phrases and controls).
-# Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 rows (appended
+# Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 and #1245 rows (appended
 # last) with origin/main 859db9f94 (as merged in #1239). Do not regenerate against
 # a branch: the column is the baseline a change is measured against.
 E3	se sale el gas
@@ -404,3 +404,31 @@ E3	se desmayó hace dos años
 E2	no, no puede respirar
 E3	tiene dolor en el pecho, creo que es un infarto
 E3	está sangrando mucho de la cabeza
+E3	mi papá está inconsciente, ayer estaba bien
+E3	mi papá no responde desde ayer
+E3	tiene dolor en el pecho desde ayer
+E3	mi abuela se cayó anoche y no se puede levantar
+E3	mi hijo no respira, no sé si alguien puede venir
+E3	mi hijo está convulsionando, de chico tenía epilepsia
+E3	ayer se desmayo y otra vez no responde
+E3	se electrocutó ayer y está inconsciente
+E3	tomó muchas pastillas
+E3	se le paralizó la cara
+E3	se cayó de la escalera y no se mueve
+E3	se cayó de la escalera y no se levanta
+E3	está desangrándose
+E3	no sé qué le pasa, no responde
+E3	se golpeó la cabeza y no responde
+E3	mi hijo está herido
+E3	no tiene pulso
+E3	me electrocuté
+E3	le dio un derrame
+E3	el precio es un infarto
+E3	los precios están de infarto
+E3	tengo convulsiones de risa
+E3	sobredosis de café
+E3	la bomba se ahogó
+E3	el calentador se ahoga
+E3	a mi papá le dio un infarto
+E3	el control remoto no responde
+E3	hace años le dio una descarga el panel
