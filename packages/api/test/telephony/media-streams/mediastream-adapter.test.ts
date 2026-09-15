@@ -42,7 +42,9 @@ import {
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
+  LANGUAGE_SWITCH_ACK,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
+import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
@@ -787,6 +789,80 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     // TTS never resolved, so no media frames should have been sent after barge-in.
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBe(0);
+  });
+
+  it('#1220 review — a holdBargeInUntilPlayed line is not cut by caller speech until its end-of-utterance mark is acked; barge-in works again after', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-hold' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const pending: Array<() => void> = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(
+        () =>
+          new Promise<TtsSynthesizeResult>((resolve) =>
+            pending.push(() => resolve({ audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' })),
+          ),
+      ),
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [], ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-hold',
+      start: { callSid: 'CA-hold', accountSid: 'AC', streamSid: 'MZ-hold', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    const flush = async () => {
+      for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
+    };
+    const clears = () => ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear').length;
+    const talk = () => handle.emit({ type: 'partial', isFinal: false, transcript: 'oiga', confidence: 0.5 });
+
+    // The E1 shape: the held Spanish 911 line, then the English script.
+    const turn = (adapter as unknown as { emitSideEffects: (fx: SideEffect[]) => Promise<void> }).emitSideEffects([
+      {
+        type: 'tts_play',
+        payload: { text: 'Si alguien está en peligro inmediato, cuelgue y llame al 911.', priority: 'safety', tier: 'E1', language: 'es', holdBargeInUntilPlayed: true },
+      },
+      { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911 now.', priority: 'safety', tier: 'E1' } },
+    ]);
+
+    // 1. Held line still synthesizing — caller speech does not clear it.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    talk();
+    await flush();
+    expect(clears()).toBe(0);
+
+    // 2. Held line fully queued, next line in flight, Twilio has NOT yet
+    //    acknowledged the held line's end-of-utterance mark — it is still
+    //    playing, so caller speech still does not clear the buffer.
+    pending[0]!();
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    const armMark = ws.sent.find(
+      (m) =>
+        (m as { event?: string }).event === 'mark' &&
+        String((m as { mark?: { name?: string } }).mark?.name).startsWith('silence-arm-'),
+    ) as { mark: { name: string } } | undefined;
+    expect(armMark).toBeDefined();
+    talk();
+    await flush();
+    expect(clears()).toBe(0);
+
+    // 3. Twilio acks the held line's mark: it has played once. Barge-in on
+    //    the following line works exactly as before.
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ-hold', mark: { name: armMark!.mark.name } });
+    await flush();
+    talk();
+    await flush();
+    expect(clears()).toBe(1);
+
+    pending[1]!();
+    await turn;
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('passes vertical keywords to Deepgram openSession when terminologyProvider yields them', async () => {
@@ -1642,7 +1718,9 @@ function makeGateway(): LLMGateway {
 }
 
 describe('production-shaped wiring (app.ts hooks)', () => {
-  function makeProductionShapedSetup(opts: { consentEvents?: InMemoryConsentEventRepository } = {}) {
+  function makeProductionShapedSetup(
+    opts: { consentEvents?: InMemoryConsentEventRepository; ttsProvider?: TtsProvider } = {},
+  ) {
     const gateway = makeGateway();
     const gatherAdapter = new TwilioGatherAdapter({
       store,
@@ -1653,7 +1731,7 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
-    const tts = makeTtsProvider();
+    const tts = opts.ttsProvider ?? makeTtsProvider();
     const adapter = new TwilioMediaStreamAdapter(
       {
         store,
@@ -1792,6 +1870,64 @@ describe('production-shaped wiring (app.ts hooks)', () => {
       (c[0] as { text: string }).text.includes('911'),
     );
     expect(safetyCallsAfterFinal).toHaveLength(1);
+  });
+
+  // #1220 review — before #1220 a Spanish-session "fuga de gas" was E2 and
+  // rendered in Spanish. E1 must keep the Spanish 911 line: spoken FIRST in
+  // the Spanish voice, then the English evacuation script, and a caller
+  // talking over it cannot barge it away before it has played.
+  it('#1220 review — a Spanish-session E1 speaks the Spanish 911 line first (es voice), then the English script; barge-in cannot cut the Spanish line', async () => {
+    const ES_911_LINE = renderTtsText(EMERGENCY_SAFETY_LINE, {}, 'es');
+    const releaseSpanishLine: Array<() => void> = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn((input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        const result: TtsSynthesizeResult = { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+        if (input.text === ES_911_LINE) {
+          return new Promise((resolve) => releaseSpanishLine.push(() => resolve(result)));
+        }
+        return Promise.resolve(result);
+      }),
+    };
+    const { gatherAdapter, adapter, ws, handle } = makeProductionShapedSetup({ ttsProvider: tts });
+    await gatherAdapter.handleInboundForStream({ callSid: 'CA-es-e1', from: '+15125550111', tenantId: 't' });
+    const session = store.findByCallSid('CA-es-e1')!;
+    session.language = 'es';
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-es-e1',
+      start: { callSid: 'CA-es-e1', accountSid: 'AC', streamSid: 'MZ-es-e1', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hay una fuga de gas en mi casa', confidence: 0.95 });
+    await vi.waitFor(() => expect(session.machine.currentState).toBe('terminated'));
+    // The Spanish 911 line is the line in flight.
+    await vi.waitFor(() => expect(releaseSpanishLine).toHaveLength(1));
+
+    // The panicked caller keeps talking: no Twilio `clear` while it plays.
+    const clears = () => ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear').length;
+    const clearsBefore = clears();
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'qué hago', confidence: 0.5 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(clears()).toBe(clearsBefore);
+
+    releaseSpanishLine[0]!();
+    const synth = tts.synthesize as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => {
+      const texts = synth.mock.calls.map((c) => (c[0] as TtsSynthesizeInput).text);
+      const spanishAt = texts.indexOf(ES_911_LINE);
+      expect(spanishAt).toBeGreaterThanOrEqual(0);
+      expect(texts.findIndex((t) => t.includes('leave the building immediately'))).toBeGreaterThan(spanishAt);
+    });
+    const spanishCall = synth.mock.calls.find((c) => (c[0] as TtsSynthesizeInput).text === ES_911_LINE)!;
+    expect((spanishCall[0] as TtsSynthesizeInput).language).toBe('es');
+    expect(
+      synth.mock.calls.filter((c) => (c[0] as TtsSynthesizeInput).text === ES_911_LINE),
+    ).toHaveLength(1);
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('DISCLOSURE_INIT_FAILED — emits logger.error with stable greppable code when initializeSession throws', async () => {
@@ -2192,6 +2328,36 @@ describe('UB-C1 — language threading + live switching', () => {
     expect(openCalls).toHaveLength(2);
     expect(openCalls[1].language).toBe('es');
     expect(events[0]).toMatchObject({ trigger: 'first_utterance' });
+  });
+
+  it('#1220 review — "¿Habla español? La casa está llena de humo" (E1 with no backstop keyword) is NEVER consumed by the language switch', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-smoke-es' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const tts = makeSpyTts();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-smoke-es', 'MZ-smoke-es'));
+    await flush();
+
+    emit({ type: 'final', isFinal: true, transcript: '¿Habla español? La casa está llena de humo', confidence: 0.9 });
+    await flush(8);
+
+    // The utterance reaches the host pipeline, where the E1 scan runs.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({
+      speechResult: '¿Habla español? La casa está llena de humo',
+    });
+    // No language acknowledgement was spoken in its place.
+    const spoken = tts.synthesize.mock.calls.map((c) => c[0].text);
+    expect(spoken).not.toContain(LANGUAGE_SWITCH_ACK.es);
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('a classified language_switch intent (audit_log) flips the language as a fallback', async () => {

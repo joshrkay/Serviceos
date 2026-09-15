@@ -684,8 +684,19 @@ export function buildTwiML(
       // audible feedback rather than silence; a real prompt registry is a
       // follow-up.
       const sayText = text.length > 0 ? text : '...';
+      // #1220 review — a line tagged with another language than the session's
+      // (the Spanish 911 line on an English-session E1) takes that language's
+      // default voice. The tenant voice override belongs to the session
+      // language, so it applies only to lines in that language.
+      const lineLanguage =
+        fx.payload.language === 'es' || fx.payload.language === 'en' ? fx.payload.language : undefined;
+      const sessionLanguage = opts.language === 'es' ? 'es' : 'en';
       const voice =
-        opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
+        lineLanguage && lineLanguage !== sessionLanguage
+          ? lineLanguage === 'es'
+            ? GATHER_VOICE_ES
+            : GATHER_VOICE_EN
+          : (opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN));
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       // The <Hangup/> is appended below; the recording block is spliced in
@@ -1729,6 +1740,11 @@ export class TwilioGatherAdapter {
       tier: safety.tier,
       ...(responseScript ? { responseScript } : {}),
       ...(safety.language ? { language: safety.language } : {}),
+      // #1220 review — a Spanish session hears the Spanish 911 line on E1 even
+      // when the hazard was reported in English.
+      ...(session.language === 'es' || session.language === 'en'
+        ? { sessionLanguage: session.language }
+        : {}),
     });
     if (effects.length === 0) {
       // Idempotent-skip (already escalating for E2, or terminated) — fall
