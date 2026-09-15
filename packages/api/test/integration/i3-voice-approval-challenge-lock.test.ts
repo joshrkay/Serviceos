@@ -944,6 +944,9 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     // The refusal is per-turn, not a lock written onto the session: nothing
     // tells the caller to park `challengeLockedOut`.
     expect(refused.sessionState?.challengeLockedOut).toBeUndefined();
+    // …and the link sent on this refusal is NOT marked as "the lockout link
+    // already sent", so a later real lockout still texts the owner (#1217 review).
+    expect(refused.sessionState?.oneTapSmsSentAfterLockout).toBeUndefined();
 
     // Capture-class approval does not depend on the lookup and still works.
     const capture = await seedPending(proposalRepo, tenantA.tenantId, {
@@ -973,5 +976,106 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
       reference: 'the Prescott payment',
     });
     expect(recovered.outcome).toBe('readback');
+  });
+
+  it('#1051 — a LOST strike write fails closed: the wrong code whose audit row cannot be written locks money approval in memory, a durable marker locks the rebuilt session, and capture still approves', async () => {
+    const lostWrite = new Error('simulated audit_events insert failure');
+    // Real Postgres for every read and every other write; only the
+    // failed-code strike INSERT is lost.
+    const strikeWriteLost: AuditRepository = {
+      create: async (event) => {
+        if (event.eventType === 'proposal.voice_approval_challenge_failed') throw lostWrite;
+        return auditRepo.create(event);
+      },
+      findByEntity: (tenantId, entityType, entityId) =>
+        auditRepo.findByEntity(tenantId, entityType, entityId),
+      findByCorrelation: (tenantId, correlationId) =>
+        auditRepo.findByCorrelation(tenantId, correlationId),
+    };
+    const { deps: healthyDeps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550112');
+    const deps: VoiceApprovalDeps = { ...healthyDeps, auditRepo: strikeWriteLost };
+    const ref = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-strike-write-lost',
+      ownerSession: true,
+    } as const;
+    const money = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $270 payment from Rowan',
+      payload: { customerName: 'Rowan Drywall', amountCents: 27000 },
+    });
+
+    const pending = await reachChallengeStage(deps, ref, 'the Rowan payment');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let lost: VoiceApprovalTurnResult;
+    let logged: string;
+    try {
+      lost = await continueVoiceApproval(deps, { ...ref, utterance: '0 0 0 0', pending });
+      logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    // The turn itself is unchanged (wrong code, try again) — but the session is
+    // locked for money-class approval, and the loss is logged.
+    expect(lost.outcome).toBe('challenge_failed');
+    expect(lost.sessionState).toMatchObject({ challengeFailCount: 1, challengeLockedOut: true });
+    expect(logged).toContain('voice approval strike audit write failed');
+    expect(logged).toContain(tenantA.tenantId);
+    expect(logged).toContain(ref.sessionId);
+    expect(logged).toContain(lostWrite.message);
+
+    // In memory: the kept challenge refuses even the correct code.
+    const inMemory = await continueVoiceApproval(deps, {
+      ...ref,
+      sessionState: { ...lost.sessionState },
+      utterance: 'four two seven one',
+      pending: lost.pending!,
+    });
+    expect(inMemory.outcome).toBe('challenge_lockout');
+    expect((await proposalRepo.findById(tenantA.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    // Real Postgres: no strike row, one durable lockout marker for this session.
+    const trail = await auditRepo.findByCorrelation(tenantA.tenantId, ref.sessionId);
+    expect(trail.filter((r) => r.eventType === 'proposal.voice_approval_challenge_failed')).toHaveLength(0);
+    const markers = trail.filter((r) => r.eventType === 'proposal.voice_challenge_lockout');
+    expect(markers).toHaveLength(1);
+    expect(markers[0].metadata).toMatchObject({
+      attemptCount: 1,
+      reason: 'strike_write_failed',
+      lostEventType: 'proposal.voice_approval_challenge_failed',
+    });
+
+    // Rebuilt session (no in-memory state) → locked from the marker.
+    const rebuilt = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Rowan payment',
+    });
+    expect(rebuilt.outcome).toBe('challenge_lockout');
+    const refusals = await refusalRows(tenantA.tenantId, money.id);
+    expect(refusals.map((r) => r.metadata?.lockSource).sort()).toEqual(['audit_trail', 'session']);
+
+    // Capture-class still approves in the locked, rebuilt session.
+    const capture = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'add_note',
+      summary: 'Note for Sorrel — back door code changed',
+      payload: { customerName: 'Sorrel Residence', note: 'back door code changed' },
+    });
+    const captureStart = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Sorrel note',
+    });
+    expect(captureStart.outcome).toBe('readback');
+    const captureApproved = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: captureStart.pending!,
+    });
+    expect(captureApproved.outcome).toBe('approved');
+    expect((await proposalRepo.findById(tenantA.tenantId, capture.id))?.status).toBe('approved');
   });
 });

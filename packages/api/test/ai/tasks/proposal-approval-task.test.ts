@@ -7,7 +7,7 @@
  * (or polite refusal + real one-tap SMS), pending-edit parity, owner
  * gate, ordinal disambiguation, stale-target fail-closed.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   startVoiceApproval,
   startVoiceBatchApproval,
@@ -29,7 +29,11 @@ import {
   type Proposal,
 } from '../../../src/proposals/proposal';
 import { applyChainMetadata } from '../../../src/proposals/chain';
-import { createAuditEvent, InMemoryAuditRepository } from '../../../src/audit/audit';
+import {
+  createAuditEvent,
+  InMemoryAuditRepository,
+  type AuditEvent,
+} from '../../../src/audit/audit';
 import type { SettingsRepository } from '../../../src/settings/settings';
 
 const TENANT = 't-voice';
@@ -2250,5 +2254,274 @@ describe('#1051 — the challenge lock survives a rebuilt session (re-derived fr
     expect((await h.proposalRepo.findById(TENANT, lopez.id))?.status).toBe('approved');
     expect((await h.proposalRepo.findById(TENANT, beta.id))?.status).toBe('ready_for_review');
     expect((await h.proposalRepo.findById(TENANT, acme.id))?.status).toBe('ready_for_review');
+  });
+});
+
+// ─── #1051 hardening (PR #1217 security review) ──────────────────────────────
+
+const STRIKE_FAILED = 'proposal.voice_approval_challenge_failed';
+const STRIKE_LOCKOUT = 'proposal.voice_challenge_lockout';
+
+/** Loses the next `n` writes of each listed event type (Infinity = all of them). */
+class FlakyAuditRepository extends InMemoryAuditRepository {
+  private readonly failuresLeft: Map<string, number>;
+
+  constructor(failures: Record<string, number>) {
+    super();
+    this.failuresLeft = new Map(Object.entries(failures));
+  }
+
+  async create(event: AuditEvent): Promise<AuditEvent> {
+    const left = this.failuresLeft.get(event.eventType) ?? 0;
+    if (left > 0) {
+      this.failuresLeft.set(event.eventType, left - 1);
+      throw new Error(`audit write lost: ${event.eventType}`);
+    }
+    return super.create(event);
+  }
+}
+
+async function captureStderr<T>(body: () => Promise<T>): Promise<{ result: T; logged: string }> {
+  const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  try {
+    const result = await body();
+    return { result, logged: spy.mock.calls.map((c) => String(c[0])).join('') };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+/** readback → yes → challenge prompt for `reference`, threading `sessionState`. */
+async function toChallenge(
+  deps: VoiceApprovalDeps,
+  reference: string,
+  sessionState: VoiceApprovalSessionState = {},
+): Promise<PendingVoiceApproval> {
+  const start = await startVoiceApproval(deps, {
+    ...ref,
+    sessionState,
+    action: 'approve',
+    reference,
+  });
+  expect(start.outcome).toBe('readback');
+  const confirm = await continueVoiceApproval(deps, {
+    ...ref,
+    sessionState,
+    utterance: 'yes',
+    pending: start.pending!,
+  });
+  expect(confirm.outcome).toBe('challenge_prompt');
+  return confirm.pending!;
+}
+
+describe('#1051 hardening — a lost strike write locks instead of losing the strike', () => {
+  it('a LOST failed-code write locks money approval for the session — at once in memory, and after a rebuild via a durable lockout marker', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const auditRepo = new FlakyAuditRepository({ [STRIKE_FAILED]: Infinity });
+    const deps: VoiceApprovalDeps = { ...h.deps, auditRepo };
+    const money = await seedMoney(h.proposalRepo, 'Acme Corp');
+    const pending = await toChallenge(deps, 'the Acme payment');
+
+    const { result: lost, logged } = await captureStderr(() =>
+      continueVoiceApproval(deps, { ...ref, utterance: '0 0 0 0', pending }),
+    );
+
+    // Everything else as before: same outcome, same line, dialogue kept…
+    expect(lost.outcome).toBe('challenge_failed');
+    expect(lost.speak).toContain('didn’t match');
+    expect(lost.pending).toEqual(pending);
+    // …but the session is locked for money-class approval (fail closed), and logged.
+    expect(lost.sessionState).toMatchObject({ challengeFailCount: 1, challengeLockedOut: true });
+    expect(logged).toContain('voice approval strike audit write failed');
+    expect(logged).toContain(STRIKE_FAILED);
+
+    // In memory: the kept challenge refuses even the RIGHT code.
+    const state: VoiceApprovalSessionState = { ...lost.sessionState };
+    const inMemory = await continueVoiceApproval(deps, {
+      ...ref,
+      sessionState: state,
+      utterance: 'four two seven one',
+      pending: lost.pending!,
+    });
+    expect(inMemory.outcome).toBe('challenge_lockout');
+    expect((await h.proposalRepo.findById(TENANT, money.id))?.status).toBe('ready_for_review');
+
+    // The strike row is lost; a durable lockout marker landed in its place.
+    const rows = auditRepo.getAll();
+    expect(rows.some((e) => e.eventType === STRIKE_FAILED)).toBe(false);
+    const marker = rows.find((e) => e.eventType === STRIKE_LOCKOUT);
+    expect(marker?.correlationId).toBe(SESSION);
+    expect(marker?.metadata).toMatchObject({
+      attemptCount: 1,
+      reason: 'strike_write_failed',
+      lostEventType: STRIKE_FAILED,
+    });
+
+    // Rebuilt session (no in-memory state) → still locked.
+    const rebuilt = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(rebuilt.outcome).toBe('challenge_lockout');
+    expect(rebuilt.sessionState).toMatchObject({ challengeLockedOut: true });
+
+    // Capture-class approval is untouched by the lock.
+    await seedPending(h.proposalRepo);
+    const capture = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Henderson estimate',
+    });
+    expect(capture.outcome).toBe('readback');
+  });
+
+  it('a LOST third-strike lockout write is retried as the marker, so a rebuilt session still sees the lock', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const auditRepo = new FlakyAuditRepository({ [STRIKE_LOCKOUT]: 1 });
+    const deps: VoiceApprovalDeps = { ...h.deps, auditRepo };
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+
+    let pending = await toChallenge(deps, 'the Acme payment');
+    let state: VoiceApprovalSessionState = {};
+    let last: VoiceApprovalTurnResult | undefined;
+    await captureStderr(async () => {
+      for (let i = 0; i < 3; i++) {
+        last = await continueVoiceApproval(deps, {
+          ...ref,
+          sessionState: state,
+          utterance: '0 0 0 0',
+          pending,
+        });
+        state = { ...state, ...last.sessionState };
+        if (last.pending) pending = last.pending;
+      }
+    });
+    expect(last!.outcome).toBe('challenge_lockout');
+    expect(state).toMatchObject({ challengeFailCount: 3, challengeLockedOut: true });
+
+    const lockoutRows = auditRepo.getAll().filter((e) => e.eventType === STRIKE_LOCKOUT);
+    expect(lockoutRows).toHaveLength(1);
+    expect(lockoutRows[0].metadata).toMatchObject({
+      attemptCount: 3,
+      reason: 'strike_write_failed',
+      lostEventType: STRIKE_LOCKOUT,
+    });
+
+    const rebuilt = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(rebuilt.outcome).toBe('challenge_lockout');
+  });
+
+  it('if the marker write is lost too, the lock still holds in memory and both losses are logged', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const auditRepo = new FlakyAuditRepository({
+      [STRIKE_FAILED]: Infinity,
+      [STRIKE_LOCKOUT]: Infinity,
+    });
+    const deps: VoiceApprovalDeps = { ...h.deps, auditRepo };
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+    const pending = await toChallenge(deps, 'the Acme payment');
+
+    const { result: lost, logged } = await captureStderr(() =>
+      continueVoiceApproval(deps, { ...ref, utterance: '0 0 0 0', pending }),
+    );
+    expect(lost.outcome).toBe('challenge_failed');
+    expect(lost.sessionState).toMatchObject({ challengeFailCount: 1, challengeLockedOut: true });
+    expect(logged).toContain('voice approval strike audit write failed');
+    expect(logged).toContain('lockout marker write also failed');
+
+    const inMemory = await startVoiceApproval(deps, {
+      ...ref,
+      sessionState: { ...lost.sessionState },
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(inMemory.outcome).toBe('challenge_lockout');
+  });
+});
+
+describe('#1051 hardening — the lock decision uses the combined strike count', () => {
+  it('memory holds 3 strikes with no lock flag and the trail holds none → locked', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const money = await seedMoney(h.proposalRepo, 'Acme Corp');
+
+    const refused = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState: { challengeFailCount: 3 },
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(
+      h.auditRepo.getAll().filter((e) => e.eventType === STRIKE_FAILED || e.eventType === STRIKE_LOCKOUT),
+    ).toHaveLength(0);
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect(refused.pending).toBeNull();
+    expect(refused.sessionState).toMatchObject({ challengeFailCount: 3, challengeLockedOut: true });
+    expect((await h.proposalRepo.findById(TENANT, money.id))?.status).toBe('ready_for_review');
+    const refusal = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_approve_refused_challenge_lockout');
+    expect(refusal?.metadata).toMatchObject({ lockSource: 'session' });
+
+    // Same rule when no audit repository is wired at all.
+    const noAudit = await startVoiceApproval(
+      { ...h.deps, auditRepo: undefined },
+      { ...ref, sessionState: { challengeFailCount: 3 }, action: 'approve', reference: 'the Acme payment' },
+    );
+    expect(noAudit.outcome).toBe('challenge_lockout');
+  });
+});
+
+describe('#1051 hardening — a lookup-failure refusal does not mark the one-tap link as sent', () => {
+  it('the fail-closed refusal still texts the link but leaves oneTapSmsSentAfterLockout unset, so a later real lockout texts again instead of claiming "already sent"', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const lookupDown: VoiceApprovalDeps = { ...h.deps, auditRepo: new LookupDownAuditRepository() };
+    const acme = await seedMoney(h.proposalRepo, 'Acme Corp');
+    const beta = await seedMoney(h.proposalRepo, 'Beta Corp', 5000);
+    const gamma = await seedMoney(h.proposalRepo, 'Gamma Corp', 3000);
+
+    // 1. The lookup is down → refused (fail closed); the escape-hatch link goes out.
+    const { result: refused } = await captureStderr(() =>
+      startVoiceApproval(lookupDown, { ...ref, action: 'approve', reference: 'the Acme payment' }),
+    );
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect(h.sent).toHaveLength(1);
+    expect(refused.sessionState?.oneTapSmsSentAfterLockout).toBeUndefined();
+    let state: VoiceApprovalSessionState = { ...refused.sessionState };
+
+    // 2. Lookup healthy again: three wrong codes on Gamma → a REAL lockout
+    //    (its own one-tap link).
+    let pending = await toChallenge(h.deps, 'the Gamma payment', state);
+    for (let i = 0; i < 3; i++) {
+      const r = await continueVoiceApproval(h.deps, {
+        ...ref,
+        sessionState: state,
+        utterance: '0 0 0 0',
+        pending,
+      });
+      state = { ...state, ...r.sessionState };
+      if (r.pending) pending = r.pending;
+    }
+    expect(state.challengeLockedOut).toBe(true);
+    const sentAfterLockout = h.sent.length;
+
+    // 3. Beta has never had a link: its refusal must send one, not claim
+    //    "already sent".
+    const betaRefused = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState: state,
+      action: 'approve',
+      reference: 'the Beta payment',
+    });
+    expect(betaRefused.outcome).toBe('challenge_lockout');
+    expect(betaRefused.speak).not.toContain('already sent');
+    expect(h.sent).toHaveLength(sentAfterLockout + 1);
+    for (const p of [acme, beta, gamma]) {
+      expect((await h.proposalRepo.findById(TENANT, p.id))?.status).toBe('ready_for_review');
+    }
   });
 });
