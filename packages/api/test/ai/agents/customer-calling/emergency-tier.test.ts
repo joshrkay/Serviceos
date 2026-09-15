@@ -404,7 +404,6 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['not-E1', 'no huelo gas', 'negated: I do not smell gas'],
     ['not-E1', 'no hay llamas en la cocina', 'negated flames'],
     ['not-E1', 'no hay humo en la cocina', 'negated smoke'],
-    ['not-E1', 'no se está escapando el gas', 'negated gas escaping'],
     ['not-E1', 'no huele a cable quemado', 'negated burning wire smell'],
     ['not-E1', 'hay humo saliendo de la chimenea', 'chimney smoke is normal'],
     // Second review, finding 3 — the flame-colour exception is only
@@ -416,6 +415,35 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['E1', 'no se hay fuego', '"no sé, hay fuego"'],
     ['E1', 'no se sale humo del enchufe', '"no sé, sale humo del enchufe"'],
     ['not-E1', 'no se huele a gas', '"no se huele" is still a denial'],
+    // Re-review, finding 1 — the leak sense of "salir"/"escapar" in every
+    // word order, with an appliance as indirect object ("le sale gas").
+    ['E1', 'se sale el gas', 'gas escaping'],
+    ['E1', 'le sale gas a la estufa', 'the stove is leaking gas'],
+    ['E1', 'a la estufa le sale gas', 'the stove is leaking gas'],
+    ['E1', 'me sale gas de la estufa', 'gas coming out of my stove'],
+    ['E1', 'sale gas por la hornilla', 'gas from the burner'],
+    ['E1', 'sale gas de la cocina', 'gas from the kitchen'],
+    ['E1', 'el gas se escapa', 'subject first'],
+    ['E1', 'el gas se está saliendo', 'subject first'],
+    ['E1', 'el gas está saliendo', 'subject first'],
+    ['E1', 'está escapando gas', 'gas escaping'],
+    ['E1', 'salió gas de la estufa', 'past tense'],
+    ['E1', 'sale mucho gas de la estufa', 'a lot of gas'],
+    ['E1', 'la estufa está botando gas', '"botar gas" = leaking gas'],
+    ['not-E1', 'on sale gas water heaters', 'English: "on sale"'],
+    ['not-E1', '¿sale gas en la factura?', 'bill'],
+    ['not-E1', 'el gas sale muy caro', 'price, subject first'],
+    ['not-E1', 'no le sale gas a la estufa', 'negated: the stove gets no gas'],
+    // Re-review, finding 2 — smoke with an ordinary cause.
+    ['not-E1', 'hay humo cuando prendo la calefacción por primera vez', 'first heat of the season'],
+    ['not-E1', 'hay humo de la carne asada en el patio', 'barbecue'],
+    // Re-review, finding 3 — flame colour plus CO symptoms, spread or a
+    // dryer is not a colour diagnostic.
+    ['E1', 'hay llamas amarillas en el calentador y me duele la cabeza', 'CO symptom'],
+    ['E1', 'hay llamas amarillas en el calentador y estamos mareados', 'CO symptom'],
+    ['E1', 'hay llamas amarillas en la estufa y se prendió la cortina', 'fire spread'],
+    ['E1', 'hay llamas naranjas en el horno y en la pared', 'flames outside the appliance'],
+    ['E1', 'veo llamas rojas en la secadora', 'a dryer has no visible flame'],
   ];
 
   it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {
@@ -428,6 +456,18 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
       expect(r.tier).not.toBe('E1');
       expect(r.requiresEvacuation).toBe(false);
     }
+  });
+
+  // Re-review, finding 4 — deliberate tie-breaks. STT cannot tell "no se …"
+  // from "no sé, …", so a leak verb after "no se" resolves upward (E1). Only
+  // "no se huele" stays a denial; it still reaches E2 via the backstop.
+  it.each([
+    ['no se está saliendo el gas', 'E1'],
+    ['no se escapa el gas', 'E1'],
+    ['no se está escapando el gas', 'E1'],
+    ['no se huele a gas', 'E2'],
+  ] as const)('tie-break: %j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
   });
 
   // Finding 5 — STT and copy-paste can deliver decomposed accents (NFD).
