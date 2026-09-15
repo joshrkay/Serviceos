@@ -27,6 +27,14 @@
  * fence.
  */
 
+import {
+  capUntrustedText,
+  findForgedSpans,
+  replaceForgedSpans,
+} from './untrusted-text-matching';
+
+export { MAX_UNTRUSTED_CONTENT_CHARS } from './untrusted-text-matching';
+
 export const UNTRUSTED_CONTENT_BLOCK_BEGIN =
   '=== UNTRUSTED CALLER CONTENT (BEGIN) ===';
 export const UNTRUSTED_CONTENT_BLOCK_END =
@@ -41,9 +49,11 @@ const HARDENING_LINE =
  * message). `label` describes what the block contains (e.g. "Call transcript",
  * "Customer message thread") so the model knows what it is reading.
  *
- * `text` is inserted verbatim — never paraphrased. Any BEGIN/END marker the
- * caller embedded to try to break out of the fence is neutralized so it cannot
- * forge an early END.
+ * `text` is inserted verbatim — never paraphrased, never normalised. Any
+ * BEGIN/END marker the caller embedded to try to break out of the fence — in
+ * any spelling a model still reads as the marker — is replaced so it cannot
+ * forge an early END. Text over MAX_UNTRUSTED_CONTENT_CHARS is truncated
+ * visibly (head and tail kept).
  */
 export function buildUntrustedContentSection(text: string, label: string): string {
   return [
@@ -56,55 +66,25 @@ export function buildUntrustedContentSection(text: string, label: string): strin
 }
 
 /**
- * Zero-width / invisible formatting characters a caller (or an STT/SMS
- * pipeline) can hide inside a marker so it no longer matches byte-for-byte
- * while still reading as the marker to a model: ZWSP, ZWNJ, ZWJ, word joiner,
- * BOM / ZWNBSP, soft hyphen, Mongolian vowel separator.
- */
-const INVISIBLE_CHARS_RE = /[\u200B-\u200D\u2060\uFEFF\u00AD\u180E]/g;
-
-/**
- * Delimiter lookalikes NFKC does NOT fold to ASCII. NFKC already maps the
- * fullwidth / small forms (＝ ﹦ （ ） ﹙ ﹚) to `=` `(` `)`; these survive it.
- * `=`: box-drawing double horizontals, the double hyphen / katakana double
- * hyphen, and the modifier equals. Parens: ornamental / mathematical brackets.
- */
-const EQUALS_LIKE = '=\u2550\u2E40\u30A0\uA78A\u2A75\u2A76\u268C';
-const OPEN_PAREN_LIKE = '(\\[{\u2768\u276A\u27EE\u2985';
-const CLOSE_PAREN_LIKE = ')\\]}\u2769\u276B\u27EF\u2986';
-
-/**
- * A forged BEGIN/END marker, matched loosely: case-insensitive, any (or no)
- * whitespace — newlines included — between every token, optional delimiter
- * runs of `=` or a lookalike, optional brackets. Runs on NFKC-normalized,
- * invisible-stripped text (see `neutralizeFenceMarkers`).
- */
-const FORGED_MARKER_RE = new RegExp(
-  `(?:[${EQUALS_LIKE}]\\s*)*` +
-    `UNTRUSTED\\s*CALLER\\s*CONTENT\\s*` +
-    `[${OPEN_PAREN_LIKE}]?\\s*(?:BEGIN|END)\\s*[${CLOSE_PAREN_LIKE}]?` +
-    `(?:\\s*[${EQUALS_LIKE}])*`,
-  'gi',
-);
-
-/**
  * Strip any fence markers a caller embedded in their text, so a transcript
  * containing "=== UNTRUSTED CALLER CONTENT (END) ===" cannot close the fence
  * early and smuggle the rest of its text out as trusted prompt.
  *
  * #894 review: an exact-string replace missed every variant a model still
- * reads as the marker — lowercase, extra/missing spaces, fullwidth `＝`,
- * zero-width characters inside, a line break splitting it, box-drawing `═`.
- * So the text is first NFKC-normalized (folds fullwidth / compatibility
- * forms) and stripped of invisible characters, then every loosely matching
- * marker is replaced. The normalization is applied to the text that is
- * fenced: a compatibility-form character in caller text reaches the model as
- * its canonical form, which is the same text to a reader and removes the
- * whole class of "looks identical, compares different" forgeries.
+ * reads as the marker (case, spacing, fullwidth `＝`, zero-width characters,
+ * a line break, box-drawing `═`).
+ *
+ * #1229 review: the #894 fix NFKC-normalised the text it then FENCED, which
+ * rewrote the caller's numbers ("1½" → "11⁄2", "4²" → "42") and re-assembled
+ * role tags `neutralizeUntrusted` had already let through (`＜system＞` →
+ * `<system>`), while still missing homoglyphs, most invisible characters,
+ * entity / JSON escapes and separators between the words. Matching now runs
+ * on a folded COPY (`untrusted-text-matching.ts`); each forged marker is
+ * replaced as one whole span of the ORIGINAL text, and every other character
+ * reaches the model byte-for-byte. The text is capped first
+ * (`capUntrustedText`, visible truncation).
  */
 function neutralizeFenceMarkers(text: string): string {
-  return text
-    .normalize('NFKC')
-    .replace(INVISIBLE_CHARS_RE, '')
-    .replace(FORGED_MARKER_RE, '[fence-marker]');
+  const capped = capUntrustedText(text);
+  return replaceForgedSpans(capped, findForgedSpans(capped, ['fence-marker']), '[fence-marker]');
 }
