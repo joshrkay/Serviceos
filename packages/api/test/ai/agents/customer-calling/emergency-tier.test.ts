@@ -377,6 +377,45 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['not-E1', 'no está saliendo gas de la estufa', 'negated gas escaping'],
     ['not-E1', 'no hay monóxido en la casa', 'negated CO'],
     ['not-E1', 'no hay humo en la casa', 'negated smoke in the house'],
+    // Second review, finding 1 — "sale" is a price in Spanish and a sale in
+    // English. Only a leak sense of "salir" counts.
+    ['not-E1', 'do you have any on sale gas water heaters', 'English: "on sale"'],
+    ['not-E1', 'any sale gas furnaces this month', 'English: "sale"'],
+    ['not-E1', '¿cuánto me sale el gas?', 'price'],
+    ['not-E1', '¿a cómo sale el propano?', 'price'],
+    ['not-E1', 'el recibo me sale el gas muy caro', 'bill'],
+    ['E1', 'está saliendo gas', 'gas escaping'],
+    ['E1', 'sale gas de la estufa', 'gas escaping from the stove'],
+    ['E1', 'sale gas de la tubería', 'gas escaping from the pipe'],
+    ['E1', 'sale gas del calentador', 'gas escaping from the heater'],
+    // Second review, finding 2 — real emergencies that were E3 (or E2).
+    ['E1', 'huelo gas', 'I smell gas'],
+    ['E1', 'huelo a gas', 'I smell gas'],
+    ['E1', 'hay llamas en la cocina', 'flames in the kitchen'],
+    ['E1', 'hay humo en la cocina', 'smoke in the kitchen'],
+    ['E1', 'se está escapando el gas', 'gas escaping'],
+    ['E1', 'se escapa el gas', 'gas escaping'],
+    ['E1', 'no puedo apagar el fuego', 'cannot put the fire out (the phrase carries its own "no")'],
+    ['E1', 'no me deja respirar el humo', 'smoke, cannot breathe (own "no")'],
+    ['E1', 'no, no puedo apagar el fuego', 'a leading "no" does not negate it'],
+    ['E1', 'no no puedo apagar el fuego', 'same, with the comma STT drops'],
+    ['E1', 'huele a cable quemado', 'burning wire smell'],
+    ['E1', 'no puedo respirar, hay humo', 'was E2 via the backstop'],
+    ['not-E1', 'no huelo gas', 'negated: I do not smell gas'],
+    ['not-E1', 'no hay llamas en la cocina', 'negated flames'],
+    ['not-E1', 'no hay humo en la cocina', 'negated smoke'],
+    ['not-E1', 'no se está escapando el gas', 'negated gas escaping'],
+    ['not-E1', 'no huele a cable quemado', 'negated burning wire smell'],
+    ['not-E1', 'hay humo saliendo de la chimenea', 'chimney smoke is normal'],
+    // Second review, finding 3 — the flame-colour exception is only
+    // "veo/hay llamas <colour> en/del <appliance>" with no other hazard word.
+    ['E1', 'salen llamas amarillas y humo negro del calentador', 'flames coming out + smoke'],
+    ['E1', 'veo llamas amarillas y humo en el calentador', 'colour plus another hazard word'],
+    ['not-E1', 'hay llamas azules en la estufa', 'flame colour diagnostic'],
+    // Second review, finding 4 — STT drops the accent and comma of "no sé,".
+    ['E1', 'no se hay fuego', '"no sé, hay fuego"'],
+    ['E1', 'no se sale humo del enchufe', '"no sé, sale humo del enchufe"'],
+    ['not-E1', 'no se huele a gas', '"no se huele" is still a denial'],
   ];
 
   it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {
