@@ -8,8 +8,13 @@
  * gave each phrase (recorded in the fixture, never regenerated on a branch).
  *
  * - A phrase that is E1 on main stays E1, unless it is listed in
- *   INTENDED_DOWNGRADES with the reviewed reason.
+ *   INTENDED_DOWNGRADES.
  * - A phrase that is E2 on main never drops to E3.
+ * - Each INTENDED_DOWNGRADES entry records its fixture (main) tier AND its
+ *   expected new tier, and both are asserted: a price question that falls to
+ *   E3 instead of E2 fails. E3 is an allowed new tier only for the reviewed
+ *   benign-smoke and figurative/non-person rows; price questions and the
+ *   ambiguous object fall go to E2 (#1253 review).
  * Upgrades are allowed: ambiguity resolves upward (goal §3).
  */
 import { describe, it, expect } from 'vitest';
@@ -19,29 +24,28 @@ import { classifyCallerSafety } from '../../../../src/ai/agents/customer-calling
 
 const FIXTURE = resolve(__dirname, 'fixtures/spanish-e1-monotonicity.tsv');
 
-/** Reviewed decisions only: each row names why a main-E1 phrase may leave E1. */
-const INTENDED_DOWNGRADES: ReadonlyMap<string, string> = new Map([
-  ['hay humo cuando prendo la calefacción por primera vez', 'first heat of the season burns off dust (#1239 review; English is E3)'],
-  ['hay humo de la carne asada en el patio', 'barbecue smoke outdoors (#1239 review)'],
-  // Josh's decision (#1241): a gas price question with no leak or harm signal is E2 (human check).
-  ['¿cuánto sale el gas en Phoenix?', 'price question naming a place → E2 (Josh, #1241)'],
-  ['¿a cómo sale el gas en esta zona?', 'price question naming a place → E2 (Josh, #1241)'],
-  ['¿cuánto me sale el gas en la casa nueva?', 'price question naming a place → E2 (Josh, #1241)'],
-  ['¿a cómo sale el gas por la tubería nueva?', 'price question naming a source → E2 (Josh, #1241)'],
-  ['¿cuánto sale el gas del calentador nuevo?', 'price question naming a source → E2 (Josh, #1241)'],
-  ['¿cuánto sale el gas del calentador?', 'price question naming a source → E2 (Josh, #1241)'],
-  ['¿a cuánto sale el gas del tanque?', 'price question naming a source → E2 (Josh, #1241)'],
-  ['¿cuánto sale el gas del tanque de 20 libras?', 'price question naming a source → E2 (Josh, #1241)'],
-  ['¿a cómo sale el propano en su compañía?', 'price question naming a company → E2 (Josh, #1241)'],
-  ['¿cuánto sale el gas por aquí?', 'price question naming a place → E2 (Josh, #1241)'],
-  // #1245 round 2, LOW over-triage: figurative or non-person readings with no person/harm signal → E3.
-  ['mi hijo está herido de amor', 'heartbroken, not injured (#1245 round 2)'],
-  ['la película era sobre alguien inconsciente', 'fiction (#1245 round 2)'],
-  ['se desmayó la señal del wifi', 'a wifi signal dropping (#1245 round 2)'],
-  ['la cotización me dio convulsiones', 'a reaction to a quote (#1245 round 2)'],
-  ['el precio me dio un toque', 'a reaction to a price (#1245 round 2)'],
-  // Same non-person-subject guard as above, found while adding the comma form of falls.
-  ['se cayó la tele y no se puede mover', 'a TV fell and cannot be moved; no person or harm named (non-person subject, #1245 round 2 class)'],
+type Tier = 'E1' | 'E2' | 'E3';
+
+/** Reviewed decisions only. `mainTier` is the fixture column; `expectedTier` is what the branch must give. */
+const INTENDED_DOWNGRADES: ReadonlyMap<string, { mainTier: Tier; expectedTier: Tier; why: string }> = new Map([
+  ['hay humo cuando prendo la calefacción por primera vez', { mainTier: 'E1', expectedTier: 'E3', why: 'first heat of the season burns off dust (#1239 review; English is E3)' }],
+  ['hay humo de la carne asada en el patio', { mainTier: 'E1', expectedTier: 'E3', why: 'barbecue smoke outdoors (#1239 review)' }],
+  ['¿cuánto sale el gas en Phoenix?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a place (Josh, #1241)' }],
+  ['¿a cómo sale el gas en esta zona?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a place (Josh, #1241)' }],
+  ['¿cuánto me sale el gas en la casa nueva?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a place (Josh, #1241)' }],
+  ['¿a cómo sale el gas por la tubería nueva?', { mainTier: 'E3', expectedTier: 'E2', why: 'price question naming a source (Josh, #1241)' }],
+  ['¿cuánto sale el gas del calentador nuevo?', { mainTier: 'E3', expectedTier: 'E2', why: 'price question naming a source (Josh, #1241)' }],
+  ['¿cuánto sale el gas del calentador?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source (Josh, #1241)' }],
+  ['¿a cuánto sale el gas del tanque?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source (Josh, #1241)' }],
+  ['¿cuánto sale el gas del tanque de 20 libras?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source (Josh, #1241)' }],
+  ['¿a cómo sale el propano en su compañía?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a company (Josh, #1241)' }],
+  ['¿cuánto sale el gas por aquí?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a place (Josh, #1241)' }],
+  ['mi hijo está herido de amor', { mainTier: 'E1', expectedTier: 'E3', why: 'figurative: heartbroken, not injured (#1245 round 2)' }],
+  ['la película era sobre alguien inconsciente', { mainTier: 'E1', expectedTier: 'E3', why: 'fiction (#1245 round 2)' }],
+  ['se desmayó la señal del wifi', { mainTier: 'E1', expectedTier: 'E3', why: 'a wifi signal dropping (#1245 round 2)' }],
+  ['la cotización me dio convulsiones', { mainTier: 'E1', expectedTier: 'E3', why: 'a reaction to a quote (#1245 round 2)' }],
+  ['el precio me dio un toque', { mainTier: 'E1', expectedTier: 'E3', why: 'a reaction to a price (#1245 round 2)' }],
+  ['se cayó la tele y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'ambiguous object fall, no person named anywhere: human check (#1253 review)' }],
 ]);
 
 const rows = readFileSync(FIXTURE, 'utf8')
@@ -60,10 +64,10 @@ describe('#1239 review — Spanish E1 monotonicity against origin/main', () => {
     }
   });
 
-  it('every intended downgrade is in the corpus and has actually left E1 (no stale entries)', () => {
-    for (const phrase of INTENDED_DOWNGRADES.keys()) {
-      expect(rows.some((r) => r.phrase === phrase), phrase).toBe(true);
-      expect(classifyCallerSafety(phrase, {}).tier, phrase).not.toBe('E1');
+  it('every intended downgrade is in the corpus with its recorded main tier, and lands exactly on its expected tier', () => {
+    for (const [phrase, { mainTier, expectedTier }] of INTENDED_DOWNGRADES) {
+      expect(rows.find((r) => r.phrase === phrase)?.mainTier, `${phrase} (fixture main tier)`).toBe(mainTier);
+      expect(classifyCallerSafety(phrase, {}).tier, `${phrase} (new tier)`).toBe(expectedTier);
     }
   });
 

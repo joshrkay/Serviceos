@@ -750,6 +750,45 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['E1', 'mi hijo se tragó una moneda y el perro ladra', 'a child, a pet nearby'],
     ['E1', 'le mordió un perro y se está hinchando', 'a dog bite with swelling'],
     ['not-E1', 'hay gas en el aire acondicionado', 'refrigerant talk'],
+    // #1253 review 1 — a person under or on a fallen object is E1.
+    ['E1', 'se cayó la tele encima de mi hijo y no se puede mover', 'person under the TV'],
+    ['E1', 'se cayó la escalera con mi papá arriba y no se puede levantar', 'person on the ladder'],
+    ['E1', 'se cayó un mueble sobre mi papá y no responde', 'person under furniture'],
+    ['E1', 'se cayó la tele sobre ella y no se mueve', 'pronoun'],
+    ['E1', 'se cayó el librero encima de mi hija y no se mueve', 'person under a bookcase'],
+    ['E1', 'se cayó la tele encima de mi hijo, no se mueve', 'comma form'],
+    ['E1', 'se cayó un mueble sobre mi papá y no se puede levantar', 'person under furniture'],
+    // #1253 review 2 — people are never objects.
+    ['E1', 'se cayó el hombre y no se mueve', 'a man'],
+    ['E1', 'se cayó el nieto y no se mueve', 'a grandson'],
+    ['E1', 'se cayó el muchacho y no se mueve', 'a young man'],
+    ['E1', 'se cayó la muchacha y no se mueve', 'a young woman'],
+    ['E1', 'se cayó el viejito y no se mueve', 'an old man'],
+    ['E1', 'se cayó el chamaco y no se mueve', 'a kid'],
+    ['E1', 'se cayó el señor y no se mueve', 'a man'],
+    ['E1', 'se cayó el esposo y no se mueve', 'a husband'],
+    // #1253 review 3 — one leak/danger lexicon for the price guard.
+    ['E1', '¿cuánto sale el gas en la casa? está chiflando el tanque', 'price question + hissing'],
+    ['E1', '¿cuánto me sale el gas? escucho un silbido en la tubería', 'price question + whistling'],
+    ['E1', '¿a cómo sale el gas? se rompió la manguera', 'price question + broken hose'],
+    ['E1', '¿cuánto sale el gas? mi hijo se mareó', 'price question + dizziness'],
+    ['E1', '¿cuánto sale el gas? la tubería está rota', 'price question + broken pipe'],
+    ['E1', '¿cuánto sale el gas? está silbando', 'price question + whistling'],
+    ['E1', '¿cuánto sale el gas? mi mamá se mareó', 'price question + dizziness'],
+    // #1253 review 4 — poison and swallowed objects with articles and more verbs.
+    ['E1', 'mi hija se tomó el cloro', 'article'],
+    ['E1', 'se bebió la lejía', 'article'],
+    ['E1', 'comió raticida', '"comió"'],
+    ['E1', 'se tragó la pila', 'article'],
+    ['E1', 'se envenenó', 'poisoned'],
+    ['E1', 'se tomó la medicina de su abuela', "someone else's medicine"],
+    ['E1', 'se tomó las pastillas de su mamá', "someone else's pills"],
+    ['E1', 'mi hijo se tragó la pila del control', 'article'],
+    ['E1', 'se tragó la moneda', 'article'],
+    // #1253 review 6 — the pet guard never fires with a person present or implied.
+    ['E1', 'se tragó una pila mientras le daba de comer al perro', 'implied person'],
+    ['E1', 'mi hijo se tragó un imán jugando con el gato', 'person with a pet nearby'],
+    ['E1', 'el niño se tragó una moneda del plato del perro', 'person, pet mentioned'],
   ];
 
   it.each(FOLLOWUP_TABLE)('%s: %j (%s)', (bucket, utterance) => {
@@ -776,8 +815,27 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['cuánto sale gas del medidor', 'E1'],
     ['cómo sale gas del tanque', 'E1'],
     ['¿cuánto sale el gas del calentador? huele muy fuerte', 'E1'],
-  ] as const)('price question: %j is %s', (utterance, tier) => {
+    // #1253 review — ambiguous object falls and pet emergencies go to E2 (human check), not E3.
+    ['se cayó la tele y no se puede mover', 'E2'],
+    ['se cayó el árbol, no se mueve', 'E2'],
+    ['mi perro se tragó una moneda', 'E2'],
+  ] as const)('price question / human-check row: %j is %s', (utterance, tier) => {
     expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+
+  // #1253 review 5 — the scan runs synchronously in the Twilio and media-stream
+  // handlers; past-marker scoping must be linear in the transcript length.
+  it('classifies an 8k-character transcript in under 20 ms', () => {
+    const long = 'se electrocutó ayer '.repeat(400);
+    expect(long.length).toBeGreaterThanOrEqual(8000);
+    classifyCallerSafety(long, {}); // warm-up (regex compilation)
+    let best = Infinity;
+    for (let i = 0; i < 3; i += 1) {
+      const t0 = performance.now();
+      classifyCallerSafety(long, {});
+      best = Math.min(best, performance.now() - t0);
+    }
+    expect(best).toBeLessThan(20);
   });
 });
 
