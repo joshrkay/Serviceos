@@ -93,6 +93,20 @@ describe('summarizeSession — happy path', () => {
     ]);
   });
 
+  // #1229 re-review — the prompt is bounded by MAX_TRANSCRIPT_TURNS (30), not
+  // by length; a whole-block cap on the caller turns cut the middle of a long call.
+  it('#1229 re-review — 30 long caller turns all reach the fence intact, first and last included', async () => {
+    const gateway = mockGateway();
+    const turns = Array.from({ length: 30 }, (_, n) => `caller: TURN${String(n).padStart(2, '0')} ${'w'.repeat(1200)}`);
+    await summarizeSession(baseInput({ gateway, transcript: turns }));
+    const messages = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    const user = messages.find((m: { role: string }) => m.role === 'user').content as string;
+    expect(user).toContain(`[1] ${turns[0]}`);
+    expect(user).toContain(`[30] ${turns[29]}`);
+    expect(turns.filter((t, i) => user.includes(`[${i + 1}] ${t}`))).toHaveLength(30);
+    expect(user).not.toMatch(/characters of caller content omitted/);
+  });
+
   it('RIVET I13 — fences ONLY caller turns; agent turns stay trusted; order preserved (Codex)', async () => {
     const gateway = mockGateway();
     await summarizeSession(

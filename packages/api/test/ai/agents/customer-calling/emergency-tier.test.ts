@@ -683,6 +683,334 @@ describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
   });
 });
 
+// ─── #1245 round-2 + #1241 follow-ups ────────────────────────────────────────
+
+describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price questions (one table)', () => {
+  const FOLLOWUP_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // A1 — fell and cannot move, without "y" or a named subject
+    ['E1', 'mi hijo se cayó del techo, no se mueve', 'comma instead of "y"'],
+    ['E1', 'se cayó, no se puede levantar', 'comma, no subject'],
+    ['E1', 'mi mamá se cayó y no puede levantarse', 'enclitic'],
+    ['E1', 'se cayó y no se puede parar', '"parar" = stand up'],
+    ['E1', 'lo encontré tirado y no se mueve', 'found lying down'],
+    ['E1', 'mi mamá se cayó, no se puede parar', 'comma + "parar"'],
+    // A2 — ongoing shock
+    ['E1', 'se está electrocutando', 'ongoing electrocution'],
+    ['E1', 'le está dando la corriente', 'ongoing shock'],
+    // A3 — a past marker on a different verb does not downgrade the event
+    ['E1', 'el enchufe que instalaron el mes pasado le dio la corriente a mi hijo', 'marker on the relative clause'],
+    ['E1', 'hace dos años le cambiaron el panel mi papá se electrocutó', 'unpunctuated, marker on another verb'],
+    ['E1', 'mi hijo se electrocutó con el cable que dejó el técnico ayer', 'marker on the relative clause'],
+    ['E1', 'mi papa se desmayo ayer estaba bien', 'unpunctuated, no accents'],
+    // A4 — every match counts, not only the first
+    ['E1', 'el año pasado se electrocutó mi primo y mi hijo se electrocutó', 'second event is present'],
+    // A5 — a present symptom after a past event
+    ['E1', 'se electrocutó ayer y está temblando', 'trembling now'],
+    ['E1', 'tomó muchas pastillas ayer y está muy dormido', 'drowsy now'],
+    ['E1', 'se desmayó anoche, está muy débil y confundido', 'weak and confused now'],
+    // A6 — missing classes
+    ['E1', 'tomó veneno', 'poison'],
+    ['E1', 'se tomó cloro', 'poison (bleach)'],
+    ['E1', 'se tragó una pila', 'swallowed a battery'],
+    ['E1', 'se tragó una moneda', 'swallowed a coin'],
+    ['E1', 'se tragó un imán', 'swallowed a magnet'],
+    ['E1', 'le picó un alacrán y se está hinchando', 'sting with swelling'],
+    ['E1', 'está vomitando sangre', 'vomiting blood'],
+    ['E1', 'le falta el aire', 'short of breath'],
+    ['E1', 'se está asfixiando', 'suffocating'],
+    ['E1', 'se desvaneció', 'fainted'],
+    ['E1', 'sangra de la cabeza', 'head bleeding'],
+    ['not-E1', 'no tomó veneno', 'negated'],
+    ['not-E1', 'no le falta el aire', 'negated'],
+    ['not-E1', 'hace años se tragó una moneda', 'clearly past'],
+    // A7 — figurative / non-person readings
+    ['not-E1', 'mi hijo está herido de amor', 'heartbroken'],
+    ['not-E1', 'la película era sobre alguien inconsciente', 'fiction'],
+    ['not-E1', 'se desmayó la señal del wifi', 'wifi signal'],
+    ['not-E1', 'la cotización me dio convulsiones', 'price reaction'],
+    ['not-E1', 'el precio me dio un toque', 'price reaction'],
+    // B — #1241 gas leak grammar
+    ['E1', 'se sale el gas what should I do', 'sourceless reflexive + English question'],
+    ['E1', 'se salió el gas cuánto cuesta', 'sourceless reflexive + price question'],
+    ['E1', 'sale gas por los dos lados cuánto cuesta', 'a number without a currency is not a price'],
+    ['E1', 'sale gas por 2 lados cuánto cuesta', 'a digit without a currency is not a price'],
+    ['E1', 'gas saliendo de la estufa', 'subject-first gerund'],
+    ['E1', 'hay gas en el aire', 'gas in the air'],
+    ['E1', 'el tanque de gas está chiflando', 'hissing tank'],
+    ['E1', 'la manguera del gas está rota', 'broken gas hose'],
+    ['E1', 'se rompió la tubería de gas', 'broken gas pipe'],
+    ['E1', 'sale gas de la tienda', 'accepted (#1241 item 3)'],
+    ['not-E1', 'el gas sale por 50 dólares al mes', 'a number with a currency is a price'],
+    // Guards for the new patterns: objects that fall, pets, air conditioning.
+    ['not-E1', 'se cayó la tele y no se puede mover', 'a TV fell (exact shape → E2)'],
+    ['E1', 'se cayó el árbol, no se mueve', 'not a household object and not the exact shape (#1253 round 2)'],
+    ['E1', 'se cayó la tele y mi hijo no se puede mover', 'an object fell on a person'],
+    ['E1', 'se cayó el niño y no se mueve', 'a child fell'],
+    ['not-E1', 'mi perro se tragó una moneda', 'a pet'],
+    ['E1', 'mi hijo se tragó una moneda y el perro ladra', 'a child, a pet nearby'],
+    ['E1', 'le mordió un perro y se está hinchando', 'a dog bite with swelling'],
+    ['not-E1', 'hay gas en el aire acondicionado', 'refrigerant talk'],
+    // #1253 review 1 — a person under or on a fallen object is E1.
+    ['E1', 'se cayó la tele encima de mi hijo y no se puede mover', 'person under the TV'],
+    ['E1', 'se cayó la escalera con mi papá arriba y no se puede levantar', 'person on the ladder'],
+    ['E1', 'se cayó un mueble sobre mi papá y no responde', 'person under furniture'],
+    ['E1', 'se cayó la tele sobre ella y no se mueve', 'pronoun'],
+    ['E1', 'se cayó el librero encima de mi hija y no se mueve', 'person under a bookcase'],
+    ['E1', 'se cayó la tele encima de mi hijo, no se mueve', 'comma form'],
+    ['E1', 'se cayó un mueble sobre mi papá y no se puede levantar', 'person under furniture'],
+    // #1253 review 2 — people are never objects.
+    ['E1', 'se cayó el hombre y no se mueve', 'a man'],
+    ['E1', 'se cayó el nieto y no se mueve', 'a grandson'],
+    ['E1', 'se cayó el muchacho y no se mueve', 'a young man'],
+    ['E1', 'se cayó la muchacha y no se mueve', 'a young woman'],
+    ['E1', 'se cayó el viejito y no se mueve', 'an old man'],
+    ['E1', 'se cayó el chamaco y no se mueve', 'a kid'],
+    ['E1', 'se cayó el señor y no se mueve', 'a man'],
+    ['E1', 'se cayó el esposo y no se mueve', 'a husband'],
+    // #1253 review 3 — one leak/danger lexicon for the price guard.
+    ['E1', '¿cuánto sale el gas en la casa? está chiflando el tanque', 'price question + hissing'],
+    ['E1', '¿cuánto me sale el gas? escucho un silbido en la tubería', 'price question + whistling'],
+    ['E1', '¿a cómo sale el gas? se rompió la manguera', 'price question + broken hose'],
+    ['E1', '¿cuánto sale el gas? mi hijo se mareó', 'price question + dizziness'],
+    ['E1', '¿cuánto sale el gas? la tubería está rota', 'price question + broken pipe'],
+    ['E1', '¿cuánto sale el gas? está silbando', 'price question + whistling'],
+    ['E1', '¿cuánto sale el gas? mi mamá se mareó', 'price question + dizziness'],
+    // #1253 review 4 — poison and swallowed objects with articles and more verbs.
+    ['E1', 'mi hija se tomó el cloro', 'article'],
+    ['E1', 'se bebió la lejía', 'article'],
+    ['E1', 'comió raticida', '"comió"'],
+    ['E1', 'se tragó la pila', 'article'],
+    ['E1', 'se envenenó', 'poisoned'],
+    ['E1', 'se tomó la medicina de su abuela', "someone else's medicine"],
+    ['E1', 'se tomó las pastillas de su mamá', "someone else's pills"],
+    ['E1', 'mi hijo se tragó la pila del control', 'article'],
+    ['E1', 'se tragó la moneda', 'article'],
+    // #1253 review 6 — the pet guard never fires with a person present or implied.
+    ['E1', 'se tragó una pila mientras le daba de comer al perro', 'implied person'],
+    ['E1', 'mi hijo se tragó un imán jugando con el gato', 'person with a pet nearby'],
+    ['E1', 'el niño se tragó una moneda del plato del perro', 'person, pet mentioned'],
+    // The pet must be the one who swallowed it; "gotea/goteando" is gas trouble.
+    ['E1', 'se tragó una moneda mientras jugaba con el perro', 'the pet is not the subject'],
+    ['E1', 'a como sale el gas del calentador esta goteando', 'price question + dripping'],
+  ];
+
+  it.each(FOLLOWUP_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+    } else {
+      expect(r.tier).not.toBe('E1');
+    }
+  });
+
+  // C — Josh's decision: a price question ("a cómo / cuánto (me/le) sale el
+  // gas …") with no leak or harm signal is E2 (human check). A named source or
+  // place is not a leak signal there. Bare leak grammar with no article stays E1.
+  it.each([
+    ['¿a cómo sale el gas por la tubería nueva?', 'E2'],
+    ['¿cuánto sale el gas del calentador nuevo?', 'E2'],
+    ['¿cuánto sale el gas en Phoenix?', 'E2'],
+    ['¿a cómo sale el gas en esta zona?', 'E2'],
+    ['¿cuánto me sale el gas en la casa nueva?', 'E2'],
+    ['¿cuánto me sale el gas?', 'E2'],
+    ['¿a cómo sale el propano?', 'E2'],
+    ['cuánto sale gas del medidor', 'E1'],
+    ['cómo sale gas del tanque', 'E1'],
+    ['¿cuánto sale el gas del calentador? huele muy fuerte', 'E1'],
+    // #1253 review — ambiguous object falls and pet emergencies go to E2 (human check), not E3.
+    ['se cayó la tele y no se puede mover', 'E2'],
+    ['mi perro se tragó una moneda', 'E2'],
+    ['mi gato se tomó el anticongelante', 'E2'],
+    ['se cayó la escalera y no se puede mover', 'E1'],
+    ['se cayó el refrigerador y no se puede mover', 'E2'],
+    ['a cómo sale el gas del tanque', 'E2'],
+  ] as const)('price question / human-check row: %j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+
+  // #1253 review 5 — the scan runs synchronously in the Twilio and media-stream
+  // handlers; past-marker scoping must be linear in the transcript length.
+  it('classifies an 8k-character transcript in under 20 ms', () => {
+    const long = 'se electrocutó ayer '.repeat(400);
+    expect(long.length).toBeGreaterThanOrEqual(8000);
+    classifyCallerSafety(`${long}warm-up`, {}); // regex compilation
+    let best = Infinity;
+    for (let i = 0; i < 3; i += 1) {
+      // A distinct transcript each run, so no per-transcript memo can answer it.
+      const transcript = `${long}${' '.repeat(i + 1)}fin`;
+      const t0 = performance.now();
+      classifyCallerSafety(transcript, {});
+      best = Math.min(best, performance.now() - t0);
+    }
+    expect(best).toBeLessThan(20);
+  });
+});
+
+
+// ─── #1253 round 2 — structural rules ────────────────────────────────────────
+
+describe('#1253 round 2 — E2 floor for heuristic suppressors, exact object-fall shape, device subject, gas lexicon', () => {
+  it.each([
+    // Rule 1 — a heuristic suppressor lowers E1 to E2 at most (a human redirects it).
+    ['casi me infarto con la cotización', 'E2'],
+    ['mi hijo está herido de amor', 'E2'],
+    ['el precio me dio un toque', 'E2'],
+    ['la cotización me dio convulsiones', 'E2'],
+    ['la película era sobre alguien inconsciente', 'E2'],
+    ['me duele el pecho de risa', 'E2'],
+    ['tengo convulsiones de risa', 'E2'],
+    ['sobredosis de café', 'E2'],
+    ['el técnico no responde mis mensajes', 'E2'],
+    ['veo llamas amarillas en el calentador', 'E2'],
+    ['el recibo me sale el gas muy caro', 'E2'],
+    ['hay humo de la parrilla', 'E2'],
+    // The two approved smoke shapes stay E3.
+    ['hay humo cuando prendo la calefacción por primera vez', 'E3'],
+    ['hay humo de la carne asada en el patio', 'E3'],
+    // Rule 2 — object fall is E2 only as the exact utterance shape.
+    ['se cayó el refrigerador y no se puede mover', 'E2'],
+    ['se cayó la escalera y no se puede mover', 'E1'],
+    ['se cayó la tele y no se mueve', 'E2'],
+    ['se cayó la tele sobre la nena y no se mueve', 'E1'],
+    ['se cayó la puerta y no se mueve mi viejo', 'E1'],
+    ['se cayó la puerta y no se mueve la doña', 'E1'],
+    ['se cayó la puerta y no se mueve don José', 'E1'],
+    ['se cayó la escalera y no se mueve Pedro', 'E1'],
+    ['se cayó la escalera y no se mueve y está morado', 'E1'],
+    ['se cayó la escalera y no se mueve, no contesta', 'E1'],
+    ['se cayó la escalera y no se puede mover, ayuda', 'E1'],
+    ['se cayó la escalera cuando estaba arriba y no se mueve', 'E1'],
+    ['se cayó el techo y no se pueden mover', 'E1'],
+    ['se cayó la escalera y no se puede levantar', 'E1'],
+    // Rule 3 — the device reading of desmayó/desvaneció needs the device as the subject right after the verb.
+    ['se desmayó la señal del wifi', 'E2'],
+    ['se desvaneció la imagen', 'E2'],
+    ['se desmayó junto al calentador', 'E1'],
+    ['se desmayó en el garaje con el carro prendido', 'E1'],
+    ['se desmayó con el generador prendido', 'E1'],
+    ['se desmayó cuando se descompuso el aire', 'E1'],
+    ['se desmayó cuando llegó el técnico', 'E1'],
+    ['se desmayó en la oficina', 'E1'],
+    ['Luz se desmayó', 'E1'],
+    ['la luz se desmayó', 'E1'],
+    ['la luz se desmayó, está en el piso', 'E1'],
+    // Rule 4 — the shared gas lexicon.
+    ['a cómo sale el gas del tanque, no para', 'E1'],
+    ['¿cuánto sale el gas? apesta', 'E1'],
+    ['¿cuánto sale el gas? huele feo', 'E1'],
+    ['a cómo sale el gas del tanque', 'E2'],
+    // Rule 6 — falls and crush gaps shared with main.
+    ['se cayó de la escalera', 'E1'],
+    ['se cayó del segundo piso', 'E1'],
+    ['el refri se cayó y lo aplastó', 'E1'],
+    ['se le cayó encima el estante', 'E1'],
+    ['le cayó la tele', 'E1'],
+    ['quedó atrapado debajo del mueble', 'E1'],
+  ] as const)('%j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+});
+
+
+// ─── #1253 round 3 ───────────────────────────────────────────────────────────
+
+describe('#1253 round 3 — falling objects on people, gas smell words, leak path after a price question, entrapment, one E2 floor', () => {
+  it.each([
+    // 1 — something falls on a person, in either word order
+    ['se cayó la tele encima del niño', 'E1'],
+    ['la tele se cayó sobre mi hijo', 'E1'],
+    ['se le vino encima el estante', 'E1'],
+    ['se cayó el librero sobre el niño', 'E1'],
+    ['se cayó el mueble encima de mi hija', 'E1'],
+    ['se derrumbó el techo encima de él', 'E1'],
+    // 2 — standalone gas-smell wording (main misses these too)
+    ['apesta a gas', 'E1'],
+    ['huele feo a gas', 'E1'],
+    ['hay un olorcito a gas', 'E1'],
+    ['it stinks of gas', 'E1'],
+    ['smells bad like gas', 'E1'],
+    // 3 — "el" is required; a leak path after the question is a leak
+    ['mira a cómo sale el gas de la estufa', 'E1'],
+    ['a cómo sale el gas de la estufa, no le puedo cerrar', 'E1'],
+    ['a cómo sale gas del tanque', 'E1'],
+    ['a cómo sale el gas por la llave de la estufa', 'E1'],
+    ['a cómo sale el gas de la estufa', 'E1'],
+    ['cuánto sale el gas del tanque, ya no le puedo cerrar', 'E1'],
+    ['a cómo sale el gas del tanque', 'E2'],
+    ['¿a cómo sale el gas por la tubería nueva?', 'E2'],
+    ['¿cuánto sale el gas del calentador nuevo?', 'E2'],
+    // 4 — escalera, ventana, silla and mesa are not in the exact object-fall shape
+    ['se cayó la escalera y no se mueve', 'E1'],
+    ['se cayó la ventana y no se mueve', 'E1'],
+    ['se cayó la silla y no se mueve', 'E1'],
+    ['se cayó la mesa y no se mueve', 'E1'],
+    ['se cayó la tele y no se mueve', 'E2'],
+    ['se cayó el refri y no se mueve', 'E2'],
+    // 5 — falls, entrapment, water, unresponsiveness (main misses these too)
+    ['se cayó por las escaleras', 'E1'],
+    ['rodó por las escaleras', 'E1'],
+    ['se cayó del tejado', 'E1'],
+    ['se callo del techo', 'E1'],
+    ['quedó prensado debajo del carro', 'E1'],
+    ['quedó atorado debajo del carro', 'E1'],
+    ['el niño quedó atrapado en la secadora', 'E1'],
+    ['se cayó a la alberca', 'E1'],
+    ['el niño se cayó a la alberca', 'E1'],
+    ['no contesta', 'E1'],
+    ['mi papá no contesta', 'E1'],
+    ['está atrapado en el elevador', 'E2'],
+    ['el técnico no contesta', 'E2'],
+  ] as const)('%j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+
+  // 7 — ONE E2 floor: every heuristic reading that lowers an E1 phrase lands on
+  // E2, never E3. The only E3 readings are the two approved smoke shapes (and the
+  // #1234 routine igniter/CO-device readings, which are not heuristic suppressors).
+  it.each([
+    ['gas price question', '¿cuánto sale el gas en Phoenix?'],
+    ['bare price / English sentence', 'el recibo me sale el gas muy caro'],
+    ['flame colour', 'veo llamas amarillas en el calentador'],
+    ['benign smoke outside the approved shapes', 'hay humo de la parrilla'],
+    ['injury idiom: price', 'el precio es un infarto'],
+    ['injury idiom: laugh', 'tengo convulsiones de risa'],
+    ['injury idiom: excess', 'sobredosis de café'],
+    ['injury idiom: device', 'el control remoto no responde'],
+    ['injury idiom: device subject', 'se desmayó la señal del wifi'],
+    ['injury idiom: unanswered', 'el técnico no contesta'],
+    ['injury idiom: figurative', 'mi hijo está herido de amor'],
+    ['injury idiom: fiction', 'la película era sobre alguien inconsciente'],
+    ['injury idiom: pet', 'mi perro se tragó una moneda'],
+    ['injury idiom: stuck', 'está atrapado en el elevador'],
+    ['exact object-fall shape', 'se cayó la tele y no se mueve'],
+  ])('the E2 floor holds for %s: %j', (_suppressor, utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E2');
+  });
+
+  it.each([
+    'hay humo cuando prendo la calefacción por primera vez',
+    'hay humo de la carne asada en el patio',
+  ])('the approved smoke shape %j is the only heuristic reading at E3', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E3');
+  });
+
+  // 6 — the approved-smoke check was quadratic on a flood of "asador".
+  it('classifies a 32k-character barbecue-smoke flood in under 40 ms', () => {
+    const long = 'hay humo del asador '.repeat(1600);
+    expect(long.length).toBeGreaterThanOrEqual(32000);
+    classifyCallerSafety(`${long}warm-up`, {});
+    let best = Infinity;
+    for (let i = 0; i < 3; i += 1) {
+      const transcript = `${long}${' '.repeat(i + 1)}en el patio`;
+      const t0 = performance.now();
+      classifyCallerSafety(transcript, {});
+      best = Math.min(best, performance.now() - t0);
+    }
+    expect(best).toBeLessThan(40);
+  });
+});
+
 // ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
 
 describe('e1ScriptReadiness (boot gate)', () => {
