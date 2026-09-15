@@ -63,8 +63,8 @@ test.describe('Real Clerk signup smoke', () => {
     // 6. Verify `/api/me` returns 200 with a real tenant id — proves the
     //    Clerk webhook fired and `bootstrapTenant` ran server-side.
     const token = await page.evaluate(async () => {
-      const auth = (window as unknown as { Clerk?: { session?: { getToken(): Promise<string | null> } } }).Clerk;
-      return auth?.session?.getToken();
+      const auth = (window as unknown as { Clerk?: { session?: { getToken(options: { template: string; skipCache: boolean }): Promise<string | null> } } }).Clerk;
+      return auth?.session?.getToken({ template: 'serviceos', skipCache: true });
     });
     expect(token, 'authenticated Clerk session bearer token').toBeTruthy();
     const meRes = await page.request.get('/api/me', { headers: { Authorization: `Bearer ${token}` } });

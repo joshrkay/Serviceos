@@ -7,8 +7,8 @@ import { submitClerkEmailForm, enterClerkTestCode } from '../helpers/clerk-email
 // database seed, provider purchase, invoice send or payment submission.
 async function token(page: Page): Promise<string> {
   const value = await page.evaluate(async () => {
-    const auth = (window as unknown as { Clerk?: { session?: { getToken(): Promise<string | null> } } }).Clerk;
-    return await auth?.session?.getToken();
+    const auth = (window as unknown as { Clerk?: { session?: { getToken(options: { template: string; skipCache: boolean }): Promise<string | null> } } }).Clerk;
+    return await auth?.session?.getToken({ template: 'serviceos', skipCache: true });
   });
   expect(value, 'a real Clerk session must exist').toBeTruthy();
   return value!;
