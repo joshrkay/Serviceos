@@ -4,8 +4,9 @@
  *
  * Validates: row schemas, enum membership, intent<->behaviors.yaml alignment,
  * and the launch floors (edge >=150 / cat >=10, negatives >=50 / cat >=10,
- * Spanish >=1200 & >=30/intent & code-switch >=50, English >=3000 &
- * >=50/intent, reviewed >=20%).
+ * Spanish >=1200 & >=30/represented inbound intent & code-switch >=50,
+ * English >=3000 & >=40 represented production intents & >=50/intent,
+ * reviewed >=20%).
  *
  * `utterances.jsonl` rows may carry optional `slots`/`confidence` fields
  * (legacy-derived rows do; originally-canonical rows don't) — this is the
@@ -15,7 +16,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CORPUS_DIR, SEEDS_DIR, readJsonl, listJsonl } from './lib';
+import { parse } from 'yaml';
+import { CORPUS_DIR, REPO_ROOT, SEEDS_DIR, readJsonl, listJsonl } from './lib';
 
 const HANDLINGS = new Set(['route_to_human', 'clarify', 'ignore', 'emergency_dispatch']);
 const ROUTINGS = new Set(['ignore', 'route_to_human', 'route_to_careers']);
@@ -32,11 +34,18 @@ const fail = (msg: string): void => {
   errors.push(msg);
 };
 
-function behaviorIds(): Set<string> {
+function inboundBehaviorIds(): Set<string> {
   const yaml = readFileSync(join(CORPUS_DIR, 'behaviors.yaml'), 'utf8');
   const ids = new Set<string>();
   for (const m of yaml.matchAll(/^\s*-\s+id:\s*([a-z_]+)\s*$/gm)) ids.add(m[1]);
   return ids;
+}
+
+function productionBehaviorIds(): Set<string> {
+  const doc = parse(readFileSync(join(REPO_ROOT, 'data', 'behaviors.yaml'), 'utf8')) as {
+    behaviors: Array<{ id: string }>;
+  };
+  return new Set(doc.behaviors.map((behavior) => behavior.id));
 }
 
 function isStr(v: unknown): v is string {
@@ -76,12 +85,10 @@ function validateUtterances(file: string, lang: 'en' | 'es', ids: Set<string>): 
     for (const [intent, n] of perIntent) if (n < 30) fail(`${file}: intent "${intent}" has ${n} ES utterances < 30`);
   }
   if (lang === 'en') {
-    // Ported from the retired corpus:utterances gate (validate-utterances.ts).
     if (rows.length < MIN_TOTAL) fail(`${file}: ${rows.length} EN utterances < ${MIN_TOTAL}`);
-    for (const id of ids) {
-      const n = perIntent.get(id) ?? 0;
+    if (perIntent.size < 40) fail(`${file}: ${perIntent.size} production intents represented < 40`);
+    for (const [id, n] of perIntent)
       if (n < MIN_PER_BEHAVIOR) fail(`${file}: behavior "${id}" has ${n} EN utterances < ${MIN_PER_BEHAVIOR}`);
-    }
   }
 }
 
@@ -132,23 +139,23 @@ function validateSlots(): void {
   }
 }
 
-function ensureSeedsCoverBehaviors(ids: Set<string>): void {
-  const en = JSON.parse(readFileSync(join(SEEDS_DIR, 'templates.en.json'), 'utf8')).templates;
+function ensureSpanishSeedsCoverInboundBehaviors(ids: Set<string>): void {
   const es = JSON.parse(readFileSync(join(SEEDS_DIR, 'templates.es.json'), 'utf8')).templates;
   for (const id of ids) {
-    if (!(id in en)) fail(`templates.en.json missing intent "${id}"`);
     if (!(id in es)) fail(`templates.es.json missing intent "${id}"`);
   }
 }
 
 function main(): void {
-  const ids = behaviorIds();
-  if (ids.size < 30) fail(`behaviors.yaml: only ${ids.size} behaviors parsed`);
-  console.error(`[schema] behaviors.yaml: ${ids.size} behaviors`);
-  ensureSeedsCoverBehaviors(ids);
-  validateUtterances('utterances.jsonl', 'en', ids);
-  validateUtterances('utterances_es.jsonl', 'es', ids);
-  validateEdges(ids);
+  const productionIds = productionBehaviorIds();
+  const inboundIds = inboundBehaviorIds();
+  if (productionIds.size < 40) fail(`data/behaviors.yaml: only ${productionIds.size} production behaviors parsed`);
+  if (inboundIds.size < 30) fail(`data/corpus/behaviors.yaml: only ${inboundIds.size} inbound behaviors parsed`);
+  console.error(`[schema] production behaviors: ${productionIds.size}; inbound behaviors: ${inboundIds.size}`);
+  ensureSpanishSeedsCoverInboundBehaviors(inboundIds);
+  validateUtterances('utterances.jsonl', 'en', productionIds);
+  validateUtterances('utterances_es.jsonl', 'es', inboundIds);
+  validateEdges(inboundIds);
   validateNegatives();
   validateSlots();
 

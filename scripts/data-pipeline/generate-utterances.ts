@@ -2,20 +2,16 @@
  * generate-utterances.ts — deterministic synthetic utterance generator.
  *
  * Expands hand-authored seed templates (data/corpus/seeds/) into the
- * English and Spanish utterance corpora by combining:
+ * Spanish inbound-call corpus by combining:
  *   templates x discourse-prefix variation x PRNG-sampled slot fillers
  * with exact-text dedup. Reproducible: same seeds => same output.
  *
  * Output:
- *   data/corpus/utterances.generated.jsonl   (English — staging, gitignored)
  *   data/corpus/utterances_es.jsonl          (Spanish + code-switch)
  *
- * The EN output is a staging file, not the corpus of record: utterances.jsonl
- * also carries frozen `legacy-*`-id rows from the T6-F01 migration that this
- * generator knows nothing about. `merge-corpus.ts` combines this file's fresh
- * `utt_en_*` rows with those frozen legacy rows into the real
- * data/corpus/utterances.jsonl — run `corpus:merge` (or the `corpus:build`
- * chain) after this script, not in place of it.
+ * English production/operator examples are the reviewed 41-intent corpus in
+ * utterances.jsonl. They deliberately use the production intent taxonomy and
+ * are not mixed with this separate 35-behavior inbound-call dataset.
  *
  * Run: pnpm corpus:generate   (or  npx tsx scripts/data-pipeline/generate-utterances.ts)
  */
@@ -48,7 +44,6 @@ export interface Utterance {
   reviewed_by_human: boolean;
 }
 
-const PREFIXES_EN = ['', 'Hi, ', 'Yeah, ', 'Um, ', 'Hey, ', 'So, ', 'Okay, ', 'Listen, ', 'Uh, ', 'Sorry, '];
 const PREFIXES_ES = ['', 'Hola, ', 'Sí, ', 'Este, ', 'Oiga, ', 'Mire, ', 'Bueno, ', 'Perdón, ', 'Disculpe, ', 'Eh, '];
 
 // English loanwords whose presence in a Spanish template marks code-switching.
@@ -57,7 +52,6 @@ const CODE_SWITCH_MARKERS = [
   'tankless', 'link', 'feedback', 'lead', 'working', 'ok', 'okay',
 ];
 
-const EN_TARGET_PER_INTENT = 100;
 const ES_TARGET_PER_INTENT = 40; // >= 30 required; 35 intents * 40 ~= 1,400 (>= 1,200)
 const REVIEWED_TEMPLATE_CUTOFF = 2; // first N templates per intent are hand-reviewed canon
 
@@ -133,23 +127,18 @@ function generate(
 
 function main(): void {
   const fillers = readJson<Fillers>(join(SEEDS_DIR, 'fillers.json'));
-  const en = readJson<TemplateFile>(join(SEEDS_DIR, 'templates.en.json'));
   const es = readJson<TemplateFile>(join(SEEDS_DIR, 'templates.es.json'));
 
-  const enRows = generate('en', en, fillers, PREFIXES_EN, EN_TARGET_PER_INTENT, 0x5e_70_01);
   const esRows = generate('es', es, fillers, PREFIXES_ES, ES_TARGET_PER_INTENT, 0x5e_70_02);
 
-  writeJsonl(join(CORPUS_DIR, 'utterances.generated.jsonl'), enRows);
   writeJsonl(join(CORPUS_DIR, 'utterances_es.jsonl'), esRows);
 
-  const enReviewed = enRows.filter((r) => r.reviewed_by_human).length;
   const esReviewed = esRows.filter((r) => r.reviewed_by_human).length;
   const esCodeSwitch = esRows.filter((r) => r.code_switch).length;
   const esByIntent = new Map<string, number>();
   for (const r of esRows) esByIntent.set(r.intent, (esByIntent.get(r.intent) ?? 0) + 1);
   const minEsPerIntent = Math.min(...esByIntent.values());
 
-  console.error(`[generate] EN utterances: ${enRows.length} (reviewed ${enReviewed}, ${pct(enReviewed, enRows.length)})`);
   console.error(`[generate] ES utterances: ${esRows.length} (reviewed ${esReviewed}, ${pct(esReviewed, esRows.length)})`);
   console.error(`[generate] ES code-switch: ${esCodeSwitch}; min ES/intent: ${minEsPerIntent}`);
 }

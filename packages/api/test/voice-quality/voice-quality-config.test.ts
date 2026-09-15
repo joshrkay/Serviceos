@@ -4,7 +4,7 @@
  * These tests cover the configuration plumbing for the corpus-runner
  * entry point. The corpus-runner entry itself
  * (`test/voice-quality/voice-quality.test.ts`) is exercised by the
- * dedicated `vitest.voice-quality.config.ts` config, which spreads
+ * dedicated `vitest.voice-quality.config.mts` config, which spreads
  * scripts in a single forked worker. The unit tests in this file run
  * under the default config and pin the contracts the corpus runner
  * depends on:
@@ -32,7 +32,7 @@ import { loadCorpus } from '../../src/ai/voice-quality/corpus/loader';
 
 describe('VQ-009 — vitest config + corpus entry plumbing', () => {
   it('VQ-009 — vitest config picks up only the corpus runner entry pattern', () => {
-    const configPath = path.resolve(__dirname, '../../vitest.voice-quality.config.ts');
+    const configPath = path.resolve(__dirname, '../../vitest.voice-quality.config.mts');
     expect(fs.existsSync(configPath)).toBe(true);
     const src = fs.readFileSync(configPath, 'utf-8');
     // Should target the corpus runner entry file specifically, NOT
@@ -52,7 +52,7 @@ describe('VQ-009 — vitest config + corpus entry plumbing', () => {
   });
 
   it('VQ-009 — vitest config sets pool=forks with a single worker', () => {
-    const configPath = path.resolve(__dirname, '../../vitest.voice-quality.config.ts');
+    const configPath = path.resolve(__dirname, '../../vitest.voice-quality.config.mts');
     const src = fs.readFileSync(configPath, 'utf-8');
     expect(src).toMatch(/pool:\s*['"]forks['"]/);
     // Vitest 4 removed poolOptions.forks.{maxForks,minForks}; the single-fork
@@ -87,7 +87,7 @@ describe('VQ-009 — vitest config + corpus entry plumbing', () => {
   });
 
   it('VQ-009 — default vitest config excludes the corpus runner entry', () => {
-    const configPath = path.resolve(__dirname, '../../vitest.config.ts');
+    const configPath = path.resolve(__dirname, '../../vitest.config.mts');
     const src = fs.readFileSync(configPath, 'utf-8');
     expect(src).toMatch(/voice-quality\.test\.ts/);
   });

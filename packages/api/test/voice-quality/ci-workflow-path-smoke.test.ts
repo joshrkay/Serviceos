@@ -32,11 +32,12 @@ describe('agent-path-smoke.yml — real-LLM path smoke workflow', () => {
     expect(src).toMatch(/AGENT_PATH_SMOKE_COST_CAP_CENTS:/);
   });
 
-  it('skips cleanly when ANTHROPIC_API_KEY is absent (fork safety)', () => {
+  it('fails closed when ANTHROPIC_API_KEY is absent', () => {
     const src = fs.readFileSync(workflowPath, 'utf-8');
-    expect(src).toMatch(/::warning::ANTHROPIC_API_KEY is not set/);
-    expect(src).toMatch(/has_key=false/);
-    expect(src).toMatch(/steps\.check\.outputs\.has_key == 'true'/);
+    expect(src).toMatch(/::error::ANTHROPIC_API_KEY is not set/);
+    expect(src).toMatch(/exit 1/);
+    expect(src).not.toMatch(/has_key=false/);
+    expect(src).not.toMatch(/steps\.check\.outputs\.has_key == 'true'/);
   });
 
   it('uploads the path-smoke report artifact', () => {

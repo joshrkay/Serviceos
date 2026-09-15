@@ -14,6 +14,10 @@
   "scripts": {
     "doctor": "tsx scripts/doctor.ts",
     "verify": "npm run doctor -- --warn-only && npm run typecheck && npm run lint && npm test",
+    "verify:ci": "npm run doctor -- --integration && npm run verify:ci:deterministic && npm run lint:workflows && npm run verify:ci:docker && npm run verify:ci:coverage",
+    "verify:ci:deterministic": "npm run check:dependency-audit && npm run check:dependency-audit:all && npm run typecheck && npm run lint && npm run corpus:gate && npm test && npm run typecheck:mobile && npm test --prefix packages/mobile",
+    "verify:ci:docker": "TEST_DB=testcontainers npm run test:integration --workspace=packages/api && npm run test:rls && npm run migrate:dryrun --workspace=packages/api",
+    "verify:ci:coverage": "npm run test:coverage && cd packages/api && ts-node scripts/check-coverage.ts && cd ../.. && npm test --prefix packages/mobile -- --coverage",
     "check:dependency-audit": "tsx scripts/check-dependency-audit.ts",
     "check:dependency-audit:all": "tsx scripts/check-dependency-audit.ts --include-dev",
     "check:env-coverage": "tsx scripts/check-env-coverage.ts",
@@ -32,15 +36,15 @@
     "test:voice-fixtures": "npm run test:voice-fixtures --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "typecheck": "npm run typecheck:api && npm run typecheck:web && npm run typecheck:corpus",
-    "typecheck:api": "cd packages/api && npx tsc --project tsconfig.build.json --noEmit",
-    "typecheck:web": "cd packages/web && npx tsc --noEmit",
+    "typecheck:api": "tsc --project packages/api/tsconfig.build.json --noEmit",
+    "typecheck:web": "tsc --project packages/web/tsconfig.json --noEmit",
     "typecheck:corpus": "tsc -p scripts/data-pipeline/tsconfig.json --noEmit",
     "typecheck:mobile": "npm run typecheck --prefix packages/mobile",
     "lint": "npm run lint --workspaces",
+    "lint:workflows": "docker run --rm -v \"$PWD:/repo\" --workdir /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color",
     "corpus:fixtures": "tsx scripts/data-pipeline/build-edge-negatives.ts && tsx scripts/data-pipeline/build-slots.ts",
-    "corpus:merge": "tsx scripts/data-pipeline/merge-corpus.ts",
     "corpus:manifest": "tsx scripts/data-pipeline/build-manifest.ts",
-    "corpus:build": "npm run corpus:generate && npm run corpus:merge && npm run corpus:fixtures",
+    "corpus:build": "npm run corpus:generate && npm run corpus:fixtures",
     "test:corpus-schema": "tsx scripts/data-pipeline/validate-corpus.ts",
     "test:dedup": "tsx scripts/data-pipeline/dedup.ts",
     "test:pii-leakage": "tsx scripts/data-pipeline/pii-leakage.ts",
@@ -82,6 +86,7 @@
     "corpus:coverage": "tsx scripts/data-pipeline/vocab-coverage.ts",
     "corpus:generate": "tsx scripts/data-pipeline/generate-utterances.ts && tsx scripts/data-pipeline/generate-transcripts.ts",
     "corpus:dedup": "tsx scripts/data-pipeline/dedup-utterances.ts",
+    "corpus:gate": "npm run corpus:behaviors && npm run test:corpus-schema && npm run corpus:dedup && npm run test:pii-leakage",
     "corpus:verify": "npm run corpus:vocab && npm run corpus:behaviors && npm run corpus:coverage && npm run corpus:dedup",
     "voice-eval:intent": "tsx packages/voice-eval/run-intent-eval.ts",
     "voice-eval:slot": "tsx packages/voice-eval/run-slot-eval.ts",
@@ -111,9 +116,12 @@
     "vitest": "^4.1.10"
   },
   "overrides": {
+    "brace-expansion@2": "2.1.4",
     "dockerode": {
       "uuid": "^11.1.1"
     },
-    "ip-address": "^10.4.0"
+    "ip-address": "^10.4.0",
+    "nanoid@3": "3.3.18",
+    "undici@7": "7.29.0"
   }
 }

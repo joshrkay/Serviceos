@@ -126,7 +126,7 @@ the drift turns CI red instead of shipping.
   su postgres -c "createdb serviceos_itest && psql -d serviceos_itest \
     -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;'"
   EXTERNAL_TEST_DB_URL='postgresql://postgres:postgres@127.0.0.1:5432/serviceos_itest' \
-    npx vitest run --config vitest.integration.config.ts test/integration/<your-test>.test.ts
+    npx vitest run --config vitest.integration.config.mts test/integration/<your-test>.test.ts
   ```
 
 - **Catch type mismatches at write time:** when a repo writes a literal/string

@@ -99,7 +99,7 @@ describe('VQ2-016 — Layer 2 pre-deploy CI workflow', () => {
     // The script wires through the dedicated Layer 2 vitest config so
     // the runner doesn't pick up the 4-fork Layer 1 pool.
     expect(pkg.scripts!['voice-quality:layer2']).toMatch(
-      /vitest run -c vitest\.voice-quality-layer2\.config\.ts/,
+      /vitest run -c vitest\.voice-quality-layer2\.config\.mts/,
     );
     // VQ2-017 hooks the weekly variant; pin it now to avoid drift.
     expect(pkg.scripts!['voice-quality:layer2:weekly']).toBeDefined();

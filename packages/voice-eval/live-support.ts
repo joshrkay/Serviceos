@@ -129,6 +129,20 @@ export interface CostCapResult {
   withinCap: boolean;
 }
 
+export class ActualCostCapExceededError extends Error {
+  constructor(
+    readonly capCents: number,
+    readonly spentCents: number,
+  ) {
+    super(`live voice eval actual cost ${spentCents.toFixed(2)}c exceeded cap ${capCents.toFixed(2)}c`);
+    this.name = 'ActualCostCapExceededError';
+  }
+}
+
+export function assertActualCostWithinCap(spentCents: number, capCents: number): void {
+  if (spentCents > capCents) throw new ActualCostCapExceededError(capCents, spentCents);
+}
+
 /** Pure cost-cap check. Does not throw — the caller decides how to abort. */
 export function checkCostCap(utterances: string[], capCents: number): CostCapResult {
   const projectedCents = projectRunCents(utterances);
@@ -245,6 +259,7 @@ export async function runLiveIntentEval(
   rows: IntentRow[],
   gateway: LLMGateway,
   ctx: ClassifyContext = { tenantId: SYNTHETIC_TENANT_ID },
+  afterRow?: () => void,
 ): Promise<LiveIntentResult> {
   const { classifyIntent } = await import('../api/src/ai/orchestration/intent-classifier');
   const pairs: { gold: string; pred: string }[] = [];
@@ -255,6 +270,7 @@ export async function runLiveIntentEval(
     pairs.push({ gold: r.intent, pred: res.intentType });
     if (res.tokenUsage) llmCalls++;
     else fastPathHits++;
+    afterRow?.();
   }
   return { pairs, fastPathHits, llmCalls };
 }
@@ -281,6 +297,7 @@ export async function runLiveSlotEval(
   examples: SlotExample[],
   gateway: LLMGateway,
   ctx: ClassifyContext = { tenantId: SYNTHETIC_TENANT_ID },
+  afterRow?: () => void,
 ): Promise<LiveSlotResult> {
   const { classifyIntent } = await import('../api/src/ai/orchestration/intent-classifier');
   const { extractLaunchSlots } = await import('../api/src/voice/launch-slots');
@@ -301,6 +318,7 @@ export async function runLiveSlotEval(
         problem_description: slots.problem_description ?? '',
       },
     });
+    afterRow?.();
   }
   return { examples: out, fastPathHits, llmCalls };
 }

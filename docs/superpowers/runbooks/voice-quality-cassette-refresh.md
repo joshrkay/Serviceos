@@ -53,7 +53,7 @@ cd packages/api
 npm run voice-quality:refresh
 ```
 
-This sets `VOICE_QUALITY_CASSETTE_MODE=refresh` and runs the corpus suite under `vitest.voice-quality.config.ts`.
+This sets `VOICE_QUALITY_CASSETTE_MODE=refresh` and runs the corpus suite under `vitest.voice-quality.config.mts`.
 
 ⚠️ **The runner makes NO live LLM calls and costs $0.** `buildCassetteGatewayForScript` (`test/voice-quality/voice-quality-driver-factory.ts`) wraps `CassetteLLMGateway` around `ScriptAwareMockGateway` — a deterministic in-repo mock whose output is a pure function of the corpus fixture, falling through to `createMockLLMGateway()`. Every recorded entry carries `"provider": "mock"`. No API key, no network egress, runnable in an offline sandbox. See `docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md`.
 

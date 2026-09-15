@@ -13,9 +13,9 @@ import { initErrorReporting } from './lib/errorReporter';
 import { registerServiceWorker } from './pwa/register-sw';
 import './index.css';
 
-const CLERK_PUBLISHABLE_KEY = getRuntimeConfigValue(
-  'VITE_CLERK_PUBLISHABLE_KEY'
-) as string | undefined;
+const DEV_AUTH_MODE = import.meta.env.VITE_AUTH_MODE === 'dev';
+const CLERK_PUBLISHABLE_KEY = (getRuntimeConfigValue('VITE_CLERK_PUBLISHABLE_KEY') ||
+  (DEV_AUTH_MODE ? 'pk_test_dev_auth_shim' : undefined)) as string | undefined;
 
 if (!CLERK_PUBLISHABLE_KEY) {
   throw new Error('VITE_CLERK_PUBLISHABLE_KEY is required — add it to your .env file');

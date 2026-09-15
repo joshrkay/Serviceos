@@ -2,8 +2,9 @@
 # negotiate / complaint / Spanish). Complements the mock Layer-1 voice-quality
 # gate: this actually calls the production classifier with a live model.
 #
-# Cost: ~9 classify calls, capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default $1).
-# Fork-safe: skips with a warning when ANTHROPIC_API_KEY is absent.
+# Cost: 11 classify calls, capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default $1).
+# Missing credentials fail as an explicit unmet prerequisite; they are never
+# reported as green execution evidence.
 name: Agent Path Smoke
 
 on:
@@ -28,43 +29,35 @@ jobs:
     timeout-minutes: 15
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      # ~$1 default; suite is ~9 Haiku classify calls.
+      # ~$1 default; suite is 11 Haiku classify calls.
       AGENT_PATH_SMOKE_COST_CAP_CENTS: '100'
       AGENT_PATH_SMOKE_PASS_RATIO: '0.8'
       AGENT_PATH_SMOKE_OUT: agent-path-smoke-report.json
     steps:
       - uses: actions/checkout@v5
-      - name: Check for API key (fork safety)
-        id: check
-        run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::warning::ANTHROPIC_API_KEY is not set — skipping real-LLM path smoke."
-            echo "This is expected on forks / when the secret is unavailable; a skipped run is NOT a passing gate."
-            echo "has_key=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "API key present."
-            echo "has_key=true" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/setup-node@v7
-        if: steps.check.outputs.has_key == 'true'
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - name: Install deps
-        if: steps.check.outputs.has_key == 'true'
         run: npm ci
       - name: Offline graph coverage (always meaningful)
-        if: steps.check.outputs.has_key == 'true'
         run: npm run agent:graph-coverage --workspace=packages/api -- --gate --markdown
+      - name: Verify API key is present
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not set — real-LLM path smoke was not executed."
+            echo "A missing credential is an unmet external prerequisite, not a green gate."
+            exit 1
+          fi
+          echo "API key present."
       - name: Real-LLM path smoke (gated)
-        if: steps.check.outputs.has_key == 'true'
         run: |
           set -o pipefail
           npm run agent:path-smoke --workspace=packages/api -- --gate \
             | tee agent-path-smoke-console.txt
       - name: Upload path-smoke report
-        if: always() && steps.check.outputs.has_key == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: agent-path-smoke-report

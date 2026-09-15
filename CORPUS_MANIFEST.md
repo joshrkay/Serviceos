@@ -10,8 +10,9 @@ script instead. All data is synthetic and PII-free (verified by
 
 | File | Rows | Lang | Source | License |
 |------|-----:|------|--------|---------|
-| `data/corpus/behaviors.yaml` | 35 behaviors | — | Hand-authored, aligned to `packages/shared/src/enums.ts` `ProposalType` + `VOICE_INBOUND_ASSISTANTS` | internal |
-| `data/corpus/utterances.jsonl` | 4,853 | en | Deterministic expansion of `seeds/templates.en.json` (`utt_en_*` rows) merged with the T6-F01-migrated legacy corpus (`legacy-*` rows — see provenance breakdown below) | internal-synthetic |
+| `data/behaviors.yaml` | 62 behaviors | — | Production taxonomy, parity-checked against `SUPPORTED_INTENTS` | internal |
+| `data/corpus/behaviors.yaml` | 35 behaviors | — | Inbound caller behavior taxonomy used by the Spanish corpus | internal |
+| `data/corpus/utterances.jsonl` | 3,033 | en | Reviewed production/operator corpus using canonical production intent labels | internal-synthetic |
 | `data/corpus/utterances_es.jsonl` | 1,400 | es | Deterministic expansion of `seeds/templates.es.json` (native US-Latino phrasing + code-switch) | internal-synthetic |
 | `data/corpus/edge_cases.jsonl` | 157 | en | Hand-authored phonetic/disfluent transcripts (`build-edge-negatives.ts`) | internal-synthetic |
 | `data/corpus/negatives.jsonl` | 62 | en | Hand-authored non-intent scripts (`build-edge-negatives.ts`) | internal-synthetic |
@@ -19,7 +20,7 @@ script instead. All data is synthetic and PII-free (verified by
 | `data/corpus/slot_fixtures/phone.jsonl` | 44 | en | Hand-authored (`build-slots.ts`) | internal-synthetic |
 | `data/corpus/slot_fixtures/service.jsonl` | 45 | en | Hand-authored (`build-slots.ts`) | internal-synthetic |
 | `data/corpus/slot_fixtures/time.jsonl` | 44 | en | Hand-authored (`build-slots.ts`) | internal-synthetic |
-| **Total labeled examples** | **6,650** | | | |
+| **Total labeled examples** | **4,830** | | | |
 
 ## Provenance breakdown — `utterances.jsonl`
 
@@ -30,16 +31,14 @@ a stable `legacy-<sha1>` id and the canonical shape, preserving `slots`/
 
 | Source | Rows | Share |
 |--------|-----:|------:|
-| `template_augmented` | 2,407 | 49.6% |
-| `synthetic_template` | 1,820 | 37.5% |
-| `curated` | 626 | 12.9% |
+| `template_augmented` | 2,407 | 79.4% |
+| `curated` | 626 | 20.6% |
 
 ## Seed files (generator inputs)
 
 | File | Purpose | License |
 |------|---------|---------|
 | `data/corpus/seeds/fillers.json` | Service / time / synthetic-persona / address filler banks | internal-synthetic |
-| `data/corpus/seeds/templates.en.json` | English seed templates per intent | internal-synthetic |
 | `data/corpus/seeds/templates.es.json` | Spanish + code-switch seed templates per intent | internal-synthetic |
 
 ## Pre-existing corpus (not modified by this pass)
@@ -55,9 +54,7 @@ a stable `legacy-<sha1>` id and the canonical shape, preserving `slots`/
 
 | Path | Role |
 |------|------|
-| `scripts/data-pipeline/generate-utterances.ts` | Deterministic utterance generator (writes the EN staging file merge-corpus.ts folds in) |
-| `scripts/data-pipeline/merge-corpus.ts` | Merges generated EN rows with frozen `legacy-*` rows into `utterances.jsonl` (`corpus:merge`) |
-| `scripts/data-pipeline/migrate-legacy-utterances.ts` | One-off, idempotent legacy-schema -> canonical-schema migration (T6-F01) |
+| `scripts/data-pipeline/generate-utterances.ts` | Deterministic Spanish inbound-call utterance generator |
 | `scripts/data-pipeline/build-edge-negatives.ts` | Edge + negative fixture builder |
 | `scripts/data-pipeline/build-slots.ts` | Slot fixture builder |
 | `scripts/data-pipeline/build-manifest.ts` | Regenerates this file (`corpus:manifest`) |
@@ -74,7 +71,7 @@ a stable `legacy-<sha1>` id and the canonical shape, preserving `slots`/
 
 - No real Reddit user attribution; no scraped copyrighted text is committed here.
 - All personas, phone numbers (`555` blocks), addresses, and names are fictional.
-- Reproducibility: `pnpm corpus:build` regenerates the synthetic (`utt_en_*`)
-  portion deterministically from seeds and merges the frozen `legacy-*` rows
-  back in (`corpus:merge`) — it is content-equivalent, not byte-identical,
-  since legacy rows are preserved data rather than derived from seeds.
+- Reproducibility: `pnpm corpus:build` regenerates the Spanish inbound-call
+  corpus and structural fixtures deterministically. The reviewed English
+  production/operator corpus is preserved as curated data rather than rebuilt
+  from lower-fidelity discourse-prefix augmentation.

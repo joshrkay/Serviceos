@@ -35,6 +35,8 @@ import { fileURLToPath } from 'node:url';
 import { slotReport } from './metrics';
 import { extractSlots } from './slot-extractor';
 import {
+  ActualCostCapExceededError,
+  assertActualCostWithinCap,
   LIVE_SLOTS,
   LIVE_SLOT_TARGET,
   SYNTHETIC_TENANT_ID,
@@ -130,7 +132,7 @@ async function runLive(gate: boolean): Promise<void> {
   const examples: SlotExample[] = sampled.map((t) => ({ transcript: t.transcript, gold: goldSlots(t) }));
   const { examples: results, fastPathHits, llmCalls } = await runLiveSlotEval(examples, gateway, {
     tenantId: SYNTHETIC_TENANT_ID,
-  });
+  }, () => assertActualCostWithinCap(spentCents, capCents));
 
   const slots = [...LIVE_SLOTS];
   const report = slotReport(results, slots, matchFn);
@@ -190,4 +192,7 @@ async function main(): Promise<void> {
   else runOffline(gate);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(e instanceof ActualCostCapExceededError ? 3 : 1);
+});

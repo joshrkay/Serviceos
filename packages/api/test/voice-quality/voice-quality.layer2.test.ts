@@ -6,11 +6,12 @@
  * perceived-completion, audio-quality), and write the final
  * `Layer2Report` to disk for the CI artifact step.
  *
- * # Skip-path semantics (no behavior change from the prior stub)
+ * # Preflight semantics
  *
- *   - Empty corpus → skip + write empty report.
- *   - Missing API keys (ANTHROPIC_API_KEY OR OPENAI_API_KEY) → skip +
- *     write empty report.
+ *   - Empty/invalid corpus or missing API keys fail closed when
+ *     `VOICE_QUALITY_LAYER2=true` (the CI/pre-deploy mode).
+ *   - Local exploratory runs without that flag skip and write an empty
+ *     failing report when prerequisites are unavailable.
  *
  * Both paths still write a valid `Layer2Report` to disk so the CI
  * `actions/upload-artifact` step always finds the file. The empty
@@ -109,16 +110,24 @@ const REPORT_PATH = path.resolve(
   '../../voice-quality-layer2-report.json',
 );
 
-const scripts = ((): VoiceQualityScript[] => {
+const corpusLoad = ((): {
+  scripts: VoiceQualityScript[];
+  error?: string;
+} => {
   try {
-    return loadLayer2Corpus();
-  } catch {
-    return [];
+    return { scripts: loadLayer2Corpus() };
+  } catch (err) {
+    return {
+      scripts: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 })();
+const scripts = corpusLoad.scripts;
 
 const hasKeys =
   !!process.env.ANTHROPIC_API_KEY && !!process.env.OPENAI_API_KEY;
+const isLayer2CIMode = process.env.VOICE_QUALITY_LAYER2 === 'true';
 
 function writeReport(report: Layer2Report): void {
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
@@ -133,6 +142,15 @@ function writeEmptyReport(): void {
 describe('Voice Quality Layer 2 — corpus', () => {
   if (scripts.length === 0) {
     writeEmptyReport();
+    if (isLayer2CIMode) {
+      it('VQ2-016 — Layer 2 corpus must load and contain eligible scripts (CI mode — must fail)', () => {
+        throw new Error(
+          'Layer 2 CI mode requires a non-empty, valid corpus.' +
+            (corpusLoad.error ? ` Load error: ${corpusLoad.error}` : ''),
+        );
+      });
+      return;
+    }
     it.skip('VQ2-016 — Layer 2 corpus empty', () => {
       expect(true).toBe(true);
     });
@@ -143,7 +161,6 @@ describe('Voice Quality Layer 2 — corpus', () => {
     // In CI mode (VOICE_QUALITY_LAYER2=true), missing keys must FAIL the gate,
     // not skip — a skipped test exits 0 and allows a false-green deploy.
     // Local/dev runs (VOICE_QUALITY_LAYER2 unset) still skip gracefully.
-    const isLayer2CIMode = process.env.VOICE_QUALITY_LAYER2 === 'true';
     if (isLayer2CIMode) {
       it('VQ2-016 — Layer 2 requires ANTHROPIC_API_KEY + OPENAI_API_KEY (CI mode — must fail)', () => {
         throw new Error(
@@ -213,10 +230,9 @@ describe('Voice Quality Layer 2 — corpus', () => {
       },
     };
 
-    // Build a Layer-2 LLM gateway for the agent loop. The same factory the
-    // graders use for judge calls, but with no event bus / no shared cost
-    // tracker — agent calls don't need to count toward suite cost in this
-    // wiring (Layer 2 cost accounting tracks Whisper + TTS + judge LLM).
+    // Build a Layer-2 LLM gateway for the agent loop. Agent calls share the
+    // suite tracker with Whisper, TTS, and judge calls so all live-provider
+    // spend contributes to the suite cap.
     const agentGateway = createRealLayerTwoGateway({
       apiKey: process.env.ANTHROPIC_API_KEY!,
       bus: new AgentEventBus(),
@@ -408,6 +424,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
     if (suiteState.perScriptResults.length === 0) return;
 
     const report = buildLayer2Report(suiteState.perScriptResults);
+    expect(
+      suiteState.suiteCostTracker.totalCents(),
+      'Layer 2 recorded no provider spend; keys alone are not proof that the live path executed',
+    ).toBeGreaterThan(0);
     expect(
       report.launchGate.pass,
       `Layer 2 launch gate failed:\n${report.launchGate.blockers.join(

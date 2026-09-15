@@ -31,49 +31,39 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Same secret names the Layer-2 workflows use. The eval only needs the
-      # Anthropic key (LLM classify); OPENAI_API_KEY is threaded for parity in
-      # case a future eval path exercises an OpenAI-backed provider.
+      # The eval only needs the Anthropic key for live classification.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       # Per-script cost ceiling (cents). Each runner projects cost conservatively
       # (no cache) and aborts before spending if the sample would exceed this.
       VOICE_EVAL_COST_CAP_CENTS: '500'   # $5 per script
     steps:
       - uses: actions/checkout@v5
-      - name: Check for API key (fork safety)
-        id: check
+      - name: Verify API key is present
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::warning::ANTHROPIC_API_KEY is not set — skipping the live voice eval."
-            echo "This is expected on forks / when the secret is unavailable; a skipped run is NOT a passing gate."
-            echo "has_key=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "API key present."
-            echo "has_key=true" >> "$GITHUB_OUTPUT"
+            echo "::error::ANTHROPIC_API_KEY is not set — live voice eval was not executed."
+            echo "A missing credential is an unmet external prerequisite, not a green gate."
+            exit 1
           fi
+          echo "API key present."
       - uses: actions/setup-node@v7
-        if: steps.check.outputs.has_key == 'true'
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - name: Install deps
-        if: steps.check.outputs.has_key == 'true'
         run: npm ci
       - name: Live intent eval (gated, sampled)
-        if: steps.check.outputs.has_key == 'true'
         run: |
           set -o pipefail
           npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 \
             | tee voice-eval-live-report.txt
       - name: Live slot eval (gated, sampled)
-        if: steps.check.outputs.has_key == 'true'
         run: |
           set -o pipefail
           npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 \
             | tee -a voice-eval-live-report.txt
       - name: Upload eval report
-        if: always() && steps.check.outputs.has_key == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: voice-eval-live-report
