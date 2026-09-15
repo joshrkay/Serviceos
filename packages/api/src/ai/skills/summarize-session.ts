@@ -190,7 +190,7 @@ Return JSON: { "summary": "..." }
   }
   sections.push(
     callerLines.length > 0
-      ? buildUntrustedContentSection(callerLines.join('\n'), 'Caller turns')
+      ? buildUntrustedContentSection(callerLines, 'Caller turns')
       : '(no caller turns)',
   );
 

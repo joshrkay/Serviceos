@@ -107,3 +107,20 @@ describe('resolveQueryText length cap (via buildSourceContext retrieval path)', 
     expect(receivedQuery).not.toContain('UNTRUSTED CALLER CONTENT');
   });
 });
+
+// #1229 re-review — recentMessages is bounded by MAX_RECENT_MESSAGES (20), not
+// by length: 20 SMS x 1,600 chars is 32k, and a whole-block cap cut the middle
+// of the thread. The cap applies per message.
+describe('buildRecentMessagesPromptSections — #1229 re-review: a long SMS history keeps every message', () => {
+  it('20 x 1,600-char customer messages all reach the fence intact, first and last included', () => {
+    const messages = Array.from({ length: 20 }, (_, n) => ({
+      role: 'customer',
+      content: `MSG${String(n).padStart(2, '0')} ${'x'.repeat(1595)}`,
+    }));
+    const { untrustedBlock } = buildRecentMessagesPromptSections(messages);
+    expect(untrustedBlock).toContain(`Customer: ${messages[0].content}`);
+    expect(untrustedBlock).toContain(`Customer: ${messages[19].content}`);
+    expect(messages.filter((m) => untrustedBlock!.includes(`Customer: ${m.content}`))).toHaveLength(20);
+    expect(untrustedBlock).not.toMatch(/characters of caller content omitted/);
+  });
+});
