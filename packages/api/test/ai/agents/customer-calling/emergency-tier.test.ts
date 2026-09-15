@@ -835,11 +835,13 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
   it('classifies an 8k-character transcript in under 20 ms', () => {
     const long = 'se electrocutó ayer '.repeat(400);
     expect(long.length).toBeGreaterThanOrEqual(8000);
-    classifyCallerSafety(long, {}); // warm-up (regex compilation)
+    classifyCallerSafety(`${long}warm-up`, {}); // regex compilation
     let best = Infinity;
     for (let i = 0; i < 3; i += 1) {
+      // A distinct transcript each run, so no per-transcript memo can answer it.
+      const transcript = `${long}${' '.repeat(i + 1)}fin`;
       const t0 = performance.now();
-      classifyCallerSafety(long, {});
+      classifyCallerSafety(transcript, {});
       best = Math.min(best, performance.now() - t0);
     }
     expect(best).toBeLessThan(20);

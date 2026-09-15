@@ -181,6 +181,16 @@ const PRICE_AMOUNT =
 const PREPOSITION_OBJECT_NOT_PRICE =
   `(?= \\S)(?! (?:(?:la|el|los|las|mi|su|un|una) )?(?:${PRICE_AMOUNT}|(?:d[oó]lares|pesos|centavos|gal[oó]n|litros?|mes|semana|a[nñ]o|factura|recibo|cuenta|cobro|precio|oferta|barato|caro|m[aá]s)(?![\\p{L}\\p{N}])))`;
 
+/**
+ * #1253 review — the ONE gas-trouble lexicon: the #1241 leak patterns below are
+ * built from these words, and the price-question guard and the bare "sale gas"
+ * suppressor consult the same words (SIGNAL_GAS_TROUBLE), so a price question
+ * that also says "está chiflando" or "se rompió la manguera" stays E1.
+ */
+const GAS_HISS_WORDS = 'chiflando|chifla|chiflido|chiflidos|silbando|silba|silbido|silbidos|goteando|gotea|goteo';
+const GAS_BROKEN_WORDS =
+  'rot[oa]s?|rompi[oó]|rompieron|quebrad[oa]s?|quebr[oó]|rajad[oa]s?|raj[oó]|picad[oa]s?|pic[oó]|suelt[oa]s?|solt[oó]|da[nñ]ad[oa]s?';
+
 export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   // Gas and propane
   { keyword: 'fuga de gas', pattern: 'fugas? de gas' },
@@ -239,12 +249,12 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   },
   {
     keyword: 'gas está chiflando',
-    pattern: '(?:gas|propano)(?: [\\p{L}]+){0,2} (?:est[aá] )?(?:chiflando|silbando|chifla|silba)',
+    pattern: `(?:gas|propano)(?: [\\p{L}]+){0,2} (?:est[aá] )?(?:${GAS_HISS_WORDS})`,
   },
   {
     keyword: 'tubería de gas rota',
     pattern:
-      '(?:manguera|tuber[ií]a|tubo|l[ií]nea|conexi[oó]n|v[aá]lvula|regulador) (?:del?|de la) (?:gas|propano) (?:est[aá] |se )?(?:rot[oa]|rompi[oó]|quebrad[oa]|quebr[oó]|rajad[oa]|raj[oó]|picad[oa]|suelt[oa]|solt[oó]|da[nñ]ad[oa])|se (?:rompi[oó]|quebr[oó]|raj[oó]|solt[oó]|pic[oó]) (?:la |el )?(?:manguera|tuber[ií]a|tubo|l[ií]nea|conexi[oó]n|v[aá]lvula|regulador) (?:del?|de la) (?:gas|propano)',
+      `(?:manguera|tuber[ií]a|tubo|l[ií]nea|conexi[oó]n|v[aá]lvula|regulador) (?:del?|de la) (?:gas|propano) (?:est[aá] |se )?(?:${GAS_BROKEN_WORDS})|se (?:${GAS_BROKEN_WORDS}) (?:la |el )?(?:manguera|tuber[ií]a|tubo|l[ií]nea|conexi[oó]n|v[aá]lvula|regulador) (?:del?|de la) (?:gas|propano)`,
   },
   { keyword: 'botando gas', pattern: 'bot(?:a|an|ando|[oó]) (?:el )?(?:gas|propano)' },
   { keyword: 'huevo podrido', pattern: 'huevos? podridos?' },
@@ -571,15 +581,21 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
   {
     keyword: 'tomó veneno',
     pattern:
-      '(?:se )?(?:tom[oó]|bebi[oó]|trag[oó]) (?:(?:un poco de|mucho|mucha) )?(?:veneno|cloro|lej[ií]a|blanqueador|thinner|tiner|gasolina|anticongelante|raticida|matarratas|insecticida|pesticida|destapacaños|destapacanos|sosa c[aá]ustica|[aá]cido|amon[ií]aco)',
+      '(?:se )?(?:tom[oó]|bebi[oó]|trag[oó]|comi[oó]|ingiri[oó]) (?:(?:el|la|los|las|un|una|un poco de|mucho|mucha|todo el|toda la) )?(?:veneno|cloro|lej[ií]a|blanqueador|thinner|tiner|gasolina|anticongelante|raticida|matarratas|insecticida|pesticida|destapacaños|destapacanos|sosa c[aá]ustica|[aá]cido|amon[ií]aco|detergente|limpiador)',
     aspect: 'event',
     idiomWhen: ['pet'],
   },
   { keyword: 'envenenado', pattern: 'envenenad[oa]s?|intoxicad[oa]s?', aspect: 'state' },
+  { keyword: 'se envenenó', pattern: 'se (?:(?:me|le|nos) )?(?:envenen[oó]|intoxic[oó])', aspect: 'event' },
+  {
+    keyword: 'se tomó la medicina de otra persona',
+    pattern: `(?:se )?(?:tom[oó]|trag[oó]) (?:la|las|el|los) (?:medicinas?|pastillas|p[ií]ldoras|medicamentos?|jarabe) (?:de|del) (?:(?:su|sus|mi|mis|tu|la|el|los|las) )?(?:${ES_PERSON_NOUN})`,
+    aspect: 'event',
+  },
   {
     keyword: 'se tragó una pila',
     pattern:
-      'se (?:(?:me|le|te|nos) )?trag[oó] (?:(?:una|un|unas|unos) )?(?:pilas?|bater[ií]as?|monedas?|im[aá]n(?:es)?|imanes|clavos?|tornillos?|aretes?|anillos?|canicas?|botones?|alfileres?|vidrios?)',
+      'se (?:(?:me|le|te|nos) )?trag[oó] (?:(?:una|un|unas|unos|la|el|las|los) )?(?:pilas?|bater[ií]as?|monedas?|im[aá]n(?:es)?|imanes|clavos?|tornillos?|aretes?|anillos?|canicas?|botones?|alfileres?|vidrios?)',
     aspect: 'event',
     idiomWhen: ['pet'],
   },
@@ -724,13 +740,15 @@ const SIGNAL_LEAK =
  * the verb.
  */
 const SIGNAL_HARM =
-  'tos|toser|tosiendo|tosen|arden (?:los )?ojos|ardor|marea\\p{L}*|mareos?|duele (?:la )?cabeza|dolor de cabeza|n[aá]useas?|v[oó]mit\\p{L}*|sue[nñ]o|somnolient\\p{L}*|desmay\\p{L}*|ahog\\p{L}*|respir\\p{L}*|en toda la casa';
+  'tos|toser|tosiendo|tosen|arden (?:los )?ojos|ardor|mare[aoó]\\p{L}*|mareos?|duele (?:la )?cabeza|dolor de cabeza|n[aá]useas?|v[oó]mit\\p{L}*|sue[nñ]o|somnolient\\p{L}*|desmay\\p{L}*|ahog\\p{L}*|respir\\p{L}*|en toda la casa';
 /**
  * Fire, smoke, explosion, CO or an alarm going off. A superset of main's
  * hazard-word and alarm-sounding lists.
  */
 const SIGNAL_SPREAD =
   'se prendi[oó]|se prendieron|se quem[oó]|se quemaron|quem(?!ador)\\p{L}*|fuego|llamas?|flamas?|humo|incendi\\p{L}*|chispas?|explot\\p{L}*|mon[oó]xido|pared(?:es)?|cortinas?|cerca|techo|muebles?|sonando|suena|son[oó]|pitando|pita|pit[oó]|pitar|pitido|chillando|activ[oó]|activad[oa]|dispar[oó]';
+/** #1253 review — gas trouble: hissing or a broken line (the shared lexicon of the #1241 patterns). */
+const SIGNAL_GAS_TROUBLE = `${GAS_HISS_WORDS}|${GAS_BROKEN_WORDS}`;
 /** Combustion indoors or enclosed (a CO risk): grill smoke in the garage. */
 const SIGNAL_ENCLOSED =
   'adentro|dentro|garajes?|cuartos?|habitaci[oó]n|rec[aá]mara|s[oó]tanos?|cerrad[oa]s?|encerrad[oa]s?|indoors?|inside|basement|garage';
@@ -745,6 +763,7 @@ const DANGER_OR_ENCLOSED_SIGNAL_RE = signalRe(SIGNAL_LEAK, SIGNAL_HARM, SIGNAL_S
 /** Danger, combustion indoors, plus a named gas source. */
 const LEAK_OR_DANGER_SIGNAL_RE = signalRe(
   SIGNAL_GAS_SOURCE,
+  SIGNAL_GAS_TROUBLE,
   SIGNAL_LEAK,
   SIGNAL_HARM,
   SIGNAL_SPREAD,
@@ -918,31 +937,43 @@ const ES_PRESENT_URGENCY_RE =
  * ("el agua está fría", "el bebé está dormido").
  */
 const ES_PRESENT_SYMPTOM_RE =
-  /(?<![\p{L}\p{N}])(?:temblando|tiembla|dormid[oa]s?|somnolient[oa]s?|adormilad[oa]s?|d[eé]bil(?:es)?|confundid[oa]s?|desorientad[oa]s?|morad[oa]s?|p[aá]lid[oa]s?|fr[ií][oa]s?|helad[oa]s?|no despierta|no reacciona|marea\p{L}*|mareos?|v[oó]mit\p{L}*|sudando fr[ií]o)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(?:temblando|tiembla|dormid[oa]s?|somnolient[oa]s?|adormilad[oa]s?|d[eé]bil(?:es)?|confundid[oa]s?|desorientad[oa]s?|morad[oa]s?|p[aá]lid[oa]s?|fr[ií][oa]s?|helad[oa]s?|no despierta|no reacciona|mare[aoó]\p{L}*|mareos?|v[oó]mit\p{L}*|sudando fr[ií]o)(?![\p{L}\p{N}])/iu;
 
 type InjuryIdiom = NonNullable<SpanishInjuryPattern['idiomWhen']>[number];
 /** Idiom contexts for {@link SpanishInjuryPattern.idiomWhen}. */
-const ES_INJURY_IDIOM_RE: Record<InjuryIdiom, RegExp> = {
+const ES_INJURY_IDIOM_RE: Record<Exclude<InjuryIdiom, 'object_fall' | 'pet'>, RegExp> = {
   price:
-    /(?<![\p{L}\p{N}])(?:precios?|costos?|caro|car[ií]simo|cuenta|factura|recibo|cobran|cobrar|cobro|de infarto|impuestos?|renta|tarifas?|cotizaci[oó]n(?:es)?|presupuestos?)(?![\p{L}\p{N}])/iu,
-  laugh: /(?<![\p{L}\p{N}])(?:de (?:la )?risa|de tanto re[ií]r|re[ií]r|riendo)(?![\p{L}\p{N}])/iu,
+    /(?<![\p{L}\p{N}])(?:precios?|costos?|caro|car[ií]simo|cuenta|factura|recibo|cobran|cobrar|cobro|de infarto|impuestos?|renta|tarifas?|cotizaci[oó]n(?:es)?|presupuestos?)(?![\p{L}\p{N}])/giu,
+  laugh: /(?<![\p{L}\p{N}])(?:de (?:la )?risa|de tanto re[ií]r|re[ií]r|riendo)(?![\p{L}\p{N}])/giu,
   excess:
-    /(?<![\p{L}\p{N}])de (?:caf[eé]|az[uú]car|chocolate|trabajo|informaci[oó]n|amor|televisi[oó]n|tele|redes|series|f[uú]tbol|estr[eé]s|realidad)(?![\p{L}\p{N}])/iu,
+    /(?<![\p{L}\p{N}])de (?:caf[eé]|az[uú]car|chocolate|trabajo|informaci[oó]n|amor|televisi[oó]n|tele|redes|series|f[uú]tbol|estr[eé]s|realidad)(?![\p{L}\p{N}])/giu,
   device:
-    /(?<![\p{L}\p{N}])(?:bomba|motor|calentador|boiler|caldera|planta|generador|carro|coche|m[aá]quina|compresor|carburador|equipo|termostato|control|pantalla|tel[eé]fono|celular|app|aplicaci[oó]n|sistema|aparato|aire|minisplit|estufa|horno|lavadora|secadora|refrigerador|breaker|interruptor|panel|sensor|detector|alarma|puerta|port[oó]n|timbre|focos?|l[aá]mparas?|bombillas?|luz|luces|computadora|laptop|tablet|televisi[oó]n|tele|router|m[oó]dem|internet|wifi|se[nñ]al|t[eé]cnico|plomero|electricista|oficina|empresa|compa[nñ][ií]a|mensajes?|llamadas?|correos?|whatsapp)(?![\p{L}\p{N}])/iu,
+    /(?<![\p{L}\p{N}])(?:bomba|motor|calentador|boiler|caldera|planta|generador|carro|coche|m[aá]quina|compresor|carburador|equipo|termostato|control|pantalla|tel[eé]fono|celular|app|aplicaci[oó]n|sistema|aparato|aire|minisplit|estufa|horno|lavadora|secadora|refrigerador|breaker|interruptor|panel|sensor|detector|alarma|puerta|port[oó]n|timbre|focos?|l[aá]mparas?|bombillas?|luz|luces|computadora|laptop|tablet|televisi[oó]n|tele|router|m[oó]dem|internet|wifi|se[nñ]al|t[eé]cnico|plomero|electricista|oficina|empresa|compa[nñ][ií]a|mensajes?|llamadas?|correos?|whatsapp)(?![\p{L}\p{N}])/giu,
   figurative:
-    /(?<![\p{L}\p{N}])(?:de amor|del coraz[oó]n|en su orgullo|en el orgullo|emocionalmente|sentimentalmente)(?![\p{L}\p{N}])/iu,
-  // A thing, not a person, is what fell ("se cayó la tele y no se puede mover"). Tested on the match itself.
-  object_fall: new RegExp(
-    `(?<![\\p{L}\\p{N}])se cay[oó] (?:el|la|los|las|un|una) (?!(?:${ES_PERSON_NOUN})(?![\\p{L}\\p{N}]))[\\p{L}]+`,
-    'iu',
-  ),
-  pet: /(?<![\p{L}\p{N}])(?:perr[oa]s?|perrit[oa]s?|gat[oa]s?|gatit[oa]s?|mascotas?|cachorr[oa]s?)(?![\p{L}\p{N}])/iu,
+    /(?<![\p{L}\p{N}])(?:de amor|del coraz[oó]n|en su orgullo|en el orgullo|emocionalmente|sentimentalmente)(?![\p{L}\p{N}])/giu,
   fiction:
-    /(?<![\p{L}\p{N}])(?:pel[ií]cula|serie|novela|libro|historia|cuento|programa|video|sue[nñ]o|so[nñ][eé])(?: [\p{L}]+){0,3} (?:sobre|acerca de)(?![\p{L}\p{N}])/iu,
+    /(?<![\p{L}\p{N}])(?:pel[ií]cula|serie|novela|libro|historia|cuento|programa|video|sue[nñ]o|so[nñ][eé])(?: [\p{L}]+){0,3} (?:sobre|acerca de)(?![\p{L}\p{N}])/giu,
 };
+const ES_PET_NOUN = 'perr[oa]s?|perrit[oa]s?|gat[oa]s?|gatit[oa]s?|mascotas?|cachorr[oa]s?';
+/** The pet is the subject right before the match: "mi perro (ya) se tragó…". */
+const ES_PET_SUBJECT_BEFORE_RE = new RegExp(
+  `(?:^|[^\\p{L}\\p{N}])(?:mi|mis|el|la|los|las|nuestr[oa]s?|su|sus|tu|tus) (?:${ES_PET_NOUN})(?: (?:ya|tambi[eé]n))?\\s*$`,
+  'iu',
+);
+/** The pet is the subject right after the match: "se tragó una pila el perro". */
+const ES_PET_SUBJECT_AFTER_RE = new RegExp(`^\\s*(?:el|la|mi|su|nuestr[oa]) (?:${ES_PET_NOUN})(?![\\p{L}\\p{N}])`, 'iu');
 /** Idioms that always name a person: gated on harm only. */
 const ES_HARM_GATED_IDIOMS: ReadonlySet<InjuryIdiom> = new Set(['figurative', 'fiction']);
+/**
+ * Readings that are not routine but not life safety either: an ambiguous object
+ * fall and a pet emergency go to E2 (human check), never E3 (#1253 review). They
+ * apply only when no person is referenced ANYWHERE, inside the match included.
+ */
+const ES_E2_IDIOMS: ReadonlySet<InjuryIdiom> = new Set(['object_fall', 'pet']);
+
+/** Household objects that fall: the only subjects the object-fall reading accepts (never "not a person"). */
+const ES_FALLEN_OBJECT_RE =
+  /(?<![\p{L}\p{N}])se cay[oó] (?:(?:el|la|los|las|un|una|mi|su|nuestr[oa]) )?(?:tele|televisi[oó]n|televisor|pantalla|muebles?|escalera|cuadro|l[aá]mpara|repisa|estante|librero|tel[eé]fono|celular|plato|vaso|foco|antena|espejo|ropero|cl[oó]set|refri|refrigerador|lavadora|secadora|estufa|horno|microondas|computadora|mesa|silla|puerta|ventana|techo|pared|barda|[aá]rbol|rama|poste|cable|tinaco|calentador|boiler|minisplit|ventilador|cortina|caja|maceta|reja|port[oó]n|l[aá]mina|teja|bote|cubeta)(?![\p{L}\p{N}])/iu;
 
 const ES_HARM_WORDS = `${SIGNAL_HARM}|inconscien\\p{L}*|desmay\\p{L}*|pecho|sangr\\p{L}*|desangr\\p{L}*|convuls\\p{L}*|pulso|herid[oa]s?|lastimad[oa]s?|golpe\\p{L}*|duele|dolor|paraliz\\p{L}*|pastillas|ambulancia|911|toc[oó]|tocar|toque|corriente|descarga|electrocut\\p{L}*|chispa\\p{L}*|cay[oó]|ca[ií]do|ca[ií]da|hospital|cl[ií]nica|m[eé]dicos?|doctor(?:a|es)?|param[eé]dicos?|urgencias`;
 /**
@@ -952,51 +983,30 @@ const ES_HARM_WORDS = `${SIGNAL_HARM}|inconscien\\p{L}*|desmay\\p{L}*|pecho|sang
 const ES_PERSON_OR_HARM_RE = new RegExp(
   // "él" only with its accent: unaccented "el" is the article in every sentence.
   `(?<![\\p{L}\\p{N}])(?:${ES_PERSON_NOUN}|él|ella|alguien|${ES_HARM_WORDS})(?![\\p{L}\\p{N}])`,
-  'iu',
+  'giu',
 );
 /** A harm or how someone got hurt, persons aside (for the figurative and fiction idioms). */
-const ES_HARM_ONLY_RE = new RegExp(`(?<![\\p{L}\\p{N}])(?:${ES_HARM_WORDS})(?![\\p{L}\\p{N}])`, 'iu');
-
-type InjuryHit = (typeof INJURY_REGEXES_ES)[number] & { index: number; text: string };
-
+const ES_HARM_ONLY_RE = new RegExp(`(?<![\\p{L}\\p{N}])(?:${ES_HARM_WORDS})(?![\\p{L}\\p{N}])`, 'giu');
 /**
- * Every Spanish injury match that is not an idiom reading. ALL matches of each
- * entry count (#1245 round 2): "el año pasado se electrocutó mi primo y mi
- * hijo se electrocutó" has a live second event.
+ * #1253 review — ANY reference to a person: a person noun, a pronoun (él/ella,
+ * or le/lo/la + a verb: "le daba de comer", "lo encontré"), a kinship term.
+ * Used anywhere in the utterance, inside the match included, by the E2
+ * object-fall and pet readings.
  */
-function spanishInjuryHits(transcript: string): InjuryHit[] {
-  const hits: InjuryHit[] = [];
-  for (const entry of INJURY_REGEXES_ES) {
-    for (const match of transcript.matchAll(entry.regexAll)) {
-      const index = match.index ?? 0;
-      const text = match[0];
-      if (entry.idiomWhen && isInjuryIdiom(entry.idiomWhen, transcript, index, text)) continue;
-      hits.push({ ...entry, index, text });
-    }
-  }
-  return hits;
-}
+const ES_PERSON_REFERENCE_RE = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${ES_PERSON_NOUN}|hombres?|mujer(?:es)?|muchach[oa]s?|chamac[oa]s?|chav[oa]s?|chavit[oa]s?|viejit[oa]s?|ancian[oa]s?|nietos?|nietas?|chic[oa]s?|j[oó]ven(?:es)?|gente|personas|t[eé]cnicos?|plomeros?|electricistas?|pintor(?:es)?|obreros?|él|ella|ellos|ellas|alguien|nadie|(?:le|lo|la|les|los|las) (?:[\\p{L}]+(?:aba|aban|[ií]a|[ií]an|ó|é|í)|di|dio|dije|dijo|vi|vio|puse|puso|tengo|tiene))(?![\\p{L}\\p{N}])`,
+  'giu',
+);
 
+/** A danger signal (leak, harm, fire/smoke/CO/alarm): the device scope of {@link hasLeakOrDangerSignal}. */
+const DANGER_SIGNAL_RE_G = new RegExp(DANGER_SIGNAL_RE.source, 'giu');
 /**
- * An idiom reading applies when its context shares the clause with the match
- * and the rest of the utterance carries no person or harm (harm only, for
- * figurative and fiction).
+ * #1253 review — the ONE leak/danger lexicon of the gas price-question guard:
+ * danger plus the words the #1241 leak patterns are built from (hissing,
+ * broken). A named source or place is not a signal here (Josh, #1241).
  */
-function isInjuryIdiom(
-  kinds: ReadonlyArray<InjuryIdiom>,
-  transcript: string,
-  index: number,
-  text: string,
-): boolean {
-  const bounds = clauseBounds(transcript, index, text.length);
-  const clauseRest = withoutSpan(transcript.slice(bounds.start, bounds.end), index - bounds.start, text.length);
-  const rest = withoutSpan(transcript, index, text.length);
-  return kinds.some(
-    (kind) =>
-      ES_INJURY_IDIOM_RE[kind].test(kind === 'object_fall' ? text : clauseRest) &&
-      !(ES_HARM_GATED_IDIOMS.has(kind) ? ES_HARM_ONLY_RE : ES_PERSON_OR_HARM_RE).test(rest),
-  );
-}
+const GAS_QUESTION_SIGNAL_RE = signalRe(SIGNAL_LEAK, SIGNAL_HARM, SIGNAL_SPREAD, SIGNAL_GAS_TROUBLE);
+const GAS_QUESTION_SIGNAL_RE_G = new RegExp(GAS_QUESTION_SIGNAL_RE.source, 'giu');
 
 /** Another finite verb or a relative/subordinating word: a past marker next to it belongs to that verb. */
 const ES_OTHER_VERB_TOKEN_RE =
@@ -1004,126 +1014,403 @@ const ES_OTHER_VERB_TOKEN_RE =
 /** A past verb that can govern a condition noun ("tuvo un infarto", "le dio una convulsión"). */
 const ES_PAST_VERB_TOKEN_RE =
   /^(?:tuvo|tuve|tuvimos|tuvieron|tuviste|dio|dieron|fue|fueron|hubo|sufri[oó]|sufrieron|estuvo|estaba|ten[ií]a|hab[ií]a|pas[oó]|daba)$|^\p{L}{2,}ó$/iu;
+const ES_PAST_MARKER_RE_G = new RegExp(ES_PAST_MARKER_RE.source, 'giu');
+
+/**
+ * #1245 round 2 / #1253 review — gas price question: "a cómo / cuánto (me/le)
+ * sale el gas …". "a cómo" is only ever a price idiom; "cuánto" needs the
+ * article ("cuánto sale gas del medidor" is leak grammar).
+ */
+const ES_GAS_PRICE_QUESTION_RE =
+  /(?<![\p{L}\p{N}])(?:a c[oó]mo (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) (?:el )?|cu[aá]nto (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) el )(?:gas|propano)(?![\p{L}\p{N}])/giu;
+
+// ─── Linear scan context (#1253 review) ─────────────────────────────────────
+//
+// The injury scan runs synchronously in the Twilio and media-stream handlers.
+// Every per-match question (which clause, is there a signal outside this span,
+// which past marker and verb are nearest) is answered from arrays built ONCE
+// per transcript with single passes, so an 8k-character transcript is linear,
+// not a rescan per match.
+
+/** Sorted, non-overlapping regex matches with O(log n) "any match outside / inside a span" queries. */
+class SpanIndex {
+  private readonly starts: number[] = [];
+  private readonly ends: number[] = [];
+  constructor(text: string, globalRe: RegExp) {
+    for (const m of text.matchAll(globalRe)) {
+      this.starts.push(m.index ?? 0);
+      this.ends.push((m.index ?? 0) + m[0].length);
+    }
+  }
+  get size(): number {
+    return this.starts.length;
+  }
+  /** Matches overlapping [s, e). */
+  private overlapping(s: number, e: number): number {
+    return lowerBound(this.starts, e) - upperBound(this.ends, s);
+  }
+  /** Any match that does not overlap [s, e) (the "rest of the utterance"). */
+  anyOutside(s: number, e: number): boolean {
+    return this.size - Math.max(0, this.overlapping(s, e)) > 0;
+  }
+  /** Any match inside [from, to) that does not overlap [s, e). */
+  anyWithinExcept(from: number, to: number, s: number, e: number): boolean {
+    const i0 = lowerBound(this.starts, from);
+    const i1 = upperBound(this.ends, to);
+    for (let i = i0; i < i1; i += 1) {
+      if (this.starts[i]! >= e || this.ends[i]! <= s) return true;
+    }
+    return false;
+  }
+}
+
+/** First index whose value is >= target. */
+function lowerBound(sorted: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid]! < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+/** First index whose value is > target. */
+function upperBound(sorted: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid]! <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+interface ScanContext {
+  readonly text: string;
+  readonly breakStarts: number[];
+  readonly breakEnds: number[];
+  readonly tokenStarts: number[];
+  readonly tokenEnds: number[];
+  /** Per token: the marker id it belongs to, or -1. */
+  readonly markerOf: Int32Array;
+  readonly markers: ReadonlyArray<{ first: number; last: number; text: string }>;
+  /** Per token: nearest other-verb token index at or before / after it (-1 / tokens.length when none). */
+  readonly prevVerb: Int32Array;
+  readonly nextVerb: Int32Array;
+  /** Prefix count of other-verb tokens: verbPrefix[i] = verbs in tokens [0, i). */
+  readonly verbPrefix: Int32Array;
+  /** Per token: nearest any-verb (other or past) before it, or -1, for a noun's governing verb. */
+  readonly prevAnyVerb: Int32Array;
+  readonly isPastVerb: Uint8Array;
+  /** Per token: id of the nearest marker ending before / starting after it (-1 when none). */
+  readonly markerBefore: Int32Array;
+  readonly markerAfter: Int32Array;
+  readonly presentBlock: boolean;
+  readonly danger: SpanIndex;
+  readonly personOrHarm: SpanIndex;
+  readonly harmOnly: SpanIndex;
+  readonly personReference: SpanIndex;
+  readonly gasQuestionSignal: SpanIndex;
+  readonly idioms: Record<Exclude<InjuryIdiom, 'object_fall' | 'pet'>, SpanIndex>;
+  readonly priceQuestions: ReadonlyArray<{ start: number; end: number }>;
+}
+
+let lastScanContext: ScanContext | null = null;
+
+function scanContext(text: string): ScanContext {
+  if (lastScanContext?.text === text) return lastScanContext;
+  const breakStarts: number[] = [];
+  const breakEnds: number[] = [];
+  for (const b of text.matchAll(CLAUSE_BREAK_RE)) {
+    breakStarts.push(b.index ?? 0);
+    breakEnds.push((b.index ?? 0) + b[0].length);
+  }
+  const tokenStarts: number[] = [];
+  const tokenEnds: number[] = [];
+  const words: string[] = [];
+  for (const t of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    tokenStarts.push(t.index ?? 0);
+    tokenEnds.push((t.index ?? 0) + t[0].length);
+    words.push(t[0]);
+  }
+  const n = words.length;
+  const markerOf = new Int32Array(n).fill(-1);
+  const markers: Array<{ first: number; last: number; text: string }> = [];
+  for (const m of text.matchAll(ES_PAST_MARKER_RE_G)) {
+    const s = m.index ?? 0;
+    const e = s + m[0].length;
+    const first = lowerBound(tokenEnds, s + 1);
+    const last = lowerBound(tokenStarts, e) - 1;
+    if (first > last) continue;
+    const id = markers.length;
+    markers.push({ first, last, text: m[0] });
+    for (let i = first; i <= last; i += 1) markerOf[i] = id;
+  }
+  const isOtherVerb = new Uint8Array(n);
+  const isPastVerb = new Uint8Array(n);
+  for (let i = 0; i < n; i += 1) {
+    if (markerOf[i] !== -1) continue;
+    if (ES_OTHER_VERB_TOKEN_RE.test(words[i]!)) isOtherVerb[i] = 1;
+    if (ES_PAST_VERB_TOKEN_RE.test(words[i]!)) isPastVerb[i] = 1;
+  }
+  const prevVerb = new Int32Array(n);
+  const prevAnyVerb = new Int32Array(n);
+  const verbPrefix = new Int32Array(n + 1);
+  const markerBefore = new Int32Array(n);
+  let lastVerb = -1;
+  let lastAny = -1;
+  let lastMarker = -1;
+  for (let i = 0; i < n; i += 1) {
+    prevAnyVerb[i] = lastAny;
+    markerBefore[i] = lastMarker;
+    if (isOtherVerb[i]) lastVerb = i;
+    if (isOtherVerb[i] || isPastVerb[i]) lastAny = i;
+    prevVerb[i] = lastVerb;
+    verbPrefix[i + 1] = verbPrefix[i]! + isOtherVerb[i]!;
+    if (markerOf[i] !== -1 && (i === n - 1 || markerOf[i + 1] !== markerOf[i])) lastMarker = markerOf[i]!;
+  }
+  const nextVerb = new Int32Array(n);
+  const markerAfter = new Int32Array(n);
+  let nextV = n;
+  let nextM = -1;
+  for (let i = n - 1; i >= 0; i -= 1) {
+    markerAfter[i] = nextM;
+    if (isOtherVerb[i]) nextV = i;
+    nextVerb[i] = nextV;
+    if (markerOf[i] !== -1 && (i === 0 || markerOf[i - 1] !== markerOf[i])) nextM = markerOf[i]!;
+  }
+  const priceQuestions = [...text.matchAll(ES_GAS_PRICE_QUESTION_RE)].map((q) => ({
+    start: q.index ?? 0,
+    end: (q.index ?? 0) + q[0].length,
+  }));
+  lastScanContext = {
+    text,
+    breakStarts,
+    breakEnds,
+    tokenStarts,
+    tokenEnds,
+    markerOf,
+    markers,
+    prevVerb,
+    nextVerb,
+    verbPrefix,
+    prevAnyVerb,
+    isPastVerb,
+    markerBefore,
+    markerAfter,
+    presentBlock: ES_PRESENT_URGENCY_RE.test(text) || ES_PRESENT_SYMPTOM_RE.test(text),
+    danger: new SpanIndex(text, DANGER_SIGNAL_RE_G),
+    personOrHarm: new SpanIndex(text, ES_PERSON_OR_HARM_RE),
+    harmOnly: new SpanIndex(text, ES_HARM_ONLY_RE),
+    personReference: new SpanIndex(text, ES_PERSON_REFERENCE_RE),
+    gasQuestionSignal: new SpanIndex(text, GAS_QUESTION_SIGNAL_RE_G),
+    idioms: {
+      price: new SpanIndex(text, ES_INJURY_IDIOM_RE.price),
+      laugh: new SpanIndex(text, ES_INJURY_IDIOM_RE.laugh),
+      excess: new SpanIndex(text, ES_INJURY_IDIOM_RE.excess),
+      device: new SpanIndex(text, ES_INJURY_IDIOM_RE.device),
+      figurative: new SpanIndex(text, ES_INJURY_IDIOM_RE.figurative),
+      fiction: new SpanIndex(text, ES_INJURY_IDIOM_RE.fiction),
+    },
+    priceQuestions,
+  };
+  return lastScanContext;
+}
+
+/** {@link clauseBounds} in O(log n) from the precomputed breaks. */
+function clauseOf(ctx: ScanContext, s: number, e: number): { start: number; end: number } {
+  const lastBefore = upperBound(ctx.breakEnds, s) - 1;
+  const start = lastBefore >= 0 ? ctx.breakEnds[lastBefore]! : 0;
+  const firstAfter = lowerBound(ctx.breakStarts, e);
+  const end = firstAfter < ctx.breakStarts.length ? ctx.breakStarts[firstAfter]! : ctx.text.length;
+  return { start, end };
+}
+
+type InjuryHit = (typeof INJURY_REGEXES_ES)[number] & { index: number; text: string };
+
+/**
+ * Every Spanish injury match that is not an idiom reading, plus the keywords
+ * of matches demoted to an E2 reading (ambiguous object fall, pet). ALL
+ * matches of each entry count (#1245 round 2).
+ */
+function spanishInjuryHits(ctx: ScanContext): { hits: InjuryHit[]; demotedE2: string[] } {
+  const hits: InjuryHit[] = [];
+  const demotedE2: string[] = [];
+  for (const entry of INJURY_REGEXES_ES) {
+    for (const match of ctx.text.matchAll(entry.regexAll)) {
+      const index = match.index ?? 0;
+      const text = match[0];
+      const idiom = entry.idiomWhen ? injuryIdiom(ctx, entry.idiomWhen, index, text) : null;
+      if (idiom && ES_E2_IDIOMS.has(idiom)) {
+        demotedE2.push(entry.keyword);
+        continue;
+      }
+      if (idiom) continue;
+      hits.push({ ...entry, index, text });
+    }
+  }
+  return { hits, demotedE2 };
+}
+
+/**
+ * The idiom reading that applies to this match, or null.
+ * - price / laugh / excess / device / figurative / fiction / pet: the idiom
+ *   context shares the clause with the match (outside the match), and the rest
+ *   of the utterance has no person-or-harm signal (harm only, for figurative
+ *   and fiction).
+ * - object_fall and pet (E2 readings): additionally, no person reference
+ *   ANYWHERE, inside the match included (#1253 review). object_fall only
+ *   recognises a listed household object as what fell.
+ */
+function injuryIdiom(
+  ctx: ScanContext,
+  kinds: ReadonlyArray<InjuryIdiom>,
+  index: number,
+  text: string,
+): InjuryIdiom | null {
+  const end = index + text.length;
+  const clause = clauseOf(ctx, index, end);
+  for (const kind of kinds) {
+    if (kind === 'object_fall') {
+      if (!ES_FALLEN_OBJECT_RE.test(text)) continue;
+    } else if (kind === 'pet') {
+      // The pet must be what swallowed or took it, not a bystander ("mientras
+      // jugaba con el perro"). Bounded look-around, O(1) per match.
+      const before = ctx.text.slice(Math.max(0, index - 40), index);
+      const after = ctx.text.slice(end, end + 40);
+      if (!ES_PET_SUBJECT_BEFORE_RE.test(before) && !ES_PET_SUBJECT_AFTER_RE.test(after)) continue;
+    } else if (!ctx.idioms[kind].anyWithinExcept(clause.start, clause.end, index, end)) {
+      continue;
+    }
+    if (ES_E2_IDIOMS.has(kind)) {
+      if (ctx.personReference.size > 0 || ctx.harmOnly.anyOutside(index, end)) continue;
+      return kind;
+    }
+    const gate = ES_HARM_GATED_IDIOMS.has(kind) ? ctx.harmOnly : ctx.personOrHarm;
+    if (gate.anyOutside(index, end)) continue;
+    return kind;
+  }
+  return null;
+}
 
 /**
  * #1245 round 2 — the past marker that modifies THIS event, if any. Scoped to
- * the event's clause, and further to the verb nearest the marker: a marker
- * closer to (or tied with) another verb or a "que" clause belongs to that
- * verb. "el enchufe que instalaron el mes pasado le dio la corriente", "mi
- * hijo se electrocutó con el cable que dejó el técnico ayer" and the
- * unpunctuated "se desmayo ayer estaba bien" stay live. A noun's span starts
- * at its governing past verb; without one the noun is not past.
+ * the event's clause and to the verb nearest the marker: a marker closer to (or
+ * tied with) another verb or a "que" clause belongs to that verb. A noun's span
+ * starts at its governing past verb; without one the noun is not past. Only the
+ * nearest marker on each side can attach (a farther one has that marker or a
+ * verb in between), so each query is O(log n) over the precomputed arrays.
  */
-function attachedPastMarker(transcript: string, hit: InjuryHit): string | null {
-  const bounds = clauseBounds(transcript, hit.index, hit.text.length);
-  const clause = transcript.slice(bounds.start, bounds.end);
-  const tokens = [...clause.matchAll(/[\p{L}\p{N}]+/gu)].map((m) => ({
-    word: m[0],
-    start: m.index ?? 0,
-    end: (m.index ?? 0) + m[0].length,
-  }));
-  const hitStart = hit.index - bounds.start;
-  const hitEnd = hitStart + hit.text.length;
-  let spanFirst = tokens.findIndex((t) => t.end > hitStart);
-  let spanLast = tokens.length - 1 - [...tokens].reverse().findIndex((t) => t.start < hitEnd);
-  if (spanFirst < 0 || spanLast < spanFirst) return null;
-
-  const markers = [...clause.matchAll(new RegExp(ES_PAST_MARKER_RE.source, 'giu'))].map((m) => {
-    const start = m.index ?? 0;
-    const end = start + m[0].length;
-    const first = tokens.findIndex((t) => t.end > start);
-    const last = tokens.length - 1 - [...tokens].reverse().findIndex((t) => t.start < end);
-    return { text: m[0], first, last };
-  });
-  if (markers.length === 0) return null;
-  const inMarker = (i: number) => markers.some((m) => i >= m.first && i <= m.last);
+function attachedPastMarker(ctx: ScanContext, hit: InjuryHit): string | null {
+  const end = hit.index + hit.text.length;
+  const clause = clauseOf(ctx, hit.index, end);
+  const clauseFirst = lowerBound(ctx.tokenEnds, clause.start + 1);
+  const clauseLast = lowerBound(ctx.tokenStarts, clause.end) - 1;
+  let spanFirst = lowerBound(ctx.tokenEnds, hit.index + 1);
+  const spanLast = lowerBound(ctx.tokenStarts, end) - 1;
+  if (spanFirst > spanLast) return null;
 
   if (hit.aspect === 'noun') {
-    let governing = -1;
-    for (let i = spanFirst - 1; i >= 0; i -= 1) {
-      if (inMarker(i)) continue;
-      if (ES_PAST_VERB_TOKEN_RE.test(tokens[i]!.word) || ES_OTHER_VERB_TOKEN_RE.test(tokens[i]!.word)) {
-        governing = i;
-        break;
-      }
-    }
-    if (governing < 0 || !ES_PAST_VERB_TOKEN_RE.test(tokens[governing]!.word)) return null;
+    const governing = spanFirst > 0 ? ctx.prevAnyVerb[spanFirst]! : -1;
+    if (governing < clauseFirst || !ctx.isPastVerb[governing]) return null;
     spanFirst = governing;
   }
+  const verbsBetween = (a: number, b: number) => (b < a ? 0 : ctx.verbPrefix[b + 1]! - ctx.verbPrefix[a]!);
+  const leftVerbGap = (from: number, markerFirst: number) => {
+    const v = from > 0 ? ctx.prevVerb[from - 1]! : -1;
+    return v >= clauseFirst ? markerFirst - v - 1 : Infinity;
+  };
+  const rightVerbGap = (from: number, markerLast: number) => {
+    const v = from < ctx.nextVerb.length ? ctx.nextVerb[from]! : ctx.nextVerb.length;
+    return v <= clauseLast ? v - markerLast - 1 : Infinity;
+  };
 
-  const otherVerbs = tokens
-    .map((t, i) => i)
-    .filter((i) => (i < spanFirst || i > spanLast) && !inMarker(i) && ES_OTHER_VERB_TOKEN_RE.test(tokens[i]!.word));
-  const gap = (aFirst: number, aLast: number, bFirst: number, bLast: number) =>
-    aFirst > bLast ? aFirst - bLast - 1 : bFirst - aLast - 1;
-
-  for (const m of markers) {
-    if (m.first < 0 || m.last < m.first) continue;
-    const toEvent = gap(m.first, m.last, spanFirst, spanLast);
-    const toOther = Math.min(Infinity, ...otherVerbs.map((v) => gap(m.first, m.last, v, v)));
-    // Ties go to the other verb: an ambiguous marker never downgrades a life-safety event.
-    if (toEvent < toOther) return m.text;
+  // Marker after the event: competing verbs are the nearest one before the
+  // event and the nearest one after the marker (none may sit in between).
+  const after = ctx.markerAfter[spanLast]!;
+  if (after >= 0) {
+    const m = ctx.markers[after]!;
+    if (m.last <= clauseLast && verbsBetween(spanLast + 1, m.first - 1) === 0) {
+      const toEvent = m.first - spanLast - 1;
+      const toOther = Math.min(leftVerbGap(spanFirst, m.first), rightVerbGap(m.last + 1, m.last));
+      if (toEvent < toOther) return m.text;
+    }
+  }
+  // Marker before the event: competing verbs are the nearest one before the
+  // marker and the nearest one after the event.
+  const before = ctx.markerBefore[spanFirst]!;
+  if (before >= 0) {
+    const m = ctx.markers[before]!;
+    if (m.first >= clauseFirst && verbsBetween(m.last + 1, spanFirst - 1) === 0) {
+      const toEvent = spanFirst - m.last - 1;
+      const toOther = Math.min(leftVerbGap(m.first, m.first), rightVerbGap(spanLast + 1, m.last));
+      if (toEvent < toOther) return m.text;
+    }
   }
   return null;
 }
 
 /**
  * True only for an event or noun match with a past or hypothetical marker
- * attached to its own verb ({@link attachedPastMarker}), and no present
- * urgency, present symptom or danger signal anywhere in the utterance. A
- * state is never past. Callers must also check that no state matched anywhere.
+ * attached to its own verb, and no present urgency, present symptom or danger
+ * signal anywhere in the utterance. A state is never past.
  */
-function isSpanishClearlyPastEvent(transcript: string, hit: InjuryHit): boolean {
+function isSpanishClearlyPastEvent(ctx: ScanContext, hit: InjuryHit): boolean {
   if (hit.aspect === 'state') return false;
-  if (!attachedPastMarker(transcript, hit)) return false;
-  if (ES_PRESENT_URGENCY_RE.test(transcript) || ES_PRESENT_SYMPTOM_RE.test(transcript)) return false;
-  return !hasLeakOrDangerSignal(withoutSpan(transcript, hit.index, hit.text.length), 'device');
+  if (!attachedPastMarker(ctx, hit)) return false;
+  if (ctx.presentBlock) return false;
+  return !ctx.danger.anyOutside(hit.index, hit.index + hit.text.length);
 }
 
-/** #1221/#1245 — the Spanish injury verdict: an E1 keyword, a recent-past E2 keyword, or neither. */
+let lastInjuryText: string | null = null;
+let lastInjuryVerdict: { e1?: string; residualE2?: string } = {};
+
+/** #1221/#1245 — the Spanish injury verdict: an E1 keyword, an E2 keyword, or neither. Memoised per transcript. */
 function classifySpanishInjury(transcript: string): { e1?: string; residualE2?: string } {
-  const hits = spanishInjuryHits(transcript);
-  if (hits.length === 0) return {};
+  if (lastInjuryText === transcript) return lastInjuryVerdict;
+  const ctx = scanContext(transcript);
+  const { hits, demotedE2 } = spanishInjuryHits(ctx);
+  let verdict: { e1?: string; residualE2?: string } = {};
   const state = hits.find((h) => h.aspect === 'state');
-  if (state) return { e1: state.keyword };
-  const live = hits.find((h) => !isSpanishClearlyPastEvent(transcript, h));
-  if (live) return { e1: live.keyword };
-  const recent = hits.find((h) => {
-    if (h.pastReportTier !== 'E2') return false;
-    const marker = attachedPastMarker(transcript, h);
-    return marker !== null && ES_RECENT_PAST_RE.test(marker);
-  });
-  return recent ? { residualE2: recent.keyword } : {};
+  const live = state ?? hits.find((h) => !isSpanishClearlyPastEvent(ctx, h));
+  if (live) {
+    verdict = { e1: live.keyword };
+  } else {
+    const recent = hits.find((h) => {
+      if (h.pastReportTier !== 'E2') return false;
+      const marker = attachedPastMarker(ctx, h);
+      return marker !== null && ES_RECENT_PAST_RE.test(marker);
+    });
+    const e2 = recent?.keyword ?? demotedE2[0];
+    if (e2) verdict = { residualE2: e2 };
+  }
+  lastInjuryText = transcript;
+  lastInjuryVerdict = verdict;
+  return verdict;
 }
-
-/**
- * Josh's decision (#1241): "a cómo / cuánto (me/le) sale el gas …". "a cómo"
- * is only ever a price idiom; "cuánto" needs the article ("cuánto sale gas
- * del medidor" is leak grammar).
- */
-const ES_GAS_PRICE_QUESTION_RE =
-  /(?<![\p{L}\p{N}])(?:a c[oó]mo (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) (?:el )?|cu[aá]nto (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) el )(?:gas|propano)(?![\p{L}\p{N}])/giu;
 
 /**
  * The gas price question overlapping a "sale gas" match, when nothing outside
- * the question signals a leak or harm (a named source or place is not a
- * signal here). Returns the question span, else null.
+ * the question signals a leak or harm in the shared gas lexicon (#1253 review).
+ * A named source or place is not a signal here. Returns true when the match is
+ * a plain price question.
  */
-function gasPriceQuestionAt(transcript: string, index: number, length: number): RegExpMatchArray | null {
-  for (const q of transcript.matchAll(ES_GAS_PRICE_QUESTION_RE)) {
-    const qStart = q.index ?? 0;
-    const qEnd = qStart + q[0].length;
-    if (qStart >= index + length || qEnd <= index) continue;
-    if (hasLeakOrDangerSignal(withoutSpan(transcript, qStart, q[0].length), 'device')) return null;
-    return q;
+function gasPriceQuestionAt(transcript: string, index: number, length: number): boolean {
+  const ctx = scanContext(transcript);
+  for (const q of ctx.priceQuestions) {
+    if (q.start >= index + length || q.end <= index) continue;
+    return !ctx.gasQuestionSignal.anyOutside(q.start, q.end);
   }
-  return null;
+  return false;
 }
 
 /** #1241 — a gas price question with no leak or harm signal: the keyword for an E2 candidate, else null. */
 function detectSpanishGasPriceQuestion(transcript: string): string | null {
-  for (const q of transcript.matchAll(ES_GAS_PRICE_QUESTION_RE)) {
-    if (gasPriceQuestionAt(transcript, q.index ?? 0, q[0].length)) return 'pregunta de precio del gas';
+  const ctx = scanContext(transcript);
+  for (const q of ctx.priceQuestions) {
+    if (!ctx.gasQuestionSignal.anyOutside(q.start, q.end)) return 'pregunta de precio del gas';
   }
   return null;
 }
