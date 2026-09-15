@@ -22,6 +22,7 @@ import {
   classifyCallerSafety,
   e1ScriptReadiness,
   E1_SCRIPT_REVIEW_REQUIRED,
+  LIFE_SAFETY_E1_SCRIPT,
 } from '../../../../src/ai/agents/customer-calling/emergency-tier';
 
 const TRIAGE_RULES_PATH = resolve(
@@ -232,6 +233,101 @@ describe('runtime E2 vocabulary — embedded sewage/AC phrases (FIX 10iii)', () 
   it('an E1 hazard still wins over an embedded E2 phrase in the same utterance (upward-only bias)', () => {
     const r = classifyCallerSafety('I smell gas and the sewage is backing up too', {});
     expect(r.tier).toBe('E1');
+  });
+});
+
+// ─── #1056 — Spanish life-safety hazards are E1, not the E2 backstop ────────
+
+describe('#1056 — Spanish hazard reports classify E1 (runtime hot path, no rules)', () => {
+  // One or more per English E1_HAZARD_PHRASES category. Unaccented variants
+  // included because STT transcripts drop diacritics.
+  it.each([
+    // Gas leak / gas smell
+    ['hay una fuga de gas en mi casa, huele muy fuerte', 'gas leak'],
+    ['creo que hay un escape de gas en la cocina', 'gas leak'],
+    ['huele a gas en todo el sótano', 'gas smell'],
+    ['hay mucho olor a gas cerca del calentador', 'gas smell'],
+    ['la cocina huele a huevo podrido', 'rotten eggs'],
+    ['hay olor a azufre en el pasillo', 'sulfur smell'],
+    // Carbon monoxide
+    ['la alarma de monóxido de carbono está sonando', 'carbon monoxide'],
+    ['la alarma de monoxido de carbono esta sonando', 'carbon monoxide, no accents'],
+    ['el detector de monóxido no deja de pitar', 'CO detector'],
+    // Fire / smoke
+    ['hay un incendio en el garaje', 'fire'],
+    ['la secadora está en llamas', 'on fire'],
+    ['el calentador se prendió fuego', 'caught fire'],
+    ['el calentador se prendio fuego', 'caught fire, no accents'],
+    ['sale humo de las rejillas de la calefacción', 'smoke coming'],
+    ['la casa está llena de humo', 'full of smoke'],
+    ['huele a humo en el cuarto de los niños', 'smell smoke'],
+    // Electrical burning / sparks
+    ['el enchufe está echando chispas', 'sparking'],
+    ['salen chispas del panel eléctrico', 'sparks from'],
+    ['se están quemando los cables de la pared', 'wires burning'],
+    ['huele a plástico quemado en el tablero', 'burning plastic'],
+  ])('classifies %j as E1 (%s)', (utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    expect(r.tier).toBe('E1');
+    expect(r.requiresEvacuation).toBe(true);
+    expect(r.language).toBe('es');
+    // No reviewed Spanish E1 script exists (O-2): the English evacuation
+    // script, which leads with 911, is spoken.
+    expect(r.responseScript).toBe(LIFE_SAFETY_E1_SCRIPT);
+    expect(r.responseScript).toMatch(/911/);
+  });
+
+  it('the ticket utterance: "fuga de gas" is E1 with the Spanish keyword and language', () => {
+    const r = classifyCallerSafety('hay una fuga de gas en mi casa, huele muy fuerte', {});
+    expect(r).toMatchObject({
+      tier: 'E1',
+      keyword: 'fuga de gas',
+      language: 'es',
+      source: 'embedded',
+      responseScript: LIFE_SAFETY_E1_SCRIPT,
+    });
+  });
+
+  it('with the corpus rules loaded too, a Spanish gas leak is still E1 (upward-only)', () => {
+    expect(classifyCallerSafety('hay una fuga de gas en mi casa', {}, rules).tier).toBe('E1');
+  });
+
+  it.each([
+    ['no hay agua caliente', 'the ticket control: no hot water'],
+    ['mi estufa de gas no prende', 'gas appliance, no hazard'],
+    ['quiero una cotización para un calentador de gas', 'gas appliance quote'],
+    ['necesito cambiar la batería del detector de humo', 'smoke detector battery'],
+    ['quiero revisar la alarma de incendio de la oficina', 'fire alarm inspection'],
+    ['las llamas del calentador están amarillas', 'flame-colour homonym (mirrors the English one)'],
+    ['no hay fuego en el piloto del calentador', 'no-flame repair call (negation keeps "hay fuego" whole)'],
+    ['no hay llamas en el quemador', 'no-flame repair call (negation keeps "hay llamas" whole)'],
+    ['tengo una fuga de agua debajo del lavabo', 'water leak'],
+    ['quiero agendar el mantenimiento anual del aire acondicionado', 'routine booking'],
+  ])('a Spanish non-hazard call is NOT E1: %j (%s)', (utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    expect(r.tier).not.toBe('E1');
+    expect(r.requiresEvacuation).toBe(false);
+  });
+
+  it('"olor a quemado" stays E2, mirroring English "burning smell" (E2 backstop, not E1)', () => {
+    expect(classifyCallerSafety('burning smell in the hallway', {}).tier).toBe('E2');
+    expect(classifyCallerSafety('hay olor a quemado en el pasillo', {}).tier).toBe('E2');
+  });
+
+  it('English E1 is unchanged: same tier, keyword, source and script', () => {
+    expect(classifyCallerSafety('I smell gas in the basement', {})).toMatchObject({
+      tier: 'E1',
+      requiresEvacuation: true,
+      keyword: 'smell gas',
+      responseScript: LIFE_SAFETY_E1_SCRIPT,
+      source: 'embedded',
+    });
+  });
+
+  it('the matched phrase carries its language: en for an English hazard, es for the Spanish E2 backstop', () => {
+    expect(classifyCallerSafety('I smell gas in the basement', {}).language).toBe('en');
+    expect(classifyCallerSafety('hay olor a quemado en el pasillo', {}).language).toBe('es');
+    expect(classifyCallerSafety('I want to book my annual tune-up', {}).language).toBeUndefined();
   });
 });
 
