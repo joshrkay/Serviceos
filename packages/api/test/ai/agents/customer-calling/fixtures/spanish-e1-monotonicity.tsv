@@ -1,7 +1,8 @@
 # #1239 review — Spanish E1 monotonicity corpus. One row per phrase: origin/main tier, TAB, phrase.
 # Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv;
-# third review: r1239b/corpus.txt and newprobes.txt).
-# Tiers recorded with origin/main efde3966e (classifier as merged in #1234). Do not regenerate against
+# third review: r1239b/corpus.txt and newprobes.txt; #1221: Spanish injury/medical phrases and controls).
+# Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 rows (appended
+# last) with origin/main 859db9f94 (as merged in #1239). Do not regenerate against
 # a branch: the column is the baseline a change is measured against.
 E3	se sale el gas
 E3	le sale gas a la estufa
@@ -353,3 +354,53 @@ E1	gas leak
 E1	carbon monoxide alarm is going off
 E3	el gas sale muy caro
 E3	no le sale gas a la estufa
+E3	mi papá está inconsciente
+E3	mi esposa está desmayada
+E3	mi abuela no responde
+E3	mi bebé no respira
+E2	mi mamá no puede respirar
+E2	no puedo respirar
+E2	no no puede respirar
+E3	dejó de respirar
+E3	tiene dolor en el pecho
+E3	me duele mucho el pecho
+E3	creo que le está dando un infarto
+E3	le dio un ataque al corazón
+E3	sangra mucho de la cabeza
+E3	hay mucha sangre
+E3	está sangrando mucho
+E3	el electricista se electrocutó
+E3	le dio la corriente
+E3	me dio un toque el enchufe
+E3	le está dando una convulsión
+E3	está convulsionando
+E3	mi hijo se está ahogando
+E3	la niña está atragantada
+E3	creo que es una sobredosis
+E3	le dio un derrame cerebral
+E3	se cayó y no se puede mover
+E3	mi papá se cayó de la escalera y no se puede mover
+E3	ayer se cayó y todavía no se puede mover
+E3	se quemó la mano con aceite
+E3	se me quemó el brazo con agua hirviendo
+E3	tiene quemaduras graves
+E3	alguien está herido
+E3	no está inconsciente
+E3	ya respira bien
+E3	no se desmayó
+E3	no tiene dolor en el pecho
+E3	no sangra mucho
+E3	no está convulsionando
+E3	el técnico se cayó de la lista
+E3	me duele el pecho de risa
+E3	necesito un electricista porque me dio un toque el enchufe ayer
+E3	el agua está hirviendo
+E3	se me quemó la comida
+E3	el técnico no responde mis mensajes
+E3	el pintor le dio un toque final a la pared
+E3	el drenaje no respira
+E3	se ahoga el motor de la planta
+E3	se desmayó hace dos años
+E2	no, no puede respirar
+E3	tiene dolor en el pecho, creo que es un infarto
+E3	está sangrando mucho de la cabeza

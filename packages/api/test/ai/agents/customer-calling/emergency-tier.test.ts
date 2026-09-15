@@ -548,6 +548,98 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
   });
 });
 
+// ─── #1221 — Spanish injury and medical emergencies are E1 ──────────────────
+
+describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
+  const SPANISH_INJURY_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // Unconscious / unresponsive (English: unconscious, unresponsive, passed out, won't wake up)
+    ['E1', 'mi papá está inconsciente', 'unconscious'],
+    ['E1', 'mi esposa está desmayada', 'passed out'],
+    ['E1', 'mi hijo se desmayó', 'passed out'],
+    ['E1', 'mi abuela no responde', 'unresponsive, person subject'],
+    // Not breathing (English: not breathing, stopped breathing)
+    ['E1', 'mi bebé no respira', 'not breathing'],
+    ['E1', 'mi mamá no puede respirar', 'cannot breathe'],
+    ['E1', 'no puedo respirar', 'cannot breathe (was E2 via the backstop)'],
+    ['E1', 'no no puede respirar', 'a leading "no" does not negate it'],
+    ['E1', 'dejó de respirar', 'stopped breathing'],
+    // Chest pain / heart attack
+    ['E1', 'tiene dolor en el pecho', 'chest pain'],
+    ['E1', 'me duele mucho el pecho', 'chest pain'],
+    ['E1', 'creo que le está dando un infarto', 'heart attack'],
+    ['E1', 'le dio un ataque al corazón', 'heart attack'],
+    // Severe bleeding
+    ['E1', 'sangra mucho de la cabeza', 'severe bleeding'],
+    ['E1', 'hay mucha sangre', 'severe bleeding'],
+    ['E1', 'está sangrando mucho', 'severe bleeding'],
+    // Electrocution / shock (English: electrocuted, got shocked, electric shock)
+    ['E1', 'el electricista se electrocutó', 'electrocuted'],
+    ['E1', 'le dio la corriente', 'electric shock'],
+    ['E1', 'me dio un toque el enchufe', 'got shocked'],
+    // Seizure
+    ['E1', 'le está dando una convulsión', 'seizure'],
+    ['E1', 'está convulsionando', 'seizure'],
+    // Choking
+    ['E1', 'mi hijo se está ahogando', 'choking / drowning'],
+    ['E1', 'la niña está atragantada', 'choking'],
+    // Overdose, stroke
+    ['E1', 'creo que es una sobredosis', 'overdose'],
+    ['E1', 'le dio un derrame cerebral', 'stroke'],
+    // Fell and cannot move
+    ['E1', 'se cayó y no se puede mover', 'fell, cannot move'],
+    ['E1', 'mi papá se cayó de la escalera y no se puede mover', 'fell from a ladder, cannot move'],
+    ['E1', 'ayer se cayó y todavía no se puede mover', 'past fall, present urgency'],
+    // Burned (injury sense; English: badly burned, severe burn)
+    ['E1', 'se quemó la mano con aceite', 'burned hand'],
+    ['E1', 'se me quemó el brazo con agua hirviendo', 'scalded arm'],
+    ['E1', 'tiene quemaduras graves', 'severe burns'],
+    // Someone hurt (English: someone is hurt / injured)
+    ['E1', 'alguien está herido', 'someone is hurt'],
+    // Negations
+    ['not-E1', 'no está inconsciente', 'negated'],
+    ['not-E1', 'ya respira bien', 'breathing again'],
+    ['not-E1', 'no se desmayó', 'negated'],
+    ['not-E1', 'no tiene dolor en el pecho', 'negated'],
+    ['not-E1', 'no sangra mucho', 'negated'],
+    ['not-E1', 'no está convulsionando', 'negated'],
+    // Routine controls
+    ['not-E1', 'el técnico se cayó de la lista', 'fell off the list'],
+    ['not-E1', 'me duele el pecho de risa', 'laughing'],
+    ['not-E1', 'necesito un electricista porque me dio un toque el enchufe ayer', 'past, resolved shock'],
+    ['not-E1', 'el agua está hirviendo', 'boiling water'],
+    ['not-E1', 'se me quemó la comida', 'burned food'],
+    ['not-E1', 'el técnico no responde mis mensajes', 'an unresponsive technician'],
+    ['not-E1', 'el pintor le dio un toque final a la pared', 'finishing touch'],
+    ['not-E1', 'el drenaje no respira', 'plumbing vent'],
+    ['not-E1', 'se ahoga el motor de la planta', 'engine flooding'],
+    ['not-E1', 'se desmayó hace dos años', 'clearly past'],
+  ];
+
+  it.each(SPANISH_INJURY_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+      expect(r.language).toBe('es');
+    } else {
+      expect(r.tier).not.toBe('E1');
+    }
+  });
+
+  // A shock yesterday is not a life-safety call any more, but the outlet that
+  // shocked the caller is still live: urgent same-day dispatch (E2), not a
+  // routine booking.
+  it('a past, resolved shock is E2: the caller is fine, the outlet is still a hazard', () => {
+    expect(
+      classifyCallerSafety('necesito un electricista porque me dio un toque el enchufe ayer', {}).tier,
+    ).toBe('E2');
+  });
+
+  it('decomposed accents still classify E1: "se desmayó" in NFD', () => {
+    expect(classifyCallerSafety('mi hijo se desmayó'.normalize('NFD'), {}).tier).toBe('E1');
+  });
+});
+
 // ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
 
 describe('e1ScriptReadiness (boot gate)', () => {

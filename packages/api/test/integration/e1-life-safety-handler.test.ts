@@ -452,4 +452,61 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
       );
     },
   );
+
+  // ─── #1221 — Spanish injury and medical emergencies ────────────────────────
+
+  const ES_911_SAY =
+    '<Say voice="Polly.Mia-Neural">Si alguien está en peligro inmediato, cuelgue y llame al 911.</Say>';
+
+  async function expectSpanishE1(c: Call, twiml: string, phrase: string): Promise<void> {
+    const row = emergencyRow(await sessionAudit(c.tenantId, c.session.id));
+    expect(row?.metadata, phrase).toMatchObject({ tier: 'E1', reason: 'life_safety_e1', language: 'es' });
+    expect(c.session.machine.currentState, phrase).toBe('terminated');
+    expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    // #1234 — the Spanish 911 line plays FIRST, then the E1 script, then the hang-up.
+    expect(twiml, phrase).toContain(ES_911_SAY);
+    expect(twiml.indexOf(ES_911_SAY)).toBeLessThan(twiml.indexOf('call 911 now'));
+    expect(twiml).toContain('<Hangup/>');
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('on-call dispatcher');
+  }
+
+  it.each([
+    ['unconscious', 'mi papá está inconsciente'],
+    ['not breathing', 'mi bebé no respira'],
+    ['chest pain / heart attack', 'tiene dolor en el pecho, creo que es un infarto'],
+    ['severe bleeding', 'está sangrando mucho de la cabeza'],
+    ['electrocution', 'el electricista se electrocutó'],
+    ['seizure', 'está convulsionando'],
+    ['choking', 'mi hijo se está ahogando'],
+    ['overdose', 'creo que es una sobredosis'],
+    ['stroke', 'le dio un derrame cerebral'],
+    ['fell and cannot move', 'se cayó y no se puede mover'],
+    ['burned', 'se quemó la mano con aceite'],
+  ])('#1221 SPANISH %s: %j is E1 at the real handler — Spanish 911 line first, hang-up', async (_class, phrase) => {
+    const c = await inboundCall(tenantB.tenantId);
+    const twiml = await turn(c, phrase);
+    await expectSpanishE1(c, twiml, phrase);
+    // Deterministic: no intent classification ran for the life-safety turn.
+    const classified = (await sessionAudit(c.tenantId, c.session.id)).filter((e) =>
+      e.eventType.endsWith(CLASSIFIED_EVENT_SUFFIX),
+    );
+    expect(classified).toHaveLength(0);
+  });
+
+  it('#1221 SPANISH SESSION: "no puedo respirar" (E2 before) is E1 on a Spanish-session call — Spanish 911 line first', async () => {
+    const c = await inboundCall(tenantB.tenantId);
+    c.session.language = 'es';
+    const twiml = await turn(c, 'no puedo respirar');
+    await expectSpanishE1(c, twiml, 'no puedo respirar');
+  });
+
+  it('#1221 control: "se me quemó la comida" is not E1 — no emergency row, no hang-up', async () => {
+    const c = await inboundCall(tenantB.tenantId);
+    const twiml = await turn(c, 'se me quemó la comida');
+    expect(emergencyRow(await sessionAudit(c.tenantId, c.session.id))).toBeUndefined();
+    expect(c.session.machine.currentState).not.toBe('terminated');
+    expect(twiml).not.toContain('<Hangup/>');
+    expect(twiml).not.toContain('Si alguien está en peligro inmediato');
+  });
 });
