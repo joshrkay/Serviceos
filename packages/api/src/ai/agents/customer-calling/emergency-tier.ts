@@ -150,13 +150,14 @@ const NOT_CHIMNEY = '(?! (?:de|por) (?:la |mi )?chimenea)';
 /**
  * "sale" is a price right after cuánto/cómo ("¿cuánto me sale el gas?", "¿a
  * cómo sale el propano?") and a discount in English ("on sale gas water
- * heaters"). A sentence about the bill, or an English sentence, is the
- * `gas_price_or_sale` routine exception.
+ * heaters", "yard sale gas line"). These two are grammatical exclusions on the
+ * phrase itself; everything looser (price or bill words elsewhere, an English
+ * sentence) is the `gas_price_or_sale` suppressor, gated on the leak signal.
  */
 const NOT_PRICE_OR_ENGLISH_SALE =
-  '(?<!(?<![\\p{L}\\p{N}])(?:cu[aá]nto|c[oó]mo|on|for|the|any|big)\\s+(?:(?:se|le|les|me|te|nos)\\s+)?)';
+  '(?<!(?<![\\p{L}\\p{N}])(?:cu[aá]nto|c[oó]mo|on|for|the|any|big|yard|garage)\\s+(?:(?:se|le|les|me|te|nos)\\s+)?)';
 const NOT_ENGLISH_GAS_NOUN =
-  '(?! (?:water|heaters?|grills?|furnaces?|dryers?|ranges?|stoves?|ovens?|fireplaces?|generators?|appliances?|and|or)(?![\\p{L}\\p{N}]))';
+  '(?! (?:water|heaters?|grills?|furnaces?|dryers?|ranges?|stoves?|ovens?|fireplaces?|generators?|appliances?|lines?|prices?|deals?|and|or)(?![\\p{L}\\p{N}]))';
 
 export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   // Gas and propane
@@ -185,7 +186,10 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
     keyword: 'el gas se escapa',
     pattern:
       'el (?:gas|propano) (?:se (?:est[aá] )?(?:escap(?:a|ando|[oó])|sal(?:e|iendo|i[oó]))|est[aá] (?:escapando|saliendo)|escap(?:a|[oó])|sal(?:e|i[oó]) (?:de|del|por))',
+    // "el propano sale por tres dólares el galón" is a price.
+    routineWhen: 'gas_price_or_sale',
   },
+  { keyword: 'se siente el gas', pattern: 'se siente (?:(?:el|un) )?(?:gas|propano)' },
   { keyword: 'botando gas', pattern: 'bot(?:a|an|ando|[oó]) (?:el )?(?:gas|propano)' },
   { keyword: 'huevo podrido', pattern: 'huevos? podridos?' },
   { keyword: 'olor a azufre', pattern: '(?:olor|huele) a azufre' },
@@ -207,6 +211,13 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'veo llamas', pattern: 'veo llamas', routineWhen: 'flame_colour' },
   { keyword: 'hay llamas', pattern: 'hay llamas(?! en el (?:piloto|quemador))', routineWhen: 'flame_colour' },
   { keyword: 'salen llamas', pattern: '(?:salen|saliendo) llamas' },
+  // A coloured flame with a signal anywhere else ("llamas amarillas y me siento
+  // mareado", "flama amarilla en el calentador y me duele la cabeza").
+  {
+    keyword: 'llamas amarillas',
+    pattern: '(?:llamas?|flamas?) (?:de color )?(?:amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?)',
+    routineWhen: 'flame_colour',
+  },
   {
     keyword: 'no puedo apagar el fuego',
     pattern: 'no (?:puedo|podemos|puede|pueden|se puede) apagar (?:el )?(?:fuego|incendio)',
@@ -333,6 +344,70 @@ function compileSpanish(entries: ReadonlyArray<SpanishHazardPattern>) {
   }));
 }
 
+// ─── #1239 review — suppressors consult ONE leak/danger gate first ──────────
+//
+// Design rule: a suppressor (price/bill/sale, English sentence, benign smoke,
+// flame colour, igniter sparks, CO-device work) may turn a Spanish E1 match
+// into "routine" ONLY when the rest of the utterance carries no leak or danger
+// signal. Three review rounds in a row, a suppressor with its own short list
+// downgraded a real emergency; the lists now live in one place, are broad, and
+// are consulted before any suppressor-specific wording.
+
+/** A named gas source: where a leak comes from. */
+const SIGNAL_GAS_SOURCE =
+  'medidor(?:es)?|boiler|caldera|secadora|tubos?|tuber[ií]as?|tanques?|cilindros?|estufas?|hornillas?|quemador(?:es)?|cocina|calentador(?:es)?|stoves?|heaters?|furnaces?|tanks?|meters?|pipes?|burners?';
+/** A leak verb or smell. */
+const SIGNAL_LEAK =
+  'sale|salen|saliendo|sali[oó]|escap\\p{L}*|fugas?|huele|huelo|olor|se siente|bot(?:a|an|ando|[oó])|smell\\p{L}*|leak\\p{L}*';
+/** Harm to people: CO symptoms, smoke inhalation, children, the whole house. */
+const SIGNAL_HARM =
+  'tos|toser|tosiendo|tosen|arden (?:los )?ojos|ardor|marea\\p{L}*|mareos?|duele (?:la )?cabeza|dolor de cabeza|n[aá]useas?|v[oó]mit\\p{L}*|sue[nñ]o|somnolient\\p{L}*|desmay\\p{L}*|ahog\\p{L}*|respir\\p{L}*|ni[nñ]os|beb[eé]s?|en toda la casa';
+/** Fire or smoke spreading beyond its source. */
+const SIGNAL_SPREAD =
+  'se prendi[oó]|se prendieron|se quem[oó]|se quemaron|fuego|llamas?|flamas?|humo|incendi\\p{L}*|chispas?|pared(?:es)?|cortinas?|cerca|techo|muebles?';
+const LEAK_OR_DANGER_SIGNAL_RE = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${SIGNAL_GAS_SOURCE}|${SIGNAL_LEAK}|${SIGNAL_HARM}|${SIGNAL_SPREAD})(?![\\p{L}\\p{N}])`,
+  'iu',
+);
+
+/**
+ * True when `text` names a gas source, a leak verb or smell, harm to people, or
+ * spreading fire/smoke. Every suppressor calls this first, on the utterance
+ * with its own trigger words blanked out (see {@link withoutSpan}), and stands
+ * down on any hit.
+ */
+function hasLeakOrDangerSignal(text: string): boolean {
+  return LEAK_OR_DANGER_SIGNAL_RE.test(text);
+}
+
+/** The utterance with the words a suppressor is judging blanked out. */
+function withoutSpan(text: string, index: number, length: number): string {
+  return `${text.slice(0, index)} ${text.slice(index + length)}`;
+}
+
+const CLAUSE_BREAK_RE = /[,.;:!?¿¡]|(?<![\p{L}\p{N}])(?:y|pero|porque|and|but|so)(?![\p{L}\p{N}])/giu;
+
+/**
+ * The clause around a match. A suppressor's own context (a price word, an
+ * English sentence, a barbecue) must sit in the SAME clause as the phrase it
+ * suppresses: "sale mucho gas, ¿cuánto cuesta la reparación?" is a leak and a
+ * separate price question, and "sale gas, what do I do?" is a Spanish leak
+ * report with an English question.
+ */
+function clauseAround(text: string, index: number, length: number): string {
+  let start = 0;
+  let end = text.length;
+  for (const brk of text.matchAll(CLAUSE_BREAK_RE)) {
+    const at = brk.index ?? 0;
+    if (at + brk[0].length <= index) start = at + brk[0].length;
+    else if (at >= index + length) {
+      end = at;
+      break;
+    }
+  }
+  return text.slice(start, end);
+}
+
 const ES_IGNITER_RE =
   /(?<![\p{L}\p{N}])(?:encendedor(?:es)?|chispero|ignitor|igniter|electrodo)(?![\p{L}\p{N}])/iu;
 const ES_ELECTRICAL_LOCATION_RE =
@@ -344,75 +419,74 @@ const ES_DEVICE_WORK_RE =
 const ES_ALARM_SOUNDING_RE =
   /(?<![\p{L}\p{N}])(?:sonando|suena|son[oó]|pitando|pita|pit[oó]|pitar|pitido|chillando|activ[oó]|activad[oa]|dispar[oó]|se prendi[oó]|mareos?|maread[oa]|dolor de cabeza|n[aá]useas)(?![\p{L}\p{N}])/iu;
 
-/** "veo/hay llamas <colour> en/del <appliance>" — a flame-colour diagnostic. */
-const ES_FLAME_COLOUR_DIAGNOSTIC_RE =
-  /(?<![\p{L}\p{N}])(?:veo|hay) (?:unas )?llamas (?:de color )?(?:amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?) (?:en|de|del)(?: el| la| los| las| mi)? (?:calentador|boiler|caldera|estufa|horno|quemador(?:es)?|piloto|hornillas?|calefacci[oó]n)(?![\p{L}\p{N}])/iu;
 /**
- * Any other hazard word voids the flame-colour exception ("quemador" is not
- * "quemado"): smoke, fire, leaks, CO symptoms (#1234 re-review: headache,
- * dizziness, nausea, vomiting, drowsiness), something else catching fire, or
- * flames outside the appliance.
+ * A flame-colour description: "(veo|hay) llamas amarillas (en el calentador)",
+ * "flama azul en la estufa". Its span is what the flame-colour suppressor
+ * blanks out before the signal gate, so "…, ¿está fuera de lo normal?" stays
+ * routine while "… y me duele la cabeza" or "veo llamas rojas en la secadora"
+ * (a dryer is a gas source, not a listed flame appliance) is E1.
  */
-const ES_OTHER_HAZARD_WORD_RE =
-  /(?<![\p{L}\p{N}])(?:humo|fuego|incendio|chispas?|quem(?!ador)\p{L}*|fugas?|escapes?|escapando|huele|huelo|olor|explot\p{L}*|mon[oó]xido|sale|salen|saliendo|duele|dolor|marea\p{L}*|mareos?|n[aá]useas?|v[oó]mit\p{L}*|sue[nñ]o|somnolient\p{L}*|prendi(?:[oó]|eron)|pared(?:es)?|techo|cortinas?|muebles?|gabinetes?|alfombra|afuera|fuera)(?![\p{L}\p{N}])/iu;
-
-/** A sentence about the gas bill: "¿sale gas en la factura?", "el recibo me sale el gas muy caro". */
-const ES_GAS_BILL_RE = /(?<![\p{L}\p{N}])(?:factura|recibo|cobro)(?![\p{L}\p{N}])/iu;
+const ES_FLAME_COLOUR_RE =
+  /(?<![\p{L}\p{N}])(?:(?:veo|hay|tiene|tengo) (?:unas? )?)?(?:llamas?|flamas?) (?:de color )?(?:amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?)(?: (?:en|de|del)(?: el| la| los| las| mi)? (?:calentador(?:es)?|boiler|caldera|estufas?|horno|quemador(?:es)?|piloto|hornillas?|calefacci[oó]n))?(?![\p{L}\p{N}])/iu;
+/** Price or bill wording: "sale" as cost ("¿qué tan caro me sale el gas?", "sale por tres dólares el galón"). */
+const ES_PRICE_RE =
+  /(?<![\p{L}\p{N}])(?:cu[aá]nto|caro|car[ií]simo|barat\p{L}*|precios?|prices?|cuesta|cobr\p{L}*|factura|recibo|pag\p{L}*|al mes|mensual\p{L}*|d[oó]lares|pesos|centavos|gal[oó]n|tarifas?|deals?|discount\p{L}*)(?![\p{L}\p{N}])/iu;
 /**
  * Words that exist only in English. Two or more make the sentence English, so
- * "sale" is a discount ("I bought a gas grill at a yard sale gas line needs
- * hookup"). One alone is code-switching and stays Spanish.
+ * "sale" is a discount. One alone is code-switching and stays Spanish.
  */
 const EN_ONLY_WORD_RE =
   /(?<![\p{L}\p{N}])(?:the|at|is|are|was|i|my|you|your|we|our|needs?|have|has|do|does|any|on|for|this|that|it|and|with|of|to|there|what|how|can|bought|buy|line)(?![\p{L}\p{N}])/giu;
-/** Any appliance or leak sign voids the bill exception. */
-const ES_GAS_LEAK_SIGN_RE =
-  /(?<![\p{L}\p{N}])(?:huele|huelo|olor|fugas?|escap\p{L}*|estufa|hornillas?|quemador(?:es)?|tuber[ií]as?|calentador|cocina|horno|tanque|cilindro|llave|v[aá]lvula|manguera)(?![\p{L}\p{N}])/iu;
-/** Smoke with an ordinary cause: first heat of the season, barbecue, cigarettes. */
+/**
+ * Smoke with an ordinary cause: the heating's first run of the season (heating
+ * AND "por primera vez" in the clause), barbecue, cigarettes. "hay humo por
+ * primera vez" alone is not a cause.
+ */
 const ES_BENIGN_SMOKE_RE =
-  /(?<![\p{L}\p{N}])(?:por primera vez|carne asada|asados?|parrillas?|asador|barbacoa|fogata|cigarros?|cigarrillos?|incienso)(?![\p{L}\p{N}])/iu;
-/** Any danger sign voids the benign-smoke exception. */
-const ES_SMOKE_DANGER_RE =
-  /(?<![\p{L}\p{N}])(?:fuego|llamas?|incendio|quem(?!ador)\p{L}*|chispas?|respir\p{L}*|tos|toser|ahog\p{L}*|marea\p{L}*|mareos?|adentro|dentro|llen[oa]|enchufes?|cables?)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(?:calefacci[oó]n(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])por primera vez|por primera vez(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])calefacci[oó]n|carne asada|asados?|parrillas?|asador|barbacoa|fogata|cigarros?|cigarrillos?|incienso)(?![\p{L}\p{N}])/iu;
+/** A quantity of gas is a leak, never a price: "sale mucho gas". */
+const ES_GAS_QUANTITY_RE = /(?<![\p{L}\p{N}])(?:mucho|much[ií]simo|bastante|demasiado)(?![\p{L}\p{N}])/iu;
 
 /**
- * Utterance-level routine exceptions for a matched Spanish entry. Narrow on
- * purpose: anything short of a clearly routine call stays E1.
- * - igniter_sparks: an igniter is named ("el encendedor echa chispas pero no
- *   prende") and no electrical location is.
+ * Utterance-level routine exceptions for a matched Spanish entry. Each one
+ * FIRST asks {@link hasLeakOrDangerSignal} about the utterance outside its own
+ * trigger words, and stands down on any signal. Then:
+ * - igniter_sparks: an igniter is named and no electrical location is.
  * - co_device_request: a detector/alarm is named with install, purchase or
- *   battery work, and nothing says it is sounding or anyone feels ill.
- * - flame_colour: "veo/hay llamas amarillas en el calentador" and no other
- *   hazard word anywhere in the utterance.
- * - gas_price_or_sale: the sentence is about the bill and names no appliance
- *   or leak, or the sentence is English.
- * - benign_smoke: first heat, barbecue or cigarette smoke, and no danger sign.
+ *   battery work, and nothing says it is sounding.
+ * - flame_colour: the flame is described only by its colour (and appliance).
+ * - gas_price_or_sale: price or bill wording, or two English-only words, in the
+ *   same clause, and no quantity of gas ("mucho").
+ * - benign_smoke: first heat, barbecue or cigarette smoke in the same clause.
  */
 function isSpanishRoutineContext(
   kind: NonNullable<SpanishHazardPattern['routineWhen']>,
   transcript: string,
+  match: RegExpExecArray,
 ): boolean {
-  if (kind === 'igniter_sparks') {
-    return ES_IGNITER_RE.test(transcript) && !ES_ELECTRICAL_LOCATION_RE.test(transcript);
-  }
   if (kind === 'flame_colour') {
-    return ES_FLAME_COLOUR_DIAGNOSTIC_RE.test(transcript) && !ES_OTHER_HAZARD_WORD_RE.test(transcript);
+    const flame = ES_FLAME_COLOUR_RE.exec(transcript);
+    return flame !== null && !hasLeakOrDangerSignal(withoutSpan(transcript, flame.index, flame[0].length));
   }
-  if (kind === 'gas_price_or_sale') {
-    const englishWords = transcript.match(EN_ONLY_WORD_RE)?.length ?? 0;
-    return (
-      englishWords >= 2 ||
-      (ES_GAS_BILL_RE.test(transcript) && !ES_GAS_LEAK_SIGN_RE.test(transcript))
-    );
+  if (hasLeakOrDangerSignal(withoutSpan(transcript, match.index, match[0].length))) return false;
+  const clause = clauseAround(transcript, match.index, match[0].length);
+  switch (kind) {
+    case 'igniter_sparks':
+      return ES_IGNITER_RE.test(transcript) && !ES_ELECTRICAL_LOCATION_RE.test(transcript);
+    case 'gas_price_or_sale':
+      return (
+        !ES_GAS_QUANTITY_RE.test(match[0]) &&
+        (ES_PRICE_RE.test(clause) || (clause.match(EN_ONLY_WORD_RE)?.length ?? 0) >= 2)
+      );
+    case 'benign_smoke':
+      return ES_BENIGN_SMOKE_RE.test(clause);
+    case 'co_device_request':
+      return (
+        ES_CO_DEVICE_RE.test(transcript) &&
+        ES_DEVICE_WORK_RE.test(transcript) &&
+        !ES_ALARM_SOUNDING_RE.test(transcript)
+      );
   }
-  if (kind === 'benign_smoke') {
-    return ES_BENIGN_SMOKE_RE.test(transcript) && !ES_SMOKE_DANGER_RE.test(transcript);
-  }
-  return (
-    ES_CO_DEVICE_RE.test(transcript) &&
-    ES_DEVICE_WORK_RE.test(transcript) &&
-    !ES_ALARM_SOUNDING_RE.test(transcript)
-  );
 }
 
 const HAZARD_REGEXES = compile(E1_HAZARD_PHRASES);
@@ -428,8 +502,9 @@ export function detectLifeSafetyE1(
     if (regex.test(transcript)) return { matched: true, keyword, language: 'en' };
   }
   for (const { keyword, regex, routineWhen } of HAZARD_REGEXES_ES) {
-    if (!regex.test(transcript)) continue;
-    if (routineWhen && isSpanishRoutineContext(routineWhen, transcript)) continue;
+    const match = regex.exec(transcript);
+    if (!match) continue;
+    if (routineWhen && isSpanishRoutineContext(routineWhen, transcript, match)) continue;
     return { matched: true, keyword, language: 'es' };
   }
   // Injury: E1 unless clearly past/hypothetical AND no present-tense urgency.
