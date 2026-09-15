@@ -82,6 +82,8 @@ export const E1_SCRIPT_REVIEW_REQUIRED = true;
 export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
   // Gas
   'smell gas', 'smells like gas', 'gas smell', 'rotten eggs', 'sulfur smell',
+  // #1253 round 3
+  'stinks of gas', 'stinks like gas', 'smells bad like gas', 'reeks of gas',
   'gas leak', 'leaking gas',
   // Carbon monoxide
   'carbon monoxide', 'co detector', 'co alarm',
@@ -152,7 +154,8 @@ export interface SpanishHazardPattern {
   readonly priceQuestion?: true;
 }
 
-const HUELE_INTENSITY = '(?:(?:mucho|muy fuerte|fuerte|bastante|demasiado|como) )?';
+const HUELE_INTENSITY =
+  '(?:(?:mucho|muy fuerte|fuerte|bastante|demasiado|como|feo|bien feo|muy feo|raro|mal|horrible) )?';
 const NOT_CHIMNEY = '(?! (?:de|por) (?:la |mi )?chimenea)';
 /**
  * English "sale" is a discount: "on sale gas water heaters", "yard sale gas
@@ -189,7 +192,8 @@ const PREPOSITION_OBJECT_NOT_PRICE =
  */
 const GAS_HISS_WORDS = 'chiflando|chifla|chiflido|chiflidos|silbando|silba|silbido|silbidos|goteando|gotea|goteo';
 /** #1253 round 2 — gas that will not stop, stinks or escapes. */
-const GAS_ESCAPE_WORDS = 'no para|apesta|apestando|huele (?:feo|raro|fuerte|mal|horrible)|se sale|se escapa';
+const GAS_ESCAPE_WORDS =
+  'no para|apesta|apestando|huele (?:feo|raro|fuerte|mal|horrible)|se sale|se escapa|no (?:(?:le|la|lo) )?(?:puedo|podemos|puede|pueden) cerrar|no (?:(?:le|la|se) )?cierra';
 const GAS_BROKEN_WORDS =
   'rot[oa]s?|rompi[oó]|rompieron|quebrad[oa]s?|quebr[oó]|rajad[oa]s?|raj[oó]|picad[oa]s?|pic[oó]|suelt[oa]s?|solt[oó]|da[nñ]ad[oa]s?';
 
@@ -201,7 +205,9 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'huele a gas', pattern: `huele ${HUELE_INTENSITY}a gas` },
   { keyword: 'huele a propano', pattern: `huele ${HUELE_INTENSITY}a propano` },
   { keyword: 'se huele gas', pattern: 'se huele (?:a )?(?:gas|propano)' },
-  { keyword: 'olor a gas', pattern: 'olor (?:(?:muy )?(?:fuerte|intenso|raro) )?(?:a|de) (?:gas|propano)' },
+  { keyword: 'olor a gas', pattern: 'olor(?:cito|zote)? (?:(?:muy )?(?:fuerte|intenso|raro|feo) )?(?:a|de) (?:gas|propano)' },
+  { keyword: 'apesta a gas', pattern: 'apest(?:a|aba|ando) (?:(?:mucho|bien|horrible) )?a (?:gas|propano)' },
+  { keyword: 'chiflando gas', pattern: `(?:est[aá] )?(?:${GAS_HISS_WORDS}|botando|tirando) (?:el )?(?:gas|propano)` },
   { keyword: 'huelo gas', pattern: `huelo ${HUELE_INTENSITY}(?:a )?(?:gas|propano)` },
   // Leak sense of "salir"/"escapar"/"botar", in every word order (#1234
   // re-review). An appliance is often the indirect object: "le sale gas a la
@@ -421,7 +427,16 @@ export interface SpanishInjuryPattern {
    * they always name a person.
    */
   readonly idiomWhen?: ReadonlyArray<
-    'price' | 'laugh' | 'excess' | 'device' | 'device_subject' | 'figurative' | 'fiction' | 'pet'
+    | 'price'
+    | 'laugh'
+    | 'excess'
+    | 'device'
+    | 'device_subject'
+    | 'unanswered'
+    | 'figurative'
+    | 'fiction'
+    | 'pet'
+    | 'stuck'
   >;
   /**
    * A RECENT past report (ayer, anoche, hace N ≤ 7 días) still leaves a live
@@ -440,6 +455,11 @@ const ES_BODY_PART =
 /** Things that fall on people (household objects plus structure and yard). */
 const ES_FALLING_THING =
   'tele|televisi[oó]n|televisor|muebles?|escalera|cuadro|l[aá]mpara|repisa|estante|librero|espejo|ropero|refri|refrigerador|lavadora|secadora|estufa|horno|mesa|silla|puerta|ventana|techo|pared|barda|[aá]rbol|rama|poste|piedra|ladrillos?|viga|l[aá]mina|teja|reja|port[oó]n|tinaco|calentador|boiler|minisplit';
+/** Heights someone falls from. */
+const ES_HEIGHT =
+  'escaleras?|escalones|segundo piso|tercer piso|un segundo piso|piso de arriba|techo|tejado|azotea|andamio|[aá]rbol|balc[oó]n|ventana|altura|barda';
+/** "encima de / sobre / arriba de <a person>" (#1253 round 3). */
+const ES_ON_A_PERSON = `(?:encima de(?:l| la| los| las| mi| mis| su| sus| tu)?|arriba de(?:l| la| mi| su)?|sobre(?: el| la| los| las| mi| mis| su| sus| tu)?) (?:${ES_PERSON_NOUN}|niñ[oa]s?|nena|nene|chiquit[oa]s?|chamaquit[oa]s?|criaturas?|él|ella|ellos|ellas|alguien)`;
 /** A fall, or someone found on the floor. */
 const ES_FALL =
   '(?:se (?:(?:me|le|nos) )?(?:cay[oó]|ha ca[ií]do|cayeron)|(?:l[oa]s?|le) encontr(?:[eé]|amos|aron) (?:tirad[oa]s?|en el (?:piso|suelo))|est[aá]n? tirad[oa]s?)';
@@ -475,10 +495,10 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
   },
   {
     keyword: 'no responde',
-    pattern: 'no (?:responde|reacciona|despierta|se despierta|abre los ojos)',
+    pattern: 'no (?:responde|contesta|reacciona|despierta|se despierta|abre los ojos)',
     carriesNegation: true,
     aspect: 'state',
-    idiomWhen: ['device'],
+    idiomWhen: ['device', 'unanswered'],
   },
   // Not breathing, no pulse (English: not breathing, stopped breathing)
   {
@@ -653,8 +673,24 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
   // #1253 round 2, rule 6: a fall from height, something falling on someone, trapped.
   {
     keyword: 'se cayó de la escalera',
+    pattern: `(?:(?:se (?:(?:me|le|nos) )?)?(?:cay[oó]|call[oó]|ha ca[ií]do|cayeron)|se (?:avent[oó]|tir[oó]|lanz[oó])) (?:de|del|desde|por) (?:(?:la|el|las|los|una|un|lo alto de la|lo alto del) )?(?:${ES_HEIGHT})|(?:se )?(?:cay[oó]|call[oó]) en las escaleras|(?:se )?rod[oó] (?:por|de) (?:las |la )?escaleras?`,
+    aspect: 'event',
+  },
+  {
+    keyword: 'se cayó a la alberca',
     pattern:
-      'se (?:(?:me|le|nos) )?(?:cay[oó]|ha ca[ií]do|cayeron) (?:de|del|desde) (?:(?:la|el|las|los|una|un|lo alto de la|lo alto del) )?(?:escaleras?|escalones|segundo piso|tercer piso|piso de arriba|techo|azotea|andamio|[aá]rbol|balc[oó]n|ventana|altura|barda)',
+      '(?:se )?(?:cay[oó]|call[oó]|cayeron) (?:a|al|en) (?:(?:la|el) )?(?:alberca|piscina|pileta|pozo|r[ií]o|lago|canal|agua|cisterna|tinaco|mar|presa)',
+    aspect: 'event',
+    idiomWhen: ['pet'],
+  },
+  {
+    keyword: 'en el fondo de la alberca',
+    pattern: 'en el fondo de (?:la|el) (?:alberca|piscina|pileta|agua|r[ií]o|lago|pozo|cisterna)',
+    aspect: 'state',
+  },
+  {
+    keyword: 'se cayó encima de alguien',
+    pattern: `(?:se (?:(?:le|me|nos|les) )?)?(?:cay[oó]|call[oó]|vino|derrumb[oó]|desplom[oó])(?: (?:el|la|los|las|un|una) (?:${ES_FALLING_THING}))? ${ES_ON_A_PERSON}|(?:el|la|los|las|un|una) (?:${ES_FALLING_THING}) (?:se )?(?:cay[oó]|call[oó]|vino|derrumb[oó]|desplom[oó]) ${ES_ON_A_PERSON}|se (?:le|me|nos|les) vino (?:encima|abajo)`,
     aspect: 'event',
   },
   { keyword: 'lo aplastó', pattern: '(?:lo|la|le|los|las|me|nos) aplast[oó]|qued[oó] aplastad[oa]', aspect: 'event' },
@@ -665,9 +701,10 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
   },
   {
     keyword: 'quedó atrapado',
-    pattern: '(?:qued[oó]|quedaron|est[aá]n?) atrapad[oa]s? (?:debajo|abajo|bajo|entre|dentro|adentro)',
+    pattern:
+      '(?:qued[oó]|quedaron|est[aá]n?|estamos) (?:atrapad|prensad|atorad|aplastad)[oa]s? (?:debajo|abajo|bajo|entre|dentro|adentro|en|con)',
     aspect: 'state',
-    idiomWhen: ['pet'],
+    idiomWhen: ['pet', 'stuck'],
   },
   // Burned, injury sense (English: badly burned, severe burn)
   {
@@ -886,13 +923,6 @@ const ES_PRICE_RE =
  */
 const EN_ONLY_WORD_RE =
   /(?<![\p{L}\p{N}])(?:the|at|is|are|was|i|my|you|your|we|our|needs?|have|has|do|does|any|on|for|this|that|it|and|with|of|to|there|what|how|can|bought|buy|line)(?![\p{L}\p{N}])/giu;
-/**
- * Smoke with an ordinary cause: the heating's first run of the season (heating
- * AND "por primera vez" in the clause), barbecue, cigarettes. "hay humo por
- * primera vez" alone is not a cause.
- */
-const ES_BENIGN_SMOKE_RE =
-  /(?<![\p{L}\p{N}])(?:calefacci[oó]n(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])por primera vez|por primera vez(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])calefacci[oó]n|carne asada|asados?|parrillas?|asador|barbacoa|fogata|cigarros?|cigarrillos?|incienso)(?![\p{L}\p{N}])/iu;
 /** A quantity of gas is a leak, never a price: "sale mucho gas". */
 const ES_GAS_QUANTITY_RE = /(?<![\p{L}\p{N}])(?:mucho|much[ií]simo|bastante|demasiado)(?![\p{L}\p{N}])/iu;
 
@@ -911,39 +941,58 @@ const ES_GAS_QUANTITY_RE = /(?<![\p{L}\p{N}])(?:mucho|much[ií]simo|bastante|dem
 function isSpanishRoutineContext(
   kind: NonNullable<SpanishHazardPattern['routineWhen']>,
   transcript: string,
-  match: RegExpExecArray,
+  match: RegExpMatchArray,
 ): boolean {
+  const ctx = scanContext(transcript);
+  const index = match.index ?? 0;
+  const end = index + match[0].length;
   if (kind === 'flame_colour') {
-    const flame = ES_FLAME_COLOUR_RE.exec(transcript);
-    return (
-      flame !== null && !hasLeakOrDangerSignal(withoutSpan(transcript, flame.index, flame[0].length), 'gas')
-    );
+    const flame = ctx.flameColour.overlap(index, end) ?? ctx.flameColour.overlap(0, ctx.text.length);
+    return flame !== null && !ctx.gasSignal.anyOutside(flame.start, flame.end);
   }
-  const scope =
-    kind === 'gas_price_or_sale' ? 'gas' : kind === 'benign_smoke' ? 'combustion' : 'device';
-  if (hasLeakOrDangerSignal(withoutSpan(transcript, match.index, match[0].length), scope)) return false;
-  const clause = clauseAround(transcript, match.index, match[0].length);
+  const signal = kind === 'gas_price_or_sale' ? ctx.gasSignal : kind === 'benign_smoke' ? ctx.combustionSignal : ctx.danger;
+  if (signal.anyOutside(index, end)) return false;
+  const clause = clauseOf(ctx, index, end);
   switch (kind) {
     case 'igniter_sparks':
-      return ES_IGNITER_RE.test(transcript) && !ES_ELECTRICAL_LOCATION_RE.test(transcript);
+      return ctx.igniterOnly;
     case 'gas_price_or_sale':
       return (
         !ES_GAS_QUANTITY_RE.test(match[0]) &&
-        (ES_PRICE_RE.test(clause) || (clause.match(EN_ONLY_WORD_RE)?.length ?? 0) >= 2)
+        (ctx.priceWords.anyWithin(clause.start, clause.end) || ctx.englishWords.countWithin(clause.start, clause.end) >= 2)
       );
     case 'benign_smoke':
-      return ES_BENIGN_SMOKE_RE.test(clause);
+      return benignSmokeShape(ctx, clause) !== null;
     case 'co_device_request':
-      return (
-        ES_CO_DEVICE_RE.test(transcript) &&
-        ES_DEVICE_WORK_RE.test(transcript) &&
-        !ES_ALARM_SOUNDING_RE.test(transcript)
-      );
+      return ctx.coDeviceWork;
   }
 }
 
+/**
+ * The benign cause of smoke in a clause, answered from span indexes (linear;
+ * the old `.*` regexes were quadratic on a flood of "asador"): 'first_heat'
+ * (heating + "por primera vez") and 'outdoor_cooking' are the two shapes
+ * approved in #1239; 'other' (barbecue indoors or unspecified, cigarettes,
+ * incense) is a heuristic reading capped at E2.
+ */
+function benignSmokeShape(
+  ctx: ScanContext,
+  clause: { start: number; end: number },
+): 'first_heat' | 'outdoor_cooking' | 'other' | null {
+  if (ctx.heating.anyWithin(clause.start, clause.end) && ctx.firstTime.anyWithin(clause.start, clause.end)) {
+    return 'first_heat';
+  }
+  const cooking = ctx.cooking.anyWithin(clause.start, clause.end);
+  if (cooking && ctx.outdoors.anyWithin(clause.start, clause.end)) return 'outdoor_cooking';
+  if (cooking || ctx.otherSmokeCause.anyWithin(clause.start, clause.end)) return 'other';
+  return null;
+}
+
 const HAZARD_REGEXES = compile(E1_HAZARD_PHRASES);
-const HAZARD_REGEXES_ES = compileSpanish(E1_HAZARD_PATTERNS_ES);
+const HAZARD_REGEXES_ES = compileSpanish(E1_HAZARD_PATTERNS_ES).map((entry) => ({
+  ...entry,
+  regexAll: new RegExp(entry.regex.source, 'giu'),
+}));
 const INJURY_REGEXES = compile(E1_INJURY_PHRASES);
 const INJURY_REGEXES_ES = compileSpanish(E1_INJURY_PATTERNS_ES).map((entry) => ({
   ...entry,
@@ -974,7 +1023,10 @@ const ES_PRESENT_SYMPTOM_RE =
 
 type InjuryIdiom = NonNullable<SpanishInjuryPattern['idiomWhen']>[number];
 /** Idiom contexts for {@link SpanishInjuryPattern.idiomWhen}. */
-const ES_INJURY_IDIOM_RE: Record<Exclude<InjuryIdiom, 'device_subject' | 'pet'>, RegExp> = {
+const ES_INJURY_IDIOM_RE: Record<Exclude<InjuryIdiom, 'device_subject' | 'pet' | 'stuck'>, RegExp> = {
+  // "no responde / no contesta" about a business, not a person (#1253 round 3).
+  unanswered:
+    /(?<![\p{L}\p{N}])(?:t[eé]cnicos?|tel[eé]fono|celular|oficina|empresa|compa[nñ][ií]a|mensajes?|llamadas?|correos?|whatsapp|plomero|electricista|contratista|n[uú]mero|recepci[oó]n)(?![\p{L}\p{N}])/giu,
   price:
     /(?<![\p{L}\p{N}])(?:precios?|costos?|caro|car[ií]simo|cuenta|factura|recibo|cobran|cobrar|cobro|de infarto|impuestos?|renta|tarifas?|cotizaci[oó]n(?:es)?|presupuestos?)(?![\p{L}\p{N}])/giu,
   laugh: /(?<![\p{L}\p{N}])(?:de (?:la )?risa|de tanto re[ií]r|re[ií]r|riendo)(?![\p{L}\p{N}])/giu,
@@ -996,7 +1048,10 @@ const ES_PET_SUBJECT_BEFORE_RE = new RegExp(
 /** The pet is the subject right after the match: "se tragó una pila el perro". */
 const ES_PET_SUBJECT_AFTER_RE = new RegExp(`^\\s*(?:el|la|mi|su|nuestr[oa]) (?:${ES_PET_NOUN})(?![\\p{L}\\p{N}])`, 'iu');
 /** Idioms that always name a person: gated on harm only. */
-const ES_HARM_GATED_IDIOMS: ReadonlySet<InjuryIdiom> = new Set(['figurative', 'fiction']);
+const ES_HARM_GATED_IDIOMS: ReadonlySet<InjuryIdiom> = new Set(['figurative', 'fiction', 'stuck']);
+/** Stuck somewhere unpleasant but not dangerous: "atrapado en el elevador / el tráfico" (E2, #1253 round 3). */
+const ES_STUCK_BENIGN_AFTER_RE =
+  /^ ?(?:el|la|un|una|los|las) (?:elevador|ascensor|tr[aá]fico|tr[aá]nsito|fila|cola|junta|reuni[oó]n|trabajo|embotellamiento)(?![\p{L}\p{N}])/iu;
 /**
  * Readings that apply only when no person is referenced ANYWHERE, inside the
  * match included (#1253 review): a pet emergency, and a device as the subject
@@ -1015,7 +1070,7 @@ const ES_DEVICE_SUBJECT_AFTER_RE =
  * "levantar" (a person gets up, an object does not) stays E1.
  */
 const ES_EXACT_OBJECT_FALL_RE =
-  /^se cay[oó] (?:el|la|los|las|un|una) (?:tele|televisi[oó]n|televisor|pantalla|mueble|escalera|cuadro|l[aá]mpara|repisa|estante|librero|tel[eé]fono|celular|plato|vaso|foco|antena|espejo|ropero|cl[oó]set|refri|refrigerador|lavadora|secadora|estufa|horno|microondas|computadora|mesa|silla|puerta|ventana|cortina|maceta|ventilador|calentador|boiler|minisplit|caja|bote|cubeta)(?:,| y) no se (?:puede mover|mueve)$/iu;
+  /^se cay[oó] (?:el|la|los|las|un|una) (?:tele|televisi[oó]n|televisor|pantalla|mueble|cuadro|l[aá]mpara|repisa|estante|librero|tel[eé]fono|celular|plato|vaso|foco|antena|espejo|ropero|cl[oó]set|refri|refrigerador|lavadora|secadora|estufa|horno|microondas|computadora|puerta|cortina|maceta|ventilador|calentador|boiler|minisplit|caja|bote|cubeta)(?:,| y) no se (?:puede mover|mueve)$/iu;
 
 /** The whole utterance, normalised for an exact-shape comparison. */
 function normalisedUtterance(text: string): string {
@@ -1073,7 +1128,15 @@ const ES_PAST_MARKER_RE_G = new RegExp(ES_PAST_MARKER_RE.source, 'giu');
  * article ("cuánto sale gas del medidor" is leak grammar).
  */
 const ES_GAS_PRICE_QUESTION_RE =
-  /(?<![\p{L}\p{N}])(?:a c[oó]mo (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) (?:el )?|cu[aá]nto (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) el )(?:gas|propano)(?![\p{L}\p{N}])/giu;
+  /(?<![\p{L}\p{N}])(?<!(?:mira|miren|mire|ve|vea|ven|oye|oiga|ay|uy) )(?:a c[oó]mo|cu[aá]nto) (?:(?:me|le|les|nos|te) )?sal(?:e|en|dr[aá]) el (?:gas|propano)(?![\p{L}\p{N}])/giu;
+/**
+ * #1253 round 3 — a leak path right after the question ("a cómo sale el gas de
+ * la estufa", "… por la llave") is where the gas is escaping, not a price. A
+ * new install ("por la tubería nueva", "del calentador nuevo") and the tank
+ * itself stay price questions.
+ */
+const ES_GAS_LEAK_PATH_AFTER_RE =
+  /^ (?:de|del|por) (?:(?:la|el|las|los) )?(?:llaves?|estufas?|conexi[oó]n|conexiones|tuber[ií]as?|mangueras?|v[aá]lvulas?|regulador|hornillas?|quemador(?:es)?)(?![\p{L}\p{N}])(?! nuev[oa]s?)/iu;
 
 // ─── Linear scan context (#1253 review) ─────────────────────────────────────
 //
@@ -1104,14 +1167,30 @@ class SpanIndex {
   anyOutside(s: number, e: number): boolean {
     return this.size - Math.max(0, this.overlapping(s, e)) > 0;
   }
-  /** Any match inside [from, to) that does not overlap [s, e). */
+  /**
+   * Any match inside [from, to) that does not overlap [s, e). O(log n): matches
+   * are sorted and non-overlapping, so the only candidates are the first match
+   * at or after `from` and the first match at or after `e`.
+   */
   anyWithinExcept(from: number, to: number, s: number, e: number): boolean {
     const i0 = lowerBound(this.starts, from);
-    const i1 = upperBound(this.ends, to);
-    for (let i = i0; i < i1; i += 1) {
-      if (this.starts[i]! >= e || this.ends[i]! <= s) return true;
-    }
-    return false;
+    if (i0 < this.size && this.ends[i0]! <= to && (this.ends[i0]! <= s || this.starts[i0]! >= e)) return true;
+    const i1 = lowerBound(this.starts, Math.max(from, e));
+    return i1 < this.size && this.ends[i1]! <= to;
+  }
+  /** Any match inside [from, to). O(log n). */
+  anyWithin(from: number, to: number): boolean {
+    const i0 = lowerBound(this.starts, from);
+    return i0 < this.size && this.ends[i0]! <= to;
+  }
+  /** Number of matches inside [from, to). O(log n). */
+  countWithin(from: number, to: number): number {
+    return Math.max(0, upperBound(this.ends, to) - lowerBound(this.starts, from));
+  }
+  /** The first match overlapping [s, e), or null. O(log n). */
+  overlap(s: number, e: number): { start: number; end: number } | null {
+    const i = upperBound(this.ends, s);
+    return i < this.size && this.starts[i]! < e ? { start: this.starts[i]!, end: this.ends[i]! } : null;
   }
 }
 
@@ -1166,7 +1245,20 @@ interface ScanContext {
   readonly harmOnly: SpanIndex;
   readonly personReference: SpanIndex;
   readonly gasQuestionSignal: SpanIndex;
-  readonly idioms: Record<Exclude<InjuryIdiom, 'device_subject' | 'pet'>, SpanIndex>;
+  /** Hazard-suppressor indexes (#1253 round 3: every routine reading answered in O(log n)). */
+  readonly gasSignal: SpanIndex;
+  readonly combustionSignal: SpanIndex;
+  readonly priceWords: SpanIndex;
+  readonly englishWords: SpanIndex;
+  readonly flameColour: SpanIndex;
+  readonly heating: SpanIndex;
+  readonly firstTime: SpanIndex;
+  readonly cooking: SpanIndex;
+  readonly outdoors: SpanIndex;
+  readonly otherSmokeCause: SpanIndex;
+  readonly igniterOnly: boolean;
+  readonly coDeviceWork: boolean;
+  readonly idioms: Record<Exclude<InjuryIdiom, 'device_subject' | 'pet' | 'stuck'>, SpanIndex>;
   readonly priceQuestions: ReadonlyArray<{ start: number; end: number }>;
 }
 
@@ -1260,11 +1352,24 @@ function scanContext(text: string): ScanContext {
     harmOnly: new SpanIndex(text, ES_HARM_ONLY_RE),
     personReference: new SpanIndex(text, ES_PERSON_REFERENCE_RE),
     gasQuestionSignal: new SpanIndex(text, GAS_QUESTION_SIGNAL_RE_G),
+    gasSignal: new SpanIndex(text, new RegExp(LEAK_OR_DANGER_SIGNAL_RE.source, 'giu')),
+    combustionSignal: new SpanIndex(text, new RegExp(DANGER_OR_ENCLOSED_SIGNAL_RE.source, 'giu')),
+    priceWords: new SpanIndex(text, new RegExp(ES_PRICE_RE.source, 'giu')),
+    englishWords: new SpanIndex(text, EN_ONLY_WORD_RE),
+    flameColour: new SpanIndex(text, new RegExp(ES_FLAME_COLOUR_RE.source, 'giu')),
+    heating: new SpanIndex(text, /(?<![\p{L}\p{N}])calefacci[oó]n(?![\p{L}\p{N}])/giu),
+    firstTime: new SpanIndex(text, /(?<![\p{L}\p{N}])por primera vez(?![\p{L}\p{N}])/giu),
+    cooking: new SpanIndex(text, /(?<![\p{L}\p{N}])(?:carne asada|asados?|parrillas?|asador|barbacoa)(?![\p{L}\p{N}])/giu),
+    outdoors: new SpanIndex(text, /(?<![\p{L}\p{N}])(?:patio|afuera|jard[ií]n|terraza|yarda)(?![\p{L}\p{N}])/giu),
+    otherSmokeCause: new SpanIndex(text, /(?<![\p{L}\p{N}])(?:fogata|cigarros?|cigarrillos?|incienso)(?![\p{L}\p{N}])/giu),
+    igniterOnly: ES_IGNITER_RE.test(text) && !ES_ELECTRICAL_LOCATION_RE.test(text),
+    coDeviceWork: ES_CO_DEVICE_RE.test(text) && ES_DEVICE_WORK_RE.test(text) && !ES_ALARM_SOUNDING_RE.test(text),
     idioms: {
       price: new SpanIndex(text, ES_INJURY_IDIOM_RE.price),
       laugh: new SpanIndex(text, ES_INJURY_IDIOM_RE.laugh),
       excess: new SpanIndex(text, ES_INJURY_IDIOM_RE.excess),
       device: new SpanIndex(text, ES_INJURY_IDIOM_RE.device),
+      unanswered: new SpanIndex(text, ES_INJURY_IDIOM_RE.unanswered),
       figurative: new SpanIndex(text, ES_INJURY_IDIOM_RE.figurative),
       fiction: new SpanIndex(text, ES_INJURY_IDIOM_RE.fiction),
     },
@@ -1329,6 +1434,8 @@ function injuryIdiom(
   for (const kind of kinds) {
     if (kind === 'device_subject') {
       if (!ES_DEVICE_SUBJECT_AFTER_RE.test(ctx.text.slice(end, end + 40))) continue;
+    } else if (kind === 'stuck') {
+      if (!ES_STUCK_BENIGN_AFTER_RE.test(ctx.text.slice(end, end + 40))) continue;
     } else if (kind === 'pet') {
       // The pet must be what swallowed or took it, not a bystander ("mientras
       // jugaba con el perro"). Bounded look-around, O(1) per match.
@@ -1453,20 +1560,23 @@ function classifySpanishInjury(transcript: string): { e1?: string; residualE2?: 
  */
 function gasPriceQuestionAt(transcript: string, index: number, length: number): boolean {
   const ctx = scanContext(transcript);
-  for (const q of ctx.priceQuestions) {
-    if (q.start >= index + length || q.end <= index) continue;
-    return !ctx.gasQuestionSignal.anyOutside(q.start, q.end);
+  const qs = ctx.priceQuestions;
+  let lo = 0;
+  let hi = qs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (qs[mid]!.end <= index) lo = mid + 1;
+    else hi = mid;
   }
-  return false;
+  const q = qs[lo];
+  if (!q || q.start >= index + length) return false;
+  return isPlainGasPriceQuestion(ctx, q);
 }
 
-/** #1241 — a gas price question with no leak or harm signal: the keyword for an E2 candidate, else null. */
-function detectSpanishGasPriceQuestion(transcript: string): string | null {
-  const ctx = scanContext(transcript);
-  for (const q of ctx.priceQuestions) {
-    if (!ctx.gasQuestionSignal.anyOutside(q.start, q.end)) return 'pregunta de precio del gas';
-  }
-  return null;
+/** A price question with no leak/harm signal outside it and no leak path right after it. */
+function isPlainGasPriceQuestion(ctx: ScanContext, q: { start: number; end: number }): boolean {
+  if (ctx.gasQuestionSignal.anyOutside(q.start, q.end)) return false;
+  return !ES_GAS_LEAK_PATH_AFTER_RE.test(ctx.text.slice(q.end, q.end + 40));
 }
 
 interface LifeSafetyScan {
@@ -1476,14 +1586,6 @@ interface LifeSafetyScan {
 }
 
 /**
- * #1253 round 2 — the two benign-smoke shapes approved in #1239 are the only
- * heuristic readings allowed to reach E3: the heating's first run of the season,
- * and outdoor cooking.
- */
-const ES_APPROVED_E3_SMOKE_RE =
-  /(?<![\p{L}\p{N}])(?:calefacci[oó]n(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])por primera vez|por primera vez(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])calefacci[oó]n|(?:carne asada|asador|asados?|parrilla|barbacoa)(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])(?:patio|afuera|jard[ií]n|terraza|yarda)|(?:patio|afuera|jard[ií]n|terraza|yarda)(?![\p{L}\p{N}]).*(?<![\p{L}\p{N}])(?:carne asada|asador|asados?|parrilla|barbacoa))(?![\p{L}\p{N}])/iu;
-
-/**
  * Which routine readings may take a hazard to E3. Igniter sparks and CO-device
  * work are reviewed routine calls (#1234). Price/English, flame colour and
  * benign smoke outside the two approved shapes stop at E2 (#1253 round 2, rule 1).
@@ -1491,11 +1593,14 @@ const ES_APPROVED_E3_SMOKE_RE =
 function routineReadingReachesE3(
   kind: NonNullable<SpanishHazardPattern['routineWhen']>,
   transcript: string,
-  match: RegExpExecArray,
+  match: RegExpMatchArray,
 ): boolean {
   if (kind === 'igniter_sparks' || kind === 'co_device_request') return true;
-  if (kind === 'benign_smoke') return ES_APPROVED_E3_SMOKE_RE.test(clauseAround(transcript, match.index, match[0].length));
-  return false;
+  if (kind !== 'benign_smoke') return false;
+  const ctx = scanContext(transcript);
+  const index = match.index ?? 0;
+  const shape = benignSmokeShape(ctx, clauseOf(ctx, index, index + match[0].length));
+  return shape === 'first_heat' || shape === 'outdoor_cooking';
 }
 
 let lastLifeSafetyText: string | null = null;
@@ -1510,22 +1615,50 @@ function scanLifeSafety(transcript: string): LifeSafetyScan {
   return scan;
 }
 
+/**
+ * #1253 round 3 — the ONE enforcement point of the E2 floor. Every heuristic
+ * reading that lowers an E1 phrase reports here: a gas price question, a routine
+ * hazard reading (price/English, flame colour, benign smoke), an injury idiom
+ * (price, laugh, excess, device, device subject, unanswered, figurative, fiction,
+ * pet, stuck) and the exact object-fall shape. The only readings allowed to go
+ * lower are the two approved benign-smoke shapes and the #1234 routine
+ * igniter/CO-device readings, and they say so through `reachesE3`.
+ */
+class HeuristicFloor {
+  private keyword: string | undefined;
+  lower(keyword: string, reachesE3 = false): void {
+    if (!reachesE3) this.keyword ??= keyword;
+  }
+  get floorE2(): string | undefined {
+    return this.keyword;
+  }
+}
+
 function scanLifeSafetyUncached(transcript: string): LifeSafetyScan {
-  let floorE2: string | undefined;
+  const floor = new HeuristicFloor();
   // Acute hazards: always E1.
   for (const { keyword, regex } of HAZARD_REGEXES) {
     if (regex.test(transcript)) return { e1: { keyword, language: 'en' } };
   }
-  for (const { keyword, regex, routineWhen, priceQuestion } of HAZARD_REGEXES_ES) {
-    const match = regex.exec(transcript);
-    if (!match) continue;
-    // #1241 — a gas price question with no leak/harm signal is E2 (its own candidate), never E1.
-    if (priceQuestion && gasPriceQuestionAt(transcript, match.index, match[0].length)) continue;
-    if (routineWhen && isSpanishRoutineContext(routineWhen, transcript, match)) {
-      if (!routineReadingReachesE3(routineWhen, transcript, match)) floorE2 ??= keyword;
+  for (const { keyword, regex, regexAll, routineWhen, priceQuestion } of HAZARD_REGEXES_ES) {
+    if (!routineWhen && !priceQuestion) {
+      if (regex.test(transcript)) return { e1: { keyword, language: 'es' } };
       continue;
     }
-    return { e1: { keyword, language: 'es' } };
+    // A suppressible entry: EVERY match is judged (a lowered first match must
+    // not hide a live second one).
+    for (const match of transcript.matchAll(regexAll)) {
+      const index = match.index ?? 0;
+      if (priceQuestion && gasPriceQuestionAt(transcript, index, match[0].length)) {
+        floor.lower(keyword);
+        continue;
+      }
+      if (routineWhen && isSpanishRoutineContext(routineWhen, transcript, match)) {
+        floor.lower(keyword, routineReadingReachesE3(routineWhen, transcript, match));
+        continue;
+      }
+      return { e1: { keyword, language: 'es' } };
+    }
   }
   // Injury: E1 unless clearly past/hypothetical AND no present-tense urgency.
   const clearlyNonAcute =
@@ -1539,11 +1672,15 @@ function scanLifeSafetyUncached(transcript: string): LifeSafetyScan {
     }
   }
   // #1221 — Spanish injury/medical: a present symptom is always E1; an event
-  // is E1 unless its own clause is clearly past (#1245 review).
+  // is E1 unless its own clause is clearly past (#1245 review). Idiom readings,
+  // the exact object-fall shape and a recent past shock report to the floor.
   const spanishInjury = classifySpanishInjury(transcript);
   if (spanishInjury.e1) return { e1: { keyword: spanishInjury.e1, language: 'es' } };
-  floorE2 ??= spanishInjury.residualE2;
-  return floorE2 ? { floorE2 } : {};
+  if (spanishInjury.residualE2) floor.lower(spanishInjury.residualE2);
+  // A price question no "sale gas" entry matched ("¿cuánto les saldrá el gas?").
+  const ctx = scanContext(transcript);
+  if (ctx.priceQuestions.some((q) => isPlainGasPriceQuestion(ctx, q))) floor.lower('pregunta de precio del gas');
+  return floor.floorE2 ? { floorE2: floor.floorE2 } : {};
 }
 
 /** Pure, synchronous, free — the embedded E1 life-safety scan. */
@@ -1686,10 +1823,7 @@ export function classifyCallerSafety(
   // smoke outside the approved shapes): E2 floor, a human redirects it.
   const floorE2 = e1.matched ? null : (scanLifeSafety(text).floorE2 ?? null);
   if (floorE2) candidates.push({ tier: 'E2', source: 'embedded', keyword: floorE2, language: 'es' });
-  // #1241 (Josh) — a gas price question with no leak or harm signal: human check.
-  const gasPriceQuestion = e1.matched ? null : detectSpanishGasPriceQuestion(text);
-  if (gasPriceQuestion)
-    candidates.push({ tier: 'E2', source: 'embedded', keyword: gasPriceQuestion, language: 'es' });
+
   if (backstop.matched)
     candidates.push({
       tier: 'E2',
