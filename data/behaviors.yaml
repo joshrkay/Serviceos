@@ -150,6 +150,66 @@ behaviors:
     description: Request a review/feedback from a customer.
     critical_slots: [name, channel]
     min_examples: 50
+  - id: batch_invoice
+    category: proposal-driving
+    description: Draft invoices for all completed, unbilled jobs in one reviewed batch.
+    critical_slots: []
+    min_examples: 50
+  - id: add_crew_member
+    category: proposal-driving
+    description: Assign an additional crew member to an existing appointment.
+    critical_slots: [appointment_ref, technician]
+    min_examples: 50
+  - id: remove_crew_member
+    category: proposal-driving
+    description: Remove a crew member from an existing appointment.
+    critical_slots: [appointment_ref, technician]
+    min_examples: 50
+  - id: send_estimate_nudge
+    category: proposal-driving
+    description: Send a follow-up message for an estimate awaiting a customer response.
+    critical_slots: [estimate_ref, name, channel]
+    min_examples: 50
+  - id: send_payment_reminder
+    category: proposal-driving
+    description: Send a payment reminder for an outstanding invoice.
+    critical_slots: [invoice_ref, name, channel]
+    min_examples: 50
+  - id: apply_late_fee
+    category: proposal-driving
+    description: Apply the configured late fee to an eligible overdue invoice.
+    critical_slots: [invoice_ref]
+    min_examples: 50
+  - id: create_invoice_schedule
+    category: proposal-driving
+    description: Create a milestone or progress-billing schedule for a job.
+    critical_slots: [job_ref, schedule_description]
+    min_examples: 50
+  - id: respond_to_review
+    category: proposal-driving
+    description: Draft a response to a customer review for owner approval.
+    critical_slots: [review_reference, response_text]
+    min_examples: 50
+  - id: create_standing_instruction
+    category: proposal-driving
+    description: Capture a persistent operating instruction for explicit review.
+    critical_slots: [instruction_text]
+    min_examples: 50
+  - id: update_brand_voice
+    category: proposal-driving
+    description: Capture a proposed change to the tenant's outbound brand voice.
+    critical_slots: [brand_voice]
+    min_examples: 50
+  - id: complaint
+    category: proposal-driving
+    description: Record dissatisfaction and create an owner follow-up without negotiating autonomously.
+    critical_slots: [complaint_text]
+    min_examples: 50
+  - id: negotiation
+    category: proposal-driving
+    description: Capture a price, scope, or terms negotiation request for owner review.
+    critical_slots: [negotiation_ask]
+    min_examples: 50
   # ── Lookup (read-only; routed straight to lookup_* skill) ────────────────────
   - id: lookup_appointments
     category: lookup
@@ -211,6 +271,26 @@ behaviors:
     description: Read the service/price-book catalog.
     critical_slots: [service_type]
     min_examples: 50
+  - id: lookup_day_overview
+    category: lookup
+    description: Read the owner's operational overview for a requested day.
+    critical_slots: [time_window]
+    min_examples: 50
+  - id: lookup_digest
+    category: lookup
+    description: Read the stored end-of-day digest narrative.
+    critical_slots: [time_window]
+    min_examples: 50
+  - id: lookup_pending_items
+    category: lookup
+    description: Read aging estimates, unpaid invoices, and unanswered recovery work.
+    critical_slots: [time_window]
+    min_examples: 50
+  - id: lookup_job_profit
+    category: lookup
+    description: Read revenue, cost, and profit for a resolved job.
+    critical_slots: [job_ref]
+    min_examples: 50
   # ── Signal (session control; NOT proposal-driving) ──────────────────────────
   - id: language_switch
     category: signal
@@ -221,6 +301,26 @@ behaviors:
     category: signal
     description: Caller explicitly asks to speak with a human (seamless handoff).
     critical_slots: []
+    min_examples: 50
+  - id: en_route
+    category: signal
+    description: Technician reports that they are traveling to an appointment.
+    critical_slots: [job_ref, appointment_ref]
+    min_examples: 50
+  - id: approve_proposal
+    category: signal
+    description: Verified owner approves a pending proposal by voice.
+    critical_slots: [proposal_ref]
+    min_examples: 50
+  - id: reject_proposal
+    category: signal
+    description: Verified owner rejects a pending proposal by voice.
+    critical_slots: [proposal_ref]
+    min_examples: 50
+  - id: edit_proposal
+    category: signal
+    description: Verified owner requests a bounded edit to a pending proposal.
+    critical_slots: [proposal_ref, edit_text]
     min_examples: 50
   # ── Conversational (turn-level; non-proposal) ───────────────────────────────
   - id: confirm

@@ -32,6 +32,8 @@ import { fileURLToPath } from 'node:url';
 import { classificationReport, stableHash } from './metrics';
 import { classifyBaseline } from './baseline-classifier';
 import {
+  ActualCostCapExceededError,
+  assertActualCostWithinCap,
   LIVE_INTENT_TARGET,
   SYNTHETIC_TENANT_ID,
   checkCostCap,
@@ -111,7 +113,7 @@ async function runLive(gate: boolean): Promise<void> {
 
   const { pairs, fastPathHits, llmCalls } = await runLiveIntentEval(sample, gateway, {
     tenantId: SYNTHETIC_TENANT_ID,
-  });
+  }, () => assertActualCostWithinCap(spentCents, capCents));
 
   const report = classificationReport(pairs);
   console.log(`   evaluated rows:     ${report.total}`);
@@ -163,4 +165,7 @@ async function main(): Promise<void> {
   else runOffline(gate);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(e instanceof ActualCostCapExceededError ? 3 : 1);
+});

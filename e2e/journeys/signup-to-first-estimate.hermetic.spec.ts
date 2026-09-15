@@ -2,7 +2,6 @@ import { test, expect } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
-import { hasViteClerkKey } from '../helpers/clerk-key';
 
 /**
  * Journey 1 — HERMETIC: signup → tenant bootstrap → authed app → first estimate.
@@ -85,12 +84,13 @@ test.describe('Journey 1 (hermetic) — signup webhook → tenant → first esti
   // (playwright.config.ts's apiWebServerEnv). When E2E_BASE_URL points at a
   // deployed environment the local webServer is skipped and that API is NOT in
   // bypass mode — so the hermetic journey only runs against the local stack.
-  // A (placeholder-ok) Vite Clerk key is still required for the SPA to boot.
-  const hermeticLocal = !process.env.E2E_BASE_URL && hasViteClerkKey();
+  // playwright.config.ts supplies the non-secret placeholder key needed for
+  // the local SPA to boot, so local execution itself is the only prerequisite.
+  const hermeticLocal = !process.env.E2E_BASE_URL;
   test.skip(
     !hermeticLocal,
     'Hermetic Journey-1 runs against the local DEV_AUTH_BYPASS API webServer: ' +
-      'leave E2E_BASE_URL unset and set VITE_CLERK_PUBLISHABLE_KEY (placeholder ok).',
+      'leave E2E_BASE_URL unset.',
   );
 
   test('signed webhook bootstraps the tenant; stub session owns it; first estimate is created + visible', async ({

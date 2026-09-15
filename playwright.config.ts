@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { PLACEHOLDER_CLERK_PK } from './e2e/helpers/clerk-key';
 
 /**
  * Playwright config for ServiceOS E2E tests.
@@ -14,6 +15,14 @@ const isCI = !!process.env.CI;
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
+
+// Local hermetic specs stub Clerk before the SPA loads. Give both the test
+// process and Vite the same syntactically valid non-secret key so a bare
+// `npm run e2e` exercises those specs instead of silently skipping them.
+// Deployed/real-Clerk runs continue to provide their own key.
+if (!skipWebServer && !process.env.VITE_CLERK_PUBLISHABLE_KEY) {
+  process.env.VITE_CLERK_PUBLISHABLE_KEY = PLACEHOLDER_CLERK_PK;
+}
 
 // §10 — when Clerk journey tests run, default v2 on for the Vite dev server unless
 // the caller already set the flag explicitly.

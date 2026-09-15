@@ -1,13 +1,4 @@
 {
   "//": "Time-boxed exceptions to the high-severity production dependency gate. Policy: docs/quality/dependency-audit-policy.md. Every field is mandatory; an expired OR no-longer-matching entry fails CI. Critical severities cannot be excepted.",
-  "exceptions": [
-    {
-      "package": "react-router",
-      "advisory": "GHSA-qwww-vcr4-c8h2",
-      "owner": "web",
-      "rationale": "CSRF bypass in React Router's RSC (React Server Components) request handler: an action can execute before the 400 response is returned. packages/web is a client-rendered Vite SPA — it has no RSC entrypoint, no server request handler, and no react-router/rsc import — so the vulnerable code path is not reachable in this build. The advisory range (7.12.0 - 8.2.0) covers the pinned 7.18.1, and the fix landed in 8.3.0, i.e. remediation is a React Router v7 -> v8 major migration rather than a patch bump.",
-      "mitigation": "No RSC usage to disable. Tracked separately as a React Router v8 migration; the SPA's mutating requests go through the API's own auth + CORS layers (verifyClerkSession, CORS_ORIGIN pinned in production), which are unaffected by this advisory.",
-      "expires": "2026-10-23"
-    }
-  ]
+  "exceptions": []
 }

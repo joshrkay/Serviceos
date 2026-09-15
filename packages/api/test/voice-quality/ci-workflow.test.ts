@@ -84,7 +84,7 @@ describe('VQ-024 — CI workflow integration', () => {
     expect(pkg.scripts).toBeDefined();
     expect(pkg.scripts!['voice-quality']).toBeDefined();
     expect(pkg.scripts!['voice-quality']).toMatch(
-      /vitest run -c vitest\.voice-quality\.config\.ts/,
+      /vitest run -c vitest\.voice-quality\.config\.mts/,
     );
   });
 

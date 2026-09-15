@@ -32,7 +32,7 @@ Green locally (ran only 2 integration files); red on CI (ran all 102).
   assumption about DB state was wrong.
 
 ## Solution
-The integration suite runs in a **single fork** (`vitest.integration.config.ts`:
+The integration suite runs in a **single fork** (`vitest.integration.config.mts`:
 `pool: 'forks', singleFork: true`) sharing **one** database. ~10 sibling suites
 (`reports`, `public-intake`, `rls-tenant-isolation`, `dropped-call-worker`, …)
 deliberately run, in their setup:

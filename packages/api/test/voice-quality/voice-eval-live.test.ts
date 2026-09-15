@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest';
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
 import { SYSTEM_PROMPT } from '../../src/ai/orchestration/intent-classifier';
 import {
+  assertActualCostWithinCap,
   DEFAULT_COST_CAP_CENTS,
   EST_SYSTEM_PROMPT_TOKENS,
   LIVE_INTENT_TARGET,
@@ -120,6 +121,11 @@ describe('voice-eval live plumbing — cost cap', () => {
     expect(resolveCostCapCents({ VOICE_EVAL_COST_CAP_CENTS: '0' } as NodeJS.ProcessEnv)).toBe(DEFAULT_COST_CAP_CENTS);
   });
 
+  it('actual-cost guard throws as soon as recorded spend exceeds the cap', () => {
+    expect(() => assertActualCostWithinCap(100, 100)).not.toThrow();
+    expect(() => assertActualCostWithinCap(101, 100)).toThrow(/actual cost.*exceeded cap/);
+  });
+
   // Regression pin for a real PR-review finding: EST_SYSTEM_PROMPT_TOKENS is a
   // hand-set constant, not a measurement, so nothing stopped it drifting below
   // the real classifier prompt as the intent taxonomy grew — a
@@ -176,6 +182,23 @@ describe('voice-eval live plumbing — intent run loop (mocked gateway)', () => 
     // Empty transcript never hits the gateway → fast-path; the other does.
     expect(res.fastPathHits).toBe(1);
     expect(res.llmCalls).toBe(1);
+  });
+
+  it('stops the intent loop immediately when the post-row budget guard throws', async () => {
+    const gw = mockGateway('{"intentType":"unknown","confidence":0.5}');
+    let completed = 0;
+    await expect(
+      runLiveIntentEval(
+        [{ utterance: 'one', intent: 'unknown' }, { utterance: 'two', intent: 'unknown' }],
+        gw,
+        undefined,
+        () => {
+          completed += 1;
+          throw new Error('budget crossed');
+        },
+      ),
+    ).rejects.toThrow('budget crossed');
+    expect(completed).toBe(1);
   });
 });
 

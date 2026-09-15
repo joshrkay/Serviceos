@@ -32,8 +32,32 @@ const REPORT_PATH = path.resolve(
   __dirname,
   '../../voice-quality-layer2-report.json',
 );
+const ENTRY_PATH = path.resolve(
+  __dirname,
+  'voice-quality.layer2.test.ts',
+);
 
 describe('VQ2-followup — Layer 2 entry-test wiring', () => {
+  it('VQ2-fix — CI mode fails closed when the corpus is empty or cannot load', () => {
+    const entrySource = fs.readFileSync(ENTRY_PATH, 'utf8');
+
+    expect(entrySource).toMatch(
+      /VQ2-016 — Layer 2 corpus must load and contain eligible scripts \(CI mode — must fail\)/,
+    );
+    expect(entrySource).toContain(
+      'Layer 2 CI mode requires a non-empty, valid corpus.',
+    );
+  });
+
+  it('VQ2-fix — the live launch verdict requires recorded provider spend', () => {
+    const entrySource = fs.readFileSync(ENTRY_PATH, 'utf8');
+
+    expect(entrySource).toContain('Layer 2 recorded no provider spend');
+    expect(entrySource).toMatch(
+      /suiteState\.suiteCostTracker\.totalCents\(\)[\s\S]*toBeGreaterThan\(0\)/,
+    );
+  });
+
   it('VQ2-followup — empty corpus produces a valid Layer2Report with launchGate.pass=false', () => {
     const report = buildLayer2Report([]);
 

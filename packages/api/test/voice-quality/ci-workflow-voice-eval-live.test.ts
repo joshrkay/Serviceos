@@ -40,18 +40,18 @@ describe('voice-eval-live.yml — scheduled live eval workflow', () => {
     expect(src).toMatch(/run-slot-eval\.ts --live --gate --max-utterances \d+/);
   });
 
-  it('uses the Layer-2 secret names and a per-script cost cap', () => {
+  it('uses the required provider secret and a per-script cost cap', () => {
     const src = read();
     expect(src).toMatch(/ANTHROPIC_API_KEY:\s*\$\{\{ secrets\.ANTHROPIC_API_KEY \}\}/);
-    expect(src).toMatch(/OPENAI_API_KEY:\s*\$\{\{ secrets\.OPENAI_API_KEY \}\}/);
+    expect(src).not.toMatch(/OPENAI_API_KEY:\s*\$\{\{ secrets\.OPENAI_API_KEY \}\}/);
     expect(src).toMatch(/VOICE_EVAL_COST_CAP_CENTS:/);
   });
 
-  it('skips cleanly with a loud warning when the key is absent (fork safety)', () => {
+  it('fails closed when the key is absent', () => {
     const src = read();
-    expect(src).toMatch(/::warning::ANTHROPIC_API_KEY is not set/);
-    expect(src).toMatch(/has_key=false/);
-    expect(src).toMatch(/steps\.check\.outputs\.has_key == 'true'/);
+    expect(src).toMatch(/::error::ANTHROPIC_API_KEY is not set/);
+    expect(src).toMatch(/exit 1/);
+    expect(src).not.toMatch(/has_key=false/);
   });
 
   it('uploads the eval report as an artifact even on failure', () => {

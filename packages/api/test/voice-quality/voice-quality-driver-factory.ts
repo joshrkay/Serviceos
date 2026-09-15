@@ -448,6 +448,21 @@ export function makeVoiceQualityDriverFactory(
       update: async () => settingsRow,
       incrementEstimateNumber: async () => 1,
       incrementInvoiceNumber: async () => 1,
+      upsertIdentityFields: async (tenantId, fields) =>
+        ({
+          id: `settings-${tenantId}`,
+          tenantId,
+          businessName: fields.businessName ?? '',
+          estimatePrefix: 'EST-',
+          invoicePrefix: 'INV-',
+          nextEstimateNumber: 1,
+          nextInvoiceNumber: 1,
+          defaultPaymentTermDays: 30,
+          aiModel: fields.bootstrapAiModel,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          ...fields,
+        }) as unknown as TenantSettings,
     };
     let now: (() => Date) | undefined;
     if (businessHours?.callMomentLocal) {

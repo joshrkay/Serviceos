@@ -42,6 +42,18 @@ const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 const EST_SYSTEM_PROMPT_TOKENS = 13500;
 const EST_OUTPUT_TOKENS_PER_CALL = 250;
 
+class ActualCostCapExceededError extends Error {
+  constructor(
+    readonly capCents: number,
+    readonly spentCents: number,
+  ) {
+    super(
+      `agent path smoke actual cost ${spentCents.toFixed(2)}¢ exceeded cap ${capCents.toFixed(2)}¢`,
+    );
+    this.name = 'ActualCostCapExceededError';
+  }
+}
+
 const argv = process.argv.slice(2);
 const gate = argv.includes('--gate');
 const asJson = argv.includes('--json');
@@ -131,6 +143,11 @@ async function main(): Promise<void> {
   const report = await runPathSmoke({
     gateway,
     passRatio,
+    afterTurn: () => {
+      if (spentCents > capCents) {
+        throw new ActualCostCapExceededError(capCents, spentCents);
+      }
+    },
   });
 
   if (asJson) {
@@ -189,5 +206,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error(err);
-  process.exit(1);
+  process.exit(err instanceof ActualCostCapExceededError ? 3 : 1);
 });

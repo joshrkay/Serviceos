@@ -52,7 +52,7 @@ export async function setup(): Promise<void> {
   const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
   container = await new PostgreSqlContainer(image)
     .withDatabase('serviceos_test')
-    // Integration files run in a single fork (vitest.integration.config.ts);
+    // Integration files run in a single fork (vitest.integration.config.mts);
     // several open their own app DB pool via createApp() and don't close it,
     // so connections accumulate across the ~58-file run and exhaust the
     // default 100 slots ("sorry, too many clients already", FATAL 53300) on

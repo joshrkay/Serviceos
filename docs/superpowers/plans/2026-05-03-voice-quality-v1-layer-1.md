@@ -328,7 +328,7 @@ export class TextModeDriver implements AgentDriver { ... }
 
 **Files:**
 - Create: `packages/api/test/voice-quality/voice-quality.test.ts`
-- Modify: `packages/api/vitest.config.ts` — add separate config or workspace entry for voice-quality
+- Modify: `packages/api/vitest.config.mts` — add separate config or workspace entry for voice-quality
 
 **Test entry:**
 ```ts
@@ -469,8 +469,8 @@ Output: JSON for CI consumption + Markdown summary for PR comments.
 ### Task VQ-024 — npm script + workflow integration
 
 **Files:**
-- Modify: `packages/api/package.json` — add `"voice-quality": "vitest run -c vitest.voice-quality.config.ts"`
-- Create: `packages/api/vitest.voice-quality.config.ts`
+- Modify: `packages/api/package.json` — add `"voice-quality": "vitest run -c vitest.voice-quality.config.mts"`
+- Create: `packages/api/vitest.voice-quality.config.mts`
 - Modify: `.github/workflows/pr-checks.yml` — add `voice-quality` job (depends on typecheck, runs in parallel with integration)
 - Create: `.github/workflows/voice-quality-nightly.yml` — nightly Pg variant
 

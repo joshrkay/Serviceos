@@ -251,7 +251,7 @@ Run full record pass per [voice-quality-cassette-refresh.md](../runbooks/voice-q
 - [ ] **Step 1: Run corpus**
 
 ```bash
-cd packages/api && npx vitest run -c vitest.voice-quality.config.ts
+cd packages/api && npx vitest run -c vitest.voice-quality.config.mts
 ```
 
 Expected: `launchGate.pass === true` in output or report artifact.
