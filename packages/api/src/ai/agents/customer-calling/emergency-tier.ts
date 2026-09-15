@@ -100,41 +100,104 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
  * `detectEmergency` backstop, which is E2: the caller got the dispatcher line,
  * the call stayed open and a drafted booking stayed live.
  *
- * Phrase-level like the English table, so every entry names a hazard. Bare
+ * Every entry names a hazard, like the English table. Bare
  * "fuego"/"humo"/"llamas"/"chispas"/"incendio" are left out:
  * - "las llamas del calentador están amarillas" is a routine diagnostic call.
  * - "la alarma de incendio" is an inspection.
- * - "olor a quemado" stays E2, the same as English "burning smell".
- * "hay fuego" / "hay llamas" (there is a fire / there are flames) are left out
- * too. Spanish negation keeps them whole: "no hay fuego en el piloto" is a
- * routine no-flame repair call, while English "there is no fire" never
- * contains "there is a fire". An E1 false positive hangs up on the customer.
- * Phrases whose English twin carries the same negation risk ("sparks from",
- * "seeing flames") are mirrored, the same way the English table accepts them.
- * Unaccented variants are listed because STT drops diacritics. Matched with
- * Unicode-aware word edges (see `compileUnicode`).
+ *
+ * Entries are regex sources, not bare phrases, because Spanish needs three
+ * things English word order gives the English table for free (#1220 review):
+ * - Negation sits in front of the phrase: "no hay fuga de gas" contains
+ *   "fuga de gas". Every entry is compiled behind {@link ES_NEGATION_GUARD}.
+ * - Adjectives follow the noun: "veo llamas amarillas" is a flame-colour
+ *   diagnostic, while English "seeing yellow flames" never contains
+ *   "seeing flames". Colour and chimney exceptions are lookaheads on the entry.
+ * - Accents: `[oó]` covers the unaccented form STT often returns.
+ *
+ * `routineWhen` names an utterance-level exception (see
+ * {@link isSpanishRoutineContext}): igniter sparks and CO-detector install work
+ * are routine trade calls. An E1 false positive hangs up on the customer.
+ *
+ * Open for bilingual trade sign-off (listed on the #1220 follow-up PR):
+ * "huele a quemado" is E1 while "olor a quemado" stays on the E2 backstop,
+ * the same as English "burning smell". Water that smells of rotten eggs or
+ * sulfur stays E1, the same as English "rotten eggs" / "sulfur smell".
  */
-export const E1_HAZARD_PHRASES_ES: ReadonlyArray<string> = [
-  // Gas
-  'fuga de gas', 'escape de gas', 'huele a gas', 'olor a gas', 'olor de gas',
-  'huevo podrido', 'huevos podridos', 'olor a azufre', 'huele a azufre',
+export interface SpanishHazardPattern {
+  /** Canonical phrase stamped on the audit row. */
+  readonly keyword: string;
+  /** Regex source, matched case-insensitively between Unicode word edges. */
+  readonly pattern: string;
+  readonly routineWhen?: 'igniter_sparks' | 'co_device_request';
+}
+
+const HUELE_INTENSITY = '(?:(?:mucho|muy fuerte|fuerte|bastante|demasiado|como) )?';
+const NOT_CHIMNEY = '(?! (?:de|por) (?:la |mi )?chimenea)';
+const NOT_FLAME_COLOUR = '(?! (?:de color|amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?))';
+
+export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
+  // Gas and propane
+  { keyword: 'fuga de gas', pattern: 'fugas? de gas' },
+  { keyword: 'escape de gas', pattern: 'escapes? de gas' },
+  { keyword: 'fuga de propano', pattern: '(?:fugas?|escapes?) de propano' },
+  { keyword: 'huele a gas', pattern: `huele ${HUELE_INTENSITY}a gas` },
+  { keyword: 'huele a propano', pattern: `huele ${HUELE_INTENSITY}a propano` },
+  { keyword: 'se huele gas', pattern: 'se huele (?:a )?(?:gas|propano)' },
+  { keyword: 'olor a gas', pattern: 'olor (?:(?:muy )?(?:fuerte|intenso|raro) )?(?:a|de) (?:gas|propano)' },
+  // "¿cuánto sale el gas?" asks a price.
+  { keyword: 'sale gas', pattern: '(?<!cu[aá]nto )(?:sale|saliendo) (?:el )?(?:gas|propano)' },
+  { keyword: 'huevo podrido', pattern: 'huevos? podridos?' },
+  { keyword: 'olor a azufre', pattern: '(?:olor|huele) a azufre' },
   // Carbon monoxide
-  'monóxido de carbono', 'monoxido de carbono',
-  'detector de monóxido', 'detector de monoxido', 'alarma de monóxido', 'alarma de monoxido',
-  // Fire / smoke
-  'hay un incendio', 'tenemos un incendio', 'se incendió', 'se incendio',
-  'se está incendiando', 'se esta incendiando', 'en llamas',
-  'se prendió fuego', 'se prendio fuego', 'agarró fuego', 'agarro fuego',
-  'veo llamas', 'salen llamas', 'saliendo llamas',
-  'huele a humo', 'olor a humo', 'sale humo', 'saliendo humo', 'humo en la casa',
-  'lleno de humo', 'llena de humo', 'llenando de humo',
-  // Electrical
-  'cables quemándose', 'cables quemandose',
-  'se están quemando los cables', 'se estan quemando los cables',
-  'plástico quemado', 'plastico quemado',
-  'echando chispas', 'echa chispas', 'saltan chispas', 'saltando chispas',
-  'salen chispas', 'saliendo chispas', 'chispas del', 'chispas de la', 'chispas cerca',
+  { keyword: 'monóxido de carbono', pattern: 'mon[oó]xido de carbono', routineWhen: 'co_device_request' },
+  { keyword: 'detector de monóxido', pattern: '(?:detector|sensor) de (?:mon[oó]xido|co)', routineWhen: 'co_device_request' },
+  { keyword: 'alarma de monóxido', pattern: 'alarma de (?:mon[oó]xido|co)', routineWhen: 'co_device_request' },
+  { keyword: 'hay monóxido', pattern: 'hay mon[oó]xido' },
+  // Fire and smoke
+  { keyword: 'hay un incendio', pattern: '(?:hay|tenemos) un incendio' },
+  { keyword: 'se incendió', pattern: 'se (?:incendi[oó]|est[aá] incendiando)' },
+  { keyword: 'en llamas', pattern: 'en llamas' },
+  { keyword: 'se prendió fuego', pattern: 'se (?:(?:le|les|me|nos) )?prendi[oó] (?:en )?fuego' },
+  { keyword: 'agarró fuego', pattern: 'agarr[oó] fuego' },
+  // A flame in the pilot or burner is how the appliance works.
+  { keyword: 'hay fuego', pattern: 'hay fuego(?! en el (?:piloto|quemador))' },
+  { keyword: 'veo llamas', pattern: `(?:veo|salen|saliendo) llamas${NOT_FLAME_COLOUR}` },
+  { keyword: 'huele a humo', pattern: '(?:huele|olor) a humo' },
+  { keyword: 'sale humo', pattern: `(?:sale|salen|saliendo) humo${NOT_CHIMNEY}` },
+  { keyword: 'humo saliendo', pattern: `humo saliendo${NOT_CHIMNEY}` },
+  { keyword: 'humo en la casa', pattern: 'humo en (?:la|mi) casa' },
+  { keyword: 'lleno de humo', pattern: 'llen(?:o|a|ando) de humo' },
+  {
+    keyword: 'se está quemando la casa',
+    pattern: '(?:se (?:est[aá] quemando|quema) (?:la|mi) casa|(?:la|mi) casa se (?:est[aá] quemando|quema))',
+  },
+  // Electrical burning, short circuit and sparks
+  { keyword: 'cables quemándose', pattern: 'cables quem[aá]ndose' },
+  { keyword: 'se están quemando los cables', pattern: 'se est[aá]n quemando los cables' },
+  { keyword: 'los cables se están quemando', pattern: 'cables se est[aá]n quemando' },
+  { keyword: 'plástico quemado', pattern: 'pl[aá]stico quemado' },
+  { keyword: 'huele a quemado', pattern: 'huele a quemado' },
+  { keyword: 'cortocircuito', pattern: 'corto ?circuitos?' },
+  {
+    keyword: 'echando chispas',
+    pattern: '(?:echando|echa|echan|saltan|saltando|salen|saliendo) chispas',
+    routineWhen: 'igniter_sparks',
+  },
+  // Replaces the old "chispas del" / "chispas de la": sparks FROM an electrical
+  // location, not "chispas de la estufa al prender" (the igniter).
+  {
+    keyword: 'chispas del enchufe',
+    pattern:
+      'chispas (?:del|de la|de los|de las|en el|en la) (?:enchufe|tomacorriente|contacto|panel|tablero|breaker|interruptor|cables?|caja de fusibles|medidor)',
+    routineWhen: 'igniter_sparks',
+  },
+  { keyword: 'chispas cerca', pattern: 'chispas cerca', routineWhen: 'igniter_sparks' },
 ];
+
+/** The Spanish E1 vocabulary as canonical phrases (audit keywords). */
+export const E1_HAZARD_PHRASES_ES: ReadonlyArray<string> = E1_HAZARD_PATTERNS_ES.map(
+  (entry) => entry.keyword,
+);
 
 /**
  * Injury / medical-event phrasing. E1 by default (broad on purpose — a missed
@@ -182,22 +245,62 @@ function compile(phrases: ReadonlyArray<string>) {
   });
 }
 /**
- * Unicode-aware word edges for the Spanish table. JS `\b` is ASCII-only, so a
- * phrase with an accented edge ("se incendió") would never match. Same
- * lookarounds as `emergency-detector.ts`. The English tables keep `\b`
- * byte-for-byte.
+ * #1220 review — immediate negation in front of a Spanish hazard phrase:
+ * "no huele a gas", "no hay (una | ningún) fuga de gas", "no está saliendo
+ * gas", "no se huele gas". Only the words directly in front count, so
+ * "no sé si hay fuga de gas" stays E1. "no" must be a whole word, so "bueno
+ * huele a gas" stays E1. A comma breaks it: "no, huele a gas" stays E1.
  */
-function compileUnicode(phrases: ReadonlyArray<string>) {
-  return phrases.map((kw) => {
-    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return {
-      keyword: kw,
-      regex: new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu'),
-    };
-  });
+const ES_NEGATION_GUARD =
+  '(?<!(?<![\\p{L}\\p{N}])no\\s+(?:(?:hay|est[aá]n?|se|siento|tengo|noto)\\s+)?(?:(?:un|una|ning[uú]n|ninguna)\\s+)?)';
+
+/** Unicode word edges: JS `\b` is ASCII-only, so "se incendió" would never match. */
+function compileSpanish(entries: ReadonlyArray<SpanishHazardPattern>) {
+  return entries.map(({ keyword, pattern, routineWhen }) => ({
+    keyword,
+    routineWhen,
+    regex: new RegExp(
+      `(?<![\\p{L}\\p{N}])${ES_NEGATION_GUARD}(?:${pattern})(?![\\p{L}\\p{N}])`,
+      'iu',
+    ),
+  }));
 }
+
+const ES_IGNITER_RE =
+  /(?<![\p{L}\p{N}])(?:encendedor(?:es)?|chispero|ignitor|igniter|electrodo)(?![\p{L}\p{N}])/iu;
+const ES_ELECTRICAL_LOCATION_RE =
+  /(?<![\p{L}\p{N}])(?:enchufes?|tomacorrientes?|contactos?|panel|tablero|breakers?|interruptor(?:es)?|cables?|fusibles?|medidor|cortocircuito)(?![\p{L}\p{N}])/iu;
+const ES_CO_DEVICE_RE = /(?<![\p{L}\p{N}])(?:detector(?:es)?|alarmas?|sensor(?:es)?)(?![\p{L}\p{N}])/iu;
+const ES_DEVICE_WORK_RE =
+  /(?<![\p{L}\p{N}])(?:instalar|instalaci[oó]n|comprar|cambiar|reemplazar|poner|bater[ií]as?|pilas?|cotizaci[oó]n|precio|revisar|inspecci[oó]n|mantenimiento)(?![\p{L}\p{N}])/iu;
+/** A sounding alarm or CO symptoms outrank any install/battery wording. */
+const ES_ALARM_SOUNDING_RE =
+  /(?<![\p{L}\p{N}])(?:sonando|suena|son[oó]|pitando|pita|pit[oó]|pitar|pitido|chillando|activ[oó]|activad[oa]|dispar[oó]|se prendi[oó]|mareos?|maread[oa]|dolor de cabeza|n[aá]useas)(?![\p{L}\p{N}])/iu;
+
+/**
+ * Utterance-level routine exceptions for a matched Spanish entry. Narrow on
+ * purpose: anything short of a clearly routine call stays E1.
+ * - igniter_sparks: an igniter is named ("el encendedor echa chispas pero no
+ *   prende") and no electrical location is.
+ * - co_device_request: a detector/alarm is named with install, purchase or
+ *   battery work, and nothing says it is sounding or anyone feels ill.
+ */
+function isSpanishRoutineContext(
+  kind: NonNullable<SpanishHazardPattern['routineWhen']>,
+  transcript: string,
+): boolean {
+  if (kind === 'igniter_sparks') {
+    return ES_IGNITER_RE.test(transcript) && !ES_ELECTRICAL_LOCATION_RE.test(transcript);
+  }
+  return (
+    ES_CO_DEVICE_RE.test(transcript) &&
+    ES_DEVICE_WORK_RE.test(transcript) &&
+    !ES_ALARM_SOUNDING_RE.test(transcript)
+  );
+}
+
 const HAZARD_REGEXES = compile(E1_HAZARD_PHRASES);
-const HAZARD_REGEXES_ES = compileUnicode(E1_HAZARD_PHRASES_ES);
+const HAZARD_REGEXES_ES = compileSpanish(E1_HAZARD_PATTERNS_ES);
 const INJURY_REGEXES = compile(E1_INJURY_PHRASES);
 
 /** Pure, synchronous, free — the embedded E1 life-safety scan. */
@@ -208,8 +311,10 @@ export function detectLifeSafetyE1(
   for (const { keyword, regex } of HAZARD_REGEXES) {
     if (regex.test(transcript)) return { matched: true, keyword, language: 'en' };
   }
-  for (const { keyword, regex } of HAZARD_REGEXES_ES) {
-    if (regex.test(transcript)) return { matched: true, keyword, language: 'es' };
+  for (const { keyword, regex, routineWhen } of HAZARD_REGEXES_ES) {
+    if (!regex.test(transcript)) continue;
+    if (routineWhen && isSpanishRoutineContext(routineWhen, transcript)) continue;
+    return { matched: true, keyword, language: 'es' };
   }
   // Injury: E1 unless clearly past/hypothetical AND no present-tense urgency.
   const clearlyNonAcute =
@@ -292,10 +397,13 @@ export function classifyCallerSafety(
   ctx: UrgencyContext,
   rules?: TriageRules,
 ): SafetyClassification {
-  const e1 = detectLifeSafetyE1(utterance);
-  const embeddedE2 = detectEmbeddedE2(utterance);
-  const backstop = detectEmergency(utterance);
-  const engine = rules ? classifyUrgencyTier({ utterance, context: ctx }, rules) : null;
+  // #1220 review — compose decomposed accents ("mono\u0301xido") so the
+  // accented table entries match whatever normalization STT delivers.
+  const text = utterance.normalize('NFC');
+  const e1 = detectLifeSafetyE1(text);
+  const embeddedE2 = detectEmbeddedE2(text);
+  const backstop = detectEmergency(text);
+  const engine = rules ? classifyUrgencyTier({ utterance: text, context: ctx }, rules) : null;
 
   let engineTier: SafetyTier | null = null;
   if (engine) {
