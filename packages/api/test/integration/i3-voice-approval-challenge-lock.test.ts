@@ -30,19 +30,20 @@ import {
  * The invariant was previously proven in memory only
  * (`test/ai/tasks/proposal-approval-task.test.ts`, an InMemoryProposalRepository
  * + InMemoryAuditRepository). This file drives the SAME product seams —
- * `startVoiceApproval` (src/ai/tasks/proposal-approval-task.ts:910) and
- * `continueVoiceApproval` (…:1332) — against a real `PgProposalRepository`,
+ * `startVoiceApproval` (src/ai/tasks/proposal-approval-task.ts:987) and
+ * `continueVoiceApproval` (…:1409) — against a real `PgProposalRepository`,
  * `PgSettingsRepository` and `PgAuditRepository`, and reads every attempt's
  * audit row back through `PgAuditRepository.findByEntity`
  * (src/audit/pg-audit.ts:48).
  *
  * Seams under test:
- *   - challenge verify + session fail counter — proposal-approval-task.ts:1541
- *   - 3rd failure → lockout + one-tap SMS      — proposal-approval-task.ts:1542-1557
- *   - post-lockout refusal of money/irreversible — proposal-approval-task.ts:656 (refuseChallengeLocked)
- *   - lock re-derived from audit_events (#1051) — proposal-approval-task.ts:419 (resolveChallengeLock),
- *     checked at readback :717, confirm :1456 and challenge :1510
- *   - capture-class bypasses the challenge      — proposal-approval-task.ts:371 (requiresChallenge)
+ *   - challenge verify + session fail counter — proposal-approval-task.ts:1618
+ *   - 3rd failure → lockout + one-tap SMS      — proposal-approval-task.ts:1619-1635
+ *   - post-lockout refusal of money/irreversible — proposal-approval-task.ts:730 (refuseChallengeLocked)
+ *   - lock re-derived from audit_events (#1051) — proposal-approval-task.ts:433 (resolveChallengeLock),
+ *     checked at readback :794, confirm :1533 and challenge :1587
+ *   - a lost strike write locks (fail closed)   — proposal-approval-task.ts:506 (recordStrike)
+ *   - capture-class bypasses the challenge      — proposal-approval-task.ts:383 (requiresChallenge)
  *
  * The SMS transport is stubbed (an external send, not a DB leg); every
  * proposal row, settings row and audit row in this file is real Postgres.

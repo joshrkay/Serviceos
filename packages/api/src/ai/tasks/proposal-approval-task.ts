@@ -341,6 +341,29 @@ export function composeReadback(proposal: Proposal, action: VoiceApprovalAction)
 
 // ─── Internals ───────────────────────────────────────────────────────────────
 
+/** Write one voice-approval audit row. Throws when the write fails. */
+async function writeAudit(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  eventType: string,
+  proposalId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: ref.tenantId,
+      actorId: VOICE_APPROVAL_ACTOR_ID,
+      actorRole: 'system',
+      eventType,
+      entityType: 'proposal',
+      entityId: proposalId || ref.sessionId,
+      correlationId: ref.sessionId,
+      metadata: { ...metadata, channel: 'voice', sessionId: ref.sessionId },
+    }),
+  );
+}
+
 async function audit(
   deps: VoiceApprovalDeps,
   ref: VoiceApprovalSessionRef,
@@ -348,23 +371,12 @@ async function audit(
   proposalId: string,
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
-  if (!deps.auditRepo) return;
   try {
-    await deps.auditRepo.create(
-      createAuditEvent({
-        tenantId: ref.tenantId,
-        actorId: VOICE_APPROVAL_ACTOR_ID,
-        actorRole: 'system',
-        eventType,
-        entityType: 'proposal',
-        entityId: proposalId || ref.sessionId,
-        correlationId: ref.sessionId,
-        metadata: { ...metadata, channel: 'voice', sessionId: ref.sessionId },
-      }),
-    );
+    await writeAudit(deps, ref, eventType, proposalId, metadata);
   } catch {
     // Audit is best-effort here; the proposal mutations carry their own
-    // proposal.approved / proposal.rejected events via actions.ts.
+    // proposal.approved / proposal.rejected events via actions.ts. Strike
+    // writes are the exception — see `recordStrike`.
   }
 }
 
@@ -412,9 +424,11 @@ interface ChallengeLock {
  * never consult it.
  *
  * - Locked in memory → locked, no lookup.
- * - No audit repository wired → `audit()` never recorded a strike, so there
- *   is nothing to re-derive from; the in-memory counter stands alone.
+ * - No audit repository wired → no strike was ever recorded, so there is
+ *   nothing to re-derive from; the in-memory counter stands alone.
  * - Lookup error → FAIL CLOSED: locked for this turn, and logged.
+ * - Otherwise locked when a lockout row exists or the COMBINED count
+ *   (max of memory and trail) has reached the cap.
  */
 async function resolveChallengeLock(
   deps: VoiceApprovalDeps,
@@ -424,7 +438,16 @@ async function resolveChallengeLock(
   if (ref.sessionState?.challengeLockedOut) {
     return { locked: true, failCount: memoryCount, source: 'session' };
   }
-  if (!deps.auditRepo) return { locked: false, failCount: memoryCount };
+  if (!deps.auditRepo) {
+    return memoryCount >= MAX_CHALLENGE_ATTEMPTS
+      ? {
+          locked: true,
+          failCount: memoryCount,
+          source: 'session',
+          restored: { challengeFailCount: memoryCount, challengeLockedOut: true },
+        }
+      : { locked: false, failCount: memoryCount };
+  }
 
   let rows: AuditEvent[];
   try {
@@ -452,11 +475,11 @@ async function resolveChallengeLock(
   }
 
   const failCount = Math.max(memoryCount, strikes);
-  if (lockoutRecorded || strikes >= MAX_CHALLENGE_ATTEMPTS) {
+  if (lockoutRecorded || failCount >= MAX_CHALLENGE_ATTEMPTS) {
     return {
       locked: true,
       failCount,
-      source: 'audit_trail',
+      source: lockoutRecorded || strikes >= MAX_CHALLENGE_ATTEMPTS ? 'audit_trail' : 'session',
       restored: { challengeFailCount: failCount, challengeLockedOut: true },
     };
   }
@@ -465,6 +488,57 @@ async function resolveChallengeLock(
     failCount,
     ...(strikes > memoryCount ? { restored: { challengeFailCount: failCount } } : {}),
   };
+}
+
+/**
+ * #1051 — write a strike row (a wrong code, or the lockout it triggers). Unlike
+ * `audit()`, a lost strike is NOT silently dropped: the rebuilt-session lock is
+ * derived from these rows, so a lost one would hand back a try.
+ *
+ * Returns true when the strike was recorded (or no audit repository is wired —
+ * nothing is ever recorded then). Returns false when the write failed: the
+ * caller must lock money-class approval for the session (fail closed). Before
+ * returning, the loss is logged and a durable lockout marker
+ * (`proposal.voice_challenge_lockout`, `reason: 'strike_write_failed'`) is
+ * attempted, so a session rebuilt after a transient write failure is locked
+ * too; if that write is lost as well, the lock holds in memory only (logged).
+ */
+async function recordStrike(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  eventType: typeof CHALLENGE_FAILED_EVENT | typeof CHALLENGE_LOCKOUT_EVENT,
+  proposalId: string,
+  metadata: { attemptCount: number } & Record<string, unknown>,
+): Promise<boolean> {
+  try {
+    await writeAudit(deps, ref, eventType, proposalId, metadata);
+    return true;
+  } catch (err) {
+    const context = {
+      tenantId: ref.tenantId,
+      sessionId: ref.sessionId,
+      proposalId,
+      lostEventType: eventType,
+      attemptCount: metadata.attemptCount,
+    };
+    logger.error(
+      'voice approval strike audit write failed — locking money-class voice approval for this session (fail closed)',
+      { ...context, error: err instanceof Error ? err.message : String(err) },
+    );
+    try {
+      await writeAudit(deps, ref, CHALLENGE_LOCKOUT_EVENT, proposalId, {
+        attemptCount: metadata.attemptCount,
+        reason: 'strike_write_failed',
+        lostEventType: eventType,
+      });
+    } catch (markerErr) {
+      logger.error(
+        'voice approval lockout marker write also failed — the lock holds in memory only; a rebuilt session will not see it',
+        { ...context, error: markerErr instanceof Error ? markerErr.message : String(markerErr) },
+      );
+    }
+    return false;
+  }
 }
 
 /**
@@ -669,7 +743,10 @@ async function refuseChallengeLocked(
   });
   const sessionState: Partial<VoiceApprovalSessionState> = {
     ...lock.restored,
-    ...(smsSent ? { oneTapSmsSentAfterLockout: true } : {}),
+    // A lookup-failure refusal is not a lockout: marking its link as "the
+    // lockout link" would make a later real lockout claim "already sent" for a
+    // proposal that never got one.
+    ...(smsSent && lock.source !== 'lookup_failed' ? { oneTapSmsSentAfterLockout: true } : {}),
   };
   const speak = alreadySent
     ? "For security, I can’t take that approval by voice this call. The text link was already sent."
@@ -1542,7 +1619,8 @@ export async function continueVoiceApproval(
     if (failCount >= MAX_CHALLENGE_ATTEMPTS) {
       // 3rd failure — lock the session and send the SMS fallback.
       const smsSent = await sendOneTapFallback(deps, input, proposal);
-      await audit(deps, input, CHALLENGE_LOCKOUT_EVENT, proposal.id, {
+      // Already locking; a lost write is retried as the durable marker.
+      await recordStrike(deps, input, CHALLENGE_LOCKOUT_EVENT, proposal.id, {
         attemptCount: failCount,
         oneTapSmsSent: smsSent,
       });
@@ -1556,7 +1634,7 @@ export async function continueVoiceApproval(
         sessionState: { challengeFailCount: failCount, challengeLockedOut: true },
       };
     }
-    await audit(deps, input, CHALLENGE_FAILED_EVENT, proposal.id, {
+    const strikeRecorded = await recordStrike(deps, input, CHALLENGE_FAILED_EVENT, proposal.id, {
       attemptCount: failCount,
     });
     return {
@@ -1564,7 +1642,12 @@ export async function continueVoiceApproval(
       pending,
       outcome: 'challenge_failed',
       proposalId: proposal.id,
-      sessionState: { challengeFailCount: failCount },
+      // A strike that could not be recorded locks money-class approval for the
+      // session (fail closed) rather than being lost to a later rebuild.
+      sessionState: {
+        challengeFailCount: failCount,
+        ...(strikeRecorded ? {} : { challengeLockedOut: true }),
+      },
     };
   }
   await audit(deps, input, 'proposal.voice_approval_challenge_passed', proposal.id);
