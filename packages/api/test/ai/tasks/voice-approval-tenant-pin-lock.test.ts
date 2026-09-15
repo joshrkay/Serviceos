@@ -181,7 +181,7 @@ const seedCapture = (repo: InMemoryProposalRepository, customerName: string) =>
  */
 async function strikeRow(
   auditRepo: InMemoryAuditRepository,
-  opts: { tenantId?: string; sessionId: string; at?: Date; eventType?: string },
+  opts: { tenantId?: string; sessionId: string; at?: Date; eventType?: string; attemptId?: string },
 ): Promise<void> {
   const event: AuditEvent = createAuditEvent({
     tenantId: opts.tenantId ?? TENANT,
@@ -191,7 +191,12 @@ async function strikeRow(
     entityType: 'proposal',
     entityId: 'p-earlier-call',
     correlationId: opts.sessionId,
-    metadata: { channel: 'voice', sessionId: opts.sessionId, attemptCount: 1 },
+    metadata: {
+      channel: 'voice',
+      sessionId: opts.sessionId,
+      attemptCount: 1,
+      ...(opts.attemptId ? { attemptId: opts.attemptId, reason: 'refused_over_limit' } : {}),
+    },
   });
   if (opts.at) event.createdAt = opts.at;
   await auditRepo.create(event);
@@ -597,6 +602,32 @@ describe('#1233 review — the owner alert is CLAIMED before it is sent', () => 
     });
     expect(r.outcome).toBe('challenge_lockout');
   }
+
+  it('#1233 re-run — a wrong code that reaches the limit only with ANOTHER call’s still-pending attempt claims and sends nothing; once that attempt is cleared the tenant is not locked', async () => {
+    const h = makeHarness();
+    await strikesInOtherCalls(h.auditRepo, 3);
+    // Another call reserved an attempt a moment ago; its outcome is not recorded yet.
+    await strikeRow(h.auditRepo, { sessionId: 'call-in-flight', at: new Date() });
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+    await seedMoney(h.proposalRepo, 'Beta Corp', 5000);
+
+    const { confirm } = await toConfirmOutcome(h, 'call-racing', 'the Acme payment');
+    expect(confirm!.outcome).toBe('challenge_prompt');
+    await continueVoiceApproval(h.deps, {
+      ...call('call-racing'),
+      utterance: '0 0 0 0',
+      pending: confirm!.pending!,
+    });
+    expect(h.claims).toHaveLength(0);
+    expect(h.sent).toHaveLength(0);
+
+    // The in-flight attempt turns out to be refused over the budget and is cleared.
+    const inFlight = eventsOf(h, PIN_ATTEMPT).find((e) => e.correlationId === 'call-in-flight')!;
+    await strikeRow(h.auditRepo, { sessionId: 'call-in-flight', eventType: PIN_ATTEMPT_CLEARED, attemptId: inFlight.id });
+    const { start } = await toConfirmOutcome(h, 'call-after', 'the Beta payment');
+    expect(start.outcome).toBe('readback');
+    expect(h.sent).toHaveLength(0);
+  });
 
   it('a claim another call already holds → nothing is sent', async () => {
     const h = makeHarness({ alertRepo: { claim: async () => false } });

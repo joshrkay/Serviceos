@@ -499,13 +499,26 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     );
     expect(dropped).toHaveLength(0);
 
+    // The planner's choice depends on statistics, so give it a realistic
+    // tenant: ten days of ordinary audit history, one row a minute (inside a
+    // rolled-back transaction, ANALYZE included), then EXPLAIN the 24h lookup.
+    const busy = await freshTenant();
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO audit_events (tenant_id, actor_id, actor_role, event_type, entity_type, entity_id, created_at)
+         SELECT $1, 'i3t-history', 'system', 'job.updated', 'job', g::text, now() - (g || ' minutes')::interval
+           FROM generate_series(1, 14400) g`,
+        [busy.tenantId],
+      );
+      await client.query('ANALYZE audit_events');
+      // A test database is small enough that a sequential scan is always
+      // cheapest; rule it out to see which INDEX the planner picks.
       await client.query('SET LOCAL enable_seqscan = off');
       await client.query(`PREPARE i3t_pin_lock AS ${VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL}`);
       const { rows: plan } = await client.query<{ 'QUERY PLAN': string }>(
-        `EXPLAIN EXECUTE i3t_pin_lock('${crypto.randomUUID()}', ARRAY['${PIN_ATTEMPT}', '${PIN_ATTEMPT_CLEARED}'], now() - interval '25 hours')`,
+        `EXPLAIN EXECUTE i3t_pin_lock('${busy.tenantId}', ARRAY['${PIN_ATTEMPT}', '${PIN_ATTEMPT_CLEARED}'], now() - interval '24 hours')`,
       );
       await client.query('DEALLOCATE i3t_pin_lock');
       await client.query('ROLLBACK');
