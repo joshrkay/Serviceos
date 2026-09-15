@@ -645,6 +645,11 @@ describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
     ['not-E1', 'el calentador se ahoga', 'heater flooding'],
     ['E1', 'a mi papá le dio un infarto', 'the idiom word with a person'],
     ['not-E1', 'el control remoto no responde', 'a device, not a person'],
+    // Idiom readings must never swallow how someone got hurt, or reach across
+    // a clause into a separate price remark.
+    ['E1', 'tocó el enchufe y no responde', 'touched a live outlet, unresponsive'],
+    ['E1', 'le dio un infarto y la cuenta del hospital es cara', 'heart attack + a separate price remark'],
+    ['not-E1', 'el foco no responde', 'a light bulb'],
   ];
 
   it.each(SPANISH_INJURY_TABLE)('%s: %j (%s)', (bucket, utterance) => {
