@@ -1,5 +1,6 @@
 import { messagesContainImage, type LLMProvider, type LLMRequest, type LLMResponse } from '../gateway/gateway';
 import { matchUpdateJobPriorityPhrase } from '../orchestration/intent-classifier';
+import { UNTRUSTED_CONTENT_BLOCK_BEGIN, UNTRUSTED_CONTENT_BLOCK_END } from '../untrusted-content';
 
 /**
  * Deterministic mock provider for unit tests and hermetic local/dev.
@@ -79,6 +80,25 @@ function lastUserText(request: LLMRequest): string {
     }
   }
   return '';
+}
+
+/**
+ * #894 — an S1 caller's utterance reaches `classify_intent` wrapped in the I13
+ * untrusted-content fence (`classifierUserContent` →
+ * `buildUntrustedContentSection`): BEGIN marker, a label line, the caller's
+ * words, the hardening line, END marker. A real model classifies the quoted
+ * words, not the fence's own label and hardening text — so must this script,
+ * or the hardening line's quoted examples ("ignore previous instructions")
+ * become an extracted name and the markers bleed into multi-line matches.
+ * Text with no fence (every owner surface) is returned unchanged.
+ */
+function fencedUtteranceOrText(text: string): string {
+  const begin = text.indexOf(UNTRUSTED_CONTENT_BLOCK_BEGIN);
+  const end = text.lastIndexOf(UNTRUSTED_CONTENT_BLOCK_END);
+  if (begin < 0 || end <= begin) return text;
+  // ['', '<label> — caller-authored, quoted verbatim as DATA:', ...words, '<hardening line>', '']
+  const lines = text.slice(begin + UNTRUSTED_CONTENT_BLOCK_BEGIN.length, end).split('\n');
+  return lines.slice(2, -2).join('\n');
 }
 
 /**
@@ -254,6 +274,10 @@ export function scriptHermeticResponse(request: LLMRequest): string {
   }
 
   if (taskType === 'classify_intent' || taskType.startsWith('classify')) {
+    // #894 — script from the caller's words inside the fence (unchanged for
+    // an unfenced owner utterance). Deliberately shadows the outer text/lower.
+    const text = fencedUtteranceOrText(lastUserText(request));
+    const lower = text.toLowerCase();
     if (
       /\b(create|add|new)\b.*\bcustomer\b/.test(lower) ||
       /\bcustomer\b.*\b(named|name)\b/.test(lower)

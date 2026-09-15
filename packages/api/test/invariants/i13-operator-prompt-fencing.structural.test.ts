@@ -321,8 +321,8 @@ const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string 
   },
   {
     file: 'src/ai/orchestration/intent-classifier.ts',
-    as: 'owner-authored-input',
-    why: "Classifies the owner's command-line utterance (`matchOwnerOperatorCommand`); caller text reaches it only through the fenced context sections.",
+    as: 'fenced',
+    why: "#894 — on the S1 profiles ('caller', 'field_tech') classifierUserContent wraps the caller's utterance in buildUntrustedContentSection (neutralized first) and CALLER_UTTERANCE_FENCE_PROMPT_SECTION states the data-not-instructions rule. Owner surfaces ('operator', 'owner_line') still send the owner's own command raw — owner-authored input, byte-identical.",
   },
   {
     file: 'src/ai/orchestration/transcript-decomposer.ts',
@@ -639,7 +639,8 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
       expect(entry.file, entry.file).toMatch(/^src\/.+\.ts$/);
     }
     // Stated as a measurement so a silent reclassification shows up in review.
+    // 13 since #894 moved intent-classifier.ts from owner-authored-input to fenced.
     const ownerAuthored = CLASSIFIED.filter((c) => c.as === 'owner-authored-input');
-    expect(ownerAuthored.length).toBe(14);
+    expect(ownerAuthored.length).toBe(13);
   });
 });

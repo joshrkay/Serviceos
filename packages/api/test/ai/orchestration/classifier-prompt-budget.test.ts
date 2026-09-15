@@ -27,6 +27,8 @@ import {
   type ClassifierProfile,
 } from '../../../src/ai/orchestration/classifier-profile';
 import {
+  CALLER_UTTERANCE_FENCE_PROMPT_SECTION,
+  classifierUserContent,
   CUSTOMER_PROTECTION_PROMPT_SECTION,
   isLookupIntent,
   SYSTEM_PROMPT,
@@ -126,24 +128,28 @@ function worstCaseVerticalSection(): string {
 
 describe('classifier prompt budget — per-profile first turn', () => {
   const cases: Array<{ profile: ClassifierProfile; sections: string[] }> = [
-    // Live telephony always appends customer protection for callers.
-    { profile: 'caller', sections: [CUSTOMER_PROTECTION_PROMPT_SECTION] },
-    // field_tech gets no sections at all.
-    { profile: 'field_tech', sections: [] },
+    // Live telephony always appends customer protection for callers; every
+    // S1 profile also carries the #894 caller-utterance fence rule.
+    { profile: 'caller', sections: [CUSTOMER_PROTECTION_PROMPT_SECTION, CALLER_UTTERANCE_FENCE_PROMPT_SECTION] },
+    // field_tech gets no protection/extended section — only the #894 fence rule.
+    { profile: 'field_tech', sections: [CALLER_UTTERANCE_FENCE_PROMPT_SECTION] },
   ];
 
   it.each(cases)(
-    '$profile worst first turn (prompt + sections + full HVAC pack + max training assets + utterance) fits the per-turn budget with 15% margin',
+    '$profile worst first turn (prompt + sections + full HVAC pack + max training assets + fenced utterance) fits the per-turn budget with 15% margin',
     ({ profile, sections }) => {
       const firstTurn =
         buildClassifierSystemPrompt(profile) +
         sections.join('') +
         worstCaseVerticalSection() +
-        SAMPLE_UTTERANCE;
+        // #894 — the S1 utterance is sent fenced (label + hardening line + markers).
+        classifierUserContent(SAMPLE_UTTERANCE, profile);
       const tokens = estimateTokens(firstTurn);
       // Measured 2026-08-28 (#902): caller ≈ 7,004 tok, field_tech ≈ 6,802,
       // vs the 85% line of 9,000 × 0.85 = 7,650 — ≥5% real slack on both,
       // against a ceiling every term of which is bounded by code.
+      // Re-measured 2026-09-14 (#894 — fence rule + fenced utterance, ≈350
+      // tok): caller ≈ 7,350, field_tech ≈ 7,148 — ≈3.9% / 6.6% slack.
       expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * BUDGET_MARGIN);
     },
   );
