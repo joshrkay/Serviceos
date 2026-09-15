@@ -35,6 +35,7 @@ import {
   SendPaymentReminderTaskHandler,
   ApplyLateFeeTaskHandler,
   RecordPaymentTaskHandler,
+  RecordRefundTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
   UpdateCustomerTaskHandler,
@@ -48,7 +49,14 @@ import {
   RequestFeedbackTaskHandler,
   BatchInvoiceTaskHandler,
   CreateInvoiceScheduleTaskHandler,
+  UpdateCatalogItemTaskHandler,
 } from '../tasks/voice-extended-tasks';
+import { ApplyCreditTaskHandler } from '../tasks/apply-credit-task';
+import { SendCustomerMessageTaskHandler } from '../tasks/send-customer-message-task';
+import { CreateChangeOrderTaskHandler } from '../tasks/create-change-order-task';
+import { CreateServiceAgreementTaskHandler } from '../tasks/create-service-agreement-task';
+import { AddMaterialTaskHandler } from '../tasks/add-material-task';
+import { AddCatalogItemTaskHandler } from '../tasks/add-catalog-item-task';
 
 /**
  * B5 (feat: voice-transcript-and-agent-paths) — the deps shared by the
@@ -251,6 +259,27 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   );
   handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
+  handlers.set('record_refund', new RecordRefundTaskHandler());
+  // Tradesperson wave 1, Task 4 — apply_credit's voice on-ramp.
+  handlers.set('apply_credit', new ApplyCreditTaskHandler());
+  // Tradesperson wave 1, Task 5 — send_customer_message's voice on-ramp.
+  // The optional gateway-driven rewrite pass degrades to verbatim
+  // passthrough when absent or on failure (see the handler's doc comment).
+  handlers.set('send_customer_message', new SendCustomerMessageTaskHandler(deps.gateway));
+  // Tradesperson wave 1, Task 6 — create_change_order's voice on-ramp.
+  // catalogRepo powers line-item grounding (same dep draft_estimate uses);
+  // absent → the line rides the spoken amount as-is, uncatalogued.
+  handlers.set('create_change_order', new CreateChangeOrderTaskHandler(deps.catalogRepo));
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement's
+  // voice on-ramp. No deps: customer resolution rides context.customerId
+  // (router-injected), cadence->RRULE mapping is a fixed table, and
+  // startsOn defaulting reads context.timezone/context.now directly.
+  handlers.set('create_service_agreement', new CreateServiceAgreementTaskHandler());
+  // Task 9 (2026-08-07 tradesperson plan) — add_material's voice on-ramp.
+  // No deps: jobId resolution rides context.existingEntities.jobId
+  // (router-injected, see the handler's own doc comment), and
+  // materialNeededBy parsing reads context.timezone/context.now directly.
+  handlers.set('add_material', new AddMaterialTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());
@@ -265,6 +294,15 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // U2 — milestone billing plan from a spoken sentence (deterministic
   // parser; no LLM drafting call).
   handlers.set('create_invoice_schedule', new CreateInvoiceScheduleTaskHandler());
+  // Tradesperson wave 1, Task 2 — WS20's update_catalog_item voice on-ramp.
+  // catalogRepo powers the spoken-reference → item resolution; absent →
+  // every reference stays gated (missingFields: ['catalogItemId']).
+  handlers.set('update_catalog_item', new UpdateCatalogItemTaskHandler(deps.catalogRepo));
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item's voice
+  // on-ramp. No deps: this is a pure create (no spoken reference to
+  // resolve against the existing catalog the way update_catalog_item
+  // needs catalogRepo for).
+  handlers.set('add_catalog_item', new AddCatalogItemTaskHandler());
   // B4 — unified issue_invoice: gated missingFields ladder (rung 3) PLUS
   // conversation-context resolution (rung 2, needs proposalRepo). See the
   // class doc comment in ./task-router.ts for the full resolution ladder.

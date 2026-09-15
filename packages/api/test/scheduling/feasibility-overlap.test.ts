@@ -127,3 +127,113 @@ describe('checkFeasibility — overlap sub-check', () => {
     expect(r.blocking.some((b) => b.conflictingEntityId === 'a-conflict-late')).toBe(true);
   });
 });
+
+describe('checkFeasibility — no assigned technician (#909/A11, 2026-08-31 live sweep)', () => {
+  // Live evidence: RescheduleAppointmentExecutionHandler's execution retried
+  // forever on `invalid input syntax for type uuid: ""` — an unassigned
+  // appointment's `proposedTechnicianId` reached `assignmentRepo.
+  // findByTechnician` (and three sibling repo calls) as an empty string,
+  // which Postgres rejects for a `uuid`-typed column. `proposedTechnicianId`
+  // is now uuid-or-absent (#935/#947 doctrine): `undefined`, never `''`.
+  function spyDeps(siblings: Appointment[]): {
+    deps: FeasibilityDependencies;
+    calls: { findByTechnician: number; findByTechnicianWorkingHours: number; findByTechnicianAndDateRange: number; skillsForTechnician: number };
+  } {
+    const calls = {
+      findByTechnician: 0,
+      findByTechnicianWorkingHours: 0,
+      findByTechnicianAndDateRange: 0,
+      skillsForTechnician: 0,
+    };
+    const deps: FeasibilityDependencies = {
+      assignmentRepo: {
+        findByTechnician: async () => {
+          calls.findByTechnician += 1;
+          return [];
+        },
+        findByAppointment: async () => [],
+      } as any,
+      appointmentRepo: {
+        findById: async (_t: string, id: string) => siblings.find((s) => s.id === id) ?? null,
+      } as any,
+      jobRepo: { findById: async () => null } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo: {
+        findByTechnician: async () => {
+          calls.findByTechnicianWorkingHours += 1;
+          return [];
+        },
+      } as any,
+      unavailableBlockRepo: {
+        findByTechnicianAndDateRange: async () => {
+          calls.findByTechnicianAndDateRange += 1;
+          return [];
+        },
+      } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: {
+        // A required skill the technician HOLDS — this describe block is
+        // about WHICH repo methods get called (skillsForTechnician is only
+        // reached when a required skill exists at all), not skill-matching
+        // outcomes (that's feasibility-skill.test.ts); keep the control
+        // path's result clean (feasible: true) while still exercising the
+        // call.
+        requiredSkillsForJob: async () => ['licensed'],
+        skillsForTechnician: async () => {
+          calls.skillsForTechnician += 1;
+          return ['licensed'];
+        },
+      } as any,
+    };
+    return { deps, calls };
+  }
+
+  it('returns feasible with no blocking issues, and never calls any per-technician repo method, when proposedTechnicianId is undefined', async () => {
+    const appt = mkAppt();
+    const { deps, calls } = spyDeps([appt]);
+
+    const r = await checkFeasibility(
+      {
+        tenantId: 't-1',
+        appointment: appt,
+        proposedTechnicianId: undefined,
+        proposedScheduledStart: appt.scheduledStart,
+        proposedScheduledEnd: appt.scheduledEnd,
+      },
+      deps,
+    );
+
+    expect(r.feasible).toBe(true);
+    expect(r.blocking).toHaveLength(0);
+    expect(r.warnings).toHaveLength(0);
+    expect(r.travelTime).toBeNull();
+    // The actual regression proof: not one of the four per-technician repo
+    // methods was ever invoked, so none could have been called with `''`.
+    expect(calls.findByTechnician).toBe(0);
+    expect(calls.findByTechnicianWorkingHours).toBe(0);
+    expect(calls.findByTechnicianAndDateRange).toBe(0);
+    expect(calls.skillsForTechnician).toBe(0);
+  });
+
+  it('still runs every check normally once a real technician id is supplied (guard is not over-broad)', async () => {
+    const appt = mkAppt();
+    const { deps, calls } = spyDeps([appt]);
+
+    const r = await checkFeasibility(
+      {
+        tenantId: 't-1',
+        appointment: appt,
+        proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: appt.scheduledStart,
+        proposedScheduledEnd: appt.scheduledEnd,
+      },
+      deps,
+    );
+
+    expect(r.feasible).toBe(true);
+    expect(calls.findByTechnician).toBeGreaterThan(0);
+    expect(calls.findByTechnicianWorkingHours).toBeGreaterThan(0);
+    expect(calls.findByTechnicianAndDateRange).toBeGreaterThan(0);
+    expect(calls.skillsForTechnician).toBeGreaterThan(0);
+  });
+});

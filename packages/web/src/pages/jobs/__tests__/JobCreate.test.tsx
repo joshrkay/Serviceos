@@ -115,3 +115,92 @@ describe('JobCreate (P11-006)', () => {
     });
   });
 });
+
+// ─── #878: /jobs/new?customerId=… pre-fills the customer picker ──────────────
+
+describe('JobCreate ?customerId= prefill (#878)', () => {
+  const locations = [
+    { id: 'loc-1', label: 'Home', street1: '100 Main St', city: 'Austin', state: 'TX', postalCode: '78701', isPrimary: true },
+  ];
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('hydrates the picker from the URL and POSTs the prefilled customerId', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL, opts?: RequestInit) => {
+      const u = String(url);
+      if (u === '/api/customers/cust-1') {
+        return { ok: true, status: 200, json: async () => ({ id: 'cust-1', firstName: 'Carol', lastName: 'Diaz' }) } as unknown as Response;
+      }
+      if (u.startsWith('/api/locations')) {
+        return { ok: true, status: 200, json: async () => locations } as unknown as Response;
+      }
+      if (u.startsWith('/api/users')) {
+        return { ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response;
+      }
+      if (u === '/api/jobs' && opts?.method === 'POST') {
+        return { ok: true, status: 201, json: async () => ({ id: 'job-77' }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/jobs/new?customerId=cust-1']}>
+        <JobCreate />
+      </MemoryRouter>
+    );
+
+    // The FULL customer is fetched so the picker shows a display name, not
+    // the raw UUID (#878's symptom).
+    await waitFor(() => {
+      expect(screen.getByLabelText('customer-search')).toHaveValue('Carol Diaz');
+    });
+    // The locations cascade auto-selects the primary, as a manual pick would.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Service location/i)).toHaveValue('loc-1');
+    });
+
+    fireEvent.change(screen.getByLabelText(/Summary/i), { target: { value: 'AC repair' } });
+    fireEvent.click(screen.getByRole('button', { name: /create job/i }));
+
+    await waitFor(() => {
+      const postCall = vi
+        .mocked(apiFetch)
+        .mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'POST');
+      expect(postCall).toBeDefined();
+      const body = JSON.parse((postCall![1] as RequestInit).body as string);
+      expect(body.customerId).toBe('cust-1');
+      expect(body.locationId).toBe('loc-1');
+    });
+  });
+
+  it('keeps the form usable with an empty picker when the customer 404s', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u === '/api/customers/cust-gone') {
+        return { ok: false, status: 404, json: async () => ({ error: 'NOT_FOUND' }) } as unknown as Response;
+      }
+      if (u.startsWith('/api/users')) {
+        return { ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/jobs/new?customerId=cust-gone']}>
+        <JobCreate />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/customers/cust-gone');
+    });
+    expect(screen.getByLabelText('customer-search')).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: /create job/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/Customer is required/i);
+    });
+  });
+});

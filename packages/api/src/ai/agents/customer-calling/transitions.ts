@@ -18,6 +18,15 @@ import type { EntityKind } from '../../resolution/entity-resolver';
 import { redactByTier } from '../../../logging/redact';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
+import { SENTENCE_CATALOG_ES } from './tts-copy';
+
+/**
+ * #1220 review — the catalogued Spanish rendering of the RV-142 911 line
+ * ("Si alguien está en peligro inmediato, cuelgue y llame al 911."). Spoken
+ * ahead of the E1 script to a Spanish caller. Not new wording: it is the line
+ * a Spanish gas-leak caller already heard on the E2 path before #1220.
+ */
+const EMERGENCY_SAFETY_LINE_ES = SENTENCE_CATALOG_ES[EMERGENCY_SAFETY_LINE] ?? EMERGENCY_SAFETY_LINE;
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -83,6 +92,31 @@ export const POST_QUOTE_REPROMPT_LINE =
 export const NEGOTIATION_HOLDING_LINE =
   "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?";
 
+/**
+ * #846 / D-027 — deterministic acknowledgment spoken when the caller reports
+ * dissatisfaction with completed work or service. The agent never argues,
+ * promises a remedy, or improvises an apology beyond this — it acknowledges
+ * and hands the caller to a human (the complaint guard fast-paths to
+ * `escalating`, like operator_request). The one-shot `callback` proposal the
+ * voice-turn processor builds — with the same severity markers the
+ * recorded-memo path uses — is the escalation's paper trail, not a
+ * deflection. Exported so adapters/tests share it.
+ */
+export const COMPLAINT_ESCALATION_LINE =
+  "I'm sorry to hear that — let me get a person on the line to help you right away.";
+
+/**
+ * #846 — spoken when the caller answers "yes" (a bare `confirm` intent) at
+ * intent_capture with nothing pending to confirm. There is no question on the
+ * table, so the honest handling is a spoken re-prompt — never a
+ * `voice_clarification` card for an operator to puzzle over. (When a readback
+ * IS pending the FSM is in `intent_confirm`/`entity_confirm` and the adapters
+ * run strict confirmation there, so this line is only reachable with nothing
+ * pending.) Exported so adapters/tests share it.
+ */
+export const CONFIRM_NOTHING_PENDING_LINE =
+  "I don't have anything waiting on a yes from you just yet — what would you like to do?";
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function auditLog(
@@ -146,12 +180,62 @@ function notifyOncall(context: CallingAgentContext, reason: string): SideEffect 
  * same on-call notification, same escalationReason — the caller experience
  * is identical either way: "couldn't find/confirm the record, connecting
  * you with a team member."
+ *
+ * TWO audiences, split on `context.channel` (SCH-D3):
+ *
+ *   TELEPHONY — unchanged, and deliberately so. An inbound CALLER cannot
+ *   see a screen, cannot retype a name, and has no other way forward: the
+ *   only honest recovery is a human, so the call escalates and on-call is
+ *   paged. `escalationReason: 'entity_not_found'` is untouched.
+ *
+ *   IN-APP (`channel: 'inapp'`) — the authenticated operator's own app
+ *   surface, the same channel `TRUSTED_CHANNELS` (create-voice-turn-
+ *   processor.ts, I6) already treats as the owner's. Here the escalation
+ *   was actively wrong: an operator who mistyped/misspoke a name ("cancel
+ *   the Patel appointment" for a customer who does not exist) got their
+ *   session terminated into `escalating` AND paged the on-call human — for
+ *   their own typo, on a surface where they can simply say another name.
+ *   So: say honestly what was not found, return to `intent_capture` with
+ *   the session intact, and page nobody. No proposal is minted on either
+ *   path, and nothing is guessed on either path — the only difference is
+ *   who is asked to recover.
  */
 function escalateEntityNotFound(
   fromState: CallingAgentState,
   eventType: string,
-  context: CallingAgentContext
+  context: CallingAgentContext,
+  notFound?: { entityKind?: string; reference?: string },
 ): TransitionResult {
+  if (context.channel === 'inapp') {
+    return {
+      nextState: 'intent_capture',
+      sideEffects: [
+        auditLog(context, fromState, 'intent_capture', 'entity_not_found_operator', {
+          ...(notFound?.entityKind ? { entityKind: notFound.entityKind } : {}),
+          ...(notFound?.reference ? { reference: notFound.reference } : {}),
+          // Which of the two seams asked (resolution miss vs. a declined
+          // confirmation) — the old audit encoded this in the event type.
+          resolutionEvent: eventType,
+        }),
+        ttsPlay('entity_not_found_operator', {
+          template: 'entity_not_found_operator',
+          ...(notFound?.entityKind ? { entityKind: notFound.entityKind } : {}),
+          ...(notFound?.reference ? { reference: notFound.reference } : {}),
+        }),
+      ],
+      updatedContext: {
+        ...context,
+        // The request is over; the next utterance is a fresh one. Clear the
+        // pending confirmation (as the escalation does) and the parked
+        // intent/entities, so a follow-up name is captured cleanly instead
+        // of being merged into the request that just failed.
+        pendingEntityConfirmation: undefined,
+        pendingEntityAmbiguity: undefined,
+        currentIntent: undefined,
+        extractedEntities: undefined,
+      },
+    };
+  }
   return {
     nextState: 'escalating',
     sideEffects: [
@@ -361,6 +445,106 @@ function checkGlobalGuards(
     return { nextState: state, sideEffects, updatedContext };
   }
 
+  // #846 / D-027 — complaint guardrail. The caller reports dissatisfaction
+  // with completed work or service. Mirrors the operator_request guard
+  // above, NOT negotiation: an unhappy caller gets a HUMAN, not a hold-and-
+  // continue — the guard acknowledges and fast-paths to `escalating`
+  // (auditLog + notify_oncall + escalationReason, the same escalation
+  // machinery operator_request drives). The first cut of this guard
+  // deflected and continued; the owner ratified escalation on 2026-08-28.
+  // Unlike operator_request there is no escalationTriggers deflect branch: a
+  // complaint always reaches a person — no tenant toggle maps to it.
+  //
+  // The one-shot `callback` proposal (idempotent via `complaintFlagged`) is
+  // kept as the escalation's PAPER TRAIL: the voice-turn processor enriches
+  // it with the shared severity markers, and `event.utterance` travels in
+  // the payload so severity detection sees the caller's actual words.
+  // Before this guard existed the intent fell through to
+  // `intentToProposalType`'s default and became a bare clarification card —
+  // "let me check that" with no signal a complaint was ever heard.
+  if (event.type === 'intent_classified' && event.intentType === 'complaint') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const alreadyFlagged = context.complaintFlagged === true;
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      complaintFlagged: true,
+      escalationReason: 'complaint',
+    };
+    const sideEffects: SideEffect[] = [
+      auditLog(updatedContext, state, 'escalating', 'complaint_guardrail', { alreadyFlagged }),
+      // Tagged so a settings-aware processor can brand-voice it later, same
+      // convention as `negotiation_holding`.
+      ttsPlay(COMPLAINT_ESCALATION_LINE, { source: 'complaint_ack' }),
+      // Executed by the media-streams / in-app adapters (the Gather path has
+      // no quality-event executor; its complaint telemetry is the
+      // `proposal_created` session-bus event the processor emits).
+      {
+        type: 'emit_quality_event',
+        payload: { eventType: 'complaint_guardrail', alreadyFlagged },
+      },
+    ];
+    if (!alreadyFlagged) {
+      sideEffects.push({
+        type: 'create_proposal',
+        payload: {
+          tenantId: updatedContext.tenantId,
+          intent: 'complaint',
+          entities: {
+            ...updatedContext.extractedEntities,
+            ...event.entities,
+            ...(updatedContext.customerId ? { customerId: updatedContext.customerId } : {}),
+          },
+          sessionId: updatedContext.sessionId,
+          callSid: updatedContext.callSid,
+          conversationId: updatedContext.conversationId,
+          customerId: updatedContext.customerId,
+          // The caller's raw words — severity detection ("refund", "my
+          // lawyer") runs over these, not just classifier-extracted
+          // entities, mirroring ComplaintTaskHandler's noteBody ?? message
+          // fallback on the memo path.
+          ...(event.utterance ? { utterance: event.utterance } : {}),
+          // Link the complaint follow-up proposal to the classify call's
+          // ai_runs row (FK-satisfied) instead of null.
+          ...(event.aiRunId ? { aiRunId: event.aiRunId } : {}),
+        },
+      });
+    }
+    sideEffects.push(notifyOncall(updatedContext, 'complaint'));
+    return { nextState: 'escalating', sideEffects, updatedContext };
+  }
+
+  // #846 — a bare `confirm` ("yes", "that's right") with nothing on the
+  // table to confirm: every real pending question lives elsewhere
+  // (`intent_confirm` / `entity_confirm` readbacks, the adapters' out-of-FSM
+  // approval and consent dialogues consume their turns before
+  // classification, and a live post-quote "yes" in `closing` is consumed by
+  // the adapters' deterministic pendingQuote pre-check before the classifier
+  // ever runs). Speak a re-prompt and stay — before this guard the intent
+  // fell through to the proposal path and minted a `voice_clarification`
+  // card an operator could never act on. Covers BOTH states the adapters
+  // classify in (`intent_capture` and `closing` — the same pair
+  // twilio-adapter/speechTurn gate on); `intent_confirm` keeps its
+  // pre-existing intent_classified-as-correction handling untouched.
+  if (
+    event.type === 'intent_classified' &&
+    event.intentType === 'confirm' &&
+    (state === 'intent_capture' || state === 'closing')
+  ) {
+    return {
+      nextState: state,
+      sideEffects: [
+        auditLog(context, state, state, 'confirm_without_pending'),
+        ttsPlay(CONFIRM_NOTHING_PENDING_LINE),
+      ],
+      updatedContext: context,
+    };
+  }
+
   // RV-140/RV-142 — deterministic emergency keyword hit. Fast-paths to
   // escalating from any non-terminal state, BEFORE any LLM call. The 911
   // safety line is the FIRST side effect (RV-142) so it is always spoken
@@ -389,6 +573,12 @@ function checkGlobalGuards(
       // Reviewed tier script (goal §3: "build the routing; source the
       // script"); falls back to the generic 911 line.
       const safetyScript = event.responseScript ?? EMERGENCY_SAFETY_LINE;
+      // #1220 review — no reviewed Spanish E1 script exists (O-2), but a
+      // Spanish caller (the matched phrase, or the session's language) must
+      // not lose the Spanish 911 line the E2 path gave them before #1220. It
+      // plays first, in Spanish, and is held against barge-in until it has
+      // played once; the E1 script follows.
+      const spanishCaller = event.language === 'es' || event.sessionLanguage === 'es';
       return {
         nextState: 'terminated',
         sideEffects: [
@@ -396,8 +586,19 @@ function checkGlobalGuards(
             tier: 'E1',
             reason: 'life_safety_e1',
             keyword: event.keyword,
+            ...(event.language ? { language: event.language } : {}),
           }),
-          // Life-safety script spoken FIRST, before anything else.
+          // Life-safety lines spoken FIRST, before anything else.
+          ...(spanishCaller
+            ? [
+                ttsPlay(EMERGENCY_SAFETY_LINE_ES, {
+                  priority: 'safety',
+                  tier: 'E1',
+                  language: 'es',
+                  holdBargeInUntilPlayed: true,
+                }),
+              ]
+            : []),
           ttsPlay(safetyScript, { priority: 'safety', tier: 'E1' }),
           // Abort + revoke any booking already drafted/held this call.
           {
@@ -765,6 +966,12 @@ function transitionIntentCapture(
         // the `...context` spread above would leak the previous run and the
         // eventual create_proposal would link to the WRONG ai_runs record.
         lastAiRunId: event.aiRunId,
+        // The caller's own words for this turn — the only place a contract
+        // field the classifier never extracts (update_job's status) can come
+        // from once the confirm turn replaces the transcript's last line with
+        // "yes". Unconditional for the same reason lastAiRunId is: a
+        // re-classification must not inherit the previous turn's words.
+        lastUtterance: event.utterance,
         retryCount: 0,
       };
       return {
@@ -978,9 +1185,12 @@ function transitionEntityResolution(
     };
   }
 
-  // entity_not_found → escalate
+  // entity_not_found → escalate (telephony) / honest not-found (in-app)
   if (event.type === 'entity_not_found') {
-    return escalateEntityNotFound('entity_resolution', 'entity_not_found', context);
+    return escalateEntityNotFound('entity_resolution', 'entity_not_found', context, {
+      ...(event.entityKind ? { entityKind: event.entityKind } : {}),
+      ...(event.reference ? { reference: event.reference } : {}),
+    });
   }
 
   // entity_confirm_candidate → a single middle-confidence match. Ask the
@@ -1048,9 +1258,16 @@ function transitionEntityConfirm(
   }
 
   // Declined / unclear / timeout / no pending candidate → escalate, same
-  // path and effects as entity_not_found.
+  // path and effects as entity_not_found. On the in-app operator surface
+  // that is the honest not-found line + `intent_capture`, not a page — the
+  // candidate we offered was wrong, and the operator can just say another
+  // name (see escalateEntityNotFound).
   if (event.type === 'entity_confirm_declined') {
-    return escalateEntityNotFound('entity_confirm', 'entity_confirm_declined', context);
+    const pending = context.pendingEntityConfirmation;
+    return escalateEntityNotFound('entity_confirm', 'entity_confirm_declined', context, {
+      ...(pending?.entityKind ? { entityKind: pending.entityKind } : {}),
+      ...(pending?.reference ? { reference: pending.reference } : {}),
+    });
   }
 
   return ignoredTransition('entity_confirm', event, context);
@@ -1097,10 +1314,65 @@ function transitionIntentConfirm(
             // sets proposals.ai_run_id to an actual row (FK-satisfied), not
             // null. Omitted when the classify call had no persisted run.
             ...(context.lastAiRunId ? { aiRunId: context.lastAiRunId } : {}),
+            // The caller's words for the REQUEST turn (not this "yes"), for
+            // the payload fields that exist nowhere else — see
+            // `lastUtterance` on CallingAgentContext (types.ts). The
+            // complaint guard above passes the same thing under the same key.
+            ...(context.lastUtterance ? { utterance: context.lastUtterance } : {}),
           },
         },
       ],
-      updatedContext: { ...context, retryCount: 0 },
+      updatedContext: { ...context, retryCount: 0, confirmDetailRetryCount: 0 },
+    };
+  }
+
+  // D01 — the caller supplied MORE DETAIL for the same request instead of a
+  // yes/no. Merge the new slots and re-run entity resolution over the
+  // accumulated set (the adapter's Path A drives the resolver from
+  // entity_resolution and lands us back here with a fresh readback). The
+  // merge order matches entity_resolved's: already-captured entities first,
+  // this turn's values last, so a later correction of a slot wins.
+  if (event.type === 'intent_details_supplied') {
+    // Train-7 — an EMPTY delta means the caller answered the readback with
+    // something we could not turn into a slot. Ask again rather than
+    // correcting: `correction` clears currentIntent AND every slot captured
+    // so far, so one bad guess costs a multi-turn booking everything (live
+    // evidence: D01 turn 2, session 12ccb578). Stay put, re-speak the
+    // readback, and count the no-progress turn — the adapter stops asking
+    // at MAX_CONFIRM_DETAIL_RETRIES and corrects then.
+    if (Object.keys(event.entities).length === 0) {
+      const noProgressCount = (context.confirmDetailRetryCount ?? 0) + 1;
+      return {
+        nextState: 'intent_confirm',
+        sideEffects: [
+          auditLog(context, 'intent_confirm', 'intent_confirm', 'intent_detail_unclear', {
+            intentType: context.currentIntent,
+            confirmDetailRetryCount: noProgressCount,
+          }),
+          ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+        ],
+        updatedContext: { ...context, confirmDetailRetryCount: noProgressCount },
+      };
+    }
+    return {
+      nextState: 'entity_resolution',
+      sideEffects: [
+        auditLog(context, 'intent_confirm', 'entity_resolution', 'intent_details_supplied', {
+          intentType: context.currentIntent,
+          // Strict tier for the same reason intent_capture's
+          // intent_classified audit uses it: PII_KEY_PATTERNS masks the
+          // customerName/phone this event exists to carry, while keeping
+          // the diagnostic keys (jobTitle, dateTimeDescription) readable.
+          entities: redactByTier(event.entities, 'strict'),
+        }),
+      ],
+      updatedContext: {
+        ...context,
+        extractedEntities: { ...context.extractedEntities, ...event.entities },
+        // A productive turn clears the no-progress budget.
+        confirmDetailRetryCount: 0,
+        retryCount: 0,
+      },
     };
   }
 
@@ -1121,6 +1393,7 @@ function transitionIntentConfirm(
         // Abandon the captured turn's run id so a re-classify can't reuse it.
         lastAiRunId: undefined,
         retryCount: 0,
+        confirmDetailRetryCount: 0,
       },
     };
   }
@@ -1141,6 +1414,7 @@ function transitionIntentConfirm(
         // Abandon the captured turn's run id so a re-classify can't reuse it.
         lastAiRunId: undefined,
         retryCount: 0,
+        confirmDetailRetryCount: 0,
       },
     };
   }
@@ -1345,25 +1619,38 @@ function transitionClosing(
   }
 
   // operator_request is handled by checkGlobalGuards and never reaches here.
-  // intent_classified in closing → treat as second intent (loop back)
+  // intent_classified in closing → a SECOND request in the same session.
+  //
+  // inapp-50 runtime verification (2026-09-09): this used to loop back to
+  // intent_capture and DROP the classified event — the operator's second
+  // request ("Open a job for Khan…" right after a booking closed) produced
+  // no readback, no speech and no proposal: dead air, and a following "yes"
+  // hit the nothing-pending guard. Every session-scoped harness case starts
+  // a fresh session, which is why it never surfaced there. Reset the
+  // per-request context exactly as `second_intent` does, then hand the SAME
+  // event to the intent_capture handler so the new request proceeds through
+  // entity_resolution → readback like a first request would (emergency
+  // fast-path, τ_int gating and the reprompt budget all apply unchanged).
   if (event.type === 'intent_classified') {
+    const resetContext: CallingAgentContext = {
+      ...context,
+      currentIntent: undefined,
+      extractedEntities: undefined,
+      pendingProposalId: undefined,
+      // WS18 — a genuine second intent abandons the live quote.
+      pendingQuote: undefined,
+      // Abandon the prior turn's run id so the second intent's proposal
+      // can't inherit the first turn's ai_runs record.
+      lastAiRunId: undefined,
+      retryCount: 0,
+    };
+    const captured = transitionIntentCapture(event, resetContext);
     return {
-      nextState: 'intent_capture',
+      ...captured,
       sideEffects: [
-        auditLog(context, 'closing', 'intent_capture', 'second_intent_via_classify'),
+        auditLog(context, 'closing', captured.nextState, 'second_intent_via_classify'),
+        ...captured.sideEffects,
       ],
-      updatedContext: {
-        ...context,
-        currentIntent: undefined,
-        extractedEntities: undefined,
-        pendingProposalId: undefined,
-        // WS18 — a genuine second intent abandons the live quote.
-        pendingQuote: undefined,
-        // Abandon the prior turn's run id so the second intent's proposal
-        // can't inherit the first turn's ai_runs record.
-        lastAiRunId: undefined,
-        retryCount: 0,
-      },
     };
   }
 

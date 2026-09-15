@@ -210,6 +210,22 @@ export interface JobRepository {
     customerId: string,
     opts?: JobFindByCustomerOptions,
   ): Promise<Job[]>;
+  /**
+   * Task 10 (2026-08-07 tradesperson plan) quality-review C2 — bulk read
+   * by id, tenant-scoped. Exists so
+   * a caller who already knows WHICH jobs it needs (e.g. the distinct
+   * `jobId`s off a day's appointments) can fetch exactly those rows
+   * instead of paging `findByTenant` by `createdAt DESC` and hoping the
+   * relevant job is recent enough to be on the page. It never is,
+   * reliably, once a tenant has done more than `limit` jobs — a job
+   * created months ago can still have a live appointment today (recurring
+   * maintenance, a reschedule), and `findByTenant({ limit })` silently
+   * drops it. Strictly MORE bounded than any tenant-wide page: the
+   * result set is exactly `ids.length` rows, correct at any tenant size,
+   * any job age. Empty `ids` returns `[]` without a query. Order is not
+   * guaranteed — callers that care, index by id.
+   */
+  findByIds(tenantId: string, ids: string[]): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
   /**
    * Atomically credit `amountCents` to the job's paid deposit in a SINGLE
@@ -228,6 +244,17 @@ export interface JobRepository {
     now: Date,
   ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
+  /**
+   * #1152 — atomic replacement for the getNextJobNumber() + create()
+   * two-step, which let two concurrent creates for the same tenant read
+   * the same "next number" (each call is its own transaction) and race to
+   * insert the same job_number, tripping `idx_jobs_number` as a raw
+   * unmapped 500. Optional on the interface so the in-memory fake (whose
+   * Map-backed counters are inherently serialized inside single-threaded
+   * Node) keeps its existing getNextJobNumber() + create() path; only the
+   * Postgres-backed repository needs the lock.
+   */
+  createWithAutoNumber?(job: Omit<Job, 'jobNumber'>): Promise<Job>;
   /**
    * Tier 4 (Deposit rules — PR 3c follow-up). Atomic claim of a job's
    * paid deposit for a specific invoice. Returns the updated job
@@ -275,14 +302,11 @@ export async function createJob(
     throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
   }
 
-  const jobNumber = await repository.getNextJobNumber(input.tenantId);
-
-  const job: Job = {
+  const jobWithoutNumber: Omit<Job, 'jobNumber'> = {
     id: uuidv4(),
     tenantId: input.tenantId,
     customerId: input.customerId,
     locationId: input.locationId,
-    jobNumber: `JOB-${String(jobNumber).padStart(4, '0')}`,
     summary: input.summary,
     problemDescription: input.problemDescription,
     status: 'new',
@@ -300,7 +324,20 @@ export async function createJob(
     updatedAt: new Date(),
   };
 
-  const created = await repository.create(job);
+  // #1152 — createWithAutoNumber (when the repository implements it, i.e.
+  // Postgres) computes the job_number AND inserts inside one tenant-scoped
+  // advisory-locked transaction, closing the race where two concurrent
+  // creates for the same tenant could read the same getNextJobNumber()
+  // count in separate transactions and collide on idx_jobs_number. Fall
+  // back to the old two-step for repositories that don't implement it
+  // (e.g. the in-memory fake, whose Map-backed counters are already
+  // serialized inside single-threaded Node).
+  const created = repository.createWithAutoNumber
+    ? await repository.createWithAutoNumber(jobWithoutNumber)
+    : await repository.create({
+        ...jobWithoutNumber,
+        jobNumber: `JOB-${String(await repository.getNextJobNumber(input.tenantId)).padStart(4, '0')}`,
+      });
 
   if (auditRepo) {
     const event = createAuditEvent({
@@ -409,6 +446,14 @@ export class InMemoryJobRepository implements JobRepository {
     results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     const limit = Math.min(opts?.limit ?? results.length, MAX_JOB_LIMIT);
     return results.slice(0, limit).map((j) => ({ ...j }));
+  }
+
+  async findByIds(tenantId: string, ids: string[]): Promise<Job[]> {
+    if (ids.length === 0) return [];
+    const idSet = new Set(ids);
+    return Array.from(this.jobs.values())
+      .filter((j) => j.tenantId === tenantId && idSet.has(j.id))
+      .map((j) => ({ ...j }));
   }
 
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {

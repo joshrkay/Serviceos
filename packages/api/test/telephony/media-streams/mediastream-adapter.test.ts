@@ -24,6 +24,7 @@ vi.mock('../../../src/analytics/posthog', () => ({
 import {
   TwilioMediaStreamAdapter,
   DEFAULT_SILENCE_REPROMPT_MS,
+  DEFAULT_MAX_CALL_DURATION_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -40,7 +41,10 @@ import {
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
+  LANGUAGE_SWITCH_ACK,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
+import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
@@ -158,6 +162,28 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     });
     await new Promise((r) => setImmediate(r));
     expect(provider.openSession).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['matching', 'other-call', 'other-account', 'unbound'])('enforces the authenticated upgrade binding for a %s start frame', async mismatch => {
+    const session = store.create('tenant-a', 'telephony', { callSid: 'CA-bound' });
+    session.twilioAccountSid = 'AC-bound';
+    const other = store.create('tenant-b', 'telephony', { callSid: 'CA-other' });
+    other.twilioAccountSid = 'AC-other';
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter({
+      store, streamingProvider: provider, speechTurn: async () => [],
+      ...(mismatch === 'unbound' ? {} : { authenticatedCall: { callSid: 'CA-bound', accountSid: 'AC-bound' } }),
+    }, ws);
+    adapter.start();
+    ws.inboundJson({ event: 'start', streamSid: 'MZ-bound', start: {
+      callSid: mismatch === 'other-call' ? 'CA-other' : 'CA-bound',
+      accountSid: mismatch === 'other-account' ? 'AC-other' : 'AC-bound',
+      streamSid: 'MZ-bound', tracks: ['inbound'],
+    } });
+    await new Promise(r => setImmediate(r));
+    expect(provider.openSession).toHaveBeenCalledTimes(mismatch === 'matching' ? 1 : 0);
+    expect(ws.closed).toBe(mismatch !== 'matching');
   });
 
   it('forwards base64 audio to the Deepgram session', async () => {
@@ -763,6 +789,80 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     // TTS never resolved, so no media frames should have been sent after barge-in.
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBe(0);
+  });
+
+  it('#1220 review — a holdBargeInUntilPlayed line is not cut by caller speech until its end-of-utterance mark is acked; barge-in works again after', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-hold' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const pending: Array<() => void> = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(
+        () =>
+          new Promise<TtsSynthesizeResult>((resolve) =>
+            pending.push(() => resolve({ audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' })),
+          ),
+      ),
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [], ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-hold',
+      start: { callSid: 'CA-hold', accountSid: 'AC', streamSid: 'MZ-hold', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    const flush = async () => {
+      for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
+    };
+    const clears = () => ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear').length;
+    const talk = () => handle.emit({ type: 'partial', isFinal: false, transcript: 'oiga', confidence: 0.5 });
+
+    // The E1 shape: the held Spanish 911 line, then the English script.
+    const turn = (adapter as unknown as { emitSideEffects: (fx: SideEffect[]) => Promise<void> }).emitSideEffects([
+      {
+        type: 'tts_play',
+        payload: { text: 'Si alguien está en peligro inmediato, cuelgue y llame al 911.', priority: 'safety', tier: 'E1', language: 'es', holdBargeInUntilPlayed: true },
+      },
+      { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911 now.', priority: 'safety', tier: 'E1' } },
+    ]);
+
+    // 1. Held line still synthesizing — caller speech does not clear it.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    talk();
+    await flush();
+    expect(clears()).toBe(0);
+
+    // 2. Held line fully queued, next line in flight, Twilio has NOT yet
+    //    acknowledged the held line's end-of-utterance mark — it is still
+    //    playing, so caller speech still does not clear the buffer.
+    pending[0]!();
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    const armMark = ws.sent.find(
+      (m) =>
+        (m as { event?: string }).event === 'mark' &&
+        String((m as { mark?: { name?: string } }).mark?.name).startsWith('silence-arm-'),
+    ) as { mark: { name: string } } | undefined;
+    expect(armMark).toBeDefined();
+    talk();
+    await flush();
+    expect(clears()).toBe(0);
+
+    // 3. Twilio acks the held line's mark: it has played once. Barge-in on
+    //    the following line works exactly as before.
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ-hold', mark: { name: armMark!.mark.name } });
+    await flush();
+    talk();
+    await flush();
+    expect(clears()).toBe(1);
+
+    pending[1]!();
+    await turn;
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('passes vertical keywords to Deepgram openSession when terminologyProvider yields them', async () => {
@@ -1618,7 +1718,9 @@ function makeGateway(): LLMGateway {
 }
 
 describe('production-shaped wiring (app.ts hooks)', () => {
-  function makeProductionShapedSetup(opts: { consentEvents?: InMemoryConsentEventRepository } = {}) {
+  function makeProductionShapedSetup(
+    opts: { consentEvents?: InMemoryConsentEventRepository; ttsProvider?: TtsProvider } = {},
+  ) {
     const gateway = makeGateway();
     const gatherAdapter = new TwilioGatherAdapter({
       store,
@@ -1629,7 +1731,7 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
-    const tts = makeTtsProvider();
+    const tts = opts.ttsProvider ?? makeTtsProvider();
     const adapter = new TwilioMediaStreamAdapter(
       {
         store,
@@ -1661,6 +1763,15 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     );
     return { gatherAdapter, adapter, ws, tts, handle, gateway };
   }
+
+  it('binds a verified inbound account to the stream URL and refuses a different account on replay', async () => {
+    const { gatherAdapter } = makeProductionShapedSetup({});
+    const opts = { callSid: 'CA-bound-url', accountSid: 'AC-bound', from: '+15125550111', tenantId: 't' };
+    const twiml = await gatherAdapter.handleInboundForStream(opts);
+    expect(twiml).toContain('/api/telephony/stream/CA-bound-url');
+    expect(store.findByCallSid(opts.callSid)?.twilioAccountSid).toBe(opts.accountSid);
+    await expect(gatherAdapter.handleInboundForStream({ ...opts, accountSid: 'AC-other' })).rejects.toThrow('account mismatch');
+  });
 
   it('RV-130 — session init speaks greeting+disclosure over stream TTS and ledgers implicit consent', async () => {
     const consentEvents = new InMemoryConsentEventRepository();
@@ -1759,6 +1870,64 @@ describe('production-shaped wiring (app.ts hooks)', () => {
       (c[0] as { text: string }).text.includes('911'),
     );
     expect(safetyCallsAfterFinal).toHaveLength(1);
+  });
+
+  // #1220 review — before #1220 a Spanish-session "fuga de gas" was E2 and
+  // rendered in Spanish. E1 must keep the Spanish 911 line: spoken FIRST in
+  // the Spanish voice, then the English evacuation script, and a caller
+  // talking over it cannot barge it away before it has played.
+  it('#1220 review — a Spanish-session E1 speaks the Spanish 911 line first (es voice), then the English script; barge-in cannot cut the Spanish line', async () => {
+    const ES_911_LINE = renderTtsText(EMERGENCY_SAFETY_LINE, {}, 'es');
+    const releaseSpanishLine: Array<() => void> = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn((input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        const result: TtsSynthesizeResult = { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+        if (input.text === ES_911_LINE) {
+          return new Promise((resolve) => releaseSpanishLine.push(() => resolve(result)));
+        }
+        return Promise.resolve(result);
+      }),
+    };
+    const { gatherAdapter, adapter, ws, handle } = makeProductionShapedSetup({ ttsProvider: tts });
+    await gatherAdapter.handleInboundForStream({ callSid: 'CA-es-e1', from: '+15125550111', tenantId: 't' });
+    const session = store.findByCallSid('CA-es-e1')!;
+    session.language = 'es';
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-es-e1',
+      start: { callSid: 'CA-es-e1', accountSid: 'AC', streamSid: 'MZ-es-e1', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hay una fuga de gas en mi casa', confidence: 0.95 });
+    await vi.waitFor(() => expect(session.machine.currentState).toBe('terminated'));
+    // The Spanish 911 line is the line in flight.
+    await vi.waitFor(() => expect(releaseSpanishLine).toHaveLength(1));
+
+    // The panicked caller keeps talking: no Twilio `clear` while it plays.
+    const clears = () => ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear').length;
+    const clearsBefore = clears();
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'qué hago', confidence: 0.5 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(clears()).toBe(clearsBefore);
+
+    releaseSpanishLine[0]!();
+    const synth = tts.synthesize as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => {
+      const texts = synth.mock.calls.map((c) => (c[0] as TtsSynthesizeInput).text);
+      const spanishAt = texts.indexOf(ES_911_LINE);
+      expect(spanishAt).toBeGreaterThanOrEqual(0);
+      expect(texts.findIndex((t) => t.includes('leave the building immediately'))).toBeGreaterThan(spanishAt);
+    });
+    const spanishCall = synth.mock.calls.find((c) => (c[0] as TtsSynthesizeInput).text === ES_911_LINE)!;
+    expect((spanishCall[0] as TtsSynthesizeInput).language).toBe('es');
+    expect(
+      synth.mock.calls.filter((c) => (c[0] as TtsSynthesizeInput).text === ES_911_LINE),
+    ).toHaveLength(1);
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('DISCLOSURE_INIT_FAILED — emits logger.error with stable greppable code when initializeSession throws', async () => {
@@ -2159,6 +2328,36 @@ describe('UB-C1 — language threading + live switching', () => {
     expect(openCalls).toHaveLength(2);
     expect(openCalls[1].language).toBe('es');
     expect(events[0]).toMatchObject({ trigger: 'first_utterance' });
+  });
+
+  it('#1220 review — "¿Habla español? La casa está llena de humo" (E1 with no backstop keyword) is NEVER consumed by the language switch', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-smoke-es' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const tts = makeSpyTts();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-smoke-es', 'MZ-smoke-es'));
+    await flush();
+
+    emit({ type: 'final', isFinal: true, transcript: '¿Habla español? La casa está llena de humo', confidence: 0.9 });
+    await flush(8);
+
+    // The utterance reaches the host pipeline, where the E1 scan runs.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({
+      speechResult: '¿Habla español? La casa está llena de humo',
+    });
+    // No language acknowledgement was spoken in its place.
+    const spoken = tts.synthesize.mock.calls.map((c) => c[0].text);
+    expect(spoken).not.toContain(LANGUAGE_SWITCH_ACK.es);
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('a classified language_switch intent (audit_log) flips the language as a fallback', async () => {
@@ -3501,5 +3700,331 @@ describe('C5 capture gate', () => {
       .value as Promise<StreamingSession>);
     ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
     expect(session.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── U5 — absolute per-call duration cap ─────────────────────────────────────
+//
+// The 30-minute audio-idle timer is re-armed on EVERY inbound `media` frame,
+// and Twilio streams comfort-noise frames for the whole call, so nothing on
+// this transport ever cut a live call: a wedged caller, a looping test dialer
+// or a runaway dialogue ran until Twilio's own limit. These pins assert ONE
+// absolute wall-clock timer armed at `start()`, never touched by media frames,
+// that speaks a wrap-up line 30 s before the limit and then ends the leg
+// through the existing FSM end_session path with terminal reason
+// `max_call_duration`.
+describe('U5 absolute per-call duration cap', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  const WRAP_UP_EN = renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, 'en');
+  const MAX_DURATION_EFFECTS: SideEffect[] = [
+    { type: 'end_session', payload: { reason: 'max_call_duration' } },
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeCircuit() {
+    return { recordFailure: vi.fn(), recordSuccess: vi.fn(), isOpen: vi.fn(() => false) };
+  }
+
+  async function setupCappedCall(
+    callSid: string,
+    opts: {
+      maxCallDurationMs?: number;
+      ttsFails?: boolean;
+      language?: 'en' | 'es';
+      /**
+       * Hold the FIRST synthesize() of this exact text open until the test
+       * calls `releaseDeferredTts()` — models an agent turn (or the wrap-up
+       * itself) whose TTS is still in flight when a timer fires.
+       */
+      deferText?: string;
+      speechTurn?: () => Promise<SideEffect[]>;
+    } = {},
+  ) {
+    const session = store.create('t', 'telephony', { callSid });
+    if (opts.language) session.language = opts.language;
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const texts: string[] = [];
+    let releaseDeferredTts: () => void = () => {};
+    let deferred = false;
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        if (opts.ttsFails) throw new Error('tts down');
+        if (opts.deferText !== undefined && input.text === opts.deferText && !deferred) {
+          deferred = true;
+          await new Promise<void>((r) => {
+            releaseDeferredTts = r;
+          });
+        }
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    const finalizeOnClose = vi.fn();
+    const circuit = makeCircuit();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: opts.speechTurn ?? (async () => []),
+        ttsProvider: tts,
+        finalizeOnClose,
+        realtimeCircuit: circuit,
+        connectionRegistry: new InMemoryConnectionRegistry(),
+        ...(opts.maxCallDurationMs !== undefined ? { maxCallDurationMs: opts.maxCallDurationMs } : {}),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: `MZ-${callSid}`,
+      start: { callSid, accountSid: 'AC', streamSid: `MZ-${callSid}`, tracks: ['inbound'] },
+    });
+    await flush();
+    await flush();
+    return {
+      adapter,
+      ws,
+      handle,
+      texts,
+      finalizeOnClose,
+      circuit,
+      session,
+      releaseDeferredTts: () => releaseDeferredTts(),
+    };
+  }
+
+  /** Drain several microtask/immediate rounds so chained awaits settle. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 6; i++) await flush();
+  }
+
+  /** Advance the clock in 1 s steps, feeding a media frame each step. */
+  async function streamFor(ws: FakeWs, ms: number): Promise<void> {
+    for (let t = 0; t < ms; t += 1_000) {
+      ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+      await vi.advanceTimersByTimeAsync(Math.min(1_000, ms - t));
+      await flush();
+    }
+  }
+
+  it('exports a 15-minute default', () => {
+    expect(DEFAULT_MAX_CALL_DURATION_MS).toBe(15 * 60 * 1000);
+  });
+
+  it('speaks the wrap-up once at limit-30s and ends the call at the limit despite continuous media frames', async () => {
+    const { ws, texts, finalizeOnClose, session } = await setupCappedCall('CA-cap-1', {
+      maxCallDurationMs: 90_000,
+    });
+
+    // Continuous frames re-arm the idle timer every second; the absolute
+    // cap must be unaffected by that.
+    await streamFor(ws, 59_000);
+    expect(texts).toEqual([]);
+    expect(ws.closed).toBe(false);
+
+    await streamFor(ws, 1_000);
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+
+    await streamFor(ws, 29_000);
+    expect(ws.closed).toBe(false);
+
+    await streamFor(ws, 1_000);
+    expect(ws.closed).toBe(true);
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual(MAX_DURATION_EFFECTS);
+    // The spoken wrap-up is on the transcript as an agent line.
+    expect(session.transcript).toContain(`agent: ${WRAP_UP_EN}`);
+  });
+
+  it('a normal end before the limit clears the timers — no wrap-up, no second finalize', async () => {
+    const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-cap-2', {
+      maxCallDurationMs: 90_000,
+    });
+    await streamFor(ws, 10_000);
+    ws.inboundJson({ event: 'stop', streamSid: 'MZ-CA-cap-2' });
+    await flush();
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('caller_hangup');
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    await flush();
+    expect(texts).toEqual([]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('limits under 60s skip the pre-warning: the wrap-up is spoken at the limit, then the call ends', async () => {
+    const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-cap-3', {
+      maxCallDurationMs: 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    await flush();
+    expect(texts).toEqual([]);
+    expect(ws.closed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    await flush();
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+  });
+
+  it('localizes the wrap-up to the session language', async () => {
+    const { texts } = await setupCappedCall('CA-cap-es', {
+      maxCallDurationMs: 90_000,
+      language: 'es',
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(texts).toEqual([renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, 'es')]);
+    expect(texts[0]).not.toBe(WRAP_UP_EN);
+  });
+
+  it('a TTS failure during the wrap-up does not prevent the close at the limit', async () => {
+    const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-cap-4', {
+      maxCallDurationMs: 90_000,
+      ttsFails: true,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(ws.closed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await flush();
+    await flush();
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('session_ended');
+    expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+  });
+
+  it('a max-duration close never votes the realtime health circuit', async () => {
+    const { ws, circuit } = await setupCappedCall('CA-cap-5', { maxCallDurationMs: 5_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flush();
+    await flush();
+    expect(ws.closed).toBe(true);
+    expect(circuit.recordSuccess).not.toHaveBeenCalled();
+    expect(circuit.recordFailure).not.toHaveBeenCalled();
+  });
+
+  // PR #975 review finding 3 — the pre-limit wrap-up used to be spoken from a
+  // bare timer, outside the session lock and outside the turn pipeline: it
+  // could overlap an in-flight agent turn's TTS, and a barge-in `clear` could
+  // drop its audio while the "spoken" flag was already latched on scheduling,
+  // so the caller was hard-closed at the limit with no warning heard.
+  describe('wrap-up is serialized with the turn pipeline (PR #975 finding 3)', () => {
+    const AGENT_LINE = 'Sure, let me look that up for you.';
+
+    it('a wrap-up timer that fires during an in-flight agent turn plays AFTER that turn finishes, not over it', async () => {
+      const { adapter, ws, handle, texts, finalizeOnClose, releaseDeferredTts } =
+        await setupCappedCall('CA-cap-a', {
+          maxCallDurationMs: 90_000,
+          deferText: AGENT_LINE,
+          speechTurn: async () => [{ type: 'tts_play', payload: { text: AGENT_LINE } }],
+        });
+
+      // Caller speaks at t=50s; the agent's reply TTS is held in flight.
+      await vi.advanceTimersByTimeAsync(50_000);
+      handle.emit({ type: 'final', isFinal: true, transcript: 'what time do you open', confidence: 0.95 });
+      await settle();
+      expect(texts).toEqual([AGENT_LINE]);
+      expect(adapter._debugState().agentSpeaking).toBe(true);
+
+      // t=60s: the wrap-up timer fires while the agent turn is still speaking.
+      // It must NOT start a second, concurrent utterance.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(texts).toEqual([AGENT_LINE]);
+      expect(ws.sent.some((m) => (m as Record<string, unknown>).event === 'clear')).toBe(false);
+
+      // The agent turn completes → the deferred wrap-up plays next.
+      releaseDeferredTts();
+      await settle();
+      expect(texts).toEqual([AGENT_LINE, WRAP_UP_EN]);
+      expect(adapter._debugState().agentSpeaking).toBe(false);
+      expect(ws.closed).toBe(false);
+
+      // The completed wrap-up is latched: the close at the limit does not repeat it.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(texts).toEqual([AGENT_LINE, WRAP_UP_EN]);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+      expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+    });
+
+    it('a barge-in that drops the wrap-up un-latches it: the close at the limit speaks it once more before hanging up', async () => {
+      const { adapter, ws, handle, texts, finalizeOnClose, releaseDeferredTts, session } =
+        await setupCappedCall('CA-cap-b', {
+          maxCallDurationMs: 90_000,
+          deferText: WRAP_UP_EN,
+        });
+
+      // t=60s: idle caller → the wrap-up starts speaking (TTS held in flight).
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(adapter._debugState().agentSpeaking).toBe(true);
+
+      // Caller talks over it → barge-in sends Twilio `clear`, dropping the wrap-up audio.
+      handle.emit({ type: 'interim', isFinal: false, transcript: 'wait', confidence: 0.5 });
+      await settle();
+      expect(ws.sent.some((m) => (m as Record<string, unknown>).event === 'clear')).toBe(true);
+      releaseDeferredTts();
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(ws.closed).toBe(false);
+
+      // t=90s: the caller never heard the warning, so the close speaks it again first.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(texts).toEqual([WRAP_UP_EN, WRAP_UP_EN]);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+      expect(finalizeOnClose.mock.calls[0][1]).toBe('session_ended');
+      expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+      expect(session.transcript.filter((l) => l === `agent: ${WRAP_UP_EN}`)).toHaveLength(2);
+    });
+
+    it('idle at limit-30s: the wrap-up is spoken immediately, under the session lock', async () => {
+      const { ws, texts, finalizeOnClose, session } = await setupCappedCall('CA-cap-c', {
+        maxCallDurationMs: 90_000,
+      });
+      const lockSpy = vi.spyOn(store, 'withSessionLock');
+
+      await vi.advanceTimersByTimeAsync(59_999);
+      await settle();
+      expect(texts).toEqual([]);
+      expect(lockSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(lockSpy).toHaveBeenCalledWith(session.id, expect.any(Function));
+      expect(ws.closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -15,11 +15,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildFailureTaxonomy,
+  buildRegisterCaseRow,
+  isRegisterProbeCase,
   loadProbeCases,
   probeCasesMeta,
   runVoiceSessionProbe,
+  renderRegisterSummaryMarkdown,
   scoreAssistant,
+  scoreRegisterCase,
   scoreVoice,
+  summarizeRegisterRun,
 } from './probe-operator-voice-50-live.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,8 +42,14 @@ const jwtFileArg = process.argv.includes('--jwt-file')
   : process.env.SERVICEOS_JWT_FILE || null;
 const voiceOnly = process.argv.includes('--voice-only') || process.env.VOICE_ONLY === '1';
 const waitClosed = process.argv.includes('--wait-closed') || process.env.WAIT_AI_CLOSED === '1';
+// `--probe v2..v6` → the operator-voice corpora; `--probe inapp-50` → the
+// in-app 50-case register (fixtures/voice/inapp-50-cases.json), the SAME
+// file the hermetic harness (packages/api/scripts/run-inapp-50.ts) drives, so
+// a live run and a hermetic run score one register.
 const CORPUS_PATH = probeArg
-  ? path.join(ROOT, `fixtures/voice/operator-voice-top-50-${probeArg}-cases.json`)
+  ? probeArg === 'inapp-50'
+    ? path.join(ROOT, 'fixtures/voice/inapp-50-cases.json')
+    : path.join(ROOT, `fixtures/voice/operator-voice-top-50-${probeArg}-cases.json`)
   : null;
 
 export function loadServiceosJwtFromFile(jwtFile) {
@@ -149,6 +160,7 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
   const assistantCounts = { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0, BLOCKED: 0 };
   const voiceCounts = { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0, BLOCKED: 0 };
   const results = [];
+  const registerCaseRows = [];
   const resolveToken = typeof tokenOrGetter === 'function' ? tokenOrGetter : () => tokenOrGetter;
 
   if (waitClosed) {
@@ -188,16 +200,36 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
         reason: `session_create_${sess.status}`,
         httpStatus: sess.status,
       };
+      if (isRegisterProbeCase(c)) {
+        registerCaseRows.push(
+          buildRegisterCaseRow(c, {
+            verdict: voice.verdict,
+            reason: voice.reason,
+            stage: 'none',
+            rootCause: { category: 'infra', detail: voice.reason },
+            proposals: [],
+            unchecked: [],
+          }),
+        );
+      }
     } else {
       const voiceFirstTurn = await apiBound('POST', `/api/voice/sessions/${sess.json.sessionId}/input`, {
         body: { text: c.utterance },
       });
       const voiceTurns = await runVoiceSessionProbe(apiBound, token, sess.json.sessionId, c, voiceFirstTurn);
       const finalVoiceTurn = voiceTurns.finalVoiceTurn;
+      // Register cases (fixtures/voice/inapp-50-cases.json, an `expect`
+      // block) score through scoreRegisterCase — see probe-operator-voice-
+      // 50-live.mjs's doc comment for what it checks vs. `unchecked`. Every
+      // other corpus (v2–v6) passes through scoreVoice completely unchanged.
+      const registerScore = isRegisterProbeCase(c) ? scoreRegisterCase(c, voiceTurns.turns) : null;
       voice = {
-        ...scoreVoice(finalVoiceTurn.json, finalVoiceTurn.status),
+        ...(registerScore ?? scoreVoice(finalVoiceTurn.json, finalVoiceTurn.status)),
         firstTurnState: voiceFirstTurn.json?.state ?? null,
       };
+      if (registerScore) {
+        registerCaseRows.push(buildRegisterCaseRow(c, registerScore));
+      }
     }
     voiceCounts[voice.verdict] = (voiceCounts[voice.verdict] ?? 0) + 1;
     results.push({ id: c.id, cat: c.cat, op: c.op, utterance: c.utterance, assistant, voice });
@@ -209,12 +241,18 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
     `Failure taxonomy: infra(A)=${failureTaxonomy.A} product(B)=${failureTaxonomy.B}`,
   );
 
+  const registerGate = registerCaseRows.length > 0 ? summarizeRegisterRun(registerCaseRows, source) : null;
+
   return {
     corpus,
     assistantCounts,
     voiceCounts,
     results,
     failureTaxonomy,
+    // Hermetic-shaped cases[] + gate — only present for a register run
+    // (--probe inapp-50), so build-dashboard.mjs / triage-report.mjs can
+    // consume a live run the same way they consume a hermetic one.
+    ...(registerGate ? { cases: registerCaseRows, summary: registerGate.summary, gate: registerGate } : {}),
     voiceOnly,
     waitClosed,
   };
@@ -346,6 +384,7 @@ async function main() {
 | Prod /api/me (HMAC) | ${report.auth.prod_me_hmac?.status ?? 'n/a'} |
 
 ${report.probe?.assistantCounts ? `## Voice probe (${probeArg})\n\nAssistant PASS: ${report.probe.assistantCounts.PASS}/50\nVoice PASS: ${report.probe.voiceCounts.PASS}/50\nFailure taxonomy: infra(A)=${report.probe.failureTaxonomy?.A ?? 0} product(B)=${report.probe.failureTaxonomy?.B ?? 0}` : report.probe?.skipped ? `## Voice probe\n\nSkipped: ${report.probe.reason}` : ''}
+${report.probe?.gate ? `\n${renderRegisterSummaryMarkdown(report.probe.gate, report.probe.cases)}\n` : ''}
 
 ${report.auth.error ? `\n**Auth error:** ${report.auth.error}` : ''}
 `;

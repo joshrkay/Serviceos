@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { CustomerRepository } from '../customers/customer';
 import {
@@ -118,6 +119,7 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
+    notFoundOnMalformedId('Lead not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const lead = await leadRepo.findById(req.auth!.tenantId, req.params.id);
       if (!lead) {
@@ -133,6 +135,7 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    notFoundOnMalformedId('Lead not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateLeadSchema.parse(req.body);
       const updated = await updateLead(
@@ -157,6 +160,7 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:create'),
+    notFoundOnMalformedId('Lead not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       // Empty body is fine — address may already live on the lead.
       const body =
@@ -187,6 +191,7 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    notFoundOnMalformedId('Lead not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = loseLeadSchema.parse(req.body);
       const updated = await loseLead(

@@ -24,6 +24,28 @@ import {
   type ProposalType,
   type TrustTier,
 } from '../../src/proposals/proposal';
+import { LEGACY_AUTO_APPROVE_THRESHOLD } from '../../src/proposals/auto-approve';
+
+// followup-autoapprove-default audit — standing invariant pin. See the doc
+// comments on AUTONOMOUS_BOOKING_THRESHOLD_FLOOR (this file's module) and
+// LEGACY_AUTO_APPROVE_THRESHOLD (proposals/auto-approve.ts) for the full
+// mechanism: ai/voice-turn/create-voice-turn-processor.ts never threads
+// supervisorMode/supervisorPresent, so its create_booking proposals always
+// fall through decideInitialStatus's GENERIC shouldAutoApprove(confidence,
+// LEGACY_AUTO_APPROVE_THRESHOLD) check rather than consulting this lane's own
+// dedicated threshold — harmless ONLY while this holds, because eligibility
+// already guarantees confidenceScore >= AUTONOMOUS_BOOKING_THRESHOLD_FLOOR.
+// If either constant moves independently and breaks this, a lane-eligible
+// booking from that caller would silently land in 'draft' instead of
+// 'approved' with no other test catching it (both constants are declared and
+// tested in their own modules with no shared reference between them).
+describe('accidental coupling — AUTONOMOUS_BOOKING_THRESHOLD_FLOOR vs LEGACY_AUTO_APPROVE_THRESHOLD', () => {
+  it('the floor is never stricter than the legacy threshold create-voice-turn-processor.ts actually applies', () => {
+    expect(AUTONOMOUS_BOOKING_THRESHOLD_FLOOR).toBeGreaterThanOrEqual(
+      LEGACY_AUTO_APPROVE_THRESHOLD,
+    );
+  });
+});
 
 const NOW = new Date('2026-07-02T15:00:00Z');
 

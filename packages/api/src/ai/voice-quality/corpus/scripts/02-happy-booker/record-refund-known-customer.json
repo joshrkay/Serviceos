@@ -1,0 +1,53 @@
+{
+  "id": "record-refund-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550415",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_record_refund",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_record_refund_owner",
+        "tenantId": "t_02_record_refund",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555550415",
+        "secondaryPhone": null,
+        "email": "sam.refund@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Refund the Smiths 100 dollars in cash, the recharge didn't hold.",
+      "expected": {
+        "intent": "record_refund",
+        "proposalType": "record_refund",
+        "slots": {
+          "amountCents": 10000
+        },
+        "spokenAnswerMatches": "Got it — I've drafted a record refund for review. Anything else I can help you with?",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

@@ -35,6 +35,7 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
 import { createCatalogItem } from '../../src/catalog/catalog-item';
 import { EstimateTaskHandler } from '../../src/ai/tasks/estimate-task';
+import { CreateChangeOrderTaskHandler } from '../../src/ai/tasks/create-change-order-task';
 import { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
@@ -266,5 +267,78 @@ describe('Postgres integration — voice draft_estimate → approve → execute 
     const other = await createTestTenant(pool);
     const found = await estimateRepo.findById(other.tenantId, resultEntityId);
     expect(found).toBeNull();
+  });
+
+  // Tradesperson wave 1, Task 6 — the SAME production registry, but for the
+  // NEW create_change_order proposal type (migration 271): mints a NEW
+  // estimate pinned to the EXISTING job above, flagged is_change_order.
+  // NOT executed locally (no Docker in this environment) — typechecked
+  // against tsconfig.build.json and reviewed by inspection; run in PR CI
+  // against real Postgres, same as every other test in this file.
+  it('create_change_order: persists an estimate row flagged is_change_order and linked to the EXISTING job', async () => {
+    const handler = new CreateChangeOrderTaskHandler(catalogRepo);
+    const result = await handler.handle({
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      message: 'The Johnsons want a second zone — change order for 1800',
+      // Router-injected verified jobId (create_change_order joins
+      // JOB_REF_INTENTS — entity-resolution.ts) pointing at the job seeded
+      // in the outer beforeAll above.
+      existingEntities: { jobId, changeOrderDescription: 'Second zone', amount: 180000 },
+    });
+
+    expect(result.taskType).toBe('create_change_order');
+    expect(result.proposal.proposalType).toBe('create_change_order');
+    const draftedPayload = result.proposal.payload as Record<string, unknown>;
+    expect(draftedPayload.jobId).toBe(jobId);
+
+    let proposal: Proposal = result.proposal;
+    if (proposal.status !== 'approved') {
+      proposal = transitionProposal(proposal, 'ready_for_review', tenant.userId);
+      proposal = transitionProposal(proposal, 'approved', tenant.userId);
+    }
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    // PRODUCTION registry — proves create_change_order registers on the
+    // real estimateRepo/settingsRepo deps (same block as update_estimate,
+    // handlers.ts), not a hand-constructed handler.
+    const handlers = createExecutionHandlerRegistry({
+      estimateRepo,
+      settingsRepo,
+      jobRepo,
+      locationRepo,
+      auditRepo,
+      customerRepo,
+    });
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
+    const executor = new ProposalExecutor(handlers, proposalRepo, guard, auditRepo);
+    await proposalRepo.create(proposal);
+
+    const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const { result: execResult } = await executor.execute(proposal, context);
+    expect(execResult.success).toBe(true);
+    expect(execResult.resultEntityId).toBeDefined();
+
+    const { rows } = await pool.query(
+      `SELECT tenant_id, job_id, is_change_order, status FROM estimates WHERE id = $1`,
+      [execResult.resultEntityId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].tenant_id).toBe(tenant.tenantId);
+    expect(rows[0].job_id).toBe(jobId);
+    expect(rows[0].is_change_order).toBe(true);
+    expect(rows[0].status).toBe('draft');
+
+    // The change-order-specific audit event fires (never the generic
+    // estimate.created — see CreateChangeOrderExecutionHandler's doc
+    // comment on why that would double-count against estimate_created).
+    const { rows: eventRows } = await pool.query(
+      `SELECT event_type FROM audit_events
+        WHERE tenant_id = $1 AND entity_type = 'estimate' AND entity_id = $2`,
+      [tenant.tenantId, execResult.resultEntityId],
+    );
+    expect(eventRows.map((r) => r.event_type)).toEqual(['estimate.change_order_created']);
   });
 });

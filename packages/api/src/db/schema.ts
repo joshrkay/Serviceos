@@ -982,7 +982,7 @@ export const MIGRATIONS = {
     ALTER TABLE proposals ALTER COLUMN idempotency_key DROP NOT NULL;
     ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
     ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
-      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone')) NOT VALID;
   `,
 
   '040_create_technician_location_pings': `
@@ -1912,7 +1912,7 @@ export const MIGRATIONS = {
   '069_extend_leads_source_check': `
     ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
     ALTER TABLE leads ADD CONSTRAINT leads_source_check
-      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal')) NOT VALID;
   `,
 
   // Twilio per-tenant subaccount model.
@@ -1969,7 +1969,7 @@ export const MIGRATIONS = {
         'suspended',
         'terminated',
         'releasing'
-      ));
+      )) NOT VALID;
   `,
 
   '072_add_executing_status': `
@@ -1977,7 +1977,7 @@ export const MIGRATIONS = {
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
     ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
-      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone')) NOT VALID;
   `,
 
   '073_add_execution_retry_count': `
@@ -2070,7 +2070,7 @@ export const MIGRATIONS = {
           deposit_strategy IS NULL
           OR (deposit_strategy = 'percentage' AND deposit_percentage_bps IS NOT NULL)
           OR (deposit_strategy = 'fixed' AND deposit_fixed_cents IS NOT NULL)
-        );
+        ) NOT VALID;
   `,
 
   '078_jobs_deposit_columns': `
@@ -2107,7 +2107,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS jobs_deposit_paid_lte_required;
     ALTER TABLE jobs
       ADD CONSTRAINT jobs_deposit_paid_lte_required
-        CHECK (deposit_paid_cents <= deposit_required_cents);
+        CHECK (deposit_paid_cents <= deposit_required_cents) NOT VALID;
   `,
 
   '079_tenant_settings_deposit_timing_policy': `
@@ -2418,7 +2418,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
     ALTER TABLE tenant_settings
       ADD CONSTRAINT tenant_settings_region_format_check
-        CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$');
+        CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$') NOT VALID;
   `,
 
   '089_drop_vertical_packs_type_check': `
@@ -2444,11 +2444,11 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_voice_agent_name_length,
       ADD CONSTRAINT tenant_settings_voice_agent_name_length
-        CHECK (voice_agent_name IS NULL OR length(voice_agent_name) <= 80);
+        CHECK (voice_agent_name IS NULL OR length(voice_agent_name) <= 80) NOT VALID;
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length,
       ADD CONSTRAINT tenant_settings_voice_greeting_length
-        CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500);
+        CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500) NOT VALID;
   `,
 
   // B2 — Persistent outcome stamping. Mirrors voice_recordings.outcome
@@ -3472,7 +3472,7 @@ export const MIGRATIONS = {
     -- CHECK. Explicit DROP + ADD mirrors proposals_status_check.
     ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
-      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other')) NOT VALID;
   `,
 
   '134_proposal_chains': `
@@ -3918,7 +3918,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS tenant_integrations_provider_check;
     ALTER TABLE tenant_integrations
       ADD CONSTRAINT tenant_integrations_provider_check
-        CHECK (provider IN ('twilio', 'sendgrid', 'google_business'));
+        CHECK (provider IN ('twilio', 'sendgrid', 'google_business')) NOT VALID;
 
     -- Add the credentials JSONB column used by CredentialResolver.getCredential.
     -- Defaults to '{}' so existing twilio/sendgrid rows are unaffected.
@@ -4121,7 +4121,7 @@ export const MIGRATIONS = {
           'proposal_rendered','reapproval_rendered','clarification_sent',
           'reply_approve','reply_reject','edit_session_opened','edit_request',
           'review_required_rendered'
-        ));
+        )) NOT VALID;
   `,
 
   // RV-120 — per-call vulnerability triage outcomes. One row per
@@ -4239,7 +4239,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS chk_recording_retention_days_positive;
     ALTER TABLE tenant_settings
       ADD CONSTRAINT chk_recording_retention_days_positive
-        CHECK (recording_retention_days > 0);
+        CHECK (recording_retention_days > 0) NOT VALID;
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE voice_recordings
@@ -4279,7 +4279,7 @@ export const MIGRATIONS = {
           'proposal_rendered','reapproval_rendered','clarification_sent',
           'reply_approve','reply_reject','edit_session_opened','edit_request',
           'review_required_rendered','voice_reapproval'
-        ));
+        )) NOT VALID;
   `,
 
   // F17 / P15-001 — per-tenant QuickBooks (Xero enum reserved) accounting sync.
@@ -4332,7 +4332,7 @@ export const MIGRATIONS = {
 
     ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
     ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
-      CHECK (provider IN ('google', 'quickbooks', 'xero'));
+      CHECK (provider IN ('google', 'quickbooks', 'xero')) NOT VALID;
   `,
 
   '173_create_hfcr_weekly_sends': `
@@ -4373,7 +4373,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS chk_agreement_renewal_term_positive;
     ALTER TABLE service_agreements
       ADD CONSTRAINT chk_agreement_renewal_term_positive
-        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0);
+        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0) NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_agreements_auto_renew
       ON service_agreements (tenant_id, ends_on)
       WHERE auto_renew = TRUE AND status = 'active';
@@ -4390,7 +4390,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS chk_agreement_member_discount_bps;
     ALTER TABLE service_agreements
       ADD CONSTRAINT chk_agreement_member_discount_bps
-        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
+        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000) NOT VALID;
   `,
 
   // Membership engine (#6 phase 3) — priority booking. A membership with
@@ -4548,7 +4548,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS appointment_type TEXT;
     ALTER TABLE appointments
       ADD CONSTRAINT appointments_appointment_type_check
-      CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+      CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic')) NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
   `,
 
@@ -4559,7 +4559,7 @@ export const MIGRATIONS = {
     -- so the INSERT failed (23514). Widen the constraint to include the value.
     ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_account_type_check;
     ALTER TABLE customers ADD CONSTRAINT customers_account_type_check
-      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager')) NOT VALID;
   `,
 
   '184_tenant_settings_labor_rate': `
@@ -4732,7 +4732,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS address_type TEXT NOT NULL DEFAULT 'service';
     ALTER TABLE service_locations
       ADD CONSTRAINT service_locations_address_type_check
-      CHECK (address_type IN ('service', 'billing', 'both'));
+      CHECK (address_type IN ('service', 'billing', 'both')) NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_service_locations_billing
       ON service_locations(tenant_id, customer_id)
       WHERE address_type IN ('billing', 'both');
@@ -4755,7 +4755,7 @@ export const MIGRATIONS = {
           'reply_approve','reply_reject','edit_session_opened','edit_request',
           'review_required_rendered','voice_reapproval',
           'digest_approve_all_rendered'
-        ));
+        )) NOT VALID;
   `,
 
   // U6 (CRM Jobber parity, Phase 2 — communication loop): widen the
@@ -4767,6 +4767,20 @@ export const MIGRATIONS = {
   // ledger every other outbound send writes to, so DNC suppression and
   // delivery accounting stay uniform across transactional and conversational
   // sends.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): the runner has no ledger —
+  // getMigrationSQL() re-executes every migration on every boot — so an
+  // ADD CONSTRAINT without NOT VALID re-validates the ENTIRE table on every
+  // single deploy, against THIS migration's (now-stale, pre-269/270)
+  // vocabulary. Once a later migration (269, 270) legitimately widens the
+  // constraint further and the app starts writing those newer entity_type
+  // values, the NEXT deploy replays this migration first and rejects the
+  // rows a later statement in the very same corpus would have allowed —
+  // ATRewriteTable/SQLSTATE 23514, e.g. on 'portal_session'/'custom_message'
+  // rows. 092/125/164 got this right with NOT VALID; this one (and 269, 270
+  // below) regressed the pattern. NOT VALID only skips validating
+  // pre-existing rows at ADD-CONSTRAINT time — new/updated rows are still
+  // checked immediately, so enforcement for future writes is unchanged.
   '190_dispatch_entity_conversation_reply': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -4777,7 +4791,7 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest', 'conversation_reply'
-        ));
+        )) NOT VALID;
   `,
 
   // CRM two-way comms follow-up: an inbound text from an unknown number
@@ -4788,7 +4802,7 @@ export const MIGRATIONS = {
   '191_extend_leads_source_check_sms': `
     ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
     ALTER TABLE leads ADD CONSTRAINT leads_source_check
-      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal','sms'));
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal','sms')) NOT VALID;
   `,
 
   // The DNC management UI (commit 98b5a43) rewrote PgDncRepository to read/write
@@ -4811,7 +4825,7 @@ export const MIGRATIONS = {
   '193_extend_vertical_training_assets_painting': `
     ALTER TABLE vertical_training_assets DROP CONSTRAINT IF EXISTS vertical_training_assets_vertical_type_check;
     ALTER TABLE vertical_training_assets ADD CONSTRAINT vertical_training_assets_vertical_type_check
-      CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting'));
+      CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting')) NOT VALID;
   `,
 
   // Post-job thank-you SMS (PRD §7.2 demo moment). Adds:
@@ -5128,7 +5142,7 @@ export const MIGRATIONS = {
   '207_jobs_status_canonical_lifecycle': `
     ALTER TABLE jobs
       ADD CONSTRAINT jobs_status_check
-      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled')) NOT VALID;
   `,
 
   '209_create_corrections': `
@@ -5517,7 +5531,7 @@ export const MIGRATIONS = {
     ALTER TABLE recurring_jobs
       ADD CONSTRAINT recurring_jobs_appointment_type_check
       CHECK (appointment_type IS NULL OR appointment_type IN
-        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic')) NOT VALID;
 
     -- Materialization ledger: one row per generated occurrence. The UNIQUE
     -- constraint is the idempotency guarantee (claimOccurrence does an
@@ -6512,7 +6526,7 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewed_script_length,
       ADD CONSTRAINT tenant_settings_e1_reviewed_script_length
-        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000);
+        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000) NOT VALID;
   `,
 
   // ANS-001 — (tenant_id, session_id) alone collapsed DISTINCT follow-ups for
@@ -6538,6 +6552,11 @@ export const MIGRATIONS = {
   // change stays independently reviewable/reversible. Reuses the same
   // dispatch ledger every other outbound send writes to, so DNC suppression
   // and delivery accounting stay uniform.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): see the comment on 190 above
+  // — without NOT VALID, every redeploy re-validates the whole table against
+  // THIS (pre-270) vocabulary, which rejects 'custom_message' rows the app
+  // legitimately writes once 270 has been live for a while.
   '269_dispatch_entity_portal_session': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -6548,7 +6567,354 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest', 'conversation_reply', 'portal_session'
-        ));
+        )) NOT VALID;
+  `,
+  // Tradesperson wave 1 — free-form owner-approved customer message
+  // (send_customer_message proposal). New dispatch entity type so the
+  // message_dispatches audit trail can carry it.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): see the comment on 190 above.
+  // This is currently the LAST widening, so its list already matches
+  // DispatchEntityType in full — but leaving off NOT VALID here still means
+  // every redeploy re-scans the whole table for no benefit, and the next
+  // widening after this one would reintroduce the exact same failure mode.
+  '270_dispatch_entity_custom_message': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session', 'custom_message'
+        )) NOT VALID;
+  `,
+  // Tradesperson wave 1 — change orders are estimates pinned to an existing
+  // job and flagged so reporting can separate scope-adds from original bids.
+  '271_estimates_change_order_flag': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS is_change_order BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_estimates_change_order
+      ON estimates (tenant_id, job_id) WHERE is_change_order = TRUE;
+  `,
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan) — voice-captured
+  // materials/shopping list. An item is an operational row (like
+  // call_me_back_tasks), created via an approved add_material proposal;
+  // purchasing/PO automation is a non-goal.
+  '272_create_material_items': `
+    CREATE TABLE IF NOT EXISTS material_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID REFERENCES jobs(id),
+      description TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+      vendor TEXT,
+      -- 'cancelled' is unreachable today (no method sets it); kept for
+      -- forward-compat since a future task may add markCancelled, and
+      -- dropping a CHECK value later would cost its own migration.
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'purchased', 'cancelled')),
+      needed_by TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      purchased_by TEXT,
+      purchased_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE material_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE material_items FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_material_items ON material_items;
+    CREATE POLICY tenant_isolation_material_items ON material_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    -- Single covering index for the one real query shape (listPending: tenant +
+    -- pending + ORDER BY created_at). status = 'pending' is a SQL LITERAL, not a
+    -- bind param, so the planner can prove the predicate implies the index —
+    -- keep it a literal; parameterizing it later would make the index unusable.
+    -- No plain (tenant_id) index: nothing in this module queries by tenant_id
+    -- alone (markPurchased hits the id primary key).
+    CREATE INDEX IF NOT EXISTS idx_material_items_pending
+      ON material_items (tenant_id, created_at) WHERE status = 'pending';
+  `,
+  // A3 (2026-08-10) — index for listPending's ONE ordering, reversing #819's
+  // decision to ship without one. A NEW migration, not an edit to 272: 272
+  // shipped to main in PR #814, and the immutability guard's rule for a
+  // shipped migration is "add a new one with idempotent CREATE INDEX IF NOT
+  // EXISTS" (test/db/migration-immutability.test.ts).
+  //
+  // WHY THE DECISION FLIPPED. #819 declined this index on two premises, both
+  // of which turned out to be false: (1) "markPurchased continuously prunes
+  // the pending set" — markPurchased has NO production caller, so a tenant's
+  // pending set is strictly monotonic; and (2) a revisit trigger of "~2,000
+  // concurrently-pending rows for one tenant" that nothing observes (no
+  // materials route, no metric, no alert; lookup_events.result_count
+  // saturates at 6). Unbounded growth plus an unobservable trigger is not a
+  // plan. The write side is negligible either way — this table is written
+  // once per approved voice add_material proposal.
+  //
+  // WHY THE FULL FOUR-COLUMN KEY. listPending orders `needed_by ASC NULLS
+  // LAST, created_at ASC, id ASC` under a tenant_id equality and the
+  // status = 'pending' literal. (tenant_id, needed_by, created_at) leaves
+  // the trailing `id ASC` unsupplied, which the planner resolves with an
+  // Incremental Sort rather than a plain index scan; including `id` makes
+  // the whole sort index-supplied so the LIMIT bounds the work. A btree ASC
+  // index already stores NULLs last, which is exactly what NULLS LAST wants.
+  //
+  // 272's idx_material_items_pending is deliberately NOT dropped here even
+  // though nothing orders by created_at any more. The runner has no ledger —
+  // getMigrationSQL() re-executes every migration on every boot — so a
+  // CREATE in 272 plus a DROP in 273 would rebuild and destroy that index on
+  // every boot. Keeping a redundant index is much cheaper than that.
+  '273_material_items_urgency_index': `
+    CREATE INDEX IF NOT EXISTS idx_material_items_pending_urgency
+      ON material_items (tenant_id, needed_by, created_at, id)
+      WHERE status = 'pending';
+  `,
+
+  // #1061 — one tenant per DID.
+  //
+  // `tenant_integrations.provider_data->>'phoneE164'` had no uniqueness
+  // constraint, so two tenants could each be provisioned with the same Twilio
+  // number. Three call sites then pick a row with `LIMIT 1` and no ORDER BY:
+  // PgPhoneNumberRepository.findByNumber, app.ts's resolveTenantIdByPhoneNumber
+  // (inbound /voice + /gather routing), and — since PR #1082 — tenant
+  // credential selection in integrations/credentials.ts. An inbound call to a
+  // shared DID lands in an arbitrary tenant and replies on arbitrary
+  // credentials. Every one of those resolves the tenant FROM the DID, so there
+  // is no tenant scope in which application code could check for the conflict:
+  // the guarantee has to be a database constraint.
+  //
+  // ADDITIVE. Creates an index; drops nothing. 070's UNIQUE (tenant_id,
+  // provider) stays as-is (it forbids two twilio rows for ONE tenant; this
+  // forbids one DID across TWO tenants — different, complementary guarantees).
+  //
+  // ── OPERATOR PRE-FLIGHT — RUN BEFORE DEPLOYING THIS ────────────────────
+  // The runner has no ledger: getMigrationSQL() re-executes every migration on
+  // every boot, and applyMigrations() sends the whole corpus as ONE statement,
+  // so a CREATE UNIQUE INDEX that fails on pre-existing duplicates fails the
+  // entire migration run and blocks the deploy (migrate.ts sets
+  // process.exitCode = 1). Confirm there are no duplicate claims first:
+  //
+  //   SET app.system_lookup = 'true';  -- tenant_integrations is FORCE RLS (074)
+  //   SELECT provider_data->>'phoneE164'              AS phone_e164,
+  //          count(*)                                 AS claim_count,
+  //          array_agg(tenant_id  ORDER BY created_at) AS tenant_ids,
+  //          array_agg(status     ORDER BY created_at) AS statuses,
+  //          array_agg(created_at ORDER BY created_at) AS created_ats
+  //     FROM tenant_integrations
+  //    WHERE provider = 'twilio'
+  //      AND provider_data->>'phoneE164' IS NOT NULL
+  //      AND provider_data->>'phoneE164' NOT LIKE '+1500555____'
+  //    GROUP BY 1
+  //   HAVING count(*) > 1
+  //    ORDER BY claim_count DESC, phone_e164;
+  //
+  // The WHERE clause must stay character-for-character identical to the
+  // index's below: if the two drift, the pre-flight stops predicting whether
+  // the index can be built, which is the only job it has.
+  //
+  // Zero rows → this migration applies cleanly. Any rows → reconcile them
+  // first (decide which tenant keeps the DID; the loser's phoneE164 must be
+  // cleared and its line re-provisioned), because the index cannot be created
+  // while a duplicate exists. See docs/audit/lane-reports/1061-did-uniqueness.md.
+  //
+  // ── Why not CONCURRENTLY ───────────────────────────────────────────────
+  // The runner does NOT support it. applyMigrations() issues the whole corpus
+  // via a single client.query(), which node-pg sends as a simple query — an
+  // implicit transaction block — and CREATE INDEX CONCURRENTLY is rejected
+  // inside one (25001). It also sets statement_timeout = '25s'. On a table
+  // this size (one row per tenant per provider) a plain build takes
+  // milliseconds and the ACCESS EXCLUSIVE lock is negligible. If
+  // tenant_integrations ever grows large enough to matter, an operator can
+  // build it CONCURRENTLY out-of-band BEFORE the deploy — the
+  // `IF NOT EXISTS` below then finds it already present and no-ops:
+  //
+  //   CREATE UNIQUE INDEX CONCURRENTLY uq_tenant_integrations_twilio_phone_e164
+  //     ON tenant_integrations (provider, (provider_data->>'phoneE164'))
+  //     WHERE provider = 'twilio'
+  //       AND provider_data->>'phoneE164' IS NOT NULL
+  //       AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
+  //
+  // ── Why the test-exchange carve-out ────────────────────────────────────
+  // workers/provision-twilio.ts assigns the SAME Twilio magic test number
+  // (+15005550006, STUB_DEV_PHONE_E164) to EVERY tenant provisioned without
+  // real Twilio credentials. Those numbers are not dialable and never route a
+  // real inbound call, so uniqueness over them protects nothing — and without
+  // a carve-out the second dev/CI tenant onward would fail to provision.
+  //
+  // The carve-out is the EXCHANGE, not the `stub: true` marker those rows
+  // also carry, matching isTwilioTestNumber (telephony/phone-policy.ts):
+  // 500-555 is not an assignable NANP block, so "there is no legitimate
+  // tenant line to false-positive on". Two reasons the marker is the wrong
+  // key, both found on PR #1120:
+  //   1. Rows hold the magic number WITHOUT the marker — the marker postdates
+  //      them (public-intake.test.ts calls them "rows predating it"), and a
+  //      pre-flight against a real database returned four of them. Keying on
+  //      the marker would fail CREATE INDEX on those rows and block a deploy.
+  //   2. Keying on the marker is a loophole in the other direction: `stub:
+  //      true` on a REAL dialable number would exempt it from the constraint.
+  // LIKE rather than a regex deliberately — `\d` and `\+` inside this
+  // template literal would be swallowed as JS escapes before Postgres saw them.
+  '274_tenant_integrations_unique_twilio_did': `
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_integrations_twilio_phone_e164
+      ON tenant_integrations (provider, (provider_data->>'phoneE164'))
+      WHERE provider = 'twilio'
+        AND provider_data->>'phoneE164' IS NOT NULL
+        AND provider_data->>'phoneE164' NOT LIKE '+1500555____';
+  `,
+
+  // #1139 (rows 9.8/9.9) — the payload AS FIRST PROPOSED. `editProposal`
+  // overwrites `proposals.payload` with the operator's correction before
+  // approval (the executor executes that payload, and records it as
+  // proposal_executions.executed_payload). The correction-lesson recorder
+  // diffs "what the AI drafted" against "what was executed", but the draft
+  // was gone — so no correction lesson was ever recorded on the real
+  // pipeline. `editProposal` now copies the pre-edit payload here on the
+  // FIRST edit that changes a field and never again; NULL = never edited, so
+  // `payload` is still the original. Nullable, no default, no backfill:
+  // existing rows keep their current meaning.
+  //
+  // Pre-flight: none needed — ADD COLUMN of a nullable JSONB with no default
+  // cannot fail on existing rows (catalog-only change, no table rewrite).
+  // Sanity check before deploy (expect 0 rows — nothing else owns the name):
+  //   SELECT 1 FROM information_schema.columns
+  //    WHERE table_name = 'proposals' AND column_name = 'original_payload';
+  '275_proposals_original_payload': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS original_payload JSONB;
+  `,
+  // #1131 — dispatch_analytics.event_type's CHECK (inline in 105) never listed
+  // 'en_route_notice_sent' / 'en_route_notice_failed', which the delay
+  // delivery worker (notifications/delay-notifications.ts) writes for every
+  // "on my way" notice, nor 'crew_added' / 'crew_removed', which
+  // proposals/execution/crew-handler.ts writes. Every such insert threw 23514.
+  // The list below is exactly DispatchEventType (dispatch/analytics.ts) — a
+  // strict superset of 105's list, so no existing row can violate it.
+  //
+  // 105 is CREATE TABLE IF NOT EXISTS, so on an existing database it never
+  // re-creates its (auto-named) constraint; on a fresh one it creates the old
+  // list and this step replaces it — both converge on the same definition.
+  // NOT VALID for the same reason as 190/269/270: the runner has no ledger and
+  // re-runs this on every boot, so a validating ADD would re-scan the whole
+  // table each deploy. New and updated rows are still checked.
+  //
+  // Pre-flight (informational — the widening cannot fail on existing data):
+  //   SELECT event_type, count(*) FROM dispatch_analytics GROUP BY 1;
+  '276_dispatch_analytics_event_type_en_route': `
+    ALTER TABLE dispatch_analytics
+      DROP CONSTRAINT IF EXISTS dispatch_analytics_event_type_check;
+    ALTER TABLE dispatch_analytics
+      ADD CONSTRAINT dispatch_analytics_event_type_check
+        CHECK (event_type IN (
+          'assigned', 'reassigned', 'crew_added', 'crew_removed',
+          'rescheduled', 'canceled', 'conflict_detected',
+          'delay_notice_sent', 'delay_notice_failed',
+          'en_route_notice_sent', 'en_route_notice_failed'
+        )) NOT VALID;
+  `,
+  // #1158 — make "this tenant never chose a travel buffer" REPRESENTABLE, the
+  // same move 263 made for timezone. 098 added job_buffer_minutes as
+  // `INT NOT NULL DEFAULT 30` and every signup writes a settings row, so an
+  // untouched tenant read back a stored 30 and availability labelled it
+  // `bufferSource: 'tenant'` — the owner was told they had configured a
+  // buffer they never set. NULL now means "not configured"; every reader
+  // applies the 30-minute default in code (effectiveBufferMinutes in
+  // scheduling/booking-availability.ts, onboarding/load-facts.ts), so the
+  // EFFECTIVE buffer — and therefore every offered/accepted slot — is
+  // unchanged.
+  //
+  // Backfill: a stored 30 becomes NULL only when the audit trail shows no
+  // write that carried a buffer for that tenant. The writes that carry one:
+  //   - PUT /api/onboarding/identity (the route REQUIRED jobBufferMinutes up
+  //     to this change) → 'tenant.identity_set' with metadata.hourlyRateCents;
+  //   - the conversational onboarding_tenant_settings handler (writes 30) →
+  //     'tenant.identity_set' with metadata.jobBufferMinutes;
+  //   - PUT /api/settings → 'settings.tenant.updated' whose
+  //     metadata.changedKeys contains 'jobBufferMinutes'.
+  // ('tenant.identity_set' from the onboarding_schedule handler carries only
+  // businessHours and is NOT evidence.) ASSUMPTION: a buffer write that
+  // predates those audit shapes leaves no trace, so such a tenant is
+  // relabelled 'default' — its effective buffer stays 30 either way.
+  //
+  // One-shot: the runner has no ledger and re-runs every migration on each
+  // boot, so the whole block is guarded on the column still being NOT NULL.
+  // After the first successful run the column is nullable and the backfill
+  // never runs again (it must not: a later NULL is a genuine "unset").
+  // The migrate role bypasses RLS (see 119), so the UPDATE and the audit
+  // lookup see every tenant.
+  //
+  // Pre-flight (run before deploy; informational — the block cannot fail on
+  // existing data):
+  //   SELECT count(*) FILTER (WHERE job_buffer_minutes = 30) AS stored_30,
+  //          count(*) FILTER (WHERE job_buffer_minutes = 30 AND NOT EXISTS (
+  //            SELECT 1 FROM audit_events ae WHERE ae.tenant_id = ts.tenant_id AND (
+  //              (ae.event_type = 'tenant.identity_set'
+  //                AND (ae.metadata ? 'jobBufferMinutes' OR ae.metadata ? 'hourlyRateCents'))
+  //              OR (ae.event_type = 'settings.tenant.updated'
+  //                AND ae.metadata -> 'changedKeys' ? 'jobBufferMinutes')))) AS becomes_null,
+  //          count(*) FILTER (WHERE job_buffer_minutes <> 30) AS custom_kept
+  //     FROM tenant_settings ts;
+  '277_tenant_settings_job_buffer_nullable': `
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'tenant_settings'
+           AND column_name = 'job_buffer_minutes'
+           AND is_nullable = 'NO'
+      ) THEN
+        ALTER TABLE tenant_settings ALTER COLUMN job_buffer_minutes DROP DEFAULT;
+        ALTER TABLE tenant_settings ALTER COLUMN job_buffer_minutes DROP NOT NULL;
+        UPDATE tenant_settings ts
+           SET job_buffer_minutes = NULL
+         WHERE ts.job_buffer_minutes = 30
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_events ae
+              WHERE ae.tenant_id = ts.tenant_id
+                AND (
+                  (ae.event_type = 'tenant.identity_set'
+                    AND (ae.metadata ? 'jobBufferMinutes' OR ae.metadata ? 'hourlyRateCents'))
+                  OR (ae.event_type = 'settings.tenant.updated'
+                    AND ae.metadata -> 'changedKeys' ? 'jobBufferMinutes')
+                )
+           );
+      END IF;
+    END $$;
+  `,
+  '278_call_transcript_turns_call_sid': `
+    ALTER TABLE call_transcript_turns ALTER COLUMN voice_recording_id DROP NOT NULL;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS call_sid TEXT;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS session_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_call_leg
+      ON call_transcript_turns (tenant_id, call_sid, session_id, turn_index)
+      WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
+      ON call_transcript_turns (tenant_id, call_sid);
+  `,
+
+  // #1051 follow-up / #1233 review — the owner alert for the tenant-wide voice
+  // money-approval PIN lock is CLAIMED here before it is sent: one row per
+  // (tenant, lock episode), inserted with ON CONFLICT DO NOTHING, and only the
+  // caller whose insert lands sends the text (settings/pg-voice-approval-pin-
+  // lock-alert.ts). A NEW, empty, tiny table — deliberately NOT an index on
+  // audit_events: a blocking index build on that large table could outrun the
+  // migration statement timeout (migrate.ts) and fail the deploy. The attempt
+  // lookup itself is served by 245's idx_audit_events_tenant_created_at.
+  // The primary key is the claim; no other index is needed (every read and
+  // write is by (tenant_id, episode_key)). Idempotent; drops nothing.
+  '279_create_voice_approval_pin_lock_alerts': `
+    CREATE TABLE IF NOT EXISTS voice_approval_pin_lock_alerts (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      episode_key TEXT NOT NULL,
+      session_id TEXT,
+      strike_count INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, episode_key)
+    );
+    ALTER TABLE voice_approval_pin_lock_alerts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_approval_pin_lock_alerts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_approval_pin_lock_alerts ON voice_approval_pin_lock_alerts;
+    CREATE POLICY tenant_isolation_voice_approval_pin_lock_alerts ON voice_approval_pin_lock_alerts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 

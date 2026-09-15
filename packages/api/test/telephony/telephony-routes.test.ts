@@ -42,7 +42,7 @@ function buildHarness() {
   const store = new VoiceSessionStore();
   const gateway = makeGateway(
     JSON.stringify({
-      intentType: 'create_invoice',
+      intentType: 'draft_estimate',
       confidence: 0.91,
       reasoning: 'clear command',
       extractedEntities: {},

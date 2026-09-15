@@ -111,6 +111,97 @@ function clampDuration(min: number): number {
   return Math.min(min, MAX_DURATION_MIN);
 }
 
+/**
+ * SPOKEN clock hours written as WORDS: "Tuesday two o'clock", "Tuesday at two".
+ *
+ * chrono reads "2 o'clock" / "at 2" as a certain hour but ignores the word
+ * forms entirely, so the phrase parsed as a bare date and came back
+ * `ambiguous_no_time` — the caller was asked "what time on Tuesday?" for a
+ * sentence that stated the time out loud. That is a VOICE-shaped failure: an
+ * operator dictating a booking says "two o'clock", they do not say "2", and a
+ * speech-to-text transcript of "Tuesday at 2" is the string "Tuesday at two".
+ * Without this, the SAME sentence resolved when typed and asked a pointless
+ * question when spoken into the mic — register cases book-01/book-02 (digits,
+ * "o'clock") passed while book-03 ("Tuesday at two") did not.
+ *
+ * Strictly additive by construction. The substitution is ANCHORED — to the
+ * `o'clock` token (straight or curly apostrophe, or the bare "oclock"
+ * spelling) that FOLLOWS the number word, or to the temporal preposition `at`
+ * that PRECEDES it — and only ever rewrites the number word itself, so:
+ *   - no phrase that resolves today can change (they contain no "<word>
+ *     o'clock" or "at <word>" pair — if they did, they would be failing
+ *     today);
+ *   - a stray "two" with neither anchor is untouched, because a bare word
+ *     number is genuinely ambiguous ("two hours", "two of them", "two of the
+ *     filters") and guessing at it is exactly what this module refuses to do;
+ *   - an `at`-anchored hour followed by a MINUTE word ("at two thirty", "at
+ *     two fifteen") is also untouched: rewriting it to "at 2 thirty" would
+ *     let chrono read the hour and drop the minutes, silently booking 2:00
+ *     for a caller who said 2:30. An incomplete time still asks.
+ * Nothing else about parsing, the meridiem bias, or the ambiguity report
+ * changes — an hour that is still unstated still asks.
+ */
+const SPOKEN_HOUR_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+  eleven: '11',
+  twelve: '12',
+};
+
+const SPOKEN_HOUR_ALTERNATION = Object.keys(SPOKEN_HOUR_WORDS).join('|');
+
+const SPOKEN_OCLOCK_RE = new RegExp(
+  `\\b(${SPOKEN_HOUR_ALTERNATION})\\b(\\s+o[’']?clock\\b)`,
+  'gi',
+);
+
+/**
+ * Minute words that turn an `at`-anchored hour into an INCOMPLETE time. Listed
+ * rather than inferred: these are the only ways English states minutes in
+ * words, and anything outside the list ("at two pm", "at two on Tuesday") is a
+ * complete hour that chrono can read once the word becomes a digit.
+ */
+const SPOKEN_MINUTE_WORDS = [
+  'oh',
+  'o',
+  'five',
+  'ten',
+  'fifteen',
+  'twenty',
+  'twenty-five',
+  'thirty',
+  'thirty-five',
+  'forty',
+  'forty-five',
+  'fifty',
+  'fifty-five',
+];
+
+const SPOKEN_AT_HOUR_RE = new RegExp(
+  `(\\bat\\s+)(${SPOKEN_HOUR_ALTERNATION})\\b(?!\\s+(?:${SPOKEN_MINUTE_WORDS.join('|')})\\b)`,
+  'gi',
+);
+
+function normalizeSpokenClockWords(text: string): string {
+  return text
+    .replace(
+      SPOKEN_OCLOCK_RE,
+      (_match, word: string, tail: string) => `${SPOKEN_HOUR_WORDS[word.toLowerCase()]}${tail}`,
+    )
+    .replace(
+      SPOKEN_AT_HOUR_RE,
+      (_match, head: string, word: string) => `${head}${SPOKEN_HOUR_WORDS[word.toLowerCase()]}`,
+    );
+}
+
 /** Detect an explicit daypart word so "tomorrow morning" resolves to a window. */
 function detectDaypart(text: string): keyof typeof DAYPARTS | undefined {
   const lower = text.toLowerCase();
@@ -162,7 +253,10 @@ export function resolveDateTime(
   const now = opts.now ?? new Date();
   const durationMin = clampDuration(opts.defaultDurationMin ?? DEFAULT_DURATION_MIN);
 
-  const text = (phrase ?? '').trim();
+  // A spoken "two o'clock" is normalized to "2 o'clock" before chrono sees
+  // it — see normalizeSpokenClockWords for why this cannot change any phrase
+  // that resolves today.
+  const text = normalizeSpokenClockWords((phrase ?? '').trim());
   if (!text) return { ok: false, reason: 'empty' };
 
   // chrono is timezone-naive: feed it a reference Date whose LOCAL fields
@@ -272,6 +366,88 @@ export function resolveDateTime(
     result.arrivalWindowEndUtc = arrivalEnd.toUTC().toISO()!;
   }
   return result;
+}
+
+/**
+ * Resolve a spoken DAY phrase ("Thursday", "tomorrow", "next Monday",
+ * "this Friday", "Thursday afternoon") to a calendar date key
+ * (`YYYY-MM-DD`) in the tenant's timezone — WITHOUT requiring a
+ * time-of-day or daypart.
+ *
+ * (2026-08-09, Task 10 quality-review C1) This is the lookup-side sibling
+ * of `resolveDateTime`, which this module's OTHER exported function
+ * intentionally REFUSES a bare day for (`ambiguous_no_time`) — booking a
+ * bare "Thursday" is meaningless, there's no time to reserve. But a
+ * day/window LOOKUP ("who's free Thursday?", "what's Mike's day look
+ * like Monday?") has NOTHING to book; it only needs to know WHICH DAY.
+ * `ai/skills/lookup-crew-schedule.ts` used to call `resolveDateTime` for
+ * this and silently answered about TODAY for every bare-day phrase —
+ * "Thursday", "tomorrow", "Monday", "this Friday", "next week" all
+ * failed with `ambiguous_no_time` and fell through to a today-default,
+ * even though the classifier prompt actively instructs callers to speak
+ * exactly those phrasings. One shared chrono parse, two contracts:
+ * `resolveDateTime` needs a time to book; this needs ONLY the day.
+ *
+ * Returns `null` when the phrase is empty, unparseable, or the tenant
+ * zone is invalid — callers must treat `null` as "couldn't tell which
+ * day was meant," never guess a day.
+ *
+ * ── NOT A DEADLINE RESOLVER (2026-08-09, review follow-up J4) ────────────
+ *
+ * This answers "WHICH ONE CALENDAR DAY did they mean?". It does NOT answer
+ * "where does this deadline RANGE end?", and the two are different
+ * questions for any phrase naming a period rather than a day. Measured,
+ * reference Thu 2026-06-11 America/New_York:
+ *
+ *   "end of the week"        -> 2026-06-18   (a deadline reading wants 06-14)
+ *   "by the end of the month"-> 2026-07-11   (a deadline reading wants 06-30)
+ *   "this week"              -> 2026-06-12
+ *   "the weekend"            -> 2026-06-13
+ *   "last Friday"            -> 2026-06-12   (`forwardDate: true` flips a
+ *                                             backward phrase forward)
+ *
+ * Both current callers are day-shaped and safe: `lookup-crew-schedule.ts`
+ * genuinely wants one day, and `lookup-materials.ts` uses the resolved day
+ * as a bracketed [day, day+1) window whose label it ALWAYS speaks back, so
+ * a range phrase surfaces as an audible mismatch rather than a silent wrong
+ * answer. Do NOT add a deadline/range caller without first building a
+ * resolver with that contract — widening this one in place would silently
+ * change what both existing callers report.
+ */
+export function resolveSpokenDay(phrase: string, opts: ResolveDateTimeOptions = {}): string | null {
+  const timezone = isValidTimezone(opts.timezone) ? opts.timezone : DEFAULT_TENANT_TIMEZONE;
+  const now = opts.now ?? new Date();
+  const text = (phrase ?? '').trim();
+  if (!text) return null;
+
+  // Same tenant-local reference-date construction as resolveDateTime, so
+  // "tomorrow"/"next Thursday" anchor to the tenant's today, not the
+  // server's — see that function's own comment for the full rationale.
+  const refLocal = DateTime.fromJSDate(now).setZone(timezone);
+  const referenceDate = new Date(
+    refLocal.year,
+    refLocal.month - 1,
+    refLocal.day,
+    refLocal.hour,
+    refLocal.minute,
+    refLocal.second,
+    refLocal.millisecond,
+  );
+
+  const results = chrono.parse(text, referenceDate, { forwardDate: true });
+  if (results.length === 0) return null;
+
+  const start = results[0].start;
+  const year = start.get('year');
+  const month = start.get('month');
+  const dayOfMonth = start.get('day');
+  if (year == null || month == null || dayOfMonth == null) return null;
+
+  // Render at LOCAL midnight in the tenant zone (no time component at
+  // all is needed) and format as YYYY-MM-DD.
+  const dt = DateTime.fromObject({ year, month, day: dayOfMonth }, { zone: timezone });
+  if (!dt.isValid) return null;
+  return dt.toFormat('yyyy-MM-dd');
 }
 
 /**

@@ -19,6 +19,15 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import buildReport from './qa-matrix/helpers/report-builder';
+// Static import (not dynamic `import()`) — same fix as this file's own
+// report-builder import and global-setup.ts's ephemeral-DB bootstrap: a
+// dynamic import() of a raw .ts path does not consistently resolve through
+// Playwright's registered require-hook transform (observed: it can return a
+// module shape whose named exports aren't the awaited object's own
+// properties, e.g. "getHeldContainer is not a function"), where a static
+// import is transpiled by Playwright's loader up front and behaves
+// predictably.
+import { getHeldContainer, stopHeldContainer, clearStateFile, STATE_FILE } from './fixtures/setup-test-db';
 
 export default async function globalTeardown(): Promise<void> {
   // --- BEGIN: ephemeral-DB block ---
@@ -38,11 +47,6 @@ export default async function globalTeardown(): Promise<void> {
 
 async function teardownEphemeralDb(): Promise<void> {
   console.log('[e2e globalTeardown] E2E_USE_TEST_DB=true — tearing down ephemeral DB…');
-
-  // Lazy-import: matches global-setup.ts and keeps the DB-fixtures dep
-  // graph out of the bare smoke path.
-  const { getHeldContainer, stopHeldContainer, clearStateFile, STATE_FILE } =
-    await import('./fixtures/setup-test-db');
 
   // Fast path: we started a container in this process, so we have the
   // reference and can stop it cleanly without re-discovering by ID.

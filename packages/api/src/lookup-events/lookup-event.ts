@@ -22,6 +22,18 @@ export interface LookupEvent {
   /** The intent that triggered the lookup, e.g. `lookup_appointments`. */
   intent: string;
   resultStatus: LookupEventStatus;
+  /**
+   * Rows actually FETCHED for this turn — honest, but not always the true
+   * total. `lookup_materials` (Task 9, 2026-08-07 tradesperson plan)
+   * fetches `MAX_ITEMS_SPOKEN + 1` (6)
+   * rows at the repo boundary (bounded fetch, I4) and reports whichever of
+   * those it got, so this column SATURATES at 6 for that intent: a real 6
+   * pending items and a real 600 are both recorded as `resultCount: 6`.
+   * `avg(result_count) where intent = 'lookup_materials'` (or any query
+   * that treats this as a true count) is therefore a ceilinged metric, not
+   * an exact one — see `ai/skills/lookup-materials.ts`'s module doc
+   * comment for the full rationale.
+   */
   resultCount: number;
   /** TTS-ready single-line summary the caller heard. */
   summary: string;

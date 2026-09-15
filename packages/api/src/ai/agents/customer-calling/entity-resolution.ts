@@ -46,7 +46,7 @@ const CUSTOMER_REF_INTENTS = new Set([
   'create_invoice',
   'draft_estimate',
   'create_appointment',
-  'create_booking',
+  'create_booking', // vacuous today — see the note at SCHEDULING_CREATE_INTENTS below.
   'send_invoice',
   'send_estimate',
   // A spoken nudge names a PERSON ("nudge the Khan estimate"), not display
@@ -66,10 +66,53 @@ const CUSTOMER_REF_INTENTS = new Set([
   'add_note',
   'request_feedback',
   'notify_delay',
+  // Tradesperson wave 1, Task 5 — a spoken "text/email the Hendersons..."
+  // names a PERSON, not display text. Without this the router never
+  // resolved that name to a customerId, so SendCustomerMessageTaskHandler
+  // could only see raw free text — mirrors send_estimate_nudge's rationale
+  // above.
+  'send_customer_message',
   'log_expense',
   'add_service_location',
   'mark_lead_lost',
   'confirm_appointment',
+  // Tradesperson wave 1 — each alias joins the SAME customer-reference
+  // resolution its target proposal type already gets (per-alias, not a
+  // blanket rule — a future alias must be checked against its own target,
+  // not assumed):
+  //   schedule_inspection  → create_appointment (already above) resolves
+  //                          customerName; the inspection's own customer
+  //                          reference needs the same resolution.
+  //   log_permit           → add_note (already above) resolves
+  //                          customerName when a permit note names a
+  //                          customer rather than a job ("Note the
+  //                          electrical permit was approved for the
+  //                          Hendersons") — without this, that customer
+  //                          reference stayed fully manual even though
+  //                          plain add_note already resolves it.
+  //   log_warranty_claim   → create_job (already above) resolves
+  //                          customerName for the new warranty job record.
+  'schedule_inspection',
+  'log_permit',
+  'log_warranty_claim',
+  // Task 7 (2026-08-07 tradesperson plan) — "sign the Garcias up for the
+  // annual maintenance plan" names a PERSON, not display text. Mirrors
+  // send_customer_message's rationale above: without this the router
+  // never resolved that name to a customerId, so
+  // CreateServiceAgreementTaskHandler could only see raw free text.
+  'create_service_agreement',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // log_expense's proposal type, so it mirrors log_expense's OWN
+  // CUSTOMER_REF_INTENTS membership too, for full parity with its target
+  // (Task 1's adjudication: an alias's entity-resolution membership must
+  // mirror the target). log_mileage's own taxonomy (intent-classifier.ts)
+  // instructs the classifier to extract `mileageMiles`/`jobReference`, not
+  // `customerName` — but `customerName` is a SHARED template key, so a
+  // real utterance ("log 32 miles for the Hendersons") could still
+  // populate it; this membership is what makes that name resolve to a
+  // customerId the same way it would for log_expense, rather than staying
+  // inert free text.
+  'log_mileage',
 ]);
 
 const INVOICE_DOC_INTENTS = new Set([
@@ -79,6 +122,20 @@ const INVOICE_DOC_INTENTS = new Set([
   'apply_late_fee',
   'issue_invoice',
   'send_payment_reminder',
+  // Tradesperson wave 1, Task 3 — record_refund needs the SAME invoice-
+  // reference resolution record_payment gets: the spoken invoice reference
+  // rides `entities.jobReference` (there is no separate `invoiceReference`
+  // extraction field anywhere in this taxonomy — every invoice-doc intent
+  // reuses jobReference/jobTitle, disambiguated by this set's membership),
+  // resolved here to a verified `invoiceId` BEFORE RecordRefundTaskHandler
+  // runs (voice-action-router.ts stamps it onto `context.existingEntities`).
+  'record_refund',
+  // Tradesperson wave 1, Task 4 — apply_credit needs the SAME invoice-
+  // reference resolution record_refund/record_payment get: the spoken
+  // invoice reference rides `entities.jobReference`, resolved here to a
+  // verified `invoiceId` BEFORE ApplyCreditTaskHandler runs
+  // (voice-action-router.ts stamps it onto `context.existingEntities`).
+  'apply_credit',
 ]);
 
 const ESTIMATE_DOC_INTENTS = new Set([
@@ -87,6 +144,23 @@ const ESTIMATE_DOC_INTENTS = new Set([
   'send_estimate_nudge',
 ]);
 
+/**
+ * Job-reference resolution membership. Before adding a NEW intent here,
+ * decide TWO separate questions — conflating them is exactly what caused
+ * schedule_inspection's real bug (e255bbc0 introduced it, 3b10d44d fixed
+ * it):
+ *   1. Does an EXPLICIT spoken jobReference for this intent need to resolve
+ *      to an existing job? If yes, join this set.
+ *   2. Does this intent's `jobTitle` field carry a NEW job's descriptive
+ *      name rather than an existing-job lookup key? If yes, it must ALSO
+ *      join `JOB_TITLE_FALLBACK_EXCLUDED_INTENTS` below — even while
+ *      staying a member of THIS set — otherwise the `jobReference ??
+ *      jobTitle` fallback (in `planVoiceEntityLookups` below) will search
+ *      for a job that was never meant to exist by that name.
+ * `create_job`/`create_booking` answer NO to (1): they never join this set
+ * at all (see the fallback's own comment for the full rationale).
+ * `schedule_inspection` answers YES to both.
+ */
 const JOB_REF_INTENTS = new Set([
   'update_job',
   'log_time_entry',
@@ -101,8 +175,86 @@ const JOB_REF_INTENTS = new Set([
   // contract, so an unresolved (or absent) reference still logs the expense
   // unlinked — resolution only ever ADDS the link, never gates the capture.
   'log_expense',
+  // Tradesperson wave 1 — per-alias job-reference rationale (log_warranty_claim
+  // is deliberately ABSENT: its target, create_job, never joins
+  // JOB_REF_INTENTS either — see the comment above the fallback below —
+  // so a new warranty job's descriptive jobTitle can never be misread as a
+  // lookup for an existing job):
+  //   log_permit           → add_note (already above) resolves an EXPLICIT
+  //                          spoken jobReference ("on the Patel job") the
+  //                          same way; a permit note names the job it
+  //                          attaches to just like any other add_note.
+  //   schedule_inspection  → is ALSO in JOB_TITLE_FALLBACK_EXCLUDED_INTENTS
+  //                          below — its jobTitle carries descriptive
+  //                          inspection text, never an existing-job name —
+  //                          but stays a JOB_REF_INTENTS member so an
+  //                          EXPLICIT spoken jobReference ("on the Patel
+  //                          job") still resolves to a jobId.
+  'log_permit',
+  'schedule_inspection',
+  // Tradesperson wave 1, Task 6 — create_change_order mints a NEW estimate
+  // pinned to an EXISTING job: the spoken jobReference MUST resolve to a
+  // real jobId (a change order without its job is meaningless), same
+  // resolution ladder as update_job/log_expense. jobId is REQUIRED on the
+  // contract (unlike log_expense's optional link), so an unresolved
+  // reference gates the proposal — see CreateChangeOrderTaskHandler.
+  'create_change_order',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: "grab three
+  // boxes of PEX for the Patel job" resolves the spoken jobReference →
+  // jobId so the captured material item keeps its job link. jobId is
+  // OPTIONAL on the add_material contract, so an unresolved (or absent)
+  // reference still captures the item unlinked — resolution only ever
+  // ADDS the link, never gates the proposal (same posture as
+  // log_expense's jobId).
+  'add_material',
+  // Task 9 — lookup_materials: "what materials are open on the Patel
+  // job?" resolves the SAME way so the shopping-list readback can scope
+  // to one job. Read-only — no contract/gating implications at all.
+  'lookup_materials',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // log_expense's proposal type, so it mirrors log_expense's OWN
+  // JOB_REF_INTENTS membership exactly: "Log 32 miles to the Patel job"
+  // resolves the spoken jobReference → jobId so the mileage expense keeps
+  // its job link. jobId is OPTIONAL on the (shared) log_expense contract,
+  // so an unresolved (or absent) reference still logs the expense
+  // unlinked — resolution only ever ADDS the link, never gates.
+  'log_mileage',
 ]);
 
+/**
+ * Spec-review fix (2026-08-07) — intents whose jobTitle must NEVER be used
+ * as the jobReference fallback below, even though they ARE JOB_REF_INTENTS
+ * members (unlike create_job/create_booking, which get this for free by
+ * never joining JOB_REF_INTENTS at all — see the comment above the fallback).
+ * schedule_inspection needs BOTH behaviors at once: an explicit "on the
+ * Patel job" must still resolve (JOB_REF_INTENTS membership, OR-branch
+ * below), but its jobTitle carries the inspection's own descriptive text
+ * ("Inspection — rough-in", intent-classifier.ts), not a job name — using it
+ * as a lookup key would search for a job that was never meant to exist by
+ * that name, producing a bogus not_found. Because
+ * requiresExistingEntity('schedule_inspection') is TRUE (e255bbc0 — a NAMED
+ * job must actually exist), that bogus not_found would incorrectly escalate
+ * an inspection that never named a job at all, instead of proceeding the
+ * same way create_appointment does: falling through to
+ * CreateAppointmentExecutionHandler's SCH-02 fallback (proposals/execution/
+ * handlers.ts), which auto-opens a NEW job named `jobTitle || proposal.
+ * summary` when a customerId is resolvable (or fails with the same
+ * missing-customerId error any other unresolved jobId hits) — never "no job
+ * link" (a booked appointment always ends up attached to a job one way or
+ * another).
+ */
+const JOB_TITLE_FALLBACK_EXCLUDED_INTENTS = new Set(['schedule_inspection']);
+
+// Quality-review note (2026-08-08) — 'create_booking' in this set (and in
+// CUSTOMER_REF_INTENTS above) is a defensive, currently-VACUOUS entry: it
+// names a ProposalType (proposals/proposal.ts), never a classifier
+// IntentType (ai/orchestration/intent-classifier.ts) — grep confirms no
+// `IntentType` union member is named `create_booking`. Since every `intent`
+// value these sets are checked against (`.has(intent)`) is classifier
+// output, this entry can never match today. Kept (not removed) as a
+// forward guard in case a future classifier intent is ever named to match
+// it directly — removing it would be a silent behavior no-op either way,
+// so there is no urgency to delete it.
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
 
 const APPOINTMENT_REF_INTENTS = new Set([
@@ -110,6 +262,17 @@ const APPOINTMENT_REF_INTENTS = new Set([
   'reschedule_appointment',
   'confirm_appointment',
   'reassign_appointment',
+  // SCH-D2 — a delay notice IS about an appointment: `notifyDelayPayload
+  // Schema` gates on `appointmentId || appointmentReference`, and
+  // `NotifyDelayExecutionHandler` needs the id to know which customer to
+  // text. Before this membership the spoken reference ("running late for
+  // the 2pm") was never resolved at all — it reached the proposal as raw
+  // free text — and a delay turn that named only the CUSTOMER had nothing
+  // to anchor on either (see the customer-anchored plan below).
+  // requiresExistingEntity('notify_delay') was ALREADY true (the intent is
+  // in both CUSTOMER_REF_INTENTS and JOB_REF_INTENTS), so this changes no
+  // escalation posture — it only gives the gate a resolver behind it (#909).
+  'notify_delay',
   // U2 (B7.10) — crew add/remove name an appointment ("add Jake to the 2pm
   // tomorrow"). Route the spoken reference through the same appointment
   // resolver reassign uses; a unique match rides
@@ -137,11 +300,80 @@ const APPOINTMENT_JOB_FALLBACK_INTENTS = new Set([
   'reassign_appointment',
 ]);
 
-const TECHNICIAN_REF_INTENTS = new Set([
+/**
+ * Exported (spec-review addendum, Task 10) — `ai/orchestration/lookup-
+ * dispatch.ts` (the assistant-chat surface) gates its own
+ * `targetTechnicianName` resolution on this SAME set, mirroring the memo
+ * path (`workers/voice-action-router.ts`'s `annotateResolvedEntities`
+ * call, which reaches this set via `planVoiceEntityLookups` internally).
+ * Before that fix, the chat surface resolved a spoken technician name for
+ * EVERY lookup intent, including `lookup_my_day` — a wasted resolver
+ * query there, and on an ambiguous name it returned a list of crew-member
+ * full names for the one lookup intent with NO permission gate.
+ */
+export const TECHNICIAN_REF_INTENTS = new Set([
   'reassign_appointment',
   'add_crew_member',
   'remove_crew_member',
+  // Task 10 (2026-08-07 tradesperson plan) — the owner-extended crew
+  // lookups reuse the SAME technician resolution reassign/add-crew/
+  // remove-crew get: "What's Mike's day look like?" / "How many hours did
+  // Carlos log?" name a crew member via `targetTechnicianName`, resolved
+  // here to a verified `technicianId` BEFORE the lookup skill runs
+  // (voice-lookup-answer.ts stamps it onto ExecuteLookupInput). An
+  // unresolved name is refused by the CALLER, never silently widened to
+  // the whole crew's schedule/hours (see that module's `lookup_crew_
+  // schedule`/`lookup_timesheets` cases).
+  'lookup_crew_schedule',
+  'lookup_timesheets',
 ]);
+
+/**
+ * SCH-D1 — scheduling CREATE intents that may NAME the technician the new
+ * visit is for ("slot Carlos at Garcia Tuesday two o'clock"). Consulted
+ * ONLY by `planVoiceEntityLookups` for the `targetTechnicianName` lookup,
+ * deliberately NOT folded into `TECHNICIAN_REF_INTENTS`.
+ *
+ * WHY A SEPARATE SET. `TECHNICIAN_REF_INTENTS` feeds TWO different things:
+ * the technician lookup here AND `requiresExistingEntity` below. Adding
+ * `create_appointment` there would make it a record-OPERATING intent, so a
+ * booking for a BRAND-NEW customer (whose customer lookup legitimately
+ * returns not_found — the whole point of ENTITY_CREATION_INTENTS) would
+ * start escalating to on-call instead of drafting a gated proposal. This
+ * set answers only the first question: "may a spoken technician name on
+ * this intent be resolved to a verified id?"
+ *
+ * The resolved id lands on `createAppointmentPayloadSchema.technicianId`
+ * (an optional uuid) via the payload builder's scalar promotion, so an
+ * UNRESOLVED name never gates the booking — it simply doesn't assign
+ * anyone, exactly as before this set existed. `schedule_inspection` is an
+ * alias onto the same proposal type and gets the same treatment (Task 1's
+ * per-alias adjudication: mirror the target).
+ */
+const SCHEDULING_TECHNICIAN_INTENTS = new Set([
+  'create_appointment',
+  'schedule_inspection',
+]);
+
+/**
+ * #909 — intents that operate on an EXISTING lead, named by the person or
+ * company on it ("convert the Greenfield lead", "mark the Acme lead lost").
+ *
+ * `convertLeadPayloadSchema` / `markLeadLostPayloadSchema` both gate on a
+ * resolved `leadId` while the classifier can only ever emit a free-text
+ * `leadReference` — and this planner had NO `lead` branch, so `leadId` was
+ * never resolved on ANY voice surface and the gate had nothing behind it that
+ * could ever lift it. That is precisely the #909 shape CLAUDE.md forbids: "a
+ * proposal gated on an entity id it does not have must have a resolver behind
+ * that gate". `PgEntityResolver.resolveLead` (and the fixture resolver) have
+ * existed since #909; only the plan was missing (register case cust-03).
+ *
+ * Members of `requiresExistingEntity` too: converting a lead that does not
+ * exist is not a request that can proceed, so a miss is an honest "I couldn't
+ * find a matching lead" (in-app: back to intent_capture — transitions.ts
+ * `escalateEntityNotFound`), never a gated card nobody can complete.
+ */
+const LEAD_REF_INTENTS = new Set(['convert_lead', 'mark_lead_lost']);
 
 /**
  * VOX-02 — intents whose whole point is to OPEN a record that does not exist
@@ -185,6 +417,7 @@ export function requiresExistingEntity(intent: string): boolean {
     APPOINTMENT_REF_INTENTS.has(intent) ||
     JOB_REF_INTENTS.has(intent) ||
     TECHNICIAN_REF_INTENTS.has(intent) ||
+    LEAD_REF_INTENTS.has(intent) ||
     CUSTOMER_REF_INTENTS.has(intent)
   );
 }
@@ -196,6 +429,12 @@ const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
   estimate: 'estimateId',
   appointment: 'appointmentId',
   technician: 'technicianId',
+  lead: 'leadId',
+  // #909 — catalogItemId is gated only via the post-draft chat loop
+  // (GATED_REFERENCE_SOURCES.catalogItemId); `update_catalog_item` is not a
+  // member of any of `planVoiceEntityLookups`'s intent sets above, so this
+  // entry exists solely to keep this Record exhaustive over `EntityKind`.
+  catalogItem: 'catalogItemId',
   pending_proposal: undefined,
 };
 
@@ -209,6 +448,13 @@ export interface VoiceEntityLookup {
    * when the caller supplied a stickyJobId to `planVoiceEntityLookups`.
    */
   jobId?: string;
+  /**
+   * SCH-D2 — customer anchor threaded to the resolver for `kind:
+   * 'appointment'` lookups planned by
+   * `planCustomerAnchoredAppointmentLookup` (an operator who named the
+   * PERSON but no visit). Never set by `planVoiceEntityLookups`.
+   */
+  customerId?: string;
 }
 
 export interface ParsedWindow {
@@ -219,7 +465,7 @@ export interface ParsedWindow {
 /**
  * U4 (Part E punch #1) — per-session inputs for spoken-datetime resolution.
  * Threaded by the two live-call entry points (create-voice-turn-processor's
- * `resolveTurnEntities` and InAppVoiceAdapter's `resolveEntities`), each of
+ * `resolveTurnEntityEvent` and InAppVoiceAdapter's `resolveEntities`), each of
  * which resolves the tenant settings ONCE per session.
  */
 export interface SchedulingResolutionOptions {
@@ -337,11 +583,18 @@ export function planVoiceEntityLookups(
   // classified with entities.jobTitle="QA Matrix job" and no jobReference at
   // all, silently dropping the job link and failing execution downstream).
   // create_job/create_booking are deliberately excluded from JOB_REF_INTENTS
-  // /SCHEDULING_CREATE_INTENTS's fallback below, so this can never misread an
-  // intentional new-job title as a reference to an existing job.
+  // /SCHEDULING_CREATE_INTENTS's fallback below (they never join
+  // JOB_REF_INTENTS at all), so this can never misread an intentional
+  // new-job title as a reference to an existing job. schedule_inspection
+  // needs the opposite shape — it IS a JOB_REF_INTENTS member (an explicit
+  // "on the Patel job" must still resolve) — so it is excluded from this
+  // fallback by name via JOB_TITLE_FALLBACK_EXCLUDED_INTENTS instead: its
+  // jobTitle carries descriptive inspection text, never a job name.
   const jobReference =
     trimReference(entities.jobReference) ??
-    (JOB_REF_INTENTS.has(intent) ? trimReference(entities.jobTitle) : undefined);
+    (JOB_REF_INTENTS.has(intent) && !JOB_TITLE_FALLBACK_EXCLUDED_INTENTS.has(intent)
+      ? trimReference(entities.jobTitle)
+      : undefined);
   if (jobReference) {
     const documentKind = documentKindForReference(intent, jobReference);
     if (documentKind) {
@@ -353,12 +606,27 @@ export function planVoiceEntityLookups(
   }
 
   const targetTechnicianName = trimReference(entities.targetTechnicianName);
-  if (targetTechnicianName && TECHNICIAN_REF_INTENTS.has(intent)) {
+  if (
+    targetTechnicianName &&
+    (TECHNICIAN_REF_INTENTS.has(intent) || SCHEDULING_TECHNICIAN_INTENTS.has(intent))
+  ) {
     lookups.push({
       kind: 'technician',
       reference: targetTechnicianName,
       refKey: 'technicianId',
     });
+  }
+
+  // #909 — the lead a convert/mark-lost operates on. `leadReference` is the
+  // classifier's own field for it (intent-taxonomy-blocks.ts) and the
+  // deterministic owner-command matcher for "convert the X lead into a
+  // customer" emits the same key. `customerName` is deliberately NOT a
+  // fallback: on these two intents that field names the customer a lead would
+  // BECOME, not the lead — resolving it as a lead reference would be a guess
+  // about which record the operator meant.
+  const leadReference = trimReference(entities.leadReference);
+  if (leadReference && LEAD_REF_INTENTS.has(intent)) {
+    lookups.push({ kind: 'lead', reference: leadReference, refKey: 'leadId' });
   }
 
   const appointmentReference = trimReference(entities.appointmentReference);
@@ -377,6 +645,116 @@ export function planVoiceEntityLookups(
   }
 
   return lookups;
+}
+
+/**
+ * SCH-D2 — the SECOND-PASS appointment lookup for an operator who named the
+ * PERSON and no visit: "text Garcia that I'm running twenty minutes late",
+ * "confirm Garcia", "cancel Garcia's appointment".
+ *
+ * Why a second pass rather than another entry in `planVoiceEntityLookups`:
+ * the anchor is the customerId THIS TURN resolved, which does not exist yet
+ * when the first-pass plan is built. `resolveSchedulingEntities` therefore
+ * calls this after the planned lookups have run, with the customerId that
+ * came back (or the explicit uuid the caller already had).
+ *
+ * Deliberately narrow — every condition below is load-bearing:
+ *   - APPOINTMENT_REF_INTENTS only: these are the intents whose contract
+ *     needs an appointmentId (cancel / reschedule / confirm / reassign /
+ *     notify_delay / add-crew / remove-crew). Nothing else gains an
+ *     appointment reference it never asked for.
+ *   - ONLY when the classifier extracted NO `appointmentReference`. A
+ *     spoken reference is the operator's own words and keeps its existing
+ *     resolution path (date phrase → clock time → job name), untouched.
+ *   - The reference passed through is the spoken day phrase when there is
+ *     one ("confirm Garcia for Tuesday" with the day in
+ *     `dateTimeDescription`), else `''` — the resolver reads `''` as "that
+ *     customer's upcoming appointment", which is exactly what was said.
+ *
+ * Resolution stays honest end to end: the resolver answers one / several /
+ * none, and several is the EXISTING one-tap disambiguation, never a pick.
+ */
+export function planCustomerAnchoredAppointmentLookup(
+  intent: string,
+  entities: Record<string, unknown>,
+  customerId: string,
+): VoiceEntityLookup | undefined {
+  if (!APPOINTMENT_REF_INTENTS.has(intent)) return undefined;
+  if (trimReference(entities.appointmentReference)) return undefined;
+
+  const dayPhrase =
+    trimReference(entities.dateTimeDescription) ??
+    (typeof entities.datetime === 'string' ? trimReference(entities.datetime) : undefined);
+
+  return {
+    kind: 'appointment',
+    reference: dayPhrase ?? '',
+    refKey: 'appointmentId',
+    customerId,
+  };
+}
+
+/**
+ * The DOCUMENT twin of `planCustomerAnchoredAppointmentLookup`, for the
+ * operator who named the PERSON and no paperwork: "nudge Khan about the
+ * pending estimate", "send Johnson a reminder on the overdue invoice", "text
+ * Smith the invoice link".
+ *
+ * Those utterances carry `customerName` and NOTHING the document-reference
+ * branch of `planVoiceEntityLookups` can use (that branch reads
+ * `jobReference`, which the classifier only fills when a document number or
+ * job name was actually spoken). So `estimateId`/`invoiceId` stayed absent and
+ * the proposal was either gated on a field nothing could ever fill — a #909
+ * gate with no resolver behind it — or, for `send_estimate_nudge`, minted
+ * INVALID with an empty `missingFields` (register cases est-06 / inv-08).
+ *
+ * Same second-pass shape and the same load-bearing conditions as the
+ * appointment version:
+ *   - ESTIMATE_DOC_INTENTS / INVOICE_DOC_INTENTS only — the two families
+ *     whose contracts want a document id. Nothing else gains a reference it
+ *     never asked for.
+ *   - ONLY when NO document reference was spoken (no `jobReference`, and no
+ *     `jobTitle` the JOB_REF fallback would have read as one). A spoken
+ *     reference is the operator's own words and keeps its existing path —
+ *     exact number first, then the customer-name traversal — untouched.
+ *   - ONLY when the id is still absent; the caller checks that.
+ *
+ * The `reference` passed through is the operator's word for the customer,
+ * because with no document named that IS how the document was referred to
+ * ("Khan's estimate"). `PgEntityResolver` scopes on the verified `customerId`
+ * anchor and uses the reference only for the honest not-found line; a resolver
+ * that keys on text (the register's fixture resolver) reads the same words the
+ * operator said. Empty when the customer came from session identity rather
+ * than a spoken name — the anchor alone is a complete scope.
+ *
+ * Honest end to end: the resolver answers one / several / none, several is the
+ * EXISTING one-tap disambiguation, and none is a not-found — never a pick.
+ */
+export function planCustomerAnchoredDocumentLookup(
+  intent: string,
+  entities: Record<string, unknown>,
+  customerId: string,
+): VoiceEntityLookup | undefined {
+  const kind: EntityKind | undefined = ESTIMATE_DOC_INTENTS.has(intent)
+    ? 'estimate'
+    : INVOICE_DOC_INTENTS.has(intent)
+      ? 'invoice'
+      : undefined;
+  if (!kind) return undefined;
+  // Anything the first pass would have treated as a document reference means
+  // the operator DID name the paperwork; that resolution already ran and this
+  // fallback must not second-guess it.
+  if (trimReference(entities.jobReference) ?? trimReference(entities.jobTitle)) return undefined;
+
+  const refKey = REF_KEY_BY_KIND[kind];
+  if (!refKey) return undefined;
+
+  return {
+    kind,
+    reference: trimReference(entities.customerName) ?? '',
+    refKey,
+    customerId,
+  };
 }
 
 function foldResolution(
@@ -426,6 +804,7 @@ async function resolvePlannedLookups(
       reference: lookup.reference,
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
+      ...(lookup.customerId ? { customerId: lookup.customerId } : {}),
     });
     const terminal = foldResolution(
       result,
@@ -533,6 +912,30 @@ export async function resolveSchedulingEntities(
 
   const terminal = await resolvePlannedLookups(resolver, tenantId, planned, refs);
   if (terminal) return terminal;
+
+  // SCH-D2 — SECOND PASS: the operator named the PERSON, not the visit.
+  // `refs.customerId` is whatever the first pass just resolved (or the
+  // explicit uuid folded in above), so this runs only when a real, verified
+  // customer is in hand and the intent still has no appointmentId.
+  if (refs.customerId && !refs.appointmentId) {
+    const anchored = planCustomerAnchoredAppointmentLookup(intent, entities, refs.customerId);
+    if (anchored) {
+      const anchoredTerminal = await resolvePlannedLookups(resolver, tenantId, [anchored], refs);
+      if (anchoredTerminal) return anchoredTerminal;
+    }
+  }
+
+  // The DOCUMENT twin of the pass above, for the operator who named the person
+  // and no paperwork ("nudge Khan about the pending estimate"). Same
+  // preconditions: a verified customer in hand, and the id this intent's
+  // contract wants still absent.
+  if (refs.customerId && !refs.estimateId && !refs.invoiceId) {
+    const anchoredDoc = planCustomerAnchoredDocumentLookup(intent, entities, refs.customerId);
+    if (anchoredDoc) {
+      const docTerminal = await resolvePlannedLookups(resolver, tenantId, [anchoredDoc], refs);
+      if (docTerminal) return docTerminal;
+    }
+  }
 
   if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
     refs.reason = 'Requested by caller via voice session';

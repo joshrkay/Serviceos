@@ -319,3 +319,24 @@ describe('no-guessed-timezone — ensureTenantSettings seeds no zone either', ()
     expect(settings.timezone).toBeUndefined();
   });
 });
+
+describe('#874 — upsertIdentityFields serviceAreaRadius tri-state (in-memory parity)', () => {
+  // The real semantics live in pg-settings.ts SQL (pinned by
+  // test/integration/onboarding-identity.test.ts); this keeps the
+  // in-memory fake honest for every route test built on it.
+  it('omitted keeps the stored radius, explicit null clears it', async () => {
+    const repo = new InMemorySettingsRepository();
+    const base = { businessName: 'Radius Co', jobBufferMinutes: 30, hourlyRateCents: 10000 };
+
+    await repo.upsertIdentityFields('tenant-radius', { ...base, serviceAreaRadius: 30 });
+
+    const kept = await repo.upsertIdentityFields('tenant-radius', base);
+    expect(kept.serviceAreaRadius).toBe(30);
+
+    const cleared = await repo.upsertIdentityFields('tenant-radius', {
+      ...base,
+      serviceAreaRadius: null,
+    });
+    expect(cleared.serviceAreaRadius).toBeNull();
+  });
+});

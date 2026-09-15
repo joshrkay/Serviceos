@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import type { SettingsRepository } from '../settings/settings';
 import type { OnboardingFacts } from './derive-status';
 import { currentTenantContext } from '../middleware/tenant-context';
+import { effectiveBufferMinutes } from '../scheduling/booking-availability';
 
 const VALID_SUBSCRIPTION_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
 type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete';
@@ -82,7 +83,10 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     identity: {
       businessName: settings?.businessName ?? null,
       businessHours: ts?.business_hours ?? null,
-      jobBufferMinutes: ts?.job_buffer_minutes ?? null,
+      // #1158 — NULL now means "buffer not configured" (migration 277), not
+      // "identity incomplete": a settings row always has an effective buffer
+      // (the 30-minute default), exactly as when the column defaulted to 30.
+      jobBufferMinutes: ts ? effectiveBufferMinutes(ts.job_buffer_minutes) : null,
       hourlyRateCents: ts?.hourly_rate_cents ?? null,
       // Read from tenant_settings directly (like the other migration-098
       // columns above) rather than the repo mapper, which folds NULL into

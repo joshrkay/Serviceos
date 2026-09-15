@@ -9,6 +9,11 @@ export const PROPOSAL_EVENT_TYPES = [
   'proposal.expired',
   'proposal.executed',
   'proposal.execution_failed',
+  // Emitted by workers/execution-worker.ts, not logProposalEvent above (the
+  // sweep has no `actor` in the human-approval sense — see the
+  // 'system:execution-worker' sentinel at the call site) — listed here so
+  // this registry stays a complete inventory of proposal.* event types.
+  'proposal.execution_timed_out',
   'proposal.edited',
 ] as const;
 

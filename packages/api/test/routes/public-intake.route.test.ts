@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Express } from 'express';
 import request from 'supertest';
 import rateLimit from 'express-rate-limit';
+import type { Pool } from 'pg';
 import { createPublicIntakeRouter } from '../../src/routes/public-intake';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -189,6 +190,90 @@ describe('public-intake route', () => {
       const res = await request(app).get('/public/intake/not-a-uuid');
       expect(res.status).toBe(400);
       expect(res.body).toEqual({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
+    });
+  });
+
+  // #880 — the tenant_integrations phoneE164 fallback only exists when the
+  // router is built WITH a pool (as app.ts does in prod). A dev-stub
+  // provisioning row ({phoneE164: '+15005550006', stub: true}) reaching a
+  // deployed DB used to leak Twilio's magic test number onto public intake
+  // and booking pages. These tests pin the suppression: stub/magic rows
+  // yield businessPhone null (the web's honest empty state), real
+  // provisioned numbers still serve.
+  describe('GET /public/intake/:tenantId — Twilio fallback phone (#880)', () => {
+    /** Minimal pool stub for the GET route's three raw queries. */
+    function fallbackPool(
+      integrationRow: { phone: string | null; stub?: string | null } | null,
+    ): Pool {
+      return {
+        query: vi.fn(async (sql: string) => {
+          if (/FROM tenant_integrations/i.test(sql)) {
+            return {
+              rows: integrationRow
+                ? [{ phone: integrationRow.phone, stub: integrationRow.stub ?? null }]
+                : [],
+            };
+          }
+          if (/FROM tenant_settings/i.test(sql)) return { rows: [] };
+          if (/FROM google_reviews/i.test(sql)) return { rows: [{ avg: null, c: '0' }] };
+          return { rows: [] };
+        }),
+      } as unknown as Pool;
+    }
+
+    function buildAppWithPool(pool: Pool): Express {
+      const pooledApp = express();
+      pooledApp.use(express.json());
+      pooledApp.use(
+        '/public/intake',
+        createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo, settingsRepo, packRegistry, pool),
+      );
+      return pooledApp;
+    }
+
+    it('serves a real provisioned number when settings has no business phone', async () => {
+      const pooledApp = buildAppWithPool(fallbackPool({ phone: '+15125550123' }));
+      const res = await request(pooledApp).get(`/public/intake/${tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBe('+15125550123');
+    });
+
+    it('suppresses a Twilio magic test number in the fallback (exact #880 repro)', async () => {
+      // No `stub` marker — pins the suppression on the number itself, for
+      // rows written before the marker existed.
+      const pooledApp = buildAppWithPool(fallbackPool({ phone: '+15005550006' }));
+      const res = await request(pooledApp).get(`/public/intake/${tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBeNull();
+    });
+
+    it('suppresses any row marked stub:true regardless of its number', async () => {
+      const pooledApp = buildAppWithPool(
+        fallbackPool({ phone: '+15125550123', stub: 'true' }),
+      );
+      const res = await request(pooledApp).get(`/public/intake/${tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBeNull();
+    });
+
+    it('suppresses a magic test number stored as the settings business phone', async () => {
+      await settingsRepo.create({
+        id: 'settings-880',
+        tenantId,
+        businessName: 'Stubbed Co',
+        businessPhone: '+15005550006',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const pooledApp = buildAppWithPool(fallbackPool(null));
+      const res = await request(pooledApp).get(`/public/intake/${tenantId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.businessPhone).toBeNull();
     });
   });
 });

@@ -67,32 +67,84 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
   }
 
   async create(job: Job): Promise<Job> {
+    return this.withTenant(job.tenantId, (client) => this.insertJob(client, job));
+  }
+
+  private async insertJob(client: PoolClient, job: Job): Promise<Job> {
+    const result = await client.query(
+      `INSERT INTO jobs (
+        id, tenant_id, customer_id, location_id, job_number, summary,
+        problem_description, status, priority, assigned_technician_id,
+        originating_lead_id, created_by, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      RETURNING *`,
+      [
+        job.id,
+        job.tenantId,
+        job.customerId,
+        job.locationId,
+        job.jobNumber,
+        job.summary,
+        job.problemDescription ?? null,
+        job.status,
+        job.priority,
+        job.assignedTechnicianId ?? null,
+        job.originatingLeadId ?? null,
+        job.createdBy,
+        job.createdAt,
+        job.updatedAt,
+      ]
+    );
+    return mapRow(result.rows[0]);
+  }
+
+  /**
+   * #1152 — atomic replacement for the getNextJobNumber() + create() two-step.
+   * The old pattern computed `job_number` via an unlocked `COUNT(*)::int + 1`
+   * in one transaction, then inserted in a SEPARATE transaction/connection
+   * (getNextJobNumber and create are independent `withTenant` calls except
+   * when a request-scoped transaction happens to be shared). Two concurrent
+   * creates for the same tenant could read the same count and the loser
+   * would trip `idx_jobs_number` (UNIQUE (tenant_id, job_number)) as a raw,
+   * unmapped 500.
+   *
+   * Here the lock, the numbering read, and the insert all run inside ONE
+   * `withTenant` transaction:
+   *   - `pg_advisory_xact_lock` is tenant-scoped (keyed by tenant id) and
+   *     transaction-scoped — it blocks a concurrent caller for the SAME
+   *     tenant until this transaction commits or rolls back, then releases
+   *     automatically (no unlock call, no leak on error).
+   *   - Once the lock is held, a concurrent transaction's own numbering
+   *     SELECT can't run until this one has committed (or aborted), so it
+   *     always sees this insert (READ COMMITTED takes a fresh per-statement
+   *     snapshot) — no repeat numbers, no lost updates.
+   *   - Numbering derives from MAX(job_number) instead of COUNT(*), so a
+   *     deleted job's number is never reissued (COUNT(*) would decrement
+   *     and reuse it). Only job_number values matching the `JOB-<digits>`
+   *     format this repository produces are considered; other formats
+   *     (fixtures like `JOB-001` or ad-hoc test values) that don't match
+   *     are ignored by the regex extraction rather than breaking MAX().
+   *
+   * This is atomic under both an HTTP request's shared per-request
+   * transaction (P0-024 client reuse in withTenantTransaction) and a
+   * standalone caller (worker, direct repository test) that gets its own
+   * fresh transaction per call — either way, lock + read + insert are one
+   * transaction, so there is no window for a second caller to interleave.
+   */
+  async createWithAutoNumber(job: Omit<Job, 'jobNumber'>): Promise<Job> {
     return this.withTenant(job.tenantId, async (client) => {
-      const result = await client.query(
-        `INSERT INTO jobs (
-          id, tenant_id, customer_id, location_id, job_number, summary,
-          problem_description, status, priority, assigned_technician_id,
-          originating_lead_id, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-        RETURNING *`,
-        [
-          job.id,
-          job.tenantId,
-          job.customerId,
-          job.locationId,
-          job.jobNumber,
-          job.summary,
-          job.problemDescription ?? null,
-          job.status,
-          job.priority,
-          job.assignedTechnicianId ?? null,
-          job.originatingLeadId ?? null,
-          job.createdBy,
-          job.createdAt,
-          job.updatedAt,
-        ]
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `job_number:${job.tenantId}`,
+      ]);
+
+      const { rows } = await client.query<{ next_number: number }>(
+        `SELECT COALESCE(MAX((substring(job_number FROM 'JOB-(\\d+)$'))::int), 0) + 1 AS next_number
+         FROM jobs WHERE tenant_id = $1`,
+        [job.tenantId]
       );
-      return mapRow(result.rows[0]);
+      const jobNumber = `JOB-${String(rows[0].next_number).padStart(4, '0')}`;
+
+      return this.insertJob(client, { ...job, jobNumber } as Job);
     });
   }
 
@@ -152,6 +204,25 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {
     return this.withTenant(tenantId, async (client) => {
       return this.queryListRows(client, tenantId, options);
+    });
+  }
+
+  /**
+   * Task 10 (2026-08-07 tradesperson plan) quality-review C2 — bulk read
+   * by id, tenant-scoped. See the
+   * interface doc comment (jobs/job.ts) for the full rationale: a caller
+   * that already knows which job ids it needs (e.g. off a day's
+   * appointments) must not depend on those jobs being recent enough to
+   * survive a `findByTenant({ limit })` page.
+   */
+  async findByIds(tenantId: string, ids: string[]): Promise<Job[]> {
+    if (ids.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM jobs WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
+        [tenantId, ids],
+      );
+      return result.rows.map(mapRow);
     });
   }
 

@@ -16,6 +16,13 @@
  *   4. Throttling: a tenant with backoff_until > now is skipped without
  *      a Google call (throttled++); a 429 from Google records the
  *      quota state via the recordQuotaError SQL.
+ *   5. Row 9.4's audit leg: the sweep's two durable writes are now
+ *      audited through the production `PgAuditRepository` — a fresh
+ *      review insert emits `review.ingested` (entity `review`), and a
+ *      429/auth backoff stamp emits `review.sweep_backoff` (entity
+ *      `review_poll_state`). Both read back here at real Postgres,
+ *      including the idempotency claim (a re-sweep that inserts
+ *      nothing audits nothing) and T1.
  *
  * Proposal emission is intentionally NOT wired here — it is fully
  * covered by the unit test and adds substantial fixture cost without
@@ -27,6 +34,7 @@ import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { PgReviewRepository } from '../../src/reputation/pg-review';
 import { PgReviewPollStateRepository } from '../../src/reputation/poll-state';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type {
   CredentialResolver,
   CredentialRow,
@@ -187,12 +195,14 @@ describe('Google Reviews worker — integration', () => {
   let pool: Pool;
   let reviewRepo: PgReviewRepository;
   let pollStateRepo: PgReviewPollStateRepository;
+  let auditRepo: PgAuditRepository;
   let tenantA: { tenantId: string; userId: string };
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     reviewRepo = new PgReviewRepository(pool);
     pollStateRepo = new PgReviewPollStateRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     await ensureRlsAppRole(pool);
   });
 
@@ -232,6 +242,7 @@ describe('Google Reviews worker — integration', () => {
       listTenantIds: async () => [tenantA.tenantId],
       fetchFn,
       logger,
+      auditRepo,
     });
 
     expect(result.tenants).toBe(1);
@@ -259,6 +270,27 @@ describe('Google Reviews worker — integration', () => {
     expect(state!.cursor).not.toBeNull();
     expect(state!.backoffUntil).toBeNull();
     expect(state!.consecutive429Count).toBe(0);
+
+    // Row 9.4 audit leg — each freshly-ingested review carries its own
+    // `review.ingested` row, keyed to the persisted review's id, read back
+    // through the production PgAuditRepository.
+    const r1Events = await auditRepo.findByEntity(tenantA.tenantId, 'review', r1!.id);
+    expect(r1Events).toHaveLength(1);
+    expect(r1Events[0]).toMatchObject({
+      tenantId: tenantA.tenantId,
+      eventType: 'review.ingested',
+      entityType: 'review',
+      entityId: r1!.id,
+      actorRole: 'system',
+    });
+    expect(r1Events[0].metadata).toMatchObject({
+      source: 'google_business',
+      rating: 5,
+      externalReviewId: 'accounts/123/locations/456/reviews/r1',
+    });
+    const r2Events = await auditRepo.findByEntity(tenantA.tenantId, 'review', r2!.id);
+    expect(r2Events).toHaveLength(1);
+    expect(r2Events[0].eventType).toBe('review.ingested');
   });
 
   it('idempotent on re-sweep: a second sweep with the same upstream data persists nothing new', async () => {
@@ -282,8 +314,17 @@ describe('Google Reviews worker — integration', () => {
       listTenantIds: async () => [tenantA.tenantId],
       fetchFn,
       logger,
+      auditRepo,
     });
     expect(first.persisted).toBe(1);
+
+    const ingested = await reviewRepo.findByExternalId(
+      tenantA.tenantId,
+      'accounts/123/locations/456/reviews/r_idem',
+    );
+    expect(
+      await auditRepo.findByEntity(tenantA.tenantId, 'review', ingested!.id),
+    ).toHaveLength(1);
 
     const second = await runGoogleReviewsSweep({
       reviewRepo,
@@ -292,10 +333,17 @@ describe('Google Reviews worker — integration', () => {
       listTenantIds: async () => [tenantA.tenantId],
       fetchFn,
       logger,
+      auditRepo,
     });
     // The upsert flipped to inserted=false; nothing new persists.
     expect(second.persisted).toBe(0);
     expect(second.fetched).toBeGreaterThanOrEqual(0);
+
+    // …and nothing new is audited either: the audit row rides the same
+    // `inserted` signal as the persist, so a re-sweep is silent on both.
+    expect(
+      await auditRepo.findByEntity(tenantA.tenantId, 'review', ingested!.id),
+    ).toHaveLength(1);
   });
 
   it('throttling: a tenant whose backoff_until is in the future is skipped — no Google call, throttled++', async () => {
@@ -339,6 +387,7 @@ describe('Google Reviews worker — integration', () => {
       listTenantIds: async () => [tenantA.tenantId],
       fetchFn,
       logger,
+      auditRepo,
     });
 
     expect(result.throttled).toBe(1);
@@ -350,6 +399,25 @@ describe('Google Reviews worker — integration', () => {
     expect(after!.backoffUntil).not.toBeNull();
     // backoffUntil must be in the future after a quota error.
     expect(after!.backoffUntil!.getTime()).toBeGreaterThan(Date.now());
+
+    // Row 9.4 audit leg — the backoff stamp is a durable state change the
+    // owner feels (reviews stop arriving), so it is audited too, not just
+    // logged. Keyed on the poll-state row, which is per tenant.
+    const backoffEvents = await auditRepo.findByEntity(
+      tenantA.tenantId,
+      'review_poll_state',
+      tenantA.tenantId,
+    );
+    expect(backoffEvents).toHaveLength(1);
+    expect(backoffEvents[0]).toMatchObject({
+      eventType: 'review.sweep_backoff',
+      entityType: 'review_poll_state',
+      actorRole: 'system',
+    });
+    expect(backoffEvents[0].metadata).toMatchObject({
+      reason: 'quota_429',
+      retryAfterSeconds: 45,
+    });
   });
 
   it('silently skips tenants with no integration row (not counted as failed)', async () => {
@@ -417,6 +485,7 @@ describe('Google Reviews worker — integration', () => {
       listTenantIds: async () => [tenantA.tenantId, tenantB.tenantId],
       fetchFn,
       logger,
+      auditRepo,
     });
 
     // Each tenant sees only its own review via the prod read path.
@@ -448,6 +517,18 @@ describe('Google Reviews worker — integration', () => {
     expect(externalIdsUnderA).not.toContain('accounts/789/locations/012/reviews/iso_b');
     expect(externalIdsUnderB).toContain('accounts/789/locations/012/reviews/iso_b');
     expect(externalIdsUnderB).not.toContain('accounts/123/locations/456/reviews/iso_a');
+
+    // Row 9.4 audit leg, T1 — each tenant's ingest is audited under its OWN
+    // tenant id in the same sweep, and neither tenant's context can read the
+    // other's `review.ingested` row.
+    const aAudit = await auditRepo.findByEntity(tenantA.tenantId, 'review', aSees!.id);
+    const bAudit = await auditRepo.findByEntity(tenantB.tenantId, 'review', bSees!.id);
+    expect(aAudit).toHaveLength(1);
+    expect(bAudit).toHaveLength(1);
+    expect(aAudit[0].eventType).toBe('review.ingested');
+    expect(bAudit[0].eventType).toBe('review.ingested');
+    expect(await auditRepo.findByEntity(tenantB.tenantId, 'review', aSees!.id)).toHaveLength(0);
+    expect(await auditRepo.findByEntity(tenantA.tenantId, 'review', bSees!.id)).toHaveLength(0);
   });
 
   // U3 — findRecent pins the REAL columns (rating, review_create_time) and

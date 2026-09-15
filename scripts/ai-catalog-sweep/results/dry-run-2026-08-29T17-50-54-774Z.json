@@ -1,0 +1,17 @@
+{
+  "started": "2026-08-29T17:50:54.773Z",
+  "mode": "dry-run",
+  "corpus": {
+    "version": "v1",
+    "label": "AI-capability catalog live sweep (dev) — proposal-driving + lookup + direct-act + control + no-onramp + surface-refusal",
+    "casesPath": "/Users/macmini/Serviceos-wt/sweep/scripts/ai-catalog-sweep/corpus.json",
+    "rowCount": 99
+  },
+  "auth": {
+    "meStatus": 200
+  },
+  "db": {
+    "reachable": true,
+    "superuserVerify": true
+  }
+}

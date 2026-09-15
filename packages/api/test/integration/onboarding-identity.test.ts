@@ -97,6 +97,38 @@ describe('PUT /api/onboarding/identity', () => {
     expect(dbRow.rows[0].hourly_rate_cents).toBe(20000);
   });
 
+  // #874 — service_area_radius is tri-state against the REAL upsert SQL
+  // (the CASE/COALESCE split lives in pg-settings.ts, so only Postgres can
+  // prove it): omitted keeps the stored radius, explicit null clears it.
+  it('serviceAreaRadius: omitted keeps the stored value, null clears it (#874)', async () => {
+    const base = {
+      businessName: 'Radius Co',
+      businessHours: { mon: null },
+      jobBufferMinutes: 30,
+      hourlyRateCents: 10000,
+    };
+    await request(app).put('/api/onboarding/identity').send({ ...base, serviceAreaRadius: 30 });
+
+    // Omitted → kept.
+    await request(app).put('/api/onboarding/identity').send(base);
+    let row = await pool.query(
+      'SELECT service_area_radius FROM tenant_settings WHERE tenant_id=$1',
+      [currentTenant.tenantId],
+    );
+    expect(row.rows[0].service_area_radius).toBe(30);
+
+    // Explicit null → cleared.
+    const res = await request(app)
+      .put('/api/onboarding/identity')
+      .send({ ...base, serviceAreaRadius: null });
+    expect(res.status).toBe(200);
+    row = await pool.query(
+      'SELECT service_area_radius FROM tenant_settings WHERE tenant_id=$1',
+      [currentTenant.tenantId],
+    );
+    expect(row.rows[0].service_area_radius).toBeNull();
+  });
+
   it('emits a tenant.identity_set audit event', async () => {
     await request(app).put('/api/onboarding/identity').send({
       businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000,
@@ -106,5 +138,66 @@ describe('PUT /api/onboarding/identity', () => {
       [currentTenant.tenantId]
     );
     expect(ev.rows.length).toBe(1);
+  });
+
+  // §8.1/§8.9 row 1.2 — a neighbour tenant's identity writes (including the
+  // #874 serviceAreaRadius tri-state) must never bleed into tenant A's row,
+  // and the tenant.identity_set audit trail is per-tenant, read back through
+  // PgAuditRepository (not just a raw SELECT).
+  it("a neighbour tenant's identity upsert never changes tenant A's row, and audit events are per tenant", async () => {
+    const tenantA = currentTenant;
+    const tenantB = await createTestTenant(pool);
+    const auditRepo = new PgAuditRepository(pool);
+
+    // Seed tenant A with a radius, as tenant A.
+    await request(app).put('/api/onboarding/identity').send({
+      businessName: 'Tenant A Co',
+      businessHours: { mon: null },
+      jobBufferMinutes: 30,
+      hourlyRateCents: 10000,
+      serviceAreaRadius: 40,
+    });
+
+    // Full row snapshot (not just business_name + service_area_radius) —
+    // a regression that leaks tenant B's business_hours, job buffer,
+    // hourly rate, or timezone into tenant A's row while leaving those two
+    // columns alone would otherwise slip past this test (Codex review,
+    // PR #1074).
+    const rowABefore = (
+      await pool.query('SELECT * FROM tenant_settings WHERE tenant_id=$1', [tenantA.tenantId])
+    ).rows[0];
+
+    // Act as tenant B and upsert its OWN identity, including a DIFFERENT
+    // serviceAreaRadius and an explicit null — this must not touch tenant A.
+    currentTenant = tenantB;
+    await request(app).put('/api/onboarding/identity').send({
+      businessName: 'Tenant B Co',
+      businessHours: { tue: null },
+      jobBufferMinutes: 60,
+      hourlyRateCents: 20000,
+      serviceAreaRadius: 99,
+    });
+    await request(app).put('/api/onboarding/identity').send({
+      businessName: 'Tenant B Co',
+      businessHours: { tue: null },
+      jobBufferMinutes: 60,
+      hourlyRateCents: 20000,
+      serviceAreaRadius: null,
+    });
+
+    const rowAAfter = (
+      await pool.query('SELECT * FROM tenant_settings WHERE tenant_id=$1', [tenantA.tenantId])
+    ).rows[0];
+    expect(rowAAfter).toEqual(rowABefore);
+    expect(rowAAfter.business_name).toBe('Tenant A Co');
+    expect(rowAAfter.service_area_radius).toBe(40);
+
+    // Restore tenant A context for the remaining assertions.
+    currentTenant = tenantA;
+
+    const auditA = await auditRepo.findByEntity(tenantA.tenantId, 'tenant_settings', tenantA.tenantId);
+    const auditB = await auditRepo.findByEntity(tenantB.tenantId, 'tenant_settings', tenantB.tenantId);
+    expect(auditA.filter((e) => e.eventType === 'tenant.identity_set').length).toBe(1);
+    expect(auditB.filter((e) => e.eventType === 'tenant.identity_set').length).toBe(2);
   });
 });

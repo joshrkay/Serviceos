@@ -1,3 +1,5 @@
+import { createLogger } from '../logging/logger';
+
 /**
  * Operator mode (Phase 12). Mirrors the same type defined in
  * `middleware/auth.ts` and `packages/shared/src/types.ts`. We re-declare
@@ -5,6 +7,62 @@
  * middleware would invert the layering.
  */
 export type Mode = 'supervisor' | 'tech' | 'both';
+
+const autoApproveLogger = createLogger({
+  service: 'proposals.auto-approve',
+  environment: process.env.NODE_ENV || 'dev',
+});
+
+/**
+ * Commit 3 (followup-autoapprove-default) — throttle for the loud guard
+ * below. Module-level, process-lifetime, keyed per proposal type (I1,
+ * post-C1 review): the guard exists to catch a NEW caller shipping the
+ * exact gap that let assistant-chat silently inherit the permissive legacy
+ * threshold with no real supervision signal (see
+ * `resolveAutoApproveThreshold`'s doc comment). A SINGLE global latch was
+ * the original commit-3 design, reasoned from a one-known-gap model — but
+ * `ai/voice-turn/create-voice-turn-processor.ts`'s D-015 telephony booking
+ * lane (still, deliberately, never threading either field — see its own
+ * comment) fires on every `create_booking` auto-approval in production. At
+ * realistic volume that consumes a global latch within seconds of process
+ * start, permanently masking a genuinely NEW offending proposal type for
+ * the rest of the process's life — the exact failure mode this guard
+ * exists to prevent, just moved one level up.
+ *
+ * Keying per proposal type (and, when the caller can supply one, a surface
+ * label — e.g. the `sourceContext.surface`/`channel` stamp voice/telephony
+ * paths already set) means the known telephony `create_booking` gap
+ * consumes only ITS OWN key; a different type (or the same type from a
+ * different surface) still gets its own one-time warning. Capped (see
+ * `MAX_TRACKED_MISSING_SUPERVISION_KEYS`) so an attacker (or a bug) can't
+ * grow this into unbounded memory by cycling proposal types — oldest key
+ * pruned first, mirroring `createInMemoryNonceStore`'s pattern below.
+ */
+const MAX_TRACKED_MISSING_SUPERVISION_KEYS = 128;
+const warnedMissingSupervisionKeys = new Set<string>();
+
+/**
+ * Best-effort identity for the loud-guard throttle above. Purely
+ * diagnostic — never affects the resolved threshold. `proposalType` is
+ * always available (every `decideInitialStatus` call has one); `surface`
+ * is optional and caller-supplied (e.g. 'S1' / 'S2' / a channel string) so
+ * two different surfaces creating the SAME proposal type without
+ * supervision each get their own warning rather than one masking the
+ * other.
+ */
+export interface MissingSupervisionWarningContext {
+  proposalType?: string;
+  surface?: string;
+}
+
+function missingSupervisionWarningKey(ctx: MissingSupervisionWarningContext | undefined): string {
+  return `${ctx?.proposalType ?? 'unknown'}::${ctx?.surface ?? 'unknown'}`;
+}
+
+/** Test-only: reset the per-key throttle above. */
+export function _resetMissingSupervisionSignalWarningForTests(): void {
+  warnedMissingSupervisionKeys.clear();
+}
 
 /**
  * Default per-mode auto-approve thresholds for proposals (Phase 12).
@@ -28,6 +86,18 @@ export const DEFAULT_AUTO_APPROVE_THRESHOLDS: Record<Mode, number> = {
  * Pre-Phase-12 default. Used when no `supervisorMode` is supplied —
  * i.e. callers that don't yet thread mode through (legacy paths,
  * backfills). Keeps the existing 0.9 behavior unchanged.
+ *
+ * ACCIDENTAL COUPLING (followup-autoapprove-default audit) — this value must
+ * stay `<= AUTONOMOUS_BOOKING_THRESHOLD_FLOOR` (proposals/autonomous-lane.ts).
+ * `ai/voice-turn/create-voice-turn-processor.ts` never threads
+ * `supervisorMode`/`supervisorPresent`, so its `create_booking` proposals
+ * always resolve THIS constant (never the D-015 lane's own dedicated
+ * threshold, and never the categorical `null` block) whenever the lane
+ * already deemed them eligible. That's harmless today only because this
+ * constant equals the lane's floor (0.9 === 0.9) — eligibility already
+ * guarantees the confidence score clears it. See
+ * `AUTONOMOUS_BOOKING_THRESHOLD_FLOOR`'s doc comment for the full mechanism
+ * and `test/proposals/autonomous-lane.test.ts` for the pinned invariant.
  */
 export const LEGACY_AUTO_APPROVE_THRESHOLD = 0.9;
 
@@ -57,6 +127,14 @@ export interface ResolveThresholdInput {
    * missing mode falls through to `DEFAULT_AUTO_APPROVE_THRESHOLDS`.
    */
   tenantOverride?: Partial<Record<Mode, number>>;
+
+  /**
+   * I1 (post-C1 review, followup-autoapprove-default) — identity for the
+   * missing-supervision-signal warning's per-key throttle. Purely
+   * diagnostic; never affects resolution. See
+   * `MissingSupervisionWarningContext`'s doc comment.
+   */
+  warningContext?: MissingSupervisionWarningContext;
 }
 
 /**
@@ -84,6 +162,34 @@ export function resolveAutoApproveThreshold(
   }
 
   if (input.supervisorMode === undefined) {
+    // Commit 3 — loud guard, behavior-preserving. We're already past the
+    // `supervisorPresent === false` check above, so `supervisorPresent`
+    // here is either `true` (an intentional partial signal — fine, no
+    // warning) or `undefined` (the caller never threaded it at all — the
+    // exact shape of the assistant-chat gap this followup fixed). Warn only
+    // on the latter; never change the resolution — still the legacy 0.9
+    // default either way. I1 — keyed per proposal type (+ surface, when
+    // supplied) rather than a single global latch; see
+    // `warnedMissingSupervisionKeys`'s doc comment for why.
+    if (input.supervisorPresent === undefined) {
+      const key = missingSupervisionWarningKey(input.warningContext);
+      if (!warnedMissingSupervisionKeys.has(key)) {
+        if (warnedMissingSupervisionKeys.size >= MAX_TRACKED_MISSING_SUPERVISION_KEYS) {
+          const oldest = warnedMissingSupervisionKeys.values().next().value;
+          if (oldest !== undefined) warnedMissingSupervisionKeys.delete(oldest);
+        }
+        warnedMissingSupervisionKeys.add(key);
+        autoApproveLogger.warn(
+          'resolveAutoApproveThreshold called with no supervision signal — ' +
+            'falling through to the permissive LEGACY_AUTO_APPROVE_THRESHOLD ' +
+            '(0.9) with no unsupervised hard-block. If this caller can create ' +
+            'an autonomous, capture-class proposal, thread a real ' +
+            'supervisorPresent (and, where available, supervisorMode) — see ' +
+            'workers/voice-action-router.ts or routes/assistant.ts for the ' +
+            `pattern. Logged once per proposal type/surface (key: ${key}).`,
+        );
+      }
+    }
     return LEGACY_AUTO_APPROVE_THRESHOLD;
   }
 

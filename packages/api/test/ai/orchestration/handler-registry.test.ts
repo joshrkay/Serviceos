@@ -81,6 +81,36 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   'batch_invoice',
   'create_invoice_schedule',
   'issue_invoice',
+  // Tradesperson wave 1, Task 2 (2026-08-07 plan) — update_catalog_item's
+  // voice on-ramp (WS20's pre-existing proposal type + execution handler).
+  'update_catalog_item',
+  // Tradesperson wave 1, Task 3 (2026-08-07 plan) — record_refund: a NEW
+  // money-class proposal type for recording MANUAL refunds by voice.
+  'record_refund',
+  // Tradesperson wave 1, Task 4 (2026-08-07 plan) — apply_credit: a NEW
+  // money-class proposal type that reduces what a customer owes on an
+  // issued invoice (goodwill, warranty labor, price match).
+  'apply_credit',
+  // Tradesperson wave 1, Task 5 (2026-08-07 plan) — send_customer_message:
+  // a NEW comms-class proposal type for a free-form owner-approved
+  // outbound customer message.
+  'send_customer_message',
+  // Tradesperson wave 1, Task 6 (2026-08-07 plan) — create_change_order:
+  // a NEW capture-class proposal type that mints a NEW estimate pinned to
+  // an EXISTING job, flagged isChangeOrder (migration 271).
+  'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement: a
+  // NEW capture-class proposal type that signs a customer up to a
+  // recurring maintenance plan/membership.
+  'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: a NEW
+  // capture-class proposal type that adds a row to the voice-captured
+  // shopping list (Task 8's material_items substrate).
+  'add_material',
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: a NEW
+  // capture-class proposal type that lets an owner add a price-book entry
+  // by voice, the create-side mirror of update_catalog_item.
+  'add_catalog_item',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

@@ -131,3 +131,40 @@ export function formatUsdCentsWhole(cents: number): string {
 export function formatUsdCentsPlain(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
+
+/** True for integer-cents payload keys (`amountCents`, `unitPriceCents`, …). */
+export function isCentsKey(key: string): boolean {
+  return /cents$/i.test(key);
+}
+
+/**
+ * Parse an operator's money INPUT (dollars) into integer cents, or null when
+ * it isn't a money string. String math throughout — never
+ * `Number(x) * 100`, which turns "0.29" into 28.999999999999996.
+ *
+ * Review J5 — lives here so the web chat card and the API's `editFields`
+ * emitter agree on one parse. They previously had none at all: the card sent
+ * the raw input STRING for a `z.number()` payload field and every money edit
+ * 400'd with "Invalid payload after edit". Server-side coercion cannot
+ * substitute for this — coercing "290000" would mean 290000 CENTS ($2,900),
+ * wrong by 100x. `packages/mobile` carries local twins of these three
+ * (proposals/proposalReview.ts, lib/format.ts) that predate this module and
+ * behave identically; they should migrate here.
+ */
+export function parseMoneyToCents(text: string): number | null {
+  const cleaned = text.trim().replace(/^\$/, '').replace(/,/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  const [dollars, frac = ''] = cleaned.split('.');
+  return Number(dollars) * 100 + Number((frac + '00').slice(0, 2));
+}
+
+/**
+ * Integer cents → the bare editable input text (`12345 → "123.45"`). The
+ * inverse of {@link parseMoneyToCents}; no `$`/`,` so round-tripping an
+ * untouched field never registers as an edit.
+ */
+export function centsToInputValue(cents: number): string {
+  const sign = cents < 0 ? '-' : '';
+  const abs = Math.abs(Math.trunc(cents));
+  return `${sign}${Math.trunc(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
+}

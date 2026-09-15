@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { ValidationError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
@@ -41,6 +42,7 @@ export function createMaintenanceContractsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
+    notFoundOnMalformedId('Contract not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const found = await repo.findById(req.auth!.tenantId, req.params.id);
       if (!found) {

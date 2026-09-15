@@ -90,6 +90,19 @@ function setupApi(appointments: unknown[] = [appt1, appt2], jobs: Record<string,
     if (url.includes('/api/users')) {
       return mockResponse({ data: TECHNICIANS });
     }
+    // #879: the JobPicker searches GET /api/jobs?search=…&limit=10.
+    if (url.startsWith('/api/jobs?')) {
+      const search = decodeURIComponent(url.match(/search=([^&]*)/)?.[1] ?? '').toLowerCase();
+      const matches = Object.values(jobs).filter((j) => {
+        const job = j as { jobNumber?: string; summary?: string };
+        return (
+          !search ||
+          job.jobNumber?.toLowerCase().includes(search) ||
+          job.summary?.toLowerCase().includes(search)
+        );
+      });
+      return mockResponse({ data: matches });
+    }
     const jobMatch = url.match(/^\/api\/jobs\/([^/?]+)/);
     if (jobMatch) {
       const job = jobs[jobMatch[1]];
@@ -351,9 +364,11 @@ describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', (
     await screen.findByText('Alice Smith');
 
     fireEvent.click(screen.getByRole('button', { name: /new appointment/i }));
-    fireEvent.change(screen.getByPlaceholderText('paste job UUID'), {
-      target: { value: 'j1' },
+    // #879: choose the job through the searchable picker.
+    fireEvent.change(screen.getByLabelText('job-search'), {
+      target: { value: 'JOB-001' },
     });
+    fireEvent.click(await screen.findByTestId('job-option-j1'));
     const timeInputs = document.querySelectorAll('input[type="time"]');
     fireEvent.change(timeInputs[0], { target: { value: '14:00' } });
     fireEvent.change(timeInputs[1], { target: { value: '16:00' } });
@@ -376,6 +391,30 @@ describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', (
     expect(new Date(body.scheduledEnd).getUTCHours()).toBe(20);
     // The appointment's tz field carries the TENANT tz, not the browser's.
     expect(body.timezone).toBe('America/New_York');
+    // The picker resolved the search to the real job id, not the typed text.
+    expect(body.jobId).toBe('j1');
+  });
+});
+
+// ─── #879: the Job field is a searchable picker, not a raw-UUID input ────────
+
+describe('#879 — new appointment job selection', () => {
+  it('offers a searchable job picker instead of the paste-UUID input', async () => {
+    renderPage();
+    await screen.findByText('Alice Smith');
+
+    fireEvent.click(screen.getByRole('button', { name: /new appointment/i }));
+
+    expect(screen.queryByPlaceholderText('paste job UUID')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('job-search')).toBeInTheDocument();
+    // Create stays disabled until a job is actually chosen from the picker.
+    expect(screen.getByRole('button', { name: /create appointment/i })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('job-search'), {
+      target: { value: 'drain' },
+    });
+    fireEvent.click(await screen.findByTestId('job-option-j2'));
+    expect(screen.getByRole('button', { name: /create appointment/i })).toBeEnabled();
   });
 });
 

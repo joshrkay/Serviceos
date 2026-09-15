@@ -41,6 +41,10 @@ function proposal(payload: Record<string, unknown>): Proposal {
   } as Proposal;
 }
 
+// The contract-level "no price ceiling" tests that used to live here moved
+// to test/proposals/contracts/update-catalog-item.test.ts (follow-up fix,
+// 2026-08-09) — both halves of this type's payload contract (evidence
+// optionality + the price ceiling) now live together in one file.
 describe('UpdateCatalogItemExecutionHandler', () => {
   it('applies the proposed unit price to the catalog item + emits catalog audit', async () => {
     const catalogRepo = new InMemoryCatalogItemRepository();

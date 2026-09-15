@@ -4,6 +4,10 @@ import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence } from '../guardrails/confidence';
 import type { JobRepository } from '../../jobs/job';
 import { candidatesForReference } from '../resolution/reference-candidates';
+import {
+  normalizeJobStatus,
+  normalizeJobPriority,
+} from '../../proposals/job-edit-phrases';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 
 // Mirrors EstimateEditTaskHandler / InvoiceEditTaskHandler's check: a
@@ -39,18 +43,6 @@ function resolvedJobIdFrom(context: TaskContext): string | undefined {
   return isUuid(id) ? id : undefined;
 }
 
-/** Canonical Job status/priority value sets (mirrors jobStatusSchema / jobPrioritySchema in @ai-service-os/shared). */
-const VALID_STATUSES = new Set([
-  'new',
-  'scheduled',
-  'dispatched',
-  'in_progress',
-  'completed',
-  'invoiced',
-  'closed',
-  'canceled',
-]);
-const VALID_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
 
 /**
  * UpdateJobTaskHandler — produces `update_job` proposals from voice /
@@ -117,18 +109,6 @@ function tryParseJson(content: string): Record<string, unknown> | null {
   }
 }
 
-function normalizeStatus(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, '_');
-  return VALID_STATUSES.has(normalized) ? normalized : undefined;
-}
-
-function normalizePriority(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim().toLowerCase();
-  return VALID_PRIORITIES.has(normalized) ? normalized : undefined;
-}
-
 function buildPayload(parsed: Record<string, unknown> | null): Record<string, unknown> {
   if (!parsed) return {};
   const payload: Record<string, unknown> = {};
@@ -143,10 +123,13 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
     payload.jobId = parsed.jobId;
   }
 
-  const status = normalizeStatus(parsed.status);
+  // Canonical enum normalizers are shared with the deterministic live-turn
+  // phrase parse (proposals/job-edit-phrases.ts) so the LLM leg and the voice
+  // leg can never disagree on what a valid status/priority spelling is.
+  const status = normalizeJobStatus(parsed.status);
   if (status) payload.status = status;
 
-  const priority = normalizePriority(parsed.priority);
+  const priority = normalizeJobPriority(parsed.priority);
   if (priority) payload.priority = priority;
 
   if (typeof parsed.title === 'string' && parsed.title.trim().length > 0) {

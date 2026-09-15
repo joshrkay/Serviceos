@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveDateTime,
+  resolveSpokenDay,
   formatForReadback,
   DEFAULT_TENANT_TIMEZONE,
 } from '../../../src/ai/scheduling/resolve-datetime';
@@ -121,5 +122,200 @@ describe('resolveDateTime', () => {
     const s = formatForReadback('2026-06-02T18:00:00.000Z', 'America/New_York');
     expect(s).toContain('2:00');
     expect(s).toContain('Tuesday');
+  });
+});
+
+// (2026-08-09, Task 10 quality-review C1) — resolveSpokenDay is the
+// lookup-side sibling of resolveDateTime: it must ACCEPT every bare-day
+// phrase resolveDateTime correctly REFUSES for booking. NOW is a Thursday
+// so the exact phrases the review probed are pinned verbatim.
+describe('resolveSpokenDay', () => {
+  // Thursday 2026-06-11, 07:00 America/New_York (11:00 UTC).
+  const NOW_THU = new Date('2026-06-11T11:00:00.000Z');
+
+  it('resolves a bare weekday that IS today to today\'s date key', () => {
+    expect(resolveSpokenDay('Thursday', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-11',
+    );
+  });
+
+  it('resolves "tomorrow" (bare, no time-of-day) — resolveDateTime refuses this exact phrase', () => {
+    expect(resolveSpokenDay('tomorrow', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-12',
+    );
+    // Pin the contrast: the booking resolver correctly refuses the same phrase.
+    const booking = resolveDateTime('tomorrow', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves "Monday" (bare weekday, forward-looking) — resolveDateTime refuses this exact phrase', () => {
+    expect(resolveSpokenDay('Monday', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-15',
+    );
+    const booking = resolveDateTime('Monday', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves "this Friday" — resolveDateTime refuses this exact phrase', () => {
+    expect(resolveSpokenDay('this Friday', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-12',
+    );
+    const booking = resolveDateTime('this Friday', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves "next week" to a date — resolveDateTime refuses this exact phrase', () => {
+    const key = resolveSpokenDay('next week', { timezone: 'America/New_York', now: NOW_THU });
+    expect(key).not.toBeNull();
+    expect(key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const booking = resolveDateTime('next week', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves a daypart phrase to the same day as the bare weekday ("Thursday afternoon" == today)', () => {
+    expect(
+      resolveSpokenDay('Thursday afternoon', { timezone: 'America/New_York', now: NOW_THU }),
+    ).toBe('2026-06-11');
+  });
+
+  it('"next Thursday afternoon" resolves to NEXT WEEK\'s Thursday, not today', () => {
+    expect(
+      resolveSpokenDay('next Thursday afternoon', { timezone: 'America/New_York', now: NOW_THU }),
+    ).toBe('2026-06-18');
+  });
+
+  it('returns null for an unparseable phrase — never guesses a day', () => {
+    expect(
+      resolveSpokenDay('gibberish not a date', { timezone: 'America/New_York', now: NOW_THU }),
+    ).toBeNull();
+  });
+
+  it('returns null for an empty/absent phrase', () => {
+    expect(resolveSpokenDay('', { timezone: 'America/New_York', now: NOW_THU })).toBeNull();
+    expect(resolveSpokenDay('   ', { timezone: 'America/New_York', now: NOW_THU })).toBeNull();
+  });
+
+  it('anchors to the TENANT timezone, not the server/UTC day', () => {
+    // 11:00 UTC Thursday is already Thursday in every US zone, so use a
+    // moment where the tenant-local day differs from the UTC day: 02:30
+    // UTC on 2026-06-12 (Friday) is still 22:30 Thursday in
+    // America/Los_Angeles (PDT, UTC-7).
+    const crossMidnightUtc = new Date('2026-06-12T02:30:00.000Z');
+    expect(
+      resolveSpokenDay('today', { timezone: 'America/Los_Angeles', now: crossMidnightUtc }),
+    ).toBe('2026-06-11');
+    expect(
+      resolveSpokenDay('tomorrow', { timezone: 'America/Los_Angeles', now: crossMidnightUtc }),
+    ).toBe('2026-06-12');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPOKEN clock hours written as words ("Tuesday two o'clock") — register case
+// book-02. An operator DICTATING a booking says "two o'clock"; chrono only
+// understands "2 o'clock", so the phrase used to come back
+// `ambiguous_no_time` and the caller was asked for a time they had just said.
+// ---------------------------------------------------------------------------
+
+describe('resolveDateTime — spoken "<word> o\'clock"', () => {
+  const TZ = 'America/Phoenix'; // no DST, so the offset is fixed at -7
+
+  it('resolves "Tuesday two o\'clock" to the same instant as "Tuesday 2 o\'clock"', () => {
+    const spoken = resolveDateTime("Tuesday two o'clock", { timezone: TZ, now: NOW });
+    const digits = resolveDateTime("Tuesday 2 o'clock", { timezone: TZ, now: NOW });
+    expect(spoken.ok).toBe(true);
+    expect(digits.ok).toBe(true);
+    if (spoken.ok && digits.ok) {
+      expect(spoken.startUtc).toBe(digits.startUtc);
+      expect(spoken.precision).toBe('exact');
+      // The bare-hour service bias still applies (1–7 → PM), unchanged.
+      expect(spoken.startUtc).toBe('2026-06-02T21:00:00.000Z');
+    }
+  });
+
+  it('accepts the curly apostrophe and the bare "oclock" spelling', () => {
+    for (const phrase of ['Tuesday two o’clock', 'Tuesday two oclock']) {
+      const res = resolveDateTime(phrase, { timezone: TZ, now: NOW });
+      expect(res.ok).toBe(true);
+      if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+    }
+  });
+
+  it('covers the whole one–twelve range', () => {
+    const eleven = resolveDateTime("Tuesday eleven o'clock", { timezone: TZ, now: NOW });
+    expect(eleven.ok).toBe(true);
+    // 8–12 stay as spoken (a bare "11" is morning) — 11:00 MST = 18:00 UTC.
+    if (eleven.ok) expect(eleven.startUtc).toBe('2026-06-02T18:00:00.000Z');
+  });
+
+  it('does not touch a number word that is not an hour ("two hours")', () => {
+    const res = resolveDateTime('tomorrow at 2pm for two hours', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The SECOND anchor for the same voice-shaped failure: the temporal
+// preposition "at". Register case book-03, "Book Smith furnace maintenance
+// Tuesday at two" — a mic transcript of the phrasing book-01 writes as
+// "Tuesday at 2 pm". Until this landed, the identical booking resolved when
+// typed with digits and asked "what time of day?" when dictated, on a surface
+// (the assistant's mic button) whose whole job is to accept dictation.
+// ---------------------------------------------------------------------------
+
+describe('resolveDateTime — spoken "at <word>"', () => {
+  const TZ = 'America/Phoenix'; // no DST, so the offset is fixed at -7
+
+  it('resolves "Tuesday at two" to the same instant as "Tuesday at 2"', () => {
+    const spoken = resolveDateTime('Tuesday at two', { timezone: TZ, now: NOW });
+    const digits = resolveDateTime('Tuesday at 2', { timezone: TZ, now: NOW });
+    expect(spoken.ok).toBe(true);
+    expect(digits.ok).toBe(true);
+    if (spoken.ok && digits.ok) {
+      expect(spoken.startUtc).toBe(digits.startUtc);
+      // The bare-hour service bias still applies (1–7 → PM), unchanged.
+      expect(spoken.startUtc).toBe('2026-06-02T21:00:00.000Z');
+      expect(spoken.precision).toBe('exact');
+    }
+  });
+
+  it('reads the whole booking sentence, not just the date phrase', () => {
+    const res = resolveDateTime('Book Smith furnace maintenance Tuesday at two', {
+      timezone: TZ,
+      now: NOW,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+  });
+
+  it('honours an explicit meridiem after the word hour ("at eight am")', () => {
+    const res = resolveDateTime('Tuesday at eight am', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T15:00:00.000Z');
+  });
+
+  it('still asks when the minutes are spoken as words — never books 2:00 for "two thirty"', () => {
+    for (const phrase of ['Tuesday at two thirty', 'Tuesday at two fifteen']) {
+      const res = resolveDateTime(phrase, { timezone: TZ, now: NOW });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('ambiguous_no_time');
+    }
+  });
+
+  it('leaves an UNANCHORED number word alone — a bare "two" is still never guessed', () => {
+    const res = resolveDateTime('Tuesday two', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe('ambiguous_no_time');
+  });
+
+  it('does not rewrite "at" followed by a non-hour word', () => {
+    const res = resolveDateTime('Tuesday at noon', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T19:00:00.000Z');
   });
 });

@@ -12,7 +12,9 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
 } from '../../src/ai/agents/customer-calling/tts-copy';
+import { EMERGENCY_SAFETY_LINE } from '../../src/ai/agents/customer-calling/emergency-detector';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { CALLER_UTTERANCE_FENCE_PROMPT_SECTION } from '../../src/ai/orchestration/intent-classifier';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
 import {
   InMemoryOnCallRepository,
@@ -1017,9 +1019,13 @@ describe('TwilioGatherAdapter.handleGather', () => {
   let sessionId: string;
 
   beforeEach(async () => {
+    // #886/#887 — the suite session is an inbound CUSTOMER line ('caller'
+    // profile), so the canned classification must be an intent that surface
+    // offers; draft_estimate is S1-reachable capture (create_invoice would
+    // now be caught by the post-parse intent_off_surface guard).
     gateway = makeGatewayReturning(
       JSON.stringify({
-        intentType: 'create_invoice',
+        intentType: 'draft_estimate',
         confidence: 0.92,
         reasoning: 'clear command',
         extractedEntities: { customerName: 'Acme', amount: 45000 },
@@ -1048,6 +1054,53 @@ describe('TwilioGatherAdapter.handleGather', () => {
     }
   });
 
+  it('an off-surface classification on the Gather seam is audited as voice.intent_off_surface (#902)', async () => {
+    // The adapter is the second live classify seam (the first is the
+    // processor speechTurn); both must leave the same trail when the
+    // post-parse guard intercepts an intent the 'caller' profile refuses —
+    // the interception must not dissolve into a bare reprompt.
+    const offAuditRepo = new InMemoryAuditRepository();
+    const offGateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'record_payment',
+        confidence: 0.95,
+        reasoning: 'caller wants to pay',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+    );
+    const built = makeAdapter({ gateway: offGateway, auditRepo: offAuditRepo });
+    await built.adapter.handleInbound({
+      callSid: 'CA-offsurface',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (built.store as unknown as { sessions: Map<string, unknown> }).sessions.keys(),
+    );
+    const offSessionId = ids[0] as string;
+    const offSession = await built.store.get(offSessionId);
+    if (offSession && offSession.machine.currentState === 'ask_caller') {
+      offSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    await built.adapter.handleGather({
+      sessionId: offSessionId,
+      callSid: 'CA-offsurface',
+      speechResult: 'I want to pay my invoice over the phone',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const events = offAuditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(events).toHaveLength(1);
+    expect(events[0].tenantId).toBe('tenant-abc');
+    expect(events[0].entityId).toBe(offSessionId);
+    expect(events[0].metadata).toMatchObject({ intent: 'record_payment', profile: 'caller' });
+  });
+
   describe('Phase-2 Track A owner lookup wiring', () => {
     const tenantId = 'tenant-owner';
 
@@ -1070,7 +1123,11 @@ describe('TwilioGatherAdapter.handleGather', () => {
       };
     }
 
-    async function ownerAdapter(intentType: string, ownerSession = true, extendedIntents = true) {
+    async function ownerAdapter(
+      intentType: string,
+      actor: { userId: string; role: 'owner' | 'dispatcher' | 'technician' } | null = { userId: 'clerk-owner', role: 'owner' },
+      extendedIntents = true,
+    ) {
       const store = new VoiceSessionStore();
       const gateway = makeGatewayReturning(JSON.stringify({ intentType, confidence: 0.96 }));
       const appointmentRepo = new InMemoryAppointmentRepository();
@@ -1088,16 +1145,30 @@ describe('TwilioGatherAdapter.handleGather', () => {
         appointmentRepo,
         jobRepo,
         proposalRepo,
-        dailyDigestRepo,
         estimateRepo,
         invoiceRepo,
-        droppedCallRecoveryRepo,
+        // #866 — lookups dispatch through the shared bundle, the same shape
+        // app.ts hands memo + chat. Authorization is the actor's role, and
+        // the recovery port rides `answers` now that the shared
+        // `lookup_pending_items` case threads it on every surface.
+        lookups: {
+          answers: {
+            dailyDigestRepo,
+            estimateRepo,
+            invoiceRepo,
+            droppedCallRecoveryRepo,
+            resolveMemberRole: async (_t: string, userId: string) =>
+              actor && userId === actor.userId ? actor.role : null,
+          },
+          shared: { appointmentRepo, jobRepo, proposalRepo },
+        },
       });
       const session = store.create(tenantId, 'telephony', {
         callSid: `CA-${intentType}`,
-        ...(ownerSession ? { ownerSession: true } : {}),
+        ...(actor?.role === 'owner' ? { ownerSession: true } : {}),
         ...(extendedIntents ? { extendedIntents: true } : {}),
       });
+      if (actor) session.actorUserId = actor.userId;
       advanceToIntentCapture(session);
       return {
         adapter,
@@ -1198,9 +1269,9 @@ describe('TwilioGatherAdapter.handleGather', () => {
     });
 
     it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
-      'non-owner session refuses %s and speaks the existing lookup fallback',
+      'a session with NO actor (customer line) is refused %s — owner-extended lookups are never answered to an anonymous caller',
       async (intentType) => {
-        const deps = await ownerAdapter(intentType, false);
+        const deps = await ownerAdapter(intentType, null);
         const xml = await deps.adapter.handleGather({
           sessionId: deps.session.id,
           callSid: `CA-${intentType}-non-owner`,
@@ -1209,25 +1280,73 @@ describe('TwilioGatherAdapter.handleGather', () => {
           tenantId,
         });
 
-        expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+        expect(xml).toContain('owner-level report');
         expect(xml).not.toContain('Owner digest: revenue was strong');
       },
     );
 
-    it('flag-off owner session refuses a forced lookup_digest classification without calling the skill', async () => {
-      const deps = await ownerAdapter('lookup_digest', true, false);
+    it('lookup_pending_items speaks the dropped-call recoveries line at the PHONE seam (the port the old switch passed and the shared dispatch briefly lost)', async () => {
+      const deps = await ownerAdapter('lookup_pending_items');
+      // "Unanswered" = a recovery SMS that was SENT and never suppressed —
+      // schedule then markSent, the two steps the recovery worker takes.
+      const row = await deps.droppedCallRecoveryRepo.schedule({
+        tenantId,
+        voiceSessionId: 'a1111111-1111-4111-8111-111111111111',
+        callerE164: '+15125550111',
+        scheduledFor: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      await deps.droppedCallRecoveryRepo.markSent(
+        tenantId,
+        row.id,
+        'SM-test',
+        new Date(Date.now() - 30 * 60 * 1000),
+      );
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_pending_items-recoveries',
+        speechResult: 'what is pending',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('dropped-call recovery');
+    });
+
+    it('a forced lookup_digest classification with NO resolvable actor is refused without calling the skill', async () => {
+      const deps = await ownerAdapter('lookup_digest', null, false);
       const findLatest = vi.spyOn(deps.dailyDigestRepo, 'findLatest');
 
       const xml = await deps.adapter.handleGather({
         sessionId: deps.session.id,
-        callSid: 'CA-lookup_digest-flag-off-owner',
+        callSid: 'CA-lookup_digest-no-actor',
         speechResult: 'read me my day',
         confidence: 0.95,
         tenantId,
       });
 
-      expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+      expect(xml).toContain('owner-level report');
       expect(findLatest).not.toHaveBeenCalled();
+    });
+
+    it('the extendedIntents flag no longer gates DISPATCH: a flag-off owner actor is answered (the flag gates classification only)', async () => {
+      const deps = await ownerAdapter('lookup_digest', { userId: 'clerk-owner', role: 'owner' }, false);
+      await deps.dailyDigestRepo.upsert(
+        tenantId,
+        new Date().toISOString().slice(0, 10),
+        {} as Parameters<InMemoryDailyDigestRepository['upsert']>[2],
+        'Owner digest: revenue was strong',
+      );
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_digest-flag-off-owner-actor',
+        speechResult: 'read me my day',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('Owner digest: revenue was strong');
     });
   });
 
@@ -1235,21 +1354,21 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const xml = await adapter.handleGather({
       sessionId,
       callSid: 'CA-gx',
-      speechResult: 'Create an invoice for Acme for 450 dollars',
+      speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
       confidence: 0.95,
       tenantId: 'tenant-abc',
     });
 
     const snap = await store.snapshot(sessionId);
     expect(snap?.state).toBe('intent_confirm');
-    expect(snap?.context.currentIntent).toBe('create_invoice');
+    expect(snap?.context.currentIntent).toBe('draft_estimate');
     // Readback tts_play surfaced into the TwiML.
     expect(xml).toMatch(/<Say.*confirm/i);
     expect(xml).toContain('<Gather');
 
     // Caller transcript was appended (canonical store stores formatted strings).
     expect(snap?.transcript[0]).toBe(
-      'caller: Create an invoice for Acme for 450 dollars'
+      'caller: I need an estimate for a water heater replacement, around 450 dollars'
     );
   });
 
@@ -1305,6 +1424,17 @@ describe('TwilioGatherAdapter.handleGather', () => {
   // Confidence is processed as before, and repeated low confidence hands the
   // caller off instead of looping.
   describe('low acoustic Gather Confidence', () => {
+    // PR #975 F5 — the ladder's terminal branch now kicks off the (LLM-backed,
+    // best-effort) call summary. Stub it so the `gateway.complete` assertions
+    // below keep isolating the classifier/turn pipeline; the summary kick
+    // itself is pinned in gather-max-call-duration.test.ts.
+    beforeEach(() => {
+      vi.spyOn(
+        (adapter as unknown as { processor: { runSummary: (s: unknown) => Promise<void> } }).processor,
+        'runSummary',
+      ).mockResolvedValue(undefined);
+    });
+
     it('reprompts without running the classifier when Confidence is below the floor', async () => {
       const xml = await adapter.handleGather({
         sessionId,
@@ -1327,7 +1457,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       const xml = await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: 0.95,
         tenantId: 'tenant-abc',
       });
@@ -1342,7 +1472,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       const xml = await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: undefined,
         tenantId: 'tenant-abc',
       });
@@ -1402,7 +1532,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: 0.95,
         tenantId: 'tenant-abc',
       });
@@ -1439,6 +1569,17 @@ describe('TwilioGatherAdapter.handleGather', () => {
   // confidence: reprompt below the cap, escalation + hangup at it, and a
   // single combined streak for mixed silence/mumble sequences.
   describe('silent caller (empty SpeechResult) shares the low-confidence ladder', () => {
+    // PR #975 F5 — the ladder's terminal branch now kicks off the (LLM-backed,
+    // best-effort) call summary. Stub it so the `gateway.complete` assertions
+    // below keep isolating the classifier/turn pipeline; the summary kick
+    // itself is pinned in gather-max-call-duration.test.ts.
+    beforeEach(() => {
+      vi.spyOn(
+        (adapter as unknown as { processor: { runSummary: (s: unknown) => Promise<void> } }).processor,
+        'runSummary',
+      ).mockResolvedValue(undefined);
+    });
+
     it('first silent turn reprompts with a new <Gather> and no <Hangup/>', async () => {
       const xml = await adapter.handleGather({
         sessionId,
@@ -1533,7 +1674,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: 0.95,
         tenantId: 'tenant-abc',
       });
@@ -1599,6 +1740,10 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
     ).toBe(false);
+    // #886/#887 — an anonymous/customer call gets the surface-gated 'caller'
+    // base taxonomy: money-ask escalation line in, money intents out.
+    expect(systemMessages[0].content).toContain('a person handles\nmoney on this line');
+    expect(systemMessages[0].content).not.toContain('"record_payment"');
     const session = await store.get(sid);
     expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
   });
@@ -1724,13 +1869,19 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
     // Customer protection still on; owner lookups off when flag resolver fails.
-    expect(systemMessages.length).toBe(2);
+    // #894 — plus the caller-utterance fence rule every S1 caller turn carries.
+    expect(systemMessages.length).toBe(3);
+    expect(systemMessages[2].content).toBe(CALLER_UTTERANCE_FENCE_PROMPT_SECTION);
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
     ).toBe(false);
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('negotiation')),
     ).toBe(true);
+    // #886/#887 — still the surface-gated 'caller' base when the flag
+    // resolver fails (profile derives from identity, not tenant flags).
+    expect(systemMessages[0].content).toContain('a person handles\nmoney on this line');
+    expect(systemMessages[0].content).not.toContain('"record_payment"');
   });
 
   it('emergency_dispatch fast-paths to escalating and skips intent_confirm', async () => {
@@ -1949,7 +2100,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
     await adapter.handleGather({
       sessionId,
       callSid: 'CA-gx',
-      speechResult: 'Create an invoice for Acme for 450 dollars',
+      speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
       confidence: 0.95,
       tenantId: 'tenant-abc',
     });
@@ -2174,6 +2325,59 @@ describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', 
   });
 });
 
+// ─── PR-0b (#968/#962) — Gather must not silently drop the turn when the
+// tenant's keyword-frustration toggle is off ──────────────────────────────
+
+describe('TwilioGatherAdapter.handleGather — frustration toggle OFF must not drop the turn', () => {
+  it('tenant toggle off: a frustration keyword still reaches classification and the TwiML speaks (turn not silently dropped)', async () => {
+    const tenantId = 'tenant-toggle-off';
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'draft_estimate',
+        confidence: 0.92,
+        reasoning: 'clear command',
+        extractedEntities: { customerName: 'Acme', amount: 45000 },
+      }),
+    );
+    const { adapter, store } = makeAdapter({ gateway });
+    const session = store.create(tenantId, 'telephony', {
+      callSid: 'CA-toggle-off',
+      escalationTriggers: {
+        trigger_low_confidence: true,
+        trigger_explicit_request: true,
+        trigger_keyword_frustration: false,
+      },
+    });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      tenantId,
+      callSid: 'CA-toggle-off',
+      from: '+15125550100',
+      to: '+15125550999',
+    });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+
+    const xml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-toggle-off',
+      speechResult: 'this is ridiculous',
+      confidence: 0.95,
+      tenantId,
+    });
+
+    // With the toggle OFF, the keyword must not silently eat the turn: the
+    // caller must hear a normal turn outcome (a <Say>), not bare silence —
+    // today's bug returns a bare <Response><Gather .../></Response> with no
+    // <Say> at all, because the Gather path dispatches frustration_detected
+    // unconditionally and the FSM re-gate (transitions.ts) no-ops it into
+    // zero side effects when the toggle is off.
+    expect(xml).toContain('<Say');
+    // And with the toggle off, this keyword must not have escalated at all.
+    expect(xml).not.toContain('Let me get a person on the line for you right away');
+  });
+});
+
 // ─── RV-140/RV-142 — emergency keyword interrupt (shared safety scan) ────────
 
 describe('RV-140 — deterministic emergency scan (both transcript entry points)', () => {
@@ -2226,6 +2430,147 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
     expect(session.machine.currentState).toBe('terminated');
     expect(twiml).toContain('call 911');
     expect(twiml).toContain('<Hangup/>');
+  });
+
+  // #1056 — a Spanish hazard report takes the same E1 close. No reviewed
+  // Spanish E1 script exists (O-2), so the English evacuation script (which
+  // leads with 911) is spoken, then the call hangs up.
+  it('#1056 handleGather: a Spanish gas leak ("fuga de gas") is E1 — evacuation script with 911, then <Hangup/>', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-1' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-1',
+      speechResult: 'hay una fuga de gas en mi casa, huele muy fuerte',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    for (const [arg] of (gateway.complete as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(JSON.stringify(arg)).toMatch(/Summarize the customer service call/i);
+    }
+    expect(session.machine.currentState).toBe('terminated');
+    expect(session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(twiml).toContain('leave the building immediately');
+    expect(twiml).toContain('call 911');
+    expect(twiml).toContain('<Hangup/>');
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('on-call dispatcher');
+  });
+
+  it('#1056 processCallerUtterance: a Spanish carbon-monoxide alarm is E1 — closes with no LLM call and no dispatcher bridge', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-2' });
+
+    const sideEffects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-es-2',
+      speechResult: 'la alarma de monoxido de carbono esta sonando',
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('terminated');
+    const tts = sideEffects.filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]?.payload as { text: string; tier?: string }).tier).toBe('E1');
+    expect((tts[0]?.payload as { text: string }).text).toContain('911');
+    expect(sideEffects.some((fx) => fx.type === 'notify_oncall')).toBe(false);
+    expect(sideEffects.some((fx) => fx.type === 'revoke_pending_bookings')).toBe(true);
+  });
+
+  it('#1056 handleGather: a Spanish non-hazard call ("no hay agua caliente") is not E1 — no evacuation, no hangup', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-3' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      tenantId: 'tenant-t1',
+      callSid: 'CA-em-es-3',
+      from: '+15125550100',
+      to: '+15125550999',
+    });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-3',
+      speechResult: 'no hay agua caliente',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect(session.machine.currentState).not.toBe('terminated');
+    expect(session.machine.currentContext.escalationReason).not.toBe('life_safety_e1');
+    expect(twiml).not.toContain('leave the building');
+    expect(twiml).not.toContain('<Hangup/>');
+  });
+
+  // #1220 review — before #1220 a Spanish gas leak was E2 and the caller heard
+  // the 911 line in Spanish. E1 must not take that away: a Spanish caller
+  // (matched phrase OR session language) hears the EXISTING Spanish 911 line
+  // first, in the Spanish voice, then the English evacuation script. No new
+  // wording — the line is the catalogued RV-142 translation.
+  const ES_911_LINE = renderTtsText(EMERGENCY_SAFETY_LINE, {}, 'es');
+
+  it('#1220 review handleGather: a Spanish gas leak on an English session hears the Spanish 911 line (Spanish voice) BEFORE the English E1 script', async () => {
+    expect(ES_911_LINE).toBe('Si alguien está en peligro inmediato, cuelgue y llame al 911.');
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-911-1' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-911-1',
+      speechResult: 'hay una fuga de gas en mi casa',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    const spanishSay = `<Say voice="Polly.Mia-Neural">${ES_911_LINE}</Say>`;
+    expect(twiml).toContain(spanishSay);
+    expect(twiml.split(ES_911_LINE)).toHaveLength(2); // spoken exactly once
+    expect(twiml.indexOf(spanishSay)).toBeLessThan(twiml.indexOf('leave the building immediately'));
+    // The English script keeps the English voice on an English session.
+    expect(twiml).toMatch(/<Say voice="Polly\.Joanna">If anyone is in immediate danger[^<]*leave the building immediately/);
+    expect(twiml).toContain('<Hangup/>');
+  });
+
+  it('#1220 review handleGather: a Spanish-session caller reporting in English ("I smell gas") still hears the Spanish 911 line first', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-911-2' });
+    session.language = 'es';
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-911-2',
+      speechResult: 'I smell gas in the kitchen',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect(session.machine.currentState).toBe('terminated');
+    expect(twiml).toContain(`<Say voice="Polly.Mia-Neural">${ES_911_LINE}</Say>`);
+    expect(twiml.indexOf(ES_911_LINE)).toBeLessThan(twiml.indexOf('leave the building immediately'));
+    expect(twiml).toContain('<Hangup/>');
+  });
+
+  it('#1220 review handleGather: an English caller on an English session hears no Spanish line (English E1 unchanged)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-en-911-3' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-en-911-3',
+      speechResult: 'I smell gas in the kitchen',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect(session.machine.currentState).toBe('terminated');
+    expect(twiml).not.toContain(ES_911_LINE);
+    expect(twiml).not.toContain('Polly.Mia-Neural');
+    expect(twiml.match(/<Say /g)).toHaveLength(1);
+    expect(twiml).toContain('leave the building immediately');
   });
 
   it('ANS-001: the 911 TwiML returns even when the E1 tenant-alert SMS hangs forever', async () => {

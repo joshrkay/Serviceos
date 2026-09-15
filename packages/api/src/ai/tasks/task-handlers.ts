@@ -1,5 +1,6 @@
 import { Proposal, CreateProposalInput, createProposal, ProposalType } from '../../proposals/proposal';
 import type { InjectedStandingInstruction } from '../standing-instructions-context';
+import type { IntentType } from '../orchestration/intent-classifier';
 
 export interface TaskContext {
   tenantId: string;
@@ -7,6 +8,24 @@ export interface TaskContext {
   conversationId?: string;
   existingEntities?: Record<string, unknown>;
   userId: string;
+  /**
+   * Quality-review fix (2026-08-09, Task 11) — the classified voice/chat
+   * intent, when the entry point has one to give (voice-action-router.ts).
+   * Multiple intents can alias onto the SAME `taskType`/proposal type (e.g.
+   * `log_mileage` and `log_expense` both drive `LogExpenseTaskHandler`), so
+   * a handler that needs to tell them apart cannot use `taskType` — this is
+   * the one place to look. Before this field existed, `LogExpenseTaskHandler`
+   * had to key its `log_mileage` branch on the mere PRESENCE of an
+   * extracted-entity field (`mileageMiles`) instead, which a shared,
+   * un-scoped classifier JSON template could defeat: the model is free to
+   * populate `mileageMiles` on a `log_expense` turn (or `amount` on a
+   * `log_mileage` turn) since nothing enforces per-intent field scoping
+   * (`entitiesForProposal`, `workers/voice-action-router.ts`, is a
+   * passthrough for every intent except `create_customer`). Optional —
+   * older/other entry points (e.g. `ai/orchestration/task-router.ts`, which
+   * has no production callers today) may still omit it.
+   */
+  intent?: IntentType;
   /**
    * Resolved caller identity. Set by the entry-point once the inbound
    * caller has been matched to a customer (e.g. by caller-ID). Handlers
@@ -102,6 +121,24 @@ export interface TaskContext {
    * leaves this undefined and never blocks the task.
    */
   standingInstructions?: InjectedStandingInstruction[];
+  /**
+   * #1173 — photos the operator attached to this turn (Assistant chat),
+   * already resolved TENANT-SCOPED by the entry point and presigned to a URL
+   * the gateway can fetch (`files/chat-image-attachments.ts`). A handler that
+   * accepts images (EstimateTaskHandler) sends one image part per photo on
+   * its model request — the same `LLMContentPart` shape
+   * MmsEstimateTaskHandler builds. `fileId` rides along for provenance only;
+   * the model never sees it. Absent → a text-only request, byte-identical to
+   * before.
+   */
+  images?: TaskImage[];
+}
+
+/** #1173 — one resolved, presigned photo handed to a drafting task. */
+export interface TaskImage {
+  url: string;
+  contentType?: string;
+  fileId?: string;
 }
 
 export interface TaskResult {

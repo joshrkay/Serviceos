@@ -6,7 +6,14 @@ import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import type { JobRepository } from '../../src/jobs/job';
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
-const jobId = '00000000-0000-4000-8000-0000000000j1';
+// Round 4b — must be a genuine hex uuid: create-appointment-task.ts now
+// verify-or-gates payload.jobId before the held-slot branch even runs (a
+// non-uuid value, however uuid-SHAPED, is dropped and gated rather than
+// ridden through — the sweep row A33 fix). This fixture used to be
+// deliberately non-hex (a trailing "j1"); that was never load-bearing to
+// what this suite proves (held-slot booking happens when a repo is wired),
+// so it is now a plain valid id like every other fixture in this file.
+const jobId = '00000000-0000-4000-8000-0000000000f1';
 
 /** Minimal fake gateway that returns a fixed JSON booking. */
 function fakeGateway(json: Record<string, unknown>): LLMGateway {
@@ -104,7 +111,8 @@ describe('CreateAppointmentAITaskHandler — held-slot booking', () => {
   });
 });
 
-// A valid-hex UUID (the shared `jobId` fixture above is intentionally non-hex).
+// A second, distinct valid uuid — kept separate from the shared `jobId`
+// fixture above purely so the two describe blocks below never collide.
 const validJobId = '00000000-0000-4000-8000-000000000abc';
 
 /** Minimal jobRepo whose findById returns the seeded job only for its own id. */

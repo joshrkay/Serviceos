@@ -22,6 +22,14 @@
  * other outbound send writes to (entity_type='conversation_reply'), so delivery
  * accounting and suppression stay uniform across transactional and
  * conversational sends.
+ *
+ * Audit (row 9.12): all three outcomes of a Send are recorded on the
+ * `conversation` entity — `conversation.reply.sent`,
+ * `conversation.reply.suppressed` (DNC block) and `conversation.reply.failed`
+ * (provider failure). The two refusals matter most: the operator acted and
+ * nothing reached the customer, and for the DNC block there is deliberately
+ * no dispatch row to carry that fact, so the audit row is the only record
+ * that the reply was stopped.
  */
 import { createHash } from 'crypto';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
@@ -325,6 +333,61 @@ async function resolveTarget(
   );
 }
 
+/**
+ * Row 9.12 — one guarded audit write for a reply that did NOT go out.
+ *
+ * The `sent` path has always audited (`conversation.reply.sent`, below).
+ * The two refusal paths did not, and they are the ones the row's criterion
+ * is actually about: the operator pressed Send, nothing reached the
+ * customer, and — for the DNC block — there is deliberately no dispatch row
+ * to carry that fact either, so the audit trail is the only place it
+ * survives. A suppression the owner did not choose must not be invisible to
+ * them.
+ *
+ * DELIBERATELY SWALLOWED, exactly like the `sent` emitter three lines from
+ * the end of `sendConversationReply`: the caller is about to receive a
+ * `ConversationReplyError` that already tells them what happened, and an
+ * audit outage must not replace a precise `dnc_blocked` / `delivery_failed`
+ * error with a ledger error.
+ */
+async function auditReplyRefusal(
+  deps: ConversationReplyDeps,
+  input: {
+    tenantId: string;
+    conversationId: string;
+    actorId: string;
+    actorRole: string;
+    eventType: 'conversation.reply.suppressed' | 'conversation.reply.failed';
+    channel: ReplyChannel;
+    recipient: string;
+    reason: ConversationReplyErrorCode;
+    dispatchId?: string;
+  },
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  try {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.actorId,
+        actorRole: input.actorRole,
+        eventType: input.eventType,
+        entityType: 'conversation',
+        entityId: input.conversationId,
+        ...(input.dispatchId ? { correlationId: input.dispatchId } : {}),
+        metadata: {
+          channel: input.channel,
+          recipient: input.recipient,
+          reason: input.reason,
+          ...(input.dispatchId ? { dispatchId: input.dispatchId } : {}),
+        },
+      }),
+    );
+  } catch {
+    /* audit is best-effort — never mask the real refusal */
+  }
+}
+
 function buildIdempotencyKey(
   conversationId: string,
   channel: ReplyChannel,
@@ -376,6 +439,16 @@ export async function sendConversationReply(
       normalizePhone(target.recipient),
     );
     if (onDnc) {
+      await auditReplyRefusal(deps, {
+        tenantId: input.tenantId,
+        conversationId: input.conversationId,
+        actorId: input.actorId,
+        actorRole: input.actorRole,
+        eventType: 'conversation.reply.suppressed',
+        channel: target.channel,
+        recipient: target.recipient,
+        reason: 'dnc_blocked',
+      });
       throw new ConversationReplyError(
         'dnc_blocked',
         'Recipient has opted out (STOP/DNC); reply not sent',
@@ -434,11 +507,23 @@ export async function sendConversationReply(
       errorMessage: err instanceof Error ? err.message : String(err),
       idempotencyKey,
     };
+    let failedDispatchId: string | undefined;
     try {
-      await deps.dispatchRepo.create(failedDispatch);
+      failedDispatchId = (await deps.dispatchRepo.create(failedDispatch)).id;
     } catch {
       /* best-effort failure record */
     }
+    await auditReplyRefusal(deps, {
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      actorId: input.actorId,
+      actorRole: input.actorRole,
+      eventType: 'conversation.reply.failed',
+      channel: target.channel,
+      recipient: target.recipient,
+      reason: 'delivery_failed',
+      ...(failedDispatchId ? { dispatchId: failedDispatchId } : {}),
+    });
     throw new ConversationReplyError(
       'delivery_failed',
       err instanceof Error ? err.message : 'Reply delivery failed',

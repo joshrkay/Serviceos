@@ -1,0 +1,155 @@
+{
+  "started": "2026-08-29T17:49:24.265Z",
+  "finished": "2026-08-29T17:49:32.681Z",
+  "corpus": {
+    "version": "v1",
+    "label": "AI-capability catalog live sweep (dev) — proposal-driving + lookup + direct-act + control + no-onramp + surface-refusal",
+    "casesPath": "scripts/ai-catalog-sweep/corpus.json",
+    "rowCount": 99,
+    "ranCount": 3
+  },
+  "targets": {
+    "api": "https://serviceosapi-development.up.railway.app",
+    "note": "AI-capability catalog live sweep (dev) — proposal-driving + lookup + direct-act + control + no-onramp + surface-refusal via scripts/ai-catalog-sweep/corpus.json"
+  },
+  "tenant": {
+    "id": "a948cc66-7279-44bd-9718-4ef7721f9422",
+    "label": "QA matrix tenant A (.env.qa.local)",
+    "ownerSubject": "qa-matrix-user-A",
+    "techSubject": "ai-catalog-sweep-tech-actor"
+  },
+  "auth": {
+    "meStatus": 200
+  },
+  "db": {
+    "reachable": true,
+    "superuserVerify": true
+  },
+  "fixtureBootstrap": {
+    "summary": [
+      "users: exists ai-catalog-sweep-tech-baker",
+      "users: exists ai-catalog-sweep-tech-actor",
+      "leads: exists Johnson",
+      "leads: exists Nguyen"
+    ]
+  },
+  "fixtures": {
+    "customerName": "qa-matrix-A-customer",
+    "jobSummary": "QA Matrix job for qa-matrix-A"
+  },
+  "grep": "A08,L09,B01",
+  "concurrency": 3,
+  "counts": {
+    "PASS": 2,
+    "PARTIAL": 1
+  },
+  "countsByOutcomeClass": {
+    "honest_refusal": 1,
+    "lookup_answer": 1,
+    "executes": 1
+  },
+  "results": [
+    {
+      "id": "A08",
+      "intent": "create_customer",
+      "surface": "chat",
+      "expectedOutcome": "executes",
+      "verdict": "PASS",
+      "outcomeClass": "executes",
+      "reason": "proposal_executed",
+      "httpStatus": 200,
+      "model": "intent-classifier",
+      "taskType": "assistant.create_customer",
+      "content": "New customer: Priya Shah. Review and approve to add them to your CRM.",
+      "proposalId": "76e9165b-3215-4bca-a5f0-856c5ba400df",
+      "proposalType": "Customer",
+      "approve": {
+        "status": "executed",
+        "resultEntityId": "c838f31a-b484-4f95-9c63-3b50fa61d505",
+        "proposalType": "create_customer"
+      },
+      "dbVerify": {
+        "table": "customers",
+        "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{resultEntityId}}'",
+        "sql": "SELECT * FROM customers WHERE tenant_id = 'a948cc66-7279-44bd-9718-4ef7721f9422' AND id = 'c838f31a-b484-4f95-9c63-3b50fa61d505'",
+        "rowCount": 1,
+        "matched": true,
+        "superuserVerify": true,
+        "sampleRow": {
+          "id": "c838f31a-b484-4f95-9c63-3b50fa61d505",
+          "tenant_id": "a948cc66-7279-44bd-9718-4ef7721f9422",
+          "first_name": "Priya",
+          "last_name": "Shah",
+          "display_name": "Priya Shah",
+          "company_name": null,
+          "primary_phone": "480-555-0187",
+          "secondary_phone": null,
+          "email": "priya.shah.qa@example.com",
+          "preferred_channel": "phone",
+          "sms_consent": false,
+          "communication_notes": null,
+          "is_archived": false,
+          "archived_at": null,
+          "created_by": "qa-matrix-user-A",
+          "created_at": "2026-08-29T17:49:31.566Z",
+          "updated_at": "2026-08-29T17:49:31.566Z",
+          "phone_normalized": "4805550187",
+          "originating_lead_id": null,
+          "preferred_language": null,
+          "date_of_birth": null,
+          "account_type": null,
+          "consent_status": "not_requested",
+          "consent_recorded_at": null,
+          "consent_recorded_by": null,
+          "consent_method": null,
+          "parent_account_id": null,
+          "source": null
+        }
+      },
+      "notes": "Root of the customer chain (chat's own create_customer branch, per catalog.md — not the shared drafting handler)."
+    },
+    {
+      "id": "B01",
+      "intent": "emergency_dispatch",
+      "surface": "chat",
+      "expectedOutcome": "honest_refusal",
+      "verdict": "PASS",
+      "outcomeClass": "honest_refusal",
+      "reason": "honest_refusal_confirmed",
+      "httpStatus": 200,
+      "model": "honesty-guard",
+      "taskType": "assistant.unhandled.emergency_dispatch",
+      "content": "I understood that as a \"emergency dispatch\" request, but I can't do that from here yet — I haven't created, changed, or scheduled anything. You can do it directly in the app for now. I can help with invoices, estimates, jobs, appointments, customers, and questions about your day.",
+      "proposalId": null,
+      "proposalType": null,
+      "approve": null,
+      "dbVerify": null,
+      "notes": "CHAT_DISPATCH_EXCLUDED_INTENTS companion to A23 — documented memo/chat divergence (routes/assistant.ts)."
+    },
+    {
+      "id": "L09",
+      "intent": "lookup_availability",
+      "surface": "chat",
+      "expectedOutcome": "lookup_answer",
+      "verdict": "PARTIAL",
+      "outcomeClass": "lookup_answer",
+      "reason": "lookup_answer_not_confirmed",
+      "httpStatus": 200,
+      "model": "gpt-4o-mini-2024-07-18",
+      "taskType": "assistant.general",
+      "content": "I don't have access to the schedule to check availability. Please consult your scheduling system or calendar for team member availability on Thursday.",
+      "proposalId": null,
+      "proposalType": null,
+      "approve": null,
+      "dbVerify": {
+        "table": "ai_runs",
+        "whereShape": "tenant_id = '{{tenantId}}' AND task_type LIKE 'assistant.lookup%' ORDER BY created_at DESC LIMIT 3",
+        "sql": "SELECT * FROM ai_runs WHERE tenant_id = 'a948cc66-7279-44bd-9718-4ef7721f9422' AND task_type LIKE 'assistant.lookup%' ORDER BY created_at DESC LIMIT 3",
+        "rowCount": 0,
+        "matched": false,
+        "superuserVerify": true,
+        "sampleRow": null
+      }
+    }
+  ]
+}

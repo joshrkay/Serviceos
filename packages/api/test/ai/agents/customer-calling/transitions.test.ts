@@ -484,14 +484,17 @@ describe('WS18 — a genuine second intent still clears the quote', () => {
     expect(result.updatedContext.pendingProposalId).toBeUndefined();
   });
 
-  it('intent_classified (second intent via classify) → intent_capture and clears pendingQuote', () => {
+  it('intent_classified (second intent via classify) clears pendingQuote and PROCESSES the new request (entity_resolution)', () => {
     const ctx = closingWithQuote();
     const result = transition(
       'closing',
       { type: 'intent_classified', intentType: 'create_appointment', entities: {}, confidence: 0.9 },
       ctx,
     );
-    expect(result.nextState).toBe('intent_capture');
+    // A genuine second intent abandons the live quote AND is not dropped: it
+    // rides the intent_capture path a first request takes.
+    expect(result.nextState).toBe('entity_resolution');
+    expect(result.updatedContext.currentIntent).toBe('create_appointment');
     expect(result.updatedContext.pendingQuote).toBeUndefined();
   });
 });
@@ -652,17 +655,43 @@ describe('SCH-03 — context.jobId survives the same turn-boundary resets as cus
     expect(result.updatedContext.jobId).toBe('job-sticky');
   });
 
-  it('second_intent_via_classify (closing → intent_capture) clears extractedEntities but keeps customerId AND jobId', () => {
+  it('second_intent_via_classify (closing → a second request) PROCESSES the new intent — entity_resolution with the new entities, sticky customerId AND jobId kept, prior request cleared', () => {
+    const closingCtx: CallingAgentContext = { ...resolvedCtx, pendingProposalId: 'prop-1', pendingQuote: undefined };
+    const result = transition(
+      'closing',
+      {
+        type: 'intent_classified',
+        intentType: 'cancel_appointment',
+        entities: { appointmentReference: 'Tuesday' },
+        confidence: 0.9,
+      },
+      closingCtx,
+    );
+    // The second request is not dropped: it rides the same path a first
+    // request takes from intent_capture.
+    expect(result.nextState).toBe('entity_resolution');
+    expect(result.updatedContext.currentIntent).toBe('cancel_appointment');
+    expect(result.updatedContext.extractedEntities).toEqual({ appointmentReference: 'Tuesday' });
+    expect(result.updatedContext.pendingProposalId).toBeUndefined();
+    expect(result.updatedContext.customerId).toBe('cust-sticky');
+    expect(result.updatedContext.jobId).toBe('job-sticky');
+    const audits = result.sideEffects
+      .filter((e) => e.type === 'audit_log')
+      .map((e) => e.payload.eventType);
+    expect(audits[0]).toBe('agent.calling.closing.second_intent_via_classify');
+    expect(audits).toContain('agent.calling.intent_capture.intent_classified');
+  });
+
+  it('second_intent_via_classify below τ_int reprompts instead of silently dropping the turn', () => {
     const closingCtx: CallingAgentContext = { ...resolvedCtx, pendingProposalId: 'prop-1' };
     const result = transition(
       'closing',
-      { type: 'intent_classified', intentType: 'cancel_appointment', entities: {}, confidence: 0.9 },
+      { type: 'intent_classified', intentType: 'unknown', entities: {}, confidence: 0.2 },
       closingCtx,
     );
     expect(result.nextState).toBe('intent_capture');
+    expect(result.sideEffects.some((e) => e.type === 'tts_play')).toBe(true);
     expect(result.updatedContext.extractedEntities).toBeUndefined();
-    expect(result.updatedContext.customerId).toBe('cust-sticky');
-    expect(result.updatedContext.jobId).toBe('job-sticky');
   });
 });
 

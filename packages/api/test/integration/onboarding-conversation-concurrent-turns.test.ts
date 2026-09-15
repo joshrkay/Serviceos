@@ -29,7 +29,7 @@ import {
   type OnboardingSession,
   type OnboardingSessionRepository,
 } from '../../src/db/onboarding-session-repository';
-import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { OnboardingConversationOrchestrator } from '../../src/ai/orchestration/onboarding-conversation';
 import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -144,7 +144,7 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
   let pool: Pool;
   let tenant: { tenantId: string; userId: string };
   let sessionRepo: PgOnboardingSessionRepository;
-  let auditRepo: InMemoryAuditRepository;
+  let auditRepo: PgAuditRepository;
   let proposalRepo: InMemoryProposalRepository;
 
   beforeAll(async () => {
@@ -156,7 +156,7 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
   beforeEach(async () => {
     tenant = await createTestTenant(pool);
     sessionRepo = new PgOnboardingSessionRepository(pool);
-    auditRepo = new InMemoryAuditRepository();
+    auditRepo = new PgAuditRepository(pool);
     proposalRepo = new InMemoryProposalRepository();
   });
 
@@ -299,5 +299,13 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
       (p) => (p.sourceContext as Record<string, unknown> | undefined)?.conversationId === sessionId,
     );
     expect(forThisSession.length).toBe(c1.proposalIds.length);
+
+    // Real Postgres, both legs: the same dedup the batch-id assertions above
+    // prove also holds for the FSM's own audit trail — the terminal-turn
+    // race must not double-write 'agent.onboarding.review_confirmed' any
+    // more than it double-writes the proposal batch.
+    const auditRows = await auditRepo.findByEntity(tenant.tenantId, 'onboarding_session', sessionId);
+    const reviewConfirmed = auditRows.filter((r) => r.eventType === 'agent.onboarding.review_confirmed');
+    expect(reviewConfirmed).toHaveLength(1);
   });
 });

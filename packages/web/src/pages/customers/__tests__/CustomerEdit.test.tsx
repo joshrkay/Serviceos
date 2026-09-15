@@ -238,3 +238,211 @@ describe('P11-007 CustomerEdit', () => {
     });
   });
 });
+
+// Root-cause fix for the `/customers/new` 500: the web app had no create
+// route, so "new" was captured as `:id` by CustomerDetail and the API was
+// asked for GET /api/customers/new. This is the page the new customers/new
+// route (routes.ts) renders: CustomerEdit without a customerId.
+describe('CustomerEdit — create mode (no customerId)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('renders a blank create form immediately, with no fetch-on-mount', async () => {
+    render(<CustomerEdit />);
+
+    expect(await screen.findByTestId('customer-edit-form')).toBeInTheDocument();
+    expect(screen.getByText('New Customer')).toBeInTheDocument();
+    expect(screen.getByLabelText('firstName')).toHaveValue('');
+    // The bug this guards against: CustomerDetail fetching GET
+    // /api/customers/new. The create form must never call apiFetch until
+    // the user submits.
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('POSTs a new customer on save and never calls /api/customers/new', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 'c-new', firstName: 'Grace', lastName: 'Hopper' }),
+    } as unknown as Response);
+
+    const onSaved = vi.fn();
+    render(<CustomerEdit onSaved={onSaved} />);
+
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Grace' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledWith('c-new');
+    });
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = vi.mocked(apiFetch).mock.calls[0];
+    expect(url).toBe('/api/customers');
+    expect(url).not.toBe('/api/customers/new');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body.firstName).toBe('Grace');
+    expect(body.lastName).toBe('Hopper');
+  });
+
+  it('shows a first-name-required error on a fully blank submit', () => {
+    render(<CustomerEdit />);
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/first name is required/i);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  // createCustomerSchema (packages/api/src/shared/contracts.ts) requires
+  // BOTH firstName and lastName — unlike edit mode's PUT, which allows
+  // company-only. AddCustomerSheet (CustomersPage.tsx), the other create
+  // path, agrees: it has no company field at all and always derives both
+  // firstName and lastName from its single "Full name" input before
+  // POSTing. Company-only must not reach the server here either — a
+  // company-only submit would otherwise pass this form's client check,
+  // POST, and come back as a 400 the user never asked for.
+  it('rejects a company-only submit with a last-name-required error and never calls POST /api/customers', () => {
+    render(<CustomerEdit />);
+
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Acme Plumbing' } });
+    fireEvent.change(screen.getByLabelText('companyName'), { target: { value: 'Acme Plumbing' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/last name is required/i);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('shows the API error when the POST fails (server 400 is surfaced, not swallowed)', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ message: 'firstName and lastName are required' }),
+    } as unknown as Response);
+
+    render(<CustomerEdit />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Grace' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('firstName and lastName are required');
+  });
+
+  it('Cancel and Create controls are present and full-size for the create form', () => {
+    render(<CustomerEdit />);
+    expect(screen.getByRole('button', { name: /create/i }).className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: /cancel/i }).className).toContain('min-h-11');
+  });
+});
+
+// #1155 (row 2.12) — the owner can mark a customer as a business /
+// property-manager account from the customer form; the choice rides the same
+// PUT/POST the other fields do.
+describe('CustomerEdit — account type (#1155)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('pre-fills the stored accountType and PUTs a changed one', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...baseCustomer, accountType: 'property_manager' }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...baseCustomer, accountType: 'b2b' }),
+      } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('accountType')).toHaveValue('property_manager');
+    });
+    expect(screen.getByLabelText('accountType').className).toContain('min-h-11');
+
+    fireEvent.change(screen.getByLabelText('accountType'), { target: { value: 'b2b' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => {
+      const body = JSON.parse(vi.mocked(apiFetch).mock.calls[1][1]?.body as string);
+      expect(body.accountType).toBe('b2b');
+    });
+  });
+
+  it('POSTs the chosen accountType on create, and omits the key when not set', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({ id: 'c-pm' }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({ id: 'c-plain' }),
+      } as unknown as Response);
+
+    const { unmount } = render(<CustomerEdit onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Pat' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Manager' } });
+    fireEvent.change(screen.getByLabelText('accountType'), { target: { value: 'property_manager' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(vi.mocked(apiFetch).mock.calls[0][1]?.body as string).accountType).toBe(
+      'property_manager',
+    );
+    unmount();
+
+    const onSaved = vi.fn();
+    render(<CustomerEdit onSaved={onSaved} />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Rita' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Residential' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('c-plain'));
+    expect(JSON.parse(vi.mocked(apiFetch).mock.calls[1][1]?.body as string)).not.toHaveProperty(
+      'accountType',
+    );
+  });
+
+  // #1155 review — there is no un-classify path (PUT rejects '' and null), so
+  // once a customer HAS a classification, "Not set" would save as a silent
+  // no-op while the form reports success. It must not be offered.
+  it('does not offer "Not set" once a customer has a stored accountType', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseCustomer, accountType: 'property_manager' }),
+    } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('accountType')).toHaveValue('property_manager');
+    });
+    const labels = Array.from(
+      (screen.getByLabelText('accountType') as HTMLSelectElement).options,
+    ).map((o) => o.textContent);
+    expect(labels).not.toContain('Not set');
+    expect(labels.length).toBeGreaterThan(0);
+  });
+
+  it('still offers "Not set" for an unclassified customer', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => baseCustomer,
+    } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('firstName')).toHaveValue('Alice');
+    });
+    const labels = Array.from(
+      (screen.getByLabelText('accountType') as HTMLSelectElement).options,
+    ).map((o) => o.textContent);
+    expect(labels).toContain('Not set');
+  });
+});

@@ -27,6 +27,14 @@
  * fence.
  */
 
+import {
+  capUntrustedText,
+  findForgedSpans,
+  replaceForgedSpans,
+} from './untrusted-text-matching';
+
+export { MAX_UNTRUSTED_CONTENT_CHARS } from './untrusted-text-matching';
+
 export const UNTRUSTED_CONTENT_BLOCK_BEGIN =
   '=== UNTRUSTED CALLER CONTENT (BEGIN) ===';
 export const UNTRUSTED_CONTENT_BLOCK_END =
@@ -41,9 +49,11 @@ const HARDENING_LINE =
  * message). `label` describes what the block contains (e.g. "Call transcript",
  * "Customer message thread") so the model knows what it is reading.
  *
- * `text` is inserted verbatim — never paraphrased. Any BEGIN/END marker the
- * caller embedded to try to break out of the fence is neutralized so it cannot
- * forge an early END.
+ * `text` is inserted verbatim — never paraphrased, never normalised. Any
+ * BEGIN/END marker the caller embedded to try to break out of the fence — in
+ * any spelling a model still reads as the marker — is replaced so it cannot
+ * forge an early END. Text over MAX_UNTRUSTED_CONTENT_CHARS is truncated
+ * visibly (head and tail kept).
  */
 export function buildUntrustedContentSection(text: string, label: string): string {
   return [
@@ -56,12 +66,25 @@ export function buildUntrustedContentSection(text: string, label: string): strin
 }
 
 /**
- * Strip any literal fence markers a caller embedded in their text, so a
- * transcript containing "=== UNTRUSTED CALLER CONTENT (END) ===" cannot close
- * the fence early and smuggle the rest of its text out as trusted prompt.
+ * Strip any fence markers a caller embedded in their text, so a transcript
+ * containing "=== UNTRUSTED CALLER CONTENT (END) ===" cannot close the fence
+ * early and smuggle the rest of its text out as trusted prompt.
+ *
+ * #894 review: an exact-string replace missed every variant a model still
+ * reads as the marker (case, spacing, fullwidth `＝`, zero-width characters,
+ * a line break, box-drawing `═`).
+ *
+ * #1229 review: the #894 fix NFKC-normalised the text it then FENCED, which
+ * rewrote the caller's numbers ("1½" → "11⁄2", "4²" → "42") and re-assembled
+ * role tags `neutralizeUntrusted` had already let through (`＜system＞` →
+ * `<system>`), while still missing homoglyphs, most invisible characters,
+ * entity / JSON escapes and separators between the words. Matching now runs
+ * on a folded COPY (`untrusted-text-matching.ts`); each forged marker is
+ * replaced as one whole span of the ORIGINAL text, and every other character
+ * reaches the model byte-for-byte. The text is capped first
+ * (`capUntrustedText`, visible truncation).
  */
 function neutralizeFenceMarkers(text: string): string {
-  return text
-    .split(UNTRUSTED_CONTENT_BLOCK_BEGIN).join('[fence-marker]')
-    .split(UNTRUSTED_CONTENT_BLOCK_END).join('[fence-marker]');
+  const capped = capUntrustedText(text);
+  return replaceForgedSpans(capped, findForgedSpans(capped, ['fence-marker']), '[fence-marker]');
 }

@@ -7,7 +7,6 @@
  * both write through this one function, never a re-implementation —
  * see routes/onboarding.ts POST /pack for the original.
  */
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool, PoolClient } from 'pg';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
@@ -88,36 +87,17 @@ export async function activatePackWithSeed(
   const { tenantId, packId, actorId, lockClient, lockPool } = input;
   const { settingsRepo, packActivationRepo, auditRepo, packSeedDeps } = deps;
 
-  // Read current settings to get existing activeVerticalPacks.
-  const existing = await settingsRepo.findByTenant(tenantId);
-  const currentPacks = existing?.activeVerticalPacks ?? [];
-  const newPacks = Array.from(new Set([...currentPacks, packId])); // Idempotent union
-
-  if (existing) {
-    await settingsRepo.update(tenantId, { activeVerticalPacks: newPacks });
-  } else {
-    // Auto-create minimal settings row if the tenant hasn't set identity yet.
-    await settingsRepo.create({
-      id: uuidv4(),
-      tenantId,
-      businessName: '', // Will remain empty until identity is set.
-      // No guessed timezone — the zone stays unset until the tenant
-      // chooses one, matching createSettings/ensureTenantSettings, so
-      // the scheduling gate never mistakes a seeded value for a choice.
-      estimatePrefix: 'EST-',
-      invoicePrefix: 'INV-',
-      nextEstimateNumber: 1001,
-      nextInvoiceNumber: 1001,
-      defaultPaymentTermDays: 30,
-      activeVerticalPacks: newPacks,
-      // Seed the platform default AI model so the onboarding "AI check"
-      // finds aiConfigPresent=true. Same value ensureTenantSettings uses.
-      aiModel: resolveBootstrapAiModel(),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-  }
-
+  // #1083 — the guard is taken FIRST, before any write. It used to sit
+  // after the tenant_settings read-then-update-or-INSERT below, which meant
+  // the loser of the lock still performed a real, unguarded write to a
+  // per-tenant table on its way to being told "in progress": two concurrent
+  // first-ever activations both observed "no settings row" and both INSERTed,
+  // and the loser died at `tenant_settings_tenant_id_key` (raw 23505) before
+  // the guard was ever evaluated. That is the difference, for the caller,
+  // between "try again" (PACK_ACTIVATION_IN_PROGRESS) and a 500. Every write
+  // this function performs — settings included — now happens with the lock
+  // held, so a loser returns `{ status: 'locked' }` having written nothing.
+  //
   // Serialize pack activation + seed per (tenant, pack). Two concurrent
   // callers for the same tenant+pack could both pass the "already
   // activated" branch and reach the seed probe before either commits;
@@ -156,6 +136,21 @@ export async function activatePackWithSeed(
   }
 
   try {
+    // Ensure the tenant has a settings row listing this pack. ONE atomic
+    // upsert-and-merge (settings/pg-settings.ts) rather than a read followed
+    // by a create-or-update, because the advisory lock above CANNOT protect
+    // this write: it is keyed by (tenant, pack) while `tenant_settings` is
+    // keyed by tenant alone. Two writers reach the row without holding this
+    // pack's key — the sibling `onboarding_tenant_settings` handler, which
+    // calls `upsertIdentityFields` before it ever tries the lock
+    // (proposals/execution/onboarding-handlers.ts:197), and a concurrent
+    // activation of a DIFFERENT pack. A read-then-write here therefore
+    // either raises 23505 (which, on the HTTP path, aborts the caller's
+    // shared request transaction and 500s the route — #1083's symptom on the
+    // winner's side) or silently drops the other activation's entry from the
+    // mirror. The statement merges instead, so neither can happen.
+    await settingsRepo.ensureActiveVerticalPack(tenantId, packId, resolveBootstrapAiModel());
+
     try {
       await activatePack({ tenantId, packId }, packActivationRepo);
     } catch (err) {

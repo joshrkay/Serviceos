@@ -3,6 +3,7 @@
   "bucket": "01-happy-lookups",
   "callerId": "+15555550502",
   "callerIdBlocked": false,
+  "callerIsOwner": true,
   "fixtures": {
     "tenant": {
       "id": "t_01_lookup_revenue",

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { InAppVoiceAdapter, buildInappGreeting } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
-import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
@@ -22,7 +22,17 @@ import {
 } from '../../../../src/proposals/execution/voice-extended-handlers';
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import type { Customer } from '../../../../src/customers/customer';
+import { InMemoryMoneyDashboardRepository } from '../../../../src/reports/money-dashboard';
+import { InMemoryJobRepository } from '../../../../src/jobs/job';
+import { InMemoryInvoiceRepository } from '../../../../src/invoices/invoice';
+import { LOOKUP_UNAVAILABLE_LINE } from '../../../../src/workers/voice-lookup-answer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
+import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
+import { InMemoryBrandVoiceRepository } from '../../../../src/tenants/brand/in-memory-brand-voice-repository';
+import { approveProposal, editProposal } from '../../../../src/proposals/actions';
+import { RespondToReviewTaskHandler } from '../../../../src/ai/tasks/review-response-task';
+import { InMemoryReviewRepository, Review } from '../../../../src/reputation/review';
+import type { BuildReviewResponseProposalDeps } from '../../../../src/reputation/build-proposal';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -115,31 +125,285 @@ describe('InAppVoiceAdapter', () => {
     expect(callerPlanResolver).not.toHaveBeenCalled();
   });
 
-  it('answers an authenticated owner lookup without mutation confirmation', async () => {
-    const ownerLookupResolver = vi.fn(async () => 'You have two appointments today.');
-    const adapter = new InAppVoiceAdapter({
-      store,
-      gateway: scriptedGateway([
-        JSON.stringify({
-          intentType: 'lookup_day_overview',
-          confidence: 0.98,
-          extractedEntities: {},
-        }),
-      ]),
-      proposalRepo,
-      auditRepo,
-      onCallRepo,
-      extendedIntentsEnabled: async () => true,
-      ownerLookupResolver,
+  /**
+   * Read-only `lookup_*` turns.
+   *
+   * The surface used to intercept exactly ONE intent (`lookup_day_overview`),
+   * and only for owner sessions, through a bespoke `ownerLookupResolver`.
+   * Everything else — "what does Khan owe?", "when's Garcia's next
+   * appointment?" — fell into the drafting FSM, and because the lookup family
+   * is deliberately absent from `INTENT_TO_PROPOSAL_TYPE`, a confirming "yes"
+   * minted a dead `voice_clarification` card. The adapter now routes EVERY
+   * lookup at confidence >= TAU_INT through the shared dispatch
+   * (`ai/voice-turn/inapp-lookup-surface.ts`), out of the FSM entirely.
+   */
+  describe('read-only lookups answer out-of-FSM', () => {
+    const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+
+    function resolvesTo(id: string, label: string): EntityResolver {
+      return {
+        resolve: vi.fn(async ({ kind }: { kind: string }) => ({
+          kind: 'resolved' as const,
+          candidate: { id, kind: kind as never, label, score: 0.97 },
+        })),
+      } as unknown as EntityResolver;
+    }
+
+    async function seededCustomerRepo() {
+      const customerRepo = new InMemoryCustomerRepository();
+      await customerRepo.create({
+        id: CUSTOMER_ID,
+        tenantId: TENANT,
+        displayName: 'Priya Khan',
+        firstName: 'Priya',
+        lastName: 'Khan',
+        isArchived: false,
+        createdBy: USER,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as unknown as Customer);
+      return customerRepo;
+    }
+
+    it('lookup_customer speaks the customer, stays in intent_capture, mints nothing', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_customer',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo, proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'Pull up Khan');
+
+      expect(result.ttsText?.toLowerCase()).toContain('priya khan');
+      // The FSM never saw the turn: no readback, no proposal, ready for the
+      // next question.
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
     });
 
-    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
-    const result = await adapter.handleInput(sessionId, 'What appointments are scheduled today?');
+    it('a lookup no longer needs an owner session — a plain operator is answered', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_customer',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo, proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
 
-    expect(result.state).toBe('intent_capture');
-    expect(result.ttsText).toBe('You have two appointments today.');
-    expect(result.proposalIds).toHaveLength(0);
-    expect(ownerLookupResolver).toHaveBeenCalledWith(TENANT, sessionId, 'lookup_day_overview');
+      // No `role` argument at all — the old gate (`ownerSession === true`)
+      // would have dropped this straight into the proposal funnel.
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'dispatcher');
+      const result = await adapter.handleInput(sessionId, 'Pull up Khan');
+
+      expect(result.ttsText?.toLowerCase()).toContain('priya khan');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('an ambiguous customer name asks which one — never a silent guess', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_balance',
+            confidence: 0.93,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo: new InMemoryCustomerRepository(), proposalRepo },
+          entityResolver: {
+            // Two records with the SAME display name — the case that made the
+            // old copy unanswerable ("Smith; Smith"). The hint is what the
+            // operator can actually choose between.
+            resolve: vi.fn(async ({ kind }: { kind: string }) => ({
+              kind: 'ambiguous' as const,
+              candidates: [
+                {
+                  id: 'c-1',
+                  kind: kind as never,
+                  label: 'Khan Household',
+                  hint: '104 QA Cedar Avenue',
+                  score: 0.86,
+                },
+                {
+                  id: 'c-2',
+                  kind: kind as never,
+                  label: 'Khan Household',
+                  hint: '77 Mill Road',
+                  score: 0.84,
+                },
+              ],
+            })),
+          } as unknown as EntityResolver,
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'What does Khan owe?');
+
+      expect(result.ttsText).toContain('More than one match for "Khan"');
+      expect(result.ttsText).toContain('Khan Household (104 QA Cedar Avenue)');
+      expect(result.ttsText).toContain('Khan Household (77 Mill Road)');
+      expect(result.ttsText).toMatch(/which one did you mean\?/i);
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('"what does Khan owe us" is answered ABOUT Khan — never "your account"', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_balance',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: { invoiceRepo: new InMemoryInvoiceRepository() },
+          shared: { customerRepo, jobRepo: new InMemoryJobRepository(), proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'What does Khan owe us?');
+
+      // The skill's phone-shaped copy is "Your account is paid in full —
+      // nothing currently owed"; the operator is not the customer.
+      expect(result.ttsText).not.toMatch(/\byour\b/i);
+      expect(result.ttsText).toContain("Priya Khan's account is paid in full");
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('a technician asking for revenue hears the refusal, never the number', async () => {
+      const moneyDashboardRepo = new InMemoryMoneyDashboardRepository();
+      moneyDashboardRepo.setSummary({
+        month: '2026-09',
+        revenueCents: 4_250_00,
+        outstandingCents: 90_000,
+      } as never);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_revenue',
+            confidence: 0.94,
+            extractedEntities: {},
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          // The DB-authoritative role — deliberately independent of the
+          // session's own role claim, which is the point of the gate.
+          answers: { moneyDashboardRepo, resolveMemberRole: async () => 'technician' },
+          shared: { proposalRepo },
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, 'user-tech', undefined, 'technician');
+      const result = await adapter.handleInput(sessionId, 'How much revenue this month?');
+
+      expect(result.ttsText).toContain("That's an owner-level report");
+      expect(result.ttsText).not.toMatch(/4,?250/);
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('below TAU_INT a lookup still takes the reprompt path — nothing is looked up', async () => {
+      const resolve = vi.fn();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_customer',
+            confidence: 0.4,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: {},
+          shared: { customerRepo: new InMemoryCustomerRepository(), proposalRepo },
+          entityResolver: { resolve } as unknown as EntityResolver,
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'mmm khan something');
+
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+      // Below the band we do not claim to know what was asked, so no repo is
+      // read and no answer is invented.
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('with no lookups bundle wired the operator hears the honest unavailable line', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_day_overview',
+            confidence: 0.98,
+            extractedEntities: {},
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        extendedIntentsEnabled: async () => true,
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+      const result = await adapter.handleInput(sessionId, 'What appointments are scheduled today?');
+
+      expect(result.state).toBe('intent_capture');
+      expect(result.ttsText).toBe(LOOKUP_UNAVAILABLE_LINE);
+      // The regression this replaced: a dead clarification card.
+      expect(result.proposalIds).toHaveLength(0);
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    });
   });
 
   it('happy path: high-confidence intent creates a proposal and closes', async () => {
@@ -508,7 +772,9 @@ describe('InAppVoiceAdapter', () => {
       expect(verticalPromptResolver).toHaveBeenCalledWith(TENANT);
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(2);
+      // base + vertical + customerProtectionIntents (#914 — always on for
+      // inapp; appended after vertical/plan — see intent-classifier.ts).
+      expect(systemMessages).toHaveLength(3);
       expect(systemMessages[1].content).toContain('Service vertical: HVAC Professional');
     });
 
@@ -532,7 +798,8 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
     });
 
     it('omits the vertical message when resolver returns undefined', async () => {
@@ -553,7 +820,8 @@ describe('InAppVoiceAdapter', () => {
 
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
     });
   });
 
@@ -604,9 +872,10 @@ describe('InAppVoiceAdapter', () => {
       expect(callerPlanResolver).toHaveBeenCalledWith(TENANT, 'cust-1');
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      // Base prompt + plan section = 2 system messages (no vertical
-      // resolver wired in this test).
-      expect(systemMessages).toHaveLength(2);
+      // Base prompt + plan section + customerProtectionIntents (#914 —
+      // always on for inapp) = 3 system messages (no vertical resolver
+      // wired in this test).
+      expect(systemMessages).toHaveLength(3);
       expect(systemMessages[1].content).toContain('Caller plan context');
       expect(systemMessages[1].content).toContain('Gold Membership');
     });
@@ -687,7 +956,943 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
+    });
+  });
+
+  describe('#914 (A49/A50) — customer protection (complaint/negotiation) is always on for inapp', () => {
+    // Before this fix, inapp-adapter.ts's startSession() never set
+    // `customerProtectionIntents` on the FSM context (unlike
+    // twilio-adapter.ts's telephony leg, which hardcodes it `true`), and
+    // handleInput() never forwarded it into the classify context even when
+    // it WAS set. classifyIntent's `protectionOn` gate — see
+    // intent-classifier.ts — therefore never appended
+    // CUSTOMER_PROTECTION_PROMPT_SECTION to the prompt for a non-owner (or
+    // extendedIntents-disabled) inapp caller, so the LLM had no guidance to
+    // recognize "I'm really unhappy..." / "knock $50 off..." as
+    // complaint/negotiation and the turn fell through to the generic
+    // low-confidence reprompt instead of the FSM's dedicated guards
+    // (transitions.ts complaint/negotiation branches).
+    it('stamps customerProtectionIntents on the FSM context at startSession, for a NON-owner caller', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
+    });
+
+    it('stamps customerProtectionIntents on the FSM context for an OWNER caller too', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+      const session = store.peek(sessionId);
+      expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
+    });
+
+    it('forwards customerProtectionIntents into the classify call, so the prompt carries CUSTOMER_PROTECTION_PROMPT_SECTION', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(
+        systemMessages.some((m: { content: string }) =>
+          m.content.includes('Customer protection intents (enabled on this call'),
+        ),
+      ).toBe(true);
+    });
+
+    it('a classified complaint reaches the FSM complaint guard (escalating + pinned note), not the generic reprompt', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      expect(result.state).toBe('escalating');
+      expect(result.ttsText).not.toMatch(/say that again/i);
+    });
+
+    it('a classified negotiation reaches the FSM negotiation guard (holding line), not the generic reprompt', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'negotiation',
+          confidence: 0.9,
+          extractedEntities: { negotiationAsk: '50 off' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, "Knock 50 off or I'm leaving a 1-star review");
+
+      expect(result.ttsText).not.toMatch(/say that again/i);
+    });
+
+    // A49/A50 — before this fix, inapp-adapter.ts's own `handleCreateProposal`
+    // had no branch for `intent === 'complaint' | 'negotiation'` (unlike
+    // ai/voice-turn/create-voice-turn-processor.ts's #883 dedicated
+    // branches), so the FSM's create_proposal side effect fell through to
+    // the generic `intentToProposalType` lookup — whose documented DEFAULT
+    // for an unmapped intent (neither is in proposals/voice-intent-map.ts)
+    // is `voice_clarification`. That type has NO execution handler, so a
+    // live sweep approve() call polled forever ("No execution handler
+    // registered for proposal type 'voice_clarification'"). Both intents
+    // must mint the dedicated `callback` instead — see
+    // proposals/guardrails/voice-protection-proposal.ts.
+    it('A49 — a classified complaint mints the dedicated callback proposal, not a dead voice_clarification', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      expect(result.state).toBe('escalating');
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('callback');
+    });
+
+    it('D-027 — a complaint utterance carrying a high-severity marker (e.g. "lawyer") stamps the severity marker on the callback payload', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm going to get a lawyer and sue you over this leak",
+      );
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('callback');
+      const meta = (stored?.payload as { _meta?: { markers?: Array<{ reason: string }> } })._meta;
+      expect(meta?.markers?.some((m) => m.reason === 'complaint_high_severity')).toBe(true);
+    });
+
+    it('A50 — a classified negotiation mints the dedicated callback proposal, not a dead voice_clarification', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'negotiation',
+          confidence: 0.9,
+          extractedEntities: { negotiationAsk: '50 off' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, "Knock 50 off or I'm leaving a 1-star review");
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      // No customerId is resolved for this session, so discount evaluation
+      // (which requires one) never engages — same V1 fallback the telephony
+      // path uses when a caller isn't a matched CRM customer: a plain
+      // enriched `callback`, never the dead generic-map `voice_clarification`.
+      expect(stored?.proposalType).toBe('callback');
+    });
+  });
+
+  // A46 — before this fix, inapp-adapter.ts's `handleCreateProposal` had no
+  // branch for `intent === 'respond_to_review'`, so it fell through to the
+  // generic buildVoiceProposalPayload promotion — which cannot draft
+  // `publicResponse.text` (that needs a review lookup + an LLM draft, not a
+  // classifier-entity promotion). The persisted-but-broken payload then
+  // failed at approval: "review_response_proposal payload is missing the
+  // required publicResponse component" (live evidence, sweep row A46,
+  // 2026-08-30). The fix reuses `RespondToReviewTaskHandler` — the SAME
+  // deterministic resolution + drafting path the recorded-memo on-ramp
+  // already uses — so a live-call draft is identical to a poll-initiated one.
+  describe('A46 — respond_to_review drafts the same review_response_proposal the memo on-ramp does', () => {
+    function draftDeps(
+      publicText: string,
+    ): BuildReviewResponseProposalDeps {
+      return {
+        llmGateway: {} as never,
+        customerLoader: { findCandidates: vi.fn(async () => []) } as never,
+        brandVoiceLoader: { load: vi.fn(async () => ({ tone: 'neutral' })) } as never,
+        serviceCreditRepo: { sumIssuedInLast12Months: vi.fn(async () => 0) } as never,
+        classifier: async () =>
+          ({ classification: 'vague_complaint', confidence: 1, source: 'regex' }) as never,
+        matcher: async () => null,
+        draftPublic: vi.fn(async () => publicText),
+      };
+    }
+
+    it('the exact A46 utterance ("Reply to the 1-star review from yesterday") drafts a review_response_proposal WITH a populated publicResponse', async () => {
+      const reviewRepo = new InMemoryReviewRepository();
+      const theReview: Review = {
+        id: 'review-1',
+        tenantId: TENANT,
+        externalReviewId: 'ext-1',
+        locationId: 'accounts/a/locations/l',
+        reviewerDisplayName: 'Maria Alvarez',
+        reviewerProfileUrl: null,
+        rating: 1,
+        commentText: 'Terrible service',
+        createTime: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        updateTime: null,
+        firstFetchedAt: new Date(),
+        lastFetchedAt: new Date(),
+      };
+      await reviewRepo.upsert(theReview);
+
+      const respondToReviewTaskHandler = new RespondToReviewTaskHandler(
+        proposalRepo,
+        reviewRepo,
+        draftDeps('We are sorry to hear this — please reach out so we can make it right.'),
+      );
+
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'respond_to_review',
+          confidence: 0.9,
+          extractedEntities: { reviewReference: 'the 1-star review from yesterday' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        respondToReviewTaskHandler,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Turn 1: intent resolves and parks at the readback (intent_confirm) —
+      // no proposal without caller confirmation, same as every other intent.
+      const readback = await adapter.handleInput(sessionId, 'Reply to the 1-star review from yesterday');
+      expect(readback.state).toBe('intent_confirm');
+      // Turn 2: confirms — NOW the review-response draft is built.
+      const result = await adapter.handleInput(sessionId, 'yes');
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('review_response_proposal');
+      const publicResponse = (stored?.payload as { publicResponse?: { text?: string } })
+        .publicResponse;
+      expect(publicResponse?.text).toBe(
+        'We are sorry to hear this — please reach out so we can make it right.',
+      );
+    });
+
+    it('gates honestly to a voice_clarification (never a broken review_response_proposal) when the drafting dep is not wired', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'respond_to_review',
+          confidence: 0.9,
+          extractedEntities: { reviewReference: 'the 1-star review from yesterday' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        // No respondToReviewTaskHandler wired.
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const readback = await adapter.handleInput(sessionId, 'Reply to the 1-star review from yesterday');
+      expect(readback.state).toBe('intent_confirm');
+      const result = await adapter.handleInput(sessionId, 'yes');
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('voice_clarification');
+    });
+  });
+
+  // D01 — before this fix, a new-caller booking (free-text customerName, no
+  // resolvable customerId or jobId — this row's real shape after its 3
+  // corpus turns: "I'd like to book a new customer...", "Jordan Lee,
+  // 480-555-0199, next Tuesday morning works", "It's for a furnace
+  // diagnostic inspection at their home") had NOTHING nameable to gate on:
+  // `createAppointmentPayloadSchema`'s whole-object refine ("requires jobId
+  // ... or a customerId") has no Zod field path, so it was silently dropped
+  // and the payload persisted unchanged with no missingFields — clearing the
+  // way to auto-approve into a guaranteed execution failure
+  // (CreateAppointmentExecutionHandler: "Payload must include a valid
+  // jobId" — live evidence, sweep row D01, 2026-08-30). The fix names the
+  // gap `customerId` (voice-payload.ts) and this adapter now threads it into
+  // the persisted proposal's `missingFields`, forcing status 'draft' so
+  // `approveProposal` refuses it until an operator resolves the customer.
+  describe('D01 — create_appointment with no resolvable customer gates on missingFields, never auto-approves', () => {
+    it('the accumulated D01 entities (free-text customerName, no customerId/jobId) persist as a DRAFT create_appointment proposal with missingFields: ["customerId"]', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_appointment',
+          confidence: 0.95,
+          extractedEntities: {
+            customerName: 'Jordan Lee',
+            customerPhone: '480-555-0199',
+            scheduledStart: '2026-09-08T12:00:00.000Z',
+            scheduledEnd: '2026-09-08T13:00:00.000Z',
+            jobTitle: 'Furnace diagnostic inspection',
+          },
+        }),
+        JSON.stringify({ answer: 'yes', reasoning: 'confirmed' }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Deliberately avoids the literal phrase "new customer" — the
+      // classifier's deterministic P18-001 sign-up override
+      // (isCreateCustomerSignupPhrasing, intent-classifier.ts) forces intent
+      // to create_customer on that exact phrasing, which is a DIFFERENT,
+      // already-covered path — this test targets create_appointment's own
+      // missing-customer gate, matching the proposal_type the corpus's live
+      // dbVerify evidence actually recorded for D01.
+      const readback = await adapter.handleInput(
+        sessionId,
+        "I'd like to book a diagnostic visit for a caller who isn't in the system yet — Jordan Lee, 480-555-0199, next Tuesday morning, furnace diagnostic inspection at their home",
+      );
+      expect(readback.state).toBe('intent_confirm');
+      const result = await adapter.handleInput(sessionId, 'yes');
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('create_appointment');
+      // Never a bare, unexecutable voice_clarification, and never silently
+      // persisted with no missingFields either — a real, reviewable draft.
+      // `decideInitialStatus` returns 'draft' for a non-empty missingFields
+      // (proposals/proposal.ts), which the adapter's existing QA-2026-06-05
+      // promote step then surfaces to the operator inbox as
+      // 'ready_for_review' — orthogonal to the missingFields gate itself,
+      // which `approveProposal` still enforces regardless of status label.
+      expect(stored?.status).toBe('ready_for_review');
+      expect(missingFieldsFor(stored!)).toContain('customerId');
+
+      // The D-004 guarantee this fix exists for: approval is refused with a
+      // reason an operator can act on, NEVER silently approved into the
+      // guaranteed CreateAppointmentExecutionHandler "Payload must include a
+      // valid jobId" failure the live sweep observed.
+      await expect(
+        approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
+      ).rejects.toThrow(/customerId/);
+    });
+  });
+
+  // D01 (2026-08-30 live sweep) — the THREE-TURN new-caller booking, which
+  // never left `intent_capture` live: every turn came back "I want to make
+  // sure I got that right — can you say that again?" and no proposal was
+  // ever minted. Two defects compounded:
+  //   1. turn 1 ("…book a new customer for a diagnostic visit") was rewritten
+  //      by the P18-001 sign-up override into create_customer, or missed
+  //      outright by a non-deterministic gpt-4o-mini — closed by the
+  //      anchored `matchNewBookingPhrase` short-circuit;
+  //   2. turn 2 (the slots) hit `intent_confirm`, was not an affirmation, and
+  //      so became a `correction` that WIPED currentIntent + extractedEntities
+  //      — closed by `intent_details_supplied`, which merges the new slots and
+  //      re-runs the SAME entity resolver over the accumulated set.
+  describe('D01 — the three-turn new-caller booking reaches a gated draft', () => {
+    // Turn 1 short-circuits deterministically (no gateway call). Turns 2 and
+    // 3 are the classifier extracting slots from a readback answer; NEITHER
+    // names create_appointment, which is the point.
+    //
+    // Both shapes are the ones the deployed round-4 sweep actually produced
+    // (session 0d1f2025, tenant a948cc66): "Jordan Lee, 480-555-0199" reads
+    // as create_customer, and the turn-3 job fragment reads as
+    // schedule_inspection — whose own taxonomy block extracts customerName /
+    // jobReference / jobTitle / dateTimeDescription and puts the inspection
+    // type in `jobTitle`, the field that block documents as "also the short
+    // name of the new work being scheduled on create_appointment". Turn 3 is
+    // the regression this round fixes: it was landing as `correction`.
+    const slotFillTurns = [
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.8,
+        extractedEntities: {
+          customerName: 'Jordan Lee',
+          phone: '480-555-0199',
+          dateTimeDescription: 'next Tuesday morning',
+        },
+      }),
+      JSON.stringify({
+        intentType: 'schedule_inspection',
+        confidence: 0.91,
+        extractedEntities: {
+          jobTitle: 'Inspection — furnace diagnostic',
+          serviceAddress: 'their home',
+        },
+      }),
+    ];
+
+    it('all three corpus turns accumulate into ONE create_appointment draft, gated on missingFields: ["customerId"]', async () => {
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      // Turn 1 — the booking opening. Deterministic: no LLM round-trip.
+      const turn1 = await adapter.handleInput(
+        sessionId,
+        "I'd like to book a new customer for a diagnostic visit",
+      );
+      expect(turn1.state).toBe('intent_confirm');
+      expect(gateway.complete).not.toHaveBeenCalled();
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+        'create_appointment',
+      );
+
+      // Turn 2 — name / phone / time. Pre-fix this cleared the booking.
+      const turn2 = await adapter.handleInput(
+        sessionId,
+        'Jordan Lee, 480-555-0199, next Tuesday morning works',
+      );
+      expect(turn2.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+        'create_appointment',
+      );
+
+      // Turn 3 — the work being booked. Live this landed as `correction`
+      // (audit trail: intent_confirm.correction → intent_capture) and the
+      // whole booking was wiped one turn from the finish line.
+      const turn3 = await adapter.handleInput(
+        sessionId,
+        "It's for a furnace diagnostic inspection at their home",
+      );
+      expect(turn3.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+        'create_appointment',
+      );
+
+      // Every turn's slots survived into one accumulated set.
+      const accumulated = store.peek(sessionId)?.machine.currentContext.extractedEntities;
+      expect(accumulated).toMatchObject({
+        customerName: 'Jordan Lee',
+        phone: '480-555-0199',
+        dateTimeDescription: 'next Tuesday morning',
+        jobTitle: 'Inspection — furnace diagnostic',
+        serviceAddress: 'their home',
+      });
+
+      // The readback is finally answered — the same auto-continuation the
+      // live sweep harness sends once a session parks in intent_confirm.
+      const result = await adapter.handleInput(sessionId, "Yes, that's correct.");
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('create_appointment');
+      // draft_gated, exactly as corpus row D01 expects: a new caller has no
+      // customerId to resolve, so the proposal is reviewable but NOT
+      // approvable until an operator supplies one (D-004).
+      expect(missingFieldsFor(stored!)).toContain('customerId');
+      await expect(
+        approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
+      ).rejects.toThrow(/customerId/);
+    });
+
+    // The live round-4 regression, isolated: turns 1+2 already worked in
+    // production; this pins turn 3 on its own, driving the FSM through
+    // entity_resolution rather than the `correction` the audit trail showed.
+    it('turn 3 (a job-description fragment classified schedule_inspection) merges as slot detail, never a correction', async () => {
+      const dispatched: string[] = [];
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId)!;
+      const realDispatch = session.machine.dispatch.bind(session.machine);
+      session.machine.dispatch = (event: CallingAgentEvent): SideEffect[] => {
+        dispatched.push(event.type);
+        return realDispatch(event);
+      };
+
+      await adapter.handleInput(sessionId, "I'd like to book a new customer for a diagnostic visit");
+      await adapter.handleInput(sessionId, 'Jordan Lee, 480-555-0199, next Tuesday morning works');
+      dispatched.length = 0;
+
+      const turn3 = await adapter.handleInput(
+        sessionId,
+        "It's for a furnace diagnostic inspection at their home",
+      );
+
+      expect(dispatched).toContain('intent_details_supplied');
+      expect(dispatched).not.toContain('correction');
+      // Merged, then re-run through the SAME resolver (entity_resolution)
+      // before the readback — slot-fill is not a resolution bypass.
+      expect(dispatched).toContain('entity_resolved');
+      expect(turn3.state).toBe('intent_confirm');
+      const ctx = store.peek(sessionId)?.machine.currentContext;
+      expect(ctx?.currentIntent).toBe('create_appointment');
+      expect(ctx?.extractedEntities).toMatchObject({
+        customerName: 'Jordan Lee',
+        jobTitle: 'Inspection — furnace diagnostic',
+        serviceAddress: 'their home',
+      });
+    });
+
+    it('an address-only fragment classified add_service_location merges as the booking WHERE', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'add_service_location',
+          confidence: 0.9,
+          extractedEntities: { serviceAddress: '104 Cedar Lane, Scottsdale' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const detail = await adapter.handleInput(sessionId, "It's at 104 Cedar Lane, Scottsdale");
+      expect(detail.state).toBe('intent_confirm');
+      expect(
+        store.peek(sessionId)?.machine.currentContext.extractedEntities?.serviceAddress,
+      ).toBe('104 Cedar Lane, Scottsdale');
+    });
+
+    // Coordinator item 3 — a fragment the classifier cannot name. `classifyIntent`
+    // maps a below-threshold pick to `unknown` but KEEPS its extractedEntities,
+    // so the slot content still lands instead of wiping the booking.
+    it('a low-confidence fragment WITH entities slot-fills rather than correcting', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_job',
+          confidence: 0.35,
+          extractedEntities: { jobTitle: 'Furnace diagnostic' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const detail = await adapter.handleInput(sessionId, 'furnace diagnostic');
+      expect(detail.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.extractedEntities?.jobTitle).toBe(
+        'Furnace diagnostic',
+      );
+    });
+
+    // The second gate, doing its job: a sibling intent that arrives carrying
+    // nothing from a booking's own vocabulary contributes NOTHING — widening
+    // the family did not blanket-accept. Note the alias is keyed by source
+    // intent, so `appointmentReference` is reinterpreted as the booking's
+    // date ONLY for `confirm_appointment`, never for another sibling.
+    // Train-7: contributing nothing is now a bounded re-ask rather than an
+    // immediate wipe, so the assertion is on what was (not) merged, plus the
+    // eventual give-up.
+    it('a sibling intent carrying only foreign entities merges nothing, then corrects once bounded', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'schedule_inspection',
+          confidence: 0.92,
+          extractedEntities: { appointmentReference: "tomorrow's 3pm" },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+
+      const first = await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
+      expect(first.state).toBe('intent_confirm');
+      const merged = store.peek(sessionId)?.machine.currentContext.extractedEntities ?? {};
+      // Neither verbatim nor aliased — this sibling has no claim on that key.
+      expect(merged.appointmentReference).toBeUndefined();
+      expect(merged.dateTimeDescription).toBeUndefined();
+
+      // R2 — the follow-up attempts must be DISTINCT utterances. A verbatim
+      // re-send within 15 s is now a client retry (the duplicate-turn guard
+      // replays the readback without re-classifying), so it is deliberately
+      // not an attempt against the no-progress budget. Three separate tries
+      // that contribute nothing still exhaust it, which is the invariant.
+      await adapter.handleInput(sessionId, 'the inspection tomorrow at three');
+      const exhausted = await adapter.handleInput(sessionId, "that inspection, tomorrow 3pm");
+      expect(exhausted.state).toBe('intent_capture');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
+    });
+
+    // reschedule/cancel/reassign are deliberately OUT of the sibling family:
+    // they operate on an appointment that already exists, so their
+    // newDateTimeDescription must never be folded into a different, unsaved
+    // booking even though that key IS a booking slot.
+    it('a reschedule of an EXISTING appointment is a correction, not a WHEN slot', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'reschedule_appointment',
+          confidence: 0.94,
+          extractedEntities: {
+            appointmentReference: 'the Miller appointment',
+            newDateTimeDescription: 'Thursday at 2',
+          },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const switched = await adapter.handleInput(
+        sessionId,
+        'Actually, move the Miller appointment to Thursday at 2',
+      );
+      expect(switched.state).toBe('intent_capture');
+      expect(store.peek(sessionId)?.machine.currentContext.extractedEntities).toBeUndefined();
+    });
+
+    it('a plain "no" at the readback still corrects, with no classifier round-trip', async () => {
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const corrected = await adapter.handleInput(sessionId, "No, that's not right");
+      expect(corrected.state).toBe('intent_capture');
+      expect(gateway.complete).not.toHaveBeenCalled();
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
+    });
+
+    it('a genuinely DIFFERENT request at the readback is still a correction, not a slot merge', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'send_invoice',
+          confidence: 0.93,
+          extractedEntities: { customerName: 'Miller' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const switched = await adapter.handleInput(
+        sessionId,
+        'Actually, send the invoice for the Miller job',
+      );
+      expect(switched.state).toBe('intent_capture');
+      const ctx = store.peek(sessionId)?.machine.currentContext;
+      expect(ctx?.currentIntent).toBeUndefined();
+      // The foreign request's entities were NOT folded into the booking.
+      expect(ctx?.extractedEntities).toBeUndefined();
+    });
+
+    // Train-7 — this used to assert `intent_capture` on the FIRST no-slot
+    // turn. That wipe is the regression itself: one bad heuristic guess
+    // destroyed everything the caller had said. A no-slot turn now re-asks,
+    // and only gives up (correcting) once the bounded budget is spent.
+    it('a readback answer carrying no slots re-asks instead of wiping, then corrects once bounded', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+
+      // MAX_CONFIRM_DETAIL_RETRIES = 2 no-progress turns are absorbed…
+      // R2 — each attempt is a DIFFERENT sentence on purpose: a verbatim
+      // re-send within 15 s is a client retry (replayed by the duplicate-turn
+      // guard without re-classifying), not a fresh attempt at the readback.
+      for (const [attempt, utterance] of [
+        [1, 'hmm what were we doing'],
+        [2, 'sorry, what were we talking about'],
+      ] as const) {
+        const noSlots = await adapter.handleInput(sessionId, utterance);
+        expect(noSlots.state, `attempt ${attempt} must not wipe the booking`).toBe(
+          'intent_confirm',
+        );
+        expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+          'create_appointment',
+        );
+      }
+
+      // …and the third gives up, exactly as the pre-Train-7 first turn did,
+      // so an unparseable conversation can never park here forever.
+      const exhausted = await adapter.handleInput(sessionId, 'wait, what was that again');
+      expect(exhausted.state).toBe('intent_capture');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
+    });
+
+    // THE TRAIN-7 REGRESSION, isolated. "…next Tuesday morning works" is
+    // agreement-shaped, so the classifier reads it as `confirm_appointment`
+    // — whose ONLY extraction field is `appointmentReference`
+    // (intent-taxonomy-blocks.ts:341, example "The customer confirmed
+    // Tuesday's visit"). #938 admitted that intent through gate 1 while
+    // excluding that key from gate 2, so the slots came back empty and the
+    // booking was corrected away two turns in (live: session 12ccb578).
+    it('turn 2 read as confirm_appointment merges its appointmentReference as the booking WHEN', async () => {
+      const dispatched: string[] = [];
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'confirm_appointment',
+          confidence: 0.9,
+          extractedEntities: { appointmentReference: 'next Tuesday morning' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, "I'd like to book a new customer for a diagnostic visit");
+      const session = store.peek(sessionId)!;
+      const realDispatch = session.machine.dispatch.bind(session.machine);
+      session.machine.dispatch = (event: CallingAgentEvent): SideEffect[] => {
+        dispatched.push(event.type);
+        return realDispatch(event);
+      };
+
+      const turn2 = await adapter.handleInput(
+        sessionId,
+        'Jordan Lee, 480-555-0199, next Tuesday morning works',
+      );
+
+      expect(dispatched).toContain('intent_details_supplied');
+      expect(dispatched).not.toContain('correction');
+      expect(turn2.state).toBe('intent_confirm');
+      const ctx = store.peek(sessionId)?.machine.currentContext;
+      expect(ctx?.currentIntent).toBe('create_appointment');
+      // Aliased onto the booking's own vocabulary, not merged verbatim.
+      expect(ctx?.extractedEntities?.dateTimeDescription).toBe('next Tuesday morning');
+      expect(ctx?.extractedEntities?.appointmentReference).toBeUndefined();
+    });
+
+    // End-to-end with BOTH live classifications this campaign has actually
+    // observed for these turns — confirm_appointment on turn 2 (train-7)
+    // and schedule_inspection on turn 3 (round-4). Neither is
+    // create_appointment; the booking must survive both and still gate.
+    it('the three turns survive the live confirm_appointment + schedule_inspection readings and gate', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'confirm_appointment',
+          confidence: 0.9,
+          extractedEntities: { appointmentReference: 'next Tuesday morning' },
+        }),
+        JSON.stringify({
+          intentType: 'schedule_inspection',
+          confidence: 0.91,
+          extractedEntities: { jobTitle: 'Inspection — furnace diagnostic' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, "I'd like to book a new customer for a diagnostic visit");
+      await adapter.handleInput(sessionId, 'Jordan Lee, 480-555-0199, next Tuesday morning works');
+      const turn3 = await adapter.handleInput(
+        sessionId,
+        "It's for a furnace diagnostic inspection at their home",
+      );
+      expect(turn3.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.extractedEntities).toMatchObject({
+        dateTimeDescription: 'next Tuesday morning',
+        jobTitle: 'Inspection — furnace diagnostic',
+      });
+
+      const result = await adapter.handleInput(sessionId, "Yes, that's correct.");
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('create_appointment');
+      expect(missingFieldsFor(stored!)).toContain('customerId');
+      await expect(
+        approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
+      ).rejects.toThrow(/customerId/);
+    });
+
+    it('the alias never overwrites a date the booking already captured', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.8,
+          extractedEntities: {
+            customerName: 'Jordan Lee',
+            dateTimeDescription: 'next Tuesday morning',
+          },
+        }),
+        JSON.stringify({
+          intentType: 'confirm_appointment',
+          confidence: 0.9,
+          extractedEntities: { appointmentReference: 'the one on the calendar' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      await adapter.handleInput(sessionId, 'Jordan Lee, next Tuesday morning');
+      await adapter.handleInput(sessionId, "yep the one on the calendar, that's the visit");
+
+      // The real value from the earlier turn survives — an aliased
+      // reference is a fallback, never an overwrite.
+      expect(
+        store.peek(sessionId)?.machine.currentContext.extractedEntities?.dateTimeDescription,
+      ).toBe('next Tuesday morning');
+    });
+
+    it('slot-fill re-runs the entity resolver, so a customer that DOES exist gets a verified id', async () => {
+      // The invariant this must not break: slot-fill is not a bypass. The
+      // accumulated customerName goes through the SAME resolver turn 1 used.
+      const entityResolver = {
+        resolve: vi.fn(async (input: { kind: string; reference: string }) =>
+          input.kind === 'customer' && input.reference === 'Jordan Lee'
+            ? {
+                kind: 'resolved' as const,
+                candidate: {
+                  id: 'cust-jordan',
+                  label: 'Jordan Lee',
+                  score: 0.98,
+                  kind: 'customer' as const,
+                },
+              }
+            : { kind: 'skipped' as const },
+        ),
+      } as unknown as EntityResolver;
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        entityResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      await adapter.handleInput(sessionId, 'Jordan Lee, 480-555-0199, next Tuesday morning works');
+
+      expect(entityResolver.resolve).toHaveBeenCalled();
+      expect(
+        store.peek(sessionId)?.machine.currentContext.extractedEntities?.customerId,
+      ).toBe('cust-jordan');
     });
   });
 
@@ -1256,6 +2461,297 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
       const proposals = await proposalRepo.findByTenant(TENANT);
       expect(proposals[0].payload.channel).toBe('sms');
     });
+
+    // A48 — before this fix, update_brand_voice's create_proposal effect was
+    // built by the SAME generic buildVoiceProposalPayload scalar-promotion
+    // loop as every other type: it copied the raw `brandVoiceInstruction`
+    // scalar verbatim (not a real brandVoiceSchema field), the contract's
+    // all-optional schema validated that no-op payload as `ok`, so the
+    // proposal shipped with `missingFields: []` — fully approvable — and
+    // UpdateBrandVoiceExecutionHandler's strip-mode parse then discarded it
+    // down to `{}` at execution: "Payload carries no brand-voice fields to
+    // apply (only unmapped free text)" on every in-app voice brand-voice
+    // edit. This is now routed through extractBrandVoiceProposalFields, the
+    // SAME dedicated LLM mapping pass the memo/phone and chat paths already
+    // use (ai/tasks/brand-voice-task.ts UpdateBrandVoiceTaskHandler).
+    it('an update_brand_voice create_proposal effect maps the spoken instruction onto typed fields and executes successfully (A48 fix)', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          confidence_score: 0.92,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      // BEFORE this fix payload.register was always undefined here — only
+      // the raw brandVoiceInstruction scalar and envelope keys were present.
+      expect(proposal.payload.register).toBe('friendly');
+      expect(proposal.payload.signoff).toBe('Thanks, QA Sweep HVAC');
+      expect(missingFieldsFor(proposal)).toEqual([]);
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        proposal,
+        { tenantId: TENANT, executedBy: 'operator-1' },
+      );
+      // BEFORE this fix, execution deterministically failed with "Payload
+      // carries no brand-voice fields to apply (only unmapped free text)".
+      expect(result.success).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+      expect(state.config.signoff).toBe('Thanks, QA Sweep HVAC');
+    });
+
+    // A48 row of the 2026-08-29 AI-catalog sweep — the sweep drove this
+    // exact utterance through `/api/voice/sessions` (which routes straight
+    // to InAppVoiceAdapter — see routes/voice-sessions.ts) and reported
+    // POST /api/proposals/:id/approve leaving the proposal stuck at
+    // `ready_for_review`. The sweep runner's approve-response body is
+    // discarded (scripts/ai-catalog-sweep/run-sweep.mjs), so it couldn't
+    // say WHY. This test closes the loop the prior test stopped short of
+    // (execution only, no approveProposal call): with the SAME clean
+    // extraction, the owner-approve call the sweep actually made succeeds.
+    // `update_brand_voice` is CONFIG_WRITING (proposals/actions.ts) and
+    // needs `settings:update`, not just `proposals:approve` — 'owner' (the
+    // sweep's default actor) holds both (auth/rbac.ts).
+    it('A48: the exact sweep utterance drafts, approves (owner), and executes end to end', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          confidence_score: 0.92,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const [drafted] = await proposalRepo.findByTenant(TENANT);
+      expect(drafted.proposalType).toBe('update_brand_voice');
+      expect(missingFieldsFor(drafted)).toEqual([]);
+
+      // The exact call that stalled at 'ready_for_review' forever in the
+      // live sweep (A48, reason `approve_no_terminal_status: ready_for_review`).
+      const approved = await approveProposal(proposalRepo, TENANT, drafted.id, USER, 'owner');
+      expect(approved.status).toBe('approved');
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        approved,
+        { tenantId: TENANT, executedBy: USER },
+      );
+      expect(result.success, result.error).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+    });
+
+    // Non-owner actors hold `proposals:approve` but NOT `settings:update` —
+    // the CONFIG_WRITING_PROPOSAL_TYPES guard in approveProposal must still
+    // refuse them for update_brand_voice specifically (proposals/actions.ts),
+    // exactly like the routes/onboarding.ts / brand-voice-router.ts HTTP
+    // routes it mirrors. An honest, actionable 403 — not a silent stall.
+    it('a dispatcher cannot approve update_brand_voice — settings:update required, not just proposals:approve', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ register: 'friendly', confidence_score: 0.9 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: { brandVoiceInstruction: 'friendly' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const [drafted] = await proposalRepo.findByTenant(TENANT);
+      expect(missingFieldsFor(drafted)).toEqual([]);
+      await expect(
+        approveProposal(proposalRepo, TENANT, drafted.id, USER, 'dispatcher'),
+      ).rejects.toThrow(/settings/);
+    });
+
+    it('an update_brand_voice effect the model cannot map at all stays gated, never approvable-then-doomed', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ unmapped: 'lock my brand voice', confidence_score: 0.2 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: { brandVoiceInstruction: 'lock my brand voice' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      // Nothing mapped at all — BRAND_VOICE_GATE_FIELD holds the gate so
+      // approveProposal refuses this, never a doomed approval.
+      expect(missingFieldsFor(proposal)).toContain('register');
+      expect(proposal.status).not.toBe('approved');
+    });
+
+    // A48 (2026-08-29 AI-catalog sweep) — the sweep's own utterance ("Set my
+    // brand voice: friendly, plain-spoken, sign off Thanks, QA Sweep HVAC")
+    // names TWO tone descriptions ("friendly" AND "plain-spoken"), not one.
+    // BRAND_VOICE_SYSTEM_PROMPT explicitly names "plain-spoken" as exactly
+    // the kind of tone phrase to map "ONLY when the mapping is unambiguous;
+    // otherwise put the raw phrase in unmapped" — with "friendly" already
+    // claiming the register slot, a real model answering honestly puts
+    // "plain-spoken" in `unmapped` rather than silently discarding it. This
+    // MIXED case (something mapped AND something left unmapped) is the
+    // FREE_TEXT_GATE_FIELD branch neither existing A48 test exercises (one
+    // scripts a fully-clean mapping, the other scripts nothing-mapped-at-all)
+    // — and it is the most likely real-world shape for this exact utterance,
+    // so it is the most plausible explanation for the row's live stall.
+    // Proves this is an HONEST, human-actionable gate (D-004: never
+    // auto-approve, never force status) — not a bug: approveProposal
+    // correctly refuses, and an operator edit unblocks it, exactly the
+    // "gate with a lifter" contract every other row in this suite proves.
+    it('a MIXED extraction (register mapped + a tone phrase the model left unmapped) gates honestly, and an operator edit unblocks it', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          unmapped: 'plain-spoken',
+          confidence_score: 0.75,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      expect(proposal.payload.register).toBe('friendly');
+      expect(proposal.payload.signoff).toBe('Thanks, QA Sweep HVAC');
+      expect(proposal.payload.freeText).toBe('plain-spoken');
+      // The mixed-content gate — never the "nothing mapped" one.
+      expect(missingFieldsFor(proposal)).toEqual(['freeText']);
+
+      // The exact call the sweep's approve POST resolves to: refuses with a
+      // reason an operator (or the review card's editFields UI) can act on,
+      // never a silent stall.
+      await expect(
+        approveProposal(proposalRepo, TENANT, proposal.id, USER, 'owner'),
+      ).rejects.toThrow(/freeText/);
+
+      // An operator confirms/edits the flagged free text — the SAME
+      // clear-on-fill unblock path every other gated row in this repo uses
+      // (clearSatisfiedMissingFields: editing the exact gated key present
+      // and non-empty lifts it). Still owner-approved after — D-004 intact.
+      await editProposal(proposalRepo, TENANT, proposal.id, USER, 'owner', {
+        freeText: 'plain-spoken (confirmed, no separate style change needed)',
+      });
+      const approved = await approveProposal(proposalRepo, TENANT, proposal.id, USER, 'owner');
+      expect(approved.status).toBe('approved');
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        approved,
+        { tenantId: TENANT, executedBy: 'operator-1' },
+      );
+      expect(result.success).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+      expect(state.config.signoff).toBe('Thanks, QA Sweep HVAC');
+    });
+
+    it("falls back to the last caller transcript line when the classifier didn't extract brandVoiceInstruction", async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ register: 'casual', confidence_score: 0.8 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      session.transcript.push('caller: keep it casual from now on');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {},
+          sessionId: session.id,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals[0].payload.register).toBe('casual');
+      const complete = gateway.complete as unknown as {
+        mock: { calls: Array<[{ messages: Array<{ content: string }> }]> };
+      };
+      expect(complete.mock.calls[0][0].messages[1].content).toContain('keep it casual from now on');
+    });
   });
 });
 
@@ -1503,13 +2999,20 @@ describe('InAppVoiceAdapter#toResolutionEvent', () => {
     }
   });
 
-  it('not_found on a record-operating intent → entity_not_found with no payload (Fix 1 regression guard)', async () => {
+  it('not_found on a record-operating intent → entity_not_found carrying WHAT was not found (Fix 1 regression guard)', async () => {
     const event = await toResolutionEvent({
       status: 'not_found',
       refs: {},
       notFound: { entityKind: 'job', reference: 'the QA Matrix job' },
     });
-    expect(event).toEqual({ type: 'entity_not_found' });
+    // SCH-D3 — the kind/reference ride along so the in-app operator surface
+    // can say what it could not find ("I couldn't find a matching job for the
+    // QA Matrix job"). Telephony ignores both and escalates exactly as before.
+    expect(event).toEqual({
+      type: 'entity_not_found',
+      entityKind: 'job',
+      reference: 'the QA Matrix job',
+    });
   });
 
   // VOX-02 — the escalation is narrowed to intents that need a pre-existing

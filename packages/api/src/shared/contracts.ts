@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { catalogUnitSchema } from '@ai-service-os/shared';
+import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 
 export const tenantIdHeader = 'x-tenant-id';
@@ -152,6 +152,16 @@ export const createCustomerSchema = z.object({
   smsConsent: z.boolean().optional(),
   communicationNotes: z.string().optional(),
   source: z.enum(CUSTOMER_SOURCES).optional(),
+  // #1155 — additive: lets an owner mark a business / property-manager
+  // account (previously Zod stripped it, so only direct SQL could set it).
+  accountType: accountTypeSchema.optional(),
+});
+
+// #1155 — PUT /api/customers/:id forwards the body as-is (see routes/
+// customers.ts); this validates ONLY the accountType key so an out-of-enum
+// value is a 400 instead of reaching the account_type CHECK as a 500.
+export const updateCustomerAccountTypeSchema = z.object({
+  accountType: accountTypeSchema.optional(),
 });
 
 // U1 (CRM Jobber parity) — request bodies for the nested customer-contacts
@@ -547,17 +557,15 @@ export const updateSettingsSchema = z.object({
       trigger_llm_sentiment: z.boolean(),
       llm_sentiment_threshold: z.number().min(0).max(1),
       after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
-      // RV-071 — spoken challenge (PIN/passphrase) gating money/
-      // irreversible VOICE approvals on the recognized owner line
-      // (caller-ID match; see approver-identity.ts).
-      // DEPRECATED (WS21a) — plaintext-at-rest. Enroll via
-      // `PUT /api/settings/voice-approval-pin` instead, which hashes the PIN
-      // (HMAC) and stores only `voice_approval_pin_hash`. This field is kept
-      // for back-compat (the verify seam falls back to it) but should not be
-      // written by new clients. `voice_approval_pin_hash` is intentionally
-      // NOT in this schema, so a raw hash can never be injected via the
-      // generic settings PUT (unknown keys are stripped by `.partial()`).
-      voice_approval_challenge: z.string().min(4).max(64),
+      // The money-approval PIN is NOT writable here. `PUT
+      // /api/settings/voice-approval-pin` is its only writer: it hashes the PIN,
+      // rejects weak ones and stamps the change time. None of
+      // `voice_approval_pin_hash`, `voice_approval_pin_changed_at` or the
+      // DEPRECATED plaintext `voice_approval_challenge` is in this schema, so the
+      // object's default strip discards them (#1233 review: the plaintext field
+      // used to be accepted here, enrolling any 4+ character PIN unchecked);
+      // the route also carries the stored PIN keys over this blob-replacing
+      // write so it can never drop them.
     })
     .partial()
     .optional(),
@@ -587,6 +595,35 @@ export const updateSettingsSchema = z.object({
   // mirror the DB CHECK (NUMERIC(3,2) in [0.90, 0.99]).
   autonomousBookingEnabled: z.boolean().optional(),
   autonomousBookingThreshold: z.number().min(0.9).max(0.99).optional(),
+  // #1011 (wayfinder map #995) — five keys that `PgSettingsRepository`'s write
+  // column map already carries (pg-settings.ts:372,374,431,438,439) but that
+  // were ABSENT here, so z.object's default STRIP semantics discarded them and
+  // the caller got a 200 for a write that never happened (§12.4c).
+  //
+  // Zod strict mode is deliberately NOT the remediation: `voice_approval_pin_hash`
+  // is omitted from `escalationSettings` on purpose (see its comment above) and
+  // strip is what keeps a raw credential hash out of the generic PUT. (The
+  // §12.4c falsifier greps this schema for the strict-mode call and expects
+  // exactly ONE hit — the nested autoApproveThreshold object — so do not write
+  // that token in a comment here.)
+  //
+  // No `.nullable()` on the booleans — all three columns are NOT NULL with a
+  // DEFAULT (db/schema.ts:4848, :5250, :5222, :6081), so a null write would
+  // bounce off Postgres as a 500 instead of clearing.
+  /** Post-job thank-you SMS (column NOT NULL DEFAULT TRUE; workers/thank-you-sms-worker.ts:131). */
+  sendThankYouSms: z.boolean().optional(),
+  /** Post-job review request (column NOT NULL DEFAULT TRUE; workers/review-request-worker.ts:74). */
+  sendReviewRequest: z.boolean().optional(),
+  /** Weekly feedback email — opt-OUT (digest/weekly-feedback-config.ts:51). */
+  weeklyFeedbackEnabled: z.boolean().optional(),
+  // D-019 revoked autonomous EXECUTION; these two columns are retained and now
+  // only govern whether a held booking joins the owner-approval chain
+  // (docs/decisions.md D-019). Live readers:
+  // ai/voice-turn/create-voice-turn-processor.ts:3331, :3336-3337, :3498-3500.
+  autonomousCloseEnabled: z.boolean().optional(),
+  // Nullable (column is a nullable BIGINT, db/schema.ts:6083) — mirrors
+  // depositRequiredAboveCents above. null clears the cap.
+  autonomousCloseMaxCents: z.number().int().min(0).nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {
@@ -604,6 +641,20 @@ export const updateSettingsSchema = z.object({
         path: ['depositFixedCents'],
       });
     }
+  }
+  // #1011 — refuse the one payload shape that turns the close lane ON while
+  // clearing its spend bound in the same request. `above_close_cap`
+  // (create-voice-turn-processor.ts:3336-3337) is the only thing bounding what
+  // a held booking can carry into the owner-approval chain; enabling the lane
+  // and nulling the cap together is an unbounded opt-in typed as two fields.
+  // Clearing the cap on its own is still allowed (it is a separate act).
+  if (val.autonomousCloseEnabled === true && val.autonomousCloseMaxCents === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        'autonomousCloseMaxCents cannot be cleared in the same request that enables autonomousCloseEnabled',
+      path: ['autonomousCloseMaxCents'],
+    });
   }
 });
 

@@ -29,6 +29,7 @@ import {
 } from '../payments/payment-service';
 import { randomUUID, createHmac, timingSafeEqual } from 'crypto';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
+import type { CustomerRepository } from '../customers/customer';
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
@@ -58,6 +59,12 @@ import type { ConnectAccountResolver } from '../invoices/public-invoice-service'
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
+
+// Bounds the root-provisioning `provisioningQueue.send()` await below so a
+// wedged queue client (e.g. a stalled pool.connect()) fails the webhook
+// instead of hanging the response indefinitely. Matches the 10s bound
+// already used for the Clerk metadata PATCH calls in this same handler.
+const PROVISIONING_ENQUEUE_TIMEOUT_MS = 10_000;
 
 /**
  * Best-effort mapping from a Stripe payment object to our domain
@@ -183,6 +190,12 @@ export interface WebhookRouterDeps {
    * stripeConfig + stripeFetch back the PaymentMethod-details retrieve.
    */
   customerPaymentMethodRepo?: CustomerPaymentMethodRepository;
+  /**
+   * SECURITY #1177 — the tenant-scoped customer lookup `setup_intent.succeeded`
+   * binds the metadata `customer_id` through before storing a saved card. The
+   * card is stored only when this is wired too (like `stripeConfig`).
+   */
+  customerRepo?: CustomerRepository;
   stripeConfig?: { apiKey: string };
   stripeFetch?: StripeFetch;
   integrationResolver?: (tenantId: string, provider: 'twilio' | 'sendgrid') => Promise<{
@@ -318,6 +331,207 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       connectAccountResolver: deps.connectAccountResolver,
       auditRepo: deps.auditRepo,
     });
+  };
+
+  // ───────────────────── SECURITY #1102 — account binding ─────────────────────
+  //
+  // Every Stripe settlement branch used to key off the intent's metadata alone
+  // (`pi.metadata.tenant_id` / `.invoice_id`). The signature check does not
+  // help: it attests that STRIPE sent the event, not whose account earned the
+  // money. So any tenant holding a connected account on this platform could
+  // mint a PaymentIntent on their OWN account carrying a neighbour's tenant_id
+  // + invoice_id, and Stripe would deliver a genuine, correctly-signed
+  // `payment_intent.succeeded` that marked the neighbour's invoice paid while
+  // the cash sat in the attacker's balance. The victim need not have enabled
+  // Connect at all.
+  //
+  // The seam below is the ONE place that closes it: `event.account` (the
+  // connected account the money actually landed in) is compared against the
+  // named tenant's own `tenants.stripe_connect_account_id` BEFORE any branch
+  // touches an invoice or a payment.
+  //
+  // SECURITY #1109 — the same seam guards the other money-touching branches:
+  // `setup_intent.succeeded` (saved card), `charge.refunded`,
+  // `charge.refund.updated` and `charge.dispute.created`. The refund/dispute
+  // branches bind the RESOLVED tenant (metadata, or the payments row found by
+  // the cross-tenant payment_intent lookup) once it is known, before the write.
+
+  /** The single reason string: response body, audit row, and error_message. */
+  const STRIPE_ACCOUNT_MISMATCH = 'stripe_account_mismatch';
+  /**
+   * SECURITY #1177 — the saved-card branch's metadata `customer_id` is not one
+   * of the named tenant's own customers (a neighbour's, or none at all).
+   */
+  const STRIPE_CUSTOMER_TENANT_MISMATCH = 'stripe_customer_tenant_mismatch';
+  type StripeRefusalReason = typeof STRIPE_ACCOUNT_MISMATCH | typeof STRIPE_CUSTOMER_TENANT_MISMATCH;
+
+  type EventAccountBinding =
+    | { ok: true }
+    | { ok: false; eventAccount: string; tenantConnectAccountId: string | null };
+
+  /**
+   * The tenant's own connected account id, or null when it has none.
+   *
+   * Three sources in preference order, because the router is wired differently
+   * in production and in the test harnesses, and all three read the SAME
+   * `tenants.stripe_connect_account_id` column:
+   *   1. `connectAccountResolver` — what app.ts wires (app.ts:1108-1124).
+   *   2. `connectService`         — the StripeConnectService directly.
+   *   3. `pool`                   — the column, read straight.
+   *
+   * A tenant we cannot find owns no connected account, so an unknown /
+   * malformed tenant id resolves to null and the caller refuses. Nothing
+   * wired at all likewise resolves to null: a deployment with no Connect
+   * wiring has no connected accounts, so an `event.account` on it can never
+   * belong to one of our tenants. Both are fail-CLOSED by construction.
+   * A genuine infrastructure error (pool down) still throws, so the outer
+   * catch turns it into a 500 Stripe will retry — never a silent refusal of a
+   * real payment.
+   */
+  const resolveTenantConnectAccountId = async (tenantId: string): Promise<string | null> => {
+    try {
+      if (deps.connectAccountResolver) {
+        const view = await deps.connectAccountResolver.resolveTenantConnectAccount(tenantId);
+        return view?.accountId ?? null;
+      }
+      if (deps.connectService) {
+        return (await deps.connectService.getAccount(tenantId)).accountId;
+      }
+    } catch (err) {
+      // An absent tenant owns no account — that is a refusal, not an outage.
+      if (err instanceof NotFoundError) return null;
+      throw err;
+    }
+    if (deps.pool && isValidTenantId(tenantId)) {
+      const { rows } = await deps.pool.query<{ stripe_connect_account_id: string | null }>(
+        `SELECT stripe_connect_account_id FROM tenants WHERE id = $1`,
+        [tenantId],
+      );
+      return rows[0]?.stripe_connect_account_id ?? null;
+    }
+    return null;
+  };
+
+  /**
+   * Is this event's money the named tenant's to settle?
+   *
+   *   no `event.account`  → PLATFORM-ORIGIN delivery. Stripe only stamps
+   *                         `account` on deliveries from a Connected-accounts
+   *                         destination, so there is nothing to bind against
+   *                         and behaviour is unchanged (deliberately: platform
+   *                         payments must not regress).
+   *   account matches     → the tenant's own money. Settle.
+   *   anything else       → refuse (this covers BOTH a neighbour's account and
+   *                         a tenant that never enabled Connect).
+   *
+   * Resolves at most once per event: the settlement branches are mutually
+   * exclusive `if (event.type === …)` arms, so at most one calls this.
+   */
+  const assertEventAccountBelongsToTenant = async (
+    event: { id: string; type: string; account?: string },
+    tenantId: string,
+  ): Promise<EventAccountBinding> => {
+    const eventAccount = typeof event.account === 'string' ? event.account.trim() : '';
+    if (!eventAccount) return { ok: true };
+    const tenantConnectAccountId = await resolveTenantConnectAccountId(tenantId);
+    if (tenantConnectAccountId && tenantConnectAccountId === eventAccount) return { ok: true };
+    return { ok: false, eventAccount, tenantConnectAccountId };
+  };
+
+  /**
+   * Refuse an unbound settlement: 403 (a 4xx-class refusal, never a 500 — a
+   * 500 is indistinguishable from an outage and makes Stripe retry an event
+   * that can never succeed), an audit row on the NAMED tenant so the victim
+   * can see the attempt, and a `webhook_events` row left at 'failed' — the
+   * existing vocabulary's non-processed terminal status (the column's CHECK
+   * allows only received/processing/processed/failed), so `processed_at`
+   * stays null and no reader can mistake a refusal for a settlement.
+   *
+   * #1177 — the same path refuses a saved card whose metadata customer is not
+   * the named tenant's (`reason: STRIPE_CUSTOMER_TENANT_MISMATCH`); every other
+   * caller keeps the default account-mismatch reason and its exact output.
+   */
+  const refuseUnboundStripeEvent = async (
+    res: Response,
+    webhookEventId: string,
+    ctx: {
+      tenantId: string;
+      invoiceId?: string;
+      /** #1109 — the payment a refund/dispute would have written to. */
+      paymentId?: string;
+      eventId: string;
+      eventType: string;
+      /** null for a platform-origin delivery (no `event.account`). */
+      eventAccount: string | null;
+      /** Omitted when the refusal is not about the account binding (#1177). */
+      tenantConnectAccountId?: string | null;
+      /** Defaults to STRIPE_ACCOUNT_MISMATCH. */
+      reason?: StripeRefusalReason;
+      /** #1177 — the foreign customer a saved card would have pointed at. */
+      customerId?: string;
+    },
+  ): Promise<Response> => {
+    const reason = ctx.reason ?? STRIPE_ACCOUNT_MISMATCH;
+    logger.warn(
+      reason === STRIPE_CUSTOMER_TENANT_MISMATCH
+        ? 'Stripe event refused — the metadata customer is not the tenant\'s customer'
+        : 'Stripe event refused — event.account is not the tenant\'s connected account',
+      {
+        eventId: ctx.eventId,
+        type: ctx.eventType,
+        tenantId: ctx.tenantId,
+        invoiceId: ctx.invoiceId,
+        paymentId: ctx.paymentId,
+        customerId: ctx.customerId,
+        eventAccount: ctx.eventAccount,
+        tenantConnectAccountId: ctx.tenantConnectAccountId,
+        reason,
+      },
+    );
+    // Best-effort (a failed audit write must not turn a correctly-refused
+    // event into a 500), and skipped for a malformed tenant id, which the
+    // tenant-scoped audit write could not accept anyway.
+    if (deps.auditRepo && isValidTenantId(ctx.tenantId)) {
+      await deps.auditRepo
+        .create(
+          createAuditEvent({
+            tenantId: ctx.tenantId,
+            actorId: 'system:stripe_webhook',
+            actorRole: 'system',
+            eventType: 'webhook.auth_failed',
+            entityType: 'webhook',
+            entityId: reason,
+            correlationId: ctx.eventId,
+            metadata: {
+              reason,
+              stripeEventId: ctx.eventId,
+              stripeEventType: ctx.eventType,
+              eventAccount: ctx.eventAccount,
+              ...(ctx.tenantConnectAccountId !== undefined
+                ? { tenantConnectAccountId: ctx.tenantConnectAccountId }
+                : {}),
+              invoiceId: ctx.invoiceId ?? null,
+              ...(ctx.paymentId ? { paymentId: ctx.paymentId } : {}),
+              ...(ctx.customerId ? { customerId: ctx.customerId } : {}),
+            },
+          }),
+        )
+        .catch((err) =>
+          logger.error('Failed to audit refused Stripe event', {
+            eventId: ctx.eventId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    }
+    await webhookRepo.updateStatus(
+      webhookEventId,
+      'failed',
+      reason === STRIPE_CUSTOMER_TENANT_MISMATCH
+        ? `${reason}: customer '${ctx.customerId}' is not one of tenant ${ctx.tenantId}'s customers`
+        : `${reason}: event.account '${ctx.eventAccount}' is not tenant ` +
+            `${ctx.tenantId}'s connected account (${ctx.tenantConnectAccountId ?? 'none'})`,
+    );
+    return res.status(403).json({ error: 'Forbidden', reason });
   };
 
   /**
@@ -649,10 +863,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             });
           }
 
-          // Enqueue Twilio subaccount provisioning for new tenants only.
-          // Idempotent — the worker checks tenant_integrations.status and
-          // skips if already active, so safe to re-enqueue on webhook replay.
-          if (result.created && deps.queue) {
+          // Retry enqueue even when bootstrapTenant finds an existing tenant:
+          // an earlier delivery may have persisted it before enqueue failed.
+          // Awaiting send propagates failures to the webhook retry handler.
+          // Keep the stable tenant key to dedupe a message still in the queue;
+          // the worker also checks existing provisioning before doing work.
+          if (deps.queue) {
             const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
             // Twilio callbacks land on the API origin and signatures are
             // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
@@ -715,7 +931,25 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }));
           }
 
-          if (deps.provisioningQueue && result.created) {
+          // Awaited (not fire-and-forget): `send()` is a single durable
+          // INSERT (ON CONFLICT DO NOTHING on the idempotency key below) —
+          // this awaits that durable write landing, NOT a worker receiving
+          // or completing the job. A failed enqueue THROWS so the webhook
+          // 500s and Clerk retries (same rethrow-to-retry contract as the
+          // owner-insert block below), instead of returning 200 with no
+          // durable record the send was ever attempted. Bounded by
+          // PROVISIONING_ENQUEUE_TIMEOUT_MS so a wedged queue client fails
+          // the webhook rather than hanging it.
+          //
+          // NOT gated on result.created: bootstrapTenant's idempotent
+          // re-check makes result.created false on a Clerk retry forced by a
+          // LATER failure (e.g. the owner-insert) — gating on it here would
+          // permanently skip re-enqueueing a tenant whose provisioning send
+          // never actually landed on the first attempt. The queue dedupes on
+          // the deterministic `tenant-provisioning:${tenantId}` idempotency
+          // key, so re-attempting on every retry is a harmless no-op when
+          // the first send already succeeded.
+          if (deps.provisioningQueue) {
             const queuePayload = {
               tenantId: result.tenantId,
               ownerId: userId,
@@ -724,38 +958,57 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               webhookEventId: svixId,
             };
 
-            void deps.provisioningQueue.send(
-              'tenant.provisioning.root.requested',
-              queuePayload,
-              `tenant-provisioning:${result.tenantId}`
-            ).then(async (queueMessageId) => {
-              if (deps.auditRepo) {
-                await deps.auditRepo.create(createAuditEvent({
-                  tenantId: result.tenantId,
-                  actorId: userId,
-                  actorRole: 'owner',
-                  eventType: 'tenant.signup.provisioning.enqueued',
-                  entityType: 'tenant',
-                  entityId: result.tenantId,
-                  correlationId: signupCorrelationId,
-                  metadata: {
-                    queueMessageId,
-                    queueType: 'tenant.provisioning.root.requested',
-                  },
-                }));
-              }
-              logger.info('Root provisioning orchestration enqueued', {
-                tenantId: result.tenantId,
-                queueMessageId,
-                signupCorrelationId,
-              });
-            }).catch((err) => {
-              logger.error('Failed to enqueue root provisioning orchestration', {
+            let enqueueTimer: ReturnType<typeof setTimeout> | undefined;
+            const enqueueTimedOut = new Promise<never>((_resolve, reject) => {
+              enqueueTimer = setTimeout(
+                () => reject(new Error('Root provisioning enqueue timed out')),
+                PROVISIONING_ENQUEUE_TIMEOUT_MS,
+              );
+              if (enqueueTimer && typeof enqueueTimer.unref === 'function') enqueueTimer.unref();
+            });
+
+            let queueMessageId: string;
+            try {
+              queueMessageId = await Promise.race([
+                deps.provisioningQueue.send(
+                  'tenant.provisioning.root.requested',
+                  queuePayload,
+                  `tenant-provisioning:${result.tenantId}`
+                ),
+                enqueueTimedOut,
+              ]);
+            } catch (err) {
+              logger.error('Failed to enqueue root provisioning orchestration — failing webhook so Clerk retries', {
                 tenantId: result.tenantId,
                 signupCorrelationId,
                 error: err instanceof Error ? err.message : 'Unknown error',
               });
+              throw err;
+            } finally {
+              if (enqueueTimer) clearTimeout(enqueueTimer);
+            }
+
+            logger.info('Root provisioning orchestration enqueued', {
+              tenantId: result.tenantId,
+              queueMessageId,
+              signupCorrelationId,
             });
+
+            if (deps.auditRepo) {
+              await deps.auditRepo.create(createAuditEvent({
+                tenantId: result.tenantId,
+                actorId: userId,
+                actorRole: 'owner',
+                eventType: 'tenant.signup.provisioning.enqueued',
+                entityType: 'tenant',
+                entityId: result.tenantId,
+                correlationId: signupCorrelationId,
+                metadata: {
+                  queueMessageId,
+                  queueType: 'tenant.provisioning.root.requested',
+                },
+              }));
+            }
           }
 
           // QUALITY-2026-07-12 WS4 (+ PR #669 review) — create the OWNER's
@@ -1034,14 +1287,55 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         };
         const siTenantId = si.metadata?.tenant_id;
         const siCustomerId = si.metadata?.customer_id;
+
+        // SECURITY #1109 — a card saved on another tenant's connected account
+        // must not be stored against (and later charged for) the named tenant.
+        if (siTenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, siTenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId: siTenantId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
+
         if (
           deps.customerPaymentMethodRepo &&
+          deps.customerRepo &&
           deps.stripeConfig &&
           siTenantId &&
           siCustomerId &&
           si.customer &&
           si.payment_method
         ) {
+          // SECURITY #1177 — binding the account is not enough: the metadata
+          // could name the sender's own tenant with ANOTHER tenant's customer_id,
+          // storing a cross-tenant reference (and answering a customer-existence
+          // oracle). Resolve the customer through the tenant-scoped repository
+          // for the named tenant before anything is read or written; a customer
+          // that is not that tenant's is refused through the same path, audited
+          // on the named tenant, and nothing is stored. Malformed ids (the UUID
+          // check) are refused without a query rather than 500-ing into retries.
+          const siCustomer =
+            isValidTenantId(siTenantId) && isValidTenantId(siCustomerId)
+              ? await deps.customerRepo.findById(siTenantId, siCustomerId)
+              : null;
+          if (!siCustomer) {
+            const eventAccount = (event as { account?: string }).account;
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId: siTenantId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: typeof eventAccount === 'string' && eventAccount ? eventAccount : null,
+              reason: STRIPE_CUSTOMER_TENANT_MISMATCH,
+              customerId: siCustomerId,
+            });
+          }
+
           const already = await deps.customerPaymentMethodRepo.findByStripePaymentMethodId(
             siTenantId,
             si.payment_method,
@@ -1162,6 +1456,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const invoiceId = session.metadata?.invoice_id;
         const depositForJobId = session.metadata?.deposit_for_job_id;
         const amountTotal = session.amount_total; // already in cents
+
+        // SECURITY #1102 — before the deposit credit OR the invoice credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
 
         // Tier 4 (Deposit rules — PR 3b). Deposit branch: credit
         // depositPaidCents on the linked job. Cap at depositRequiredCents
@@ -1395,6 +1704,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         // `amount_received` is 0 — the to-be-credited amount is `amount`.
         const amountCents = pi.amount ?? pi.amount_received;
 
+        // SECURITY #1102 — before the in-flight credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
+
         if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
           logger.info('payment_intent.processing missing invoice metadata — skipping', {
             eventId: event.id, paymentIntentId: piId,
@@ -1485,6 +1809,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const invoiceId = pi.metadata?.invoice_id;
         const piId = pi.id;
         const amountCents = pi.amount_received ?? pi.amount;
+
+        // SECURITY #1102 — before the settlement credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
 
         if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
           logger.info('payment_intent.succeeded missing invoice metadata — skipping', {
@@ -1673,6 +2012,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const tenantId = pi.metadata?.tenant_id;
         const invoiceId = pi.metadata?.invoice_id;
         const piId = pi.id;
+
+        // SECURITY #1102 — the failure branch is money-touching too: a
+        // payment_failed on a previously-settled intent REVERSES the payment
+        // and reopens the invoice, so an unbound delivery is a vandalism
+        // vector, not just a mis-credit.
+        if (tenantId) {
+          const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+          if (!binding.ok) {
+            return refuseUnboundStripeEvent(res, webhookEvent.id, {
+              tenantId,
+              invoiceId,
+              eventId: event.id,
+              eventType: event.type,
+              eventAccount: binding.eventAccount,
+              tenantConnectAccountId: binding.tenantConnectAccountId,
+            });
+          }
+        }
 
         if (!tenantId || !invoiceId || !piId) {
           logger.info('payment_intent.payment_failed missing invoice metadata — skipping', {
@@ -2127,6 +2484,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           return res.status(200).json({ received: true, skipped: true });
         }
 
+        // SECURITY #1109 — the refund must have happened on the resolved
+        // tenant's own connected account before it touches their payment.
+        const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+        if (!binding.ok) {
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId,
+            paymentId,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: binding.eventAccount,
+            tenantConnectAccountId: binding.tenantConnectAccountId,
+          });
+        }
+
         // Stripe's `created` is a unix-seconds epoch; convert to JS Date.
         const refundedAt = refund.created
           ? new Date(refund.created * 1000)
@@ -2268,6 +2639,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           throw new NotFoundError('Payment', refund.id ?? 'unknown');
         }
 
+        // SECURITY #1109 — bind the RESOLVED tenant (metadata, or the owner of
+        // the payments row the cross-tenant lookup found) to event.account.
+        const binding = await assertEventAccountBelongsToTenant(event, tenantId);
+        if (!binding.ok) {
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId,
+            paymentId,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: binding.eventAccount,
+            tenantConnectAccountId: binding.tenantConnectAccountId,
+          });
+        }
+
         const refundedAt = refund.created ? new Date(refund.created * 1000) : new Date();
 
         try {
@@ -2347,6 +2732,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             eventId: event.id, disputeId: dispute.id,
           });
           throw new NotFoundError('Payment', dispute.id ?? 'unknown');
+        }
+
+        // SECURITY #1109 — the chargeback must be on the resolved payment's
+        // tenant's own connected account before we reverse it.
+        const binding = await assertEventAccountBelongsToTenant(event, payment.tenantId);
+        if (!binding.ok) {
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId: payment.tenantId,
+            invoiceId: payment.invoiceId,
+            paymentId: payment.id,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: binding.eventAccount,
+            tenantConnectAccountId: binding.tenantConnectAccountId,
+          });
         }
 
         const result = await reversePayment(

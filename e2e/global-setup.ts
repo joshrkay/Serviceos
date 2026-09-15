@@ -19,6 +19,16 @@
  */
 
 import { clerkSetup } from '@clerk/testing/playwright';
+// Static imports (not dynamic `import()`) — same fix as global-teardown.ts's
+// own report-builder import: a dynamic import() of a raw .ts path is loaded
+// through Node's native ESM loader's CJS-interop path (loadCJSModule), which
+// does NOT run through Playwright's registered require-hook transform, so
+// the file's own `import` syntax throws "Cannot use import statement outside
+// a module." A static import IS transpiled by Playwright's loader up front.
+// This does cost smoke runs (E2E_USE_TEST_DB unset) the testcontainers/pg
+// dependency graph at load time, same tradeoff global-teardown.ts accepted.
+import { setupTestDb, writeStateFile } from './fixtures/setup-test-db';
+import { seedJourneyFixtures } from './fixtures/seed-journey-fixtures';
 
 export default async function globalSetup(): Promise<void> {
   // --- BEGIN: ephemeral-DB block ---
@@ -26,22 +36,9 @@ export default async function globalSetup(): Promise<void> {
   // (no spawnSync), so the testcontainer it starts survives until
   // global-teardown.ts calls stopHeldContainer() at the end of the run.
   if (process.env.E2E_USE_TEST_DB === 'true') {
-    try {
-      await bootstrapEphemeralDb();
-    } catch (err) {
-      // Don't take the whole e2e run down — smoke tests don't need the DB,
-      // and journey specs self-skip when their seeded env vars are absent.
-      // Loud warning so the operator sees the real cause in CI logs.
-      console.error(
-        '\n[e2e globalSetup] EPHEMERAL DB BOOTSTRAP FAILED — journey tests ' +
-          'will skip themselves. Smoke + journey-agnostic specs will still run.\n' +
-          '[e2e globalSetup] Root cause:\n',
-        err
-      );
-      // Clear the env so journey specs notice the failure cleanly.
-      process.env.E2E_USE_TEST_DB = '';
-      delete process.env.DATABASE_URL;
-    }
+    // Explicitly requesting real Postgres makes its availability a prerequisite.
+    // Never turn a failed migration/connection into a green, skipped journey.
+    await bootstrapEphemeralDb();
   }
   // --- END: ephemeral-DB block ---
 
@@ -76,12 +73,6 @@ export default async function globalSetup(): Promise<void> {
 
 async function bootstrapEphemeralDb(): Promise<void> {
   console.log('[e2e globalSetup] E2E_USE_TEST_DB=true — bootstrapping ephemeral DB…');
-
-  // Lazy-import so smoke runs (E2E_USE_TEST_DB unset) never load the
-  // testcontainers/pg dependency graph and never trip on this module's
-  // own bootstrap issues — only the DB path needs these.
-  const { setupTestDb, writeStateFile } = await import('./fixtures/setup-test-db');
-  const { seedJourneyFixtures } = await import('./fixtures/seed-journey-fixtures');
 
   // 1. Start (or adopt) the test DB IN THIS PROCESS. If we own a
   //    container, setupTestDb() stores the ref in module state so

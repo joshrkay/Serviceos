@@ -8,6 +8,7 @@ import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
+import { buildRepositories, type Repositories } from './db/build-repositories';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
@@ -26,6 +27,7 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
+import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
@@ -35,7 +37,6 @@ import {
   verifyRs256Token, type AuthenticatedRequest } from './auth/clerk';
 import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
-import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
@@ -54,34 +55,12 @@ import {
   createIntegrationsRouter,
   createIntegrationsOAuthCallbackRouter,
 } from './routes/integrations';
-import {
-  PgAccountingIntegrationRepository,
-  PgAccountingSyncLogRepository,
-  PgAccountingOAuthStateRepository,
-  InMemoryAccountingIntegrationRepository,
-  InMemoryAccountingSyncLogRepository,
-  InMemoryAccountingOAuthStateRepository,
-} from './integrations/accounting/repository';
 import { resolveQuickBooksOAuthConfig } from './integrations/accounting/quickbooks-oauth';
 import {
   runAccountingSyncSweep,
   ACCOUNTING_SYNC_INTERVAL_MS,
 } from './workers/accounting-sync-worker';
-import {
-  PgCalendarIntegrationRepository,
-  PgOAuthStateRepository,
-  InMemoryCalendarIntegrationRepository,
-  InMemoryOAuthStateRepository,
-} from './integrations/calendar-integration';
-import {
-  CalendarSyncService,
-  PgAppointmentCalendarEventRepository,
-  InMemoryAppointmentCalendarEventRepository,
-} from './integrations/calendar-sync';
-import { PgUserRepository } from './users/pg-user';
-import { InMemoryUserRepository } from './users/user';
-import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
-import { InMemoryPendingInvitationRepository } from './users/pending-invitation';
+import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
@@ -89,11 +68,7 @@ import { createPaymentRouter } from './routes/payments';
 import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
 import { createDevicesRouter } from './routes/devices';
-import {
-  DEVICE_TOKEN_STALE_AFTER_DAYS,
-  InMemoryDeviceTokenRepository,
-} from './push/device-token-service';
-import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
+import { DEVICE_TOKEN_STALE_AFTER_DAYS } from './push/device-token-service';
 import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
 import {
   approverUserIdsResolver,
@@ -101,16 +76,14 @@ import {
   notifyNeedsApproval as notifyNeedsApprovalPush_,
 } from './notifications/proposal-push-notifier';
 import { OwnerNotificationService } from './notifications/owner-notification-service';
-import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
-import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
-import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
 import {
   TechnicianAssignmentNotifier,
   setTechnicianAssignmentNotifier,
 } from './appointments/assignment-notifications';
+import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -127,8 +100,7 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
-import { PgBrandVoiceRepository } from './tenants/brand/pg-brand-voice-repository';
-import { InMemoryBrandVoiceRepository } from './tenants/brand/in-memory-brand-voice-repository';
+import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
@@ -144,10 +116,6 @@ import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createOnboardingConversationRouter } from './routes/onboarding-conversation';
 import { OnboardingConversationOrchestrator } from './ai/orchestration/onboarding-conversation';
-import {
-  InMemoryOnboardingSessionRepository,
-  PgOnboardingSessionRepository,
-} from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
@@ -157,12 +125,8 @@ import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createJobPhotosRouter } from './routes/job-photos';
 import { JobPhotoService } from './jobs/job-photo-service';
-import { InMemoryJobPhotoRepository } from './jobs/job-photo';
-import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createAttachmentsRouter } from './routes/attachments';
 import { AttachmentService } from './attachments/attachment-service';
-import { InMemoryAttachmentRepository } from './attachments/attachment';
-import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
 import { initDispatchPresenceStore } from './dispatch/presence-store';
 import { initDispatchBoardFanout } from './dispatch/board-event-bus';
@@ -181,17 +145,12 @@ import { RepoBackedActivityFeedReporter } from './analytics/activity-feed';
 import { createActivityFeedRouter } from './analytics/activity-feed-router';
 import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
-import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
-import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
 import { TimeEntryService } from './time-tracking/time-entry-service';
-import {
-  PgRevenueBySourceRepository,
-  InMemoryRevenueBySourceRepository,
-} from './reports/revenue-by-source';
 import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
+import { captureServerError, redactedRoute } from './monitoring/capture-server-error';
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
@@ -209,78 +168,25 @@ import {
 } from './workers/failure-rate-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
-import { InMemoryCustomerRepository } from './customers/customer';
-import { InMemoryContactRepository } from './customers/contact';
-import { PgContactRepository } from './customers/pg-contact';
-import { InMemoryTagRepository } from './customers/tag';
-import { PgTagRepository } from './customers/pg-tag';
-import { InMemoryCustomFieldRepository } from './customers/custom-field';
-import { PgCustomFieldRepository } from './customers/pg-custom-field';
-import { InMemoryCustomerMergeRepository } from './customers/merge';
-import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
-import { InMemoryJobFormRepository } from './job-forms/job-form';
-import { PgJobFormRepository } from './job-forms/pg-job-form';
 import { createJobFormRouter } from './routes/job-forms';
-import { InMemoryRecurringJobRepository } from './recurring-jobs/recurring-job';
-import { PgRecurringJobRepository } from './recurring-jobs/pg-recurring-job';
 import { createRecurringJobRouter } from './routes/recurring-jobs';
-import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
-import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
 import { createJobCustomFieldRouter } from './routes/job-custom-fields';
-import { InMemoryFinancingRepository } from './financing/financing';
-import { PgFinancingRepository } from './financing/pg-financing';
 import { createFinancingProvider } from './financing/financing-provider';
 import { createFinancingRouter, createFinancingWebhookRouter } from './routes/financing';
-import { InMemoryCampaignRepository } from './marketing/campaign';
-import { PgCampaignRepository } from './marketing/pg-campaign';
 import { createMarketingRouter } from './routes/marketing';
-import { InMemoryCustomerGroupRepository } from './customers/customer-group';
-import { PgCustomerGroupRepository } from './customers/pg-customer-group';
 import { createCustomerGroupRouter } from './routes/customer-groups';
-import { InMemoryStandingInstructionRepository } from './instructions/standing-instructions';
-import { PgStandingInstructionRepository } from './instructions/pg-standing-instructions';
 import { createStandingInstructionRouter } from './routes/standing-instructions';
-import { InMemoryLeadRepository } from './leads/lead';
-import { InMemoryLocationRepository } from './locations/location';
-import { InMemoryJobRepository } from './jobs/job';
-import { InMemoryJobTimelineRepository } from './jobs/job-lifecycle';
-import { InMemoryAppointmentRepository } from './appointments/appointment';
-import { InMemoryAssignmentRepository } from './appointments/assignment';
-import { InMemoryEstimateRepository } from './estimates/estimate';
-import { InMemoryInvoiceRepository } from './invoices/invoice';
-import { InMemoryDunningConfigRepository, InMemoryDunningEventRepository } from './invoices/dunning-config';
-import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
-import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
-import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
-import { PgBatchInvoiceRunRepository } from './invoices/pg-batch-invoice-run';
 import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
-import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
-import { InMemoryNoteRepository } from './notes/note';
-import { InMemoryConversationRepository } from './conversations/conversation-service';
-import {
-  InMemorySettingsRepository,
-  resolveEscalationSettings,
-  createSettingsOwnerPhoneResolver,
-} from './settings/settings';
+import { resolveEscalationSettings, createSettingsOwnerPhoneResolver } from './settings/settings';
 import { InMemoryAuditRepository, createAuditEvent } from './audit/audit';
-import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
-import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
 import { LookupEventService } from './lookup-events/lookup-event-service';
-import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
-import { InMemoryServiceBundleRepository } from './verticals/bundles';
-import {
-  InMemoryPrivacyAuditRepository,
-  InMemoryTrainingAssetRepository,
-} from './verticals/in-memory-training-assets';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
 import { TrainingAssetService } from './verticals/training-asset-service';
 import { createPresidioAnonymizer } from './ai/privacy/presidio-adapter';
-import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
+import { createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
-import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
@@ -292,18 +198,10 @@ import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
-import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
-import {
-  InMemoryTechnicianLocationAuthorizer,
-  PgTechnicianLocationAuthorizer,
-} from './telemetry/technician-location-authz';
-import { InMemoryQueue, processMessage, type QueueMessage } from './queues/queue';
-import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { processMessage, type QueueMessage } from './queues/queue';
+import { createProvisionTwilioWorker } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createVerifyAiWorker } from './workers/verify-ai';
-import { InMemoryApprovalRepository } from './estimates/approval';
-import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
-import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
 import { TenantGlossaryProvider } from './voice/tenant-glossary-provider';
@@ -312,10 +210,6 @@ import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cach
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
 import { gradeVulnerability } from './ai/agents/customer-calling/vulnerability-grader';
 import { createVulnerabilityTriageHook } from './ai/agents/customer-calling/vulnerability-triage-hook';
-import {
-  PgTriageEventRepository,
-  InMemoryTriageEventRepository,
-} from './ai/agents/customer-calling/pg-triage-events';
 import { patchOwnerThrough } from './ai/skills/patch-owner-through';
 import { buildMarkCustomerVulnerablePayload } from './ai/agents/customer-calling/vulnerable-customer';
 import { createHvacPack } from './verticals/packs/hvac';
@@ -329,79 +223,24 @@ import {
 } from './ai/orchestration/caller-plan-context';
 import { createThresholdResolver } from './proposals/threshold-resolver';
 import { createVoicePersonaResolver } from './settings/voice-persona-resolver';
-import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
-import { PgCustomerRepository } from './customers/pg-customer';
-import { PgLeadRepository } from './leads/pg-lead';
-import { PgLocationRepository } from './locations/pg-location';
-import { PgJobRepository } from './jobs/pg-job';
-import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
-import { PgAppointmentRepository } from './appointments/pg-appointment';
-import { PgEstimateRepository } from './estimates/pg-estimate';
-import { PgInvoiceRepository } from './invoices/pg-invoice';
-import { PgDunningConfigRepository, PgDunningEventRepository } from './invoices/pg-dunning-config';
-import { PgPaymentRepository } from './invoices/pg-payment';
-import { InMemoryExpenseRepository } from './expenses/expense';
-import { PgExpenseRepository } from './expenses/pg-expense';
-import { PgNoteRepository } from './notes/pg-note';
-import { PgConversationRepository } from './conversations/pg-conversation';
-import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { recordApiError } from './analytics/posthog';
-import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
-import { PgServiceBundleRepository } from './verticals/pg-bundles';
-import {
-  PgPrivacyAuditRepository,
-  PgTrainingAssetRepository,
-} from './verticals/pg-training-assets';
-import { PgQualityMetricsRepository } from './quality/pg-metrics';
-import { PgVoiceRepository } from './voice/pg-voice';
-import { InMemoryVoiceSessionRepository } from './voice/voice-session';
-import { PgVoiceSessionRepository } from './voice/pg-voice-session';
-import { InMemoryCallMeBackRepository } from './voice/call-me-back/call-me-back';
-import { PgCallMeBackRepository } from './voice/call-me-back/pg-call-me-back';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
-import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
-import { PgApprovalRepository } from './estimates/pg-approval';
-import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
-import { PgPackActivationRepository } from './settings/pg-pack-activation';
-import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
-import { InMemoryFileRepository } from './files/file-service';
-import { InMemoryJobFileRepository } from './files/job-file-repository';
-import { PgFileRepository } from './files/pg-file';
-import { PgJobFileRepository } from './files/pg-job-file';
-import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
-import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
+import { createInflightSweeps } from './workers/inflight-sweeps';
+import { runLeaderGatedTick } from './workers/leader-tick';
 import { createStorageProvider } from './files/storage-provider';
 import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
-import { PgWebhookEventRepository } from './webhooks/pg-webhook-event';
-import { PgAssignmentRepository } from './appointments/pg-assignment';
-import { PgDocumentRevisionRepository } from './ai/pg-document-revision';
-import { PgDiffAnalysisRepository } from './ai/pg-diff-analysis';
-import { PgDispatchAnalyticsRepository } from './dispatch/pg-analytics';
-import { PgDelayNoticeStateRepository } from './notifications/pg-delay-notice-state';
 import { PgQueue } from './queues/pg-queue';
-import {
-  InMemoryFeedbackRequestRepository,
-} from './feedback/feedback-request';
-import {
-  InMemoryFeedbackResponseRepository,
-} from './feedback/feedback-response';
-import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
-import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
-import {
-  InMemoryDispatchRepository,
-  PgDispatchRepository,
-} from './notifications/dispatch-repository';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -412,8 +251,7 @@ import { createOneTapUndoRouter } from './routes/one-tap-undo';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
-import { PgDailyDigestRepository } from './digest/pg-daily-digest';
-import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
+import { type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import {
@@ -425,9 +263,10 @@ import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
 import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
 import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
 import {
-  PgHfcrWeeklySendRepository,
-  InMemoryHfcrWeeklySendRepository,
-} from './metrics/hfcr-weekly-send';
+  resolveTenantOwnerEmail,
+  isWeeklyFeedbackEnabledForTenant,
+  resolveTenantBusinessName,
+} from './digest/weekly-feedback-config';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { runReviewRequestSweep } from './workers/review-request-worker';
@@ -438,10 +277,6 @@ import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
-import {
-  PgGoogleBusinessIntegrationRepository,
-  InMemoryGoogleBusinessIntegrationRepository,
-} from './reputation/google-business-integration';
 import type { GoogleBusinessOAuthConfig } from './reputation/google-business-client';
 import {
   createGoogleBusinessIntegrationsRouter,
@@ -452,22 +287,14 @@ import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-load
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
-import { InMemoryAgreementRepository } from './agreements/agreement';
-import { PgAgreementRepository } from './agreements/pg-agreement';
-import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
-import { PgCustomerPaymentMethodRepository } from './payments/pg-customer-payment-method';
 import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
 import { issueInvoice } from './invoices/invoice';
 import { recordPayment } from './invoices/payment';
-import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
-import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
 import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
 import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
 import { createMessageTemplateRouter } from './messaging/message-template-router';
-import { PgMessageTemplateRepository } from './messaging/pg-message-template';
-import { InMemoryMessageTemplateRepository } from './messaging/message-template';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -494,15 +321,9 @@ import { isApproverPhone } from './proposals/approver-identity';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
-import {
-  InMemoryCorrectionLessonRepository,
-} from './learning/corrections/correction-lesson';
-import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
 import type { ConfigPorts } from './learning/corrections/lesson-applicator';
 import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
 // Story 3.9 — raw per-field proposal-edit corrections log.
-import { InMemoryCorrectionRepository } from './proposals/corrections/correction';
-import { PgCorrectionRepository } from './proposals/corrections/pg-correction';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -519,16 +340,6 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 // through detectLanguage (which applies the supported_languages gate).
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
-import {
-  PgKnowledgeChunkRepository,
-  InMemoryKnowledgeChunkRepository,
-} from './ai/training/knowledge-chunks';
-import { InMemoryRetrievalEvalRunRepository } from './ai/training/retrieval-eval-run';
-import { PgRetrievalEvalRunRepository } from './ai/training/pg-retrieval-eval-run';
-import { InMemoryProposalExecutionRepository } from './proposals/proposal-execution';
-import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
-import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
-import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
@@ -538,6 +349,7 @@ import { createEntityAliasCandidateService } from './learning/entity-aliases/can
 import { createEntityAliasesRouter } from './routes/entity-aliases';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
+import { RespondToReviewTaskHandler } from './ai/tasks/review-response-task';
 import { runExecutionSweep } from './workers/execution-worker';
 import {
   createLLMGateway,
@@ -548,14 +360,11 @@ import {
 import * as gatewayFactory from './ai/gateway/factory';
 import { shutdownRedisClients } from './redis/redis-client';
 import { createAiHealthRouter } from './routes/ai-health';
-import { InMemoryAiRunRepository } from './ai/ai-run';
-import { PgAiRunRepository } from './ai/pg-ai-run';
 import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
-import { lookupDayOverview } from './ai/skills/lookup-day-overview';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
@@ -564,14 +373,11 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
-import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
+import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
-import {
-  configureSupervisorCreationHook,
-  SUPERVISOR_DISABLED_FLAG,
-} from './proposals/supervisor/hook';
+import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
 import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
@@ -592,10 +398,6 @@ import {
 // N-004 (P2-037) — Supervisor Agent review pass (four-check pre-dispatch gate).
 import { configureSupervisorReviewGate } from './ai/supervisor/review-gate';
 import { createSupervisorReviewGate } from './ai/supervisor/reviewer';
-import {
-  InMemorySupervisorReviewRepository,
-  PgSupervisorReviewRepository,
-} from './ai/supervisor/reviews-repo';
 import { PgPricingBaselineResolver } from './ai/supervisor/pricing-baseline';
 import {
   DEFAULT_SUPERVISOR_REVIEW_MODE,
@@ -608,45 +410,33 @@ import {
 } from './config/ai-routing';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
-import {
-  NoOpIdempotencyLockProvider,
-  PgIdempotencyLockProvider,
-} from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { assertVoiceHandlersWired } from './proposals/execution/wiring-assertions';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
-import { InMemoryWorkingHoursRepository } from './availability/working-hours';
-import { PgWorkingHoursRepository } from './availability/pg-working-hours';
-import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
-import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
 import type { FeasibilityDependencies } from './scheduling/feasibility-types';
-import {
-  createDiffAnalysisWorker,
-  InMemoryDiffAnalysisRepository,
-} from './ai/diff-analysis';
-import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
+import { createDiffAnalysisWorker } from './ai/diff-analysis';
 import { e1ScriptReadiness } from './ai/agents/customer-calling/emergency-tier';
 import { createLogger } from './logging/logger';
+import { createTraceExporterFromConfig } from './ai/gateway/trace-exporter';
 import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
   createDelayNotificationWorker,
   DelayNotificationCoordinator,
-  InMemoryDelayNoticeStateRepository,
   NextCustomerSelector,
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
+import { TwilioCustomerMessageService } from './notifications/twilio-customer-message-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { runProposalExpirySweep } from './workers/proposal-expiry-worker';
-import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
   registerKeywordHandler,
@@ -660,11 +450,7 @@ import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-ne
 import { normalizePhone } from './customers/dedup';
 import { DefaultCurrentQuoteResolver } from './conversations/negotiation/current-quote-resolver';
 import { evaluateNegotiationDiscount } from './proposals/guardrails/negotiation-guardrail';
-import {
-  DroppedCallScheduler,
-  PgDroppedCallRecoveryRepository,
-  InMemoryDroppedCallRecoveryRepository,
-} from './sms/recovery/scheduler';
+import { DroppedCallScheduler } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 // P8-015 — production deps for the dropped-call recovery sweep.
 import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler';
@@ -677,10 +463,6 @@ import {
   DROPPED_CALL_RECOVERY_FLAG,
 } from './workers/dropped-call-worker';
 import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
-import {
-  PgConsentEventRepository,
-  InMemoryConsentEventRepository,
-} from './compliance/consent-events';
 import { TwilioRecordingControl } from './telephony/recording-control';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
 // P0-009: the webhook seam enqueues; the worker runs the pipeline.
@@ -691,8 +473,6 @@ import {
 // P6-028 — tech "I'm out today" keyword handler (OUT|SICK|UNAVAILABLE).
 import {
   registerTechStatusKeywords,
-  PgTechStatusTodayRepository,
-  InMemoryTechStatusTodayRepository,
   // B5.5 — the en-route ('omw' / 'on my way') SMS keyword leg.
   registerEnRouteSmsKeyword,
 } from './sms/tech-status';
@@ -705,8 +485,6 @@ import {
 } from './sms/customer-mms/customer-mms-intake';
 import {
   registerProposalReplySms,
-  PgProposalSmsEventRepository,
-  InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
   encodeDigestApproveAllBody,
   createLlmEditInterpreter,
@@ -728,7 +506,6 @@ import type { TenantIntegrationStatus } from './integrations/status-machine';
 // this composition-root into its own module so app.ts no longer carries an
 // inline repository class. Production/staging always use the Pg variant
 // (createApp() throws if DATABASE_URL is missing in those environments).
-import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-event';
 
 // Composition-root helpers extracted into ./bootstrap. Imported for local use
 // inside createApp() AND re-exported so existing tests that import them from
@@ -763,7 +540,7 @@ export type AppWithLifecycle = express.Express & {
   readonly backgroundIntervalCount: number;
 };
 
-export function createApp(): AppWithLifecycle {
+export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecycle {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
   // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
@@ -1082,40 +859,118 @@ export function createApp(): AppWithLifecycle {
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
-  // The settings repo is constructed early so the Clerk webhook tenant
-  // bootstrap can seed a default TenantSettings row alongside the new
-  // tenant — closes the onboarding hole where a new operator would 500
-  // on their first POST /api/estimates.
-  // BUG-2 — when there's no pool, every consumer must share ONE
-  // DevInMemoryTenantRepository instance, otherwise the public-intake
-  // path and the dev-auth-bypass middleware end up with disjoint
-  // tenant maps and customers created on one side don't resolve on
-  // the other.
-  // Same for settings: InMemorySettingsRepository is stateful — the
-  // Clerk webhook seeder and /api/settings must share one map or
-  // hermetic/dev boots 404 on Settings after a successful bootstrap.
-  const tenantRepo = pool
-    ? new PgTenantRepository(pool)
-    : new DevInMemoryTenantRepository();
-  const settingsRepo = pool
-    ? new PgSettingsRepository(pool)
-    : new InMemorySettingsRepository();
+  // Repositories are constructed by buildRepositories() (D-024 Stage 1).
+  // `overrides` lets a caller substitute individual repositories. It is passed
+  // IN as well as spread over the result: the two repos that capture a sibling
+  // in their constructor (customerMergeRepo, appointmentRepo) can only honour
+  // an override that reaches them before construction.
+  const {
+    tenantRepo,
+    settingsRepo,
+    webhookInvoiceRepo,
+    webhookEstimateRepo,
+    webhookPaymentRepo,
+    jobRepo,
+    pendingInvitationRepo,
+    queue,
+    webhookEventRepo,
+    dncRepo,
+    customerRepo,
+    customerContactRepo,
+    customerTagRepo,
+    customerCustomFieldRepo,
+    jobFormRepo,
+    recurringJobRepo,
+    jobCustomFieldRepo,
+    financingRepo,
+    campaignRepo,
+    customerGroupRepo,
+    standingInstructionRepo,
+    customerMergeRepo,
+    leadRepo,
+    locationRepo,
+    timelineRepo,
+    assignmentRepo,
+    appointmentRepo,
+    userRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
+    estimateRepo,
+    invoiceRepo,
+    dunningConfigRepo,
+    dunningEventRepo,
+    hfcrWeeklySendRepo,
+    invoiceScheduleRepo,
+    batchInvoiceRunRepo,
+    batchInvoiceTxRunner,
+    paymentRepo,
+    expenseRepo,
+    materialItemRepo,
+    noteRepo,
+    conversationRepo,
+    callMeBackRepo,
+    deviceTokenRepo,
+    lookupEventRepo,
+    agreementRepo,
+    customerPaymentMethodRepo,
+    templateRepo,
+    messageTemplateRepo,
+    bundleRepo,
+    qualityMetricsRepo,
+    voiceRepo,
+    voiceSessionRepo,
+    technicianLocationPingRepo,
+    technicianLocationAuthorizer,
+    approvalRepo,
+    deltaRepo,
+    packActivationRepo,
+    trainingAssetRepo,
+    privacyAuditRepo,
+    fileRepo,
+    jobFileRepo,
+    jobPhotoRepo,
+    attachmentRepo,
+    catalogRepo,
+    feedbackRequestRepo,
+    feedbackResponseRepo,
+    agreementRunRepo,
+    timeEntryRepo,
+    canonicalPackRegistry,
+    aiRunRepo,
+    knowledgeChunkRepo,
+    proposalExecutionRepo,
+    correctionLessonRepo,
+    supervisorReviewsRepo,
+    correctionRepo,
+    retrievalEvalRunRepo,
+    callTranscriptTurnRepo,
+    dispatchRepo,
+    consentEventRepo,
+    documentRevisionRepo,
+    diffAnalysisRepo,
+    techStatusTodayRepo,
+    proposalSmsEventRepo,
+    dispatchAnalyticsRepo,
+    googleBusinessIntegrationRepo,
+    brandVoiceRepo,
+    proposalIdempotencyLock,
+    delayNoticeStateRepo,
+    dailyDigestRepo,
+    calendarIntegrationRepo,
+    oauthStateRepo,
+    appointmentCalendarEventRepo,
+    accountingIntegrationRepo,
+    accountingSyncLogRepo,
+    accountingOAuthStateRepo,
+    sharedOnCallRepo,
+    droppedCallRecoveryRepo,
+    triageEventsRepo,
+    revenueBySourceRepo,
+    notificationPreferenceRepo,
+    onboardingSessionRepo,
+    voiceApprovalPinLockAlertRepo,
+  } = { ...buildRepositories(pool, directPool, overrides), ...overrides };
   const webhookSettingsRepo = settingsRepo;
-  // Constructed early so the Stripe webhook handler can record payments.
-  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
-  const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
-  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
-  // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
-  // and the rest of the app share a single instance — InMemory repos
-  // are stateful, so two separate `new InMemoryJobRepository()` calls
-  // would diverge in tests.
-  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
-  // Tier 4 (Team members — PR 3). Same hoist for pending invitations
-  // — the Clerk webhook reads them on user.created and the /api/users
-  // routes write them. Single shared InMemory in tests.
-  const pendingInvitationRepo = pool
-    ? new PgPendingInvitationRepository(pool)
-    : new InMemoryPendingInvitationRepository();
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
@@ -1142,9 +997,6 @@ export function createApp(): AppWithLifecycle {
         config: { apiKey: process.env.STRIPE_SECRET_KEY },
       })
     : undefined;
-  // Queue constructed here (before webhook router) so new-tenant webhooks can
-  // enqueue provisioning jobs synchronously during the request.
-  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   // Wrap the single audit-repo instance in the PostHog forwarding decorator at
   // the composition root: every mutation's audit write (~270 sites, all
   // domains) is threaded through `auditRepo`, so this one wrap gives full
@@ -1153,7 +1005,6 @@ export function createApp(): AppWithLifecycle {
   const webhookAuditRepo = new ForwardingAuditRepository(
     pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
   );
-  const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
   // without a pool (tests/dev) so createWebhookRouter falls back to its
@@ -1164,7 +1015,6 @@ export function createApp(): AppWithLifecycle {
   // The inbound-SMS dispatcher routes any matching first-token to these
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
-  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
   // STOP/START handler registration is deferred until the consent ledger and
   // customer repos exist (Story 10.6 unifies DNC + consent_events + the
   // customers.consent_status rollup) — see registration below.
@@ -1207,6 +1057,10 @@ export function createApp(): AppWithLifecycle {
     vapiSecretResolver,
     // #6 phase 4 — persist saved cards on setup_intent.succeeded.
     // customerPaymentMethodRepo is wired in after its instantiation below.
+    // SECURITY #1177 — the saved card's metadata customer_id is resolved through
+    // this tenant-scoped repo first; a customer that is not the named tenant's
+    // is refused and nothing is stored.
+    customerRepo,
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
@@ -1230,68 +1084,23 @@ export function createApp(): AppWithLifecycle {
     app.use('/storage-dev', createDevStorageRouter());
   }
 
-  const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
-  // U1 (CRM Jobber parity) — multiple contacts per customer.
-  const customerContactRepo = pool ? new PgContactRepository(pool)       : new InMemoryContactRepository();
-  // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
-  const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
-  const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
-  const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
-  const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
-  const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
-  const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
   const financingProvider = createFinancingProvider();
-  const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
-  const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
-  // UB-A1 — standing instructions the AI agents apply when drafting.
-  const standingInstructionRepo = pool
-    ? new PgStandingInstructionRepository(pool)
-    : new InMemoryStandingInstructionRepository();
   const entityAliasRepo = pool ? new PgEntityAliasRepository(pool) : undefined;
-  // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
-  // in one transaction; the no-DB dev path only archives (no child tables).
-  const customerMergeRepo = pool
-    ? new PgCustomerMergeRepository(pool)
-    : new InMemoryCustomerMergeRepository(customerRepo);
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
     : undefined;
-  const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
-  const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   // jobRepo is hoisted earlier so the Stripe webhook + everything else
   // share a single InMemory instance during tests.
-  const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
-  const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
-  const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
-  // Declared here (ahead of its first router use) so the jobs router's
-  // from-estimate scheduling deps can reference it.
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   // Hermetic / DEV_AUTH_BYPASS path: share one InMemoryUserModeService so
   // bootstrap can upsert the owner row (with internal_user_id) before
   // /api/me mounts. Pg-backed mode still builds its service later.
   const inMemoryUserModeService = pool ? null : new InMemoryUserModeService();
-  // Working hours are now Pg-backed in production (migration 137 added
-  // technician_working_hours), so the dispatch feasibility composer and the
-  // inbound-AI availability search enforce real working-hours rows instead of
-  // treating missing rows as no-conflict. The unavailable-block repo is now
-  // Pg-backed too (migration 116 `tech_unavailable_blocks`) so the P6-028
-  // tech "I'm out" handler persists real same-day blocks the feasibility
-  // composer reads. InMemory variants stay for tests / no-pool.
-  const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
-  const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
-  const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
-  const dunningConfigRepo  = pool ? new PgDunningConfigRepository(pool)  : new InMemoryDunningConfigRepository();
-  const dunningEventRepo   = pool ? new PgDunningEventRepository(pool)   : new InMemoryDunningEventRepository();
-  const hfcrWeeklySendRepo = pool ? new PgHfcrWeeklySendRepository(pool) : new InMemoryHfcrWeeklySendRepository();
-  const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
-  const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
-  const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
-  const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
-  const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
+  // Threaded into the execution-handler deps bag below and into
+  // lookupAnswerDeps (shared by the recorded-memo worker + assistant chat),
+  // mirroring expenseRepo / agreementRepo.
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
@@ -1323,23 +1132,9 @@ export function createApp(): AppWithLifecycle {
   // as customerPaymentMethodRepo: the router reads deps lazily).
   webhookRouterDeps.paymentLinkProvider = paymentLinkProvider;
   webhookRouterDeps.connectAccountResolver = connectAccountResolver;
-  const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
-  const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   // settingsRepo is constructed once above (webhook + /api/settings share it).
   // P2-036 V2 — resolves the customer's current live quote for the discount engine.
   const negotiationQuoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
-  // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
-  const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
-  // Mobile push-token store (POST/DELETE /api/devices, the proposal/owner
-  // push notifiers bound further down, and account deletion's token purge) +
-  // the Expo push transport. Constructed HERE — not at the router mount — so
-  // the voice adapters can take both as deps for the ANS-001 E1 alert
-  // fan-out. Pg-backed when a DB is configured (PgBaseRepository.withTenant,
-  // so every statement joins the per-request tenant transaction and RLS
-  // scopes every row); in-memory otherwise.
-  const deviceTokenRepo = pool
-    ? new PgDeviceTokenRepository(pool)
-    : new InMemoryDeviceTokenRepository();
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
   // Gated so a dev/staging E1 test call doesn't POST to Expo's live endpoint.
   // Unset/'true' keeps it on in production; set EXPO_PUSH_ENABLED=false to
@@ -1350,8 +1145,11 @@ export function createApp(): AppWithLifecycle {
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
-  // worker) so settings hits the DB at most once per tenant per TTL
-  // window across the whole process.
+  // worker, and — I3, post-C1 review, followup-autoapprove-default —
+  // the assistant-chat router, the first caller where this override can
+  // actually take effect since it's also the first to thread a real
+  // supervisorMode) so settings hits the DB at most once per tenant per
+  // TTL window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
   // Per-tenant scheduling context (IANA timezone) for the voice booking
   // path. Delegates to settingsRepo (same RLS / withTenant path) so spoken
@@ -1384,44 +1182,10 @@ export function createApp(): AppWithLifecycle {
   // both the Twilio and in-app adapters.
   const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
   const auditRepo          = webhookAuditRepo;
-  // P11-001: voice lookup-skill audit log. The skills write one row
-  // per invocation through `LookupEventService` and the Twilio adapter
-  // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
-  const lookupEventRepo    = pool ? new PgLookupEventRepository(pool)    : new InMemoryLookupEventRepository();
   const lookupEventService = new LookupEventService(lookupEventRepo);
-  // P11-001: hoisted so the Twilio lookup-skill family can read agreements.
-  // The richer agreement-service wiring (agreementRunRepo, generators,
-  // etc.) still happens further below — this declaration is purely so
-  // the read-only lookup branch has access.
-  const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
-  // #6 phase 4 — saved cards for off-session dues billing.
-  const customerPaymentMethodRepo = pool
-    ? new PgCustomerPaymentMethodRepository(pool)
-    : new InMemoryCustomerPaymentMethodRepository();
   // Wire into the webhook deps (assembled above, before this repo existed) so
   // setup_intent.succeeded can persist the card — mirrors paymentReceiptNotifier.
   webhookRouterDeps.customerPaymentMethodRepo = customerPaymentMethodRepo;
-  const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
-  const messageTemplateRepo = pool ? new PgMessageTemplateRepository(pool) : new InMemoryMessageTemplateRepository();
-  const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
-  const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
-  const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
-  const voiceSessionRepo   = pool ? new PgVoiceSessionRepository(pool)   : new InMemoryVoiceSessionRepository();
-  const technicianLocationPingRepo = pool
-    ? new PgTechnicianLocationPingRepository(pool)
-    : new InMemoryTechnicianLocationPingRepository();
-  const technicianLocationAuthorizer = pool
-    ? new PgTechnicianLocationAuthorizer(pool)
-    : new InMemoryTechnicianLocationAuthorizer();
-  const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
-  const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
-  const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const trainingAssetRepo = pool
-    ? new PgTrainingAssetRepository(pool)
-    : new InMemoryTrainingAssetRepository();
-  const privacyAuditRepo = pool
-    ? new PgPrivacyAuditRepository(pool)
-    : new InMemoryPrivacyAuditRepository();
   // Holder set later once the vertical prompt resolver is built (it
   // depends on canonicalPackRegistry, which is created further down).
   // Lifecycle mutations call this to drop the cached prompt section
@@ -1469,36 +1233,17 @@ export function createApp(): AppWithLifecycle {
     pool: pool ?? undefined,
     invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
-  const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
-  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
-  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
-  // RV-005: generalized attachments (photos & documents on any entity).
-  const attachmentRepo     = pool ? new PgAttachmentRepository(pool)     : new InMemoryAttachmentRepository();
-  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
-  const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
-  const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
   // P10-001: portal session repo (single signed token per customer for the
   // self-service portal). Wired here so both the authed creation route and
   // the public token-resolver router share one instance.
   const portalSessionRepo: PortalSessionRepository = pool
     ? new PgPortalSessionRepository(pool)
     : new InMemoryPortalSessionRepository();
-  // Agreement-runs are also surfaced on the public portal (read-only).
-  // Hoisted here so the public portal router (mounted before Clerk auth)
-  // can reference it. `agreementRepo` is already declared above (hoisted
-  // for the P11-001 voice lookup-skill family).
-  const agreementRunRepo = pool
-    ? new PgAgreementRunRepository(pool)
-    : new InMemoryAgreementRunRepository();
-  const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
   );
 
-  const canonicalPackRegistry = pool
-    ? new PgVerticalPackRegistry(pool)
-    : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
   // Synchronous transcription function — used by POST /api/voice/transcribe.
@@ -1506,9 +1251,6 @@ export function createApp(): AppWithLifecycle {
 
   // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
-  // AI-run repository — tracks every LLM call lifecycle (pending → running → completed/failed).
-  // Pg-backed in production; InMemory when DATABASE_URL is unset (dev/test).
-  const aiRunRepo = pool ? new PgAiRunRepository(pool) : new InMemoryAiRunRepository();
 
   // P2-030 — shadow comparison store.
   // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
@@ -1523,8 +1265,19 @@ export function createApp(): AppWithLifecycle {
   // Falls back to a hermetic MockLLMProvider in dev/test so the app boots
   // without an AI_PROVIDER_API_KEY and Assistant can still draft proposals
   // (fixed "unknown" mock permanently degraded the chat path).
+  // U10 — no logger was passed here before, so every best-effort
+  // `this.logger?.error` in gateway.ts (ai_runs AND trace-export failures)
+  // was silent in production. One logger, shared with the exporter.
+  const llmGatewayLogger = createLogger({
+    service: 'llm-gateway',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  // U10 — Langfuse trace export. NoopTraceExporter (zero network) unless
+  // LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are both set; flushed in the
+  // shutdown handler beside shutdownAnalytics().
+  const traceExporter = createTraceExporterFromConfig(config, llmGatewayLogger);
   const llmGateway = config.AI_PROVIDER_API_KEY
-    ? createLLMGateway(config, { aiRunRepo, shadowStore })
+    ? createLLMGateway(config, { aiRunRepo, shadowStore, logger: llmGatewayLogger, traceExporter })
     : createHermeticMockLLMGateway().gateway;
   // Wire completion probe for GET /api/health/ai/completion (even hermetic mock
   // — probe then proves the mock path responds, which is useful in local boot).
@@ -1538,39 +1291,12 @@ export function createApp(): AppWithLifecycle {
   const embeddingProvider: EmbeddingProvider | null =
     createEmbeddingProvider(config);
 
-  // Phase 4a-1 repositories — used by transcript-ingestion-worker and
-  // proposal-correction-worker. All Pg-backed in production with
-  // tenant-scoped RLS via PgBaseRepository.withTenant; InMemory in
-  // dev/test so the app boots without DATABASE_URL.
-  const knowledgeChunkRepo = pool
-    ? new PgKnowledgeChunkRepository(pool)
-    : new InMemoryKnowledgeChunkRepository();
-  const proposalExecutionRepo = pool
-    ? new PgProposalExecutionRepository(pool)
-    : new InMemoryProposalExecutionRepository();
-  // U7 — structured correction-lesson loop. The repo + ConfigPorts back the
   // recordCorrectionLessonsOnExecution call in the executor's onExecuted seam
   // (and the undo path in proposal actions). Ports cascade a distilled lesson
   // into real tenant config: labor rate (tenant_settings.labor_rate_cents_per
   // _hour), SKU price (catalog item), banned phrases (brand-voice negative
   // prompt). setTemplateWeight is a no-op — no template-weight store exists yet,
   // so scope_reclassified lessons aren't produced (no resolveTemplate passed).
-  const correctionLessonRepo = pool
-    ? new PgCorrectionLessonRepository(pool)
-    : new InMemoryCorrectionLessonRepository();
-  // WS6 — supervisor_reviews repo, hoisted here (rather than constructed
-  // inline inside the review-gate config further down) so the daily-digest
-  // worker deps can reuse the SAME instance for its "Checked: N proposals,
-  // M flagged" reflection line instead of standing up a second repo.
-  const supervisorReviewsRepo = pool
-    ? new PgSupervisorReviewRepository(pool)
-    : new InMemorySupervisorReviewRepository();
-  // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
-  // queryable per tenant and per intent; the training signal for prompt/routing
-  // improvement. Distinct from correction_lessons (cascading config above).
-  const correctionRepo = pool
-    ? new PgCorrectionRepository(pool)
-    : new InMemoryCorrectionRepository();
   const correctionConfigPorts: ConfigPorts = {
     async setLaborRateCents(tenantId, cents) {
       await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
@@ -1588,19 +1314,12 @@ export function createApp(): AppWithLifecycle {
       /* No template-weight store yet; scope_reclassified lessons aren't produced. */
     },
   };
-  const retrievalEvalRunRepo = pool
-    ? new PgRetrievalEvalRunRepository(pool)
-    : new InMemoryRetrievalEvalRunRepository();
-  const callTranscriptTurnRepo = pool
-    ? new PgCallTranscriptTurnRepository(pool)
-    : new InMemoryCallTranscriptTurnRepository();
 
   // Customer-facing message delivery for estimates and invoices.
   // prod/staging wire Twilio (SMS) + Twilio-native email or SendGrid; every
   // other environment gets InMemoryDeliveryProvider so the app boots without
   // delivery credentials AND cannot send real messages. Send routes return
   // 503 when sendService is undefined.
-  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
   // Provider selection lives in notifications/delivery-provider-factory.ts so
   // it is unit-testable without booting createApp(). The invariant it enforces:
   // ONLY prod/staging (or an explicit DELIVERY_ALLOW_REAL_PROVIDERS=true
@@ -1619,13 +1338,6 @@ export function createApp(): AppWithLifecycle {
     }),
   });
   const rawMessageDelivery: MessageDeliveryProvider | null = deliveryWiring.provider;
-  // RV-130 — consent ledger (append-only consent_events). Constructed here —
-  // before the SMS gate — because WS12 makes it the cross-channel source of
-  // truth both outbound gates consult; the STOP/START keyword handlers and
-  // the voice adapter (registered further down) append to the same instance.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
 
   // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
   // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
@@ -1907,14 +1619,6 @@ export function createApp(): AppWithLifecycle {
 
   // ── Diff-analysis worker (P0-018): compares two revision snapshots and
   // persists a structured field-level delta. P0-023 graduates the revision
-  // store and the analysis store onto Postgres when DATABASE_URL is set —
-  // dev still uses the in-memory variants so tests boot without a DB.
-  const documentRevisionRepo = pool
-    ? new PgDocumentRevisionRepository(pool)
-    : new InMemoryDocumentRevisionRepository();
-  const diffAnalysisRepo = pool
-    ? new PgDiffAnalysisRepository(pool)
-    : new InMemoryDiffAnalysisRepository();
   const diffAnalysisWorker = createDiffAnalysisWorker(
     documentRevisionRepo,
     diffAnalysisRepo
@@ -1997,9 +1701,6 @@ export function createApp(): AppWithLifecycle {
   // the STOP/START registrations so re-running createApp() (across test files /
   // multiple bootstraps in one process) re-registers without tripping the
   // duplicate-keyword guard.
-  const techStatusTodayRepo = pool
-    ? new PgTechStatusTodayRepository(pool)
-    : new InMemoryTechStatusTodayRepository();
   registerTechStatusKeywords(
     {
       userRepo,
@@ -2030,9 +1731,6 @@ export function createApp(): AppWithLifecycle {
   // approves/rejects through the EXISTING proposal actions, or opens a
   // 10-minute edit session interpreted by the LLM gateway and re-rendered
   // for re-approval. Free text with no context gets one clarification nudge.
-  const proposalSmsEventRepo = pool
-    ? new PgProposalSmsEventRepository(pool)
-    : new InMemoryProposalSmsEventRepository();
   registerProposalReplySms(
     {
       proposalRepo,
@@ -2087,9 +1785,6 @@ export function createApp(): AppWithLifecycle {
     sendService,
     allowNoopInProduction: deliveryOptedOut,
   });
-  const dispatchAnalyticsRepo = pool
-    ? new PgDispatchAnalyticsRepository(pool)
-    : new InMemoryDispatchAnalyticsRepository();
   const transactionalCommsLogger = createLogger({
     service: 'transactional-comms',
     environment: process.env.NODE_ENV || 'development',
@@ -2144,13 +1839,26 @@ export function createApp(): AppWithLifecycle {
   // that shipped but was never swapped, so review responses ignored the shop's
   // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
   const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
-  // Review-monitoring self-serve — Google Business connect + refresh.
-  // The repo writes/rotates the `tenant_integrations` credential row the
-  // poll worker + reply resolver read; the OAuth config reuses the same
+  // A46 — the SAME `respond_to_review` drafting path (deterministic review
+  // resolution + buildReviewResponseProposal, which always fills
+  // publicResponse) threaded into the LIVE voice surfaces too (Twilio's
+  // twilioAdapterDeps below, and inAppVoiceAdapter further down), not just
+  // the recorded-memo on-ramp voice-action-router.ts already wires. Without
+  // this, respond_to_review on a live call fell through to the generic
+  // buildVoiceProposalPayload promotion, which cannot draft publicResponse
+  // (live evidence: sweep row A46, 2026-08-30). `undefined` — never
+  // constructed — when reviewRepo/serviceCreditRepo/customerLoader aren't
+  // wired (no pool): both adapters gate honestly to voice_clarification.
+  const respondToReviewTaskHandler =
+    googleReviewsReviewRepo && serviceCreditRepo && googleReviewsCustomerLoader
+      ? new RespondToReviewTaskHandler(proposalRepo, googleReviewsReviewRepo, {
+          llmGateway,
+          customerLoader: googleReviewsCustomerLoader,
+          brandVoiceLoader: googleReviewsBrandVoiceLoader,
+          serviceCreditRepo,
+        })
+      : undefined;
   // Google client as calendar sync (register BOTH redirect URIs on it).
-  const googleBusinessIntegrationRepo = pool
-    ? new PgGoogleBusinessIntegrationRepository(pool)
-    : new InMemoryGoogleBusinessIntegrationRepository();
   const googleBusinessApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
   const googleBusinessOAuthConfig: GoogleBusinessOAuthConfig | undefined =
@@ -2187,12 +1895,14 @@ export function createApp(): AppWithLifecycle {
   const delayNotificationService = messageDelivery
     ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
-  // B1.18 — hoisted ahead of the execution registry (was declared next to the
-  // brand-voice router further down) so update_brand_voice's execution
-  // handler can be wired with the SAME repo instance the sheet's router uses.
-  const brandVoiceRepo = pool
-    ? new PgBrandVoiceRepository(pool)
-    : new InMemoryBrandVoiceRepository();
+  // Tradesperson wave 1, Task 5 — send_customer_message's concrete adapter,
+  // built next to delayNotificationService: same messageDelivery/dispatchRepo
+  // instances, same TCPA consent + DNC + kill-switch gates. Absent when no
+  // real messageDelivery is configured (dev/test) — the execution handler
+  // degrades to a synthetic-id passthrough.
+  const customerMessenger = messageDelivery
+    ? new TwilioCustomerMessageService(messageDelivery, dispatchRepo, customerRepo)
+    : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -2222,6 +1932,13 @@ export function createApp(): AppWithLifecycle {
     schedulingNotifier: transactionalComms,
     transactionalComms,
     expenseRepo,
+    // Task 9 (2026-08-07 tradesperson plan) — add_material writes through
+    // the SAME materialItemRepo lookup_materials reads from.
+    materialItemRepo,
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement
+    // writes through the SAME agreementRepo the recurring-agreements sweep
+    // and the authenticated /api/agreements route already use.
+    agreementRepo,
     auditRepo,
     feasibilityDeps,
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
@@ -2234,6 +1951,7 @@ export function createApp(): AppWithLifecycle {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    customerMessenger,
     // RV-141 — emergency_dispatch owner page goes through the same
     // delivery provider as every other dispatch SMS.
     ...(messageDelivery ? { emergencySmsSender: messageDelivery } : {}),
@@ -2283,11 +2001,6 @@ export function createApp(): AppWithLifecycle {
     Object.values(INTENT_TO_PROPOSAL_TYPE),
     { poolConfigured: Boolean(pool), logger: workerLogger },
   );
-  // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
-  // default to `proposal-run:{tenant}:{id}` when callers omit one.
-  const proposalIdempotencyLock = pool
-    ? new PgIdempotencyLockProvider(directPool ?? pool)
-    : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
     proposalRepo,
@@ -2427,9 +2140,6 @@ export function createApp(): AppWithLifecycle {
         })
       : undefined;
 
-  const delayNoticeStateRepo = pool
-    ? new PgDelayNoticeStateRepository(pool)
-    : new InMemoryDelayNoticeStateRepository();
   const delayNotificationCoordinator = new DelayNotificationCoordinator(
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
@@ -2570,7 +2280,14 @@ export function createApp(): AppWithLifecycle {
     // parallel track.
     moneyReconciliation: 590026,
   } as const;
-  const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
+  // #1090 — every leader-gated sweep run is registered here so `runShutdown`
+  // can wait for the tick that is ALREADY RUNNING before it closes the pool.
+  // Clearing the intervals only stops the next one.
+  const inflightSweeps = createInflightSweeps();
+  const SWEEP_DRAIN_TIMEOUT_MS = Number(process.env.SWEEP_DRAIN_TIMEOUT_MS) || 5_000;
+  const runAsLeader = (lockKey: number, work: () => Promise<void>): Promise<void> =>
+    inflightSweeps.track(runLeaderTick(lockKey, work));
+  const runLeaderTick = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
     if (!pool) {
       // In-memory dev: no coordination needed (sweeps no-op with no tenants).
@@ -2582,27 +2299,16 @@ export function createApp(): AppWithLifecycle {
     // Leader election holds a SESSION advisory lock across work(), so it must
     // run on a direct (non-PgBouncer) connection — see createDirectPool. `pool`
     // is non-null here (guarded above), so `directPool ?? pool` is defined.
-    const client = await (directPool ?? pool).connect();
-    try {
-      const res = await client.query<{ locked: boolean }>(
-        'SELECT pg_try_advisory_lock($1) AS locked',
-        [lockKey],
-      );
-      if (!res.rows[0]?.locked) return; // another instance owns this tick
-      try {
-        await work();
-        // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
-        // work() must read as lag). Keyed by lock key; the SLO monitor reads
-        // the queue-depth sampler's heartbeat as its worker-loop liveness
-        // canary. In-process registry — see monitoring/sweep-heartbeats.ts
-        // for the multi-replica caveat.
-        recordSweepSuccess(String(lockKey));
-      } finally {
-        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
-      }
-    } finally {
-      client.release();
-    }
+    // The pg_try_advisory_lock / pg_advisory_unlock pair lives in
+    // workers/leader-tick.ts (#1125).
+    await runLeaderGatedTick(directPool ?? pool, lockKey, work, () => {
+      // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
+      // work() must read as lag). Keyed by lock key; the SLO monitor reads
+      // the queue-depth sampler's heartbeat as its worker-loop liveness
+      // canary. In-process registry — see monitoring/sweep-heartbeats.ts
+      // for the multi-replica caveat.
+      recordSweepSuccess(String(lockKey));
+    });
   };
 
   // scale-to-1000 C1 — sample the durable job-queue backlog into /metrics so the
@@ -2788,6 +2494,7 @@ export function createApp(): AppWithLifecycle {
           proposalRepo,
           executor: proposalExecutor,
           logger: executionWorkerLogger,
+          auditRepo,
         });
       } catch (err) {
         executionWorkerLogger.error('Execution sweep failed', {
@@ -2831,12 +2538,6 @@ export function createApp(): AppWithLifecycle {
     paymentRepo,
     expenseRepo,
   );
-  // RV-062 — shared by the digest worker (writes) and the /api/digests
-  // web-view router (reads). Created once here so both wire to the same
-  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
-  const dailyDigestRepo = pool
-    ? new PgDailyDigestRepository(pool)
-    : new InMemoryDailyDigestRepository();
   // U3 — DB-authoritative role of a memo's creator for the owner-grade
   // lookup gate (revenue / job profit / pending items / digest). The
   // recording's created_by is the Clerk subject, so the Pg path reuses the
@@ -2882,6 +2583,7 @@ export function createApp(): AppWithLifecycle {
     moneyDashboardRepo,
     dailyDigestRepo,
     dunningConfigRepo,
+    droppedCallRecoveryRepo,
     timeEntryRepo,
     expenseRepo,
     // U7 — lookup_leads / lookup_catalog answer on memo + chat like
@@ -2889,10 +2591,36 @@ export function createApp(): AppWithLifecycle {
     leadRepo,
     catalogRepo,
     settingsRepo,
+    // Task 9 (2026-08-07 tradesperson plan) — lookup_materials answers on
+    // memo + chat from the SAME materialItemRepo add_material writes
+    // through (see the execution-handler registry call above).
+    materialItemRepo,
     // Mirrors the telephony adapter wiring: every surface writes the same
     // lookup_events analytics rows.
     lookupEvents: lookupEventService,
     resolveMemberRole: resolveVoiceMemberRole,
+  };
+
+  // #866 — the repos the lookup skills reuse from the routers, built ONCE.
+  // Handed to the assistant chat and the live phone as the same object, so
+  // three surfaces cannot drift on which repos a skill gets. (The memo worker
+  // receives the same repo instances as individual deps and assembles the
+  // identical set inside voice-action-router — by convention, not by
+  // construction.)
+  const sharedLookupRepos = {
+    jobRepo,
+    appointmentRepo,
+    customerRepo,
+    proposalRepo,
+    availabilityFinder,
+    userRepo,
+  };
+  const phoneLookupDeps = {
+    answers: lookupAnswerDeps,
+    shared: sharedLookupRepos,
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
+    tenantTimezoneResolver: async (tenantId: string) =>
+      (await tenantSchedulingResolver(tenantId))?.timezone,
   };
 
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
@@ -3394,18 +3122,9 @@ export function createApp(): AppWithLifecycle {
   // consent flow AND exchanging the callback code; without them the
   // /connect route returns ValidationError. Callback URL must match
   // the one registered in the Google Cloud OAuth console.
-  const calendarIntegrationRepo = pool
-    ? new PgCalendarIntegrationRepository(pool)
-    : new InMemoryCalendarIntegrationRepository();
-  const oauthStateRepo = pool
-    ? new PgOAuthStateRepository(pool)
-    : new InMemoryOAuthStateRepository();
   // Tier 4 (Calendar sync — PR 2). Sync service exposed on the
   // auth'd router as POST /google/test-push so operators can verify
   // their connection before relying on it for real appointments.
-  const appointmentCalendarEventRepo = pool
-    ? new PgAppointmentCalendarEventRepository(pool)
-    : new InMemoryAppointmentCalendarEventRepository();
   const googleApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
   const googleConfig =
@@ -3469,15 +3188,6 @@ export function createApp(): AppWithLifecycle {
   );
 
   // F17 / P15-001 — QuickBooks accounting OAuth callback (unauthenticated).
-  const accountingIntegrationRepo = pool
-    ? new PgAccountingIntegrationRepository(pool)
-    : new InMemoryAccountingIntegrationRepository();
-  const accountingSyncLogRepo = pool
-    ? new PgAccountingSyncLogRepository(pool)
-    : new InMemoryAccountingSyncLogRepository();
-  const accountingOAuthStateRepo = pool
-    ? new PgAccountingOAuthStateRepository(pool)
-    : new InMemoryAccountingOAuthStateRepository();
   const qboConfig = resolveQuickBooksOAuthConfig(googleApiUrl);
   const integrationsRouterDeps = {
     integrationRepo: accountingIntegrationRepo,
@@ -3514,16 +3224,18 @@ export function createApp(): AppWithLifecycle {
   const voiceEventTransport = createVoiceEventTransport(
     process.env.VOICE_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
   );
-  const voiceSessionStore = new VoiceSessionStore({ transport: voiceEventTransport });
+  // U8 (R8): every appended Twilio turn is also persisted to
+  // call_transcript_turns keyed by CallSid + session id, so the recording
+  // webhook can recover the transcript after a restart / reap.
+  const voiceSessionStore = new VoiceSessionStore({
+    transport: voiceEventTransport,
+    callTranscriptTurnRepo,
+  });
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
   // Single-instance; multi-instance Railway deploys would need Redis.
   const sharedWhisperCache = new WhisperCache();
-  // OnCall repo is created here so both the telephony adapter (notify_oncall
-  // side effect) and the in-app adapter (escalation) share a single
-  // implementation. The in-app block below reuses this same instance.
-  const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
   // §3B + §3D: shared vertical-prompt resolver injected into both
   // calling-agent adapters so per-tenant equipment terminology AND
   // intake-question disambiguation reach the classifier.
@@ -3576,12 +3288,6 @@ export function createApp(): AppWithLifecycle {
   // moneyDashboardRepo / dailyDigestRepo are constructed further up (U3 —
   // the voice-action-router worker's E-lane answer deps need them before
   // this telephony wiring block).
-  // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
-  // the FSM context snapshot at termination; the resume handler picks the
-  // thread back up when the caller replies to the recovery SMS.
-  const droppedCallRecoveryRepo = pool
-    ? new PgDroppedCallRecoveryRepository(pool)
-    : new InMemoryDroppedCallRecoveryRepository();
   const droppedCallScheduler = new DroppedCallScheduler(
     droppedCallRecoveryRepo,
     createLogger({
@@ -3811,12 +3517,20 @@ export function createApp(): AppWithLifecycle {
   const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
+    // U5 — absolute per-call duration cap, checked on every Gather turn.
+    maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
     ...(pool ? { pool } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — live-call discount engine (fail-closed; dormant until a tenant
     // configures a discount policy). settingsRepo is wired below.
     negotiationQuoteResolver,
+    // A46 — respond_to_review's only correct drafting path (see the
+    // handler's construction comment above). Processor-only key (like
+    // consentEventRepo / autonomousClose below) — not on TwilioAdapterDeps's
+    // type, but the adapter spreads `this.deps` into createVoiceTurnProcessor
+    // at runtime, so it still reaches the processor's dep surface.
+    ...(respondToReviewTaskHandler ? { respondToReviewTaskHandler } : {}),
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,
@@ -3838,6 +3552,9 @@ export function createApp(): AppWithLifecycle {
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       recordSmsEvent: recordProposalSmsRender,
     },
+    // #1051 / #1233 review — the tenant PIN-lock owner alert is claimed
+    // (insert-if-absent per tenant + lock episode) before it is sent.
+    voiceApprovalPinLockAlertRepo,
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {
@@ -3864,10 +3581,11 @@ export function createApp(): AppWithLifecycle {
     consentEvents: consentEventRepo,
     ...(twilioRecordingControl ? { recordingControl: twilioRecordingControl } : {}),
     leadRepo,
-    // P11-001: lookup-skill family wiring. Without these the adapter
-    // falls back to a "let me get a person to help" line on lookup_*
-    // intents — the call doesn't crash, but the read-only path is
-    // unavailable. agreementRepo lives a few hundred lines down.
+    // These reach the voice-turn processor through the adapter's
+    // `...this.deps` spread (proposal drafting + execution handlers).
+    // NOTE: they are no longer the lookup-skill wiring — since #866 the
+    // read-only lookups get their repos from `lookups` below, not from
+    // here. agreementRepo lives a few hundred lines down.
     jobRepo,
     appointmentRepo,
     invoiceRepo,
@@ -3879,13 +3597,26 @@ export function createApp(): AppWithLifecycle {
     // onto their conversation, mirroring the outbound click-to-call log.
     conversationRepo,
     agreementRepo,
-    moneyDashboardRepo,
     catalogRepo,
-    dailyDigestRepo,
-    dunningConfigRepo,
-    droppedCallRecoveryRepo,
-    availabilityFinder,
-    lookupEvents: lookupEventService,
+    // #866 — the phone's read-only lookups dispatch through the SAME bundle
+    // the assistant chat gets (see phoneLookupDeps above). The five
+    // lookup-only repos that used to be listed here fed the deleted
+    // per-surface switch; they now reach the skills through `answers`.
+    lookups: phoneLookupDeps,
+    // #847 — en_route ("on my way") from the live phone: the SAME technician
+    // core (dispatch/en-route-voice.ts) and the SAME coordinator instance as
+    // the app button (createDispatchRoutes), the SMS keyword and the
+    // recorded-memo worker, so every surface fires the identical audited act.
+    enRoute: {
+      userRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      auditRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+    },
     // P0 voice-safety — the inbound PHONE path resolves free-text references
     // through the SAME resolver stack the voice-action-router uses above
     // (alias-first, then pg_trgm), NOT the bare PgEntityResolver the in-app
@@ -3895,6 +3626,10 @@ export function createApp(): AppWithLifecycle {
     // spoken appointment/job reference and spoken time reached the proposal
     // unresolved and the payload could never satisfy its execution contract.
     ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
+    // #1118 — the U3 customer address hint on the phone's disambiguation
+    // question: two same-named customers are asked about, and matched, by
+    // service address — the same repo both in-app surfaces decorate with.
+    locationRepo,
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -4039,51 +3774,46 @@ export function createApp(): AppWithLifecycle {
   });
   const realtimeHealthCircuit = new RealtimeHealthCircuit();
 
-  // Per-tenant Twilio token + tenant-id resolvers, keyed off
-  // tenant_integrations. Falls back to the legacy single-account env
-  // vars when no row matches — preserves the in-production single-tenant
-  // flow while unblocking inbound calls on provisioned subaccounts.
-  // Reads the table outside withTenantTransaction (FORCE RLS) using a
-  // dedicated transaction with set_config('app.current_tenant_id', ...).
-  // Both helpers issue cross-tenant lookups against tenant_integrations
-  // (we don't know the tenant yet — that's what we're looking up).
-  // Migration 074 added a permissive read policy gated on
-  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
-  // transaction; SET LOCAL drops on COMMIT and the connection returns
-  // to the pool clean.
+  // Per-tenant Twilio credential + tenant-id resolvers, keyed off
+  // tenant_integrations. Both issue cross-tenant lookups (an inbound webhook
+  // arrives with no tenant context — finding the tenant is the point), which
+  // migration 074's permissive read policy gates on app.system_lookup = 'true',
+  // set LOCAL inside a short transaction so it drops on COMMIT and the
+  // connection returns to the pool clean.
+  //
+  // #1072 — the credential resolver is keyed on the DIALLED NUMBER, not on the
+  // payload's AccountSid: the token that may sign for a number is the one
+  // belonging to the tenant that owns it. See
+  // telephony/twilio-webhook-credential.ts for the full resolution order and
+  // the refusal cases.
+  const resolveTwilioWebhookCredential = createTwilioWebhookCredentialResolver(
+    pool ? { pool } : {},
+  );
+
+  /**
+   * Plain `AccountSid → token` view of the same resolver, for the two callers
+   * that are NOT inbound-webhook verification and must not be bound to a
+   * dialled number:
+   *   - the outbound REST client (`createTwilioCallRedirector`), which needs a
+   *     token to CALL Twilio with, not one to check a signature against;
+   *   - the outbound call-bridge callbacks, whose `To` is the CUSTOMER's
+   *     number, so binding on it would refuse a legitimate callback the moment
+   *     a tenant dials a number another tenant happens to own.
+   * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
+   * when we hold one, deployment token otherwise.
+   */
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
-    const encKey = process.env.TENANT_ENCRYPTION_KEY;
-    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
-    try {
-      const { decrypt } = await import('./integrations/crypto');
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ auth_token_primary_enc: string | null }>(
-          `SELECT auth_token_primary_enc FROM tenant_integrations
-           WHERE provider = 'twilio' AND subaccount_sid = $1
-           LIMIT 1`,
-          [accountSid],
-        );
-        await client.query('COMMIT');
-        const enc = result.rows[0]?.auth_token_primary_enc;
-        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
-      } catch (err) {
-        // Roll back before release: the outer catch swallows the error to a
-        // fallback, so without this the connection would silently return to
-        // the pool with the transaction (and system_lookup GUC) still open.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_AUTH_TOKEN;
+    const decision = await resolveTwilioWebhookCredential(
+      accountSid ? { accountSid } : {},
+    );
+    if (typeof decision === 'object') {
+      return decision.outcome === 'verify'
+        ? decision.authToken
+        : process.env.TWILIO_AUTH_TOKEN;
     }
+    return decision ?? process.env.TWILIO_AUTH_TOKEN;
   };
 
   const resolveTenantIdByPhoneNumber = async (
@@ -4105,7 +3835,7 @@ export function createApp(): AppWithLifecycle {
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
       } catch (err) {
-        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        // Same dirty-connection guard as the credential resolver's lookups.
         await client.query('ROLLBACK').catch(() => {});
         throw err;
       } finally {
@@ -4123,11 +3853,42 @@ export function createApp(): AppWithLifecycle {
   // the env-var seam in dev (with a loud WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
+  // GETs (no Clerk session) are accepted, and BEFORE the telephony router
+  // below because that router's signature middleware runs for EVERY
+  // /api/telephony/* request, matched route or not: mounting whisper after it
+  // would subject this route to the router's dialled-number binding no matter
+  // what credential view were passed here.
+  //
+  // #1072 — whisper deliberately keeps the AccountSid-only view. This is the
+  // OUTBOUND dispatcher leg of an escalation, so its `To` is the DISPATCHER's
+  // number, not the tenant's inbound DID (and Twilio sends the standard call
+  // params as QUERY parameters on a GET, so the binding would see it). If that
+  // dispatcher number is also some other tenant's DID — two businesses under
+  // one owner, a sister branch, an answering service that is itself a tenant —
+  // binding on `To` picks THAT tenant, finds the originating subaccount
+  // foreign, and refuses, killing the whisper on an escalation; an error on
+  // this URL risks dropping the call entirely (see whisper-route.ts's header).
+  // Found by Codex review on PR #1082. The signature check still gates the
+  // route — whisper TwiML carries PII (caller name, phone, intent).
+  //
+  // The middleware is scoped to the whisper path rather than the router mount
+  // so a POST to /voice does not pay a second, weaker signature check on its
+  // way past.
+  app.use(
+    '/api/telephony/whisper',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+  );
+  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
-      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
@@ -4159,56 +3920,25 @@ export function createApp(): AppWithLifecycle {
         ...(process.env.TWILIO_AUTH_TOKEN
           ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
           : {}),
-        // Phase 4a-1: enqueue transcript-ingestion when the recording row
-        // first lands. Skipped on Twilio retries (`inserted=false`) so
-        // we don't double-process the same call. Skipped silently when
-        // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
-        ...(embeddingProvider
-          ? {
-              options: {
-                onPersisted: async (event) => {
-                  if (!event.inserted) return;
-                  const session = voiceSessionStore.findByCallSid(event.callSid);
-                  if (!session) {
-                    // Session was reaped (>30 min idle) before the
-                    // recording webhook fired. Known data-loss edge
-                    // case from the in-memory session store; not
-                    // something Phase 4a-1 fixes. Phase 4 architecture
-                    // doc covers persistent FSM state as a follow-up.
-                    return;
-                  }
-                  try {
-                    await queue.send(
-                      'transcript_ingestion',
-                      {
-                        tenantId: event.tenantId,
-                        voiceRecordingId: event.voiceRecordingId,
-                        transcript: [...session.transcript],
-                        ...(session.machine.currentContext.currentIntent
-                          ? { intent: session.machine.currentContext.currentIntent }
-                          : {}),
-                        // B2: thread the typed CallOutcome into the worker
-                        // payload so voice_recordings.outcome gets stamped
-                        // alongside voice_sessions.outcome. Optional —
-                        // the worker no-ops when undefined.
-                        ...(session.terminalOutcome
-                          ? { outcome: session.terminalOutcome }
-                          : {}),
-                        durationMs: Date.now() - session.createdAt.getTime(),
-                      },
-                      `transcript:${event.voiceRecordingId}:v1`,
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.error('app: failed to enqueue transcript_ingestion', {
-                      voiceRecordingId: event.voiceRecordingId,
-                      error: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                },
-              },
-            }
-          : {}),
+        // U8 (R8): attach the turns persisted mid-call to the new recording
+        // and enqueue transcript-ingestion from them (falling back to the
+        // in-memory session, ended or not). Runs on every first delivery —
+        // the attach and the `voice.transcript_unrecoverable` audit do NOT
+        // depend on AI_PROVIDER_API_KEY; only the enqueue does, because the
+        // ingestion worker is registered only when an embedding provider is
+        // wired (see createTranscriptIngestionWorker above).
+        options: {
+          onPersisted: createRecordingTranscriptHook({
+            store: voiceSessionStore,
+            callTranscriptTurnRepo,
+            auditRepo,
+            ...(embeddingProvider ? { queue } : {}),
+            logger: createLogger({
+              service: 'recording-transcript-hook',
+              environment: process.env.NODE_ENV || 'development',
+            }),
+          }),
+        },
       },
       // U9 (voicemail → action) — replay-receipt store for the lead leg plus
       // the transcription enqueue for persisted voicemail recordings. The
@@ -4305,20 +4035,6 @@ export function createApp(): AppWithLifecycle {
       callMeBackRepo,
       businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
-  );
-
-  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
-  // signed GETs (no Clerk session) are accepted. Path is under
-  // /api/telephony so it's co-located with the main telephony webhook.
-  // Twilio signature verification is enforced to prevent unauthenticated
-  // access to whisper TwiML (which contains PII: caller name, phone, intent).
-  app.use(
-    '/api/telephony',
-    requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
-    whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
   // Owner→customer click-to-call. The authed POST /api/calls is wired only when
@@ -4471,9 +4187,11 @@ export function createApp(): AppWithLifecycle {
       // `frustration_detected` back into the FSM out-of-band.
       //
       // The sentiment function expects `deps.llm.complete({ prompt })` returning
-      // `{ text }`. We adapt the LLM gateway (which uses messages arrays) into
-      // that interface here using the `call_sentiment` task type so routing
-      // config can target it separately from main call-flow completions.
+      // `{ text, tokenUsage, model }` (#895 — usage + model id so the
+      // classifier can record its own spend on the session cost tracker). We
+      // adapt the LLM gateway (which uses messages arrays) into that interface
+      // here using the `call_sentiment` task type so routing config can target
+      // it separately from main call-flow completions.
       //
       // escalationSettings is per-tenant and resolved per-session: the
       // `resolveEscalationSettings` resolver (passed into attachMediaStreamServer
@@ -4495,7 +4213,7 @@ export function createApp(): AppWithLifecycle {
                     tenantId: input.tenantId,
                     messages: [{ role: 'user' as const, content: prompt }],
                   });
-                  return { text: res.content };
+                  return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
                 },
               },
               // Per-session cost-cap inputs threaded in by the adapter so the
@@ -4511,9 +4229,6 @@ export function createApp(): AppWithLifecycle {
       // evaluateTriage outcome to triage_events, and patches vulnerable +
       // urgent callers straight through to the owner (fallback ladder:
       // owner → on-call → voicemail + urgent SMS + call_me_back).
-      const triageEventsRepo = pool
-        ? new PgTriageEventRepository(pool)
-        : new InMemoryTriageEventRepository();
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
       // WS7 — mid-call REST redirector: on a terminal realtime failure the
       // mediastream adapter steers the LIVE call back to the Gather-fallback
@@ -4543,12 +4258,15 @@ export function createApp(): AppWithLifecycle {
                       tenantId: input.tenantId,
                       messages: [{ role: 'user' as const, content: prompt }],
                     });
-                    return { text: res.content };
+                    return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
                   },
                 },
                 ...budget,
               }),
             triageEvents: triageEventsRepo,
+            // Row 2.6 — the triage outcome's audit row, through the same
+            // repository this path already uses for the patch action below.
+            auditRepo,
             onPatchOwner: async ({ session, tenantId, decision }) => {
               const patchCallerPhone = twilioAdapter.getCallerPhone(session.id);
               const result = await patchOwnerThrough(
@@ -4686,6 +4404,10 @@ export function createApp(): AppWithLifecycle {
             },
             fillerEngine,
             fillerCache,
+            // U5 — absolute per-call duration cap: one timer per leg, armed
+            // at start() and never re-armed by media frames (the audio-idle
+            // timer is, so it never fires on a live call).
+            maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
@@ -4731,10 +4453,8 @@ export function createApp(): AppWithLifecycle {
             // with the dialogue stranded.
             handlePendingDialogueSilence: (session, tenantId) =>
               twilioAdapter.handlePendingDialogueSilence(session, tenantId),
-            // WS upgrades don't carry AccountSid; fall back to the master
-            // token. Per-tenant subaccount auth for media streams is a
-            // future-phase change (auth at first `start` message).
-            authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+            // Resolve the account bound by the verified inbound webhook.
+            authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
             // Section 7 (CRITICAL): wire the gather adapter's shared Map so
             // Dial TwiML built inside handleEscalateWithContext is visible to
@@ -4968,7 +4688,7 @@ export function createApp(): AppWithLifecycle {
   );
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
   app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
-  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo, customerRepo));
   app.use(
     '/api/standing-instructions',
     createStandingInstructionRouter(standingInstructionRepo, auditRepo)
@@ -5073,6 +4793,7 @@ export function createApp(): AppWithLifecycle {
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,
+      jobRepo,
     })
   );
   app.use(
@@ -5086,6 +4807,7 @@ export function createApp(): AppWithLifecycle {
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,
+      jobRepo,
     })
   );
   app.use(
@@ -5272,6 +4994,7 @@ export function createApp(): AppWithLifecycle {
       agreementRepo,
       templateRepo,
       customerRepo,
+      invoiceScheduleRepo,
     ),
   );
   app.use(
@@ -5289,6 +5012,7 @@ export function createApp(): AppWithLifecycle {
       agreementRepo,
       customerRepo,
       connectAccountResolver,
+      invoiceScheduleRepo,
     ),
   );
 
@@ -5346,10 +5070,6 @@ export function createApp(): AppWithLifecycle {
   // the same instance.
   app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo, pool: pool ?? undefined }));
 
-  // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
-  const revenueBySourceRepo = pool
-    ? new PgRevenueBySourceRepository(pool)
-    : new InMemoryRevenueBySourceRepository();
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
     settingsRepo,
@@ -5599,10 +5319,6 @@ export function createApp(): AppWithLifecycle {
 
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
-  // U10 — per-user notification preferences (opt-out by category).
-  const notificationPreferenceRepo = pool
-    ? new PgNotificationPreferenceRepository(pool)
-    : new InMemoryNotificationPreferenceRepository();
   app.use(
     '/api/notification-preferences',
     createNotificationPreferencesRouter(notificationPreferenceRepo, auditRepo),
@@ -5628,14 +5344,52 @@ export function createApp(): AppWithLifecycle {
   // producer seams (inbound call/SMS, appointment reminder/cancellation,
   // payment, lead, escalation). Each type targets the permission its descriptor
   // declares (owner+dispatcher, never a technician device).
-  setOwnerNotifications(
-    new OwnerNotificationService({
-      deviceTokenRepo,
-      provider: expoPushProvider,
-      resolveUserIds: userIdsWithPermissionResolver(userRepo),
-      // U10 — honor per-user category opt-outs before sending.
-      resolveMutedUserIds: (tenantId, type) =>
-        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  const ownerNotificationService = new OwnerNotificationService({
+    deviceTokenRepo,
+    provider: expoPushProvider,
+    resolveUserIds: userIdsWithPermissionResolver(userRepo),
+    // U10 — honor per-user category opt-outs before sending.
+    resolveMutedUserIds: (tenantId, type) =>
+      notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  });
+  setOwnerNotifications(ownerNotificationService);
+  // 4.11 — register the technician-assignment notifier (the doc-comment on
+  // TechnicianAssignmentNotifier already claimed this happened; it never
+  // did, so every assign/reassign silently no-op'd in production). Reuses
+  // ownerNotificationService as the `notifier` — it already implements
+  // notifyUser() and its NOTIFICATION_DESCRIPTORS registry already carries
+  // appointment_assigned / appointment_unassigned copy, built for exactly
+  // this user-targeted (not permission-broadcast) path. All deps this needs
+  // (appointment/job/customer/user/location repos) exist unconditionally in
+  // both Pg- and in-memory-backed boots, so — unlike messageDelivery below —
+  // registration itself is never gated.
+  setTechnicianAssignmentNotifier(
+    new TechnicianAssignmentNotifier({
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      userRepo,
+      locationRepo,
+      notifier: ownerNotificationService,
+      // Staff SMS is the raw, ungated `recipientClass: 'owner'` path (bypasses
+      // the customer DNC/consent gate — mirrors the emergency owner-cell
+      // paging call sites) — only available when a real delivery provider is
+      // wired (messageDelivery is null in dev/test without credentials), in
+      // which case the notifier's own doc-contract applies: no SMS sender ⇒
+      // in-app push only.
+      ...(messageDelivery
+        ? {
+            smsSender: (args: { to: string; body: string; tenantId: string; idempotencyKey?: string }) =>
+              messageDelivery!.sendSms({
+                to: args.to,
+                body: args.body,
+                tenantId: args.tenantId,
+                idempotencyKey: args.idempotencyKey,
+                recipientClass: 'owner',
+              }),
+          }
+        : {}),
+      logger: requestLogger,
     }),
   );
   // Render the real customer name in payment/cancellation pushes (best-effort;
@@ -5709,6 +5463,21 @@ export function createApp(): AppWithLifecycle {
       },
       // D2-1c — audit-log tenant-settings + language mutations.
       auditRepo,
+      // #1011 — owner-settable per-tenant capabilities (rows 2.6, 2.7). The
+      // FIRST route wiring of setTenantFlag, which shipped with zero call
+      // sites. Reuses the single shared PgTenantFeatureFlagRepository built
+      // above so the route and the capability gates read one cache. OPTIONAL:
+      // without a pool there is no tenant_feature_flags table, the dep is
+      // omitted, and both routes answer 503 — the in-memory boot and every
+      // app-booting test are unaffected.
+      tenantFeatureFlags
+        ? { tenantFlags: tenantFeatureFlags, platformFlags: featureFlagRepo, userRepo }
+        : undefined,
+      // #1143 — the owner's write path for the late-fee policy
+      // (GET/PUT /api/settings/dunning): the FIRST product caller of
+      // DunningConfigRepository.upsert. Same repo instance the overdue sweep
+      // reads, so a saved policy applies on the next sweep tick.
+      { dunningConfigRepo },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
@@ -5763,9 +5532,6 @@ export function createApp(): AppWithLifecycle {
   // existing V2 onboarding routes so the web client can post turns to
   // POST /api/onboarding/conversation/turn while the form-based
   // wizard's other endpoints stay unchanged.
-  const onboardingSessionRepo = pool
-    ? new PgOnboardingSessionRepository(pool)
-    : new InMemoryOnboardingSessionRepository();
   app.use(
     '/api/onboarding/conversation',
     createOnboardingConversationRouter({
@@ -5828,6 +5594,10 @@ export function createApp(): AppWithLifecycle {
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1173 — the files repo + object storage an Assistant chat photo was
+      // uploaded through (POST /api/files/upload-url), so a photo turn's
+      // fileIds resolve tenant-scoped into image parts on the estimate draft.
+      photoAttachments: { fileRepo, storage: storageProvider },
       // The tenant's IANA zone for the scheduling handlers this route
       // dispatches. NOTE: `lookups.tenantTimezoneResolver` below is a
       // DIFFERENT field consumed by the read-only lookup skills — it does not
@@ -5835,6 +5605,13 @@ export function createApp(): AppWithLifecycle {
       // drafted from assistant chat received NO timezone at all.
       tenantTimezoneResolver: async (tenantId: string) =>
         (await tenantSchedulingResolver(tenantId))?.timezone,
+      // I3 (post-C1 review, followup-autoapprove-default) — the SAME
+      // shared, cached resolver instance every other entry point uses (see
+      // its own comment above). Now that commit 1 threads a real
+      // supervisorMode on this surface, this is the first place the
+      // Settings UI's per-tenant auto-approve threshold actually affects a
+      // decision.
+      thresholdResolver,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
@@ -5860,16 +5637,24 @@ export function createApp(): AppWithLifecycle {
       // through to a generic LLM with no DB access.
       lookups: {
         answers: lookupAnswerDeps,
-        shared: {
-          jobRepo,
-          appointmentRepo,
-          customerRepo,
-          proposalRepo,
-          availabilityFinder,
-        },
+        shared: sharedLookupRepos,
         ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
         tenantTimezoneResolver: async (tenantId: string) =>
           (await tenantSchedulingResolver(tenantId))?.timezone,
+      },
+      // #847 — en_route ("on my way") from chat: the SAME technician core
+      // and the SAME coordinator instance as the app button, the SMS
+      // keyword, the recorded-memo worker and the live phone branch, so a
+      // technician typing "on my way" fires the identical audited act.
+      enRoute: {
+        userRepo,
+        assignmentRepo,
+        appointmentRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        auditRepo,
+        enRouteCoordinator: delayNotificationCoordinator,
       },
     }),
   );
@@ -6056,11 +5841,7 @@ export function createApp(): AppWithLifecycle {
           runRepo: agreementRunRepo,
           jobsService: agreementsJobsService,
           invoicesService: agreementsInvoicesService,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           duesCollector,
           logger: agreementsLogger,
@@ -6121,11 +5902,7 @@ export function createApp(): AppWithLifecycle {
                 },
               }
             : {}),
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           logger: callMeBackLogger,
         });
@@ -6268,11 +6045,7 @@ export function createApp(): AppWithLifecycle {
           settingsRepo,
           runRepo: batchInvoiceRunRepo,
           txRunner: batchInvoiceTxRunner,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           auditRepo,
           logger: batchInvoiceLogger,
         });
@@ -6320,11 +6093,11 @@ export function createApp(): AppWithLifecycle {
             // WS22 — "K fixed" (flagged proposal edited after review).
             auditRepo,
           },
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
+          // #1113 — the send/suppress/fail outcome's audit row. Distinct
+          // from the READ-only `auditRepo` inside `computeDeps` above,
+          // which only feeds the WS22 "N fixed" reflection.
+          auditRepo,
           // Narrative through the brand-voice composer ONLY when a real LLM
           // provider is configured — the mock gateway's canned JSON must not
           // become an owner-facing narrative. Composer failures fall back to
@@ -6417,11 +6190,7 @@ export function createApp(): AppWithLifecycle {
           dunningEventRepo,
           // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
           customerRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: overdueInvoiceLogger,
         });
       }).catch((err) => {
@@ -6465,11 +6234,7 @@ export function createApp(): AppWithLifecycle {
             // In-memory dev (no pool): no reader, no tenants — the sweep no-ops.
             ...(moneyReconciliationReader ? { reader: moneyReconciliationReader } : {}),
             auditRepo,
-            listTenantIds: async () => {
-              if (!pool) return [];
-              const r = await pool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(pool),
             logger: moneyReconciliationLogger,
           });
         }).catch((err) => {
@@ -6506,11 +6271,7 @@ export function createApp(): AppWithLifecycle {
             hfcrSendRepo: hfcrWeeklySendRepo,
             resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
             sendSms: (args) => oneTapOwnerSms(args.to, args.body),
-            listTenantIds: async () => {
-              if (!pool) return [];
-              const r = await pool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(pool),
             logger: hfcrWeeklyLogger,
           });
         }).catch((err) => {
@@ -6542,21 +6303,15 @@ export function createApp(): AppWithLifecycle {
             // WS22 — "same mistake twice" weekly rate (repeatCorrections).
             buildSnapshot: (tenantId, weekStart, weekEnd) =>
               buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
-            resolveOwnerEmail: async (tenantId) => {
-              const r = await weeklyFeedbackPool.query(
-                'SELECT owner_email FROM tenants WHERE id = $1',
-                [tenantId],
-              );
-              return (r.rows[0]?.owner_email as string | undefined) ?? null;
-            },
-            isFeedbackEnabled: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.weeklyFeedbackEnabled !== false;
-            },
-            resolveBusinessName: async (tenantId) => {
-              const s = await settingsRepo.findByTenant(tenantId);
-              return s?.businessName ?? null;
-            },
+            // Extracted to digest/weekly-feedback-config.ts so the per-tenant
+            // scoping is exercised by the sweep fan-out integration test
+            // against real rows, rather than substituted by it (D-032).
+            resolveOwnerEmail: (tenantId) =>
+              resolveTenantOwnerEmail(weeklyFeedbackPool, tenantId),
+            isFeedbackEnabled: (tenantId) =>
+              isWeeklyFeedbackEnabledForTenant(settingsRepo, tenantId),
+            resolveBusinessName: (tenantId) =>
+              resolveTenantBusinessName(settingsRepo, tenantId),
             sendEmail: (args) =>
               weeklyFeedbackDelivery.sendEmail({
                 to: args.to,
@@ -6564,10 +6319,7 @@ export function createApp(): AppWithLifecycle {
                 text: args.text,
                 html: args.html,
               }),
-            listTenantIds: async () => {
-              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
-              return r.rows.map((row: { id: string }) => row.id);
-            },
+            listTenantIds: () => listAllTenantIds(weeklyFeedbackPool),
             logger: weeklyFeedbackLogger,
             ...(config.AI_PROVIDER_API_KEY
               ? {
@@ -6640,11 +6392,7 @@ export function createApp(): AppWithLifecycle {
           customerRepo,
           settingsRepo,
           dispatchRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: appointmentReminderLogger,
         });
       }).catch((err) => {
@@ -6672,11 +6420,7 @@ export function createApp(): AppWithLifecycle {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
         // Resolved once and shared by both sweeps below (one SELECT per tick).
-        const tenantIds = await (async (): Promise<string[]> => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        })();
+        const tenantIds = await listAllTenantIds(pool);
         await runHoldReaperSweep({
           appointmentRepo,
           auditRepo,
@@ -6731,11 +6475,7 @@ export function createApp(): AppWithLifecycle {
           sendService,
           auditRepo,
           pool: pool ?? null,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: estimateReminderLogger,
         });
       }).catch((err) => {
@@ -6761,11 +6501,7 @@ export function createApp(): AppWithLifecycle {
           estimateRepo,
           auditRepo,
           moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: estimateExpiryLogger,
         });
       }).catch((err) => {
@@ -6791,11 +6527,7 @@ export function createApp(): AppWithLifecycle {
         await runProposalExpirySweep({
           proposalRepo,
           auditRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: proposalExpiryLogger,
         });
       }).catch((err) => {
@@ -6865,11 +6597,7 @@ export function createApp(): AppWithLifecycle {
           reviewRepo: googleReviewsReviewRepo,
           pollStateRepo: googleReviewsPollStateRepo,
           credentialResolver: googleReviewsCredResolver,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           logger: googleReviewsLogger,
           // Refresh-token handling: on 401 the sweep refreshes via the
           // stored refresh token, persists the rotated access token to
@@ -6877,6 +6605,9 @@ export function createApp(): AppWithLifecycle {
           // lands in the review_poll_state backoff (visible in Settings).
           googleConfig: googleBusinessOAuthConfig ?? null,
           credentialStore: googleBusinessIntegrationRepo,
+          // Row 9.4 — audit the sweep's durable writes (review ingest,
+          // quota/auth backoff stamps).
+          auditRepo,
           ...(googleReviewsProposalEmission
             ? { proposalEmission: googleReviewsProposalEmission }
             : {}),
@@ -7011,6 +6742,12 @@ export function createApp(): AppWithLifecycle {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // U3 — service locations for the customer disambiguation hint. The SAME
+    // repo the assistant-chat router is wired with (~5484 above), so the two
+    // in-app surfaces cannot drift on what an ambiguous "Smith" is spoken/
+    // written back as, or on what a "104 Cedar" answer is matched against.
+    // Replaces the adapter's own `service_locations` query.
+    locationRepo,
     // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
     // read once per session, so the in-app live path books "Thursday at 2pm"
     // in the tenant's zone exactly like the recorded-memo path.
@@ -7021,6 +6758,14 @@ export function createApp(): AppWithLifecycle {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // #883/#914 — same negotiation-guardrail enrichment the telephony leg
+    // wires, so an in-app "knock $50 off" gets the identical LTV-aware
+    // callback content instead of the bare V1 fallback.
+    ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
+    negotiationQuoteResolver,
+    // A46 — respond_to_review's only correct drafting path (see the
+    // handler's construction comment above); shared with the telephony leg.
+    ...(respondToReviewTaskHandler ? { respondToReviewTaskHandler } : {}),
     // QA-2026-07-26 — grounds voice-drafted estimate line items
     // (entities.lineItemDescriptions) against the tenant's real catalog.
     catalogRepo,
@@ -7040,18 +6785,33 @@ export function createApp(): AppWithLifecycle {
       return s?.supportedLanguages;
     },
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
-    ownerLookupResolver: async (tenantId, sessionId, intentType) => {
-      if (intentType !== 'lookup_day_overview') return undefined;
-      const result = await lookupDayOverview(
-        { tenantId, sessionId },
-        {
-          appointmentRepo,
-          jobRepo,
-          proposalRepo,
-          userRepo,
-        },
-      );
-      return result.summary;
+    // Read-only `lookup_*` dispatch for in-app operator voice — the SAME
+    // bundle the assistant-chat router and the live phone get (see
+    // `phoneLookupDeps` above), so the surfaces cannot drift on which repos
+    // a skill gets. Replaces `ownerLookupResolver`, which answered exactly
+    // ONE intent (`lookup_day_overview`) for owner sessions only; every
+    // other lookup fell into the FSM and minted a dead `voice_clarification`
+    // card. `lookup_day_overview` is answered by the shared switch itself
+    // (workers/voice-lookup-answer.ts), so nothing is lost.
+    lookups: phoneLookupDeps,
+    // SCH-D4 — en_route ("on my way") from in-app voice. Deliberately the
+    // SAME object set as the assistant router's `enRoute` bundle above (and
+    // the same `delayNotificationCoordinator` instance `createDispatchRoutes`
+    // wires as `enRouteCoordinator` for the app button), so the app button,
+    // the SMS keyword, the recorded memo, the live phone, chat and now
+    // in-app voice all fire ONE identical audited act. Without this bundle
+    // the intent fell through the FSM and minted a dead `voice_clarification`
+    // card — the exact failure `proposals/voice-intent-map.ts` predicts for a
+    // live surface with no en_route branch.
+    enRoute: {
+      userRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      auditRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
     },
   });
   app.use(
@@ -7236,11 +6996,7 @@ export function createApp(): AppWithLifecycle {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
         await runSupervisorAnnotationSweep({
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
+          listTenantIds: () => listAllTenantIds(pool),
           proposalRepo,
           gateway: llmGateway,
           ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
@@ -7274,6 +7030,18 @@ export function createApp(): AppWithLifecycle {
 
   // Global error handler
   app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    // #1090 — an error can reach here AFTER the response is already committed:
+    // asyncRoute forwards with `next(err)` precisely when `res.headersSent`,
+    // and the tenant-transaction middleware answers 500 on its own when
+    // Postgres kills the request's connection while the handler is still
+    // running. Writing a second response then throws ERR_HTTP_HEADERS_SENT,
+    // and Express's default handler answers that by destroying the socket —
+    // truncating the response the caller was already receiving. End it
+    // cleanly instead; the first response is the one that counts.
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     const { statusCode, body } = toErrorResponse(err);
     // OBS — surface server 5xx in PostHog (api_error), attributable to the
     // already-redacted route + tenant, so "where are customers hitting bugs"
@@ -7282,11 +7050,10 @@ export function createApp(): AppWithLifecycle {
     if (statusCode >= 500) {
       try {
         const anyReq = req as unknown as {
-          safeRequestLog?: { route?: string };
           auth?: { tenantId?: string; userId?: string };
         };
         recordApiError({
-          route: anyReq.safeRequestLog?.route ?? req.path,
+          route: redactedRoute(req),
           status: statusCode,
           tenantId: anyReq.auth?.tenantId ?? null,
           userId: anyReq.auth?.userId ?? null,
@@ -7294,6 +7061,9 @@ export function createApp(): AppWithLifecycle {
       } catch {
         // analytics must never break the error response
       }
+      // R1 — every unhandled 5xx reaches Sentry (shared with asyncRoute, which
+      // maps its own rejections and never reaches this handler).
+      captureServerError(err, req);
     }
     res.status(statusCode).json(body);
   });
@@ -7302,6 +7072,24 @@ export function createApp(): AppWithLifecycle {
   // the retired in-app paths (/pricing, /privacy, …) there before the SPA
   // catch-all can serve index.html for them.
   registerMarketingRedirects(app);
+
+  // RIVET C-1 — JSON 404 for unmatched API-shaped routes.
+  //
+  // Without this, an unmatched `/api/*`, `/public/*`, or `/webhooks/*` path
+  // fell through to the SPA catch-all below: 200 text/html (SPA shell) when
+  // packages/web/dist is built, or the "Frontend assets unavailable" 500
+  // when it isn't. Mobile hooks do `if (!res.ok) throw` then `res.json()`,
+  // so an unexpected 200 HTML body surfaces as an opaque SyntaxError.
+  //
+  // Mounted on the three API-shaped prefixes (not a bare '*') so every
+  // non-API path (client-side SPA routes like /jobs, /customers/123) still
+  // falls through unchanged to the catch-all below. Express's path-prefix
+  // matching requires a '/' or end-of-string boundary after the mount path,
+  // so this does NOT intercept `/api-docs` (Swagger UI, mounted earlier and
+  // meant to stay public).
+  app.use(['/api', '/public', '/webhooks'], (_req, res) => {
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found' });
+  });
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side.
@@ -7355,6 +7143,16 @@ export function createApp(): AppWithLifecycle {
       // them first does not impede the drain. (Codex review on PR #628.)
       shuttingDown = true;
       for (const handle of backgroundIntervals) clearInterval(handle);
+      // #1090 — start draining the sweep tick that is ALREADY RUNNING right
+      // here, NOT awaited: it then overlaps the voice drain below instead of
+      // adding to it. The whole sequence lives inside index.ts's
+      // SHUTDOWN_FORCE_EXIT_MS (30s default) while the voice drain alone may
+      // take DRAIN_TIMEOUT_MS (25s), so a sweep drain appended after it could
+      // be force-exited mid-flight — or push `pool.end()` past the backstop,
+      // which is the very thing this drain exists to prevent. Overlapping
+      // costs no budget: both are just waiting. Awaited below, immediately
+      // before the pool closes.
+      const sweepDrain = inflightSweeps.drain(SWEEP_DRAIN_TIMEOUT_MS);
       // Now DRAIN: wait (bounded) for in-flight voice sessions to finish before
       // tearing down the pool/Redis/sessions. The window must be shorter than
       // index.ts's force-exit and Railway's stop grace period; calls still live
@@ -7388,6 +7186,10 @@ export function createApp(): AppWithLifecycle {
         const { shutdownAnalytics } = await import('./analytics/posthog');
         await shutdownAnalytics();
       }
+      // U10 — drain queued Langfuse trace events (noop when unconfigured;
+      // never rejects) in the same queued-telemetry slot, before the cache,
+      // Redis and pool teardown below.
+      await traceExporter.flush();
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();
@@ -7395,6 +7197,23 @@ export function createApp(): AppWithLifecycle {
       // fan-out, quota, and the refactored cache) after the cache flush and
       // BEFORE the pg pool drains, in the same shutdown slot as the cache.
       await shutdownRedisClients();
+      // #1090 — collect the sweep drain started back at the top of shutdown.
+      // A sweep still mid-flight when pool.end() runs would have every
+      // remaining repository call throw "Cannot use a pool after calling end
+      // on the pool" — once per tenant/row, and, worse, after a recovery SMS
+      // may already have gone out but before it was stamped `sent` (the next
+      // boot re-sends it). Bounded, and already overlapped with the voice
+      // drain above, so it adds nothing to the force-exit budget; we proceed
+      // either way.
+      {
+        const { drained, remaining } = await sweepDrain;
+        if (!drained) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[app] ${remaining} sweep(s) still in flight after ${SWEEP_DRAIN_TIMEOUT_MS}ms — closing the pool anyway`,
+          );
+        }
+      }
       if (pool) {
         await Promise.race([
           pool.end(),

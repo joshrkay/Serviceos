@@ -159,6 +159,20 @@ describe('POST /api/onboarding/phone/claim', () => {
     expect(res.body.error).toBe('INVALID_PHONE_NUMBER');
   });
 
+  it('rejects a Twilio magic test number with 400 (#880 — E.164-shaped but never dialable)', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15005550006' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('INVALID_PHONE_NUMBER');
+    expect(res.body.message).toMatch(/test number/i);
+    // No provisioning job was enqueued for the fake number.
+    expect(await queue.receive()).toBeNull();
+  });
+
   it('409s when provisioning is past the claimable state', async () => {
     const { app } = buildApp({ pool: fakePool('partial_readiness'), queue: new InMemoryQueue() });
     const res = await request(app)

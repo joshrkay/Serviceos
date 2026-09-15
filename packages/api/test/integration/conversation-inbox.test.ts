@@ -179,9 +179,51 @@ describe('Postgres integration — U5 inbox thread listing', () => {
     expect(ld.needsReply).toBe(true);
   });
 
-  it('does not surface another tenant’s threads', async () => {
-    const other = await createTestTenant(pool);
-    const otherThreads = await conversationRepo.listInboxThreads(other.tenantId);
-    expect(otherThreads.every((t) => t.conversation.tenantId === other.tenantId)).toBe(true);
+  /**
+   * G1 (#1009 on #1013), row 9.12: the prior version of this test seeded
+   * NOTHING for the neighbour tenant, so `otherThreads.every(...)` over an
+   * empty array was vacuously true — it could not have caught a leak. This
+   * seeds a real unanswered thread for a second ("neighbour") tenant and
+   * asserts it surfaces in ITS OWN listing (sanity — the fixture is real)
+   * but never in the first tenant's.
+   */
+  it('T1: a neighbour tenant’s unanswered thread never appears in another tenant’s inbox listing', async () => {
+    const neighbourTenant = await createTestTenant(pool);
+    const neighbourCustomer = await customerRepo.create(
+      baseCustomer(neighbourTenant.tenantId, neighbourTenant.userId, {
+        displayName: 'Neighbour Nolan',
+        primaryPhone: '+15555553001',
+      }),
+    );
+    const neighbourThread = await conversationRepo.createConversation({
+      tenantId: neighbourTenant.tenantId,
+      title: 'Neighbour Nolan',
+      entityType: 'customer',
+      entityId: neighbourCustomer.id,
+      createdBy: neighbourTenant.userId,
+    });
+    await conversationRepo.addMessage({
+      tenantId: neighbourTenant.tenantId,
+      conversationId: neighbourThread.id,
+      messageType: 'text',
+      content: 'are you open Saturday?',
+      senderId: '+15555553001',
+      senderRole: 'customer',
+      source: 'sms',
+      metadata: { direction: 'inbound', channel: 'sms' },
+    });
+
+    const neighbourThreads = await conversationRepo.listInboxThreads(neighbourTenant.tenantId);
+    expect(neighbourThreads.map((t) => t.conversation.id)).toContain(neighbourThread.id);
+
+    const firstTenantThreads = await conversationRepo.listInboxThreads(tenant.tenantId);
+    expect(firstTenantThreads.map((t) => t.conversation.id)).not.toContain(neighbourThread.id);
+    expect(firstTenantThreads.every((t) => t.conversation.tenantId === tenant.tenantId)).toBe(true);
   });
+
+  // Gate note (Fable, #1013): the lane's expected-fail test asserting a stored
+  // `replyDraft` field was removed here — reply drafts are not stored, they are
+  // produced on demand by POST /api/conversations/:id/suggest-reply
+  // (SuggestReplyTask, routes/conversations.ts:303), which is unit-tested; that
+  // leg stays unit-only (PRD row 9.12, second half) and is not a missing feature.
 });

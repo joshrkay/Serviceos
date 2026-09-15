@@ -11,6 +11,12 @@
  * This is best-effort and idempotent: it no-ops when the toggle is off, when
  * the job isn't in a billable money-state, or when the job already has a live
  * invoice. Callers should not let a failure here block job completion.
+ *
+ * #1203 — it also no-ops when a milestone plan bills the accepted estimate AND
+ * completion is about to mint that plan (milestone billing on, on_completion
+ * milestones still unminted). A plan that recorded no estimate bills the job's
+ * single accepted estimate. It never yields to a plan while milestone billing
+ * is off: that plan would bill nothing.
  */
 import { Proposal, ProposalRepository, createProposal } from '../proposals/proposal';
 import { validateProposalPayload } from '../proposals/contracts';
@@ -22,6 +28,8 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { resolveSelectedLineItems } from '../shared/billing-engine';
 import { TimeEntryRepository } from '../time-tracking/time-entry';
 import { recalculateLaborFromTimeEntries } from './labor-from-time-entries';
+import { InvoiceScheduleRepository } from './invoice-schedule';
+import { acceptedEstimateIds, completionWillMintPlan, planBilledEstimateId } from './milestone-billing-guard';
 
 const AUTO_INVOICE_ACTOR = 'system:auto_invoice';
 
@@ -45,6 +53,11 @@ export interface AutoInvoiceOnCompletionDeps {
    * time before the draft is raised.
    */
   timeEntryRepo?: TimeEntryRepository;
+  /**
+   * #1203 — when present, a milestone plan that completion is about to mint
+   * for the accepted estimate suppresses the whole-estimate draft.
+   */
+  scheduleRepo?: InvoiceScheduleRepository;
 }
 
 /**
@@ -78,6 +91,19 @@ export async function maybeAutoInvoiceOnCompletion(
     ? resolveSelectedLineItems(accepted.lineItems, accepted.acceptedSelection)
     : [];
   if (billed.length === 0) return null;
+
+  // 4a. #1203 — the accepted estimate is billed by a milestone plan that the
+  //     completion effects mint right after this (runJobCompletionEffects).
+  //     A whole-estimate draft on top would bill it twice.
+  if (accepted && deps.scheduleRepo) {
+    const jobAccepted = acceptedEstimateIds(estimates);
+    const plan = (await deps.scheduleRepo.findByJob(job.tenantId, job.id)).find(
+      (s) => planBilledEstimateId(s, jobAccepted) === accepted.id,
+    );
+    if (plan && completionWillMintPlan(plan, existingInvoices, Boolean(settings.milestoneBillingEnabled))) {
+      return null;
+    }
+  }
 
   // 4b. Feature (launch) — recompute the labor line from ACTUAL logged time
   //     when the tenant opted in and any time was tracked for the job. With no

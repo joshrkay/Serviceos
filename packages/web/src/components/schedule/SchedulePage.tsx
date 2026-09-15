@@ -7,6 +7,7 @@ import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { JobPicker, type JobOption } from '../forms/JobPicker';
 import { formatInTenantTz, formatTimeInTenantTz, tenantWallClockToUtc, dateKeyInTz, dayWindowUtc } from '../../utils/formatInTenantTz';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
@@ -153,7 +154,9 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   technicians: { id: string; name: string }[];
 }) {
   const tz = useTenantTimezone();
-  const [jobId,    setJobId]    = useState('');
+  // #879: the job is chosen through the searchable JobPicker (search by job
+  // number or summary) — owners no longer paste a raw job UUID.
+  const [job,      setJob]      = useState<JobOption | null>(null);
   const [techId,   setTechId]   = useState('');
   useEffect(() => {
     if (!techId && technicians[0]?.id) setTechId(technicians[0].id);
@@ -162,27 +165,10 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   const [endTime,   setEndTime]   = useState('12:00');
   const [saving, setSaving]     = useState(false);
   const [error,  setError]      = useState<string | null>(null);
-  const [jobInfo, setJobInfo]   = useState<{ jobNumber: string; summary: string; customer?: { displayName?: string } } | null>(null);
-
-  useEffect(() => {
-    if (!jobId || jobId.length < 10) { setJobInfo(null); return; }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      const res = await apiFetch(`/api/jobs/${jobId}`).catch(() => null);
-      if (cancelled) return;
-      if (res?.ok) {
-        setJobInfo(await res.json());
-      } else {
-        // Clear stale preview when the new job id can't be resolved so
-        // dispatchers don't schedule against an unrelated prior job.
-        setJobInfo(null);
-      }
-    }, 400);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [jobId]);
 
   async function save() {
-    if (!jobId.trim()) { setError('Job ID is required'); return; }
+    const jobId = job?.id ?? '';
+    if (!jobId) { setError('Job is required'); return; }
     setSaving(true);
     setError(null);
     try {
@@ -198,7 +184,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       const apptRes = await apiFetch('/api/appointments', {
         method: 'POST',
         body: JSON.stringify({
-          jobId: jobId.trim(),
+          jobId,
           scheduledStart: start.toISOString(),
           scheduledEnd: end.toISOString(),
           timezone: tz,
@@ -211,7 +197,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
 
       // Also update the job's assigned technician and scheduled start
       if (techId) {
-        await apiFetch(`/api/jobs/${jobId.trim()}`, {
+        await apiFetch(`/api/jobs/${jobId}`, {
           method: 'PUT',
           body: JSON.stringify({ assignedTechnicianId: techId, scheduledStart: start.toISOString(), status: 'scheduled' }),
         }).catch(() => null);
@@ -234,14 +220,12 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       </div>
       {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
       <div className="grid md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Job ID *
-          <input value={jobId} onChange={e => setJobId(e.target.value)} placeholder="paste job UUID"
-            className="w-full mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
-          {jobInfo && (
-            <p className="text-xs text-slate-500 mt-0.5">{jobInfo.jobNumber} — {jobInfo.summary}</p>
-          )}
-        </label>
+        <div className="text-xs text-slate-500 md:col-span-2">
+          Job *
+          <div className="mt-0.5">
+            <JobPicker value={job} onChange={setJob} required />
+          </div>
+        </div>
         <label className="text-xs text-slate-500">
           Start time
           <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
@@ -263,7 +247,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       </div>
       <button
         onClick={save}
-        disabled={saving || !jobId.trim()}
+        disabled={saving || !job}
         className="mt-3 w-full rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
       >
         {saving ? 'Saving…' : 'Create appointment'}

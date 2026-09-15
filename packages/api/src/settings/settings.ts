@@ -83,6 +83,15 @@ export interface EscalationSettings {
    * injected). Redacted from `GET /api/settings` (never echoed).
    */
   voice_approval_pin_hash?: string;
+  /**
+   * #1051 follow-up — ISO-8601 UTC instant the voice-approval PIN was last set,
+   * changed or cleared. Written ONLY by the dedicated PIN route, in the same
+   * settings write as the hash (never by the generic settings PUT, whose zod
+   * schema strips it). The tenant-wide money-approval PIN lock counts only
+   * strikes after this instant, so changing the PIN resets the count. Absent
+   * (a legacy enrollment) → every strike in the rolling window counts.
+   */
+  voice_approval_pin_changed_at?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
@@ -711,8 +720,14 @@ export interface UpdateSettingsInput {
   autonomousBookingThreshold?: number;
   /** D-018 — opt into the autonomous close lane (column default false). */
   autonomousCloseEnabled?: boolean;
-  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
-  autonomousCloseMaxCents?: number;
+  /**
+   * D-018 — cap (integer cents) on the auto-closeable quote total.
+   * #1011: widened to accept `null` so the owner-facing PUT can CLEAR the cap
+   * (the column is a nullable BIGINT, db/schema.ts:6083), matching the shape
+   * `depositRequiredAboveCents` already has. `null` is an explicit clear;
+   * `undefined` still means "untouched".
+   */
+  autonomousCloseMaxCents?: number | null;
 }
 
 /**
@@ -728,7 +743,11 @@ export interface UpdateSettingsInput {
 export interface TenantIdentityUpsertFields {
   businessName?: string;
   serviceAreaText?: string;
-  serviceAreaRadius?: number;
+  /**
+   * #874 tri-state: omit to keep the stored radius, `null` to explicitly
+   * clear it, a number to set it.
+   */
+  serviceAreaRadius?: number | null;
   businessHours?: Record<string, { open: string; close: string } | null>;
   jobBufferMinutes?: number;
   hourlyRateCents?: number;
@@ -773,6 +792,37 @@ export interface SettingsRepository {
   upsertIdentityFields(
     tenantId: string,
     fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings>;
+  /**
+   * Atomically ensure the tenant has a settings row and that `packId` is in
+   * its `activeVerticalPacks` mirror. ONE statement in Postgres: the row is
+   * created or, on conflict, the pack is appended to the stored list —
+   * never read-modify-write, never a unique violation.
+   *
+   * Both properties are load-bearing (#1083, Codex review on PR #1106):
+   *
+   *   - **No 23505.** `activatePackWithSeed` runs on the HTTP path inside
+   *     the shared request transaction (middleware/tenant-context.ts), where
+   *     ANY failed statement aborts the whole transaction — a caught unique
+   *     violation cannot be recovered from, the next query fails 25P02 and
+   *     the route 500s.
+   *   - **No lost update.** The pack advisory lock is keyed by (tenant,
+   *     pack) while this row is keyed by tenant, so two activations for
+   *     DIFFERENT packs are not serialized against each other. Reading the
+   *     mirror and writing back a computed list drops one of them; merging
+   *     inside the statement cannot.
+   *
+   * A brand-new row gets '' for businessName and schema defaults for
+   * everything else — same "seed a minimal row" convention as
+   * `upsertIdentityFields`, including no guessed timezone. `bootstrapAiModel`
+   * is written on insert and backfilled only when the stored value is null,
+   * so the onboarding AI check finds a model without ever overwriting a
+   * tenant's choice. Other terminology keys are preserved.
+   */
+  ensureActiveVerticalPack(
+    tenantId: string,
+    packId: string,
+    bootstrapAiModel: string,
   ): Promise<TenantSettings>;
 }
 
@@ -1337,6 +1387,45 @@ export class InMemorySettingsRepository implements SettingsRepository {
       return { ...existing };
     }
     const updated = (await this.update(tenantId, updates)) ?? existing;
+    return { ...updated };
+  }
+
+  async ensureActiveVerticalPack(
+    tenantId: string,
+    packId: string,
+    bootstrapAiModel: string,
+  ): Promise<TenantSettings> {
+    const existing = this.settings.get(tenantId);
+    if (!existing) {
+      const created: TenantSettings = {
+        id: uuidv4(),
+        tenantId,
+        businessName: '',
+        // NO fallback zone — see TenantIdentityUpsertFields.timezone.
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1001,
+        nextInvoiceNumber: 1001,
+        defaultPaymentTermDays: 30,
+        activeVerticalPacks: [packId],
+        aiModel: bootstrapAiModel,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      this.settings.set(tenantId, created);
+      return { ...created };
+    }
+
+    // Single-threaded here, so read-merge-write is as atomic as the
+    // Postgres statement it stands in for.
+    const packs = existing.activeVerticalPacks ?? [];
+    const updated: TenantSettings = {
+      ...existing,
+      activeVerticalPacks: packs.includes(packId) ? [...packs] : [...packs, packId],
+      aiModel: existing.aiModel ?? bootstrapAiModel,
+      updatedAt: new Date(),
+    };
+    this.settings.set(tenantId, updated);
     return { ...updated };
   }
 }

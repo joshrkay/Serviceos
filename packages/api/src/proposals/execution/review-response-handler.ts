@@ -144,9 +144,31 @@ export class ReviewResponseExecutionHandler implements ExecutionHandler {
     context: ExecutionContext,
   ): Promise<ExecutionResult> {
     // Payload was validated against the Zod schema by the contracts
-    // registry at proposal-creation time. We trust the shape here.
+    // registry at proposal-creation time. We trust the shape here — BUT
+    // that cast is a compile-time-only assertion. `proposal.payload` is a
+    // `Record<string, unknown>` at runtime (round-tripped through the
+    // Postgres JSONB column, unvalidated by anything on the read path —
+    // neither `RespondToReviewTaskHandler` nor the google-reviews polling
+    // worker calls `assertValidProposalPayload` before persisting a draft).
+    // `publicResponse` is REQUIRED (non-nullable) in the Zod contract,
+    // unlike `privateFollowUp`/`serviceCredit`, so this line used to read
+    // `payload.publicResponse.approved` unguarded — a malformed or legacy
+    // payload threw a raw `Cannot read properties of undefined (reading
+    // 'approved')` out of `execute()`, which the execution sweep
+    // (workers/execution-worker.ts) could only record verbatim as
+    // `executionError`, telling the operator nothing about what actually
+    // broke (#911). Fail loud with a diagnosable reason instead of
+    // crashing the sweep's per-proposal try/catch.
     const payload = proposal.payload as unknown as ReviewResponseProposalPayload;
     const subResults: SubActionResult[] = [];
+
+    if (!payload.publicResponse) {
+      return {
+        success: false,
+        error: `review_response_proposal payload is missing the required publicResponse component (proposal ${proposal.id})`,
+        resultEntityId: proposal.id,
+      };
+    }
 
     if (payload.publicResponse.approved) {
       subResults.push(

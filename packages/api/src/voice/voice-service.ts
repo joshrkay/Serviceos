@@ -254,7 +254,13 @@ export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
         : contentType.includes('mpeg') ? 'mp3'
         : 'webm';
       const fd = new FormData();
-      const audioBytes = new Uint8Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength);
+      // Uint8Array.from(...) always allocates a fresh, plain `ArrayBuffer`
+      // backing store, so the result type-checks as `BlobPart` regardless of
+      // whether the Buffer's own `.buffer` is typed as the wider
+      // `ArrayBufferLike` (which can include `SharedArrayBuffer`) under the
+      // resolved `@types/node` — a `new Uint8Array(audioBuffer.buffer, ...)`
+      // view over the Buffer's backing store does not (#1149).
+      const audioBytes = Uint8Array.from(audioBuffer);
       fd.append('file', new Blob([audioBytes], { type: contentType }), 'audio.' + ext);
       fd.append('model', 'whisper-1');
       if (options?.language) {

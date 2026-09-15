@@ -24,7 +24,7 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { BrandVoice } from './brand-voice';
 import { Classification } from './classifier';
 import { MatchedCustomer } from './match-customer';
-import { redactPii } from './pii-redact';
+import { redactPiiRepeatedly } from './pii-redact';
 import { Review } from './review';
 
 import type { PrivateFollowUpChannel } from '@ai-service-os/shared';
@@ -101,7 +101,10 @@ export async function draftPrivateFollowUp(
   deps: DraftPrivateFollowUpDeps,
 ): Promise<string> {
   const rawComment = (input.review.commentText ?? '').trim();
-  const redactedComment = redactPii(rawComment, {
+  // `redactPiiRepeatedly`, not `redactPii`: ONE pass leaves the second of two
+  // abutting addresses raw, and this is the call that decides what the LLM
+  // provider's context holds. See pii-redact.ts's module header.
+  const redactedComment = redactPiiRepeatedly(rawComment, {
     // INPUT redaction allows the customer's first name through so the
     // model can reason about whether the review actually mentions
     // them (rare, but happens). Other PII is still scrubbed.
@@ -128,7 +131,7 @@ export async function draftPrivateFollowUp(
   // OUTPUT redaction. Keep the matched customer's first name visible
   // so "Hi Alice, ..." reads naturally; everything else stays
   // protected.
-  const body = redactPii(response.content.trim(), {
+  const body = redactPiiRepeatedly(response.content.trim(), {
     preserveKnownFirstNames: [input.matchedCustomer.firstName],
   });
 

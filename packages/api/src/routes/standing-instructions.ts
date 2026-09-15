@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import {
   StandingInstructionRepository,
@@ -65,6 +66,7 @@ export function createStandingInstructionRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
+    notFoundOnMalformedId('Standing instruction not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const deactivated = await deactivateStandingInstruction(
         req.auth!.tenantId,

@@ -1,5 +1,19 @@
 # PRD v4 — Part E: State Table
 
+> ## ⚠️ SUPERSEDED — 2026-09-11
+>
+> **This document is no longer canonical.** It is superseded by
+> [`docs/PRD-v5-as-built.md`](PRD-v5-as-built.md), the as-built PRD reconstructed
+> from the shipping code, per **D-030** in [`docs/decisions.md`](decisions.md).
+>
+> **Its rung ladder survives as method** and v5 scores against it. The 117 scored rows are a 2026-07-29 snapshot: two of its worst findings have since been fixed (live-call timezone, `add_note` approve-then-fail) and at least two of its gap claims are now false (the review-response approval UI exists; conversational onboarding has clients).
+>
+> It is kept in place (not archived) because it has inbound references across the
+> repo and remains useful history. **Do not treat statements below as current
+> product truth without re-verifying against code.**
+
+
+
 **Generated:** 2026-07-29, by the read-only state-verification run (`projects/rivet-part-e/master-prompt.md`).
 **Input:** PRD v4 Part B (117 requirements, B1.1–B10.10; 19 tagged 🎙️).
 **Method:** 10 lifecycle-section verification agents + a voice-reachability trace + a runtime-truth track, adjudicated centrally. Every verdict cites `file:line`, a test run and observed passing, a command output, or a probe result. Documentation was never accepted as evidence. Full per-section evidence: `projects/rivet-part-e/reports/`. This run modified nothing outside `projects/rivet-part-e/` and this file.
@@ -273,7 +287,7 @@ Of 19 🎙️ requirements: **2 reach rung 5** (B7.1, B7.7) → **11% strict voi
 | B9.12 reminder/late fee | ✗ blocked | `['invoiceId']` (+`feeCents`) unconditional |
 
 **Inverse enumerations** (mechanical, contract-test-pinned, both tests ran green):
-- **Handlers with no voice on-ramp:** exactly three, all documented-intentional and contract-pinned — `create_booking` (FSM path), `update_catalog_item` (WS20), `adopt_entity_alias` (U4).
+- **Handlers with no voice on-ramp:** at the time of this run, exactly three, all documented-intentional and contract-pinned — `create_booking` (FSM path), `update_catalog_item` (WS20), `adopt_entity_alias` (U4). **Update (Tradesperson wave 1, Task 2, taxonomy 1.7.0):** `update_catalog_item` graduated to a real voice on-ramp; only `create_booking` and `adopt_entity_alias` remain. See `docs/reference/voice-action-catalog.md` for the current state.
 - **Intents with no handler:** zero. The 25 unmapped intents decompose into 16 `lookup_*` (read-only by design — but **two have no skill case and are silently skipped**), the three hard-refused approval/edit intents, `complaint`/`negotiation` (synthetic-key routes to capture-class types), and four FSM-side non-action intents.
 - **The real drift is one layer below the tested matrix:** seven voice-mapped actions (`add_note`, `reassign_appointment`, `add_crew_member`, `remove_crew_member`, `send_estimate_nudge`, `send_payment_reminder`, `apply_late_fee`) discard resolver output or gate unconditionally. B7.11's contract tests cannot see this class; nothing tests the drafting-task ↔ execution-handler payload contract.
 

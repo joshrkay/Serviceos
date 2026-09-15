@@ -2,8 +2,9 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { ConflictError, toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoiceWithNextNumber,
@@ -34,6 +35,8 @@ import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
+import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
+import { wholeInvoiceBlockedByPlan } from '../invoices/milestone-billing-guard';
 
 const logger = createLogger({
   service: 'invoices-route',
@@ -74,6 +77,9 @@ export function createInvoiceRouter(
   customerRepo?: CustomerRepository,
   /** Routes operator payment links to Connect when charges are enabled. */
   connectAccountResolver?: ConnectAccountResolver,
+  // #1203 — POST / with an estimateId a milestone plan bills answers 409.
+  // Optional so legacy harnesses build (the check is skipped when absent).
+  scheduleRepo?: InvoiceScheduleRepository,
 ): Router {
   const router = Router();
 
@@ -157,6 +163,22 @@ export function createInvoiceRouter(
         )) as Job | undefined;
         if (parsed.estimateId) {
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
+          // #1203 — an estimate a milestone plan bills gets a readable 409, not
+          // a second whole-estimate invoice (or the unique index's raw 500).
+          if (scheduleRepo) {
+            const planJob =
+              job ?? (jobRepo ? await jobRepo.findById(req.auth!.tenantId, parsed.jobId) : null);
+            const refusal = await wholeInvoiceBlockedByPlan(
+              { scheduleRepo, invoiceRepo, settingsRepo, estimateRepo },
+              {
+                tenantId: req.auth!.tenantId,
+                jobId: parsed.jobId,
+                jobStatus: planJob?.status,
+                estimateId: parsed.estimateId,
+              },
+            );
+            if (refusal) throw new ConflictError(refusal);
+          }
         }
 
         // Member pricing (#6): fold an active membership's discount into a
@@ -386,6 +408,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:view'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const result = await getInvoice(req.auth!.tenantId, req.params.id, invoiceRepo);
@@ -421,6 +444,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     updateHandler
   );
 
@@ -429,6 +453,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     updateHandler
   );
 
@@ -437,6 +462,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!paymentLinkProvider) {
@@ -467,6 +493,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         // Guarded: a non-numeric value flows into calculateDueDate's
@@ -510,6 +537,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!paymentRepo) {
@@ -552,6 +580,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const { status } = req.body;
@@ -592,6 +621,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!sendService) {
@@ -621,6 +651,11 @@ export function createInvoiceRouter(
           tenantId: req.auth!.tenantId,
           invoiceId: req.params.id,
           ...parsed.data,
+          // #1145 — distinguishes this owner-triggered manual send from an
+          // unrelated proposal-execution send (invoice-delivery-adapter.ts)
+          // landing in the same wall-clock minute, so the two don't collide
+          // on idx_dispatches_idempotency.
+          idempotencyContext: 'owner',
         });
         // §6 Time-to-Cash. `sendInvoice` only stamps `sentAt`/`lastDispatchId`;
         // it does NOT transition the invoice's status. The job's money-state

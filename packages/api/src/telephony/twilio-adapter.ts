@@ -24,46 +24,21 @@ import {
   isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
-  OWNER_LOOKUP_INTENT_TYPES,
-  type IntentType,
 } from '../ai/orchestration/intent-classifier';
+import type { IntentType } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
 } from '../ai/tasks/create-customer-task';
-import { lookupAppointments } from '../ai/skills/lookup-appointments';
-import { lookupInvoices } from '../ai/skills/lookup-invoices';
-import { lookupBalance } from '../ai/skills/lookup-balance';
-import { lookupJobs } from '../ai/skills/lookup-jobs';
-import { lookupAgreements } from '../ai/skills/lookup-agreements';
-import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
-import { lookupCustomer } from '../ai/skills/lookup-customer';
-import { lookupEstimates } from '../ai/skills/lookup-estimates';
-import { lookupLeads } from '../ai/skills/lookup-leads';
-import { lookupRevenue } from '../ai/skills/lookup-revenue';
-import { lookupCatalog } from '../ai/skills/lookup-catalog';
-import {
-  lookupAvailability,
-  lookupBookableAvailability,
-} from '../ai/skills/lookup-availability';
-import { schedulingConfigFromSettings } from '../scheduling/booking-availability';
-import { lookupDayOverview } from '../ai/skills/lookup-day-overview';
-import { lookupDigest } from '../ai/skills/lookup-digest';
-import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
-import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
-import type { MoneyDashboardRepository } from '../reports/money-dashboard';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
-import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
 import type { TagRepository } from '../customers/tag';
 import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
-import type { DailyDigestRepository } from '../digest/digest-service';
-import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
@@ -72,13 +47,17 @@ import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import type { ConversationRepository } from '../conversations/conversation-service';
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
-import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
+import {
+  assembleB2bAccountContext,
+  buildAccountContextPromptSection,
+} from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
+import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
 import {
-  intentClassifiedEvent,
-  lookupExecutedEvent,
-} from '../ai/voice-quality/events';
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+} from '../ai/orchestration/language-detector';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type {
   CallingAgentContext,
@@ -102,17 +81,26 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { OnCallRepository } from '../oncall/rotation';
 import type { TwilioCallControl } from './twilio-call-control';
-import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
+import {
+  EMERGENCY_INTENTS,
+  type DispatcherPhoneResolver,
+} from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 import { resolveEscalationSettings } from '../settings/settings';
+import { resolvePhoneActor } from './phone-actor';
 import type { WhisperCache } from './whisper-cache';
+import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-lookup-surface';
+import { answerPhoneEnRoute, type PhoneEnRouteDeps } from '../ai/voice-turn/phone-en-route-surface';
 import {
   createVoiceTurnProcessor,
+  classifierProfileForSession,
+  auditOffSurfaceClassification,
   appendAgentTts,
+  callerTranscriptText,
   preloadSessionCatalog,
   type VoiceTurnProcessor,
   type VoiceTurnProcessorDeps,
@@ -127,11 +115,17 @@ import {
   renderTtsText,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
+  LANGUAGE_SWITCH_ACK,
+  LANGUAGE_UNSUPPORTED_LINE,
+  LANGUAGE_SWITCH_CAP_LINE,
   type SessionLanguage,
 } from '../ai/agents/customer-calling/tts-copy';
 import {
   MIN_STT_CONFIDENCE,
   MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
+  DEFAULT_MAX_CALL_DURATION_MS,
 } from './media-streams/mediastream-adapter';
 import { recordVoiceError } from '../analytics/posthog';
 import {
@@ -148,15 +142,13 @@ import type { Queue } from '../queues/queue';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../push/device-token-service';
 import type { PushDeliveryProvider } from '../notifications/push-delivery-provider';
-import type {
-  DroppedCallRecoveryRepository,
-  DroppedCallScheduler,
-} from '../sms/recovery/scheduler';
+import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
 import type { EntityResolver } from '../ai/resolution/entity-resolver';
+import type { LocationRepository } from '../locations/location';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
@@ -166,15 +158,19 @@ const logger = createLogger({
   environment: process.env.NODE_ENV || 'development',
 });
 
-function isOwnerLookupIntent(intentType: string): boolean {
-  return OWNER_LOOKUP_INTENT_TYPES.has(intentType as IntentType);
-}
-
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface TwilioAdapterDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
+  /**
+   * U5 — absolute per-call wall-clock cap (ms), wired from
+   * `VOICE_MAX_CALL_DURATION_MS`. Gather has no timer of its own (every turn
+   * is a fresh webhook), so `_handleGatherLocked` compares the session age
+   * against this on each turn and hangs up with the wrap-up line once it is
+   * exceeded. Default {@link DEFAULT_MAX_CALL_DURATION_MS}.
+   */
+  maxCallDurationMs?: number;
   /**
    * U4 — per-turn vulnerability triage on the Gather/PSTN path. Fired
    * fire-and-forget after the deterministic safety scan, symmetric to the
@@ -200,9 +196,15 @@ export interface TwilioAdapterDeps {
    * P0 voice-safety — tenant-scoped entity resolver, spread straight into
    * `createVoiceTurnProcessor` by the constructor below. Declared here (rather
    * than relying on the untyped runtime spread from app.ts) so the Gather
-   * path's `resolveTurnEntities` call is type-checked against a real dep.
+   * path's `resolveTurnEntityEvent` call is type-checked against a real dep.
    */
   entityResolver?: EntityResolver;
+  /**
+   * #1118 — spread into the processor, which decorates `entityResolver` with
+   * the U3 customer address hint so a same-name disambiguation question can
+   * be answered by service address. Absent → phone-only hints.
+   */
+  locationRepo?: Pick<LocationRepository, 'findByCustomer'>;
   /** Used as actorId on proposal/audit rows when none is in scope. */
   systemActorId?: string;
   /** Business name used in recording disclosure copy. */
@@ -277,17 +279,25 @@ export interface TwilioAdapterDeps {
   /** P2-036 V2 — threaded to the voice-turn processor for the live-call discount engine. */
   negotiationQuoteResolver?: CurrentQuoteResolver;
   estimateRepo?: EstimateRepository;
-  /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
-  moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
-  /** Phase-2 Track A: owner-scoped day/digest/pending lookups. */
-  dailyDigestRepo?: DailyDigestRepository;
-  dunningConfigRepo?: DunningConfigRepository;
-  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
-  /** When wired, lookup_availability speaks the next open slots. */
-  availabilityFinder?: AvailabilityFinder;
-  /** P11-001: when wired, every lookup invocation writes a row. */
-  lookupEvents?: LookupEventService;
+  /**
+   * #866 — the SAME lookup bundle (answers + shared repos + resolver +
+   * timezone) app.ts hands the memo worker and the assistant chat. The
+   * phone's read-only `lookup_*` intents dispatch through it
+   * (`ai/voice-turn/phone-lookup-surface.ts`). Absent → every lookup speaks
+   * the unavailable line and logs a wiring-gap warning.
+   */
+  lookups?: PhoneLookupDeps;
+  /**
+   * #847 — the en_route ("on my way") bundle: the SAME technician core the
+   * recorded-memo wrapper and the SMS keyword leg drive, plus the userRepo
+   * this surface uses to role-check the session actor. app.ts wires
+   * `enRouteCoordinator` to the SAME DelayNotificationCoordinator instance
+   * as the app button / SMS / memo legs, so every surface fires the
+   * identical audited act. Absent → the intent speaks the unavailable line
+   * and logs a wiring-gap warning (never a silent clarification card).
+   */
+  enRoute?: PhoneEnRouteDeps;
   /**
    * Phase C: per-tenant integration resolver for runtime auth lookups.
    * Wiring is optional in this adapter phase; consumers can inject and
@@ -485,6 +495,15 @@ export interface TwilioAdapterDeps {
  *   3. Neither:
  *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
+ *
+ * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
+ * tenant's own `tenant_settings.business_name` — when the per-tenant
+ * persona resolver found one; the `businessName` PARAMETER (the
+ * platform-wide `TWILIO_BUSINESS_NAME` env value / literal `'our team'`
+ * fallback the caller passes in) is used only when the tenant has none on
+ * file. Without this, every tenant that completed onboarding (which
+ * captures a business name) but never wrote a custom `voice_greeting`
+ * heard the SAME platform-wide string as every other tenant.
  */
 export function buildTelephonyGreeting(
   businessName: string,
@@ -503,10 +522,12 @@ export function buildTelephonyGreeting(
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
-  // ends with a CTA (the ES CTA already ends with '?').
+  // ends with a CTA (the ES CTA already ends with '?'). #1156: the
+  // tenant's own resolved business name wins over the env-wide fallback.
+  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
-    ? t('greeting.opener_named', language, { business: businessName, agent: persona.agentName })
-    : t('greeting.opener_default', language, { business: businessName });
+    ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
+    : t('greeting.opener_default', language, { business: resolvedBusinessName });
   const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
@@ -663,8 +684,19 @@ export function buildTwiML(
       // audible feedback rather than silence; a real prompt registry is a
       // follow-up.
       const sayText = text.length > 0 ? text : '...';
+      // #1220 review — a line tagged with another language than the session's
+      // (the Spanish 911 line on an English-session E1) takes that language's
+      // default voice. The tenant voice override belongs to the session
+      // language, so it applies only to lines in that language.
+      const lineLanguage =
+        fx.payload.language === 'es' || fx.payload.language === 'en' ? fx.payload.language : undefined;
+      const sessionLanguage = opts.language === 'es' ? 'es' : 'en';
       const voice =
-        opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
+        lineLanguage && lineLanguage !== sessionLanguage
+          ? lineLanguage === 'es'
+            ? GATHER_VOICE_ES
+            : GATHER_VOICE_EN
+          : (opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN));
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       // The <Hangup/> is appended below; the recording block is spliced in
@@ -1055,6 +1087,7 @@ export class TwilioGatherAdapter {
    * channel before Twilio finishes the connect.
    */
   async handleInboundForStream(opts: {
+    accountSid?: string;
     callSid: string;
     from: string;
     tenantId: string;
@@ -1070,7 +1103,13 @@ export class TwilioGatherAdapter {
       from: opts.from,
       tenantId: opts.tenantId,
     });
-    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+    if (opts.accountSid) {
+      if (session.twilioAccountSid && session.twilioAccountSid !== opts.accountSid) {
+        throw new Error('Twilio account mismatch on replayed call');
+      }
+      session.twilioAccountSid = opts.accountSid;
+    }
+    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid, accountSid: session.twilioAccountSid });
   }
 
   /**
@@ -1161,6 +1200,28 @@ export class TwilioGatherAdapter {
     // leaned on the voice-turn processor's callerPhoneResolver fallback, which
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
+    // #866 — resolve the caller to a tenant ACTOR once, here, for both
+    // transports (this method is the shared establishment core). The shared
+    // lookup dispatch authorises by the actor's DB role; the phone used to
+    // carry only the ownerSession boolean. Fail-soft: never blocks the call.
+    const actor = await resolvePhoneActor(
+      { ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}) },
+      opts.tenantId,
+      opts.from,
+      ownerSession,
+    );
+    if (actor) {
+      session.actorUserId = actor.userId;
+      // `via` is the one diagnostic an operator needs when an owner's
+      // lookups behave differently from expected ("resolved through the
+      // owner_phone bridge" vs "through a registered mobile"). No caller-ID
+      // or user id in the log line.
+      logger.info('phone actor resolved at session establishment', {
+        tenantId: opts.tenantId,
+        sessionId: session.id,
+        via: actor.via,
+      });
+    }
     return { session, replayed: false };
   }
 
@@ -1422,6 +1483,54 @@ export class TwilioGatherAdapter {
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
     await commit();
+
+    // Row 2.2 — the GRANT of implicit recording consent is a mutation
+    // (a `consent_events` row lands) and, until now, the only
+    // recording-consent transition with no `audit_events` row: the
+    // caller-initiated revocation already writes
+    // `recording_consent.revoked` through this same repository
+    // (`handleRecordingObjection` below). The ledger stays the
+    // append-only legal record; this is the operator-visible trail, so a
+    // grant and a revocation finally read the same way in the audit log.
+    //
+    // Guarded exactly like the revoked emitter: a ledger and a caller
+    // phone are what make a row possible at all (`discloseRecording`
+    // returns NO_CONSENT_LEDGER without both), so without them nothing
+    // was written and nothing is audited.
+    //
+    // DELIBERATELY SWALLOWED, unlike the dispatch-board emitter in
+    // #1040: every audit write on this path is best-effort by design —
+    // this runs mid-call from a fire-and-forget
+    // `void commitRecordingConsent(...)` in the media-streams adapter,
+    // and an audit failure must never drop a live call or, worse,
+    // unwind a consent row that was already committed.
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    if (this.deps.auditRepo && this.deps.consentEvents && callerPhone) {
+      try {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: session.tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'recording_consent.granted',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: {
+              kind: 'recording',
+              state: 'implicit',
+              source: 'voice',
+              phone: callerPhone,
+              customerId: session.customerId ?? null,
+              // Which transport's point-of-evidence committed it.
+              channel: session.channel,
+            },
+          }),
+        );
+      } catch {
+        /* audit is best-effort — see above */
+      }
+    }
   }
 
   /**
@@ -1472,14 +1581,17 @@ export class TwilioGatherAdapter {
    * `publicBaseUrl`'s host when set; otherwise emits an explicit
    * placeholder so a missing publicBaseUrl is loud at deploy time.
    */
-  buildStreamTwiML(opts: { sessionId: string; callSid: string }): string {
+  buildStreamTwiML(opts: { sessionId: string; callSid: string; accountSid?: string }): string {
     const baseRaw = this.deps.publicBaseUrl?.replace(/\/+$/, '') ?? '';
     // Translate http(s):// → ws(s):// so Twilio gets a valid ws URL even
     // when the operator only configured PUBLIC_API_URL.
     const wsBase = baseRaw
       ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
       : 'wss://media-streams-base-url-not-configured';
-    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}`;
+    // Stream URLs cannot carry query parameters. Bind the upgrade to the
+    // authenticated call via its path; the server resolves its account token.
+    const callPath = opts.accountSid ? `/${encodeURIComponent(opts.callSid)}` : '';
+    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}${callPath}`;
     return (
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
@@ -1627,6 +1739,12 @@ export class TwilioGatherAdapter {
       utterance: speechResult,
       tier: safety.tier,
       ...(responseScript ? { responseScript } : {}),
+      ...(safety.language ? { language: safety.language } : {}),
+      // #1220 review — a Spanish session hears the Spanish 911 line on E1 even
+      // when the hazard was reported in English.
+      ...(session.language === 'es' || session.language === 'en'
+        ? { sessionLanguage: session.language }
+        : {}),
     });
     if (effects.length === 0) {
       // Idempotent-skip (already escalating for E2, or terminated) — fall
@@ -1901,13 +2019,22 @@ export class TwilioGatherAdapter {
       ];
     }
 
-    // Always append utterance to transcript first so it is captured
+    // Append the utterance to the transcript first so it is captured
     // regardless of the path below (frustration escalation or normal turn).
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      text: opts.speechResult,
-      ts: Date.now(),
-    });
+    // #859 — this is the ONLY append for the utterance: the `speechTurn`
+    // delegation below is told `transcriptAppended: true`. An empty
+    // media-streams final is skipped for the same reason Gather skips it
+    // (_handleGatherLocked): an empty `caller:` line would make
+    // deriveCallOutcome read a silent call as caller speech.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        // #850 — a spoken money-approval challenge is redacted here rather than
+        // at each consumer, so every derived summary inherits it.
+        text: callerTranscriptText(session, opts.speechResult),
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — ONE shared deterministic safety scan (emergency keywords),
     // BEFORE the frustration check and BEFORE any LLM call. Shared with the
@@ -1946,6 +2073,7 @@ export class TwilioGatherAdapter {
       speechResult: opts.speechResult,
       callSid: opts.callSid,
       tenantId: opts.tenantId,
+      transcriptAppended: true,
     });
   }
 
@@ -2152,7 +2280,8 @@ export class TwilioGatherAdapter {
     if (opts.speechResult.trim().length > 0) {
       this.deps.store.appendTranscript(opts.sessionId, {
         speaker: 'caller',
-        text: opts.speechResult,
+        // #850 — see the sibling append above.
+        text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
       });
     }
@@ -2169,11 +2298,32 @@ export class TwilioGatherAdapter {
       return this.finalizeTwiml(session, gatherSafetyEffects, opts.sessionId);
     }
 
+    // U5 — absolute per-call duration cap. Checked after the transcript
+    // append (the utterance is never lost) and the deterministic safety scan
+    // (a life-safety utterance on the last turn still transfers), BEFORE any
+    // LLM call. Same speak-then-end shape as the low-STT-confidence ladder
+    // below: wrap-up <Say> + the builder's end_session → <Hangup/> branch,
+    // and an explicit finalize because this path never touches the FSM.
+    const maxCallDurationTwiml = await this.maybeEndForMaxCallDuration(session, opts.sessionId);
+    if (maxCallDurationTwiml) return maxCallDurationTwiml;
+
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
     // the same guard in processCallerUtterance (WS path). Runs after the
     // transcript append so the triggering utterance is always captured.
+    // PR-0b (#968/#962) — gate on the tenant's trigger_keyword_frustration
+    // toggle BEFORE dispatching, same as the media-streams path (see
+    // `triggers` in processCallerUtterance above). Without this, the FSM
+    // re-gate (transitions.ts) still no-ops a keyword match when the toggle
+    // is off (returns zero side effects), but this path unconditionally
+    // RETURNED that empty-effects TwiML — a bare <Gather> with no <Say> —
+    // silently eating the caller's turn instead of falling through to
+    // normal classification below.
     const gatherFrustration = detectFrustration(opts.speechResult);
-    if (gatherFrustration.matched) {
+    const gatherTriggers = session.machine.currentContext.escalationTriggers;
+    if (
+      gatherFrustration.matched &&
+      (!gatherTriggers || gatherTriggers.trigger_keyword_frustration)
+    ) {
       const frustrationEffects = session.machine.dispatch({
         type: 'frustration_detected',
         source: 'keyword',
@@ -2297,18 +2447,39 @@ export class TwilioGatherAdapter {
       //    (which would hang the caller mid-call).
       let classifierEvent: CallingAgentEvent | null = null;
       let classifiedIntentType: string | undefined;
+      // #866 — captured alongside the intent so the lookup branch below reads
+      // it directly rather than re-narrowing `classifierEvent`.
+      let classifiedEntities: Record<string, unknown> = {};
       const verticalPromptSection = await this.processor.resolveVerticalPromptSection(opts.tenantId);
       const planPromptSection = await this.processor.resolvePlanPromptSection(
         opts.tenantId,
         session.customerId,
       );
+      // #1155 (row 2.12) — the SAME B2B/property-manager account section the
+      // media-streams turn sends (create-voice-turn-processor.ts speechTurn),
+      // from the context loadB2bAccountContext stashed at caller
+      // identification. Absent for a residential or unmatched caller, so that
+      // call's classify prompt stays byte-identical.
+      const b2bAccountPromptSection = session.b2bAccountContext
+        ? buildAccountContextPromptSection(session.b2bAccountContext)
+        : undefined;
+      // #886/#887 — surface-conditional taxonomy: derived from session
+      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
+      // so the off-surface audit below records the same profile the guard
+      // enforced.
+      const classifierProfile = classifierProfileForSession(session);
       try {
         const classification = await classifyIntent(
           opts.speechResult,
           {
             tenantId: opts.tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
+            classifierProfile,
+            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
             // RV-071 — appended ONLY on verified owner sessions so every
             // other call's prompt stays byte-identical (cassette hashes).
             ...(session.machine.currentContext.ownerSession === true
@@ -2333,16 +2504,33 @@ export class TwilioGatherAdapter {
             tokenUsage: classification.tokenUsage,
           }),
         );
+        // #887/#902 — an off-surface classification was intercepted by the
+        // guard; leave the trail the interception would otherwise erase.
+        await auditOffSurfaceClassification({
+          auditRepo: this.deps.auditRepo,
+          tenantId: opts.tenantId,
+          sessionId: session.id,
+          profile: classifierProfile,
+          classification,
+          actorId: this.deps.systemActorId ?? 'calling-agent',
+        });
         const capExceeded = this.processor.recordCost(session, classification.tokenUsage);
-        if (capExceeded) {
+        // #1212 — an emergency outcome wins over the cap end, as in the
+        // processor's speechTurn: the classified emergency takes the FSM's
+        // emergency fast-path below, and that hand-off is the one end.
+        if (capExceeded && !EMERGENCY_INTENTS.has(classification.intentType)) {
           classifierEvent = { type: 'cost_cap_exceeded' };
         } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
           classifiedIntentType = classification.intentType;
+          classifiedEntities = (classification.extractedEntities ?? {}) as Record<string, unknown>;
           classifierEvent = {
             type: 'intent_classified',
             intentType: classification.intentType,
-            entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+            entities: classifiedEntities,
             confidence: classification.confidence,
+            // The raw transcript rides the event so guards that persist
+            // caller words (complaint severity detection) see them.
+            utterance: opts.speechResult,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
@@ -2355,6 +2543,7 @@ export class TwilioGatherAdapter {
             intentType: classification.intentType === 'unknown' ? 'unknown' : classification.intentType,
             entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
             confidence: classification.confidence,
+            utterance: opts.speechResult,
           };
         }
       } catch (err) {
@@ -2391,8 +2580,8 @@ export class TwilioGatherAdapter {
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
-      // P11-001: lookup intents bypass the proposal-draft path. Route
-      // to the corresponding skill, push its `summary` into the
+      // P11-001 / #866: lookup intents bypass the proposal-draft path. Route
+      // through the shared dispatch (phone surface adapter), push the line into the
       // tts_play stream, and DO NOT dispatch `intent_classified` —
       // the FSM stays in `intent_capture` so the next <Gather> turn
       // re-enters with "Anything else I can help you with?".
@@ -2400,11 +2589,12 @@ export class TwilioGatherAdapter {
         classifiedIntentType &&
         isLookupIntent(classifiedIntentType as Parameters<typeof isLookupIntent>[0])
       ) {
-        const lookupSummary = await this.runLookupSkill(
+        const lookupSummary = await answerPhoneLookup(this.deps.lookups, {
           session,
-          classifiedIntentType,
-          opts.tenantId,
-        );
+          tenantId: opts.tenantId,
+          intent: classifiedIntentType as IntentType,
+          entities: classifiedEntities,
+        });
         sideEffectsAll.push({
           type: 'tts_play',
           payload: { text: lookupSummary, source: 'lookup_skill' },
@@ -2413,6 +2603,48 @@ export class TwilioGatherAdapter {
           type: 'tts_play',
           payload: { text: 'Anything else I can help you with?' },
         });
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // #847 — en_route ("on my way") is a DIRECT status act (Part F
+      // decision F-3): the technician IS the human acting, so it fires the
+      // SAME audited act the app en-route button executes — never a
+      // proposal, which is why it is deliberately absent from
+      // INTENT_TO_PROPOSAL_TYPE (falling through would mint the
+      // clarification card this branch exists to prevent). Same out-of-FSM
+      // shape as the lookup branch above: identity + role are checked in
+      // the surface adapter, the outcome is spoken, and `intent_classified`
+      // is NOT dispatched — the FSM stays in intent_capture.
+      if (classifiedIntentType === 'en_route') {
+        const enRouteLine = await answerPhoneEnRoute(this.deps.enRoute, {
+          session,
+          tenantId: opts.tenantId,
+          entities: classifiedEntities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: enRouteLine, source: 'en_route' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // #846 — language_switch is an ADAPTER act, not an FSM transition or a
+      // proposal: the pure FSM cannot mutate session.language, and before
+      // this branch the intent fell through to `intentToProposalType`'s
+      // default and minted a `voice_clarification` card — so Spanish
+      // switching worked on the media-streams transport and silently
+      // degraded here. Same out-of-FSM shape as the lookup branch above:
+      // handle, speak, and do NOT dispatch `intent_classified` — the FSM
+      // stays where it is and the next <Gather> turn (built by finalizeTwiml
+      // from the flipped session.language) listens in the new language.
+      if (classifiedIntentType === 'language_switch') {
+        sideEffectsAll.push(...(await this.handleLanguageSwitchGather(session, opts)));
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
@@ -2494,17 +2726,33 @@ export class TwilioGatherAdapter {
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        const refs = await this.processor.resolveTurnEntities(
-          session,
-          opts.tenantId,
-          classifierEvent.intentType,
-          classifierEvent.entities as Record<string, unknown>,
+        // #1118 — an ambiguous reference becomes entity_ambiguous: the FSM
+        // asks (rendered to <Say> text below) instead of the ambiguity being
+        // folded into entity_resolved and dropped.
+        const resolutionFx = session.machine.dispatch(
+          await this.processor.resolveTurnEntityEvent(
+            session,
+            opts.tenantId,
+            classifierEvent.intentType,
+            classifierEvent.entities as Record<string, unknown>,
+          ),
         );
-        sideEffectsAll.push(
-          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
-        );
+        this.processor.expandDisambiguationTemplate(session, resolutionFx);
+        sideEffectsAll.push(...resolutionFx);
         this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
+    } else if (currentState === 'entity_resolution') {
+      // #1118 — the caller is answering the disambiguation question; the SAME
+      // shared handler the media-streams speechTurn runs. Without this branch
+      // the answer fell to the generic `else` → confidence_low, which the
+      // entity_resolution state ignores (a bare <Gather> with no <Say>).
+      sideEffectsAll.push(
+        ...(await this.processor.handleDisambiguationTurn(
+          session,
+          opts.tenantId,
+          opts.speechResult,
+        )),
+      );
     } else if (currentState === 'ask_caller') {
       // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
       // SAME find-or-create-customer + advance-to-intake logic the media-
@@ -2556,6 +2804,48 @@ export class TwilioGatherAdapter {
    * would never fire — the manual call here is required, same pattern
    * `/dial-result`'s successful-transfer branch already uses).
    */
+  /**
+   * U5 — end a Gather call whose age (`Date.now() - session.createdAt`, the
+   * same elapsed-time basis `runSummary` uses) has passed
+   * `deps.maxCallDurationMs`. Returns the terminal TwiML, or null when the
+   * call is still within its limit.
+   */
+  private async maybeEndForMaxCallDuration(
+    session: VoiceSession,
+    sessionId: string,
+  ): Promise<string | null> {
+    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
+    const elapsedMs = Date.now() - session.createdAt.getTime();
+    if (elapsedMs < limitMs) return null;
+
+    logger.info('handleGather: max call duration reached — ending call', {
+      sessionId,
+      callSid: session.callSid,
+      elapsedMs,
+      limitMs,
+    });
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, lang) },
+      },
+      { type: 'end_session', payload: { reason: 'max_call_duration' } },
+    ];
+    const twiml = await this.finalizeTwiml(session, effects, sessionId);
+    if (!session.ended) {
+      session.ended = true;
+      this.finalizeTerminatedSession(session, effects, 'max_call_duration');
+      // PR #975 F5 — every terminal Gather branch kicks off the summary so
+      // call_summaries captures the capped call too (parity with the FSM
+      // `terminated` branches in handleInbound / _handleGatherLocked).
+      void this.processor.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+    return twiml;
+  }
+
   private async maybeHandleLowSttConfidenceGather(
     session: VoiceSession,
     opts: { sessionId: string; confidence: number | undefined },
@@ -2600,6 +2890,11 @@ export class TwilioGatherAdapter {
       if (!session.ended) {
         session.ended = true;
         this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+        // PR #975 F5 — same omission as the max-duration end: without this a
+        // ladder hand-off left no call_summaries row.
+        void this.processor.runSummary(session).catch(() => {
+          /* swallow — summary is best-effort */
+        });
       }
       recordVoiceError({
         errorKind: 'low_stt_confidence_repeated',
@@ -2733,411 +3028,73 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * P11-001: dispatch a `lookup_*` intent to the corresponding read-only
-   * skill and return its TTS-ready `summary`. Always returns a string —
-   * a missing wiring or error degrades to a generic "let me get someone"
-   * line so the live call never bubbles a 5xx.
+   * #846 — mid-call language switch on the Gather transport.
    *
-   * Caller must guarantee `intentType` starts with `lookup_` (the gate
-   * lives at the call site so the routing branch can stay tight).
+   * Deliberately TINY compared to the media-streams `switchLanguage`: that
+   * method owns a live Deepgram socket (lock, generation bump, reopen,
+   * rollback); on Gather, Twilio does the STT per-turn via
+   * `<Gather language=...>`, so flipping `session.language` is the whole
+   * switch — `finalizeTwiml` already threads it (and `session.ttsVoice`)
+   * into every TwiML build.
+   *
+   * Policy mirrors media-streams: the tenant `supported_languages` opt-in
+   * gates the target, and the SAME per-call flap cap
+   * (MAX_LANGUAGE_SWITCHES_PER_CALL) bounds reopen-style flapping. The TTS
+   * voice is re-resolved for the NEW language — it was resolved once at
+   * session start for the then-current language, and carrying it over would
+   * read Spanish in the English voice.
+   *
+   * Never throws; always returns the side effects to speak.
    */
-  private async runLookupSkill(
+  private async handleLanguageSwitchGather(
     session: VoiceSession,
-    intentType: string,
-    tenantId: string,
-  ): Promise<string> {
-    const customerId = session.customerId;
-    const ownerSession = session.machine.currentContext.ownerSession === true;
-    const extendedIntents = session.machine.currentContext.extendedIntents === true;
-    const ownerLookup = isOwnerLookupIntent(intentType);
-    if (ownerLookup) {
-      if (!ownerSession || !extendedIntents) {
-        return this.lookupNotWiredFallback();
-      }
-      return this.runOwnerLookupSkill(session, intentType, tenantId);
-    }
-    // WS5 — `lookup_catalog` (browsing the price book) is OWNER-ONLY and
-    // tenant-scoped (no customerId needed). A customer asking about prices now
-    // flows through the grounded estimate path, which speaks catalog-grounded
-    // prices safely; they must never get a raw catalog recital. Gated on the
-    // RV-070 ownerSession flag (caller-ID identity), never utterance content —
-    // same identity source as the owner lookups above, without the
-    // extended-intents tenant opt-in. Handled here, BEFORE the customer-scoped
-    // gate, because the owner line is not itself a customer.
-    if (intentType === 'lookup_catalog') {
-      if (!ownerSession || !this.deps.catalogRepo) {
-        return this.lookupNotWiredFallback();
-      }
-      const catalogStart = Date.now();
-      try {
-        const result = await lookupCatalog(
-          { tenantId, sessionId: session.id },
-          {
-            catalogRepo: this.deps.catalogRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          },
-        );
-        session.events.emit(
-          'voice-event',
-          lookupExecutedEvent(intentType, Date.now() - catalogStart, true),
-        );
-        return result.summary;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        session.events.emit(
-          'voice-event',
-          lookupExecutedEvent(intentType, Date.now() - catalogStart, false, message),
-        );
-        return this.lookupNotWiredFallback();
-      }
-    }
-    if (!customerId) {
-      // Lookups are customer-scoped. An anonymous caller doesn't have
-      // an account to read from; we never want to leak a different
-      // tenant's summary. Degrade gracefully.
-      return "I can't pull up your account without identifying you first. Let me get a person to help.";
-    }
+    opts: { sessionId: string; tenantId: string; speechResult: string },
+  ): Promise<SideEffect[]> {
+    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    // The utterance's requested language when the heuristic can extract it,
+    // else the other half of the en/es pair (the classifier already said
+    // this turn IS a switch request) — same fallback as media-streams.
+    const target = detectLanguageSwitchIntent(opts.speechResult) ?? (current === 'es' ? 'en' : 'es');
 
-    const sharedInput = {
-      tenantId,
-      customerId,
-      sessionId: session.id,
-    };
-
-    // VQ-003: time the skill end-to-end and emit `lookup_executed` on
-    // the session bus. Both the success and error branches emit so the
-    // harness sees that a lookup attempt occurred even when it fell
-    // back to the "let me get someone" string. Errors carry the raw
-    // message; successes set `success: true` with no error field.
-    const startMs = Date.now();
-    try {
-      switch (intentType) {
-        case 'lookup_appointments': {
-          if (!this.deps.jobRepo || !this.deps.appointmentRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupAppointments(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            appointmentRepo: this.deps.appointmentRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_invoices': {
-          if (!this.deps.jobRepo || !this.deps.invoiceRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupInvoices(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            invoiceRepo: this.deps.invoiceRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_balance': {
-          if (!this.deps.jobRepo || !this.deps.invoiceRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupBalance(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            invoiceRepo: this.deps.invoiceRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_jobs': {
-          if (!this.deps.jobRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupJobs(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_agreements': {
-          if (!this.deps.agreementRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupAgreements(sharedInput, {
-            agreementRepo: this.deps.agreementRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_account_summary': {
-          if (
-            !this.deps.jobRepo ||
-            !this.deps.appointmentRepo ||
-            !this.deps.invoiceRepo ||
-            !this.deps.agreementRepo
-          ) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupAccountSummary(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            appointmentRepo: this.deps.appointmentRepo,
-            invoiceRepo: this.deps.invoiceRepo,
-            agreementRepo: this.deps.agreementRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_customer': {
-          if (!this.deps.customerRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          // The caller is already identity-resolved (customerId in
-          // session) — use that as the fuzzy-lookup target so the
-          // skill returns the record matching this caller, not a
-          // free-form fuzzy phone search.
-          const result = await lookupCustomer(
-            {
-              tenantId,
-              identifier: { type: 'id', value: customerId },
-              sessionId: session.id,
-            },
-            {
-              customerRepo: this.deps.customerRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_estimates': {
-          if (!this.deps.jobRepo || !this.deps.estimateRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupEstimates(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            estimateRepo: this.deps.estimateRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_leads': {
-          if (!this.deps.leadRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupLeads(
-            { tenantId, sessionId: session.id },
-            {
-              leadRepo: this.deps.leadRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_revenue': {
-          if (!this.deps.moneyDashboardRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupRevenue(
-            { tenantId, sessionId: session.id },
-            {
-              moneyDashboardRepo: this.deps.moneyDashboardRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_availability': {
-          const from = new Date();
-          let result;
-          if (this.deps.appointmentRepo) {
-            // Business-hours-aware path (F2): only offer slots the tenant
-            // could honor, spoken in the tenant timezone. Settings failures
-            // degrade to defaults, never block the call.
-            const settings = this.deps.settingsRepo
-              ? await this.deps.settingsRepo.findByTenant(tenantId).catch(() => null)
-              : null;
-            const config = schedulingConfigFromSettings(settings);
-            result = await lookupBookableAvailability(
-              {
-                tenantId,
-                timezone: config.timezone ?? 'America/New_York',
-                searchFrom: from,
-                searchDays: 14,
-                durationMs: 2 * 60 * 60 * 1000,
-                weeklyHours: config.weeklyHours,
-                bufferMinutes: config.bufferMinutes,
-              },
-              { appointmentRepo: this.deps.appointmentRepo },
-            );
-          } else if (this.deps.availabilityFinder) {
-            // Legacy raw-finder fallback for wirings without an appointment
-            // repo (calendar-gap walk, no hours awareness).
-            result = await lookupAvailability(
-              {
-                tenantId,
-                searchFrom: from,
-                searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
-                durationMs: 2 * 60 * 60 * 1000,
-              },
-              this.deps.availabilityFinder,
-            );
-          } else {
-            return this.lookupNotWiredFallback();
-          }
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.status === 'unavailable'
-            ? this.lookupNotWiredFallback()
-            : result.message;
-        }
-        default:
-          return this.lookupNotWiredFallback();
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.warn('runLookupSkill failed', {
-        sessionId: session.id,
-        intentType,
-        error: message,
+    if (target === current) {
+      // Already speaking the requested language — just acknowledge; no
+      // counter spend, no event.
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
+    }
+    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
+    // opt-in gate is applied here (same as the media-streams pre-scan).
+    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) {
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
+    }
+    const switchCount = session.languageSwitchCount ?? 0;
+    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+      logger.info('gather: language switch refused — flap guard', {
+        sessionId: opts.sessionId,
+        target,
+        switchCount,
       });
-      session.events.emit(
-        'voice-event',
-        lookupExecutedEvent(intentType, Date.now() - startMs, false, message),
-      );
-      return this.lookupNotWiredFallback();
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
     }
-  }
 
-  private async runOwnerLookupSkill(
-    session: VoiceSession,
-    intentType: string,
-    tenantId: string,
-  ): Promise<string> {
-    const startMs = Date.now();
-    try {
-      switch (intentType) {
-        case 'lookup_day_overview': {
-          if (!this.deps.appointmentRepo || !this.deps.jobRepo || !this.deps.proposalRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupDayOverview(
-            { tenantId, sessionId: session.id },
-            {
-              appointmentRepo: this.deps.appointmentRepo,
-              jobRepo: this.deps.jobRepo,
-              proposalRepo: this.deps.proposalRepo,
-              ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}),
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_digest': {
-          if (!this.deps.dailyDigestRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupDigest(
-            { tenantId, sessionId: session.id },
-            {
-              digestRepo: this.deps.dailyDigestRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_pending_items': {
-          if (!this.deps.estimateRepo || !this.deps.invoiceRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupPendingItems(
-            { tenantId, sessionId: session.id },
-            {
-              estimateRepo: this.deps.estimateRepo,
-              invoiceRepo: this.deps.invoiceRepo,
-              ...(this.deps.dunningConfigRepo
-                ? { dunningConfigRepo: this.deps.dunningConfigRepo }
-                : {}),
-              ...(this.deps.droppedCallRecoveryRepo
-                ? {
-                    listUnansweredRecoveries: (tenant: string) =>
-                      this.deps.droppedCallRecoveryRepo!.listUnansweredRecoveries(tenant),
-                  }
-                : {}),
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        default:
-          return this.lookupNotWiredFallback();
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.warn('runOwnerLookupSkill failed', {
-        intentType,
-        tenantId,
-        sessionId: session.id,
-        error: message,
-      });
-      session.events.emit(
-        'voice-event',
-        lookupExecutedEvent(intentType, Date.now() - startMs, false, message),
-      );
-      return this.lookupNotWiredFallback();
-    }
-  }
-
-  private lookupNotWiredFallback(): string {
-    return "I'm having trouble pulling that up right now. Let me get a person to help.";
+    session.language = target;
+    session.languageSwitchCount = switchCount + 1;
+    // Re-resolve the per-language TTS voice (settings.ttsVoiceEn/Es); a
+    // resolver failure clears the override so the language-derived default
+    // Polly voice applies rather than the stale other-language voice.
+    const resolved = await this.resolveTenantLanguage(opts.tenantId, target);
+    session.ttsVoice = resolved.ttsVoice;
+    session.events.emit(
+      'voice-event',
+      languageSwitchedEvent({
+        from: current,
+        to: target,
+        trigger: 'classified_intent',
+        switchCount: session.languageSwitchCount,
+      }),
+    );
+    // Acknowledge in the language being switched TO — the caller just told
+    // us that's the one they understand. Same copy as media-streams.
+    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
   }
 
   private async resolveExtendedIntents(tenantId: string): Promise<boolean> {

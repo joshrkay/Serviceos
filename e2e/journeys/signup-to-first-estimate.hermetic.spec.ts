@@ -185,6 +185,57 @@ test.describe('Journey 1 (hermetic) — signup webhook → tenant → first esti
       'the browser session must resolve to the SAME real tenant the webhook bootstrapped',
     ).toBe(tenantId);
 
+    // ── 3b. PASS THE ONBOARDING SOFT GATE — save business identity as owner ─────
+    // PRD row 1.5 (soft gate): "Given identity is saved, when I navigate
+    // anywhere, then the CRM is unlocked and later steps nudge rather than
+    // hard-block." packages/web/src/components/auth/ProtectedRoute.tsx's
+    // OnboardingGuard keys on `GET /api/onboarding/status` reporting the
+    // 'identity' step as status 'done'.
+    //
+    // The two backends already satisfy this differently, so we check status
+    // FIRST rather than unconditionally PUTing:
+    //   - In-memory (no pool): routes/onboarding.ts's no-pool branch soft-fills
+    //     identity as done once a settings row exists (which the webhook's
+    //     bootstrapTenant() already seeded) — this is why the journey passed
+    //     here even before this fix.
+    //   - Postgres-backed (real pool): deriveOnboardingStatus's isIdentityDone
+    //     (onboarding/derive-status.ts) requires a REAL businessName +
+    //     businessHours + jobBufferMinutes + hourlyRateCents + timezone, and
+    //     PUT /api/onboarding/identity 503s without a pool at all — so a PUT
+    //     that always ran would break the in-memory backend. Payload mirrors
+    //     the working one in packages/api/test/integration/onboarding-identity.test.ts.
+    const fetchIdentityStep = async () => {
+      const res = await page.request.get(`${API_URL}/api/onboarding/status`, {
+        headers: authHeaders,
+      });
+      expect(res.status(), '/api/onboarding/status must be 200').toBe(200);
+      const body = (await res.json()) as { steps: Array<{ id: string; status: string }> };
+      return body.steps.find((s) => s.id === 'identity');
+    };
+
+    let identityStep = await fetchIdentityStep();
+    if (identityStep?.status !== 'done') {
+      const identityRes = await page.request.put(`${API_URL}/api/onboarding/identity`, {
+        headers: { 'content-type': 'application/json', ...authHeaders },
+        data: JSON.stringify({
+          businessName: 'Journey Owner HVAC',
+          businessHours: { mon: { open: '08:00', close: '17:00' }, sat: null, sun: null },
+          jobBufferMinutes: 30,
+          hourlyRateCents: 12500,
+          timezone: 'America/Chicago',
+        }),
+      });
+      expect(
+        identityRes.ok(),
+        `PUT /api/onboarding/identity -> ${identityRes.status()}: ${await identityRes.text()}`,
+      ).toBeTruthy();
+      identityStep = await fetchIdentityStep();
+    }
+    expect(
+      identityStep?.status,
+      `identity step must report 'done' before visiting the CRM — got: ${JSON.stringify(identityStep)}`,
+    ).toBe('done');
+
     // ── 4. FIRST ESTIMATE — create the graph through the REAL API as the owner ──
     // Payloads mirror packages/api/scripts/verify-seed.mjs (integer cents).
     const stamp = Date.now();

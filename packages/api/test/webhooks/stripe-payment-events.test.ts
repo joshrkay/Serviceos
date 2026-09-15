@@ -210,12 +210,15 @@ describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
 // The primary customer path is an Elements PaymentIntent on the tenant's
 // connected account (a Stripe "direct charge"). Stripe delivers the resulting
 // `payment_intent.succeeded` from the *connected-accounts* destination, so the
-// event envelope carries a top-level `account: acct_…`. The settlement branch
-// in routes.ts routes purely off `data.object.metadata` (tenant_id/invoice_id)
-// and never reads `event.account` for payment settlement, so a connected-origin
-// event must settle the invoice identically to a platform one. These tests pin
-// that origin-agnosticism — the premise of "Connect direct charges settle
-// through the existing ledger" (prd-stripe-trades-payments §acceptance, plan U6).
+// event envelope carries a top-level `account: acct_…`. A connected-origin
+// event must settle the invoice identically to a platform one — PROVIDED the
+// account is the tenant's own.
+//
+// #1102 narrowed that premise. The branch used to route purely off
+// `data.object.metadata` and never read `event.account` at all, which let any
+// connected account settle any tenant's invoice. It now binds the two: the
+// tenant's own account settles (below), a stranger's is refused (the
+// `event.account` binding block after this one).
 describe('payment_intent.succeeded — Connect direct charge (connected-account delivery)', () => {
   const CONNECTED_ACCOUNT = 'acct_connect_w1_2';
   let invoiceRepo: InMemoryInvoiceRepository;
@@ -233,6 +236,12 @@ describe('payment_intent.succeeded — Connect direct charge (connected-account 
       paymentRepo,
       auditRepo,
       stripeWebhookSecret: STRIPE_SECRET,
+      // #1102 — the tenant owns CONNECTED_ACCOUNT, so these deliveries are its
+      // own money. Same resolver shape app.ts:1108-1124 wires in production.
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async (tenantId: string) =>
+          tenantId === TENANT ? { accountId: CONNECTED_ACCOUNT, chargesEnabled: true } : null,
+      },
     });
   });
 
@@ -506,5 +515,121 @@ describe('payment_intent.succeeded — ACH settlement sends the customer receipt
     // The invoice is credited in-flight, but the customer is told nothing yet.
     expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('paid');
     expect(receipts).toHaveLength(0);
+  });
+});
+
+// SECURITY #1102 — `event.account` must be the named tenant's own connected
+// account before ANY settlement branch touches money.
+//
+// Stripe's signature attests that Stripe sent the event, not whose account
+// earned it, so a tenant holding a connected account could mint a
+// PaymentIntent on their OWN account carrying a neighbour's tenant_id +
+// invoice_id and have the neighbour's invoice marked paid. These are the
+// route-level (no-Postgres) cases; the real-Postgres proof, including the
+// audit row and the webhook_events status, is
+// test/integration/stripe-webhook-account-binding.test.ts.
+describe('#1102 — settlement is bound to the tenant\'s own connected account', () => {
+  const OWN_ACCOUNT = 'acct_tenant_own';
+  const STRANGER_ACCOUNT = 'acct_somebody_else';
+  const REFUSED = { error: 'Forbidden', reason: 'stripe_account_mismatch' };
+
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  /** Router whose tenant owns `accountId` (or nothing, when it is null). */
+  function appWithTenantAccount(accountId: string | null) {
+    return buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async () =>
+          accountId ? { accountId, chargesEnabled: true } : null,
+      },
+    });
+  }
+
+  async function expectNothingCredited() {
+    const inv = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(inv?.status).toBe('open');
+    expect(inv?.amountPaidCents).toBe(0);
+    expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(0);
+  }
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    await invoiceRepo.create(makeOpenInvoice());
+  });
+
+  it('refuses a stranger\'s account when the tenant HAS its own', async () => {
+    const app = appWithTenantAccount(OWN_ACCOUNT);
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_1102_stranger', amount: 10000, account: STRANGER_ACCOUNT }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(REFUSED);
+    await expectNothingCredited();
+  });
+
+  it('refuses a connected-account delivery when the tenant never enabled Connect', async () => {
+    const app = appWithTenantAccount(null);
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_1102_victim', amount: 10000, account: STRANGER_ACCOUNT }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(REFUSED);
+    await expectNothingCredited();
+  });
+
+  it('FAILS CLOSED when no Connect wiring can resolve the tenant at all', async () => {
+    // A router with no connectAccountResolver, no connectService and no pool
+    // cannot prove the account belongs to the tenant. A deployment with no
+    // Connect wiring has no connected accounts, so an `event.account` on it
+    // can never be one of ours — refuse rather than credit on faith.
+    const app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+    });
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_1102_unwired', amount: 10000, account: STRANGER_ACCOUNT }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(REFUSED);
+    await expectNothingCredited();
+  });
+
+  it('settles on the tenant\'s OWN account', async () => {
+    const app = appWithTenantAccount(OWN_ACCOUNT);
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_1102_own', amount: 10000, methodType: 'card', account: OWN_ACCOUNT }),
+    );
+    expect(res.status).toBe(200);
+    expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('paid');
+    expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(1);
+  });
+
+  it('leaves PLATFORM-ORIGIN deliveries (no event.account) untouched, even with no Connect wiring', async () => {
+    const app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+    });
+    const body = piSucceeded({ piId: 'pi_1102_platform', amount: 10000, methodType: 'card' });
+    expect(body).not.toHaveProperty('account');
+    const res = await postSigned(app, body);
+    expect(res.status).toBe(200);
+    expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('paid');
+    expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(1);
   });
 });

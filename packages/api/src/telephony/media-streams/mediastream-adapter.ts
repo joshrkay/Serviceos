@@ -24,6 +24,7 @@
  * inflating unbounded.
  */
 
+import { callerTranscriptText } from '../../ai/voice-turn/transcript-append';
 import { z } from 'zod';
 import { createLogger } from '../../logging/logger';
 import type {
@@ -63,6 +64,7 @@ import {
   detectLanguageFromTranscript,
   detectLanguageSwitchIntent,
   isLanguageSupported,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
 } from '../../ai/orchestration/language-detector';
 import {
   renderTtsText,
@@ -70,9 +72,10 @@ import {
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
-import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
+import { classifyCallerSafety } from '../../ai/agents/customer-calling/emergency-tier';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
@@ -143,9 +146,18 @@ export type SpeechTurnHandler = (args: {
   speechResult: string;
   callSid: string;
   tenantId: string;
+  /**
+   * #859 — the host owns the transcript append for this utterance: it has
+   * already written the `caller:` line (or deliberately skipped an empty
+   * one), so the handler must not append again. Defaults to `false` — a
+   * caller that passes nothing gets the handler's own single append.
+   */
+  transcriptAppended?: boolean;
 }) => Promise<SideEffect[]>;
 
 export interface MediaStreamAdapterDeps {
+  /** Call/account authenticated by the WebSocket upgrade, not the start frame. */
+  authenticatedCall?: { callSid: string; accountSid: string };
   store: VoiceSessionStore;
   streamingProvider: StreamingTranscriptionProvider;
   ttsProvider?: TtsProvider;
@@ -192,6 +204,13 @@ export interface MediaStreamAdapterDeps {
   }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
+  /**
+   * U5 — absolute per-call wall-clock cap (ms), wired from
+   * `VOICE_MAX_CALL_DURATION_MS`. Unlike `audioIdleTimeoutMs` it is armed
+   * ONCE at `start()` and never re-armed by media frames. Default 15 minutes
+   * ({@link DEFAULT_MAX_CALL_DURATION_MS}).
+   */
+  maxCallDurationMs?: number;
   /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
   silenceRepromptTimeoutMs?: number;
   /**
@@ -425,12 +444,16 @@ const TELEPHONY_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 
 /**
- * UB-C1 — flap guard: maximum Deepgram finish+reopen cycles per call.
- * Two covers the legitimate shapes (wrong opening language → correct one,
- * plus one explicit switch back); anything more is flapping on the
- * revenue path and is refused.
+ * UB-C1 — the per-call language flap cap. Defined in
+ * `ai/orchestration/language-detector.ts` alongside the rest of the language
+ * POLICY it belongs to (`detectLanguageSwitchIntent`, `isLanguageSupported`)
+ * and re-exported here so this module's existing importers are unchanged.
+ *
+ * It moved because a third surface now enforces it — the in-app voice-session
+ * adapter — and an in-app turn should not have to import the Deepgram
+ * websocket adapter to learn a number. See that constant's doc comment.
  */
-const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
+export { MAX_LANGUAGE_SWITCHES_PER_CALL } from '../../ai/orchestration/language-detector';
 
 /**
  * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter
@@ -525,6 +548,38 @@ interface RuntimeState {
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
+  /**
+   * U5 — the absolute per-call cap. `maxCallDurationWarnTimer` fires the
+   * spoken wrap-up {@link MAX_CALL_DURATION_WRAP_UP_LEAD_MS} before the
+   * limit (skipped for limits too short to fit it); `maxCallDurationTimer`
+   * ends the leg at the limit. Both are armed once in `start()`, are never
+   * touched by `handleMedia` (which re-arms the idle timer on every frame —
+   * the reason that timer can never cut a live call), and are cleared in
+   * `handleClose` with every other timer.
+   */
+  maxCallDurationWarnTimer: NodeJS.Timeout | null;
+  maxCallDurationTimer: NodeJS.Timeout | null;
+  /**
+   * U5 / PR #975 F3 — where the wrap-up line is in its lifecycle on this leg:
+   *   'idle'     — not spoken yet (initial; also after the caller talked over it),
+   *   'pending'  — the warn timer fired while an agent turn's TTS was in
+   *                flight; the end of that turn's `emitSideEffects` retries it,
+   *   'speaking' — the line is being rendered right now,
+   *   'spoken'   — it completed (or its TTS failed) with no caller
+   *                interruption — the only state that suppresses a re-speak.
+   * Latched to 'spoken' on completion, never on scheduling, so a barge-in
+   * `clear` that drops the queued audio leaves the leg 'idle' and the close at
+   * the limit speaks the warning once more before ending.
+   */
+  maxCallDurationWrapUp: 'idle' | 'pending' | 'speaking' | 'spoken';
+  /** U5 — the in-flight wrap-up, so the close at the limit lets it finish rather than doubling it. */
+  maxCallDurationWrapUpInFlight: Promise<void> | null;
+  /**
+   * U5 — set immediately before the cap's `handleClose('end_session')`. A
+   * forced cut is not evidence about transport health either way, so
+   * `handleClose` skips the realtime-circuit vote when this is set.
+   */
+  maxCallDurationReached: boolean;
   /**
    * T2-F05 — per-turn caller-silence reprompt timer. Armed when the
    * dedicated end-of-utterance `silence-arm-${turnId}` mark of an agent
@@ -704,6 +759,15 @@ interface RuntimeState {
    * round-trips on subsequent interims.
    */
   interimEmergencyFired: boolean;
+  /**
+   * #1220 review — barge-in hold for a `holdBargeInUntilPlayed` line (the
+   * Spanish 911 line on a Spanish E1). Set to the line's turn id when it
+   * starts; while set, caller speech does not cancel outbound audio. Cleared
+   * when Twilio acks a `silence-arm-${n}` mark with n >= this id, i.e. the
+   * line has actually played through once (audio queued is not audio heard),
+   * or when the line's synthesis fails (nothing to protect).
+   */
+  bargeInHoldFromTurnId: number | null;
   /**
    * UB-C1 — the language the LIVE Deepgram session is listening in.
    * Distinct from `session.language` (the spoken/TTS language, which the
@@ -889,6 +953,22 @@ function observeTurnLatency(startMs: number | null): void {
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
+ * U5 — default absolute per-call duration cap: 15 minutes, matching the
+ * intent of the never-wired `DEFAULT_TELEPHONY_CAPS.maxDurationMs` this cap
+ * replaces. Overridden per process by `VOICE_MAX_CALL_DURATION_MS` (wired
+ * into `deps.maxCallDurationMs` by app.ts); shared with the Gather adapter so
+ * both transports cut at the same wall-clock limit.
+ */
+export const DEFAULT_MAX_CALL_DURATION_MS = 15 * 60 * 1000;
+
+/**
+ * U5 — how long before the cap the wrap-up line is spoken, so the caller is
+ * not cut mid-sentence without warning. Limits shorter than twice this lead
+ * skip the pre-warning and speak the wrap-up at the limit instead.
+ */
+export const MAX_CALL_DURATION_WRAP_UP_LEAD_MS = 30_000;
+
+/**
  * T2-F05 — how long after the agent finishes speaking a totally silent caller
  * waits before the reprompt fires. Default 8 s: long enough for a caller
  * checking a calendar or conferring with a spouse, short enough that the line
@@ -919,6 +999,11 @@ export class TwilioMediaStreamAdapter {
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
+      maxCallDurationWarnTimer: null,
+      maxCallDurationTimer: null,
+      maxCallDurationWrapUp: 'idle',
+      maxCallDurationWrapUpInFlight: null,
+      maxCallDurationReached: false,
       silenceRepromptTimer: null,
       pendingSilenceRepromptTurnId: null,
       callerActivityGeneration: 0,
@@ -952,6 +1037,7 @@ export class TwilioMediaStreamAdapter {
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
+      bargeInHoldFromTurnId: null,
       language: 'en',
       sttKeywords: [],
       languageSwitchCount: 0,
@@ -993,6 +1079,7 @@ export class TwilioMediaStreamAdapter {
       this.handleClose('ws_error');
     });
     this.armIdleTimer();
+    this.armMaxCallDurationTimers();
   }
 
   // ─── Inbound message dispatch ──────────────────────────────────────────────
@@ -1059,6 +1146,14 @@ export class TwilioMediaStreamAdapter {
           // only arm the T2-F05 silence countdown.
           this.armSilenceRepromptTimer(turnId);
         }
+        // #1220 review — a held line's end-of-utterance ack means the caller
+        // has heard it once: caller speech may barge in again.
+        if (isSilenceArmMark && this.state.bargeInHoldFromTurnId !== null) {
+          const ackedTurnId = Number(frame.mark?.name?.slice('silence-arm-'.length));
+          if (Number.isFinite(ackedTurnId) && ackedTurnId >= this.state.bargeInHoldFromTurnId) {
+            this.state.bargeInHoldFromTurnId = null;
+          }
+        }
         // Mark-ack is the cue to drain any backpressured outbound work.
         void this.flushQueue();
         return;
@@ -1088,6 +1183,14 @@ export class TwilioMediaStreamAdapter {
         callSid,
       });
       this.closeWs(1008, 'unknown_callsid');
+      return;
+    }
+
+    const bound = this.deps.authenticatedCall;
+    if ((bound && (callSid !== bound.callSid || frame.start.accountSid !== bound.accountSid ||
+        session.twilioAccountSid !== bound.accountSid)) || (session.twilioAccountSid && !bound)) {
+      this.logSecurityEvent('authenticated_call_mismatch', { callSid });
+      this.closeWs(1008, 'authenticated_call_mismatch');
       return;
     }
 
@@ -2099,8 +2202,10 @@ export class TwilioMediaStreamAdapter {
     // opt-in gate is applied here (only detectLanguage gates internally).
     if (!isLanguageSupported(target, session.supportedLanguages ?? null)) return false;
     // Life-safety first: "hay una fuga de gas, en español por favor" must
-    // run the emergency pipeline, not be consumed by a language ack.
-    if (detectEmergency(transcript).matched) return false;
+    // run the emergency pipeline, not be consumed by a language ack. The
+    // full tier classifier, not the backstop keywords alone (#1220 review):
+    // "¿Habla español? La casa está llena de humo" is E1 with no backstop hit.
+    if (classifyCallerSafety(transcript, {}).tier !== 'E3') return false;
 
     const switched = await this.switchLanguage(target, 'explicit_request');
     if (!switched) return false;
@@ -2109,7 +2214,10 @@ export class TwilioMediaStreamAdapter {
     // appends the caller line) — keep the transcript faithful ourselves.
     this.deps.store.appendTranscript(session.id, {
       speaker: 'caller',
-      text: transcript,
+      // #850 — this consumed-turn path cannot carry an approval challenge (a
+      // language request is not a PIN), but every caller-append site applies
+      // the same guard: one unguarded site is how the others started.
+      text: callerTranscriptText(session, transcript),
       ts: Date.now(),
     });
     const ack = LANGUAGE_SWITCH_ACK[target];
@@ -2397,7 +2505,12 @@ export class TwilioMediaStreamAdapter {
       // stripped once the text is no longer the placeholder. The
       // 'confirm_intent' hint stays: its payload carries `intent`, making
       // the re-render lossless (and it's what localizes the confirm).
-      const lang = this.currentSpokenLanguage();
+      // #1220 review — a line tagged with its own language (the Spanish 911
+      // line spoken on an E1, whatever the session language) is synthesized
+      // in that language's voice.
+      const lineLanguage = (fx.payload as { language?: unknown }).language;
+      const lang: SessionLanguage =
+        lineLanguage === 'es' || lineLanguage === 'en' ? lineLanguage : this.currentSpokenLanguage();
       const templateHint = (fx.payload as { template?: unknown }).template;
       const isSubstitutedGreeting =
         (templateHint === 'greeting' || templateHint === 'greeting_with_disclosure') &&
@@ -2408,6 +2521,10 @@ export class TwilioMediaStreamAdapter {
       const text = renderTtsText(rawText, renderPayload, lang);
       let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
+      // #1220 review — a life-safety line the caller must hear once is held
+      // against barge-in until its end-of-utterance mark is acked.
+      const holdBargeIn = (fx.payload as { holdBargeInUntilPlayed?: unknown }).holdBargeInUntilPlayed === true;
+      if (holdBargeIn) this.state.bargeInHoldFromTurnId = turnId;
       // Consent ordering — scope the completion flag + byte count to THIS turn.
       this.state.turnRealAudioComplete = false;
       this.state.turnAudioBytes = 0;
@@ -2419,6 +2536,8 @@ export class TwilioMediaStreamAdapter {
         logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
         });
+        // Nothing played, so there is nothing to protect.
+        if (holdBargeIn) this.state.bargeInHoldFromTurnId = null;
       } finally {
         if (turnId === this.state.outboundTurnId) {
           this.state.agentSpeaking = false;
@@ -2436,6 +2555,12 @@ export class TwilioMediaStreamAdapter {
         // bumped) so the mark handler can recognise that ack and only that one.
         this.state.disclosureTurnId = turnId;
       }
+    }
+    // PR #975 F3 — this turn's TTS has finished streaming. If the max-duration
+    // wrap-up was deferred behind it, speak it now as its own turn, never
+    // concurrently with the one that just ended.
+    if (this.state.maxCallDurationWrapUp === 'pending') {
+      void this.speakMaxCallDurationWrapUp();
     }
   }
 
@@ -3056,6 +3181,9 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    // #1220 review — a held life-safety line (the Spanish 911 line) plays
+    // through once, even over a caller who keeps talking.
+    if (this.state.bargeInHoldFromTurnId !== null) return;
     this.clearSilenceRepromptTimer();
     this.clearEarlyFillerTimerOnly();
     this.state.earlyFillerTurnId = null;
@@ -3097,6 +3225,147 @@ export class TwilioMediaStreamAdapter {
     if (typeof this.state.audioIdleTimer.unref === 'function') {
       this.state.audioIdleTimer.unref();
     }
+  }
+
+  // ─── U5 — absolute per-call duration cap ───────────────────────────────────
+
+  /**
+   * Arm the ONE absolute wall-clock cap for this leg. Called once from
+   * `start()`; nothing re-arms it — a call that keeps streaming audio (which
+   * every Twilio call does, silence included) still ends at the limit.
+   */
+  private armMaxCallDurationTimers(): void {
+    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
+    const unref = (t: NodeJS.Timeout) => {
+      if (typeof t.unref === 'function') t.unref();
+    };
+    if (limitMs >= MAX_CALL_DURATION_WRAP_UP_LEAD_MS * 2) {
+      this.state.maxCallDurationWarnTimer = setTimeout(() => {
+        this.state.maxCallDurationWarnTimer = null;
+        void this.speakMaxCallDurationWrapUp();
+      }, limitMs - MAX_CALL_DURATION_WRAP_UP_LEAD_MS);
+      unref(this.state.maxCallDurationWarnTimer);
+    }
+    this.state.maxCallDurationTimer = setTimeout(() => {
+      this.state.maxCallDurationTimer = null;
+      void this.endForMaxCallDuration(limitMs);
+    }, limitMs);
+    unref(this.state.maxCallDurationTimer);
+  }
+
+  private clearMaxCallDurationTimers(): void {
+    if (this.state.maxCallDurationWarnTimer) {
+      clearTimeout(this.state.maxCallDurationWarnTimer);
+      this.state.maxCallDurationWarnTimer = null;
+    }
+    if (this.state.maxCallDurationTimer) {
+      clearTimeout(this.state.maxCallDurationTimer);
+      this.state.maxCallDurationTimer = null;
+    }
+  }
+
+  /**
+   * Speak the wrap-up line once, serialized with the turn pipeline (PR #975
+   * review finding 3). The warn timer is a bare timer: it used to render the
+   * line straight over whatever the agent was already saying (two overlapping
+   * utterances) and latched "spoken" on scheduling, so a barge-in `clear` that
+   * flushed the audio still left the caller hard-closed later with no warning
+   * heard. Now the line
+   *   - runs under `withSessionLock`, queued behind an in-flight `speechTurn`
+   *     exactly like the silence-reprompt expiry;
+   *   - is deferred while an agent turn's TTS is still streaming
+   *     (`agentSpeaking` — the same in-flight signal barge-in keys off; TTS
+   *     streams outside the lock, so the lock alone cannot order them) and
+   *     retried by the end of that turn's `emitSideEffects`;
+   *   - latches 'spoken' only once it completed with no caller activity during
+   *     it (`callerActivityGeneration` unchanged — the interruption signal
+   *     every transcript bumps before barge-in). An interrupted line drops
+   *     back to 'idle' so {@link endForMaxCallDuration} speaks it once more.
+   * A TTS failure is absorbed inside the turn runner and still counts as
+   * attempted, so a dead TTS never throws into the timer callback and never
+   * blocks the close that follows.
+   */
+  private async speakMaxCallDurationWrapUp(): Promise<void> {
+    const session = this.state.session;
+    if (this.state.closed || !session) return;
+    const phase = this.state.maxCallDurationWrapUp;
+    if (phase === 'speaking' || phase === 'spoken') return;
+    this.state.maxCallDurationWrapUp = 'pending';
+    try {
+      await this.deps.store.withSessionLock(session.id, async () => {
+        if (this.state.closed || this.state.maxCallDurationWrapUp !== 'pending') return;
+        // An agent turn's TTS is still streaming: leave the wrap-up pending
+        // and let that turn's emitSideEffects retry once it has finished.
+        if (this.state.agentSpeaking) return;
+        await this.speakMaxCallDurationWrapUpLine(session);
+      });
+    } catch (err) {
+      logger.warn('mediastream: max call duration wrap-up failed', {
+        error: err instanceof Error ? err.message : String(err),
+        callSid: this.state.callSid,
+      });
+    }
+  }
+
+  /**
+   * Render the wrap-up line now and record whether the caller actually got to
+   * hear it (see {@link speakMaxCallDurationWrapUp}). Idempotent while in
+   * flight: a second caller joins the same utterance instead of doubling it.
+   */
+  private speakMaxCallDurationWrapUpLine(session: VoiceSession): Promise<void> {
+    if (this.state.maxCallDurationWrapUpInFlight) return this.state.maxCallDurationWrapUpInFlight;
+    const run = async (): Promise<void> => {
+      this.state.maxCallDurationWrapUp = 'speaking';
+      const generationAtStart = this.state.callerActivityGeneration;
+      try {
+        await this.speakRecoveryLine(session, MAX_CALL_DURATION_WRAP_UP_COPY);
+      } finally {
+        this.state.maxCallDurationWrapUpInFlight = null;
+        this.state.maxCallDurationWrapUp =
+          this.state.callerActivityGeneration === generationAtStart ? 'spoken' : 'idle';
+      }
+    };
+    const inFlight = run();
+    this.state.maxCallDurationWrapUpInFlight = inFlight;
+    return inFlight;
+  }
+
+  /**
+   * The limit hit. Same speak-then-end shape as
+   * {@link speakAndEndAfterRepeatedSpeechTurnFailures}: stash a synthetic
+   * `end_session` carrying the real reason and close through the existing
+   * `end_session` path, so `finalizeOnClose` persists
+   * `voice_sessions.terminal_reason = 'max_call_duration'`. A NEW bare
+   * `handleClose` reason is deliberately not introduced —
+   * `mapCloseReasonToFinalize` would fall through to `caller_hangup` and vote
+   * the health circuit `success`. The caller is never cut in silence: a
+   * wrap-up still mid-utterance is allowed to finish, and one that was never
+   * spoken (short limit that skipped the pre-warning, deferred behind a turn
+   * that never ended in time, or flushed by a barge-in `clear`) is spoken
+   * here — directly, preempting any in-flight agent turn the way the
+   * escalation hand-off does — before the leg ends.
+   */
+  private async endForMaxCallDuration(limitMs: number): Promise<void> {
+    if (this.state.closed) return;
+    const session = this.state.session;
+    if (session) {
+      if (this.state.maxCallDurationWrapUpInFlight) {
+        await this.state.maxCallDurationWrapUpInFlight;
+      }
+      if (!this.state.closed && this.state.maxCallDurationWrapUp !== 'spoken') {
+        await this.speakMaxCallDurationWrapUpLine(session);
+      }
+      if (this.state.closed) return;
+    }
+    logger.info('mediastream: max call duration reached — ending call', {
+      callSid: this.state.callSid,
+      limitMs,
+    });
+    this.state.maxCallDurationReached = true;
+    this.state.pendingFinalizeEffects = [
+      { type: 'end_session', payload: { reason: 'max_call_duration' } },
+    ];
+    this.handleClose('end_session');
   }
 
   /**
@@ -3228,7 +3497,14 @@ export class TwilioMediaStreamAdapter {
     // earlier, more precise signal (deepgram_unexpected_close,
     // disclosure_init_failed, deepgram_reopen_failed) already recorded and this
     // blunt terminal signal is suppressed.
-    if (this.state.session && this.state.deepgramGeneration > 0) {
+    // U5 — a max-duration cut is neither: the platform ended the call, not
+    // the transport and not the caller, so it casts no vote at all (a
+    // `success` here would let a wedged realtime path reset the circuit).
+    if (
+      this.state.session &&
+      this.state.deepgramGeneration > 0 &&
+      !this.state.maxCallDurationReached
+    ) {
       if (mapCloseReasonToFinalize(reason) === 'transport_failure') {
         this.recordCircuitOutcomeOnce('failure', reason);
       } else {
@@ -3262,6 +3538,7 @@ export class TwilioMediaStreamAdapter {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;
     }
+    this.clearMaxCallDurationTimers();
     this.clearSilenceRepromptTimer();
     if (this.state.slowConsumerTimer) {
       clearTimeout(this.state.slowConsumerTimer);

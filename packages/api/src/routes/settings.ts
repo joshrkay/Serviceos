@@ -4,10 +4,12 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { updateSettingsSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { isTwilioTestNumber } from '../telephony/phone-policy';
 import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { resolveCanonicalUser, type UserRepository } from '../users/user';
 import { z } from 'zod';
 import {
   getSettings,
@@ -20,10 +22,20 @@ import {
   validateTerminologyPreferences,
 } from '../settings/settings';
 import {
+  DunningConfig,
+  DunningConfigRepository,
+  applyLateFeePolicy,
+  defaultDunningConfig,
+  lateFeePolicyOf,
+  lateFeePolicyUpdateSchema,
+} from '../invoices/dunning-config';
+import {
   isEnrollablePin,
   normalizeEnrollmentPin,
   hashVoiceApprovalPin,
   resolveVoiceApprovalPinSecret,
+  weakPinReason,
+  type WeakPinReason,
   MIN_PIN_DIGITS,
   MAX_PIN_DIGITS,
 } from '../settings/voice-approval-pin';
@@ -104,6 +116,17 @@ const voiceApprovalPinSchema = z.object({
   pin: z.string().min(1).max(32),
 });
 
+// #1051 follow-up — the refusal copy for a guessable PIN. Deliberately free of
+// example digits: the response must never echo (or hint at) the PIN sent.
+const WEAK_PIN_MESSAGES: Record<WeakPinReason, string> = {
+  repeated_digits:
+    'That PIN is too easy to guess: it repeats a single digit. Choose a less predictable PIN.',
+  sequence:
+    'That PIN is too easy to guess: it is a straight run of digits. Choose a less predictable PIN.',
+  common:
+    'That PIN is too easy to guess: it is one of the most commonly used PINs. Choose a less predictable PIN.',
+};
+
 /**
  * WS21a — strip the money-approval PIN credential out of any settings payload
  * returned to a client. Both the HMAC hash and the deprecated plaintext
@@ -124,6 +147,8 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
     const {
       voice_approval_pin_hash: _hash,
       voice_approval_challenge: _legacy,
+      // #1233 review — when the PIN last changed is not the client's business either.
+      voice_approval_pin_changed_at: _changedAt,
       ...rest
     } = escalation;
     redactedEscalation = rest;
@@ -135,17 +160,164 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
   };
 }
 
+/**
+ * #1233 review — the escalation keys only `PUT /api/settings/voice-approval-pin`
+ * may write. The generic settings PUT replaces the whole `escalation_settings`
+ * blob, so it carries these over from the stored row: it can never drop an
+ * enrolled PIN (or a legacy plaintext challenge, or the change stamp), and —
+ * because the request schema strips them — never set one.
+ */
+const PIN_CREDENTIAL_KEYS = [
+  'voice_approval_pin_hash',
+  'voice_approval_pin_changed_at',
+  'voice_approval_challenge',
+] as const;
+
+function carryPinCredential(
+  next: Partial<EscalationSettings>,
+  stored: Partial<EscalationSettings> | undefined,
+): Partial<EscalationSettings> {
+  const merged: Partial<EscalationSettings> = { ...next };
+  for (const key of PIN_CREDENTIAL_KEYS) {
+    delete merged[key];
+    const value = stored?.[key];
+    if (typeof value === 'string' && value.length > 0) merged[key] = value;
+  }
+  return merged;
+}
+
 interface SettingsRouterDependencies {
   activationRepo: PackActivationRepository;
   verticalPackRegistry: VerticalPackRegistry;
+}
+
+// ── #1011 — owner-settable per-tenant capabilities ─────────────────────────
+//
+// EXACTLY TWO keys, as a hard allowlist. This is not tidiness — it is the
+// whole authorization hop. A tenant override WINS over the platform flag
+// (flags/pg-tenant-feature-flags.ts:145-147), so a route that wrote any
+// caller-supplied key would turn `settings:update` into the power to disable
+// platform safety gates: `supervisor_agent=false` short-circuits the D-011/U3
+// default-ON trust mechanism (proposals/supervisor/service.ts:256-275), and
+// `voice_realtime=false` reconfigures the voice stack (routes/telephony.ts).
+// Both capabilities below are per-tenant opt-INS that default OFF and cost the
+// tenant nothing to leave off, which is why they are safe to hand over.
+const OWNER_CAPABILITIES = ['dropped_call_recovery', 'voice_vulnerability_triage'] as const;
+
+type OwnerCapability = (typeof OWNER_CAPABILITIES)[number];
+
+const capabilityKeySchema = z.enum(OWNER_CAPABILITIES);
+
+const capabilityUpdateSchema = z.object({
+  enabled: z.boolean(),
+});
+
+/**
+ * The slice of `PgTenantFeatureFlagRepository` this router needs. Declared as a
+ * port so the routes layer keeps zero DB-layer imports and the in-memory boot
+ * can simply not pass one.
+ */
+export interface TenantCapabilityFlagRepository {
+  /** Resolved value through the production path (override → platform → false). */
+  isEnabledForTenant(tenantId: string, flagKey: string): Promise<boolean>;
+  /** The tenant's own override, or null when it has none. */
+  getTenantOverride(tenantId: string, flagKey: string): Promise<boolean | null>;
+  setTenantFlag(
+    tenantId: string,
+    flagKey: string,
+    enabled: boolean,
+    updatedBy?: string,
+  ): Promise<void>;
+}
+
+/** Platform-flag reads, for the D5 write-boundary floor. */
+export interface PlatformFlagReader {
+  get(name: string): Promise<{ name: string; enabled: boolean } | null>;
+}
+
+export interface SettingsCapabilityDependencies {
+  tenantFlags: TenantCapabilityFlagRepository;
+  platformFlags: PlatformFlagReader;
+  /**
+   * Needed only to map the acting principal to a `users.id`. `req.auth.userId`
+   * is the CLERK SUBJECT (`payload.sub` — auth/clerk.ts:460), e.g.
+   * `user_2abc…`, or `dev_owner` under DEV_AUTH_BYPASS
+   * (auth/dev-auth-bypass.ts:207/239/246) — but
+   * `tenant_feature_flags.updated_by` is a UUID column (migration 159).
+   * Writing the subject straight in is a 500 at the database.
+   */
+  userRepo: Pick<UserRepository, 'findByTenant'>;
+}
+
+type CapabilitySource = 'tenant' | 'platform' | 'default';
+
+/**
+ * #1011 — the D5 write-boundary rule, as ONE predicate.
+ *
+ * A platform flag row only freezes a capability when it is explicitly OFF: a
+ * row that is ON is a RAMP, and the owner may still turn the capability off for
+ * their own tenant. `source === 'platform'` is NOT the same question — it only
+ * says where the current value came from — and a client that re-derived the
+ * rule from `source` alone disabled the switch on a platform row that was on,
+ * telling the owner it was "turned off platform-wide" while the server would
+ * happily have accepted the write.
+ *
+ * So the PUT's 409 and the GET's `platformFrozen` both read this, and the
+ * client is told the answer rather than recomputing it.
+ */
+function isPlatformFrozen(platformFlag: { enabled: boolean } | null): boolean {
+  return platformFlag !== null && platformFlag.enabled === false;
+}
+
+/** #1143 — the tenant's dunning config store (Pg in production, in-memory without a pool). */
+export interface SettingsDunningDependencies {
+  dunningConfigRepo: DunningConfigRepository;
+}
+
+/**
+ * #1143 — what `GET/PUT /api/settings/dunning` return: the config the overdue
+ * sweep would use for this tenant right now, and whether the owner has ever
+ * saved one (`configured: false` = the sweep is running `defaultDunningConfig`).
+ */
+function projectDunningConfig(config: DunningConfig, configured: boolean) {
+  return {
+    configured,
+    enabled: config.enabled,
+    reminderSteps: config.reminderSteps,
+    ...lateFeePolicyOf(config),
+  };
 }
 
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
   deps?: SettingsRouterDependencies,
   auditRepo?: AuditRepository,
+  capabilityDeps?: SettingsCapabilityDependencies,
+  dunningDeps?: SettingsDunningDependencies,
 ): Router {
   const router = Router();
+
+  /**
+   * Resolve one capability for the response: its live value through the
+   * production resolver, plus WHO decided it. `source` is not cosmetic — an
+   * owner looking at an OFF switch needs to know whether that is their own
+   * choice (theirs to change) or a platform freeze (not theirs, and the PUT
+   * will 409).
+   */
+  async function readCapability(
+    capDeps: SettingsCapabilityDependencies,
+    tenantId: string,
+    key: OwnerCapability,
+  ): Promise<{ enabled: boolean; source: CapabilitySource; platformFrozen: boolean }> {
+    const [enabled, override, platform] = await Promise.all([
+      capDeps.tenantFlags.isEnabledForTenant(tenantId, key),
+      capDeps.tenantFlags.getTenantOverride(tenantId, key),
+      capDeps.platformFlags.get(key),
+    ]);
+    const source: CapabilitySource =
+      override !== null ? 'tenant' : platform ? 'platform' : 'default';
+    return { enabled, source, platformFrozen: isPlatformFrozen(platform) };
+  }
 
   router.get(
     '/',
@@ -264,6 +436,38 @@ export function createSettingsRouter(
           }
         }
 
+        // #880 — reject Twilio magic test numbers (+1500555xxxx) as the
+        // business phone: it's what public intake / booking pages display and
+        // tel:-link for customers, and a magic number is never a dialable
+        // line. Unlike owner_phone above, the value is stored AS TYPED —
+        // businessPhone is a display field that may legitimately be
+        // international or carry an extension, which the NANP-only
+        // normalizeMobileE164 would reject; forcing it here 400'd
+        // previously-savable numbers (beyond #880's scope). Normalization is
+        // attempted purely so a human-formatted magic number
+        // ("(500) 555-0006") can't slip past the E.164-shaped predicate.
+        if (parsed.businessPhone !== undefined && parsed.businessPhone !== null) {
+          const trimmed = parsed.businessPhone.trim();
+          if (trimmed === '') {
+            parsed.businessPhone = null;
+          } else {
+            let checkable = trimmed;
+            try {
+              checkable = normalizeMobileE164(trimmed);
+            } catch {
+              // Not NANP-normalizable (international, extension, …) — check
+              // the raw value and store it verbatim.
+            }
+            if (isTwilioTestNumber(checkable)) {
+              throw new ValidationError(
+                'This is a Twilio test number and cannot be used as the business phone',
+                { field: 'businessPhone' },
+              );
+            }
+            parsed.businessPhone = trimmed;
+          }
+        }
+
         // Voice-parity — normalize transfer_number to E.164 (or null to
         // clear) at the boundary so the escalation/dial code can trust the
         // stored shape, exactly like owner_phone above.
@@ -312,6 +516,16 @@ export function createSettingsRouter(
               errors: validationErrors,
             });
           }
+        }
+
+        // #1233 review — the escalation blob is replaced wholesale; keep the
+        // PIN credential exactly as stored (see carryPinCredential).
+        if (parsed.escalationSettings) {
+          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
+          parsed.escalationSettings = carryPinCredential(
+            parsed.escalationSettings,
+            stored?.escalationSettings,
+          ) as typeof parsed.escalationSettings;
         }
 
         const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo);
@@ -367,6 +581,16 @@ export function createSettingsRouter(
             { field: 'pin' },
           );
         }
+        const digits = normalizeEnrollmentPin(pin);
+        // #1051 follow-up — a guessable PIN would spend the tenant-wide
+        // 5-strikes-a-day budget in one call; refuse it before anything is stored.
+        const weakness = weakPinReason(digits);
+        if (weakness) {
+          throw new ValidationError(WEAK_PIN_MESSAGES[weakness], {
+            field: 'pin',
+            reason: weakness,
+          });
+        }
         const secret = resolveVoiceApprovalPinSecret();
         if (!secret) {
           // No server secret configured — refuse rather than store an
@@ -376,7 +600,6 @@ export function createSettingsRouter(
             { field: 'pin' },
           );
         }
-        const digits = normalizeEnrollmentPin(pin);
         const hash = hashVoiceApprovalPin(digits, tenantId, secret);
 
         // Merge into the existing escalation blob (the JSONB write REPLACES
@@ -386,6 +609,9 @@ export function createSettingsRouter(
         const nextEscalation: Partial<EscalationSettings> = {
           ...(existing.escalationSettings ?? {}),
           voice_approval_pin_hash: hash,
+          // #1051 follow-up — same write as the hash: the tenant-wide PIN lock
+          // counts only strikes after this instant, so a change resets it.
+          voice_approval_pin_changed_at: new Date().toISOString(),
         };
         delete nextEscalation.voice_approval_challenge;
         const updated = await updateSettings(
@@ -438,7 +664,12 @@ export function createSettingsRouter(
         // cleared PIN can never fall back to a stale legacy credential. After
         // this, money/irreversible voice approvals refuse with the one-tap SMS.
         const escalation = resolveEscalationSettings(existing);
-        const nextEscalation: Partial<EscalationSettings> = { ...escalation };
+        const nextEscalation: Partial<EscalationSettings> = {
+          ...escalation,
+          // #1051 follow-up — clearing is a PIN change too: strikes spent
+          // against the old PIN stop counting toward the tenant-wide lock.
+          voice_approval_pin_changed_at: new Date().toISOString(),
+        };
         delete nextEscalation.voice_approval_pin_hash;
         delete nextEscalation.voice_approval_challenge;
         const updated = await updateSettings(
@@ -462,6 +693,245 @@ export function createSettingsRouter(
         }
 
         res.status(204).end();
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // ── #1011 — per-tenant capabilities (rows 2.6, 2.7) ─────────────────────
+  //
+  // `setTenantFlag` shipped with ZERO route call sites: the per-tenant writer
+  // existed and nothing could reach it, so `dropped_call_recovery` and
+  // `voice_vulnerability_triage` were switchable only by a platform admin
+  // ramping `tenantIds` on `PUT /api/admin/feature-flags/:name`. These two
+  // routes are the owner half of that, and nothing else — the admin endpoint
+  // is unchanged, `_resolve` is unchanged, and neither capability's behaviour
+  // is touched.
+  //
+  // Mounted INSIDE the existing `/api/settings` router on purpose (D12): a new
+  // top-level mount would need its own D-022/D-024 exposure review and would
+  // sit the owner surface next to `/api/admin/*`, blurring the authority split
+  // the admin endpoint keeps.
+
+  router.get(
+    '/capabilities',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!capabilityDeps) {
+          // In-memory boot has no tenant_feature_flags table. Say so rather
+          // than returning a shape that reads as "everything is off".
+          res.status(503).json({
+            error: 'CAPABILITIES_NOT_CONFIGURED',
+            message: 'Per-tenant capabilities require a database connection',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const entries = await Promise.all(
+          OWNER_CAPABILITIES.map(
+            async (key) =>
+              [key, await readCapability(capabilityDeps, tenantId, key)] as const,
+          ),
+        );
+        res.json(Object.fromEntries(entries));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.put(
+    '/capabilities/:key',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!capabilityDeps) {
+          res.status(503).json({
+            error: 'CAPABILITIES_NOT_CONFIGURED',
+            message: 'Per-tenant capabilities require a database connection',
+          });
+          return;
+        }
+
+        // The allowlist is checked BEFORE anything else touches the request:
+        // an unlisted key must never reach a write, an audit row, or a
+        // platform lookup.
+        const key = capabilityKeySchema.safeParse(req.params.key);
+        if (!key.success) {
+          res.status(400).json({
+            error: 'UNKNOWN_CAPABILITY',
+            message: `Not an owner-settable capability. Allowed: ${OWNER_CAPABILITIES.join(', ')}`,
+          });
+          return;
+        }
+
+        const { enabled } = capabilityUpdateSchema.parse(req.body ?? {});
+
+        // The tenant is taken from the authenticated session, never from the
+        // body or query — a `tenantId` sent by the caller is ignored.
+        const tenantId = req.auth!.tenantId;
+
+        // D5 — the platform floor, enforced at the WRITE boundary only. A
+        // tenant override short-circuits `_resolve` before the platform flag is
+        // ever consulted, so without this an operator's incident kill switch
+        // (`enabled: false`) could be re-armed by any owner and the freeze
+        // would not hold. Deliberately NOT a change to `_resolve`: read-side
+        // composition is out of scope on this ticket, and whether a tenant may
+        // self-grant past a platform ramp at all is an owner decision (§E.3).
+        const platformFlag = await capabilityDeps.platformFlags.get(key.data);
+        if (isPlatformFrozen(platformFlag)) {
+          res.status(409).json({
+            error: 'PLATFORM_DISABLED',
+            message:
+              'This capability is currently disabled platform-wide and cannot be changed here',
+          });
+          return;
+        }
+
+        // `req.auth.userId` is the Clerk SUBJECT, and `updated_by` is a UUID
+        // column — passing the subject straight through is a 500 at the
+        // database (caught by the #1011 artifact gate, which drove the real
+        // route against real Postgres; the integration test had been feeding a
+        // UUID subject that production never produces).
+        //
+        // `resolveCanonicalUser` is the established dual-check
+        // (`clerkUserId === raw || id === raw`, users/user.ts) already used by
+        // the en-route voice and in-app surfaces, so a canonical id keeps
+        // working too.
+        //
+        // No users row for the subject degrades ATTRIBUTION, not the write:
+        // `updated_by` is nullable, and refusing an owner's toggle because we
+        // cannot name them would be a worse failure than an unattributed row.
+        const actor = await resolveCanonicalUser(
+          capabilityDeps.userRepo,
+          tenantId,
+          req.auth!.userId,
+        );
+
+        await capabilityDeps.tenantFlags.setTenantFlag(
+          tenantId,
+          key.data,
+          enabled,
+          actor?.id,
+        );
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'feature_flag.tenant_updated',
+              entityType: 'feature_flag',
+              entityId: key.data,
+              // `scope: 'tenant'` mirrors the `scope: 'platform'` tagging at
+              // routes/feature-flags.ts:110-131 so the two authorities stay
+              // distinguishable in one operator history view.
+              metadata: {
+                scope: 'tenant',
+                flagKey: key.data,
+                value: { enabled },
+                environment: process.env.NODE_ENV ?? 'development',
+              },
+            }),
+          );
+        }
+
+        // Echo the RESOLVED state, not the requested one — the write is an
+        // override and the reader is `isEnabledForTenant`.
+        const resolved = await readCapability(capabilityDeps, tenantId, key.data);
+        res.json({ key: key.data, ...resolved });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // ── #1143 — the tenant's dunning late-fee policy (row 8.10) ─────────────
+  //
+  // `DunningConfigRepository.upsert` shipped with ZERO product callers, so
+  // every tenant ran `defaultDunningConfig()` (`lateFeeType: 'none'`) and the
+  // overdue sweep could never propose `apply_late_fee`. These two routes are
+  // the owner's write path for the late-fee policy ONLY: `enabled` and the
+  // reminder cadence are preserved from the stored row (or the default) and
+  // are not writable here (the schema is strict). Every fee the sweep derives
+  // from this policy is still an owner-approved money-class proposal.
+
+  router.get(
+    '/dunning',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!dunningDeps) {
+          res.status(503).json({
+            error: 'DUNNING_NOT_CONFIGURED',
+            message: 'Dunning settings are not available on this deployment',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const stored = await dunningDeps.dunningConfigRepo.findByTenant(tenantId);
+        res.json(projectDunningConfig(stored ?? defaultDunningConfig(tenantId), stored !== null));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.put(
+    '/dunning',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!dunningDeps) {
+          res.status(503).json({
+            error: 'DUNNING_NOT_CONFIGURED',
+            message: 'Dunning settings are not available on this deployment',
+          });
+          return;
+        }
+        const update = lateFeePolicyUpdateSchema.parse(req.body ?? {});
+        // The tenant comes from the session, never the body (strict schema).
+        const tenantId = req.auth!.tenantId;
+        const now = new Date();
+        const current =
+          (await dunningDeps.dunningConfigRepo.findByTenant(tenantId)) ??
+          defaultDunningConfig(tenantId, now);
+        const saved = await dunningDeps.dunningConfigRepo.upsert(
+          applyLateFeePolicy(current, update, now),
+        );
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.dunning.updated',
+              entityType: 'invoice_dunning_config',
+              entityId: saved.id,
+              // Policy values only (no PII) — the diff an owner or support
+              // needs to explain a late fee on a customer's invoice.
+              metadata: { previous: lateFeePolicyOf(current), next: lateFeePolicyOf(saved) },
+            }),
+          );
+        }
+
+        res.json(projectDunningConfig(saved, true));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

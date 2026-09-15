@@ -151,4 +151,110 @@ describe('Postgres integration — held-slot reaper (U6)', () => {
     });
     expect(result.reaped).toBe(0);
   });
+
+  /**
+   * T2 (fan-out entry: sweep-tenant-fanout.test.ts, "hold-reaper sweep" —
+   * real enumerator, failure isolation) — the fan-out proof shows the sweep
+   * REACHES every tenant; it never showed that reaping one tenant's expired
+   * hold leaves a NEIGHBOUR tenant's identically-shaped hold and its slot
+   * visibility untouched. `findExpiredHolds`/the cancel write are scoped by
+   * tenantId at the SQL layer — this proves it empirically rather than by
+   * reading the query.
+   */
+  it('T2 — reaping tenant A\'s expired hold never frees or hides the identical slot for tenant B', async () => {
+    const tenantB = await createTestTenant(pool);
+    const customerRepoB = new PgCustomerRepository(pool);
+    const locationRepoB = new PgLocationRepository(pool);
+    const jobRepoB = new PgJobRepository(pool);
+
+    const customerBId = crypto.randomUUID();
+    await customerRepoB.create({
+      id: customerBId,
+      tenantId: tenantB.tenantId,
+      firstName: 'Tenant',
+      lastName: 'B',
+      displayName: 'Tenant B',
+      preferredChannel: 'sms',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: tenantB.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const locationBId = crypto.randomUUID();
+    await locationRepoB.create({
+      id: locationBId,
+      tenantId: tenantB.tenantId,
+      customerId: customerBId,
+      street1: '2 Hold St',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      addressType: 'service',
+      isArchived: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const jobBId = crypto.randomUUID();
+    await jobRepoB.create({
+      id: jobBId,
+      tenantId: tenantB.tenantId,
+      customerId: customerBId,
+      locationId: locationBId,
+      jobNumber: 'JOB-REAP-B',
+      summary: 'Tenant B hold job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: tenantB.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Tenant B has a LIVE hold (not yet expired) at the IDENTICAL wall-clock
+    // window as tenant A's already-reaped `expiredHoldId` above. If the reap
+    // query were missing its tenant_id predicate, or a bulk write leaked
+    // across tenants, this row would be canceled/freed too even though it
+    // hasn't expired.
+    const liveHoldBId = crypto.randomUUID();
+    await appointmentRepo.create({
+      id: liveHoldBId,
+      tenantId: tenantB.tenantId,
+      jobId: jobBId,
+      scheduledStart: new Date('2026-06-15T20:00:00Z'),
+      scheduledEnd: new Date('2026-06-15T21:00:00Z'),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: true,
+      holdExpiryAt: new Date('2026-06-15T19:30:00Z'),
+      createdBy: tenantB.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Sweep scoped to tenant A ONLY (as every other test in this file does) —
+    // tenant B is never listed, so a correctly-scoped sweep must not touch it.
+    const result = await runHoldReaperSweep({
+      appointmentRepo,
+      auditRepo,
+      listTenantIds: async () => [tenant.tenantId],
+      logger,
+      now: () => now,
+    });
+    expect(result.reaped).toBe(0); // tenant A's hold was already reaped by the first test in this file.
+
+    // Tenant B's LIVE hold is completely untouched: not reaped, not hidden,
+    // not freed — the reap write never crossed the tenant boundary. This is
+    // the layer that matters: `findBookableSlots`' own expiry check reads
+    // the REAL wall clock (not the sweep's injected `now`), so by the time
+    // this suite runs any 2026-06-15 holdExpiryAt reads as long past on the
+    // availability API regardless of what the reaper did — an unreliable
+    // surface for this assertion. The appointment ROW is the reliable one.
+    const holdB = await appointmentRepo.findById(tenantB.tenantId, liveHoldBId);
+    expect(holdB?.status).toBe('scheduled');
+    expect(holdB?.holdPendingApproval).toBe(true);
+    expect(holdB?.holdExpiryAt?.toISOString()).toBe('2026-06-15T19:30:00.000Z');
+    expect(await auditRepo.findByEntity(tenantB.tenantId, 'appointment', liveHoldBId)).toEqual([]);
+  });
 });

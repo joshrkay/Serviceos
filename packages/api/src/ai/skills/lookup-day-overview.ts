@@ -18,6 +18,18 @@
  * Day boundaries reuse the digest's tz machinery (`resolveDayWindow` /
  * `localDateString` — reports/money-dashboard + digest-service), so
  * "today" here is exactly the digest's tenant-local calendar day.
+ *
+ * The appointment list is the WHOLE day, unfiltered by time — an
+ * already-past 8am visit is still spoken alongside a not-yet-started 2pm
+ * one (only `canceled`/`no_show` are dropped). That's the right answer
+ * for an owner's morning overview of "what happened/is happening/will
+ * happen today." `ai/skills/lookup-my-day.ts` (Task 10, 2026-08-07
+ * tradesperson plan, quality-review I5) makes the OPPOSITE, equally
+ * deliberate choice for the SAME
+ * `AppointmentRepository.findByDateRange` data: a technician asking
+ * "what's my next job?" needs only what's still ahead, so that skill
+ * additionally drops `completed` status and anything already past
+ * `scheduledEnd`.
  */
 import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
 import type { Job, JobRepository } from '../../jobs/job';
@@ -27,7 +39,7 @@ import { buildInboxPayload, listSince } from '../../proposals/inbox';
 import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString } from '../../digest/digest-service';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
-import { plural } from './spoken-format';
+import { plural, formatTime, technicianDisplayName } from './spoken-format';
 
 export interface LookupDayOverviewInput {
   tenantId: string;
@@ -88,17 +100,6 @@ const MAX_SPOKEN_URGENT_JOBS = 3;
 const INBOX_COUNT_CAP = 100;
 /** Overnight window starts at 6pm tenant-local the previous evening. */
 const OVERNIGHT_LOOKBACK_FROM_MIDNIGHT_MS = 6 * 60 * 60 * 1000;
-
-function formatTime(d: Date, timezone: string): string {
-  return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: true,
-    timeZone: timezone,
-  })
-    .format(d)
-    .replace(':00', '');
-}
 
 export async function lookupDayOverview(
   input: LookupDayOverviewInput,
@@ -165,12 +166,7 @@ export async function lookupDayOverview(
     if (deps.userRepo) {
       try {
         const users = await deps.userRepo.findByTenant(input.tenantId);
-        userNameById = new Map(
-          users.map((u) => [
-            u.id,
-            [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email,
-          ]),
-        );
+        userNameById = new Map(users.map((u) => [u.id, technicianDisplayName(u)]));
       } catch {
         // Names are decorative — never fail the overview over them.
       }

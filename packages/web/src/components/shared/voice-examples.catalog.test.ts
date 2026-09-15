@@ -19,6 +19,11 @@ const CATALOG_PATH = resolve(here, '../../../../../docs/reference/voice-action-c
 
 interface Catalog {
   speakable: Array<{ intent: string; proposalType: string; actionClass: string }>;
+  // Tradesperson wave 1, final verification — read-only lookup intents.
+  // Optional: older catalog snapshots (pre this wave) have no `lookups`
+  // key, so a stale doc fails loudly on a MISSING array rather than
+  // silently treating every lookup example as dead.
+  lookups?: string[];
   handlerNoOnramp: string[];
   gated: string[];
 }
@@ -38,13 +43,20 @@ function loadCatalog(): Catalog {
 }
 
 describe('U7: VoiceBar examples ↔ voice-action catalog', () => {
-  const speakable = new Set(loadCatalog().speakable.map((r) => r.intent));
+  const catalog = loadCatalog();
+  const speakable = new Set(catalog.speakable.map((r) => r.intent));
+  // Tradesperson wave 1, final verification — lookups (e.g.
+  // lookup_crew_schedule) never create a proposal, so they can never
+  // appear in `speakable` (see the catalog's own "lookups" section note).
+  // A VoiceBar example is still allowed to showcase one for
+  // discoverability as long as it's a documented member of this list.
+  const lookups = new Set(catalog.lookups ?? []);
 
-  it('every example intent is a speakable catalog intent', () => {
-    const dead = VOICE_EXAMPLES.filter((e) => !speakable.has(e.intent));
+  it('every example intent is a speakable or documented-lookup catalog intent', () => {
+    const dead = VOICE_EXAMPLES.filter((e) => !speakable.has(e.intent) && !lookups.has(e.intent));
     expect(
       dead,
-      `Examples referencing non-speakable intents: ${dead.map((e) => e.intent).join(', ')}`,
+      `Examples referencing intents absent from both catalog sections: ${dead.map((e) => e.intent).join(', ')}`,
     ).toEqual([]);
   });
 
@@ -55,9 +67,12 @@ describe('U7: VoiceBar examples ↔ voice-action catalog', () => {
     expect(intents.has('create_standing_instruction')).toBe(true);
   });
 
-  it('has 12-15 distinct, non-empty examples', () => {
+  it('has 12-20 distinct, non-empty examples', () => {
+    // Bound raised 15→20 at the 2026-08-07 tradesperson-plan final
+    // verification: five new entries (change order, refund, materials,
+    // service agreement, crew schedule) brought the curated set to 19.
     expect(VOICE_EXAMPLES.length).toBeGreaterThanOrEqual(12);
-    expect(VOICE_EXAMPLES.length).toBeLessThanOrEqual(15);
+    expect(VOICE_EXAMPLES.length).toBeLessThanOrEqual(20);
     expect(new Set(VOICE_EXAMPLES.map((e) => e.example)).size).toBe(VOICE_EXAMPLES.length);
     for (const e of VOICE_EXAMPLES) expect(e.example.trim().length).toBeGreaterThan(0);
   });

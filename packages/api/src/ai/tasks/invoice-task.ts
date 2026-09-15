@@ -16,6 +16,11 @@ import {
   buildStandingInstructionsSection,
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
+import { contractErrorsFrom, contractGapFields } from './task-input';
+import {
+  correctDollarScaleIfSpoken,
+  extractSpokenWholeDollarAmounts,
+} from '../resolution/price-scale-guard';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
 Given the job context, customer information, and completed work details, generate a structured invoice.
@@ -112,37 +117,6 @@ function customerReferenceFrom(context: TaskContext): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed.slice(0, 200) : undefined;
-}
-
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload` (it stores them as `details.errors`, each
- * formatted `"<path>: <message>"`). Falls back to the error message so a
- * future error shape still leaves a breadcrumb on the proposal.
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/**
- * Map contract errors onto operator-facing `missingFields` entries: the
- * leading path segment of each Zod issue. Object-level issues carry an EMPTY
- * path, so they map to 'customerId' — the gap the operator has to fill on
- * this contract.
- */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'customerId');
-  }
-  return [...fields];
 }
 
 function buildPartialInvoicePayload(parsed: Record<string, unknown> | null): Record<string, unknown> {
@@ -294,12 +268,26 @@ export class InvoiceTaskHandler implements TaskHandler {
     // and `normalizeDraftLineItems` (execution/handlers.ts) re-validates
     // against the enum again before the row is ever written — so nothing
     // downstream trusts this raw value on its own.
+    // #909 (2026-08-31 live sweep, INV-0022) — the LLM's dollars->cents
+    // scale is nondeterministic (same response, one line converted
+    // correctly and one didn't — see price-scale-guard.ts's own doc
+    // comment for the full live shape and why the correction is
+    // evidence-gated against the spoken utterance rather than a blind
+    // "small price -> multiply" floor). Computed once per draft, outside
+    // the per-line map below.
+    const spokenDollarAmounts = extractSpokenWholeDollarAmounts(context.message);
     if (Array.isArray(payload.lineItems)) {
       payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>).map((li, idx) => {
         const qty = Number(li.quantity ?? 1) || 1;
         const rawCents = Number(li.unitPriceCents ?? li.unitPrice);
+        const scaleCorrectedCents =
+          Number.isFinite(rawCents) && rawCents >= 0
+            ? correctDollarScaleIfSpoken(Math.round(rawCents), spokenDollarAmounts)
+            : rawCents;
         const unitPriceCents =
-          Number.isFinite(rawCents) && rawCents >= 0 ? Math.round(rawCents) : undefined;
+          Number.isFinite(scaleCorrectedCents) && scaleCorrectedCents >= 0
+            ? Math.round(scaleCorrectedCents)
+            : undefined;
         return {
           id: typeof li.id === 'string' ? li.id : `li-${idx + 1}`,
           description: typeof li.description === 'string' ? li.description : 'Service',
@@ -421,7 +409,7 @@ export class InvoiceTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'customerId')) {
         if (!missingFields.includes(field)) missingFields.push(field);
       }
       confidenceScore = Math.min(confidenceScore, CONTRACT_VIOLATION_CONFIDENCE_CAP);

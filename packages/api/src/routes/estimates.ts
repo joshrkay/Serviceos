@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createEstimateSchema,
   updateEstimateSchema,
@@ -43,6 +44,7 @@ import { JobRepository } from '../jobs/job';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { convertEstimateToInvoice } from '../invoices/convert-estimate';
+import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { applyBps, resolveSelectedLineItems } from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
@@ -119,6 +121,9 @@ export function createEstimateRouter(
   // (resolved estimate → job → customer) so the UI stops rendering the
   // literal "Customer" fallback. Optional so legacy harnesses build.
   customerRepo?: CustomerRepository,
+  // #1203 — convert-to-invoice refuses an estimate billed by a milestone plan.
+  // Optional so legacy harnesses build (the check is skipped when absent).
+  scheduleRepo?: InvoiceScheduleRepository,
 ): Router {
   const router = Router();
 
@@ -396,6 +401,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const result = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
@@ -419,6 +425,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!revisionDeps?.editDeltaRepo) {
@@ -458,6 +465,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!revisionDeps?.docRevisionRepo) {
@@ -534,6 +542,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     updateHandler
   );
 
@@ -542,6 +551,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     updateHandler
   );
 
@@ -555,6 +565,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
@@ -585,6 +596,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:delete'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
@@ -614,6 +626,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:create'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const estimateNumber = await getNextEstimateNumber(req.auth!.tenantId, settingsRepo);
@@ -654,6 +667,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:create'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!templateRepo) {
@@ -700,6 +714,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:create'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!jobRepo || !moneyStateDeps) {
@@ -719,6 +734,7 @@ export function createEstimateRouter(
           moneyStateDeps: refreshDeps,
           actorId: req.auth!.userId,
           logger,
+          scheduleRepo,
         });
         if (!invoice) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
@@ -780,6 +796,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const { status } = req.body;
@@ -897,6 +914,7 @@ export function createEstimateRouter(
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
+    notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!sendService) {
@@ -922,6 +940,12 @@ export function createEstimateRouter(
           tenantId: req.auth!.tenantId,
           estimateId: req.params.id,
           ...parsed.data,
+          // #1145 — distinguishes this owner-triggered manual send from an
+          // unrelated automatic reminder (estimate-nudge.ts) or proposal-
+          // execution send (estimate-delivery-adapter.ts) landing in the
+          // same wall-clock minute, so the two don't collide on
+          // idx_dispatches_idempotency.
+          idempotencyContext: 'owner',
         });
         // §6 Time-to-Cash. sendEstimate transitions the estimate to
         // 'sent' inside SendService (not via transitionEstimateStatus),

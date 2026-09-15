@@ -1,4 +1,5 @@
-import { test, expect, Page } from '@playwright/test';
+import { Page } from '@playwright/test';
+import { test, expect, skipUnlessAuthedStack } from './helpers/dev-auth';
 import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
@@ -15,11 +16,12 @@ import { hasRealClerkPublishableKey } from './helpers/clerk-key';
  * The backend is mocked via page.route — the page is public
  * (view-token-gated) and these are pure layout assertions, so no DB or
  * Clerk journey secrets are needed beyond the UI bundle booting with a
- * real Clerk publishable key (CI placeholder is not enough).
+ * real Clerk publishable key (CI placeholder is not enough) OR the
+ * chromium-devauth project (e2e/helpers/dev-auth.ts), which boots the same
+ * public bundle without touching Clerk's CDN — this page is outside the
+ * auth-gated route tree, so dev-auth's always-"signed in" shim is harmless
+ * here.
  */
-
-// Real Clerk pk (or deployed base) — placeholder alone loads clerk-js and fails.
-const hasClerk = hasRealClerkPublishableKey();
 
 const LONG_DESCRIPTION =
   'TanklessWaterHeaterModelRTGH95DVLN2SerialAB0123456789XYZ Replacement with recirculation pump';
@@ -73,10 +75,13 @@ async function horizontalOverflow(page: Page): Promise<number> {
 }
 
 test.describe('estimate approval — mobile layout', () => {
-  test.skip(
-    !hasClerk,
-    'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests',
-  );
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      hasRealClerkPublishableKey(),
+      'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests (or run under the chromium-devauth project)',
+    );
+  });
 
   test.describe('320px (smallest supported phone)', () => {
     test.use({ viewport: { width: 320, height: 690 } });

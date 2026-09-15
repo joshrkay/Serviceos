@@ -1,0 +1,5 @@
+              tenant_id               |                    actor_id                     | actor_role |           event_type           | entity_type |              entity_id               
+--------------------------------------+-------------------------------------------------+------------+--------------------------------+-------------+--------------------------------------
+ ff9c6525-5011-448d-9b44-eb18d91a7963 | user_e2e_atech_305e14a57cb244cebd1cb67575c36799 | technician | appointment.en_route_triggered | appointment | 114da062-d049-473a-890d-fcb9a991d293
+(1 row)
+

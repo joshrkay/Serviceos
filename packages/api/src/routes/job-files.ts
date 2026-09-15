@@ -3,8 +3,10 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { MAX_FILE_SIZE, StorageProvider, UploadRequest, validateUpload } from '../files/file-service';
 import { JobFileRepository } from '../files/job-file-repository';
+import { JobRepository } from '../jobs/job';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 
 interface UploadBody {
   filename?: string;
@@ -17,10 +19,17 @@ export interface JobFilesRouterDeps {
   storage: StorageProvider;
   bucket: string;
   auditRepo: AuditRepository;
+  /**
+   * #1187 — a well-formed but unknown job id must not write an orphan
+   * `files` row (entity_id is TEXT, so Postgres never rejects it itself).
+   * Only `findById` is used, tenant-scoped, so a tenant B job id seen from
+   * tenant A also resolves to "missing".
+   */
+  jobRepo: Pick<JobRepository, 'findById'>;
 }
 
 export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
-  const { jobFileRepo, storage, bucket, auditRepo } = deps;
+  const { jobFileRepo, storage, bucket, auditRepo, jobRepo } = deps;
   const router = Router();
 
   const createUploadUrl = asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
@@ -44,6 +53,16 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
 
     if (uploadRequest.sizeBytes > MAX_FILE_SIZE) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'File size exceeds maximum allowed' });
+      return;
+    }
+
+    // #1187 — look the job up through the tenant-scoped repository before
+    // writing. Unlike job_photos/customer_group_members, files.entity_id
+    // is TEXT (no FK), so an unknown job id wrote an orphan row and a
+    // storage URL and still answered 201.
+    const job = await jobRepo.findById(req.auth!.tenantId, jobId);
+    if (!job) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
       return;
     }
 
@@ -92,6 +111,10 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    // #1187 — a malformed job id would otherwise reach jobRepo.findById's
+    // uuid-typed column comparison and 500; the id names nothing either
+    // way, so answer 404 for both a malformed and a well-formed-unknown id.
+    notFoundOnMalformedId('Job not found'),
     createUploadUrl
   );
 
@@ -100,6 +123,7 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job not found'),
     createUploadUrl
   );
 
@@ -125,6 +149,7 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job file not found', 'fileId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const file = await jobFileRepo.findById(req.auth!.tenantId, req.params.fileId);
       if (!file || file.jobId !== req.params.id) {

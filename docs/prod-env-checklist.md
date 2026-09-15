@@ -43,6 +43,7 @@
 | `ONE_TAP_APPROVE_SECRET` | One-tap approve links (digest "APPROVE"/"Invoice it", unsupervised queue_and_sms) are **silently omitted** in prod/staging — digests still send, but without action links. No boot failure, no warning. Generate: `openssl rand -hex 32` |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
+| `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | LLM trace export (U10, `packages/api/src/ai/gateway/trace-exporter.ts`) is a no-op — zero network calls; gateway completions stay visible only via `ai_runs` + Prometheus. Both required or neither. Companions: `LANGFUSE_BASE_URL` (default `https://cloud.langfuse.com`; set for self-hosted) and `LANGFUSE_CAPTURE_CONTENT=true` to also export prompts/replies (off by default — voice traces carry caller transcripts — and redacted when on) |
 
 ## SLO monitoring / operator alerting (WS15 — all optional, safe defaults)
 
@@ -76,7 +77,9 @@ Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
 | Variable | Notes |
 |----------|-------|
 | `WEB_URL` | Stripe success/cancel URLs, upgrade emails |
-| `STRIPE_PRICE_ID` | Onboarding trial subscription price |
+| `STRIPE_BASIC_PRICE_ID` | Onboarding trial — Basic plan price (must be an active, USD, monthly, $50.00 recurring price on an active product; validated live against Stripe on every checkout and by `GET /api/onboarding/billing/plans`) |
+| `STRIPE_ENTERPRISE_PRICE_ID` | Onboarding trial — Enterprise plan price (active, USD, monthly, $150.00 recurring; same live validation) |
+| `STRIPE_PRICE_ID` | **Deprecated.** Legacy single-plan trial price. Superseded by the two vars above for the onboarding checkout route; still read by `scripts/provision-tenant.ts` and the legacy (no `planId`) `createTrialCheckoutSession` path |
 
 ## Deploy topology (web + worker split)
 

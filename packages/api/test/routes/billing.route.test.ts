@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createBillingRouter } from '../../src/routes/billing';
 import { BillingService } from '../../src/billing/subscription';
+import { AppError } from '../../src/shared/errors';
 import { StripeConnectService } from '../../src/billing/stripe-connect';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -151,6 +152,46 @@ describe('POST /api/billing/portal-session — Tier 4 Subscription (Rivet)', () 
       .post('/api/billing/portal-session')
       .send({ returnUrl: 'https://app.example.com/settings' });
     expect(res.status).toBe(503);
+  });
+
+  it('passes the structured stale-customer 502 through to the response body (#873)', async () => {
+    // The service layer pins WHAT the AppError carries
+    // (test/billing/subscription.test.ts); this pins that toErrorResponse
+    // delivers all of it — status, code, actionable message, and the
+    // machine-readable details the web needs to render a recovery state
+    // instead of a dead-end toast.
+    const service = makeService({
+      getOrCreatePortalUrl: vi.fn(async () => {
+        throw new AppError(
+          'BILLING_PORTAL_FAILED',
+          "Stripe couldn't open the billing portal: No such customer: 'cus_UswJPdKUh7f1eg'" +
+            ' The saved Stripe customer for this account no longer exists — contact support to re-link billing.',
+          502,
+          {
+            stripeStatus: 404,
+            stripeCode: 'resource_missing',
+            reason: 'stripe_customer_missing',
+            stripeCustomerId: 'cus_UswJPdKUh7f1eg',
+          },
+        );
+      }),
+    } as Partial<BillingService>);
+    const app = buildApp({ service, email: 'owner@example.com' });
+
+    const res = await request(app)
+      .post('/api/billing/portal-session')
+      .send({ returnUrl: 'https://app.example.com/settings' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('BILLING_PORTAL_FAILED');
+    expect(res.body.message).toContain("No such customer: 'cus_UswJPdKUh7f1eg'");
+    expect(res.body.message).toContain('contact support to re-link billing');
+    expect(res.body.details).toMatchObject({
+      stripeStatus: 404,
+      stripeCode: 'resource_missing',
+      reason: 'stripe_customer_missing',
+      stripeCustomerId: 'cus_UswJPdKUh7f1eg',
+    });
   });
 });
 

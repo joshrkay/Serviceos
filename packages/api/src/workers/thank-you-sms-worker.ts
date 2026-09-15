@@ -41,13 +41,45 @@ import { CustomerRepository } from '../customers/customer';
 import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
+import {
+  SmsSuppressedError,
+  type SmsSuppressionReason,
+} from '../notifications/gated-message-delivery';
+
+/**
+ * Gate verdicts that are permanent for THIS customer: they reflect a consent
+ * state that cannot change without the customer acting, so the job is stamped
+ * and never re-selected — the same treatment as the `on_dnc` guard below.
+ *
+ * Everything else stays RETRYABLE, and the set is an allowlist so a reason
+ * added later defaults to retryable rather than to silent discard.
+ *
+ *  - `channel_disabled` is the operator kill switch (`TELEPHONY_ENABLED=false`).
+ *    It is thrown ahead of the owner bypass and of any consent evaluation, and
+ *    the env is read per send, so it is by construction temporary. Stamping it
+ *    would permanently discard every eligible thank-you processed during an
+ *    incident-response shutdown, and they would never send once telephony came
+ *    back.
+ *  - `missing_consent_context` can now only mean a wiring regression in this
+ *    worker (it forwards both fields below). That belongs in the failed counter
+ *    and the warn log, not in a stamp that silently consumes customer messages.
+ *
+ * Caught in review on PR #994 (Codex P1) — against the fix for the P1 one round
+ * earlier, which caught `SmsSuppressedError` wholesale.
+ */
+const PERMANENT_GATE_REASONS: ReadonlySet<SmsSuppressionReason> = new Set<SmsSuppressionReason>([
+  'no_consent',
+  'dnc',
+  'revoked',
+]);
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
-import { withSendClaim } from '../notifications/send-claim-ledger';
+import { withSendClaim, readSendClaimStatus } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
+const THANK_YOU_SENT_EVENT = 'notification.thank_you_sms.sent';
 
 export interface ThankYouSmsWorkerDeps {
   /** Source of truth for eligibility queries (cross-table jobs + tenant_settings). */
@@ -211,6 +243,18 @@ function thankYouClaimKey(jobId: string): string {
   return `thank_you_sms:${jobId}`;
 }
 
+/**
+ * #1140 — a DISTINCT claim_key namespace from `thankYouClaimKey`, used only
+ * to gate the `notification.thank_you_sms.sent` audit write itself (see the
+ * audit `withSendClaim` at the bottom of `sendOneThankYou`). The send-claim key above
+ * protects the PROVIDER call (at most one real SMS); this one protects the
+ * bookkeeping that follows it (at most one audit row), which can be reached
+ * by more than one caller once the send-claim is already `'sent'`.
+ */
+function thankYouAuditClaimKey(jobId: string): string {
+  return `thank_you_sms_audit:${jobId}`;
+}
+
 async function sendOneThankYou(
   deps: ThankYouSmsWorkerDeps,
   pool: Pool,
@@ -223,6 +267,22 @@ async function sendOneThankYou(
     // Job vanished between SELECT and now — suppress so we don't loop.
     await markHandled(deps, tenantId, jobId, null, 'job_not_found');
     return 'suppressed';
+  }
+
+  // #1184 review (PR #1196) — a job whose SMS ALREADY went out is past every
+  // suppression decision. Since #1184 "delivered, audit write failed, job left
+  // unstamped" is a normal, retryable state, and the customer can opt out in
+  // between — a STOP reply to the thank-you itself lands them on the DNC list,
+  // or the owner revokes smsConsent. Running the checks below first would stamp
+  // the job with a `suppressed` audit row for a message that was delivered, and
+  // the `sent` row would never be written. So learn that the send claim is
+  // 'sent' BEFORE any suppression check and go straight to the reconcile.
+  if ((await readSendClaimStatus(pool, tenantId, thankYouClaimKey(jobId))) === 'sent') {
+    deps.logger.info('Thank-you SMS sweep: send already completed, reconciling audit + stamp', {
+      tenantId,
+      jobId,
+    });
+    return recordSentAndStamp(deps, pool, tenantId, jobId, job.customerId);
   }
 
   const customer = await deps.customerRepo.findById(tenantId, job.customerId);
@@ -256,9 +316,40 @@ async function sendOneThankYou(
   // send and the thankYouSmsSentAt write can't resend on the next tick. A
   // sendFn throw releases the claim (withSendClaim) and rethrows — the outer
   // per-job catch above leaves thankYouSmsSentAt null so the next sweep retries.
-  const claimResult = await withSendClaim(pool, tenantId, thankYouClaimKey(jobId), () =>
-    deps.dispatcher.send({ to: customer.primaryPhone as string, body }),
-  );
+  // WS1 — the dispatcher tags every send customer-class, and the central
+  // GatedMessageDelivery wrapper FAILS CLOSED without both of these:
+  // `missing_consent_context` for a missing consent snapshot, and again for a
+  // missing tenantId (the DNC list and consent ledger are per-tenant). With
+  // `TCPA_CONSENT_ENFORCEMENT` unset in prod/staging the config resolves it to
+  // 'block', so omitting them suppressed EVERY thank-you SMS in production
+  // while every test passed against a substitute dispatcher. The two guards
+  // above already established consent and DNC for this customer; forwarding
+  // them is what lets the gate see what this worker already checked.
+  // Caught in review on PR #994 (Codex P1). Mirrors `feedback-send.ts:69`.
+  let claimResult: Awaited<ReturnType<typeof withSendClaim>>;
+  try {
+    claimResult = await withSendClaim(pool, tenantId, thankYouClaimKey(jobId), () =>
+      deps.dispatcher.send({
+        to: customer.primaryPhone as string,
+        body,
+        tenantId,
+        consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+      }),
+    );
+  } catch (err) {
+    if (err instanceof SmsSuppressedError && PERMANENT_GATE_REASONS.has(err.reason)) {
+      // Terminal, not transient. The gate consults the consent ledger, which
+      // this worker does not read, so a cross-channel revocation can suppress a
+      // send whose local consent + DNC checks both passed. That verdict will
+      // not change on the next tick: stamp it like the `on_dnc` path above
+      // rather than leaving the row to be re-selected forever.
+      await markHandled(deps, tenantId, jobId, customer.id, `consent_gate:${err.reason}`);
+      return 'suppressed';
+    }
+    // Every other suppression — the kill switch above all — falls through to
+    // the per-job catch, which leaves the stamp null so the next sweep retries.
+    throw err;
+  }
   if (claimResult.outcome === 'duplicate') {
     if (claimResult.priorStatus === 'sent') {
       // The send for this job already went out (a prior attempt completed the
@@ -268,7 +359,9 @@ async function sendOneThankYou(
       // eligibility query re-selects this job every tick forever and, since it
       // orders oldest-first under LIMIT 500, enough unreconciled rows can
       // eventually starve newer eligible jobs (Codex P2, PR #705). Falls
-      // through to the same stamp + audit the happy path runs.
+      // through to the same stamp + audit the happy path runs. (The 'sent'
+      // pre-check at the top of this function catches the common case; this
+      // branch covers a concurrent attempt finishing the send in between.)
       deps.logger.info('Thank-you SMS sweep: send already completed, reconciling missing stamp', {
         tenantId,
         jobId,
@@ -285,14 +378,89 @@ async function sendOneThankYou(
     }
   }
 
+  return recordSentAndStamp(deps, pool, tenantId, jobId, customer.id);
+}
+
+/**
+ * The bookkeeping for a thank-you SMS that has been delivered: exactly one
+ * `notification.thank_you_sms.sent` audit row, then the stamp. Reached by the
+ * attempt that just sent, and by every reconcile of an already-'sent' claim.
+ */
+async function recordSentAndStamp(
+  deps: ThankYouSmsWorkerDeps,
+  pool: Pool,
+  tenantId: string,
+  jobId: string,
+  customerId: string,
+): Promise<SendOutcome> {
+  // #1140 — exactly one notification.thank_you_sms.sent audit event per job,
+  // however many code paths converge here for the SAME real send: the attempt
+  // that just won the send claim, OR a reconcile of an already-'sent' claim
+  // running because a prior attempt's own audit/stamp hasn't landed yet — the
+  // eligibility SELECT and the stamp UPDATE are not in one transaction, so TWO
+  // overlapping sweep ticks can both observe thank_you_sms_sent_at IS NULL for
+  // the same already-'sent' claim and both reach this function. A SEPARATE
+  // claim_key namespace in the same send_claims ledger turns "write the audit"
+  // itself into a claim, so only one of any number of concurrent or sequential
+  // callers writes it. No migration — reuses the existing send_claims table.
+  //
+  // #1184 — and the claim is spent only once the row is WRITTEN. It is taken
+  // as 'claimed' and flips to 'sent' only after `auditRepo.create` resolves
+  // (withSendClaim's deferred mode: this "send" has no provider phase, so the
+  // claim never passes through the never-reclaimed 'sending' state). A throw
+  // releases the claim and propagates to the per-job catch; a crash leaves a
+  // 'claimed' row that `claimSend` stale-reclaims. Either way the stamp below
+  // has NOT been written, so the job is re-selected and the next sweep
+  // reconciles the audit (no resend: the SMS claim is already 'sent'). With
+  // no auditRepo wired there is nothing to record, so no claim is spent.
+  const auditRepo = deps.auditRepo;
+  if (auditRepo) {
+    const auditClaim = await withSendClaim(
+      pool,
+      tenantId,
+      thankYouAuditClaimKey(jobId),
+      async () => {
+        // #1184 review (PR #1196) — the audit row and the claim's completion
+        // are separate statements (the audit repository runs in its own
+        // tenant-scoped transaction), so the row can commit while the
+        // completion fails; the claim then stays 'claimed' and a sweep past the
+        // stale window reclaims it. Checking for the committed row under the
+        // claim makes that reclaim complete the claim instead of writing a
+        // second row.
+        const existing = await auditRepo.findByEntity(tenantId, 'job', jobId);
+        if (existing.some((e) => e.eventType === THANK_YOU_SENT_EVENT)) {
+          deps.logger.info('Thank-you SMS sweep: sent audit row already committed, completing its claim', {
+            tenantId,
+            jobId,
+          });
+          return;
+        }
+        await emitAudit(deps, { tenantId, jobId, customerId, outcome: 'sent' });
+      },
+      undefined,
+      { deferSendingUntilProviderStart: true },
+    );
+    if (auditClaim.outcome === 'duplicate') {
+      if (auditClaim.priorStatus !== 'sent') {
+        // Another attempt holds the audit claim and has not written the row
+        // yet. It stamps once its row lands; if its write fails, the stamp
+        // stays null so a later sweep records the audit. Stamping here would
+        // strand the job with no audit row.
+        deps.logger.info('Thank-you SMS sweep: audit write in flight by another attempt, not stamping', {
+          tenantId,
+          jobId,
+        });
+        return 'suppressed';
+      }
+      deps.logger.info('Thank-you SMS sweep: audit already recorded for this send, skipping duplicate', {
+        tenantId,
+        jobId,
+      });
+    }
+  }
+
   await deps.jobRepo.update(tenantId, jobId, {
     thankYouSmsSentAt: (deps.now ?? (() => new Date()))(),
-  });
-  await emitAudit(deps, {
-    tenantId,
-    jobId,
-    customerId: customer.id,
-    outcome: 'sent',
   });
   return 'sent';
 }
@@ -333,7 +501,7 @@ async function emitAudit(
     actorRole: 'system',
     eventType:
       input.outcome === 'sent'
-        ? 'notification.thank_you_sms.sent'
+        ? THANK_YOU_SENT_EVENT
         : 'notification.thank_you_sms.suppressed',
     entityType: 'job',
     entityId: input.jobId,

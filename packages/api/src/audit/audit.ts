@@ -24,10 +24,35 @@ export interface AuditEventInput {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * #1051 follow-up / #1233 review — the audit rows the tenant-wide voice
+ * money-approval PIN lock is derived from: an attempt RESERVED before a spoken
+ * code is compared, the row that clears one (a correct code, a cancel, a
+ * refusal over the budget), and the wrong-code rows that settle one (their
+ * `metadata.attemptId`). An attempt counts until it is cleared. Read by
+ * `findVoiceApprovalPinLockEvents`, served by migration 245's
+ * idx_audit_events_tenant_created_at.
+ */
+export const VOICE_APPROVAL_PIN_ATTEMPT_EVENT = 'proposal.voice_approval_pin_attempt';
+export const VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT = 'proposal.voice_approval_pin_attempt_cleared';
+export const VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES = [
+  VOICE_APPROVAL_PIN_ATTEMPT_EVENT,
+  VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT,
+  'proposal.voice_approval_challenge_failed',
+  'proposal.voice_challenge_lockout',
+] as const;
+
 export interface AuditRepository {
   create(event: AuditEvent): Promise<AuditEvent>;
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<AuditEvent[]>;
   findByCorrelation(tenantId: string, correlationId: string): Promise<AuditEvent[]>;
+  /**
+   * #1051 follow-up — this tenant's `VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES` rows
+   * created at or after `since`, oldest first, across EVERY voice session.
+   * Required (not optional like `findRecentByTenant`): the tenant-wide PIN lock
+   * fails closed on a repository that cannot answer it.
+   */
+  findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]>;
   /**
    * Epic 12.7 — tenant-wide chronological read (newest first) backing the
    * activity feed. Optional on the interface (matching findByCustomer /
@@ -79,6 +104,19 @@ export class InMemoryAuditRepository implements AuditRepository {
     return this.events.filter(
       (e) => e.tenantId === tenantId && e.correlationId === correlationId
     );
+  }
+
+  async findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]> {
+    const types: readonly string[] = VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES;
+    return this.events
+      .filter(
+        (e) =>
+          e.tenantId === tenantId &&
+          types.includes(e.eventType) &&
+          e.createdAt.getTime() >= since.getTime(),
+      )
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((e) => ({ ...e }));
   }
 
   async findRecentByTenant(

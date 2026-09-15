@@ -12,6 +12,9 @@ import {
   formatUsdCentsFixed,
   formatUsdCentsWhole,
   formatUsdCentsPlain,
+  isCentsKey,
+  parseMoneyToCents,
+  centsToInputValue,
 } from './money.js';
 import { resolveDbCheckSet } from './db-check.js';
 
@@ -169,5 +172,44 @@ describe('formatUsdCentsPlain', () => {
     expect(formatUsdCentsPlain(0)).toBe('$0.00');
     expect(formatUsdCentsPlain(123450)).toBe('$1234.50');
     expect(formatUsdCentsPlain(2505)).toBe('$25.05');
+  });
+});
+
+/**
+ * Review J5 — the money-INPUT half (dollars typed by an operator ⇄ integer
+ * cents on the wire). Behaviour mirrors packages/mobile's local twins, which
+ * this module is the canonical home for.
+ */
+describe('isCentsKey / parseMoneyToCents / centsToInputValue', () => {
+  it('recognises integer-cents payload keys', () => {
+    expect(isCentsKey('proposedUnitPriceCents')).toBe(true);
+    expect(isCentsKey('amountCents')).toBe(true);
+    expect(isCentsKey('quantity')).toBe(false);
+    expect(isCentsKey('centsPerMile')).toBe(false);
+  });
+
+  it('parses dollar input to integer cents with string math', () => {
+    expect(parseMoneyToCents('80')).toBe(8000);
+    expect(parseMoneyToCents('123.45')).toBe(12345);
+    expect(parseMoneyToCents('123.4')).toBe(12340);
+    expect(parseMoneyToCents('$1,299.50')).toBe(129950);
+    // The classic float trap: 0.29 * 100 === 28.999999999999996.
+    expect(parseMoneyToCents(' 0.29 ')).toBe(29);
+    expect(parseMoneyToCents('290000')).toBe(29_000_000);
+  });
+
+  it('returns null rather than a wrong number for non-money input', () => {
+    expect(parseMoneyToCents('')).toBeNull();
+    expect(parseMoneyToCents('two ninety')).toBeNull();
+    expect(parseMoneyToCents('1.234')).toBeNull();
+    expect(parseMoneyToCents('-5')).toBeNull();
+  });
+
+  it('round-trips cents through the input representation', () => {
+    for (const cents of [0, 29, 8900, 12345, 29_000_000]) {
+      expect(parseMoneyToCents(centsToInputValue(cents))).toBe(cents);
+    }
+    expect(centsToInputValue(8900)).toBe('89.00');
+    expect(centsToInputValue(-500)).toBe('-5.00');
   });
 });

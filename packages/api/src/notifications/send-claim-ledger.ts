@@ -224,8 +224,32 @@ export interface WithSendClaimOptions {
    * preparation and only flips to `'sending'` for the brief window around the
    * provider call itself. `sendFn`s that are ONLY the provider call don't need
    * this and should leave it unset.
+   *
+   * #1184 — a `sendFn` with NO provider call at all (a bookkeeping write such as
+   * the thank-you worker's completion audit row) sets this and never calls
+   * `markProviderStarting()`: the claim stays `'claimed'` (stale-reclaimable)
+   * until `sendFn` resolves, then becomes `'sent'`; a throw releases it.
    */
   deferSendingUntilProviderStart?: boolean;
+}
+
+/**
+ * The current status of a claim, or null when no row exists. A read only —
+ * never a claim. #1184 review: lets a caller learn that a provider send
+ * already completed (`'sent'`) BEFORE running checks that would otherwise
+ * treat the occasion as never sent.
+ */
+export async function readSendClaimStatus(
+  pool: Pool,
+  tenantId: string,
+  claimKey: string,
+): Promise<'claimed' | 'sending' | 'sent' | null> {
+  const res = await pool.query(
+    `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+    [tenantId, claimKey],
+  );
+  const status = res.rows[0]?.status;
+  return status === 'sent' || status === 'claimed' || status === 'sending' ? status : null;
 }
 
 /** Read the losing claim's current status and shape it into a duplicate outcome. */
@@ -234,16 +258,8 @@ async function duplicateOutcome<T>(
   tenantId: string,
   claimKey: string,
 ): Promise<SendClaimOutcome<T>> {
-  const res = await pool.query(
-    `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
-    [tenantId, claimKey],
-  );
-  const status = res.rows[0]?.status;
-  return {
-    outcome: 'duplicate',
-    priorStatus:
-      status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
-  };
+  const status = await readSendClaimStatus(pool, tenantId, claimKey);
+  return { outcome: 'duplicate', priorStatus: status ?? 'unknown' };
 }
 
 /**

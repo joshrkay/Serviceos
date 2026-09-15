@@ -5,10 +5,16 @@
  * (displayName, firstName, lastName, primaryPhone, email) and that
  * displayName is correctly computed from firstName + lastName.
  */
+import express from 'express';
 import request from 'supertest';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
-import type { Express } from 'express';
+import type { Express, NextFunction, Request, Response } from 'express';
+import { createCustomerRouter } from '../../src/routes/customers';
+import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
+import { InMemoryCustomerMergeRepository } from '../../src/customers/merge';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 async function createCustomer(app: Express, overrides: Record<string, unknown> = {}) {
   return request(app)
@@ -319,5 +325,108 @@ describe('POST /api/customers/:id/merge (Story 4.6)', () => {
       .post('/api/customers/ghost/merge')
       .send({ losingId: loser.body.id });
     expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * `customers.id` is a Postgres `uuid` column (packages/api/src/customers/
+ * pg-customer.ts — `WHERE tenant_id = $1 AND id = $2`). A malformed id
+ * (e.g. the literal "new", from the web app's `/customers/new` URL landing
+ * on the customer-detail page before it had a real create route) never
+ * reaches `InMemoryCustomerRepository` in production — only the real
+ * Postgres-backed repo. Postgres rejects it with "invalid input syntax for
+ * type uuid" before any row lookup happens, and `asyncRoute` maps that
+ * unclassified error to a bare 500 (`{ error: 'INTERNAL_ERROR' }`) — the
+ * production incident this test reproduces.
+ *
+ * `InMemoryCustomerRepository.findById` is a plain `Map.get`, so it can't
+ * reproduce this failure by itself (a `does-not-exist`/`ghost` string just
+ * misses the map and correctly 404s already — see the tests above). This
+ * thin subclass throws the same error Postgres would, so the route's
+ * malformed-id handling is proven the same way the interactions.ts /
+ * users.ts precedents for this exact bug class are: via supertest against
+ * the real route, without a live Postgres/Docker.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class PgLikeCustomerRepository extends InMemoryCustomerRepository {
+  async findById(tenantId: string, id: string) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.findById(tenantId, id);
+  }
+
+  // PgCustomerRepository.update also does `WHERE ... AND id = $N` against
+  // the uuid column (packages/api/src/customers/pg-customer.ts) — the same
+  // hole, exercised by PUT /:id and POST /:id/archive.
+  async update(tenantId: string, id: string, updates: Partial<Customer>) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.update(tenantId, id, updates);
+  }
+}
+
+function buildPgLikeApp(): Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER_ID,
+      sessionId: 'session-test-1',
+      tenantId: TEST_TENANT_ID,
+      role: 'owner',
+    };
+    next();
+  });
+  const customerRepo = new PgLikeCustomerRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  app.use(
+    '/api/customers',
+    createCustomerRouter(
+      customerRepo,
+      auditRepo,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new InMemoryCustomerMergeRepository(customerRepo),
+    ),
+  );
+  return app;
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison', () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildPgLikeApp();
+  });
+
+  it('GET /api/customers/new returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).get('/api/customers/new');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('PUT /api/customers/new returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).put('/api/customers/new').send({ firstName: 'X' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/customers/new/archive returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).post('/api/customers/new/archive').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/customers/new/merge returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app)
+      .post('/api/customers/new/merge')
+      .send({ losingId: '11111111-1111-1111-1111-111111111111' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
   });
 });

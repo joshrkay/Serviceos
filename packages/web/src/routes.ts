@@ -102,6 +102,23 @@ export const router = createBrowserRouter([
       { path: 'schedule',       lazy: async () => ({ Component: (await import('./components/schedule/SchedulePage')).SchedulePage }) },
       { path: 'dispatch',       lazy: async () => ({ Component: (await import('./pages/dispatch/DispatchBoard')).DispatchBoard }) },
       { path: 'customers',      lazy: async () => ({ Component: (await import('./components/customers/CustomersPage')).CustomersPage }) },
+      // Registered BEFORE customers/:id so the literal "new" segment can
+      // never be captured as an id (that was the bug: GET /api/customers/new
+      // 500'd — see the uuid-id guard added to packages/api/src/routes/customers.ts).
+      {
+        path: 'customers/new',
+        lazy: async () => {
+          const { CustomerEdit } = await import('./pages/customers/CustomerEdit');
+          function CustomerCreateRoute() {
+            const navigate = useNavigate();
+            return React.createElement(CustomerEdit, {
+              onSaved: (id: string) => navigate(`/customers/${id}`),
+              onCancel: () => navigate('/customers'),
+            });
+          }
+          return { Component: CustomerCreateRoute };
+        },
+      },
       {
         path: 'customers/:id',
         lazy: async () => {
@@ -262,6 +279,11 @@ export const router = createBrowserRouter([
       { path: 'digest/:date',   lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
       { path: 'reports/revenue-by-source', lazy: async () => ({ Component: (await import('./components/reports/RevenueBySourcePage')).RevenueBySourcePage }) },
       { path: 'technician/day', lazy: async () => ({ Component: (await import('./components/technician/TechnicianDayPage')).TechnicianDayPage }) },
+      // 1.11 — invited teammate's landing page (inviteTeamMember redirects
+      // here after Clerk's invitation sign-up completes). Auth-wrapped: a
+      // signed-out visit falls through to ProtectedRoute's existing
+      // unauthenticated handling (redirect to /login with a return path).
+      { path: 'accept-invitation', lazy: async () => ({ Component: (await import('./components/auth/AcceptInvitationPage')).AcceptInvitationPage }) },
       { path: 'design',         lazy: async () => ({ Component: (await import('./pages/design/Showcase')).Showcase }) },
     ],
     }],

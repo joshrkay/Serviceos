@@ -11,6 +11,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
     proposalType: row.proposal_type as Proposal['proposalType'],
     status: row.status as ProposalStatus,
     payload: row.payload as Record<string, unknown>,
+    originalPayload: (row.original_payload as Record<string, unknown>) ?? undefined,
     summary: row.summary as string,
     explanation: (row.explanation as string) ?? undefined,
     confidenceScore: row.confidence_score != null ? Number(row.confidence_score) : undefined,
@@ -505,6 +506,8 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       const fieldMap: Record<string, string> = {
         proposalType: 'proposal_type',
         payload: 'payload',
+        // #1139 — set once by editProposal (payload as first proposed).
+        originalPayload: 'original_payload',
         summary: 'summary',
         explanation: 'explanation',
         confidenceScore: 'confidence_score',
@@ -540,7 +543,10 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         if (key in updates) {
           const val = (updates as Record<string, unknown>)[key];
           const serialized =
-            key === 'payload' || key === 'confidenceFactors' || key === 'sourceContext'
+            key === 'payload' ||
+            key === 'originalPayload' ||
+            key === 'confidenceFactors' ||
+            key === 'sourceContext'
               ? val != null ? JSON.stringify(val) : null
               : val ?? null;
           setClauses.push(`${column} = $${p++}`);
@@ -596,21 +602,68 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   async resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+      executionError: string;
+    }>;
+  }> {
     return this.withCrossTenantSweep(async (client) => {
+      // RETURNING the moved-to-failed rows' identity (follow-up fix): this is
+      // the ONLY write for a HANDLER_NOT_FOUND-style stale timeout — the
+      // executor throws before any executeAudited call ever runs, so the
+      // caller (execution-worker.ts) needs enough per-row identity here to
+      // emit its own proposal.execution_timed_out audit event afterward.
+      //
+      // execution_error is COALESCE'd (PR #815 review, Important 2) to a
+      // synthesized timeout reason — NEVER a plain overwrite, so a real
+      // reason recorded earlier survives — because
+      // evaluateSilentExecutionFailures (workers/failure-rate-monitor.ts)
+      // and GET /api/proposals both read this column directly; the audit
+      // event above never reaches either surface. Wording must match
+      // staleExecutionTimeoutMessage() in proposal.ts exactly (can't share
+      // the JS string in SQL — keep the two in sync by hand).
+      //
+      // Follow-up: execution_error is also RETURNED. UPDATE ... RETURNING
+      // yields POST-update values, so this is exactly what the COALESCE
+      // resolved to — the real caught cause when execution-worker.ts
+      // recorded one on the still-'executing' row, else the synthesized
+      // wording — which the caller puts on the timeout audit event so it
+      // states WHY, not just that a timeout happened.
       const failed = await client.query(
         `UPDATE proposals
-         SET status = 'execution_failed', updated_at = NOW()
+         SET status = 'execution_failed',
+             execution_error = COALESCE(
+               execution_error,
+               'Execution timed out: claimed >' || $1::text || 'min across ' || execution_retry_count::text || ' retries, never completed'
+             ),
+             updated_at = NOW()
          WHERE status = 'executing'
            AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
-           AND execution_retry_count >= $2`,
+           AND execution_retry_count >= $2
+         RETURNING id, tenant_id, proposal_type, execution_retry_count, execution_error`,
         [staleMinutes, maxRetries]
       );
+      // `execution_error = NULL` is the RETRY half of the same concept the
+      // terminal write above COALESCEs. This is the "start a fresh attempt"
+      // boundary: the row goes back to 'approved' and will be claimed again,
+      // so the PREVIOUS attempt's reason must not ride along. Carrying it
+      // means a proposal that then executes successfully is still served by
+      // `GET /api/proposals/:id` with an error string on it — a state that
+      // was impossible while the column was only written at the terminal
+      // transition, and routine now that the sweep records the caught cause
+      // on the still-'executing' row.
       const reset = await client.query(
         `UPDATE proposals
          SET status = 'approved',
              claimed_by = NULL,
              claimed_at = NULL,
+             execution_error = NULL,
              execution_retry_count = execution_retry_count + 1,
              updated_at = NOW()
          WHERE status = 'executing'
@@ -618,7 +671,24 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
            AND execution_retry_count < $2`,
         [staleMinutes, maxRetries]
       );
-      return { resetToApproved: reset.rowCount ?? 0, movedToFailed: failed.rowCount ?? 0 };
+      // `execution_error` cannot be SQL NULL here: RETURNING yields the
+      // POST-update value and the statement above COALESCEs it to a
+      // non-null literal. There is therefore no "historical row holds NULL"
+      // case to defend against — the guard that used to be here was dead,
+      // and the test that exercised it asserted a state only a mocked Pool
+      // could produce.
+      const failedProposals = failed.rows.map((row) => ({
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        proposalType: row.proposal_type as ProposalType,
+        retryCount: Number(row.execution_retry_count),
+        executionError: row.execution_error as string,
+      }));
+      return {
+        resetToApproved: reset.rowCount ?? 0,
+        movedToFailed: failed.rowCount ?? 0,
+        failedProposals,
+      };
     });
   }
 }

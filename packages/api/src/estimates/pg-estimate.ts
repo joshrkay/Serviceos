@@ -25,8 +25,8 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           id, tenant_id, job_id, estimate_number, status,
           discount_cents, tax_rate_bps, subtotal_cents, taxable_subtotal_cents,
           tax_cents, total_cents, valid_until, customer_message, internal_notes,
-          created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          is_change_order, created_by, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
         [
           estimate.id,
           estimate.tenantId,
@@ -42,6 +42,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           estimate.validUntil ?? null,
           estimate.customerMessage ?? null,
           estimate.internalNotes ?? null,
+          // Tradesperson wave 1, Task 6 (migration 271) — defaults false via
+          // createEstimate; persisted explicitly rather than relying on the
+          // column DEFAULT so an in-memory-built Estimate always round-trips.
+          estimate.isChangeOrder ?? false,
           estimate.createdBy,
           estimate.createdAt,
           estimate.updatedAt,
@@ -507,6 +511,9 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       lastReminderAt: row.last_reminder_at ? new Date(row.last_reminder_at) : undefined,
       acceptedSelection: Array.isArray(row.accepted_selection) ? row.accepted_selection : undefined,
       deletedAt: row.deleted_at ? new Date(row.deleted_at) : undefined,
+      // Tradesperson wave 1, Task 6 (migration 271) — NOT NULL DEFAULT FALSE,
+      // so this is always a real boolean, never null/undefined on a real row.
+      isChangeOrder: Boolean(row.is_change_order),
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

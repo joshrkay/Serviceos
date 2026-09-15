@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  planCustomerAnchoredAppointmentLookup,
+  planCustomerAnchoredDocumentLookup,
   planVoiceEntityLookups,
+  requiresExistingEntity,
   resolveSchedulingEntities,
   resolveVoiceEntityReferences,
 } from '../../../../src/ai/agents/customer-calling/entity-resolution';
@@ -145,6 +148,28 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Tradesperson wave 1, Task 3 — record_refund joins INVOICE_DOC_INTENTS
+  // the same way record_payment does: there is no separate
+  // `invoiceReference` extraction field anywhere in this taxonomy, so the
+  // spoken invoice reference rides `jobReference` and is disambiguated by
+  // intent-set membership alone.
+  it('routes a jobReference to invoice lookup for record_refund', () => {
+    const lookups = planVoiceEntityLookups('record_refund', { jobReference: 'INV-0099' });
+    expect(lookups).toEqual([
+      { kind: 'invoice', reference: 'INV-0099', refKey: 'invoiceId' },
+    ]);
+  });
+
+  // Tradesperson wave 1, Task 4 — apply_credit joins INVOICE_DOC_INTENTS the
+  // same way record_refund does: no separate invoiceReference field exists,
+  // so the spoken invoice reference rides jobReference.
+  it('routes a jobReference to invoice lookup for apply_credit', () => {
+    const lookups = planVoiceEntityLookups('apply_credit', { jobReference: 'the Henderson invoice' });
+    expect(lookups).toEqual([
+      { kind: 'invoice', reference: 'the Henderson invoice', refKey: 'invoiceId' },
+    ]);
+  });
+
   it('routes EST-0042 jobReference to estimate lookup for update_estimate', () => {
     const lookups = planVoiceEntityLookups('update_estimate', { jobReference: 'EST-0042' });
     expect(lookups).toEqual([
@@ -178,6 +203,26 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     expect(lookups).toEqual([
       { kind: 'customer', reference: 'Khan', refKey: 'customerId' },
       { kind: 'estimate', reference: 'EST-0042', refKey: 'estimateId' },
+    ]);
+  });
+
+  // Tradesperson wave 1, Task 5 — a spoken "text/email the Hendersons..."
+  // names a PERSON, not display text. Mirrors send_estimate_nudge's
+  // rationale above.
+  it('resolves the spoken customer name for send_customer_message', () => {
+    const lookups = planVoiceEntityLookups('send_customer_message', { customerName: 'Henderson' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
+    ]);
+  });
+
+  // Task 7 (2026-08-07 tradesperson plan) — "sign the Garcias up for the
+  // annual maintenance plan" names a PERSON, not display text. Mirrors
+  // send_customer_message's rationale above.
+  it('resolves the spoken customer name for create_service_agreement', () => {
+    const lookups = planVoiceEntityLookups('create_service_agreement', { customerName: 'Garcia' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Garcia', refKey: 'customerId' },
     ]);
   });
 
@@ -241,6 +286,90 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Task 9 (2026-08-07 tradesperson plan) — "grab three boxes of PEX for
+  // the Patel job" joins JOB_REF_INTENTS the same way log_expense does, so
+  // the spoken job reference resolves to a jobId and the captured material
+  // keeps its job link. jobId stays OPTIONAL on the contract — an
+  // unresolved reference never gates — but a NAMED job still resolves.
+  it('plans a job lookup for add_material', () => {
+    const lookups = planVoiceEntityLookups('add_material', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 9 — lookup_materials joins JOB_REF_INTENTS the SAME way so the
+  // shopping-list readback can scope to one job ("what materials are open
+  // on the Patel job?"). Read-only — no gating implications.
+  it('plans a job lookup for lookup_materials', () => {
+    const lookups = planVoiceEntityLookups('lookup_materials', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — "Log 32 miles to the Patel
+  // job" joins JOB_REF_INTENTS the SAME way log_expense does (log_mileage
+  // is an ALIAS onto log_expense's proposal type), so the spoken job
+  // reference resolves to a jobId and the logged mileage keeps its job
+  // link. jobId stays OPTIONAL on the log_expense contract — an unresolved
+  // reference never gates — but a NAMED job still resolves.
+  it('plans a job lookup for log_mileage', () => {
+    const lookups = planVoiceEntityLookups('log_mileage', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule/
+  // lookup_timesheets join TECHNICIAN_REF_INTENTS the SAME way
+  // reassign_appointment does, so a named crew member ("What's Mike's day
+  // look like?") resolves to a verified technicianId before either skill
+  // runs. An unresolved name is refused by the caller
+  // (workers/voice-lookup-answer.ts), never silently widened to the whole
+  // crew.
+  it('resolves a named crew member for lookup_crew_schedule', () => {
+    const lookups = planVoiceEntityLookups('lookup_crew_schedule', {
+      targetTechnicianName: 'Mike',
+    });
+    expect(lookups).toEqual([{ kind: 'technician', reference: 'Mike', refKey: 'technicianId' }]);
+  });
+
+  it('lookup_crew_schedule with no named crew member plans no lookups (whole-crew ask)', () => {
+    const lookups = planVoiceEntityLookups('lookup_crew_schedule', {
+      dateTimeDescription: 'Thursday afternoon',
+    });
+    expect(lookups).toEqual([]);
+  });
+
+  it('resolves a named crew member for lookup_timesheets', () => {
+    const lookups = planVoiceEntityLookups('lookup_timesheets', {
+      targetTechnicianName: 'Carlos',
+    });
+    expect(lookups).toEqual([{ kind: 'technician', reference: 'Carlos', refKey: 'technicianId' }]);
+  });
+
+  it('lookup_timesheets with no named crew member plans no lookups (whole-crew ask)', () => {
+    const lookups = planVoiceEntityLookups('lookup_timesheets', {});
+    expect(lookups).toEqual([]);
+  });
+
+  // lookup_my_day is deliberately absent from TECHNICIAN_REF_INTENTS — it
+  // is self-scoped to the SPEAKER via resolveCanonicalUser
+  // (dispatch/en-route-voice.ts), never a spoken/resolved reference.
+  it('lookup_my_day never plans a technician lookup — it is self-scoped, not reference-scoped', () => {
+    const lookups = planVoiceEntityLookups('lookup_my_day', {
+      targetTechnicianName: 'Mike',
+    });
+    expect(lookups).toEqual([]);
+  });
+
   it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {
     const lookups = planVoiceEntityLookups(
       'remove_crew_member',
@@ -252,6 +381,89 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     expect(lookups).toEqual([
       { kind: 'technician', reference: 'Jake', refKey: 'technicianId' },
       { kind: 'appointment', reference: "Tuesday's job", refKey: 'appointmentId' },
+    ]);
+  });
+
+  // Tradesperson wave 1 (2026-08-07 plan) — aliases resolve the same refs as
+  // their targets. schedule_inspection joined BOTH CUSTOMER_REF_INTENTS and
+  // JOB_REF_INTENTS (it books a visit on an existing job for a known
+  // customer), customer-before-job per the family's standard ordering.
+  it('plans customer + job lookups for schedule_inspection', () => {
+    const lookups = planVoiceEntityLookups('schedule_inspection', {
+      customerName: 'Patel',
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Patel', refKey: 'customerId' },
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Spec-review fix (2026-08-07) — schedule_inspection's jobTitle carries
+  // DESCRIPTIVE text ("Inspection — rough-in"), never an existing-job name.
+  // Before this fix, the JOB_REF_INTENTS fallback (jobReference ?? jobTitle,
+  // see the comment above the fallback in entity-resolution.ts) misread it
+  // as a lookup key, which would search for a job literally titled
+  // "Inspection — rough-in" — a job that was never meant to exist by that
+  // name. Because requiresExistingEntity('schedule_inspection') is TRUE
+  // (e255bbc0, deliberate — an inspection needs its named job to actually
+  // exist), that bogus not_found would wrongly escalate an inspection that
+  // never named a job at all. jobTitle must never be used as a lookup key
+  // for this intent; only an explicit jobReference may.
+  it('does NOT plan a job lookup from jobTitle when no jobReference is spoken', () => {
+    const lookups = planVoiceEntityLookups('schedule_inspection', {
+      customerName: 'Patel',
+      dateTimeDescription: 'Thursday',
+      jobTitle: 'Inspection — rough-in',
+      // no jobReference
+    });
+    expect(lookups).toEqual([{ kind: 'customer', reference: 'Patel', refKey: 'customerId' }]);
+  });
+
+  it('plans a job lookup for log_permit', () => {
+    const lookups = planVoiceEntityLookups('log_permit', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Quality-review fix (2026-08-08) — log_permit ALSO joined
+  // CUSTOMER_REF_INTENTS: its target, add_note, already resolves
+  // customerName (a note can target a customer, not just a job — see
+  // NOTE_TARGET_KINDS), so a permit note naming a customer rather than a
+  // job ("Note the electrical permit was approved for the Hendersons")
+  // must resolve the same way a plain add_note would. Before this fix that
+  // customer reference stayed unresolved and fully manual.
+  it('plans a customer lookup for log_permit when a customer, not a job, is named', () => {
+    const lookups = planVoiceEntityLookups('log_permit', {
+      customerName: 'Henderson',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
+    ]);
+  });
+
+  it('plans customer + job lookups for log_permit when both are named, customer first', () => {
+    const lookups = planVoiceEntityLookups('log_permit', {
+      customerName: 'Patel',
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Patel', refKey: 'customerId' },
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // log_warranty_claim joined CUSTOMER_REF_INTENTS only — it aliases
+  // create_job, which resolves a customer, not an existing job reference.
+  it('plans a customer lookup for log_warranty_claim', () => {
+    const lookups = planVoiceEntityLookups('log_warranty_claim', {
+      customerName: 'Henderson',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
     ]);
   });
 });
@@ -354,6 +566,90 @@ describe('resolveSchedulingEntities — SCH-03 job fallback chain', () => {
   });
 });
 
+// Spec-review fix (2026-08-07) — schedule_inspection mirrors create_appointment
+// on the entity-resolution axis this plan didn't originally cover: jobTitle
+// is descriptive text, never a job-lookup key. requiresExistingEntity stays
+// TRUE for this intent (e255bbc0, deliberate — a NAMED job must actually
+// exist), so the fix is narrower than "never require an existing job": it is
+// "never attempt a job lookup the caller never asked for."
+describe('resolveSchedulingEntities — schedule_inspection descriptive jobTitle', () => {
+  it('proceeds with no job link when no job is named — the resolver is never asked to look up a job', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'job') {
+          throw new Error('must never look up a job keyed on descriptive jobTitle text');
+        }
+        return {
+          kind: 'resolved',
+          candidate: { id: 'cust-1', kind: 'customer', label: 'Patel', score: 1 },
+        };
+      }),
+    };
+    const res = await resolveSchedulingEntities(resolver, 'tenant-1', 'schedule_inspection', {
+      customerName: 'Patel',
+      dateTimeDescription: 'Thursday',
+      jobTitle: 'Inspection — rough-in',
+      // no jobReference
+    });
+    // Not a not_found escalation (VOX-02/inapp-adapter.ts) — the resolver
+    // was never asked about a job at all, so there is nothing to escalate.
+    expect(res.status).toBe('resolved');
+    expect(res.refs.customerId).toBe('cust-1');
+    expect(res.refs.jobId).toBeUndefined();
+  });
+
+  it('still resolves jobId when an existing job is explicitly named ("the Patel job")', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'job' && input.reference === 'the Patel job') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'job-77', kind: 'job', label: 'Patel Repair', score: 1 },
+          };
+        }
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'cust-1', kind: 'customer', label: 'Patel', score: 1 },
+          };
+        }
+        return { kind: 'not_found', reference: input.reference };
+      }),
+    };
+    const res = await resolveSchedulingEntities(resolver, 'tenant-1', 'schedule_inspection', {
+      customerName: 'Patel',
+      jobReference: 'the Patel job',
+      jobTitle: 'Inspection — rough-in',
+      dateTimeDescription: 'Thursday',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.jobId).toBe('job-77');
+    expect(res.refs.customerId).toBe('cust-1');
+  });
+
+  it('a NAMED job that does not exist still escalates (requiresExistingEntity stays TRUE)', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'cust-1', kind: 'customer', label: 'Patel', score: 1 },
+          };
+        }
+        return { kind: 'not_found', reference: input.reference };
+      }),
+    };
+    const res = await resolveSchedulingEntities(resolver, 'tenant-1', 'schedule_inspection', {
+      customerName: 'Patel',
+      jobReference: 'the nonexistent job',
+      jobTitle: 'Inspection — rough-in',
+    });
+    // An EXPLICIT reference that fails to resolve is a real not_found — the
+    // fallback exclusion only covers jobTitle, never a spoken jobReference.
+    expect(res.status).toBe('not_found');
+  });
+});
+
 describe('resolveVoiceEntityReferences — router annotation folding', () => {
   const TID = 'tenant-voice';
 
@@ -382,6 +678,118 @@ describe('resolveVoiceEntityReferences — router annotation folding', () => {
     if (result.kind === 'ok') {
       expect(result.resolved.invoiceId).toBe('inv-42');
       expect(result.pendingReferences).toEqual([]);
+    }
+  });
+
+  // Tradesperson wave 1, Task 3 — record_refund plugs into the SAME
+  // generic annotation pipeline record_payment uses: unique match resolves,
+  // ambiguous match clarifies, zero match leaves invoiceId absent (never a
+  // silent guess) so RecordRefundTaskHandler gates on missingFields.
+  it('record_refund: unique invoice match stamps invoiceId on the annotation', async () => {
+    const resolver = resolverWith({
+      'invoice:INV-0099': {
+        kind: 'resolved',
+        candidate: { id: 'inv-99', kind: 'invoice', label: 'INV-0099', score: 1 },
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'record_refund',
+      entities: { jobReference: 'INV-0099' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBe('inv-99');
+    }
+  });
+
+  it('record_refund: an ambiguous invoice reference becomes a clarification, never a guess', async () => {
+    const resolver = resolverWith({
+      'invoice:the Smith invoice': {
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'inv-a', kind: 'invoice', label: 'INV-0010 (Smith)', score: 0.85 },
+          { id: 'inv-b', kind: 'invoice', label: 'INV-0031 (Smith)', score: 0.82 },
+        ],
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'record_refund',
+      entities: { jobReference: 'the Smith invoice' },
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.entityKind).toBe('invoice');
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+
+  it('record_refund: a zero-match invoice reference leaves invoiceId absent (never silently guessed)', async () => {
+    const resolver = resolverWith({});
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'record_refund',
+      entities: { jobReference: 'INV-9999' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBeUndefined();
+    }
+  });
+
+  // Tradesperson wave 1, Task 4 — apply_credit plugs into the SAME generic
+  // annotation pipeline record_refund/record_payment use.
+  it('apply_credit: unique invoice match stamps invoiceId on the annotation', async () => {
+    const resolver = resolverWith({
+      'invoice:the Henderson invoice': {
+        kind: 'resolved',
+        candidate: { id: 'inv-henderson', kind: 'invoice', label: 'INV-0100 (Henderson)', score: 1 },
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'apply_credit',
+      entities: { jobReference: 'the Henderson invoice' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBe('inv-henderson');
+    }
+  });
+
+  it('apply_credit: an ambiguous invoice reference becomes a clarification, never a guess', async () => {
+    const resolver = resolverWith({
+      'invoice:the Smith invoice': {
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'inv-a', kind: 'invoice', label: 'INV-0010 (Smith)', score: 0.85 },
+          { id: 'inv-b', kind: 'invoice', label: 'INV-0031 (Smith)', score: 0.82 },
+        ],
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'apply_credit',
+      entities: { jobReference: 'the Smith invoice' },
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.entityKind).toBe('invoice');
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+
+  it('apply_credit: a zero-match invoice reference leaves invoiceId absent (never silently guessed)', async () => {
+    const resolver = resolverWith({});
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'apply_credit',
+      entities: { jobReference: 'INV-9999' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBeUndefined();
     }
   });
 
@@ -421,5 +829,438 @@ describe('resolveVoiceEntityReferences — router annotation folding', () => {
         { kind: 'customer', reference: 'Ghost Customer' },
       ]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SCH-D1 / SCH-D2 — scheduling & dispatch anchors (in-app 50-case register:
+// book-02, delay-01, confirm-01, cancel-02).
+// ---------------------------------------------------------------------------
+
+describe('SCH-D1 — a technician NAMED on a booking resolves to a technicianId', () => {
+  it('create_appointment plans a technician lookup for targetTechnicianName', () => {
+    const lookups = planVoiceEntityLookups('create_appointment', {
+      customerName: 'Garcia',
+      dateTimeDescription: 'Tuesday two o’clock',
+      jobTitle: 'HVAC install',
+      targetTechnicianName: 'Carlos',
+    });
+    expect(lookups).toContainEqual({
+      kind: 'technician',
+      reference: 'Carlos',
+      refKey: 'technicianId',
+    });
+    // Customer first, technician after — the documented clarification order.
+    expect(lookups.map((l) => l.kind)).toEqual(['customer', 'technician']);
+  });
+
+  it('schedule_inspection (the create_appointment alias) plans it too', () => {
+    const lookups = planVoiceEntityLookups('schedule_inspection', {
+      customerName: 'Garcia',
+      targetTechnicianName: 'Carlos',
+    });
+    expect(lookups.some((l) => l.kind === 'technician' && l.reference === 'Carlos')).toBe(true);
+  });
+
+  // The reason SCHEDULING_TECHNICIAN_INTENTS is a SEPARATE set from
+  // TECHNICIAN_REF_INTENTS: the latter also feeds requiresExistingEntity, so
+  // membership there would make a NEW customer's booking escalate to on-call.
+  it('does NOT make create_appointment a record-operating intent', () => {
+    expect(requiresExistingEntity('create_appointment')).toBe(false);
+    expect(requiresExistingEntity('schedule_inspection')).toBe(true); // unchanged (e255bbc0)
+  });
+
+  it('resolves the technician name into refs.technicianId, and an unresolved name never gates', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input) => {
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'cust-garcia', kind: 'customer', label: 'Garcia', score: 1 },
+          } satisfies EntityResolverResult;
+        }
+        if (input.kind === 'technician' && input.reference === 'Carlos') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'tech-carlos', kind: 'technician', label: 'Carlos', score: 1 },
+          } satisfies EntityResolverResult;
+        }
+        return { kind: 'not_found', reference: input.reference } satisfies EntityResolverResult;
+      }),
+    };
+
+    const resolved = await resolveSchedulingEntities(resolver, 'tenant-1', 'create_appointment', {
+      customerName: 'Garcia',
+      targetTechnicianName: 'Carlos',
+    });
+    expect(resolved.status).toBe('resolved');
+    expect(resolved.refs.technicianId).toBe('tech-carlos');
+
+    // An unknown tech on a CREATION intent is not_found — and because
+    // create_appointment is a creation intent, the booking still proceeds
+    // with no technicianId rather than escalating.
+    const unknown = await resolveSchedulingEntities(resolver, 'tenant-1', 'create_appointment', {
+      customerName: 'Garcia',
+      targetTechnicianName: 'Nobody',
+    });
+    expect(unknown.status).toBe('not_found');
+    expect(requiresExistingEntity('create_appointment')).toBe(false);
+  });
+});
+
+describe('SCH-D2 — customer-anchored appointment lookup (operators name the person)', () => {
+  const TENANT = 'tenant-anchor';
+  const CUSTOMER = 'cust-garcia';
+  const APPOINTMENT = 'appt-garcia-tuesday';
+
+  /** Resolves Garcia, and answers a customer-anchored appointment lookup. */
+  function anchorResolver(
+    appointment: EntityResolverResult,
+  ): EntityResolver & { calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = [];
+    return {
+      calls,
+      resolve: vi.fn(async (input) => {
+        calls.push(input as unknown as Record<string, unknown>);
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: CUSTOMER, kind: 'customer', label: 'Garcia', score: 1 },
+          } satisfies EntityResolverResult;
+        }
+        if (input.kind === 'appointment') return appointment;
+        return { kind: 'not_found', reference: input.reference } satisfies EntityResolverResult;
+      }),
+    };
+  }
+
+  it('notify_delay with only a customer name anchors the appointment lookup on that customer', async () => {
+    const resolver = anchorResolver({
+      kind: 'resolved',
+      candidate: {
+        id: APPOINTMENT,
+        kind: 'appointment',
+        label: '2026-07-28T14:00:00.000Z',
+        score: 1,
+      },
+    });
+
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'notify_delay', {
+      customerName: 'Garcia',
+      delayMinutes: 20,
+    });
+
+    expect(res.status).toBe('resolved');
+    expect(res.refs.customerId).toBe(CUSTOMER);
+    expect(res.refs.appointmentId).toBe(APPOINTMENT);
+    // The second pass anchors on the customerId the FIRST pass resolved, and
+    // passes an EMPTY reference — nothing about a visit was said.
+    expect(resolver.calls[1]).toMatchObject({
+      kind: 'appointment',
+      reference: '',
+      customerId: CUSTOMER,
+    });
+  });
+
+  it('carries the spoken day phrase through as the reference when there is one', async () => {
+    const resolver = anchorResolver({
+      kind: 'resolved',
+      candidate: { id: APPOINTMENT, kind: 'appointment', label: 'Tuesday', score: 1 },
+    });
+
+    await resolveSchedulingEntities(resolver, TENANT, 'confirm_appointment', {
+      customerName: 'Garcia',
+      dateTimeDescription: 'Tuesday',
+    });
+
+    expect(resolver.calls[1]).toMatchObject({
+      kind: 'appointment',
+      reference: 'Tuesday',
+      customerId: CUSTOMER,
+    });
+  });
+
+  it('two upcoming appointments stay ambiguous — the existing one-tap picker, never a guess', async () => {
+    const resolver = anchorResolver({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'appt-1', kind: 'appointment', label: 'Tue 2pm', score: 1 },
+        { id: 'appt-2', kind: 'appointment', label: 'Thu 9am', score: 1 },
+      ],
+    });
+
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'notify_delay', {
+      customerName: 'Garcia',
+      delayMinutes: 20,
+    });
+
+    expect(res.status).toBe('ambiguous');
+    expect(res.ambiguous?.entityKind).toBe('appointment');
+    expect(res.ambiguous?.candidates).toHaveLength(2);
+    // The customer resolved, so the partial refs still carry it.
+    expect(res.refs.customerId).toBe(CUSTOMER);
+  });
+
+  it('no upcoming appointment is an honest not_found', async () => {
+    const resolver = anchorResolver({ kind: 'not_found', reference: '' });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'notify_delay', {
+      customerName: 'Garcia',
+      delayMinutes: 20,
+    });
+    expect(res.status).toBe('not_found');
+    expect(res.notFound?.entityKind).toBe('appointment');
+  });
+
+  it('an EXPLICIT appointmentReference keeps its own resolution path (no customer anchor)', async () => {
+    const resolver = anchorResolver({
+      kind: 'resolved',
+      candidate: { id: APPOINTMENT, kind: 'appointment', label: 'Tuesday', score: 1 },
+    });
+
+    await resolveSchedulingEntities(resolver, TENANT, 'cancel_appointment', {
+      customerName: 'Garcia',
+      appointmentReference: 'Tuesday appointment',
+    });
+
+    const appointmentCall = resolver.calls.find((c) => c.kind === 'appointment');
+    expect(appointmentCall).toMatchObject({ reference: 'Tuesday appointment' });
+    expect(appointmentCall!.customerId).toBeUndefined();
+    // …and exactly one appointment lookup ran — the second pass must not
+    // re-ask for an id the first pass already resolved.
+    expect(resolver.calls.filter((c) => c.kind === 'appointment')).toHaveLength(1);
+  });
+
+  it('is scoped to APPOINTMENT_REF_INTENTS — a customer-named lookup gains nothing', async () => {
+    const resolver = anchorResolver({ kind: 'not_found', reference: '' });
+    await resolveSchedulingEntities(resolver, TENANT, 'lookup_balance', {
+      customerName: 'Garcia',
+    });
+    expect(resolver.calls.some((c) => c.kind === 'appointment')).toBe(false);
+  });
+
+  it('notify_delay is an APPOINTMENT_REF_INTENT, so a spoken reference resolves', () => {
+    const lookups = planVoiceEntityLookups('notify_delay', {
+      appointmentReference: 'the 2pm',
+    });
+    expect(lookups).toContainEqual({
+      kind: 'appointment',
+      reference: 'the 2pm',
+      refKey: 'appointmentId',
+    });
+  });
+
+  it('planCustomerAnchoredAppointmentLookup returns undefined for non-appointment intents', () => {
+    expect(
+      planCustomerAnchoredAppointmentLookup('create_invoice', {}, CUSTOMER),
+    ).toBeUndefined();
+    expect(
+      planCustomerAnchoredAppointmentLookup(
+        'cancel_appointment',
+        { appointmentReference: 'Tuesday' },
+        CUSTOMER,
+      ),
+    ).toBeUndefined();
+    expect(planCustomerAnchoredAppointmentLookup('add_crew_member', {}, CUSTOMER)).toEqual({
+      kind: 'appointment',
+      reference: '',
+      refKey: 'appointmentId',
+      customerId: CUSTOMER,
+    });
+  });
+});
+
+// #909 — `convert_lead` / `mark_lead_lost` both gate on a resolved `leadId`
+// while the classifier can only ever emit a free-text `leadReference`. This
+// planner had no `lead` branch at all, so `leadId` was never resolved on any
+// voice surface: a gate with no resolver behind it, which CLAUDE.md names as
+// a capability that can never be approved. Register case cust-03.
+describe('#909 — lead references resolve to a leadId', () => {
+  const TENANT = 'tenant-lead';
+  const LEAD = 'lead-greenfield';
+
+  function leadResolver(result: EntityResolverResult): EntityResolver & {
+    calls: Array<Record<string, unknown>>;
+  } {
+    const calls: Array<Record<string, unknown>> = [];
+    return {
+      calls,
+      resolve: vi.fn(async (input) => {
+        calls.push(input as unknown as Record<string, unknown>);
+        if (input.kind === 'lead') return result;
+        return { kind: 'not_found', reference: input.reference } satisfies EntityResolverResult;
+      }),
+    };
+  }
+
+  it.each(['convert_lead', 'mark_lead_lost'])(
+    '%s plans a lead lookup on leadReference',
+    (intent) => {
+      expect(planVoiceEntityLookups(intent, { leadReference: 'Greenfield' })).toEqual([
+        { kind: 'lead', reference: 'Greenfield', refKey: 'leadId' },
+      ]);
+    },
+  );
+
+  it('a resolved lead lands on refs.leadId', async () => {
+    const resolver = leadResolver({
+      kind: 'resolved',
+      candidate: {
+        id: LEAD,
+        kind: 'lead',
+        label: 'Greenfield Property Management',
+        score: 1,
+      },
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'convert_lead', {
+      leadReference: 'Greenfield',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.leadId).toBe(LEAD);
+  });
+
+  it('two matching leads stay ambiguous — the one-tap picker, never a pick', async () => {
+    const resolver = leadResolver({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'lead-a', kind: 'lead', label: 'Greenfield Property', score: 1 },
+        { id: 'lead-b', kind: 'lead', label: 'Greenfield Homes', score: 1 },
+      ],
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'convert_lead', {
+      leadReference: 'Greenfield',
+    });
+    expect(res.status).toBe('ambiguous');
+    expect(res.ambiguous?.entityKind).toBe('lead');
+  });
+
+  it('a lead that does not exist is an honest not_found, not a silent pass-through', async () => {
+    const resolver = leadResolver({ kind: 'not_found', reference: 'Alvarez' });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'convert_lead', {
+      leadReference: 'Alvarez',
+    });
+    expect(res.status).toBe('not_found');
+    // Record-operating: the request cannot proceed, so the surfaces speak an
+    // honest miss instead of drafting a card nobody can complete.
+    expect(requiresExistingEntity('convert_lead')).toBe(true);
+    expect(requiresExistingEntity('mark_lead_lost')).toBe(true);
+  });
+
+  it('customerName is NOT read as a lead reference — on these intents it names what the lead BECOMES', () => {
+    // convert_lead is a CUSTOMER_REF_INTENTS member (unchanged), so a spoken
+    // customer name still resolves as a CUSTOMER. What must never happen is
+    // that name being handed to the lead resolver as a second guess at which
+    // record the operator meant.
+    expect(planVoiceEntityLookups('convert_lead', { customerName: 'Greenfield' })).toEqual([
+      { kind: 'customer', reference: 'Greenfield', refKey: 'customerId' },
+    ]);
+  });
+
+  it('a lead reference on an unrelated intent plans nothing', () => {
+    expect(planVoiceEntityLookups('create_invoice', { leadReference: 'Greenfield' })).toEqual([]);
+  });
+});
+
+// The DOCUMENT twin of SCH-D2: "nudge Khan about the pending estimate" /
+// "send Johnson a reminder on the overdue invoice" name the PERSON and no
+// paperwork, so `estimateId`/`invoiceId` stayed absent — `send_estimate_nudge`
+// was minted invalid and `send_payment_reminder` gated on a field nothing
+// could fill. Register cases est-06 / inv-08.
+describe('customer-anchored DOCUMENT lookup (operators name the person, not the paperwork)', () => {
+  const TENANT = 'tenant-doc-anchor';
+  const CUSTOMER = 'cust-khan';
+
+  function docResolver(
+    document: EntityResolverResult,
+  ): EntityResolver & { calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = [];
+    return {
+      calls,
+      resolve: vi.fn(async (input) => {
+        calls.push(input as unknown as Record<string, unknown>);
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: CUSTOMER, kind: 'customer', label: 'Khan', score: 1 },
+          } satisfies EntityResolverResult;
+        }
+        if (input.kind === 'estimate' || input.kind === 'invoice') return document;
+        return { kind: 'not_found', reference: input.reference } satisfies EntityResolverResult;
+      }),
+    };
+  }
+
+  it('send_estimate_nudge with only a customer name anchors an estimate lookup on that customer', async () => {
+    const resolver = docResolver({
+      kind: 'resolved',
+      candidate: { id: 'est-1', kind: 'estimate', label: 'EST-0001', score: 1 },
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'send_estimate_nudge', {
+      customerName: 'Khan',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.customerId).toBe(CUSTOMER);
+    expect(res.refs.estimateId).toBe('est-1');
+    // Anchored on the customerId the FIRST pass resolved; the reference is
+    // the operator's own word for the customer, which is how the document was
+    // named at all ("Khan's estimate").
+    expect(resolver.calls[1]).toMatchObject({
+      kind: 'estimate',
+      reference: 'Khan',
+      customerId: CUSTOMER,
+    });
+  });
+
+  it('send_payment_reminder anchors an INVOICE lookup, not an estimate one', async () => {
+    const resolver = docResolver({
+      kind: 'resolved',
+      candidate: { id: 'inv-1', kind: 'invoice', label: 'INV-0042', score: 1 },
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'send_payment_reminder', {
+      customerName: 'Johnson',
+    });
+    expect(res.refs.invoiceId).toBe('inv-1');
+    expect(res.refs.estimateId).toBeUndefined();
+    expect(resolver.calls[1]).toMatchObject({ kind: 'invoice', customerId: CUSTOMER });
+  });
+
+  it('two open documents stay ambiguous — the existing one-tap picker', async () => {
+    const resolver = docResolver({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'inv-1', kind: 'invoice', label: 'INV-0042', hint: 'open · $450.00', score: 1 },
+        { id: 'inv-2', kind: 'invoice', label: 'INV-0043', hint: 'open · $195.00', score: 1 },
+      ],
+    });
+    const res = await resolveSchedulingEntities(resolver, TENANT, 'send_payment_reminder', {
+      customerName: 'Johnson',
+    });
+    expect(res.status).toBe('ambiguous');
+    expect(res.ambiguous?.entityKind).toBe('invoice');
+    expect(res.refs.customerId).toBe(CUSTOMER);
+  });
+
+  it('a SPOKEN document reference keeps its own resolution path — no second pass', async () => {
+    const resolver = docResolver({ kind: 'not_found', reference: 'x' });
+    await resolveSchedulingEntities(resolver, TENANT, 'send_payment_reminder', {
+      customerName: 'Johnson',
+      jobReference: 'INV-0042',
+    });
+    // customer, then the SPOKEN invoice reference — and nothing anchored.
+    expect(resolver.calls.map((c) => c.reference)).toEqual(['Johnson', 'INV-0042']);
+  });
+
+  it('planCustomerAnchoredDocumentLookup is inert outside the two document families', () => {
+    expect(
+      planCustomerAnchoredDocumentLookup('create_appointment', {}, CUSTOMER),
+    ).toBeUndefined();
+    expect(
+      planCustomerAnchoredDocumentLookup('send_estimate', { jobTitle: 'Khan install' }, CUSTOMER),
+    ).toBeUndefined();
+    expect(planCustomerAnchoredDocumentLookup('update_invoice', {}, CUSTOMER)).toEqual({
+      kind: 'invoice',
+      reference: '',
+      refKey: 'invoiceId',
+      customerId: CUSTOMER,
+    });
   });
 });
