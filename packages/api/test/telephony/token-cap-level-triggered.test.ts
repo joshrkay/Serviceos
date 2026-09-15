@@ -17,11 +17,19 @@
  * completion, the ticket's scenario: 1,450 of 1,500 output tokens, then a
  * 60-token grade.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { gradeVulnerability } from '../../src/ai/agents/customer-calling/vulnerability-grader';
+import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
+import { classifyCallerSafety } from '../../src/ai/agents/customer-calling/emergency-tier';
+import { detectFrustration } from '../../src/ai/agents/customer-calling/frustration-detector';
+import { EMERGENCY_SAFETY_LINE } from '../../src/ai/agents/customer-calling/emergency-detector';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { SideEffect } from '../../src/ai/agents/customer-calling/types';
 
@@ -59,7 +67,12 @@ function makeGatewayScript(steps: Array<{ content: string; output: number }>): L
   } as unknown as LLMGateway;
 }
 
-async function startCall(gateway: LLMGateway, callSid: string) {
+async function startCall(
+  gateway: LLMGateway,
+  callSid: string,
+  /** #1212 — on-call rotation + dispatcher phone for the P12-004 immediate Dial. */
+  onCall?: { onCallRepo: InMemoryOnCallRepository; dispatcherPhoneResolver: () => Promise<string> },
+) {
   const store = new VoiceSessionStore({ startInterval: false });
   const auditRepo = new InMemoryAuditRepository();
   const adapter = new TwilioGatherAdapter({
@@ -68,6 +81,7 @@ async function startCall(gateway: LLMGateway, callSid: string) {
     auditRepo,
     businessName: 'Acme Plumbing',
     publicBaseUrl: 'https://example.com',
+    ...(onCall ?? {}),
   });
   await adapter.handleInbound({
     callSid,
@@ -89,7 +103,14 @@ async function startCall(gateway: LLMGateway, callSid: string) {
       .getAll()
       .filter((a) => a.eventType.endsWith('.cost_cap_exceeded'))
       .map((a) => a.eventType);
-  return { adapter, store, session, capAudits, capTerminations: () => capTerminations };
+  return {
+    adapter,
+    store,
+    session,
+    auditRepo,
+    capAudits,
+    capTerminations: () => capTerminations,
+  };
 }
 
 type Call = Awaited<ReturnType<typeof startCall>>;
@@ -309,5 +330,165 @@ describe('#1204 — Media Streams transport (processCallerUtterance → speechTu
     expect(call.session.machine.currentState).toBe('intent_confirm');
     expect(call.capAudits()).toEqual([]);
     expect(call.capTerminations()).toBe(0);
+  });
+});
+
+// ─── #1212: an emergency outcome wins over the cap end ──────────────────────
+//
+// Both transports chose the cap end before looking at what the classifier
+// said, so a keyword-free emergency on the turn that crossed the cap got the
+// generic wrap-up and a cost_cap page. Each capped call below is compared
+// with the SAME call made without the between-turns grader spend.
+
+// Keyword-free: the deterministic safety scan (and the frustration scan)
+// never see it, so only the classifier can call it an emergency.
+const KEYWORD_FREE_EMERGENCY =
+  'my water heater just split open and scalding water is pouring across the garage floor';
+const EMERGENCY = JSON.stringify({
+  intentType: 'emergency_dispatch',
+  confidence: 0.94,
+  reasoning: 'active scalding-water release, needs someone now',
+  extractedEntities: {},
+});
+const EMERGENCY_HANDOFF_LINE =
+  "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.";
+const xmlText = (s: string) => s.replace(/'/g, '&apos;');
+
+const emergencyScript = () =>
+  makeGatewayScript([
+    { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+    { content: EMERGENCY, output: 1 },
+    { content: DRAFT_ESTIMATE, output: 1 },
+  ]);
+
+const onCallDeps = () => ({
+  onCallRepo: new InMemoryOnCallRepository(
+    new Map([[TENANT, [{ id: 'rot-1', userId: 'u-dispatcher', orderIndex: 0 }]]]),
+  ),
+  dispatcherPhoneResolver: async () => '+15125550111',
+});
+
+const auditTypes = (call: Call) => call.auditRepo.getAll().map((a) => a.eventType);
+
+describe('#1212 — an emergency outcome wins over the token-cap end', () => {
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  it('precondition: the utterance is keyword-free (no safety or frustration scan hit)', () => {
+    expect(classifyCallerSafety(KEYWORD_FREE_EMERGENCY, {}).tier).toBe('E3');
+    expect(detectFrustration(KEYWORD_FREE_EMERGENCY).matched).toBe(false);
+  });
+
+  describe('Gather transport (handleGather)', () => {
+    it('the capped turn speaks the emergency path and escalates as emergency_dispatch, identical to an uncapped call', async () => {
+      const control = await startCall(emergencyScript(), 'CA-1212-gather-control');
+      await gather(control, 'um I have a question');
+      const controlXml = await gather(control, KEYWORD_FREE_EMERGENCY);
+
+      const call = await startCall(emergencyScript(), 'CA-1212-gather-capped');
+      await gather(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      expect(call.session.costTracker.isExceeded).toBe(true);
+
+      const xml = await gather(call, KEYWORD_FREE_EMERGENCY);
+
+      expect(call.session.machine.currentState).toBe('escalating');
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      expect(xml).toContain(xmlText(EMERGENCY_SAFETY_LINE));
+      expect(xml).toContain(xmlText(EMERGENCY_HANDOFF_LINE));
+      expect(xml).not.toContain(escapedWrapUp);
+      expect(call.capAudits()).toEqual([]);
+      expect(auditTypes(call)).toContain('agent.calling.intent_capture.emergency_dispatch');
+      expect(normalizeTwiml(xml, call)).toBe(normalizeTwiml(controlXml, control));
+      expect(auditTypes(call)).toEqual(auditTypes(control));
+    });
+
+    it('the call still ends once: after the emergency, a later classify turn adds no cost-cap end', async () => {
+      const call = await startCall(emergencyScript(), 'CA-1212-gather-once');
+      await gather(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      await gather(call, KEYWORD_FREE_EMERGENCY);
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      expect(call.capTerminations()).toBe(1);
+
+      call.session.machine.dispatch({ type: 'proposal_queued', proposalId: 'p-1' });
+      expect(call.session.machine.currentState).toBe('closing');
+      const xml = await gather(call, 'and a quote for a furnace too');
+
+      expect(xml).not.toContain(escapedWrapUp);
+      expect(call.capAudits()).toEqual([]);
+      expect(call.capTerminations()).toBe(1);
+    });
+  });
+
+  describe('Media Streams transport (processCallerUtterance → speechTurn)', () => {
+    it('unsupervised tenant with an on-call rotation: the capped turn dials on-call immediately, identical to an uncapped call', async () => {
+      setSupervisorPresenceLoader(async () => false);
+      const control = await startCall(emergencyScript(), 'CA-1212-ms-control', onCallDeps());
+      await mediaStreamsTurn(control, 'um I have a question');
+      const controlFx = await mediaStreamsTurn(control, KEYWORD_FREE_EMERGENCY);
+
+      const call = await startCall(emergencyScript(), 'CA-1212-ms-capped', onCallDeps());
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      expect(call.session.costTracker.isExceeded).toBe(true);
+
+      const fx = await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+
+      const tts = fx.filter((f) => f.type === 'tts_play').map((f) => String(f.payload.text));
+      expect(tts).toHaveLength(1);
+      expect(tts[0]).toContain('Emergency escalation in progress');
+      expect(fx.some((f) => f.type === 'notify_oncall')).toBe(false);
+      const dial = call.auditRepo.getAll().find((a) => a.eventType === 'emergency_immediate_dial');
+      expect(dial?.metadata).toMatchObject({ intent: 'emergency_dispatch', escalated: true });
+      expect(call.capAudits()).toEqual([]);
+      expect(fx).toEqual(controlFx);
+      expect(auditTypes(call)).toEqual(auditTypes(control));
+    });
+
+    it('supervised tenant: the capped turn takes the FSM emergency path (safety line + emergency_dispatch page), identical to an uncapped call', async () => {
+      setSupervisorPresenceLoader(async () => true);
+      const control = await startCall(emergencyScript(), 'CA-1212-ms-sup-control', onCallDeps());
+      await mediaStreamsTurn(control, 'um I have a question');
+      const controlFx = await mediaStreamsTurn(control, KEYWORD_FREE_EMERGENCY);
+
+      const call = await startCall(emergencyScript(), 'CA-1212-ms-sup-capped', onCallDeps());
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+
+      const fx = await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+
+      expect(call.session.machine.currentState).toBe('escalating');
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      expect(fx.filter((f) => f.type === 'tts_play').map((f) => f.payload.text)).toEqual([
+        EMERGENCY_SAFETY_LINE,
+        EMERGENCY_HANDOFF_LINE,
+      ]);
+      expect(fx.filter((f) => f.type === 'notify_oncall').map((f) => f.payload.reason)).toEqual([
+        'emergency_dispatch',
+      ]);
+      expect(call.capAudits()).toEqual([]);
+      expect(auditTypes(call)).not.toContain('emergency_immediate_dial');
+      expect(auditTypes(call)).toEqual(auditTypes(control));
+      expect(fx.map((f) => f.type)).toEqual(controlFx.map((f) => f.type));
+    });
+
+    it('the call still ends once: after the emergency, a later classify turn adds no cost-cap end', async () => {
+      const call = await startCall(emergencyScript(), 'CA-1212-ms-once');
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      expect(call.capTerminations()).toBe(1);
+
+      call.session.machine.dispatch({ type: 'proposal_queued', proposalId: 'p-1' });
+      const later = await mediaStreamsTurn(call, 'and a quote for a furnace too');
+
+      expect(later.some((f) => f.type === 'notify_oncall')).toBe(false);
+      expect(call.capAudits()).toEqual([]);
+      expect(call.capTerminations()).toBe(1);
+    });
   });
 });
