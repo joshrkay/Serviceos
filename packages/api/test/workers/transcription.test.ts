@@ -319,7 +319,14 @@ describe('createTranscriptionWorker — U9 voicemail context threading', () => {
   });
 
   it('omits the voicemail key entirely for non-voicemail jobs (legacy events unchanged)', async () => {
+    // #1231 — voicemail status is re-derived from the recording row, and a
+    // missing row fails closed, so the in-app memo needs a row to be read.
     const voiceRepo = makeVoiceRepo();
+    vi.mocked(voiceRepo.findById).mockResolvedValue({
+      id: 'rec-1',
+      tenantId: 'tenant-1',
+      source: 'inapp_voice',
+    } as never);
     const onTranscribed = vi.fn();
     const worker = createTranscriptionWorker(voiceRepo, provider, { onTranscribed });
     await worker.handle(makeMessage(), logger);
