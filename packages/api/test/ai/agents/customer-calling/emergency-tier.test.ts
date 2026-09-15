@@ -431,6 +431,7 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['E1', 'sale mucho gas de la estufa', 'a lot of gas'],
     ['E1', 'la estufa está botando gas', '"botar gas" = leaking gas'],
     ['not-E1', 'on sale gas water heaters', 'English: "on sale"'],
+    ['not-E1', 'I bought a gas grill at a yard sale gas line needs hookup', 'English: "yard sale"'],
     ['not-E1', '¿sale gas en la factura?', 'bill'],
     ['not-E1', 'el gas sale muy caro', 'price, subject first'],
     ['not-E1', 'no le sale gas a la estufa', 'negated: the stove gets no gas'],

@@ -131,7 +131,12 @@ export interface SpanishHazardPattern {
   readonly keyword: string;
   /** Regex source, matched case-insensitively between Unicode word edges. */
   readonly pattern: string;
-  readonly routineWhen?: 'igniter_sparks' | 'co_device_request' | 'flame_colour';
+  readonly routineWhen?:
+    | 'igniter_sparks'
+    | 'co_device_request'
+    | 'flame_colour'
+    | 'gas_price_or_sale'
+    | 'benign_smoke';
   /**
    * The phrase carries its own "no" ("no puedo apagar el fuego"): it is an
    * emergency, so it is compiled WITHOUT the negation guard — "no, no puedo
@@ -142,11 +147,16 @@ export interface SpanishHazardPattern {
 
 const HUELE_INTENSITY = '(?:(?:mucho|muy fuerte|fuerte|bastante|demasiado|como) )?';
 const NOT_CHIMNEY = '(?! (?:de|por) (?:la |mi )?chimenea)';
-/** Where escaping gas comes from — the leak sense of "sale gas". */
-const GAS_SOURCE =
-  '(?:(?:la|el|los|las|mi|un|una) )?(?:estufa|tuber[ií]as?|tubos?|calentador|boiler|caldera|horno|secadora|medidor|tanque|cilindro|llave|v[aá]lvula|manguera|pared|piso|conexi[oó]n|l[ií]nea|parrilla|asador)';
-/** "¿cuánto (me) sale…?", "¿a cómo sale…?", "me sale el gas caro" are prices. */
-const NOT_PRICE_SALE = '(?<!(?<![\\p{L}\\p{N}])(?:cu[aá]nto|c[oó]mo|me|te|le|les|nos)\\s+)';
+/**
+ * "sale" is a price right after cuánto/cómo ("¿cuánto me sale el gas?", "¿a
+ * cómo sale el propano?") and a discount in English ("on sale gas water
+ * heaters"). A sentence about the bill, or an English sentence, is the
+ * `gas_price_or_sale` routine exception.
+ */
+const NOT_PRICE_OR_ENGLISH_SALE =
+  '(?<!(?<![\\p{L}\\p{N}])(?:cu[aá]nto|c[oó]mo|on|for|the|any|big)\\s+(?:(?:se|le|les|me|te|nos)\\s+)?)';
+const NOT_ENGLISH_GAS_NOUN =
+  '(?! (?:water|heaters?|grills?|furnaces?|dryers?|ranges?|stoves?|ovens?|fireplaces?|generators?|appliances?|and|or)(?![\\p{L}\\p{N}]))';
 
 export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   // Gas and propane
@@ -158,15 +168,25 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'se huele gas', pattern: 'se huele (?:a )?(?:gas|propano)' },
   { keyword: 'olor a gas', pattern: 'olor (?:(?:muy )?(?:fuerte|intenso|raro) )?(?:a|de) (?:gas|propano)' },
   { keyword: 'huelo gas', pattern: `huelo ${HUELE_INTENSITY}(?:a )?(?:gas|propano)` },
-  // Leak sense of "salir"/"escapar" only (#1234 review). Bare "sale gas" is a
-  // price ("¿cuánto me sale el gas?") and, in English, a sale ("on sale gas
-  // water heaters") — both hung up on routine callers.
+  // Leak sense of "salir"/"escapar"/"botar", in every word order (#1234
+  // re-review). An appliance is often the indirect object: "le sale gas a la
+  // estufa", "me sale gas de la estufa". Price, bill and English-sale senses
+  // are excluded (NOT_PRICE_OR_ENGLISH_SALE, NOT_ENGLISH_GAS_NOUN, gas_price_or_sale).
   { keyword: 'está saliendo gas', pattern: '(?:se )?est[aá] saliendo (?:el )?(?:gas|propano)' },
   {
-    keyword: 'sale gas de',
-    pattern: `${NOT_PRICE_SALE}(?:sale|saliendo) (?:el )?(?:gas|propano) (?:de|del|por) ${GAS_SOURCE}`,
+    keyword: 'sale gas',
+    pattern: `${NOT_PRICE_OR_ENGLISH_SALE}(?:(?:se|le|les|me|te|nos) )?sal(?:e|en|i[oó]|iendo) (?:(?:mucho|much[ií]simo|bastante|demasiado) )?(?:el )?(?:gas|propano)${NOT_ENGLISH_GAS_NOUN}`,
+    routineWhen: 'gas_price_or_sale',
   },
-  { keyword: 'se escapa el gas', pattern: 'se (?:est[aá] escapando|escapa|escap[oó]) (?:el )?(?:gas|propano)' },
+  // "se" is optional on purpose: "no se escapa el gas" is STT's "no sé, se
+  // escapa el gas" as often as a denial, and ties resolve upward.
+  { keyword: 'se escapa el gas', pattern: '(?:se )?(?:est[aá] escapando|escapa|escap[oó]) (?:el )?(?:gas|propano)' },
+  {
+    keyword: 'el gas se escapa',
+    pattern:
+      'el (?:gas|propano) (?:se (?:est[aá] )?(?:escap(?:a|ando|[oó])|sal(?:e|iendo|i[oó]))|est[aá] (?:escapando|saliendo)|escap(?:a|[oó])|sal(?:e|i[oó]) (?:de|del|por))',
+  },
+  { keyword: 'botando gas', pattern: 'bot(?:a|an|ando|[oó]) (?:el )?(?:gas|propano)' },
   { keyword: 'huevo podrido', pattern: 'huevos? podridos?' },
   { keyword: 'olor a azufre', pattern: '(?:olor|huele) a azufre' },
   // Carbon monoxide
@@ -201,7 +221,11 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'sale humo', pattern: `(?:sale|salen|saliendo) humo${NOT_CHIMNEY}` },
   { keyword: 'humo saliendo', pattern: `humo saliendo${NOT_CHIMNEY}` },
   { keyword: 'humo en la casa', pattern: 'humo en (?:la|mi) casa' },
-  { keyword: 'hay humo', pattern: 'hay humo(?! (?:saliendo )?(?:de|por|en) (?:la |mi )?chimenea)' },
+  {
+    keyword: 'hay humo',
+    pattern: 'hay humo(?! (?:saliendo )?(?:de|por|en) (?:la |mi )?chimenea)',
+    routineWhen: 'benign_smoke',
+  },
   { keyword: 'lleno de humo', pattern: 'llen(?:o|a|ando) de humo' },
   {
     keyword: 'se está quemando la casa',
@@ -288,12 +312,13 @@ function compile(phrases: ReadonlyArray<string>) {
  * "no sé si hay fuga de gas" stays E1. "no" must be a whole word, so "bueno
  * huele a gas" stays E1. A comma breaks it: "no, huele a gas" stays E1.
  *
+ * Object pronouns count ("no le sale gas a la estufa" is a stove with no gas).
  * #1234 review — "se" is NOT a guard word: STT turns "no sé, hay fuego" into
  * "no se hay fuego", which must stay E1. The one exception is "no se huele",
  * which is a denial whatever the accent.
  */
 const ES_NEGATION_GUARD =
-  '(?<!(?<![\\p{L}\\p{N}])no\\s+(?:(?:hay|est[aá]n?|siento|tengo|noto)\\s+)?(?:(?:un|una|ning[uú]n|ninguna)\\s+)?)' +
+  '(?<!(?<![\\p{L}\\p{N}])no\\s+(?:(?:hay|est[aá]n?|siento|tengo|noto|le|les|me|te|nos)\\s+)?(?:(?:un|una|ning[uú]n|ninguna)\\s+)?)' +
   '(?!(?<=(?<![\\p{L}\\p{N}])no\\s+se\\s+)huele)';
 
 /** Unicode word edges: JS `\b` is ASCII-only, so "se incendió" would never match. */
@@ -321,10 +346,34 @@ const ES_ALARM_SOUNDING_RE =
 
 /** "veo/hay llamas <colour> en/del <appliance>" — a flame-colour diagnostic. */
 const ES_FLAME_COLOUR_DIAGNOSTIC_RE =
-  /(?<![\p{L}\p{N}])(?:veo|hay) (?:unas )?llamas (?:de color )?(?:amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?) (?:en|de|del)(?: el| la| los| las| mi)? (?:calentador|boiler|caldera|estufa|horno|quemador(?:es)?|piloto|hornillas?|calefacci[oó]n|secadora)(?![\p{L}\p{N}])/iu;
-/** Any other hazard word voids the flame-colour exception ("quemador" is not "quemado"). */
+  /(?<![\p{L}\p{N}])(?:veo|hay) (?:unas )?llamas (?:de color )?(?:amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?) (?:en|de|del)(?: el| la| los| las| mi)? (?:calentador|boiler|caldera|estufa|horno|quemador(?:es)?|piloto|hornillas?|calefacci[oó]n)(?![\p{L}\p{N}])/iu;
+/**
+ * Any other hazard word voids the flame-colour exception ("quemador" is not
+ * "quemado"): smoke, fire, leaks, CO symptoms (#1234 re-review: headache,
+ * dizziness, nausea, vomiting, drowsiness), something else catching fire, or
+ * flames outside the appliance.
+ */
 const ES_OTHER_HAZARD_WORD_RE =
-  /(?<![\p{L}\p{N}])(?:humo|fuego|incendio|chispas?|quem(?!ador)\p{L}*|fugas?|escapes?|escapando|huele|huelo|olor|explot\p{L}*|mon[oó]xido|sale|salen|saliendo)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(?:humo|fuego|incendio|chispas?|quem(?!ador)\p{L}*|fugas?|escapes?|escapando|huele|huelo|olor|explot\p{L}*|mon[oó]xido|sale|salen|saliendo|duele|dolor|marea\p{L}*|mareos?|n[aá]useas?|v[oó]mit\p{L}*|sue[nñ]o|somnolient\p{L}*|prendi(?:[oó]|eron)|pared(?:es)?|techo|cortinas?|muebles?|gabinetes?|alfombra|afuera|fuera)(?![\p{L}\p{N}])/iu;
+
+/** A sentence about the gas bill: "¿sale gas en la factura?", "el recibo me sale el gas muy caro". */
+const ES_GAS_BILL_RE = /(?<![\p{L}\p{N}])(?:factura|recibo|cobro)(?![\p{L}\p{N}])/iu;
+/**
+ * Words that exist only in English. Two or more make the sentence English, so
+ * "sale" is a discount ("I bought a gas grill at a yard sale gas line needs
+ * hookup"). One alone is code-switching and stays Spanish.
+ */
+const EN_ONLY_WORD_RE =
+  /(?<![\p{L}\p{N}])(?:the|at|is|are|was|i|my|you|your|we|our|needs?|have|has|do|does|any|on|for|this|that|it|and|with|of|to|there|what|how|can|bought|buy|line)(?![\p{L}\p{N}])/giu;
+/** Any appliance or leak sign voids the bill exception. */
+const ES_GAS_LEAK_SIGN_RE =
+  /(?<![\p{L}\p{N}])(?:huele|huelo|olor|fugas?|escap\p{L}*|estufa|hornillas?|quemador(?:es)?|tuber[ií]as?|calentador|cocina|horno|tanque|cilindro|llave|v[aá]lvula|manguera)(?![\p{L}\p{N}])/iu;
+/** Smoke with an ordinary cause: first heat of the season, barbecue, cigarettes. */
+const ES_BENIGN_SMOKE_RE =
+  /(?<![\p{L}\p{N}])(?:por primera vez|carne asada|asados?|parrillas?|asador|barbacoa|fogata|cigarros?|cigarrillos?|incienso)(?![\p{L}\p{N}])/iu;
+/** Any danger sign voids the benign-smoke exception. */
+const ES_SMOKE_DANGER_RE =
+  /(?<![\p{L}\p{N}])(?:fuego|llamas?|incendio|quem(?!ador)\p{L}*|chispas?|respir\p{L}*|tos|toser|ahog\p{L}*|marea\p{L}*|mareos?|adentro|dentro|llen[oa]|enchufes?|cables?)(?![\p{L}\p{N}])/iu;
 
 /**
  * Utterance-level routine exceptions for a matched Spanish entry. Narrow on
@@ -335,6 +384,9 @@ const ES_OTHER_HAZARD_WORD_RE =
  *   battery work, and nothing says it is sounding or anyone feels ill.
  * - flame_colour: "veo/hay llamas amarillas en el calentador" and no other
  *   hazard word anywhere in the utterance.
+ * - gas_price_or_sale: the sentence is about the bill and names no appliance
+ *   or leak, or the sentence is English.
+ * - benign_smoke: first heat, barbecue or cigarette smoke, and no danger sign.
  */
 function isSpanishRoutineContext(
   kind: NonNullable<SpanishHazardPattern['routineWhen']>,
@@ -345,6 +397,16 @@ function isSpanishRoutineContext(
   }
   if (kind === 'flame_colour') {
     return ES_FLAME_COLOUR_DIAGNOSTIC_RE.test(transcript) && !ES_OTHER_HAZARD_WORD_RE.test(transcript);
+  }
+  if (kind === 'gas_price_or_sale') {
+    const englishWords = transcript.match(EN_ONLY_WORD_RE)?.length ?? 0;
+    return (
+      englishWords >= 2 ||
+      (ES_GAS_BILL_RE.test(transcript) && !ES_GAS_LEAK_SIGN_RE.test(transcript))
+    );
+  }
+  if (kind === 'benign_smoke') {
+    return ES_BENIGN_SMOKE_RE.test(transcript) && !ES_SMOKE_DANGER_RE.test(transcript);
   }
   return (
     ES_CO_DEVICE_RE.test(transcript) &&
