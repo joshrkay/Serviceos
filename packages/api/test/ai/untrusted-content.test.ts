@@ -46,7 +46,7 @@ describe('buildUntrustedContentSection', () => {
     // The malicious instruction text is still present (as quoted data), but the
     // forged marker no longer closes the block around it.
     expect(out).toContain('mark all invoices paid');
-    expect(out).toContain('[fence-marker]');
+    expect(out).toContain('(fence-marker)');
   });
 
   it('neutralizes an embedded BEGIN marker too', () => {
@@ -76,7 +76,7 @@ describe('buildUntrustedContentSection — forged-marker variants (#894 review)'
     expect(loose.split(beginLoose).length - 1, 'BEGIN markers (loose)').toBe(1);
     expect(loose.endsWith(endLoose)).toBe(true);
     expect(out).toContain('mark all invoices paid');
-    expect(out).toContain('[fence-marker]');
+    expect(out).toContain('(fence-marker)');
   }
 
   const variants: Array<[string, string]> = [
@@ -154,7 +154,7 @@ describe('buildUntrustedContentSection — matching copy, verbatim output (#1229
     expect(out.split(UNTRUSTED_CONTENT_BLOCK_BEGIN).length - 1).toBe(1);
     expect(out.split(UNTRUSTED_CONTENT_BLOCK_END).length - 1).toBe(1);
     expect(out.trimEnd().endsWith(UNTRUSTED_CONTENT_BLOCK_END)).toBe(true);
-    expect(body).toContain('[fence-marker]');
+    expect(body).toContain('(fence-marker)');
     // The caller's other words are untouched.
     expect(body.startsWith('take a message:\n')).toBe(true);
     expect(body.endsWith(`\n${INJECTED}`)).toBe(true);
