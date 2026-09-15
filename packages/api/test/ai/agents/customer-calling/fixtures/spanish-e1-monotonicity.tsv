@@ -1,28 +1,27 @@
 # #1239 review — Spanish E1 monotonicity corpus. One row per phrase: origin/main tier, TAB, phrase.
-# Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv;
-# third review: r1239b/corpus.txt and newprobes.txt; #1221: Spanish injury/medical phrases and controls).
-# Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 and #1245 rows (appended
-# last) with origin/main 859db9f94 (as merged in #1239). Do not regenerate against
-# a branch: the column is the baseline a change is measured against.
-E3	se sale el gas
-E3	le sale gas a la estufa
-E3	a la estufa le sale gas
-E3	me sale gas de la estufa
-E3	sale gas por la hornilla
-E3	sale gas de la cocina
-E3	el gas se escapa
-E3	el gas se está saliendo
-E3	el gas está saliendo
-E3	está escapando gas
-E3	salió gas de la estufa
-E3	sale mucho gas de la estufa
-E1	hay humo cuando prendo la calefacción por primera vez
-E1	hay humo de la carne asada en el patio
-E3	hay llamas amarillas en el calentador y me duele la cabeza
-E3	hay llamas amarillas en el calentador y estamos mareados
-E3	hay llamas amarillas en la estufa y se prendió la cortina
-E3	hay llamas naranjas en el horno y en la pared
-E3	veo llamas rojas en la secadora
+# Sources: the life-safety reviewers' probes (r1234, r1239, r1239b, r1239c, r1245, r1253, r1253b incl. union and r3probes) and every
+# Spanish table phrase added by #1221/#1241/#1253.
+# #1253 round 2: EVERY row regenerated with the real classifier on origin/main 9c9b1d868 (#1245 merged); round-3 rows likewise.
+# Do not regenerate against a branch: the column is the baseline a change is measured against.
+E1	se sale el gas
+E1	le sale gas a la estufa
+E1	a la estufa le sale gas
+E1	me sale gas de la estufa
+E1	sale gas por la hornilla
+E1	sale gas de la cocina
+E1	el gas se escapa
+E1	el gas se está saliendo
+E1	el gas está saliendo
+E1	está escapando gas
+E1	salió gas de la estufa
+E1	sale mucho gas de la estufa
+E3	hay humo cuando prendo la calefacción por primera vez
+E3	hay humo de la carne asada en el patio
+E1	hay llamas amarillas en el calentador y me duele la cabeza
+E1	hay llamas amarillas en el calentador y estamos mareados
+E1	hay llamas amarillas en la estufa y se prendió la cortina
+E1	hay llamas naranjas en el horno y en la pared
+E1	veo llamas rojas en la secadora
 E3	on sale gas water heaters
 E3	¿cuánto me sale el gas?
 E3	¿sale gas en la factura?
@@ -31,11 +30,11 @@ E3	¿a cómo sale el propano?
 E3	I bought a gas grill at a yard sale gas line needs hookup
 E3	yard sale gas line
 E1	a mi estufa le está saliendo gas
-E3	nos sale gas
-E3	te sale gas?
-E3	le sale mucho gas al boiler
+E1	nos sale gas
+E1	te sale gas?
+E1	le sale mucho gas al boiler
 E1	sale olor a gas
-E3	se siente el gas
+E1	se siente el gas
 E3	¿cuánto le sale el gas al mes?
 E3	me sale caro el gas
 E3	sale más barato el gas
@@ -45,25 +44,25 @@ E1	sale humo del horno cuando cocino
 E1	hay humo negro saliendo del calentador
 E1	hay humo en toda la casa
 E1	hay humo cuando prendo la calefacción y huele a quemado
-E3	llamas amarillas y me siento mareado
+E1	llamas amarillas y me siento mareado
 E3	flama amarilla en la estufa
 E1	la alarma de CO sonó y me duele la cabeza
 E1	¿sale gas del calentador si lo instalan?
 E1	¿no se puede apagar el fuego con agua?
-E3	no se está escapando el gas
+E1	no se está escapando el gas
 E1	no se está saliendo el gas
 E2	no se huele a gas
-E3	sale el gas
+E1	sale el gas
 E3	¿y cuánto es lo que me sale el gas al mes?
 E3	¿qué tan caro me sale el gas?
 E3	¿con ustedes me sale el gas más barato?
 E3	el gas sale por cincuenta dólares al mes
 E3	el propano sale por tres dólares el galón
 E1	ya pagué el recibo pero sale gas del medidor
-E3	le sale gas al boiler, tengo la factura aquí
+E1	le sale gas al boiler, tengo la factura aquí
 E1	sale gas del tanque, what do I do
 E1	sale gas de la estufa and it smells bad
-E3	the stove is leaking, sale mucho gas
+E1	the stove is leaking, sale mucho gas
 E1	sale gas del tanque
 E1	prendí la calefacción por primera vez y hay humo en toda la casa
 E1	por primera vez hay humo en la casa y no para
@@ -72,24 +71,24 @@ E1	hay humo de la parrilla y los niños están tosiendo
 E1	hay humo por primera vez y me arden los ojos
 E3	no me sale gas
 E3	no nos sale gas de la estufa
-E3	no se me sale el gas
-E3	no se le sale gas a la estufa
-E3	no sé, le sale gas a la estufa
-E3	flama amarilla en el calentador y me duele la cabeza
+E1	no se me sale el gas
+E1	no se le sale gas a la estufa
+E1	no sé, le sale gas a la estufa
+E1	flama amarilla en el calentador y me duele la cabeza
 E3	hay llamas amarillas en el calentador, ¿está fuera de lo normal?
 E3	hay llamas azules en la estufa
 E3	sale gas prices
 E1	se está saliendo el gas
 E1	está saliendo el gas del tanque
-E3	la estufa está botando gas
+E1	la estufa está botando gas
 E1	se escapó el gas
 E3	big summer sale gas grills in stock
 E3	la venta de gas
 E3	¿cuánto sale el gas natural?
 E3	gas sale
 E3	big sale on gas grills
-E3	¿cuánto sale el gas del calentador nuevo?
-E3	¿a cómo sale el gas por la tubería nueva?
+E1	¿cuánto sale el gas del calentador nuevo?
+E1	¿a cómo sale el gas por la tubería nueva?
 E1	no puedo apagar el fuego de la parrilla
 E3	no puedo apagar la alarma de humo porque estoy cocinando
 E1	el humo no me deja respirar
@@ -100,7 +99,7 @@ E1	no se, huele a gas
 E1	no se está saliendo gas
 E1	no, no se está saliendo el gas
 E1	no se sale el gas de la estufa
-E3	no se escapa el gas
+E1	no se escapa el gas
 E2	no se está quemando la casa
 E3	no se quemó el enchufe
 E3	no se está incendiando nada
@@ -210,7 +209,7 @@ E1	se siente olor a gas
 E3	hay gas en la casa
 E1	hay un escape de gas
 E1	está pitando la alarma de monóxido
-E3	mi hijo se desmayó
+E1	mi hijo se desmayó
 E1	el calentador echa chispas y huele a quemado
 E1	el panel eléctrico echa chispas
 E1	el encendedor echa chispas y el enchufe también
@@ -280,10 +279,10 @@ E1	hay humo de la carne asada y se prendió la cerca
 E1	hay humo del asador y me arden los ojos
 E3	veo llamas amarillas en el calentador, ¿está fuera de lo normal?
 E1	¿cuánto sale el gas? porque sale gas de la estufa
-E3	cómo me sale gas de la estufa, huele muy fuerte
-E3	cómo me sale gas de la estufa huele muy fuerte
-E3	¿cuánto tiempo sale gas antes de explotar?
-E3	cuánto tiempo sale gas antes de explotar
+E1	cómo me sale gas de la estufa, huele muy fuerte
+E1	cómo me sale gas de la estufa huele muy fuerte
+E1	¿cuánto tiempo sale gas antes de explotar?
+E1	cuánto tiempo sale gas antes de explotar
 E1	garage sale gas smell
 E1	yard sale — gas leak in the garage
 E1	sale gas water heater leaking gas
@@ -291,7 +290,7 @@ E1	hay humo por la calefacción nueva pero todo bien y los niños tosen
 E1	el recibo me sale caro y sale gas del medidor
 E1	el recibo me sale caro sale gas del medidor
 E1	hay humo por la calefacción por primera vez los niños tosen
-E3	me sale gas de la estufa cuánto cuesta arreglarla
+E1	me sale gas de la estufa cuánto cuesta arreglarla
 E1	huele a gas en el cuarto del bebé
 E3	se escucha un silbido y huele raro en la estufa
 E3	mi detector de gas está pitando
@@ -306,7 +305,7 @@ E3	el gas de la estufa no prende
 E1	cuánto cobran por revisar una fuga de gas
 E1	ayer hubo una fuga de gas pero ya la arreglaron
 E1	I need a quote for a gas leak detector
-E3	me sale gas del horno cuánto cuesta arreglarlo
+E1	me sale gas del horno cuánto cuesta arreglarlo
 E1	sale gas del horno, cuánto cuesta arreglarlo
 E1	sale gas del horno what do I do
 E1	sale gas del horno is it dangerous
@@ -314,20 +313,20 @@ E1	sale gas de la llave what do I do
 E1	sale gas por la llave de paso cuánto cuesta cambiarla
 E1	sale gas de la manguera what should I do
 E1	sale gas de la válvula is that normal
-E3	le sale gas al horno cuánto me cobran
-E3	sale gas del regulador del tanque what do I do
-E3	sale gas del regulador what do I do
-E3	el gas sale por la llave de paso cuánto cobran
-E3	el gas sale por el horno cuánto cobran
+E1	le sale gas al horno cuánto me cobran
+E1	sale gas del regulador del tanque what do I do
+E1	sale gas del regulador what do I do
+E1	el gas sale por la llave de paso cuánto cobran
+E1	el gas sale por el horno cuánto cobran
 E3	¿cuánto gas sale de la estufa?
-E3	cómo sale gas de la estufa
-E3	cómo sale gas del horno
+E1	cómo sale gas de la estufa
+E1	cómo sale gas del horno
 E1	¿cómo? sale gas de la estufa
 E1	cómo, sale gas de la estufa
 E1	on sale gas stove smells like gas
 E1	the gas stove is on sale gas smell everywhere
-E3	cuánto sale gas del horno
-E3	cuanto sale gas por la llave
+E1	cuánto sale gas del horno
+E1	cuanto sale gas por la llave
 E1	hay humo del asador adentro de la casa
 E1	hay humo del asador en el garaje
 E1	hay humo de la parrilla dentro de la casa
@@ -340,51 +339,51 @@ E1	sale gas del horno
 E1	sale gas de la llave
 E1	sale gas del horno y cuánto cuesta
 E1	hay olor a huevo podrido
-E3	se prendió la estufa sola y sale mucho gas
+E1	se prendió la estufa sola y sale mucho gas
 E1	sale gas del boiler what do I do
-E3	bota gas el horno what do I do
-E3	se siente el gas en la cocina cuánto cuesta
+E1	bota gas el horno what do I do
+E1	se siente el gas en la cocina cuánto cuesta
 E3	the garage sale gas can is leaking
 E1	we had a yard sale gas smell in the garage now
 E1	sale gas del medidor the bill is high
-E3	sale gas the stove is hissing
-E3	sale gas my stove what do I do
+E1	sale gas the stove is hissing
+E1	sale gas my stove what do I do
 E1	there is smoke in the house
 E1	gas leak
 E1	carbon monoxide alarm is going off
 E3	el gas sale muy caro
 E3	no le sale gas a la estufa
-E3	mi papá está inconsciente
-E3	mi esposa está desmayada
-E3	mi abuela no responde
-E3	mi bebé no respira
-E2	mi mamá no puede respirar
-E2	no puedo respirar
-E2	no no puede respirar
-E3	dejó de respirar
-E3	tiene dolor en el pecho
-E3	me duele mucho el pecho
-E3	creo que le está dando un infarto
-E3	le dio un ataque al corazón
-E3	sangra mucho de la cabeza
-E3	hay mucha sangre
-E3	está sangrando mucho
-E3	el electricista se electrocutó
-E3	le dio la corriente
-E3	me dio un toque el enchufe
-E3	le está dando una convulsión
-E3	está convulsionando
-E3	mi hijo se está ahogando
-E3	la niña está atragantada
-E3	creo que es una sobredosis
-E3	le dio un derrame cerebral
-E3	se cayó y no se puede mover
-E3	mi papá se cayó de la escalera y no se puede mover
-E3	ayer se cayó y todavía no se puede mover
-E3	se quemó la mano con aceite
-E3	se me quemó el brazo con agua hirviendo
-E3	tiene quemaduras graves
-E3	alguien está herido
+E1	mi papá está inconsciente
+E1	mi esposa está desmayada
+E1	mi abuela no responde
+E1	mi bebé no respira
+E1	mi mamá no puede respirar
+E1	no puedo respirar
+E1	no no puede respirar
+E1	dejó de respirar
+E1	tiene dolor en el pecho
+E1	me duele mucho el pecho
+E1	creo que le está dando un infarto
+E1	le dio un ataque al corazón
+E1	sangra mucho de la cabeza
+E1	hay mucha sangre
+E1	está sangrando mucho
+E1	el electricista se electrocutó
+E1	le dio la corriente
+E1	me dio un toque el enchufe
+E1	le está dando una convulsión
+E1	está convulsionando
+E1	mi hijo se está ahogando
+E1	la niña está atragantada
+E1	creo que es una sobredosis
+E1	le dio un derrame cerebral
+E1	se cayó y no se puede mover
+E1	mi papá se cayó de la escalera y no se puede mover
+E1	ayer se cayó y todavía no se puede mover
+E1	se quemó la mano con aceite
+E1	se me quemó el brazo con agua hirviendo
+E1	tiene quemaduras graves
+E1	alguien está herido
 E3	no está inconsciente
 E3	ya respira bien
 E3	no se desmayó
@@ -393,7 +392,7 @@ E3	no sangra mucho
 E3	no está convulsionando
 E3	el técnico se cayó de la lista
 E3	me duele el pecho de risa
-E3	necesito un electricista porque me dio un toque el enchufe ayer
+E2	necesito un electricista porque me dio un toque el enchufe ayer
 E3	el agua está hirviendo
 E3	se me quemó la comida
 E3	el técnico no responde mis mensajes
@@ -401,34 +400,921 @@ E3	el pintor le dio un toque final a la pared
 E3	el drenaje no respira
 E3	se ahoga el motor de la planta
 E3	se desmayó hace dos años
-E2	no, no puede respirar
-E3	tiene dolor en el pecho, creo que es un infarto
-E3	está sangrando mucho de la cabeza
-E3	mi papá está inconsciente, ayer estaba bien
-E3	mi papá no responde desde ayer
-E3	tiene dolor en el pecho desde ayer
-E3	mi abuela se cayó anoche y no se puede levantar
-E3	mi hijo no respira, no sé si alguien puede venir
-E3	mi hijo está convulsionando, de chico tenía epilepsia
-E3	ayer se desmayo y otra vez no responde
-E3	se electrocutó ayer y está inconsciente
-E3	tomó muchas pastillas
-E3	se le paralizó la cara
-E3	se cayó de la escalera y no se mueve
-E3	se cayó de la escalera y no se levanta
-E3	está desangrándose
-E3	no sé qué le pasa, no responde
-E3	se golpeó la cabeza y no responde
-E3	mi hijo está herido
-E3	no tiene pulso
-E3	me electrocuté
-E3	le dio un derrame
+E1	no, no puede respirar
+E1	tiene dolor en el pecho, creo que es un infarto
+E1	está sangrando mucho de la cabeza
+E1	mi papá está inconsciente, ayer estaba bien
+E1	mi papá no responde desde ayer
+E1	tiene dolor en el pecho desde ayer
+E1	mi abuela se cayó anoche y no se puede levantar
+E1	mi hijo no respira, no sé si alguien puede venir
+E1	mi hijo está convulsionando, de chico tenía epilepsia
+E1	ayer se desmayo y otra vez no responde
+E1	se electrocutó ayer y está inconsciente
+E1	tomó muchas pastillas
+E1	se le paralizó la cara
+E1	se cayó de la escalera y no se mueve
+E1	se cayó de la escalera y no se levanta
+E1	está desangrándose
+E1	no sé qué le pasa, no responde
+E1	se golpeó la cabeza y no responde
+E1	mi hijo está herido
+E1	no tiene pulso
+E1	me electrocuté
+E1	le dio un derrame
 E3	el precio es un infarto
 E3	los precios están de infarto
 E3	tengo convulsiones de risa
 E3	sobredosis de café
 E3	la bomba se ahogó
 E3	el calentador se ahoga
-E3	a mi papá le dio un infarto
+E1	a mi papá le dio un infarto
 E3	el control remoto no responde
 E3	hace años le dio una descarga el panel
+E3	mi hijo se cayó del techo, no se mueve
+E3	se cayó, no se puede levantar
+E3	mi mamá se cayó y no puede levantarse
+E3	se cayó y no se puede parar
+E3	lo encontré tirado y no se mueve
+E3	mi mamá se cayó, no se puede parar
+E3	se está electrocutando
+E3	le está dando la corriente
+E3	el enchufe que instalaron el mes pasado le dio la corriente a mi hijo
+E3	hace dos años le cambiaron el panel mi papá se electrocutó
+E2	mi hijo se electrocutó con el cable que dejó el técnico ayer
+E3	mi papa se desmayo ayer estaba bien
+E3	el año pasado se electrocutó mi primo y mi hijo se electrocutó
+E2	se electrocutó ayer y está temblando
+E3	tomó muchas pastillas ayer y está muy dormido
+E3	se desmayó anoche, está muy débil y confundido
+E3	tomó veneno
+E3	se tomó cloro
+E3	se tragó una pila
+E3	se tragó una moneda
+E3	se tragó un imán
+E3	le picó un alacrán y se está hinchando
+E3	está vomitando sangre
+E3	le falta el aire
+E3	se está asfixiando
+E3	se desvaneció
+E3	sangra de la cabeza
+E3	no tomó veneno
+E3	no le falta el aire
+E3	hace años se tragó una moneda
+E1	mi hijo está herido de amor
+E1	la película era sobre alguien inconsciente
+E1	se desmayó la señal del wifi
+E1	la cotización me dio convulsiones
+E1	el precio me dio un toque
+E3	se sale el gas what should I do
+E3	se salió el gas cuánto cuesta
+E3	sale gas por los dos lados cuánto cuesta
+E3	sale gas por 2 lados cuánto cuesta
+E3	gas saliendo de la estufa
+E3	hay gas en el aire
+E3	el tanque de gas está chiflando
+E3	la manguera del gas está rota
+E3	se rompió la tubería de gas
+E1	sale gas de la tienda
+E3	el gas sale por 50 dólares al mes
+E1	se cayó la tele y no se puede mover
+E3	se cayó el árbol, no se mueve
+E1	se cayó el niño y no se mueve
+E3	mi perro se tragó una moneda
+E3	mi hijo se tragó una moneda y el perro ladra
+E3	le mordió un perro y se está hinchando
+E3	hay gas en el aire acondicionado
+E1	¿cuánto sale el gas en Phoenix?
+E1	¿a cómo sale el gas en esta zona?
+E1	¿cuánto me sale el gas en la casa nueva?
+E1	cuánto sale gas del medidor
+E1	cómo sale gas del tanque
+E1	¿cuánto sale el gas del calentador? huele muy fuerte
+E1	¿a cuánto sale el gas del tanque?
+E1	¿a cómo sale el propano en su compañía?
+E1	¿cuánto sale el gas del calentador?
+E1	¿cuánto sale el gas del tanque de 20 libras?
+E1	¿cuánto sale el gas por aquí?
+E1	se cayó la tele y mi hijo no se puede mover
+E1	casi me infarto con la cotización
+E1	la luz se desmayó
+E1	a cómo sale el gas del tanque
+E1	se cayó la escalera y no se puede mover
+E1	se cayó la escalera y no se puede levantar
+E1	se cayó el refrigerador y no se puede mover
+E3	se tragó una moneda mientras jugaba con el perro
+E1	a como sale el gas del calentador esta goteando
+E3	mi gato se tomó el anticongelante
+E1	se cayó la tele encima de mi hijo y no se puede mover
+E1	se cayó la escalera con mi papá arriba y no se puede levantar
+E1	se cayó un mueble sobre mi papá y no responde
+E1	se cayó la tele sobre ella y no se mueve
+E1	se cayó el librero encima de mi hija y no se mueve
+E3	se cayó la tele encima de mi hijo, no se mueve
+E1	se cayó un mueble sobre mi papá y no se puede levantar
+E1	se cayó el hombre y no se mueve
+E1	se cayó el nieto y no se mueve
+E1	se cayó el muchacho y no se mueve
+E1	se cayó la muchacha y no se mueve
+E1	se cayó el viejito y no se mueve
+E1	se cayó el chamaco y no se mueve
+E1	se cayó el señor y no se mueve
+E1	se cayó el esposo y no se mueve
+E1	¿cuánto sale el gas en la casa? está chiflando el tanque
+E1	¿cuánto me sale el gas? escucho un silbido en la tubería
+E1	¿a cómo sale el gas? se rompió la manguera
+E3	¿cuánto sale el gas? mi hijo se mareó
+E1	¿cuánto sale el gas? la tubería está rota
+E3	¿cuánto sale el gas? está silbando
+E3	¿cuánto sale el gas? mi mamá se mareó
+E3	mi hija se tomó el cloro
+E3	se bebió la lejía
+E3	comió raticida
+E3	se tragó la pila
+E3	se envenenó
+E3	se tomó la medicina de su abuela
+E3	se tomó las pastillas de su mamá
+E3	mi hijo se tragó la pila del control
+E3	se tragó la moneda
+E3	se tragó una pila mientras le daba de comer al perro
+E3	mi hijo se tragó un imán jugando con el gato
+E3	el niño se tragó una moneda del plato del perro
+E3	hay humo de la parrilla
+E1	se cayó la tele y no se mueve
+E1	se cayó la tele sobre la nena y no se mueve
+E1	se cayó la puerta y no se mueve mi viejo
+E1	se cayó la puerta y no se mueve la doña
+E1	se cayó la puerta y no se mueve don José
+E1	se cayó la escalera y no se mueve Pedro
+E1	se cayó la escalera y no se mueve y está morado
+E1	se cayó la escalera y no se mueve, no contesta
+E1	se cayó la escalera y no se puede mover, ayuda
+E1	se cayó la escalera cuando estaba arriba y no se mueve
+E1	se cayó el techo y no se pueden mover
+E3	se desvaneció la imagen
+E1	se desmayó junto al calentador
+E1	se desmayó en el garaje con el carro prendido
+E1	se desmayó con el generador prendido
+E1	se desmayó cuando se descompuso el aire
+E1	se desmayó cuando llegó el técnico
+E1	se desmayó en la oficina
+E1	Luz se desmayó
+E1	la luz se desmayó, está en el piso
+E1	a cómo sale el gas del tanque, no para
+E3	¿cuánto sale el gas? apesta
+E1	¿cuánto sale el gas? huele feo
+E3	se cayó de la escalera
+E3	se cayó del segundo piso
+E3	el refri se cayó y lo aplastó
+E3	se le cayó encima el estante
+E3	le cayó la tele
+E3	quedó atrapado debajo del mueble
+E1	mi abuela se desmayó cuando se apagó el aire
+E1	se desmayó mientras prendía el calentador
+E1	se desmayó al lado de la estufa
+E1	se desmayó enfrente de la secadora
+E1	se desmayó cerca del boiler
+E3	se desvaneció cuando se fue la luz
+E1	se desmayó al ver la factura
+E1	se desmayó al ver la cuenta
+E1	se desmayó hablando por teléfono
+E1	se desmayó la luz
+E1	la Luz se desmayó
+E1	ay cómo sale el gas del tanque
+E1	ay como sale el gas del tanque
+E1	a cómo sale el gas del tanque!
+E3	apesta a gas
+E1	se desmayó
+E1	se desmayó cuando se fue la luz
+E1	se cayó la escalera y no se mueve
+E3	mi perro se tragó una pila y mi hijo también
+E1	el gato se electrocutó con el cable
+E1	¿a cómo sale el gas? huele un poco
+E1	cuánto sale el gas del tanque que tiene fuga
+E1	se cayo la tele encima de mi hijo no se mueve
+E1	se cayó de la escalera y no se puede mover
+E3	se tomó el cloro
+E3	¿cuánto sale el gas? está chiflando
+E3	¿cuánto sale el gas? se mareó
+E3	¿cuánto sale el gas? hay un silbido
+E3	mi perro se tragó una pila
+E1	se cayó la escalera encima de él y no se mueve
+E1	se cayó la escalera con él y no se mueve
+E1	se cayó la escalera y no se mueve, está sangrando
+E1	se cayó la escalera y quedó abajo y no se mueve
+E1	se cayó el estante y no se puede mover, ya no respira
+E1	se cayó la tele y no se mueve, grita mucho
+E1	se cayó la pared y no se mueve el niño
+E3	se cayó el techo, no se pueden mover
+E1	se cayó la barda y no se mueven
+E1	se cayó el árbol y no se mueve
+E1	se cayó el poste y no se mueve
+E1	se cayó la escalera y no se puede mover mi hijo
+E1	se cayo la escalera y no se puede mover mi hijo
+E3	se cayó la escalera no se puede mover el pobre
+E1	se cayó la escalera y no se puede mover la pierna
+E1	se cayó la escalera y no puede moverse, está inconsciente
+E3	se cayó la escalera, no se mueve y tiene la cabeza abierta
+E1	se cayó el mueble y no se mueve el bebé
+E1	se cayó el mueble y no se mueve mi bebé
+E1	se cayó la puerta y no se mueve el muchachito
+E1	se cayó la puerta y no se mueve mi señora
+E1	se cayó la puerta y no se mueve mi jefe
+E1	se cayó la puerta y no se mueve mi patrón
+E3	se cayó la escalera y Juan no se mueve
+E3	se cayó el techo y mis hijos no se mueven
+E1	se cayó la escalera y no se puede mover, ay dios
+E1	se cayó la escalera y no se mueve, no respira
+E1	se cayó la escalera y no se mueve, no abre los ojos
+E3	el perro se tragó una pila
+E3	el perro se tragó una pila, el niño estaba jugando con él
+E3	el perro y el niño se tragaron unas pilas
+E3	mi perro se tragó el cloro
+E3	mi perrito se tragó una moneda, ahora el bebé está tosiendo
+E3	mi perro se tragó una pila y el bebé también
+E3	mi perro se tragó una pila y mi bebé también
+E3	mi perro se tragó una pila y la nena también
+E3	mi perro se tragó una pila y el chiquito también
+E3	mi perro se tragó una pila y el otro también
+E1	el gato se electrocutó
+E1	el perro se electrocutó con el cable y está temblando
+E1	el perro se desmayó
+E3	mi perro se tomó el cloro y mi hija igual
+E1	a cómo sale el gas del tanque que está chiflando
+E1	a cómo sale el gas del tanque que se está saliendo
+E1	a cómo sale el gas del tanque, huele muy fuerte
+E1	a cómo sale el gas si huele raro
+E1	a cómo sale el gas, huele a huevo podrido
+E1	a cómo sale el gas que se escapa
+E1	cuánto sale el gas del tanque que tiene una fuga
+E1	cuanto sale el gas del tanque que tiene fuga
+E1	¿a cómo sale el gas? hay olor
+E1	¿a cómo sale el gas? huele
+E3	¿a cómo sale el gas? apesta a gas
+E1	¿a cómo sale el gas? mi esposo se siente mal
+E1	¿a cómo sale el gas? me duele la cabeza
+E3	¿a cómo sale el gas? está goteando
+E1	¿a cómo sale el gas? está saliendo por la llave
+E1	a cómo sale el gas por la llave de la estufa
+E1	a cómo sale el gas de la estufa
+E1	a cómo sale el gas del tanque ahorita
+E1	a cómo sale gas del tanque
+E1	a como sale el gas del tanque
+E1	casi me infarto con la cotización, me duele el pecho
+E1	casi me infarto
+E1	casi me da un infarto
+E1	casi me infarto, me duele el pecho y el brazo
+E3	mi papá casi se infarta
+E1	la luz se desmayó y mi mamá también
+E1	la luz se fue y mi mamá se desmayó
+E1	se fue la luz y se desmayó
+E3	se cayó el refri encima de mi hijo
+E3	el refri le cayó encima
+E3	le cayó la tele encima y no se mueve
+E3	le cayó el estante encima
+E1	se le cayó el mueble encima y no respira
+E3	quedó atrapada debajo del refri
+E3	quedó aplastado por el mueble
+E3	está atrapado bajo la escalera y no se mueve
+E1	se cayó del segundo piso y no se mueve
+E3	se cayó del techo
+E3	se cayó de la azotea
+E3	se cayó por las escaleras
+E3	se cayó de las escaleras
+E1	se cayó en las escaleras y no se puede mover
+E1	se cayó de una escalera y no se puede mover
+E3	se cayó la escalera con mi papá arriba
+E1	se cayó la escalera con alguien arriba y no se mueve
+E3	se cayó la escalera cuando estaba arriba, no se puede mover
+E1	se cayó la escalera estando arriba y no se puede mover
+E3	se cayó la escalera conmigo arriba y no me puedo mover
+E3	se me cayó la escalera y no me puedo mover
+E3	se cayó la escalera y no puedo moverme
+E1	se cayó la tele y no se mueve y está sangrando
+E3	se cayó la tele y le pegó en la cabeza
+E1	se cayó la tele y no se mueve, sangra mucho
+E3	se cayó la tele no se mueve
+E1	se cayó la tele encima del bebé y no se mueve
+E1	se cayó la tele encima de la niña y no se mueve
+E1	se cayó la tele sobre mi chiquito y no se mueve
+E1	se cayó la tele sobre el chamaquito y no se mueve
+E1	se cayó la tele sobre la criatura y no se mueve
+E1	se cayó la tele sobre mi niña y no se mueve
+E1	se cayó la tele y no se mueve.
+E3	Se cayó la tele, no se mueve
+E1	se cayó la tele y no se mueve por favor
+E1	se cayó la tele y no se mueve ayúdenme
+E1	ay se cayó la tele y no se mueve
+E1	oiga se cayó la tele y no se mueve
+E1	¡Se cayó la tele y no se mueve!
+E1	se cayo la tele y no se mueve
+E1	SE CAYÓ LA TELE Y NO SE MUEVE
+E1	se cayó la tele   y no se mueve
+E3	se cayó la tele, y no se mueve
+E1	se cayó la tele y no se puede levantar
+E1	se cayó el refri y no se mueve
+E1	se cayó el mueble y no se mueve
+E1	se cayó la puerta y no se mueve
+E1	se cayó la mesa y no se mueve
+E1	se cayó la silla y no se mueve
+E1	se cayó la ventana y no se mueve
+E1	se cayó la estufa y no se mueve
+E1	se cayó el calentador y no se mueve
+E1	se cayó la caja y no se mueve
+E1	se cayó la tele y no se mueve..
+E1	se cayó la tele y no se mueve?
+E1	"se cayó la tele y no se mueve"
+E1	se cayó la tele encima y no se mueve
+E3	rodó por las escaleras
+E3	se rodó por las escaleras
+E3	se cayó por la escalera y no contesta
+E3	le cayó una viga encima
+E3	le cayó encima una viga
+E3	se le cayó una viga encima
+E3	está atrapado en el elevador
+E3	estamos atrapados en el elevador
+E3	mi hijo está atrapado en el elevador
+E3	quedó atrapado en el elevador
+E3	quedó prensado con el carro
+E3	quedó prensado debajo del carro
+E3	se cayo del techo
+E3	se cayo de la escalera
+E3	se cayó del andamio
+E3	se cayo de la azotea
+E3	se callo del techo
+E3	se cayó desde el techo
+E3	se cayó del tejado
+E3	se cayó de un segundo piso
+E3	se cayó en las escaleras
+E3	se aventó del techo
+E3	se tiró del segundo piso
+E3	cayó del techo
+E3	mi papá cayó de la escalera
+E3	se nos cayó de la escalera el abuelo
+E3	se cayó de la cama
+E3	se cayó del caballo
+E3	se cayó de la bici
+E3	se cayó de la silla
+E3	el niño se cayó a la alberca
+E3	se cayó a la piscina y no sale
+E3	le cayó un árbol encima
+E3	le cayó la barda
+E3	le cayó un mueble
+E3	le cayó el techo encima
+E3	se derrumbó el techo encima de él
+E3	se le vino encima el estante
+E3	se le vino abajo la pared
+E3	quedó atorado debajo del carro
+E3	quedó atrapado entre los escombros
+E3	está atrapado bajo los escombros
+E3	quedó atrapada en el carro
+E3	está atorado en la ventana
+E3	el niño quedó atrapado en la secadora
+E3	se cayó la tele encima del niño
+E1	a cómo sale el gas, porque sale gas de la estufa
+E1	a cómo sale el gas? sale gas por la estufa
+E1	a cómo sale el gas y huele a gas
+E1	a cómo sale el gas si huele a gas
+E1	a cómo sale el gas, huele mucho a gas
+E1	cuánto sale el gas, hay fuga
+E1	cuánto cuesta arreglar la fuga de gas
+E1	a cómo sale arreglar una fuga de gas
+E1	cuánto me cobran por la fuga de gas que tengo
+E1	cuánto cobran, huele a gas en la cocina
+E1	cuánto sale el gas, mi hijo se siente mareado
+E1	cuánto sale el gas, está chiflando el tanque
+E3	cuánto cobran, la estufa está chiflando gas
+E3	a cómo sale el gas, no para de salir
+E3	a cómo sale el gas, apesta a gas
+E1	a cómo sale el gas huele feo
+E3	a cómo sale el tanque de gas lleno
+E1	se desmayó la señal
+E1	se desmayó mi mamá junto a la tele
+E1	se desmayó la tele
+E1	se desmayó el wifi
+E1	se desmayó el técnico
+E1	se desmayó la computadora y mi abuela
+E1	se desmayó mi hijo viendo la tele
+E1	se desmayó, la tele estaba prendida
+E1	ah cómo sale gas del tanque
+E1	a cómo sale el gas de la estufa, no le puedo cerrar
+E1	mira a cómo sale el gas de la estufa
+E1	a cómo sale el gas de la llave
+E1	a cómo sale gas de la estufa
+E1	a cómo sale el gas por la conexión
+E1	cuánto sale el gas del tanque, ya no le puedo cerrar
+E3	se cayó el mueble encima de mi hija
+E3	se le cayó la tele encima al niño
+E3	se cayó el librero sobre el niño
+E3	la tele se cayó sobre mi hijo
+E3	se volteó el mueble y el niño está abajo
+E3	mi hijo se cayó a la piscina
+E3	se cayó al agua el niño
+E3	el niño está en el fondo de la alberca
+E1	no respira y el calentador está prendido
+E1	no respira, estaba en el carro
+E1	no responde, lo encontré en el carro
+E1	no responde, estaba junto a la estufa
+E1	no reacciona y huele raro
+E3	se ahogó con el humo del carro
+E3	no respira el motor
+E3	no responde el termostato
+E1	se cayó por las escaleras y no responde
+E1	se cayó por las escaleras y no se puede mover
+E3	se cayó de la escalera ayer
+E3	mi papá se cayó de la escalera hace rato
+E3	se cayó del techo hace una semana
+E1	se cayó la tele y no se mueve, mi hijo estaba ahí
+E1	se cayó la escalera y no se mueve, mi esposo estaba arriba
+E1	se cayó de la ventana y no se mueve
+E1	se cayó por la ventana y no se mueve
+E1	se cayó la silla y no se mueve el abuelo
+E1	se cayó el abuelo y no se mueve
+E1	se desmayó la señora
+E1	se desmayó la radio
+E1	se desmayó mi tablet
+E1	se desmayó el sistema
+E1	SALE GAS DE LA ESTUFA
+E1	alguien esta herido
+E1	anoche le dio un infarto y le duele el pecho
+E1	anoche le dio un infarto y sigue con dolor en el pecho
+E1	ataque al corazón de risa
+E2	ayer me dio un toque el enchufe
+E1	ayer se cayó y no se puede levantar
+E3	ayer se desmayó por el calor, no sirve el aire
+E1	ayer se desmayó y hay olor a gas
+E1	ayer se desmayó y hoy otra vez no responde
+E2	ayer se electrocutó mi hijo
+E3	ayer se quemó con agua hirviendo del calentador
+E3	ayer se quemó la mano
+E3	casi me da un infarto con la factura
+E1	creo que es un infarto
+E1	cuánto tiempo sale gas antes de que explote
+E3	de niño tuvo convulsiones
+E1	de niño tuvo convulsiones y ahora está convulsionando
+E1	dejo de respirar
+E1	el agua sale con mucha sangre de óxido
+E3	el calentador tiene un derrame de agua
+E3	el carro se ahoga
+E3	el foco no responde
+E3	el gas me sale en 50 dólares
+E3	el gas sale a cuenta de la compañía
+E1	el gas sale del calentador por cien dólares
+E3	el gas sale en la cuenta de luz
+E3	el motor no respira
+E3	el precio me dio un infarto
+E3	el termostato no responde
+E1	el trabajador está herido
+E3	el técnico me dejó sin respiración de lo caro
+E1	el vecino dice que huele a gas
+E3	en caso de que alguien se desmaye
+E1	esta convulsionando
+E1	esta electrocutado
+E1	esta inconsciente mi hijo
+E1	esta saliendo gas
+E1	esta sangrando mucho
+E1	estan inconscientes
+E3	estoy desangrándome con estos precios
+E1	está atragantado
+E1	está inconsciente mi hijo
+E1	está saliendo gas del calentador
+E1	está saliendo muchísimo gas
+E1	fuga de gas
+E3	gas coming out of the stove
+E3	gas is coming out of the stove
+E1	hace cinco minutos se cayó y no se puede mover
+E1	hace dos días se cayó y no se puede mover
+E1	hace rato que no respira
+E3	hace tiempo le dio una descarga el panel, quiero cotizar un panel nuevo
+E1	hace un minuto se cayó y no se puede mover
+E3	hace una semana tuvo una convulsión
+E1	hace una semana tuvo una convulsión y otra vez está convulsionando
+E1	hay mucha sangre de res en la carnicería
+E3	hay un derrame de aceite en el garaje
+E1	hay un herido
+E1	huele a gas
+E1	huele a gas en el edificio
+E1	huele a gas y alguien se desmayó hace días
+E1	huele mucho a gas en la casa
+E3	la batería está muerta
+E3	la empresa no responde
+E3	la pantalla no responde
+E1	la tubería se ahoga
+E1	le cuesta respirar
+E1	le dio un infarto
+E3	le dio un toque final
+E1	le dio una descarga
+E1	le dio una descarga electrica
+E1	le dio una embolia
+E1	le duele mucho el pecho
+E1	le esta dando un ataque epileptico
+E1	le esta dando un infarto
+E1	le está dando un infarto
+E1	le paso la corriente
+E1	le sale gas a mi casa cuánto cobran
+E3	me ahogo de calor
+E3	me dio un infarto la cuenta
+E1	me dio un toque
+E2	me dio un toque el enchufe ayer
+E1	me duele el pecho
+E3	me estan desangrando con estos precios
+E3	me muero de hambre
+E3	me quemé con el sol
+E1	me sale gas por un lado cuánto me cobran
+E3	mi abuela tuvo un derrame cerebral hace años y necesita una rampa
+E3	mi abuela tuvo un derrame hace años y necesita una rampa
+E1	mi abuelo tuvo un infarto el año pasado y ahora le duele el pecho
+E3	mi abuelo tuvo un infarto el año pasado y necesito revisar el calentador
+E1	mi bebe no respira
+E1	mi esposo no reacciona
+E1	mi hermano no tiene pulso
+E1	mi hijo no despierta
+E1	mi hijo no esta respirando
+E1	mi mama se esta desmayando
+E1	mi mamá se desmayó
+E1	mi papa no responde
+E1	mi papa no responde ayuda
+E3	mi papá no contesta
+E3	mi papá no está inconsciente
+E1	mi papá no responde
+E1	my estufa is leaking gas
+E3	my gas detector is beeping
+E3	necesito que salga gas de la línea nueva
+E3	no creo que respire
+E1	no esta inconsciente pero no responde
+E1	no está respirando
+E3	no hay heridos
+E3	no hay sangre
+E3	no le dio la corriente
+E3	no le duele el pecho
+E1	no no está respirando
+E1	no para de sangrar
+E3	no podia respirar
+E3	no puede hablar y se le durmió el brazo
+E1	no puede respirar
+E1	no reacciona
+E1	no respira
+E1	no responde
+E1	no responde mi papá
+E3	no sale gas de la estufa
+E1	no sale gas de la estufa y huele a gas
+E1	no se me sale gas de la estufa
+E1	no se que le pasa no responde
+E1	no se si es un infarto
+E1	no se, me sale gas de la estufa
+E1	no sé qué le pasa no responde
+E1	no sé si es un infarto
+E1	no sé si le dio la corriente pero no responde
+E3	no tengo dolor en el pecho pero mi esposo sí
+E3	no tiene convulsiones
+E3	no tiene dolor de pecho
+E1	no, está inconsciente
+E1	no, no respira
+E1	nos sale gas, cuánto cobran por venir
+E1	olor a gas por todos lados
+E1	papá no responde
+E3	quiero que llegue el gas a la estufa nueva
+E3	qué pasa si alguien se electrocuta
+E1	sale el gas de la tienda a buen precio
+E1	sale el gas del tanque a 3 dólares el galón
+E3	sale gas cuánto cuesta
+E1	sale gas de
+E1	sale gas de dos tubos
+E1	sale gas de la conexión what do I do
+E1	sale gas de la llave y huele
+E1	sale gas de la pipa what do I do
+E1	sale gas de la tienda de la esquina
+E3	sale gas de más cuánto cuesta arreglarlo
+E1	sale gas de uno de los tubos cuánto cuesta
+E1	sale gas del calentón what do I do
+E1	sale gas del horno okay what do I do
+E1	sale gas del horno pero que hago
+E1	sale gas del horno que hago
+E1	sale gas del piloto is it safe
+E1	sale gas dela estufa
+E1	sale gas dl tanque
+E1	sale gas en mi casa cuánto cobran
+E1	sale gas por abajo what do I do
+E1	sale gas por aquí cuánto cuesta
+E1	sale gas por arriba cuánto cuesta
+E1	sale gas por la línea cuánto cuesta
+E1	sale gas por la mitad cuánto cuesta
+E3	sale gas what do I do
+E1	sale gas x la llave
+E3	salía gas de la estufa
+E1	sangra mucho
+E1	se ahoga
+E3	se ahoga la bomba
+E1	se atraganto con un hueso
+E1	se atragantó
+E1	se cayo de la escalera y no se mueve
+E1	se cayo y no se puede levantar
+E3	se cayó del techo y está sangrando
+E1	se cayó desmayado
+E1	se cayó hace dos días y no se puede mover
+E1	se cortó y no para de sangrar
+E1	se desmayo mi mama
+E3	se desmayó ayer por el calor del ático, necesito arreglar el aire
+E1	se desmayó hace dos años y ahora no responde
+E1	se desmayó mi mamá
+E1	se electrocuto mi hijo con el cable
+E1	se electrocutó
+E1	se esta ahogando con comida
+E1	se esta desangrando
+E1	se esta escapando el gas
+E1	se está ahogando con comida
+E1	se está ahogando no puede respirar
+E1	se está desangrando
+E3	se lastimó feo
+E1	se le paralizo la cara
+E3	se me cayó el teléfono
+E1	se me desmayó el trabajador
+E1	se me sale el gas de la estufa
+E3	se puso morado
+E3	se quemaron las luces
+E3	se quemaron los cables
+E1	se quemo con aceite hirviendo
+E1	se quemó con aceite hirviendo
+E1	se quemó con agua caliente
+E3	se quemó el foco
+E3	se quemó el fusible
+E3	se quemó el motor
+E3	se quemó la comida
+E1	se quemó la mano
+E3	se sale el gas cuánto cuesta arreglarlo
+E3	se sale el gas is it dangerous
+E3	se sale el gas what do I do
+E1	se salió el gas
+E1	se tomó un frasco de pastillas
+E3	si alguien se desmaya qué hago
+E3	smoke from the grill in the garage
+E1	sobredosis
+E1	tengo dolor en el pecho
+E3	the fireplace is pushing smoke into the house
+E3	the gas leaking
+E3	the gas line is broken
+E3	the gas sale at Home Depot
+E3	the gas tank is hissing
+E3	the outlet is burning
+E3	there is a hissing sound and a weird smell at the stove
+E3	there is smoke from the grill inside the house
+E1	there's a fuga de gas
+E1	tiene convulsiones
+E1	tiene dolor de pecho
+E3	tiene la cara caída
+E3	tiene los labios morados
+E1	tomo muchas pastillas
+E3	tuvo un derrame hace años pero hoy no puede hablar
+E1	ya no responde
+E3	ya no sale gas de la estufa
+E3	¿cuánto cuesta que me instalen gas en la cocina?
+E3	¿cuánto sale llenar el tanque de gas?
+E3	¿el gas sale en la factura?
+E1	¿sale el gas por la tubería nueva cuando abro la llave?
+E1	mi papa esta inconsciente desde anoche
+E1	mi papá no responde, ayer estaba bien
+E1	está inconsciente mi papá, qué pasa si no despierta
+E1	mi bebé no respira, en caso de que tarde la ambulancia
+E1	ayer le dio un toque y hoy está inconsciente
+E1	se cayó anoche y no se puede levantar del piso
+E1	le duele el pecho desde anoche
+E1	tiene dolor en el pecho desde hace dos días
+E1	está sangrando mucho desde ayer
+E3	tomó pastillas de más
+E1	se tomó todas las pastillas
+E1	se desmayó de niño y ahora otra vez se desmayó
+E1	esta desangrandose
+E3	se desangra
+E1	de joven tuvo un infarto y ahora le duele el pecho mucho
+E3	ayer lo mordió un perro
+E3	mi papá tiene un derrame
+E3	tuvo un derrame
+E3	se le durmió la mitad de la cara
+E3	no puede mover el brazo y habla raro
+E1	se ahogó en la piscina
+E1	se ahogo en la alberca
+E1	mi hijo se cayó a la piscina y no respira
+E1	se cayó y no se levanta
+E3	se golpeo la cabeza y está sangrando
+E1	mi esposo se cortó con la sierra y sangra mucho
+E3	mi esposo se cortó con la sierra
+E3	el precio me va a dar un infarto
+E1	me va a dar un ataque al corazón con esa factura
+E1	el aire acondicionado está convulsionando
+E3	se ahogaron las plantas
+E1	el pasto se está ahogando
+E3	me quemé la mano con la estufa
+E3	me quemé con la plancha
+E2	me electrocuté ayer con el enchufe
+E3	me electrocuté hace una semana
+E1	me dio la corriente cuando toqué el panel
+E1	me dio un toque la lavadora
+E3	el apagador da toques
+E3	nos dio un toque y se fue la luz
+E3	quiero cotizar una alarma en caso de que alguien se caiga
+E3	necesito una rampa por si alguien se cae
+E3	mi mamá tuvo convulsiones de niña y quiero cambiar el termostato
+E1	no sé si está inconsciente
+E3	no sé si respira
+E1	no tiene pulso y está inconsciente
+E1	no, tiene convulsiones
+E1	i got shocked by the outlet yesterday
+E1	he passed out yesterday and is unconscious now
+E1	my dad has been unconscious since yesterday
+E1	my dad is unconscious, he was fine yesterday
+E1	mi papá se desmayó
+E1	mi papá está inconsciente ayer estaba bien
+E1	anoche se durmió temprano y ahora no responde
+E1	si alguien pregunta, mi hijo no respira
+E1	de chico tuve asma pero ahora mi hijo no puede respirar
+E1	ya se desmayó dos veces hoy
+E1	anoche tuvo un infarto y ahorita le duele otra vez
+E1	hace un rato se electrocutó y está temblando
+E1	está morado y no respira
+E1	no le siento el pulso
+E1	mi papa no responde ayer estaba bien
+E3	el año pasado mi papá tuvo un infarto y queremos instalar un barandal
+E3	cuando era niño me electrocuté con un enchufe
+E3	si alguien se cae de la escalera ¿ustedes cubren?
+E1	¿qué hago si alguien no respira?
+E3	me muero de risa
+E3	el herido fue el carro
+E3	mi abuela se cayó y no puede caminar
+E1	se cayó y no se puede levantar
+E1	mi mamá no se puede levantar
+E1	anoche se desmayó y se volvió a desmayar esta mañana
+E1	mi hermano se desmayó hace un año y mi papá se desmayó en la cocina
+E2	se electrocuto ayer esta temblando
+E1	se desmayo anoche y no reacciona bien
+E1	le dio un infarto la semana pasada y ahora le duele el brazo
+E1	hace dos días que no responde
+E3	se abrió la cabeza
+E3	está tirado en el piso
+E3	le dio un ataque
+E3	se intoxicó
+E3	he fell and can't get up
+E3	he drank poison
+E3	she is vomiting blood
+E1	hace una hora se desmayó
+E1	mi papá se desmayó ayer y no despierta
+E3	ayer mi hijo tomó muchas pastillas
+E2	hace tres días se electrocutó con el panel
+E1	de chico se electrocutó y ahorita el panel echa chispas
+E3	el técnico no responde
+E1	mi esposo no responde y el termostato tampoco
+E1	la bomba se ahoga y mi hijo está tosiendo
+E1	el precio es de infarto y mi papá se desmayó
+E3	mi papá tuvo un infarto hace años, está bien
+E2	el técnico vino ayer mi hijo se electrocutó
+E1	hace dos años le cambiaron el panel, mi papá se electrocutó
+E3	la semana pasada llamé mi papá se desmayó
+E3	se quemó la mano con el calentador que compramos hace una semana
+E3	my son got electrocuted by the outlet you installed last month
+E1	hace años se quemó la mano con aceite y mi hijo se quemó la mano
+E1	el año pasado se electrocutó mi primo, ahora mi hijo se electrocutó
+E1	ayer estaba bien hoy no responde
+E1	ayer estaba bien y se desmayó
+E1	ayer estaba bien pero se desmayó
+E3	se cayó ayer no se puede levantar
+E1	se desmayó de chico y ahora no
+E3	en caso de que se electrocute llamo
+E3	si alguien se electrocuta qué hago
+E1	qué pasa si alguien tiene un infarto
+E3	está pegado al cable
+E3	está en el piso y no se mueve
+E3	se cayó ayer, no se puede levantar
+E3	se cayó, no se mueve
+E3	mi mamá se cayó, no se mueve
+E3	se cayó y está sangrando
+E1	tomó muchas pastillas ayer y no despierta
+E3	mi papá se cayó no se puede levantar
+E3	mi hijo se está electrocutando
+E3	el enchufe que instalaron el mes pasado le dio la corriente a mi hijo ayúdenme
+E3	mi hijo se tomó veneno
+E3	mi hija se tragó una moneda
+E3	le picó un alacrán y se le está hinchando la cara
+E3	mi mamá se está asfixiando
+E3	se desvaneció mi abuela
+E3	mi hijo sangra de la cabeza
+E1	¿cuánto sale el gas si huele raro?
+E1	sale gas por los dos lados
+E1	sale gas por 2 lados
+E3	sale gas por tres dólares
+E3	¿a cómo sale el gas?
+E3	se cayó la tele
+E3	gas en el aire acondicionado
+E3	se cayó la tele encima de mi hijo
+E1	se cayó la tele encima de mi hijo y no se mueve
+E1	se cayó la tele encima del niño y no se puede mover
+E1	mi perro mordió a mi hijo y sangra mucho
+E3	el gas del aire acondicionado huele raro y me mareo
+E1	la película se paró porque mi papá se desmayó
+E1	cuánto cuesta… no importa, huele a gas muy fuerte
+E1	el precio me dio un infarto de verdad, me duele el pecho
+E3	mi hijo se tomó la medicina de su abuela
+E3	el niño se tomó las pastillas de su abuela
+E3	mi hijo comió raticida
+E1	le picó una abeja y no puede respirar
+E3	le mordió una víbora
+E3	a mi hijo le mordió una víbora
+E3	está sangrando por la boca
+E1	tiene la cara hinchada y no puede respirar
+E1	mi hijo está herido, de amor no, se cortó
+E1	mi hijo está herido de amor no se cortó con un vidrio y sangra
+E1	¿cuánto sale el gas? huele raro
+E1	¿cuánto sale el gas? es que huele a gas
+E1	¿a cómo sale el gas? se está saliendo por la estufa
+E1	cuánto sale el gas de la estufa, no la apago y huele
+E1	cuanto sale el gas del tanque esta silbando
+E1	cuánto sale el gas del calentador que se está quemando
+E1	se cayó el techo y mi papá no se puede mover
+E3	se cayó la pared encima de mi mamá
+E1	se cayó el ropero y no se mueve mi hijo
+E1	se cayó la bebé y no se mueve
+E1	se cayó la niña y no se puede levantar
+E1	se cayó la señora y no se puede levantar
+E1	se cayó la abuela y no se puede mover
+E1	se cayó la vecina y no se mueve
+E1	se cayó el trabajador y no se puede mover
+E1	se cayó la tele y el niño no se puede mover
+E1	la película era sobre alguien inconsciente y ahora mi papá está inconsciente
+E1	estábamos viendo una película sobre alguien inconsciente y mi papá no responde
+E1	herido de amor no, está herido de verdad, sangra
+E1	se desmayó la señal del wifi y mi abuela se desmayó
+E1	el precio me dio un toque, mi hijo tocó el cable
+E1	la cotización me dio convulsiones y mi hijo está convulsionando
+E3	mi perro comió veneno
+E3	el perro se tragó un clavo y mi hijo también
+E3	mi hijo y el perro se tragaron unas pilas
+E3	mi hijo se tragó la pila del control del perro
+E3	mi hija se tragó una moneda del perrito
+E3	le mordió un perro a mi hijo y se le está hinchando
+E1	le mordió un perro y está sangrando mucho
+E3	le mordió el perro a mi hijo y se le hinchó la mano
+E1	el perro mordió a mi hijo y no puede respirar
+E1	mi perro está inconsciente
+E1	mi perro no respira
+E3	tomó veneno para ratas
+E3	se tomó el veneno de las ratas
+E3	mi hijo bebió cloro
+E3	se tragó el destapacaños
+E3	se comió unas pastillas
+E3	se comió las pastillas de la abuela
+E3	se tomó un frasco de jarabe
+E3	tomó pastillas de su abuela
+E3	creo que se envenenó
+E3	se intoxicó con gas
+E3	se tragó una batería de reloj
+E3	se tragó un botón
+E3	se atoró con una moneda
+E3	le picó una avispa y se le cerró la garganta
+E3	le picó una abeja y se hinchó mucho
+E1	le picaron las abejas y no puede respirar
+E3	lo picó un alacrán
+E3	le picó un alacrán a mi bebé
+E3	le mordió una serpiente
+E3	una víbora le mordió a mi papá
+E3	una serpiente mordió a mi hijo
+E3	lo mordió una víbora de cascabel
+E3	está sangrando por la nariz y no para
+E3	le sale sangre de la boca
+E3	escupe sangre
+E3	tose sangre
+E3	sangra por los oídos
+E3	tiene la cara hinchada
+E3	tiene la lengua hinchada y no puede hablar
+E3	se le hinchó la garganta
+E3	le falta aire
+E3	me falta el aire
+E3	no le entra el aire
+E3	se está poniendo morado
+E1	se ahoga, le falta el aire
+E2	se electrocutó ayer y ya está bien
+E1	se desmayó ayer y hoy está bien
+E3	se desmayó la semana pasada
+E1	ayer se desmayó y ahora está dormido
+E1	el mes pasado le dio la corriente y ahora está confundido
+E3	el precio del gas me dio un infarto
+E3	la factura me dio un infarto
+E1	la cotización me dio un infarto y ahora me duele el pecho
+E1	se cayó la señal y no se puede mover el carro
+E1	la escalera se cayó y no se puede mover
+E3	se cayó el refrigerador sobre mi pie y no me puedo mover
+E1	se cayó el árbol sobre la casa y no se mueve nadie
+E1	se cayó la tele encima de él y no se puede mover
+E1	se cayó el andamio y el trabajador no se mueve
+E1	se cayó la escalera y mi papá no se puede levantar
+E3	hay mucho gas en el aire acondicionado
+E3	hay gas en el aire, acondicionado apagado
+E3	hay gas en el aire acondicionado y huele fuerte
+E1	el aire acondicionado huele a gas
+E1	sale gas del aire acondicionado
+E3	huele feo a gas
+E3	hay un olorcito a gas
+E3	it stinks of gas
+E3	smells bad like gas
+E3	se cayó a la alberca
+E3	no contesta
+E3	el técnico no contesta
+E3	E1
+E3	E2
