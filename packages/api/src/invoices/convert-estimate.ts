@@ -12,10 +12,14 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ConflictError, ValidationError } from '../shared/errors';
 import { resolveSelectedLineItems } from '../shared/billing-engine';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { isPostCompletionStatus } from '../jobs/job-lifecycle';
 import { Logger } from '../logging/logger';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import { InvoiceScheduleRepository } from './invoice-schedule';
-import { milestonePlanBillingEstimate, wholeInvoiceRefusedByPlanReason } from './milestone-billing-guard';
+import {
+  estimateLinkHeldByMilestoneReason,
+  invoiceStillBills,
+  wholeInvoiceBlockedByPlan,
+} from './milestone-billing-guard';
 
 export interface ConvertEstimateDeps {
   estimateRepo: EstimateRepository;
@@ -48,8 +52,12 @@ export interface ConvertEstimateDeps {
  * the linked job is credited onto the new invoice. Emits
  * `estimate.converted` and rolls up the job money state.
  *
- * #1203 — refused (409) while a milestone plan bills the estimate: the plan
- * has minted a milestone that still bills, or completion will still mint it.
+ * #1203 — refused (409) while a milestone plan bills the estimate (the plan
+ * has minted a milestone that still bills, or completion will still mint it),
+ * and when the estimate's single link is held by one of the plan's milestone
+ * invoices that no longer bills. A plan that recorded no estimate counts as
+ * billing the job's single accepted estimate. Never returns a milestone
+ * invoice, or an invoice that no longer bills, as "the" conversion.
  *
  * Returns null when the estimate doesn't exist.
  */
@@ -86,25 +94,28 @@ export async function convertEstimateToInvoice(
 
   const job = (await deps.jobRepo.findById(tenantId, estimate.jobId)) as Job | null;
 
-  // #1203 — plan then convert: never a second, whole-estimate invoice.
+  // #1203 — plan then convert: never a second, whole-estimate invoice, and
+  // never an insert that can only collide with a plan milestone's link.
   if (deps.scheduleRepo) {
-    const schedules = await deps.scheduleRepo.findByJob(tenantId, estimate.jobId);
-    if (schedules.some((s) => s.estimateId === estimate.id)) {
-      const settings = await deps.settingsRepo.findByTenant(tenantId);
-      const billing = milestonePlanBillingEstimate({
-        estimateId: estimate.id,
-        schedules,
-        invoices: existing,
-        milestoneBillingEnabled: Boolean(settings?.milestoneBillingEnabled),
-        completionStillAhead: !job || !isPostCompletionStatus(job.status),
-      });
-      if (billing) throw new ConflictError(wholeInvoiceRefusedByPlanReason(billing));
-    }
+    const refusal = await wholeInvoiceBlockedByPlan(
+      {
+        scheduleRepo: deps.scheduleRepo,
+        invoiceRepo: deps.invoiceRepo,
+        settingsRepo: deps.settingsRepo,
+        estimateRepo: deps.estimateRepo,
+      },
+      { tenantId, jobId: estimate.jobId, jobStatus: job?.status, estimateId: estimate.id, invoices: existing },
+    );
+    if (refusal) throw new ConflictError(refusal);
   }
 
   let invoice;
   try {
-    invoice = await createInvoiceWithNextNumber(
+    // #1203 — SAVEPOINT-wrap the insert: on the request path (POST
+    // /estimates/:id/convert-to-invoice) a 23505 would otherwise abort the
+    // whole request transaction, so the re-fetch below could never run and the
+    // caller got a 500. No-op off the request path.
+    invoice = await withRequestSavepoint(() => createInvoiceWithNextNumber(
       {
         tenantId,
         jobId: estimate.jobId,
@@ -119,17 +130,31 @@ export async function convertEstimateToInvoice(
       deps.invoiceRepo,
       deps.settingsRepo,
       deps.auditRepo,
-    );
+    ));
   } catch (err) {
     // Concurrency backstop: a racing convert may have inserted the linked
     // invoice between our findByJob check and this insert, tripping the
     // uq_invoices_estimate unique index (Postgres 23505). Re-fetch and
     // return the winner's invoice so both callers get a consistent result.
+    // #1203 — only a real conversion that still bills is "the winner". The
+    // link can also be held by a milestone invoice, or by one that no longer
+    // bills; returning that as "Invoice created" would bill nothing.
     const code = (err as { code?: string } | undefined)?.code;
     if (code === '23505') {
-      const raced = (await deps.invoiceRepo.findByJob(tenantId, estimate.jobId))
-        .find((inv) => inv.estimateId === estimate.id);
+      const holders = (await deps.invoiceRepo.findByJob(tenantId, estimate.jobId)).filter(
+        (inv) => inv.estimateId === estimate.id,
+      );
+      const raced = holders.find((inv) => inv.scheduleId === undefined && invoiceStillBills(inv));
       if (raced) return raced;
+      const holder = holders[0];
+      if (holder) {
+        throw new ConflictError(
+          holder.scheduleId !== undefined
+            ? estimateLinkHeldByMilestoneReason(holder)
+            : `This estimate is linked to ${holder.invoiceNumber}, which is ${holder.status}, so no new invoice ` +
+              'can be linked to it and none was created. Invoice it by hand (without choosing the estimate).',
+        );
+      }
     }
     throw err;
   }

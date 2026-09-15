@@ -4,7 +4,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { ConflictError, toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoiceWithNextNumber,
@@ -35,6 +35,8 @@ import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
+import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
+import { wholeInvoiceBlockedByPlan } from '../invoices/milestone-billing-guard';
 
 const logger = createLogger({
   service: 'invoices-route',
@@ -75,6 +77,9 @@ export function createInvoiceRouter(
   customerRepo?: CustomerRepository,
   /** Routes operator payment links to Connect when charges are enabled. */
   connectAccountResolver?: ConnectAccountResolver,
+  // #1203 — POST / with an estimateId a milestone plan bills answers 409.
+  // Optional so legacy harnesses build (the check is skipped when absent).
+  scheduleRepo?: InvoiceScheduleRepository,
 ): Router {
   const router = Router();
 
@@ -158,6 +163,22 @@ export function createInvoiceRouter(
         )) as Job | undefined;
         if (parsed.estimateId) {
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
+          // #1203 — an estimate a milestone plan bills gets a readable 409, not
+          // a second whole-estimate invoice (or the unique index's raw 500).
+          if (scheduleRepo) {
+            const planJob =
+              job ?? (jobRepo ? await jobRepo.findById(req.auth!.tenantId, parsed.jobId) : null);
+            const refusal = await wholeInvoiceBlockedByPlan(
+              { scheduleRepo, invoiceRepo, settingsRepo, estimateRepo },
+              {
+                tenantId: req.auth!.tenantId,
+                jobId: parsed.jobId,
+                jobStatus: planJob?.status,
+                estimateId: parsed.estimateId,
+              },
+            );
+            if (refusal) throw new ConflictError(refusal);
+          }
         }
 
         // Member pricing (#6): fold an active membership's discount into a

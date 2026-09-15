@@ -9,14 +9,11 @@ import {
 import { SettingsRepository } from '../../settings/settings';
 import { AuditRepository } from '../../audit/audit';
 import { Job, JobRepository, createJob } from '../../jobs/job';
-import { isPostCompletionStatus } from '../../jobs/job-lifecycle';
 import { LocationRepository } from '../../locations/location';
 import { CustomerRepository } from '../../customers/customer';
+import { EstimateRepository } from '../../estimates/estimate';
 import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
-import {
-  milestonePlanBillingEstimate,
-  wholeInvoiceRefusedByPlanReason,
-} from '../../invoices/milestone-billing-guard';
+import { wholeInvoiceBlockedByPlan } from '../../invoices/milestone-billing-guard';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -60,6 +57,9 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     // #1203 — when wired, a whole-estimate draft for an estimate a milestone
     // plan bills is refused. Absent → no plan check (legacy fixtures).
     private readonly scheduleRepo?: InvoiceScheduleRepository,
+    // #1203 — resolves plans that recorded no estimate to the job's single
+    // accepted estimate. Absent → only recorded plan estimates are checked.
+    private readonly estimateRepo?: EstimateRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without both
@@ -162,19 +162,16 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     // #1203 — plan then draft_invoice: never a second, whole-estimate invoice.
     const draftEstimateId = typeof payload.estimateId === 'string' ? payload.estimateId : undefined;
     if (draftEstimateId && jobId && this.scheduleRepo) {
-      const schedules = await this.scheduleRepo.findByJob(context.tenantId, jobId);
-      if (schedules.some((sched) => sched.estimateId === draftEstimateId)) {
-        const invoices = await this.invoiceRepo.findByJob(context.tenantId, jobId);
-        const settings = await this.settingsRepo.findByTenant(context.tenantId);
-        const billing = milestonePlanBillingEstimate({
-          estimateId: draftEstimateId,
-          schedules,
-          invoices,
-          milestoneBillingEnabled: Boolean(settings?.milestoneBillingEnabled),
-          completionStillAhead: !existingJob || !isPostCompletionStatus(existingJob.status),
-        });
-        if (billing) return { success: false, error: wholeInvoiceRefusedByPlanReason(billing) };
-      }
+      const refusal = await wholeInvoiceBlockedByPlan(
+        {
+          scheduleRepo: this.scheduleRepo,
+          invoiceRepo: this.invoiceRepo,
+          settingsRepo: this.settingsRepo,
+          estimateRepo: this.estimateRepo,
+        },
+        { tenantId: context.tenantId, jobId, jobStatus: existingJob?.status, estimateId: draftEstimateId },
+      );
+      if (refusal) return { success: false, error: refusal };
     }
 
     try {

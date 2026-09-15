@@ -253,7 +253,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
   },
   {
-    at: 'src/routes/invoices.ts:178',
+    at: 'src/routes/invoices.ts:199',
     as: 'violation',
     why: "Recomputes an invoice subtotal by hand (`parsed.lineItems.reduce(... + li.totalCents)`) to feed the member-discount `applyBps`. It reaches for the engine's `applyBps` and then defines `subtotal` itself — so if the engine's subtotal ever stops meaning \"every line\" (optional and tier lines are already selectable), the member discount silently uses a different base than the invoice does.",
   },

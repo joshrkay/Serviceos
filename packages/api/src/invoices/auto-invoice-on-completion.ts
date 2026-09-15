@@ -14,8 +14,9 @@
  *
  * #1203 — it also no-ops when a milestone plan bills the accepted estimate AND
  * completion is about to mint that plan (milestone billing on, on_completion
- * milestones still unminted). It never yields to a plan while milestone
- * billing is off: that plan would bill nothing.
+ * milestones still unminted). A plan that recorded no estimate bills the job's
+ * single accepted estimate. It never yields to a plan while milestone billing
+ * is off: that plan would bill nothing.
  */
 import { Proposal, ProposalRepository, createProposal } from '../proposals/proposal';
 import { validateProposalPayload } from '../proposals/contracts';
@@ -28,7 +29,7 @@ import { resolveSelectedLineItems } from '../shared/billing-engine';
 import { TimeEntryRepository } from '../time-tracking/time-entry';
 import { recalculateLaborFromTimeEntries } from './labor-from-time-entries';
 import { InvoiceScheduleRepository } from './invoice-schedule';
-import { completionWillMintPlan } from './milestone-billing-guard';
+import { acceptedEstimateIds, completionWillMintPlan, planBilledEstimateId } from './milestone-billing-guard';
 
 const AUTO_INVOICE_ACTOR = 'system:auto_invoice';
 
@@ -95,8 +96,9 @@ export async function maybeAutoInvoiceOnCompletion(
   //     completion effects mint right after this (runJobCompletionEffects).
   //     A whole-estimate draft on top would bill it twice.
   if (accepted && deps.scheduleRepo) {
+    const jobAccepted = acceptedEstimateIds(estimates);
     const plan = (await deps.scheduleRepo.findByJob(job.tenantId, job.id)).find(
-      (s) => s.estimateId === accepted.id,
+      (s) => planBilledEstimateId(s, jobAccepted) === accepted.id,
     );
     if (plan && completionWillMintPlan(plan, existingInvoices, Boolean(settings.milestoneBillingEnabled))) {
       return null;
