@@ -90,13 +90,31 @@ describe('#1231 — transcription worker: voicemail status comes from the record
     expect(event.voicemail).toEqual({ callerPhone: OWNER_PHONE });
   });
 
-  it('FAIL-CLOSED: a recording lookup error yields a voicemail event (and transcription still completes)', async () => {
-    const voiceRepo = repo(async () => {
-      throw new Error('db down');
-    });
+  it.each([
+    ['batch_upload'],
+    ['some_future_source'],
+    [undefined],
+  ])("ALLOWLIST: a row with source=%s is not in-app audio, so it yields a voicemail event", async (source) => {
+    const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, ...(source ? { source } : {}) }));
     const event = await completionEvent(voiceRepo, job());
     expect(event.voicemail).toEqual({});
-    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(TENANT, REC, 'completed', expect.anything());
+  });
+
+  it('reads the recording row BEFORE transcribing', async () => {
+    const order: string[] = [];
+    const voiceRepo = repo(async () => {
+      order.push('findById');
+      return { id: REC, tenantId: TENANT, source: 'inapp_voice' };
+    });
+    const transcribe = vi.fn(async () => {
+      order.push('transcribe');
+      return { transcript: CALLER_TEXT, metadata: {} };
+    });
+    await createTranscriptionWorker(voiceRepo, { transcribe }, { onTranscribed: vi.fn() }).handle(
+      job(),
+      silentLogger(),
+    );
+    expect(order).toEqual(['findById', 'transcribe']);
   });
 
   it('FAIL-CLOSED: a missing recording row yields a voicemail event', async () => {
@@ -145,6 +163,64 @@ describe('#1231 — worker + real handoff hook: a retried caller voicemail never
       entityId: REC,
       metadata: { callerVerified: false, enqueued: false },
     });
+  });
+
+  it('DB BLIP: a recording lookup error FAILS the job (nothing completed, nothing routed); the queue retry routes the owner memo normally', async () => {
+    const { hook, send, create } = handoff();
+    const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, source: 'inapp_voice' }));
+    vi.mocked(voiceRepo.findById).mockRejectedValueOnce(new Error('connection terminated'));
+    const transcribe = vi.fn(async () => ({ transcript: CALLER_TEXT, metadata: {} }));
+    const worker = createTranscriptionWorker(voiceRepo, { transcribe }, { onTranscribed: hook });
+
+    // Attempt 1: the read fails → the job throws so the queue retries it.
+    await expect(worker.handle(job(), silentLogger())).rejects.toThrow('connection terminated');
+    expect(voiceRepo.updateStatus).not.toHaveBeenCalledWith(TENANT, REC, 'completed', expect.anything());
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+
+    // Attempt 2 (queue redelivery): the owner memo completes and routes normally.
+    await worker.handle(job(), silentLogger());
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(TENANT, REC, 'completed', expect.anything());
+    expect(send).toHaveBeenCalledOnce();
+    const [type, payload] = send.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(type).toBe('voice_action_router');
+    expect(payload).toMatchObject({ tenantId: TENANT, recordingId: REC, transcript: CALLER_TEXT });
+    expect('sourceChannel' in payload).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("AUDIT ACTOR: a voicemail derived from the row on a retry is audited as 'transcription_retry' with the retrying operator", async () => {
+    const { hook, create } = handoff();
+    const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, source: 'inbound_call' }));
+    await createTranscriptionWorker(voiceRepo, provider, { onTranscribed: hook }).handle(
+      job({ retryRequestedBy: 'user-operator-1' }),
+      silentLogger(),
+    );
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0][0]).toMatchObject({
+      actorId: 'transcription_retry',
+      actorRole: 'system',
+      eventType: 'voicemail.router_gate',
+      metadata: { callerVerified: false, enqueued: false, retryRequestedBy: 'user-operator-1' },
+    });
+  });
+
+  it("AUDIT ACTOR: a first-delivery voicemail (webhook marker) is still audited as 'voicemail_webhook'", async () => {
+    const { hook, create, send } = handoff();
+    const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, source: 'inbound_call' }));
+    await createTranscriptionWorker(voiceRepo, provider, { onTranscribed: hook }).handle(
+      job({ voicemail: { callerPhone: OWNER_PHONE } }),
+      silentLogger(),
+    );
+    expect(create.mock.calls[0][0]).toMatchObject({
+      actorId: 'voicemail_webhook',
+      metadata: { callerVerified: true, enqueued: true },
+    });
+    expect((create.mock.calls[0][0] as { metadata: Record<string, unknown> }).metadata).not.toHaveProperty(
+      'retryRequestedBy',
+    );
+    expect(send.mock.calls[0][1]).toMatchObject({ sourceChannel: 'voicemail' });
   });
 
   it('CONTROL — retry of an in-app memo: one router job, no sourceChannel, no gate audit', async () => {

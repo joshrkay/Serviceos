@@ -180,12 +180,14 @@ describe('#1231 — voice-action-router: an inbound-call recording is untrusted 
     expect(proposals.map((p) => p.sourceContext?.sourceChannel)).toEqual(['voicemail']);
   });
 
-  it("CONTROL — an in-app memo (source='inapp_voice') with no sourceChannel still classifies raw and is not stamped", async () => {
+  it("CONTROL — a stamped in-app memo (source='inapp_voice', provenance 'operator') with no sourceChannel still classifies raw and is not stamped", async () => {
     const { gateway, requests } = recordingGateway();
     const voiceRepo = voiceRepoWith(async (tenantId, id) => ({
       id,
       tenantId,
       source: 'inapp_voice',
+      // The transcription worker stamps this for authenticated in-app memos.
+      transcriptMetadata: { provenance: 'operator' },
       createdBy: 'owner-1',
       status: 'completed',
     }));
@@ -200,6 +202,48 @@ describe('#1231 — voice-action-router: an inbound-call recording is untrusted 
     const proposals = await proposalRepo.findByTenant(TENANT);
     expect(proposals).toHaveLength(1);
     expect(proposals[0].sourceContext?.sourceChannel).toBeUndefined();
+  });
+
+  it.each([
+    ['batch_upload', {}],
+    ['some_future_source', {}],
+    ['inapp_voice', {}], // in-app row WITHOUT the operator stamp
+    ['inapp_voice', { provenance: 'caller' }],
+    [undefined, { provenance: 'operator' }],
+  ])(
+    'ALLOWLIST: source=%s metadata=%j is not a stamped in-app memo → fenced, stamped voicemail, held',
+    async (source, transcriptMetadata) => {
+      const { gateway, requests } = recordingGateway();
+      const voiceRepo = voiceRepoWith(async (tenantId, id) => ({
+        id,
+        tenantId,
+        ...(source ? { source } : {}),
+        transcriptMetadata,
+        createdBy: 'batch-importer',
+        status: 'completed',
+      }));
+      await worker(gateway, voiceRepo).handle(
+        msg({ tenantId: TENANT, userId: 'system', transcript: TRANSCRIPT, recordingId: RECORDING_ID }),
+        silentLogger(),
+      );
+      expectFenced(classifyUser(requests).user);
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].sourceContext?.sourceChannel).toBe('voicemail');
+      expect(proposals[0].status).not.toBe('approved');
+    },
+  );
+
+  it('FAIL-CLOSED: a missing recording row is fenced and stamped voicemail', async () => {
+    const { gateway, requests } = recordingGateway();
+    const voiceRepo = voiceRepoWith(async () => null);
+    await worker(gateway, voiceRepo).handle(
+      msg({ tenantId: TENANT, userId: 'system', transcript: TRANSCRIPT, recordingId: RECORDING_ID }),
+      silentLogger(),
+    );
+    expectFenced(classifyUser(requests).user);
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals.map((p) => p.sourceContext?.sourceChannel)).toEqual(['voicemail']);
   });
 
   it('the recording is looked up under the JOB tenant (never a bare id)', async () => {

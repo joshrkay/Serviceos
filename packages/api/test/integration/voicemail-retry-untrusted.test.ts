@@ -27,6 +27,8 @@
  *      sourceChannel for an inbound-call recording (what the pre-fix retry
  *      produced) → the router reads the row: classify request fenced (shape
  *      captured), proposal stamped voicemail and held.
+ *   2b. ALLOWLIST: a batch_upload row (anything but a stamped in-app memo) →
+ *      fenced and held the same way.
  *   3. CONTROL: an owner's in-app memo whose transcription failed, retried →
  *      routes normally: raw classify request, proposal not voicemail-stamped.
  *   4. T1: tenant B's operator retries tenant A's recording id → 404, nothing
@@ -187,14 +189,29 @@ describe('Postgres integration — #1231 transcription retry keeps voicemail tex
     });
   }
 
-  /** Claim every visible message of `type` for our tenants (deleting as we go). */
+  /**
+   * This file's messages of `type`, and ONLY this file's (its two tenants).
+   * Deliberately not `receiveBatch`: that claims every visible message in
+   * the shared `_queue_messages` table — other suites' included — and hides
+   * them behind a visibility backoff. Callers `queue.delete` what they handle.
+   */
   async function claim<T extends { tenantId: string }>(type: string): Promise<QueueMessage<T>[]> {
-    const ours = new Set([tenantA.tenantId, tenantB.tenantId]);
-    const out: QueueMessage<T>[] = [];
-    for (const m of await queue.receiveBatch<T>(100)) {
-      if (m.type === type && ours.has(m.payload.tenantId)) out.push(m);
-    }
-    return out;
+    const { rows } = await pool.query(
+      `SELECT id, type, payload, attempts, max_attempts, idempotency_key, created_at
+         FROM _queue_messages
+        WHERE type = $1 AND payload->>'tenantId' = ANY($2::text[])
+        ORDER BY created_at`,
+      [type, [tenantA.tenantId, tenantB.tenantId]],
+    );
+    return rows.map((row) => ({
+      id: row.id as string,
+      type: row.type as string,
+      payload: row.payload as T,
+      attempts: Number(row.attempts),
+      maxAttempts: Number(row.max_attempts),
+      idempotencyKey: row.idempotency_key as string,
+      createdAt: (row.created_at as Date).toISOString(),
+    }));
   }
 
   async function queueRows(recordingId: string) {
@@ -314,11 +331,13 @@ describe('Postgres integration — #1231 transcription retry keeps voicemail tex
       [tenantA.tenantId, recId],
     );
     dump('audit_events (scenario 1)', audit.rows);
+    // The operator's retry — not the voicemail webhook — triggered this gate.
     expect(audit.rows.filter((r) => r.event_type === 'voicemail.router_gate')).toEqual([
       expect.objectContaining({
-        actor_id: 'voicemail_webhook',
+        actor_id: 'transcription_retry',
+        actor_role: 'system',
         entity_type: 'voice_recording',
-        metadata: { callerVerified: false, enqueued: false },
+        metadata: { callerVerified: false, enqueued: false, retryRequestedBy: tenantA.userId },
       }),
     ]);
   });
@@ -379,6 +398,43 @@ describe('Postgres integration — #1231 transcription retry keeps voicemail tex
     dump('proposals (scenario 2)', proposals.rows);
     expect(proposals.rows).toEqual([
       { proposal_type: 'create_appointment', status: 'ready_for_review', channel: 'voicemail', recording: recId },
+    ]);
+  });
+
+  it('2b — a batch_upload recording (not a stamped in-app memo) is fenced and held by the router', async () => {
+    const callSid = `CA1231${crypto.randomUUID().slice(0, 8)}`;
+    const { voiceRecordingId: recId } = await inboundVoicemail(tenantA, callSid);
+    // No production writer mints batch_upload yet; the CHECK constraint allows it.
+    await pool.query(`UPDATE voice_recordings SET source = 'batch_upload', created_by = 'batch-importer' WHERE id = $1`, [recId]);
+    await voiceRepo.updateStatus(tenantA.tenantId, recId, 'completed', { transcript: INFLIGHT_VOICEMAIL });
+    await queue.send<VoiceActionRouterPayload>(
+      'voice_action_router',
+      { tenantId: tenantA.tenantId, userId: 'system', transcript: INFLIGHT_VOICEMAIL, recordingId: recId },
+      `${tenantA.tenantId}:${recId}:voice_action_router`,
+    );
+
+    const { gateway, requests } = recordingGateway();
+    const jobs = await claim<VoiceActionRouterPayload>('voice_action_router');
+    expect(jobs.map((m) => m.payload.recordingId)).toEqual([recId]);
+    for (const m of jobs) {
+      await routerWorker(gateway).handle(m, silentLogger());
+      await queue.delete(m.id);
+    }
+    const classify = requests.filter((r) => r.taskType === 'classify_intent');
+    expect(classify).toHaveLength(1);
+    const u = classify[0].messages.filter((m) => m.role === 'user')[0].content;
+    expect(u.startsWith(UNTRUSTED_CONTENT_BLOCK_BEGIN)).toBe(true);
+    expect(u.trimEnd().endsWith(UNTRUSTED_CONTENT_BLOCK_END)).toBe(true);
+
+    const rows = await pool.query(
+      `SELECT r.source, p.proposal_type, p.status, p.source_context->>'sourceChannel' AS channel
+         FROM proposals p JOIN voice_recordings r ON r.id::text = p.source_context->>'recordingId'
+        WHERE p.tenant_id = $1 AND r.id = $2`,
+      [tenantA.tenantId, recId],
+    );
+    dump('recording + proposal (scenario 2b, batch_upload)', rows.rows);
+    expect(rows.rows).toEqual([
+      { source: 'batch_upload', proposal_type: 'create_appointment', status: 'ready_for_review', channel: 'voicemail' },
     ]);
   });
 
