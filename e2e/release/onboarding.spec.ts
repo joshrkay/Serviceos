@@ -20,6 +20,22 @@ async function api(page: Page, method: string, path: string, data?: unknown) {
   return response.json();
 }
 
+test.afterEach(async ({ page }, info) => {
+  if (info.status === info.expectedStatus) return;
+  // Diagnostic structure only: no input values, emails, tokens or passwords.
+  const form = await page.locator('input').evaluateAll(inputs => inputs.map(input => ({
+    name: input.getAttribute('name'), type: input.getAttribute('type'),
+    label: input.getAttribute('aria-label'), autocomplete: input.getAttribute('autocomplete'),
+  })));
+  const signup = await page.evaluate(() => {
+    const signup = (window as unknown as { Clerk?: { client?: { signUp?: {
+      status?: string; missingFields?: string[]; unverifiedFields?: string[];
+    } } } }).Clerk?.client?.signUp;
+    return signup && { status: signup.status, missingFields: signup.missingFields, unverifiedFields: signup.unverifiedFields };
+  });
+  console.log('[release-signup-diagnostic]', JSON.stringify({ path: new URL(page.url()).pathname, form, signup }));
+});
+
 test('real signup -> tenant -> identity -> first draft estimate -> returning login', async ({ page }) => {
   const email = `rivet-release-${randomUUID()}+clerk_test@example.com`;
   const password = `RivetQA!${randomUUID()}`;
