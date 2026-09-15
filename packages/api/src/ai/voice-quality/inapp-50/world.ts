@@ -174,7 +174,11 @@ function contentTokens(value: string): string[] {
  * The tenant-local calendar date a spoken day phrase names, or undefined when
  * the reference is not a day phrase at all ("the Garcia job", "").
  */
-function referenceDayIso(reference: string, timezone: string): string | undefined {
+export function referenceDayIso(
+  reference: string,
+  timezone: string,
+  now: Date = new Date(),
+): string | undefined {
   // Only the DAY token is handed to the parser. Chrono will not parse
   // "Tuesday appointment" / "Tuesday visit" as a whole (the trailing noun
   // defeats it) and a failed parse would silently demote a day phrase to a
@@ -189,7 +193,7 @@ function referenceDayIso(reference: string, timezone: string): string | undefine
   // `ambiguous_no_time` because it must never invent an hour to book at. We
   // only want the CALENDAR DAY, and midday cannot shift a date in any zone,
   // so the anchor makes the phrase resolvable without changing what it names.
-  const resolved = resolveDateTime(`${match[0]} at 12:00 pm`, { timezone });
+  const resolved = resolveDateTime(`${match[0]} at 12:00 pm`, { timezone, now });
   if (!resolved.ok) return undefined;
   return DateTime.fromISO(resolved.startUtc, { zone: timezone }).toISODate() ?? undefined;
 }
