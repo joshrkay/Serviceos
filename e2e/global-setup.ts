@@ -36,22 +36,9 @@ export default async function globalSetup(): Promise<void> {
   // (no spawnSync), so the testcontainer it starts survives until
   // global-teardown.ts calls stopHeldContainer() at the end of the run.
   if (process.env.E2E_USE_TEST_DB === 'true') {
-    try {
-      await bootstrapEphemeralDb();
-    } catch (err) {
-      // Don't take the whole e2e run down — smoke tests don't need the DB,
-      // and journey specs self-skip when their seeded env vars are absent.
-      // Loud warning so the operator sees the real cause in CI logs.
-      console.error(
-        '\n[e2e globalSetup] EPHEMERAL DB BOOTSTRAP FAILED — journey tests ' +
-          'will skip themselves. Smoke + journey-agnostic specs will still run.\n' +
-          '[e2e globalSetup] Root cause:\n',
-        err
-      );
-      // Clear the env so journey specs notice the failure cleanly.
-      process.env.E2E_USE_TEST_DB = '';
-      delete process.env.DATABASE_URL;
-    }
+    // Explicitly requesting real Postgres makes its availability a prerequisite.
+    // Never turn a failed migration/connection into a green, skipped journey.
+    await bootstrapEphemeralDb();
   }
   // --- END: ephemeral-DB block ---
 

@@ -232,6 +232,7 @@ export default defineConfig<DevAuthFixtures>({
       // NO_AUTH_BYPASS_SPECS below); running them here too would hit the
       // wrong api/web server.
       testIgnore: [
+        '**/release/**',
         '**/qa-matrix/**',
         '**/coverage-sweep.spec.ts',
         '**/ui-flow-capture*.spec.ts',
