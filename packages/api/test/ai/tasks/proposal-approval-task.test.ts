@@ -29,7 +29,7 @@ import {
   type Proposal,
 } from '../../../src/proposals/proposal';
 import { applyChainMetadata } from '../../../src/proposals/chain';
-import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import { createAuditEvent, InMemoryAuditRepository } from '../../../src/audit/audit';
 import type { SettingsRepository } from '../../../src/settings/settings';
 
 const TENANT = 't-voice';
@@ -2038,5 +2038,217 @@ describe('WS19 — batch voice approval', () => {
     expect(start.outcome).toBe('readback');
     expect(isBatchActive(start.sessionState)).toBe(false);
     expect(start.sessionState?.batchQueue).toBeUndefined();
+  });
+});
+
+// ─── #1051 — the three-strike lock re-derived from the audit trail ───────────
+
+class LookupDownAuditRepository extends InMemoryAuditRepository {
+  async findByCorrelation(): Promise<never> {
+    throw new Error('audit lookup down');
+  }
+}
+
+/** Three wrong codes on an Acme money proposal in `ref`'s session → locked. */
+async function lockViaDialogue(h: {
+  deps: VoiceApprovalDeps;
+  proposalRepo: InMemoryProposalRepository;
+}): Promise<Proposal> {
+  const proposal = await seedMoney(h.proposalRepo, 'Acme Corp');
+  const start = await startVoiceApproval(h.deps, {
+    ...ref,
+    action: 'approve',
+    reference: 'the Acme payment',
+  });
+  expect(start.outcome).toBe('readback');
+  const confirm = await continueVoiceApproval(h.deps, {
+    ...ref,
+    utterance: 'yes',
+    pending: start.pending!,
+  });
+  expect(confirm.outcome).toBe('challenge_prompt');
+  let pending = confirm.pending!;
+  let sessionState: VoiceApprovalSessionState = {};
+  for (let i = 0; i < 3; i++) {
+    const r = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: '0 0 0 0',
+      pending,
+    });
+    sessionState = { ...sessionState, ...r.sessionState };
+    if (r.pending) pending = r.pending;
+  }
+  expect(sessionState.challengeLockedOut).toBe(true);
+  return proposal;
+}
+
+describe('#1051 — the challenge lock survives a rebuilt session (re-derived from audit_events)', () => {
+  it('a rebuilt session (same id, no state) is refused at readback and handed the re-derived lock', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    await lockViaDialogue(h);
+    const beta = await seedMoney(h.proposalRepo, 'Beta Corp', 5000);
+
+    const refused = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Beta payment',
+    });
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect(refused.pending).toBeNull();
+    expect(refused.sessionState).toMatchObject({ challengeLockedOut: true, challengeFailCount: 3 });
+    expect((await h.proposalRepo.findById(TENANT, beta.id))?.status).toBe('ready_for_review');
+    const event = h.auditRepo
+      .getAll()
+      .find(
+        (e) =>
+          e.eventType === 'proposal.voice_approve_refused_challenge_lockout' &&
+          e.entityId === beta.id,
+      );
+    expect(event?.metadata).toMatchObject({ lockSource: 'audit_trail' });
+  });
+
+  it('strike rows of ANOTHER session or ANOTHER tenant never count toward this session', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const strike = (tenantId: string, sessionId: string, eventType: string) =>
+      h.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: VOICE_APPROVAL_ACTOR_ID,
+          actorRole: 'system',
+          eventType,
+          entityType: 'proposal',
+          entityId: 'p-elsewhere',
+          correlationId: sessionId,
+          metadata: { channel: 'voice', sessionId },
+        }),
+      );
+    for (const [tenantId, sessionId] of [
+      [TENANT, 'sess-other'],
+      ['t-neighbour', SESSION],
+    ] as const) {
+      await strike(tenantId, sessionId, 'proposal.voice_approval_challenge_failed');
+      await strike(tenantId, sessionId, 'proposal.voice_approval_challenge_failed');
+      await strike(tenantId, sessionId, 'proposal.voice_challenge_lockout');
+    }
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(start.outcome).toBe('readback');
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+    expect(confirm.outcome).toBe('challenge_prompt');
+    const firstWrong = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: '0 0 0 0',
+      pending: confirm.pending!,
+    });
+    expect(firstWrong.outcome).toBe('challenge_failed');
+    expect(firstWrong.sessionState).toMatchObject({ challengeFailCount: 1 });
+  });
+
+  it('the strike count is the LARGER of memory and the trail — a strike missing from the trail still counts', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+    // Two strikes in memory, none in the trail (e.g. the best-effort audit
+    // writes for them failed).
+    const sessionState: VoiceApprovalSessionState = { challengeFailCount: 2 };
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+    const third = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: '9 9 9 9',
+      pending: confirm.pending!,
+    });
+    expect(third.outcome).toBe('challenge_lockout');
+    expect(third.sessionState).toMatchObject({ challengeFailCount: 3, challengeLockedOut: true });
+  });
+
+  it('no audit repository wired → nothing was recorded to re-derive from; the in-memory counter stands alone', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+    const deps: VoiceApprovalDeps = { ...h.deps, auditRepo: undefined };
+    const start = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(start.outcome).toBe('readback');
+  });
+
+  it('a failed lookup FAILS CLOSED at readback, confirm and challenge — and writes no lock onto the session', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const deps: VoiceApprovalDeps = { ...h.deps, auditRepo: new LookupDownAuditRepository() };
+    const money = await seedMoney(h.proposalRepo, 'Acme Corp');
+    await seedPending(h.proposalRepo); // capture-class Henderson estimate
+
+    const atReadback = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(atReadback.outcome).toBe('challenge_lockout');
+    expect(atReadback.sessionState?.challengeLockedOut).toBeUndefined();
+
+    const atConfirm = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: { action: 'approve', stage: 'confirm', proposalId: money.id },
+    });
+    expect(atConfirm.outcome).toBe('challenge_lockout');
+
+    const atChallenge = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'four two seven one',
+      pending: { action: 'approve', stage: 'challenge', proposalId: money.id },
+    });
+    expect(atChallenge.outcome).toBe('challenge_lockout');
+    expect((await h.proposalRepo.findById(TENANT, money.id))?.status).toBe('ready_for_review');
+
+    // Capture-class never consults the lock.
+    const capture = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Henderson estimate',
+    });
+    expect(capture.outcome).toBe('readback');
+  });
+
+  it('a rebuilt session’s batch walk skips money on the re-derived lock without prompting a challenge, and still approves capture items', async () => {
+    const h = makeBatchHarness({ challenge: '4271' });
+    const acme = await lockViaDialogue(h);
+    const lopez = await seedCapture(h.proposalRepo, 'Lopez');
+    const beta = await seedMoney(h.proposalRepo, 'Beta', 5000);
+
+    const { result, sessionState, lines } = await walkBatch(
+      h,
+      (_p, cur) => (cur.pending!.stage === 'confirm' ? 'yes' : 'four two seven one'),
+      {}, // rebuilt: no in-memory state
+    );
+
+    expect(result.outcome).toBe('batch_complete');
+    expect(sessionState.challengeLockedOut).toBe(true);
+    expect(lines.join(' ')).not.toContain('approval code');
+    expect((await h.proposalRepo.findById(TENANT, lopez.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, beta.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, acme.id))?.status).toBe('ready_for_review');
   });
 });
