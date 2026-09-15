@@ -1242,6 +1242,65 @@ describe('createVoiceTurnProcessor — #1204 token cap crossed between turns', (
       expect(outcome.capTerminations).toBe(1);
     });
 
+    // Review finding (PR #1216): an immediate Dial that found no one to
+    // transfer to used to return without touching the FSM. The call stayed in
+    // intent_capture with the cap's one end already spent, so nothing capped
+    // it again until the max-duration limit.
+    it.each([
+      [
+        'rotation entry with no reachable phone',
+        () => new Map([['tenant-abc', [{ id: 'rot-1', userId: 'u-no-phone', orderIndex: 0 }]]]),
+      ],
+      ['empty rotation', () => new Map<string, never[]>([['tenant-abc', []]])],
+    ])(
+      'immediate Dial with no transfer (%s): the capped emergency turn still reaches the FSM emergency path, and later turns are not classified',
+      async (_label, rotation) => {
+        setSupervisorPresenceLoader(async () => false);
+        const gateway = makeGatewayScript([
+          { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+          { content: EMERGENCY, output: 1 },
+          { content: DRAFT_ESTIMATE, output: 1 },
+        ]);
+        const ctx = makeCtx({
+          gateway,
+          withRepos: true,
+          onCallRepo: new InMemoryOnCallRepository(rotation()),
+          dispatcherPhoneResolver: async () => null as unknown as string,
+        });
+        const terminations = watchTerminations(ctx.session);
+        await turn(ctx, 'um I have a question');
+        await runSentimentClassifier(ctx.session, 60);
+        expect(ctx.session.costTracker.isExceeded).toBe(true);
+
+        const fx = await turn(ctx, KEYWORD_FREE_EMERGENCY);
+
+        // The immediate-Dial attempt is still recorded, and found no one.
+        const dial = ctx.auditRepo.getAll().find((a) => a.eventType === 'emergency_immediate_dial');
+        expect(dial?.metadata).toMatchObject({
+          intent: 'emergency_dispatch',
+          escalated: false,
+          transferInitiated: false,
+        });
+        // …and the call is no longer left in intent_capture.
+        const outcome = capOutcome(ctx, fx, terminations);
+        expect(outcome).toMatchObject({
+          state: 'escalating',
+          escalationReason: 'emergency_dispatch',
+          tts: [EMERGENCY_SAFETY_LINE, EMERGENCY_HANDOFF_LINE],
+          notifyReasons: ['emergency_dispatch'],
+          capAudits: [],
+          capTerminations: 1,
+        });
+
+        // A later utterance is not classified as a fresh intent on an
+        // uncapped-looking call.
+        const classifyCallsBefore = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+        await turn(ctx, 'hello? is anyone there');
+        expect((gateway.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBe(classifyCallsBefore);
+        expect(ctx.session.machine.currentState).toBe('escalating');
+      },
+    );
+
     it('a non-emergency capped turn still ends for the cap, once (unchanged)', async () => {
       const ctx = makeCtx({
         gateway: makeGatewayScript([

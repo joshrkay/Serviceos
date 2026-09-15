@@ -370,6 +370,35 @@ describe('#1204 — token cap crossed between turns ends the call, audit row at 
       expect(capped).toEqual(await trail(control));
     });
 
+    it('Media Streams, unsupervised tenant, no reachable on-call phone: the capped turn writes the failed Dial row AND the FSM emergency_dispatch transition (not stuck in intent_capture)', async () => {
+      setSupervisorPresenceLoader(async () => false);
+      const tenant = await rotationTenant('ms-unsupervised-nophone-capped');
+      const call = await startCall(
+        tenant,
+        'CA-1212-ms-nophone',
+        makeGatewayScript([
+          { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+          { content: EMERGENCY, output: 1 },
+        ]),
+        // The owner is on the rotation but has no reachable phone.
+        { proposalRepo, onCallRepo, dispatcherPhoneResolver: async () => null as unknown as string },
+      );
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      expect(call.session.costTracker.isExceeded).toBe(true);
+      await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+
+      expect(call.session.machine.currentState).toBe('escalating');
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      const rows = await auditRepo.findRecentByTenant(call.tenant.tenantId, { limit: 200 });
+      expect(rows.find((r) => r.eventType === 'emergency_immediate_dial')?.metadata).toMatchObject({
+        escalated: false,
+        transferInitiated: false,
+      });
+      expect(rows.map((r) => r.eventType)).toContain('agent.calling.intent_capture.emergency_dispatch');
+      expect(rows.some((r) => r.eventType.endsWith('.cost_cap_exceeded'))).toBe(false);
+    });
+
     it('T1 — neighbour tenant B (no rotation) gets none of the emergency rows and no proposals', async () => {
       const neighbourAll = await auditRepo.findRecentByTenant(neighbour.tenantId, { limit: 200 });
       expect(neighbourAll.every((r) => r.tenantId === neighbour.tenantId)).toBe(true);
