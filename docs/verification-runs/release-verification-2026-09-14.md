@@ -24,7 +24,7 @@ Local infrastructure initially lacked the Playwright browser build and psql. Use
 
 `Onboarding database verification` runs on PRs/main and manually. It needs no provider credentials; its green check proves the named local app/database journeys only.
 
-`Release verification` runs manually or on same-repository PRs changing its files. It uses GitHub environment `dev` and the existing `RAILWAY_TOKEN` to read the Development API's Clerk **test** keys, validates the prefixes and masks the values. No keys are written to the repository or uploaded artifacts. The target is fixed to the existing Development web URL. It uses real Clerk signup and retains isolated QA draft records for diagnosis, without sending estimates, submitting payments or explicitly buying phone resources. No auth traces are uploaded.
+`Release verification` runs manually only (never on pull-request code automatically). It uses GitHub environment `dev` and the existing `RAILWAY_TOKEN` to read the Development API's Clerk **test** keys, validates the prefixes and masks the values. Dependencies are installed before keys load. No keys are written to the repository or uploaded artifacts. The target is fixed to the existing Development web URL. It uses real Clerk signup and retains isolated QA draft records for diagnosis, without sending estimates, submitting payments or explicitly buying phone resources. No auth traces are uploaded.
 
 ## Remaining release gates
 

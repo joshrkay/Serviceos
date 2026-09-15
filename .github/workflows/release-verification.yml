@@ -1,18 +1,11 @@
 name: Release verification
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/release-verification.yml"
-      - "scripts/release/**"
-      - "e2e/release/**"
-      - "playwright.release.config.ts"
 permissions:
   contents: read
 jobs:
   development-onboarding:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch'
     environment: dev
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -22,17 +15,17 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: npm
+      - run: npm ci
+      - name: Install browser
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
+          npx playwright install --with-deps chromium
       - name: Load Development Clerk test keys through existing Railway access
         run: node scripts/release/load-development-clerk.mjs
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Require real development credentials
         run: node scripts/release/verify.mjs --credentials
-      - run: npm ci
-      - name: Install browser
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
-          npx playwright install --with-deps chromium
       - name: Real Development signup and first draft estimate
         run: npx playwright test --config playwright.release.config.ts
       - name: Refuse skipped or empty release evidence
