@@ -18,6 +18,15 @@ import type { EntityKind } from '../../resolution/entity-resolver';
 import { redactByTier } from '../../../logging/redact';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
+import { SENTENCE_CATALOG_ES } from './tts-copy';
+
+/**
+ * #1220 review — the catalogued Spanish rendering of the RV-142 911 line
+ * ("Si alguien está en peligro inmediato, cuelgue y llame al 911."). Spoken
+ * ahead of the E1 script to a Spanish caller. Not new wording: it is the line
+ * a Spanish gas-leak caller already heard on the E2 path before #1220.
+ */
+const EMERGENCY_SAFETY_LINE_ES = SENTENCE_CATALOG_ES[EMERGENCY_SAFETY_LINE] ?? EMERGENCY_SAFETY_LINE;
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -564,6 +573,12 @@ function checkGlobalGuards(
       // Reviewed tier script (goal §3: "build the routing; source the
       // script"); falls back to the generic 911 line.
       const safetyScript = event.responseScript ?? EMERGENCY_SAFETY_LINE;
+      // #1220 review — no reviewed Spanish E1 script exists (O-2), but a
+      // Spanish caller (the matched phrase, or the session's language) must
+      // not lose the Spanish 911 line the E2 path gave them before #1220. It
+      // plays first, in Spanish, and is held against barge-in until it has
+      // played once; the E1 script follows.
+      const spanishCaller = event.language === 'es' || event.sessionLanguage === 'es';
       return {
         nextState: 'terminated',
         sideEffects: [
@@ -573,7 +588,17 @@ function checkGlobalGuards(
             keyword: event.keyword,
             ...(event.language ? { language: event.language } : {}),
           }),
-          // Life-safety script spoken FIRST, before anything else.
+          // Life-safety lines spoken FIRST, before anything else.
+          ...(spanishCaller
+            ? [
+                ttsPlay(EMERGENCY_SAFETY_LINE_ES, {
+                  priority: 'safety',
+                  tier: 'E1',
+                  language: 'es',
+                  holdBargeInUntilPlayed: true,
+                }),
+              ]
+            : []),
           ttsPlay(safetyScript, { priority: 'safety', tier: 'E1' }),
           // Abort + revoke any booking already drafted/held this call.
           {

@@ -18,6 +18,8 @@ import type {
   CallingAgentState,
   SideEffect,
 } from '../../../../src/ai/agents/customer-calling/types';
+import { EMERGENCY_SAFETY_LINE } from '../../../../src/ai/agents/customer-calling/emergency-detector';
+import { SENTENCE_CATALOG_ES } from '../../../../src/ai/agents/customer-calling/tts-copy';
 
 const baseContext: CallingAgentContext = {
   sessionId: 'session-e1',
@@ -95,6 +97,39 @@ describe('ANS-001 E1 — life safety never books, from any state', () => {
     // terminated is terminal — the global guard must not re-fire.
     expect(types(result.sideEffects)).not.toContain('revoke_pending_bookings');
     expect(result.nextState).toBe('terminated');
+  });
+});
+
+describe('#1220 review — a Spanish E1 caller hears the catalogued Spanish 911 line before the E1 script', () => {
+  const ES_911_LINE = SENTENCE_CATALOG_ES[EMERGENCY_SAFETY_LINE];
+  const ttsPayloads = (fx: SideEffect[]) =>
+    fx.filter((f) => f.type === 'tts_play').map((f) => f.payload as Record<string, unknown>);
+
+  it.each([
+    ['the matched phrase is Spanish', { language: 'es' as const }],
+    ['the session speaks Spanish', { language: 'en' as const, sessionLanguage: 'es' as const }],
+  ])('when %s: Spanish 911 line (es, safety, held against barge-in), then the E1 script', (_why, langs) => {
+    expect(ES_911_LINE).toBe('Si alguien está en peligro inmediato, cuelgue y llame al 911.');
+    const result = transition('intent_capture', { ...E1_EVENT, ...langs }, baseContext);
+    const tts = ttsPayloads(result.sideEffects);
+    expect(tts).toHaveLength(2);
+    expect(tts[0]).toMatchObject({
+      text: ES_911_LINE,
+      language: 'es',
+      priority: 'safety',
+      tier: 'E1',
+      holdBargeInUntilPlayed: true,
+    });
+    expect(tts[1]).toMatchObject({ text: (E1_EVENT as { responseScript: string }).responseScript, priority: 'safety', tier: 'E1' });
+    expect(result.nextState).toBe('terminated');
+  });
+
+  it('an English E1 on an English session is unchanged: the E1 script is the only line', () => {
+    for (const event of [E1_EVENT, { ...E1_EVENT, language: 'en' as const, sessionLanguage: 'en' as const }]) {
+      const tts = ttsPayloads(transition('intent_capture', event, baseContext).sideEffects);
+      expect(tts).toHaveLength(1);
+      expect(tts[0]!.text).toBe((E1_EVENT as { responseScript: string }).responseScript);
+    }
   });
 });
 
