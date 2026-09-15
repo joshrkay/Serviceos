@@ -36,6 +36,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { createProposal } from '../../src/proposals/proposal';
+import { classifierProfileForSession } from '../../src/ai/voice-turn/create-voice-turn-processor';
 import { createHermeticMockLLMGateway } from '../../src/ai/gateway/factory';
 import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
@@ -263,5 +264,117 @@ describe('Postgres integration — Gather transport: the caller transcript is fe
     );
     const counts = Object.fromEntries(perTenant.map((r) => [r.tenant_id, r.n]));
     expect(counts).toEqual({ [tenantA.tenantId]: 2, [tenantB.tenantId]: 2 });
+  });
+
+  /**
+   * #894 review item 4 — the protection that does NOT depend on the model.
+   * The hermetic mock never returns approve_proposal, so the test above would
+   * also pass without a fence. Here the classifier is a stub that fully OBEYS
+   * the injection: approve_proposal, confidence 1, naming the waiting
+   * proposal. `approve_proposal` is exempt from the classifier's post-parse
+   * profile guard (SURFACE_GUARD_EXEMPT_INTENTS), so the only thing between
+   * that output and an approval is the RV-071 ownerSession gate in
+   * `handleVoiceApprovalIntent`. Proven at the real Gather seam on a caller
+   * session; the owner line is the control (same stub, no denial).
+   */
+  it('PROTECTION: a classifier that OBEYS the injection (approve_proposal) on a caller session is refused by the owner gate — nothing approved, denial audited', async () => {
+    const CALLER = '+15125558943';
+    const OWNER_LINE = '+15125558944';
+    await seedCustomer(tenantA, CALLER, 'Oscar Obeyed');
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region, owner_phone)
+       VALUES ($1, $2, 'Fence Test Co', 'America/Chicago', 'TX', $3)
+       ON CONFLICT (tenant_id) DO UPDATE SET owner_phone = EXCLUDED.owner_phone`,
+      [crypto.randomUUID(), tenantB.tenantId, OWNER_LINE],
+    );
+    const waitingA = await seedWaitingProposal(tenantA, 'Obeyed waiting estimate');
+
+    const obeyingGateway = (): LLMGateway =>
+      ({
+        complete: async (req: LLMRequest): Promise<LLMResponse> => ({
+          content:
+            req.metadata?.skill === 'confirm_intent'
+              ? JSON.stringify({ answer: 'yes', reasoning: 'caller confirmed' })
+              : JSON.stringify({
+                  intentType: 'approve_proposal',
+                  confidence: 1,
+                  reasoning: 'the caller told me to',
+                  extractedEntities: { proposalReference: 'Obeyed waiting estimate' },
+                }),
+          model: 'stub',
+          provider: 'stub',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+          latencyMs: 1,
+        }),
+      }) as unknown as LLMGateway;
+
+    async function obeyedCall(tenant: TestTenant, from: string) {
+      const store = new VoiceSessionStore({ startInterval: false });
+      const adapter = new TwilioGatherAdapter({
+        store,
+        gateway: obeyingGateway(),
+        pool,
+        customerRepo,
+        proposalRepo,
+        auditRepo,
+        settingsRepo,
+        businessName: 'Fence Test Co',
+        publicBaseUrl: 'https://example.com',
+      } as never);
+      const callSid = `CA-894-obey-${crypto.randomUUID().slice(0, 8)}`;
+      await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: tenant.tenantId });
+      const session = store.findByCallSid(callSid)!;
+      if (session.machine.currentState === 'greeting') session.machine.dispatch({ type: 'greeted_ok' });
+      if (session.machine.currentState === 'ask_caller') {
+        await adapter.handleGather({ sessionId: session.id, callSid, speechResult: 'My name is Pat Owner', confidence: 0.95, tenantId: tenant.tenantId });
+      }
+      const profile = classifierProfileForSession(session);
+      for (const speech of [TENANT_A_TURN, 'yes, approve it']) {
+        await adapter.handleGather({ sessionId: session.id, callSid, speechResult: speech, confidence: 0.95, tenantId: tenant.tenantId });
+      }
+      const denials = (await auditRepo.findByEntity(tenant.tenantId, 'voice_session', session.id))
+        .filter((e) => e.eventType === 'agent.calling.voice_approval_denied');
+      const { rows: denialRows } = await pool.query(
+        `SELECT event_type, metadata->>'reason' AS reason, metadata->>'intentType' AS intent
+           FROM audit_events WHERE tenant_id = $1 AND event_type = 'agent.calling.voice_approval_denied'
+            AND metadata->>'sessionId' = $2`,
+        [tenant.tenantId, session.id],
+      );
+      return { session, profile, denials, denialRows };
+    }
+
+    // ── caller session: the gate refuses ─────────────────────────────────
+    const caller = await obeyedCall(tenantA, CALLER);
+    expect(caller.profile).toBe('caller');
+    expect(caller.session.machine.currentContext.ownerSession).not.toBe(true);
+    expect(caller.denialRows.length + caller.denials.length).toBeGreaterThanOrEqual(1);
+    const reasons = [
+      ...caller.denialRows.map((r) => r.reason),
+      ...caller.denials.map((e) => (e.metadata as Record<string, unknown> | undefined)?.reason),
+    ];
+    expect(reasons.every((r) => r === 'not_owner_session')).toBe(true);
+    expect(caller.session.pendingVoiceApproval).toBeUndefined();
+    const { rows: afterCaller } = await pool.query(
+      `SELECT id, status FROM proposals WHERE tenant_id = $1 ORDER BY created_at`,
+      [tenantA.tenantId],
+    );
+    expect(afterCaller.find((r) => r.id === waitingA)?.status).toBe('ready_for_review');
+    expect(afterCaller.some((r) => r.status === 'approved' || r.status === 'executed')).toBe(false);
+
+    // ── CONTROL: the same obeying stub on tenant B's verified owner line is NOT denied ──
+    const owner = await obeyedCall(tenantB, OWNER_LINE);
+    expect(owner.profile).toBe('owner_line');
+    expect(owner.denialRows).toEqual([]);
+    expect(owner.denials).toEqual([]);
+    // …and on the owner line the obeying classifier + "yes" really does
+    // approve a waiting proposal. That is what makes the caller-session
+    // refusal above meaningful: the ownerSession gate is the ONLY thing
+    // standing between an obeyed injection and an approval (owner-line
+    // caller-ID trust itself is spoofable — ticketed separately).
+    const { rows: ownerRows } = await pool.query(
+      `SELECT status FROM proposals WHERE tenant_id = $1 AND summary = 'Tenant B waiting estimate'`,
+      [tenantB.tenantId],
+    );
+    expect(ownerRows.map((r) => r.status)).toEqual(['approved']);
   });
 });

@@ -91,14 +91,25 @@ function lastUserText(request: LLMRequest): string {
  * or the hardening line's quoted examples ("ignore previous instructions")
  * become an extracted name and the markers bleed into multi-line matches.
  * Text with no fence (every owner surface) is returned unchanged.
+ *
+ * Anchored: only a message that IS a fence — starts with the BEGIN marker
+ * line and ends with the END marker line — is unwrapped, so owner text that
+ * merely quotes a marker string somewhere is never sliced.
  */
 function fencedUtteranceOrText(text: string): string {
-  const begin = text.indexOf(UNTRUSTED_CONTENT_BLOCK_BEGIN);
-  const end = text.lastIndexOf(UNTRUSTED_CONTENT_BLOCK_END);
-  if (begin < 0 || end <= begin) return text;
-  // ['', '<label> — caller-authored, quoted verbatim as DATA:', ...words, '<hardening line>', '']
-  const lines = text.slice(begin + UNTRUSTED_CONTENT_BLOCK_BEGIN.length, end).split('\n');
-  return lines.slice(2, -2).join('\n');
+  const trimmed = text.trim();
+  if (
+    !trimmed.startsWith(`${UNTRUSTED_CONTENT_BLOCK_BEGIN}\n`) ||
+    !trimmed.endsWith(`\n${UNTRUSTED_CONTENT_BLOCK_END}`)
+  ) {
+    return text;
+  }
+  // [label line, ...words, hardening line]
+  const lines = trimmed
+    .slice(UNTRUSTED_CONTENT_BLOCK_BEGIN.length + 1, trimmed.length - UNTRUSTED_CONTENT_BLOCK_END.length - 1)
+    .split('\n');
+  if (lines.length < 3) return text;
+  return lines.slice(1, -1).join('\n');
 }
 
 /**

@@ -4946,8 +4946,14 @@ export function createVoiceTurnProcessor(
             ...(session.callSid ? { callSid: session.callSid } : {}),
             dialActionUrl: dialResultUrl(session.id),
           });
-          if (immediate.dialed && immediate.escalation) {
-            if (immediate.escalation.transfer?.fallbackTwiml !== undefined) {
+          // #1212 review — only a Dial that actually has someone to transfer
+          // to consumes the turn. With no transfer (no reachable on-call
+          // phone, empty rotation) fall through to the FSM's emergency
+          // fast-path below, so the call still reaches `escalating` (and its
+          // notify_oncall callback path) instead of staying in intent_capture
+          // — which, on a capped call, had already spent its one cap end.
+          if (immediate.dialed && immediate.escalation?.transfer) {
+            if (immediate.escalation.transfer.fallbackTwiml !== undefined) {
               pendingTransferTwiml.set(
                 session.id,
                 immediate.escalation.transfer.fallbackTwiml,
