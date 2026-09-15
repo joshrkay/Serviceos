@@ -88,6 +88,7 @@ import {
 import { NegotiationGuardrailTaskHandler } from '../ai/tasks/negotiation-task';
 import type { VoiceAnswerStatus, VoiceLookupAnswer } from '@ai-service-os/shared';
 import type { VoiceRepository } from '../voice/voice-service';
+import { classifyRecordingProvenance } from '../ai/content-provenance';
 import {
   executeLookupAnswer,
   LOOKUP_REQUIRED_PERMISSION,
@@ -1945,23 +1946,24 @@ export function holdIfUntrustedSource(
 }
 
 /**
- * #1231 — the router's own read of the DURABLE recording row: a transcript
- * whose recording is caller audio (`source='inbound_call'`, RIVET I13) is
- * voicemail-sourced whatever the queue job says.
+ * #1231 — the router's own read of the DURABLE recording row: a transcript is
+ * voicemail-sourced (untrusted) unless its recording is a stamped in-app
+ * memo, whatever the queue job says.
  *
  * The transcription hook stamps `sourceChannel: 'voicemail'` on the jobs it
  * builds, but a job is only as good as its enqueuer: the pre-#1231 retry
  * path minted router jobs for caller voicemails with NO stamp, and those can
  * still be sitting in the queue at deploy. Reading the row here makes the
  * fence (`untrustedTranscript`) and the hold (`holdIfUntrustedSource`) key
- * on the recording, not the job. The job stamp can only ADD restriction:
+ * on the recording, not the job.
  *
- *   - job says 'voicemail'            → 'voicemail'
- *   - no recordingId / no voiceRepo   → undefined (text-mode, legacy deps)
- *   - row source='inbound_call'       → 'voicemail'
- *   - row missing / lookup failed     → 'voicemail' (fail closed: fenced +
- *                                        held, never dropped)
- *   - any other row                   → undefined (in-app memo, unchanged)
+ * ALLOWLIST (#1244 review): trust is exactly `classifyRecordingProvenance`
+ * === 'trusted' — `source='inapp_voice'` stamped 'operator' by the
+ * transcription worker. 'inbound_call', 'batch_upload', unknown sources, an
+ * unstamped row, a missing row, and a lookup error all resolve to
+ * 'voicemail' (fenced + held, never dropped). The job stamp can only ADD
+ * restriction; no recordingId / no voiceRepo keeps the job's value
+ * (text-mode driver, legacy deps).
  *
  * Exported for the chokepoint tests.
  */
@@ -1976,8 +1978,8 @@ export async function resolveRecordingSourceChannel(
   if (!recordingId || !voiceRepo) return undefined;
   try {
     const recording = await voiceRepo.findById(tenantId, recordingId);
-    if (recording && recording.source !== 'inbound_call') return undefined;
-    log.warn('voice-action-router: job carried no sourceChannel but the recording is untrusted caller audio — treating as voicemail', {
+    if (recording && classifyRecordingProvenance(recording) === 'trusted') return undefined;
+    log.warn('voice-action-router: job carried no sourceChannel and the recording is not a stamped in-app memo — treating as voicemail', {
       recordingId,
       recordingSource: recording?.source ?? null,
     });

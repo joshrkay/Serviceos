@@ -40,11 +40,15 @@ export function createTranscriptionRouterHandoff(
     if (event.voicemail) {
       // Audit the gate decision (repo invariant: new pipeline legs
       // audit). Best-effort — never blocks the enqueue path.
+      // #1244 review — attribute it to what actually triggered it: the
+      // voicemail webhook, or an operator's transcription retry (whose
+      // voicemail status was re-derived from the recording row).
+      const retryTriggered = event.voicemailOrigin === 'recording_source';
       try {
         await deps.auditRepo.create(
           createAuditEvent({
             tenantId: event.tenantId,
-            actorId: 'voicemail_webhook',
+            actorId: retryTriggered ? 'transcription_retry' : 'voicemail_webhook',
             actorRole: 'system',
             eventType: 'voicemail.router_gate',
             entityType: 'voice_recording',
@@ -52,6 +56,9 @@ export function createTranscriptionRouterHandoff(
             metadata: {
               callerVerified: routerAllowed,
               enqueued: routerAllowed,
+              ...(retryTriggered && event.retryRequestedBy
+                ? { retryRequestedBy: event.retryRequestedBy }
+                : {}),
             },
           }),
         );
