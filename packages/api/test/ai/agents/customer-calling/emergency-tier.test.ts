@@ -741,6 +741,14 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['E1', 'se rompió la tubería de gas', 'broken gas pipe'],
     ['E1', 'sale gas de la tienda', 'accepted (#1241 item 3)'],
     ['not-E1', 'el gas sale por 50 dólares al mes', 'a number with a currency is a price'],
+    // Guards for the new patterns: objects that fall, pets, air conditioning.
+    ['not-E1', 'se cayó la tele y no se puede mover', 'a TV fell'],
+    ['not-E1', 'se cayó el árbol, no se mueve', 'a tree fell'],
+    ['E1', 'se cayó el niño y no se mueve', 'a child fell'],
+    ['not-E1', 'mi perro se tragó una moneda', 'a pet'],
+    ['E1', 'mi hijo se tragó una moneda y el perro ladra', 'a child, a pet nearby'],
+    ['E1', 'le mordió un perro y se está hinchando', 'a dog bite with swelling'],
+    ['not-E1', 'hay gas en el aire acondicionado', 'refrigerant talk'],
   ];
 
   it.each(FOLLOWUP_TABLE)('%s: %j (%s)', (bucket, utterance) => {
