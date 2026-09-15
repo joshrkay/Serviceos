@@ -571,6 +571,7 @@ function checkGlobalGuards(
             tier: 'E1',
             reason: 'life_safety_e1',
             keyword: event.keyword,
+            ...(event.language ? { language: event.language } : {}),
           }),
           // Life-safety script spoken FIRST, before anything else.
           ttsPlay(safetyScript, { priority: 'safety', tier: 'E1' }),
