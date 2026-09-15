@@ -540,6 +540,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['276_dispatch_analytics_event_type_en_route', 'e3635f6dfcaa29a6e7b01a96724d81db84a7ccae1bfff08714234fa40a29a11b'],
   // #975 U8 (renumbered 278 after #1188's 277): call_transcript_turns gains call_sid/session_id; voice_recording_id nullable
   ['278_call_transcript_turns_call_sid', '10b6695fe7b6da9106c56fa21f0445d46b41c7125ef2670d891701efafaf5e5a'],
+  // #1051 follow-up — partial index serving the tenant-wide voice PIN lock lookup
+  ['279_audit_events_voice_pin_lock_index', '9d38ea9c943b3d709c582cbb1544179b60c70e275ecf34b94b24dbda86ec1948'],
 ];
 
 function hashMigration(value: string): string {

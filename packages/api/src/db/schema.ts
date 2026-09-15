@@ -6890,6 +6890,20 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
       ON call_transcript_turns (tenant_id, call_sid);
   `,
+
+  // #1051 follow-up — the tenant-wide voice money-approval PIN lock counts a
+  // tenant's strike rows (and its one owner-alert row) across ALL voice
+  // sessions in a rolling window, before every money-class voice step
+  // (PgAuditRepository.findVoiceApprovalPinLockEvents). A partial index over
+  // just those event types keeps that a tiny range scan instead of walking the
+  // tenant's whole audit trail. The IN list must stay identical to the literal
+  // list in pg-audit.ts (VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL) for the planner to
+  // use it. Idempotent (IF NOT EXISTS); drops nothing.
+  '279_audit_events_voice_pin_lock_index': `
+    CREATE INDEX IF NOT EXISTS idx_audit_events_voice_pin_lock
+      ON audit_events (tenant_id, created_at)
+      WHERE event_type IN ('proposal.voice_approval_challenge_failed', 'proposal.voice_challenge_lockout', 'proposal.voice_approval_tenant_lock_alerted');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
