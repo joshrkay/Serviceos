@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
@@ -172,7 +172,13 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     proposalRepo = new PgProposalRepository(pool);
     auditRepo = new PgAuditRepository(pool);
     settingsRepo = new PgSettingsRepository(pool);
+  });
 
+  // #1051 tenant-wide lock — fresh tenants per test. Every test here spends
+  // money-approval strikes, and 5 strikes inside 24h lock a tenant's voice
+  // money approval across ALL its sessions, so a shared tenant would carry
+  // strikes from one test into the next.
+  beforeEach(async () => {
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
     tenantC = await createTestTenant(pool);
@@ -889,6 +895,8 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
       findByCorrelation: async () => {
         throw outage;
       },
+      findVoiceApprovalPinLockEvents: (tenantId, since) =>
+        auditRepo.findVoiceApprovalPinLockEvents(tenantId, since),
     };
     const { deps: healthyDeps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550111');
     const deps: VoiceApprovalDeps = { ...healthyDeps, auditRepo: lookupDown };
@@ -992,6 +1000,8 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
         auditRepo.findByEntity(tenantId, entityType, entityId),
       findByCorrelation: (tenantId, correlationId) =>
         auditRepo.findByCorrelation(tenantId, correlationId),
+      findVoiceApprovalPinLockEvents: (tenantId, since) =>
+        auditRepo.findVoiceApprovalPinLockEvents(tenantId, since),
     };
     const { deps: healthyDeps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550112');
     const deps: VoiceApprovalDeps = { ...healthyDeps, auditRepo: strikeWriteLost };

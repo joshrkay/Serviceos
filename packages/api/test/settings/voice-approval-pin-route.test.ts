@@ -93,11 +93,11 @@ describe('WS21a — voice-approval PIN enrollment route', () => {
     const first = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
     expect(first.voice_approval_challenge).toBeUndefined();
 
-    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '9999' });
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '5382' });
     const second = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
     expect(second.voice_approval_pin_hash).not.toBe(first.voice_approval_pin_hash);
     expect(second.voice_approval_pin_hash).toBe(
-      hashVoiceApprovalPin('9999', tenantId, 'unit-test-enc-key'),
+      hashVoiceApprovalPin('5382', tenantId, 'unit-test-enc-key'),
     );
   });
 
@@ -149,5 +149,74 @@ describe('WS21a — voice-approval PIN enrollment route', () => {
       .put('/api/settings/voice-approval-pin')
       .send({ pin: '4271' });
     expect(res.status).toBe(400);
+  });
+
+  // ── #1051 follow-up — weak-PIN rejection + the PIN-change stamp ──────────
+  it.each([
+    ['1111', 'repeated_digits'],
+    ['0000', 'repeated_digits'],
+    ['1234', 'sequence'],
+    ['4321', 'sequence'],
+    ['0123', 'sequence'],
+    ['123456', 'sequence'],
+    ['1212', 'common'],
+    ['2580', 'common'],
+    ['6969', 'common'],
+    ['1004', 'common'],
+    ['2000', 'common'],
+  ])('rejects the weak PIN %s (%s) with a clear 400 and stores nothing', async (pin, reason) => {
+    const res = await request(app).put('/api/settings/voice-approval-pin').send({ pin });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.message).toMatch(/too easy to guess/i);
+    expect(res.body.details).toMatchObject({ field: 'pin', reason });
+    expect(JSON.stringify(res.body)).not.toContain(pin);
+    const stored = await settingsRepo.findByTenant(tenantId);
+    expect(stored!.escalationSettings?.voice_approval_pin_hash).toBeUndefined();
+    const events = await auditRepo.findRecentByTenant(tenantId);
+    expect(events.find((e) => e.eventType === 'settings.voice_approval_pin.set')).toBeUndefined();
+  });
+
+  it('a weak PIN typed with separators is still rejected (normalized first)', async () => {
+    const res = await request(app).put('/api/settings/voice-approval-pin').send({ pin: '1-2-3-4' });
+    expect(res.status).toBe(400);
+    expect(res.body.details).toMatchObject({ reason: 'sequence' });
+  });
+
+  it('a weak PIN cannot replace an enrolled one — the old PIN stays', async () => {
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '4271' });
+    const before = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    const res = await request(app).put('/api/settings/voice-approval-pin').send({ pin: '1111' });
+    expect(res.status).toBe(400);
+    const after = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    expect(after.voice_approval_pin_hash).toBe(before.voice_approval_pin_hash);
+    expect(after.voice_approval_pin_changed_at).toBe(before.voice_approval_pin_changed_at);
+  });
+
+  it('setting and changing the PIN stamps voice_approval_pin_changed_at (the tenant strike count resets from it)', async () => {
+    const t0 = Date.now();
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '4271' });
+    const first = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    expect(typeof first.voice_approval_pin_changed_at).toBe('string');
+    const firstAt = new Date(first.voice_approval_pin_changed_at!).getTime();
+    expect(firstAt).toBeGreaterThanOrEqual(t0);
+    expect(firstAt).toBeLessThanOrEqual(Date.now());
+
+    await new Promise((r) => setTimeout(r, 5));
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '5382' });
+    const second = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    expect(new Date(second.voice_approval_pin_changed_at!).getTime()).toBeGreaterThan(firstAt);
+  });
+
+  it('clearing the PIN stamps voice_approval_pin_changed_at too', async () => {
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '4271' });
+    const set = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    await new Promise((r) => setTimeout(r, 5));
+    await request(app).delete('/api/settings/voice-approval-pin');
+    const cleared = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    expect(cleared.voice_approval_pin_hash).toBeUndefined();
+    expect(new Date(cleared.voice_approval_pin_changed_at!).getTime()).toBeGreaterThan(
+      new Date(set.voice_approval_pin_changed_at!).getTime(),
+    );
   });
 });
