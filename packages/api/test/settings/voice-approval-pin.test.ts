@@ -12,6 +12,7 @@ import {
   hashVoiceApprovalPin,
   voiceApprovalPinMatches,
   resolveVoiceApprovalPinSecret,
+  weakPinReason,
   MIN_PIN_DIGITS,
   MAX_PIN_DIGITS,
 } from '../../src/settings/voice-approval-pin';
@@ -109,5 +110,32 @@ describe('resolveVoiceApprovalPinSecret', () => {
   });
   it('returns null when neither is set', () => {
     expect(resolveVoiceApprovalPinSecret({} as NodeJS.ProcessEnv)).toBeNull();
+  });
+});
+
+// #1051 follow-up — a guessable PIN defeats the tenant-wide 5-strike budget.
+describe('weakPinReason', () => {
+  it('rejects all-same digits', () => {
+    for (const pin of ['0000', '1111', '99999', '777777']) {
+      expect(weakPinReason(pin), pin).toBe('repeated_digits');
+    }
+  });
+
+  it('rejects straight sequences, up or down', () => {
+    for (const pin of ['1234', '0123', '4321', '6789', '9876', '12345', '543210', '345678']) {
+      expect(weakPinReason(pin), pin).toBe('sequence');
+    }
+  });
+
+  it('rejects the denylist of very common PINs', () => {
+    for (const pin of ['1212', '2580', '6969', '1004', '2000', '1122', '2001', '121212', '112233']) {
+      expect(weakPinReason(pin), pin).toBe('common');
+    }
+  });
+
+  it('accepts ordinary PINs — including near-misses of the weak shapes', () => {
+    for (const pin of ['4271', '5382', '1235', '9870', '1113', '7890', '42710', '839204']) {
+      expect(weakPinReason(pin), pin).toBeNull();
+    }
   });
 });

@@ -135,6 +135,10 @@ class ProvenanceAuditRepository implements AuditRepository {
     return this.delegate.findByCorrelation(tenantId, correlationId);
   }
 
+  findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]> {
+    return this.delegate.findVoiceApprovalPinLockEvents(tenantId, since);
+  }
+
   findRecentByTenant(
     tenantId: string,
     options?: { limit?: number },

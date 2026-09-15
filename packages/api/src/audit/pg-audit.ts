@@ -1,6 +1,19 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { AuditEvent, AuditRepository } from './audit';
+import { AuditEvent, AuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES } from './audit';
+
+/**
+ * #1051 follow-up / #1233 review — the tenant-wide voice PIN lock lookup:
+ * $1 tenant, $2 event types, $3 since. Served by migration 245's
+ * `idx_audit_events_tenant_created_at` (tenant_id, created_at DESC) — a range
+ * scan over the tenant's recent rows, filtered by type. Exported so the
+ * integration test EXPLAINs the exact SQL that runs.
+ */
+export const VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL = `SELECT * FROM audit_events
+       WHERE tenant_id = $1
+         AND event_type = ANY($2::text[])
+         AND created_at >= $3
+       ORDER BY created_at ASC`;
 
 function mapRow(row: Record<string, unknown>): AuditEvent {
   return {
@@ -61,6 +74,17 @@ export class PgAuditRepository extends PgBaseRepository implements AuditReposito
         `SELECT * FROM audit_events WHERE tenant_id = $1 AND correlation_id = $2 ORDER BY created_at DESC`,
         [tenantId, correlationId]
       );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL, [
+        tenantId,
+        [...VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES],
+        since,
+      ]);
       return result.rows.map(mapRow);
     });
   }
