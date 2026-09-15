@@ -603,20 +603,24 @@ async function resolveTenantPinLock(
   }
   const attempts: ReservedPinAttempt[] = [];
   const clearedIds = new Set<string>();
+  const settledIds = new Set<string>();
   for (const row of rows) {
     // Defense in depth: the query is already tenant-scoped.
     if (row.tenantId !== tenantId) continue;
+    const attemptId = typeof row.metadata?.attemptId === 'string' ? row.metadata.attemptId : null;
     if (row.eventType === VOICE_APPROVAL_PIN_ATTEMPT_EVENT) {
       attempts.push({ id: row.id, at: row.createdAt });
     } else if (row.eventType === VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT) {
-      const attemptId = row.metadata?.attemptId;
-      if (typeof attemptId === 'string') clearedIds.add(attemptId);
+      if (attemptId) clearedIds.add(attemptId);
+    } else if (row.eventType === CHALLENGE_FAILED_EVENT || row.eventType === CHALLENGE_LOCKOUT_EVENT) {
+      // A recorded wrong-code outcome (or its durable marker) settles the attempt.
+      if (attemptId) settledIds.add(attemptId);
     }
   }
   const pinChangedAt = await readPinChangedAt(deps, tenantId);
   return {
     status: 'resolved',
-    decision: decideTenantPinLock({ attempts, clearedIds, pinChangedAt, now }),
+    decision: decideTenantPinLock({ attempts, clearedIds, settledIds, pinChangedAt, now }),
   };
 }
 
@@ -812,6 +816,7 @@ async function recordStrike(
         attemptCount: metadata.attemptCount,
         reason: 'strike_write_failed',
         lostEventType: eventType,
+        ...(typeof metadata.attemptId === 'string' ? { attemptId: metadata.attemptId } : {}),
       });
     } catch (markerErr) {
       logger.error(

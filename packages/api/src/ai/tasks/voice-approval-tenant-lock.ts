@@ -19,10 +19,14 @@
  * reservations, the one that counts last sees all of them.
  *
  * The owner is alerted ONCE per lock episode. The episode is identified by the
- * attempt that engaged it — the `TENANT_PIN_STRIKE_LIMIT`-th counted attempt,
- * oldest first. While the lock holds no new attempt is compared, so that
- * attempt stays the same until one ages out (releasing the lock); a later
- * re-engagement has a new engaging attempt, and therefore a new alert.
+ * attempt that engaged it — the `TENANT_PIN_STRIKE_LIMIT`-th SETTLED counted
+ * attempt, oldest first. Settled means its wrong-code outcome is recorded (or
+ * it has been pending longer than `PIN_ATTEMPT_SETTLE_MS`). A still-pending
+ * reservation counts for the lock (fail closed) but never keys the episode:
+ * its outcome may yet clear it, and a reservation stamped earlier but committed
+ * later would otherwise move the key and re-send the alert. While the lock
+ * holds no new attempt is compared, so the key stays the same until an attempt
+ * ages out (releasing the lock); a re-engagement has a new key, and a new alert.
  *
  * No I/O: the caller reads the rows and the PIN change time and hands them in.
  */
@@ -36,6 +40,12 @@ export const TENANT_PIN_STRIKE_WINDOW_MS = 24 * 60 * 60 * 1000;
  * far ahead of the deciding replica's `now` still counts.
  */
 export const PIN_LOCK_CLOCK_SKEW_MS = 60 * 1000;
+/**
+ * A reservation normally gets its outcome within milliseconds. One still
+ * pending after this long (a crash between reservation and outcome) is
+ * treated as a spent guess for the episode key too.
+ */
+export const PIN_ATTEMPT_SETTLE_MS = 2 * 60 * 1000;
 
 export interface ReservedPinAttempt {
   /** The reservation's audit row id — the key a clearing row refers to. */
@@ -48,6 +58,8 @@ export interface TenantPinLockInput {
   attempts: readonly ReservedPinAttempt[];
   /** Ids of attempts that were cleared (passed, cancelled, refused over the budget). */
   clearedIds: ReadonlySet<string>;
+  /** Ids of attempts whose wrong-code outcome is recorded (failed / lockout rows). */
+  settledIds: ReadonlySet<string>;
   /** Latest PIN set/change/clear; null when unknown (every attempt in the window counts). */
   pinChangedAt: Date | null;
   now: Date;
@@ -57,7 +69,11 @@ export interface TenantPinLockDecision {
   locked: boolean;
   /** Attempts counting right now: reserved, not cleared, after the PIN change, inside the window. */
   strikeCount: number;
-  /** When locked, the attempt that engaged this lock episode — the owner-alert claim key. */
+  /**
+   * The attempt that engaged this lock episode — the owner-alert claim key.
+   * Null when unlocked, or while one of the attempts that would engage it is
+   * still pending.
+   */
   engagingAttemptId: string | null;
 }
 
@@ -77,10 +93,14 @@ export function decideTenantPinLock(input: TenantPinLockInput): TenantPinLockDec
     .sort((a, b) => a.at.getTime() - b.at.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const strikeCount = counted.length;
   const locked = strikeCount >= TENANT_PIN_STRIKE_LIMIT;
+  const settled = counted.filter(
+    (a) => input.settledIds.has(a.id) || now - a.at.getTime() > PIN_ATTEMPT_SETTLE_MS,
+  );
   return {
     locked,
     strikeCount,
-    engagingAttemptId: locked ? counted[TENANT_PIN_STRIKE_LIMIT - 1].id : null,
+    engagingAttemptId:
+      locked && settled.length >= TENANT_PIN_STRIKE_LIMIT ? settled[TENANT_PIN_STRIKE_LIMIT - 1].id : null,
   };
 }
 

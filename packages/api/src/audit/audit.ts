@@ -27,8 +27,9 @@ export interface AuditEventInput {
 /**
  * #1051 follow-up / #1233 review — the audit rows the tenant-wide voice
  * money-approval PIN lock is derived from: an attempt RESERVED before a spoken
- * code is compared, and the row that clears one (a correct code, a cancel, a
- * refusal over the budget). An attempt counts until it is cleared. Read by
+ * code is compared, the row that clears one (a correct code, a cancel, a
+ * refusal over the budget), and the wrong-code rows that settle one (their
+ * `metadata.attemptId`). An attempt counts until it is cleared. Read by
  * `findVoiceApprovalPinLockEvents`, served by migration 245's
  * idx_audit_events_tenant_created_at.
  */
@@ -37,6 +38,8 @@ export const VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT = 'proposal.voice_approval
 export const VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES = [
   VOICE_APPROVAL_PIN_ATTEMPT_EVENT,
   VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT,
+  'proposal.voice_approval_challenge_failed',
+  'proposal.voice_challenge_lockout',
 ] as const;
 
 export interface AuditRepository {
