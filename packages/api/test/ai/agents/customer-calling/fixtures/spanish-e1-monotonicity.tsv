@@ -2,7 +2,7 @@
 # Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv;
 # third review: r1239b/corpus.txt and newprobes.txt; #1221: Spanish injury/medical phrases and controls).
 # Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 and #1245 rows
-# (appended after them) with origin/main 859db9f94 (as merged in #1239); the #1245 round-2/#1241 rows (appended
+# (appended after them) with origin/main 859db9f94 (as merged in #1239); the #1245 round-2, #1241 and #1253 rows (appended
 # last) with origin/main 9c9b1d868 (as merged in #1245). Do not regenerate against
 # a branch: the column is the baseline a change is measured against.
 E3	se sale el gas
@@ -498,3 +498,46 @@ E1	¿cuánto sale el gas del calentador?
 E1	¿cuánto sale el gas del tanque de 20 libras?
 E1	¿cuánto sale el gas por aquí?
 E1	se cayó la tele y mi hijo no se puede mover
+E1	casi me infarto con la cotización
+E1	la luz se desmayó
+E1	a cómo sale el gas del tanque
+E1	se cayó la escalera y no se puede mover
+E1	se cayó la escalera y no se puede levantar
+E1	se cayó el refrigerador y no se puede mover
+E3	se tragó una moneda mientras jugaba con el perro
+E1	a como sale el gas del calentador esta goteando
+E3	mi gato se tomó el anticongelante
+E1	se cayó la tele encima de mi hijo y no se puede mover
+E1	se cayó la escalera con mi papá arriba y no se puede levantar
+E1	se cayó un mueble sobre mi papá y no responde
+E1	se cayó la tele sobre ella y no se mueve
+E1	se cayó el librero encima de mi hija y no se mueve
+E3	se cayó la tele encima de mi hijo, no se mueve
+E1	se cayó un mueble sobre mi papá y no se puede levantar
+E1	se cayó el hombre y no se mueve
+E1	se cayó el nieto y no se mueve
+E1	se cayó el muchacho y no se mueve
+E1	se cayó la muchacha y no se mueve
+E1	se cayó el viejito y no se mueve
+E1	se cayó el chamaco y no se mueve
+E1	se cayó el señor y no se mueve
+E1	se cayó el esposo y no se mueve
+E1	¿cuánto sale el gas en la casa? está chiflando el tanque
+E1	¿cuánto me sale el gas? escucho un silbido en la tubería
+E1	¿a cómo sale el gas? se rompió la manguera
+E3	¿cuánto sale el gas? mi hijo se mareó
+E1	¿cuánto sale el gas? la tubería está rota
+E3	¿cuánto sale el gas? está silbando
+E3	¿cuánto sale el gas? mi mamá se mareó
+E3	mi hija se tomó el cloro
+E3	se bebió la lejía
+E3	comió raticida
+E3	se tragó la pila
+E3	se envenenó
+E3	se tomó la medicina de su abuela
+E3	se tomó las pastillas de su mamá
+E3	mi hijo se tragó la pila del control
+E3	se tragó la moneda
+E3	se tragó una pila mientras le daba de comer al perro
+E3	mi hijo se tragó un imán jugando con el gato
+E3	el niño se tragó una moneda del plato del perro

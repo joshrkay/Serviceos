@@ -789,6 +789,9 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['E1', 'se tragó una pila mientras le daba de comer al perro', 'implied person'],
     ['E1', 'mi hijo se tragó un imán jugando con el gato', 'person with a pet nearby'],
     ['E1', 'el niño se tragó una moneda del plato del perro', 'person, pet mentioned'],
+    // The pet must be the one who swallowed it; "gotea/goteando" is gas trouble.
+    ['E1', 'se tragó una moneda mientras jugaba con el perro', 'the pet is not the subject'],
+    ['E1', 'a como sale el gas del calentador esta goteando', 'price question + dripping'],
   ];
 
   it.each(FOLLOWUP_TABLE)('%s: %j (%s)', (bucket, utterance) => {
@@ -819,6 +822,10 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['se cayó la tele y no se puede mover', 'E2'],
     ['se cayó el árbol, no se mueve', 'E2'],
     ['mi perro se tragó una moneda', 'E2'],
+    ['mi gato se tomó el anticongelante', 'E2'],
+    ['se cayó la escalera y no se puede mover', 'E2'],
+    ['se cayó el refrigerador y no se puede mover', 'E2'],
+    ['a cómo sale el gas del tanque', 'E2'],
   ] as const)('price question / human-check row: %j is %s', (utterance, tier) => {
     expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
   });

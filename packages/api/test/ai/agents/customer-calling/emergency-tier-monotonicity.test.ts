@@ -46,6 +46,13 @@ const INTENDED_DOWNGRADES: ReadonlyMap<string, { mainTier: Tier; expectedTier: T
   ['la cotización me dio convulsiones', { mainTier: 'E1', expectedTier: 'E3', why: 'a reaction to a quote (#1245 round 2)' }],
   ['el precio me dio un toque', { mainTier: 'E1', expectedTier: 'E3', why: 'a reaction to a price (#1245 round 2)' }],
   ['se cayó la tele y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'ambiguous object fall, no person named anywhere: human check (#1253 review)' }],
+  // Same classes, found in the #1253 reviewer corpus (flagged on the PR for confirmation).
+  ['a cómo sale el gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source, no "¿" (Josh, #1241)' }],
+  ['se cayó la escalera y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'ambiguous object fall, no person named anywhere (#1253 review)' }],
+  ['se cayó la escalera y no se puede levantar', { mainTier: 'E1', expectedTier: 'E2', why: 'ambiguous object fall, no person named anywhere (#1253 review)' }],
+  ['se cayó el refrigerador y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'ambiguous object fall, no person named anywhere (#1253 review)' }],
+  ['casi me infarto con la cotización', { mainTier: 'E1', expectedTier: 'E3', why: 'a reaction to a quote, the class of "la cotización me dio convulsiones" (#1245 round 2)' }],
+  ['la luz se desmayó', { mainTier: 'E1', expectedTier: 'E3', why: 'a light going out, the class of "se desmayó la señal del wifi" (#1245 round 2)' }],
 ]);
 
 const rows = readFileSync(FIXTURE, 'utf8')
