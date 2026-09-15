@@ -743,7 +743,7 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['not-E1', 'el gas sale por 50 dólares al mes', 'a number with a currency is a price'],
     // Guards for the new patterns: objects that fall, pets, air conditioning.
     ['not-E1', 'se cayó la tele y no se puede mover', 'a TV fell'],
-    ['not-E1', 'se cayó el árbol, no se mueve', 'a tree fell'],
+    ['E1', 'se cayó el árbol, no se mueve', 'not a household object and not the exact shape (#1253 round 2)'],
     ['E1', 'se cayó la tele y mi hijo no se puede mover', 'an object fell on a person'],
     ['E1', 'se cayó el niño y no se mueve', 'a child fell'],
     ['not-E1', 'mi perro se tragó una moneda', 'a pet'],
@@ -820,7 +820,6 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['¿cuánto sale el gas del calentador? huele muy fuerte', 'E1'],
     // #1253 review — ambiguous object falls and pet emergencies go to E2 (human check), not E3.
     ['se cayó la tele y no se puede mover', 'E2'],
-    ['se cayó el árbol, no se mueve', 'E2'],
     ['mi perro se tragó una moneda', 'E2'],
     ['mi gato se tomó el anticongelante', 'E2'],
     ['se cayó la escalera y no se puede mover', 'E2'],
@@ -845,6 +844,71 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
       best = Math.min(best, performance.now() - t0);
     }
     expect(best).toBeLessThan(20);
+  });
+});
+
+
+// ─── #1253 round 2 — structural rules ────────────────────────────────────────
+
+describe('#1253 round 2 — E2 floor for heuristic suppressors, exact object-fall shape, device subject, gas lexicon', () => {
+  it.each([
+    // Rule 1 — a heuristic suppressor lowers E1 to E2 at most (a human redirects it).
+    ['casi me infarto con la cotización', 'E2'],
+    ['mi hijo está herido de amor', 'E2'],
+    ['el precio me dio un toque', 'E2'],
+    ['la cotización me dio convulsiones', 'E2'],
+    ['la película era sobre alguien inconsciente', 'E2'],
+    ['me duele el pecho de risa', 'E2'],
+    ['tengo convulsiones de risa', 'E2'],
+    ['sobredosis de café', 'E2'],
+    ['el técnico no responde mis mensajes', 'E2'],
+    ['veo llamas amarillas en el calentador', 'E2'],
+    ['el recibo me sale el gas muy caro', 'E2'],
+    ['hay humo de la parrilla', 'E2'],
+    // The two approved smoke shapes stay E3.
+    ['hay humo cuando prendo la calefacción por primera vez', 'E3'],
+    ['hay humo de la carne asada en el patio', 'E3'],
+    // Rule 2 — object fall is E2 only as the exact utterance shape.
+    ['se cayó el refrigerador y no se puede mover', 'E2'],
+    ['se cayó la escalera y no se puede mover', 'E2'],
+    ['se cayó la tele y no se mueve', 'E2'],
+    ['se cayó la tele sobre la nena y no se mueve', 'E1'],
+    ['se cayó la puerta y no se mueve mi viejo', 'E1'],
+    ['se cayó la puerta y no se mueve la doña', 'E1'],
+    ['se cayó la puerta y no se mueve don José', 'E1'],
+    ['se cayó la escalera y no se mueve Pedro', 'E1'],
+    ['se cayó la escalera y no se mueve y está morado', 'E1'],
+    ['se cayó la escalera y no se mueve, no contesta', 'E1'],
+    ['se cayó la escalera y no se puede mover, ayuda', 'E1'],
+    ['se cayó la escalera cuando estaba arriba y no se mueve', 'E1'],
+    ['se cayó el techo y no se pueden mover', 'E1'],
+    ['se cayó la escalera y no se puede levantar', 'E1'],
+    // Rule 3 — the device reading of desmayó/desvaneció needs the device as the subject right after the verb.
+    ['se desmayó la señal del wifi', 'E2'],
+    ['se desvaneció la imagen', 'E2'],
+    ['se desmayó junto al calentador', 'E1'],
+    ['se desmayó en el garaje con el carro prendido', 'E1'],
+    ['se desmayó con el generador prendido', 'E1'],
+    ['se desmayó cuando se descompuso el aire', 'E1'],
+    ['se desmayó cuando llegó el técnico', 'E1'],
+    ['se desmayó en la oficina', 'E1'],
+    ['Luz se desmayó', 'E1'],
+    ['la luz se desmayó', 'E1'],
+    ['la luz se desmayó, está en el piso', 'E1'],
+    // Rule 4 — the shared gas lexicon.
+    ['a cómo sale el gas del tanque, no para', 'E1'],
+    ['¿cuánto sale el gas? apesta', 'E1'],
+    ['¿cuánto sale el gas? huele feo', 'E1'],
+    ['a cómo sale el gas del tanque', 'E2'],
+    // Rule 6 — falls and crush gaps shared with main.
+    ['se cayó de la escalera', 'E1'],
+    ['se cayó del segundo piso', 'E1'],
+    ['el refri se cayó y lo aplastó', 'E1'],
+    ['se le cayó encima el estante', 'E1'],
+    ['le cayó la tele', 'E1'],
+    ['quedó atrapado debajo del mueble', 'E1'],
+  ] as const)('%j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
   });
 });
 
