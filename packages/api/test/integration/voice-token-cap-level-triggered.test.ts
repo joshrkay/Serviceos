@@ -15,12 +15,20 @@
  * T1: tenant A's calls cross the cap; neighbour tenant B's call in the same
  * run stays under it (divergent data) and its audit trail carries no cap row.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { PgOnCallRepository } from '../../src/oncall/rotation';
+import {
+  pgSupervisorPresenceLoader,
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
+import { classifyCallerSafety } from '../../src/ai/agents/customer-calling/emergency-tier';
 import { gradeVulnerability } from '../../src/ai/agents/customer-calling/vulnerability-grader';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 
@@ -72,7 +80,17 @@ describe('#1204 — token cap crossed between turns ends the call, audit row at 
     await closeSharedTestDb();
   });
 
-  async function startCall(tenant: TestTenant, callSid: string, gateway: LLMGateway) {
+  async function startCall(
+    tenant: TestTenant,
+    callSid: string,
+    gateway: LLMGateway,
+    /** #1212 — real proposal + on-call repos for the emergency path. */
+    emergencyDeps?: {
+      proposalRepo: PgProposalRepository;
+      onCallRepo: PgOnCallRepository;
+      dispatcherPhoneResolver: () => Promise<string>;
+    },
+  ) {
     const store = new VoiceSessionStore({ startInterval: false });
     const adapter = new TwilioGatherAdapter({
       store,
@@ -81,6 +99,7 @@ describe('#1204 — token cap crossed between turns ends the call, audit row at 
       systemActorId: tenant.userId,
       businessName: 'Acme Plumbing',
       publicBaseUrl: 'https://example.com',
+      ...(emergencyDeps ?? {}),
     });
     await adapter.handleInbound({
       callSid,
@@ -212,5 +231,157 @@ describe('#1204 — token cap crossed between turns ends the call, audit row at 
     expect(neighbourAll.length).toBeGreaterThan(0);
     expect(neighbourAll.some((r) => r.eventType.endsWith('.cost_cap_exceeded'))).toBe(false);
     expect(neighbourAll.every((r) => r.tenantId === neighbour.tenantId)).toBe(true);
+  });
+
+  // ─── #1212: an emergency outcome wins over the cap end ──────────────────
+  //
+  // Each call runs in its own tenant (owner on the on-call rotation), so a
+  // capped call's whole audit + proposal trail can be compared with the same
+  // call made uncapped. Neighbour tenant B (no rotation, divergent config)
+  // must stay untouched.
+  describe('#1212 — a keyword-free emergency on the capped turn takes the emergency path', () => {
+    const KEYWORD_FREE_EMERGENCY =
+      'my water heater just split open and scalding water is pouring across the garage floor';
+    const EMERGENCY = JSON.stringify({
+      intentType: 'emergency_dispatch',
+      confidence: 0.94,
+      reasoning: 'active scalding-water release, needs someone now',
+      extractedEntities: {},
+    });
+    let proposalRepo: PgProposalRepository;
+    let onCallRepo: PgOnCallRepository;
+    const emergencyTenants: string[] = [];
+
+    beforeAll(() => {
+      proposalRepo = new PgProposalRepository(pool);
+      onCallRepo = new PgOnCallRepository(pool);
+    });
+
+    afterEach(() => {
+      _resetSupervisorPresenceCache();
+      setSupervisorPresenceLoader(null);
+    });
+
+    afterAll(() => {
+      // For the PR row dump.
+      console.log(`#1212 emergency tenants: ${emergencyTenants.join(',')} neighbour: ${neighbour.tenantId}`);
+    });
+
+    /** A fresh tenant whose owner is the only on-call rotation entry (tenant config; no product route writes it). */
+    async function rotationTenant(label: string): Promise<TestTenant> {
+      const tenant = await createTestTenant(pool);
+      await pool.query(
+        `INSERT INTO tenant_oncall_rotation (tenant_id, user_id, order_index) VALUES ($1, $2, 0)`,
+        [tenant.tenantId, tenant.userId],
+      );
+      emergencyTenants.push(`${label}=${tenant.tenantId}`);
+      return tenant;
+    }
+
+    async function emergencyCall(label: string, callSid: string) {
+      const tenant = await rotationTenant(label);
+      return startCall(
+        tenant,
+        callSid,
+        makeGatewayScript([
+          { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+          { content: EMERGENCY, output: 1 },
+        ]),
+        { proposalRepo, onCallRepo, dispatcherPhoneResolver: async () => '+15125550111' },
+      );
+    }
+
+    /** The tenant's whole trail, order-independent (rows written in one ms tie on created_at). */
+    async function trail(call: Call) {
+      const audits = await auditRepo.findRecentByTenant(call.tenant.tenantId, { limit: 200 });
+      const proposals = await proposalRepo.findByTenant(call.tenant.tenantId);
+      return {
+        auditTypes: audits.map((r) => r.eventType).sort(),
+        proposalTypes: proposals.map((p) => p.proposalType).sort(),
+      };
+    }
+
+    it('precondition: the utterance is keyword-free', () => {
+      expect(classifyCallerSafety(KEYWORD_FREE_EMERGENCY, {}).tier).toBe('E3');
+    });
+
+    it('Gather: the capped turn writes the emergency_dispatch rows an uncapped call writes, and no cost_cap row', async () => {
+      const control = await emergencyCall('gather-control', 'CA-1212-gather-control');
+      await gather(control, 'um I have a question');
+      await gather(control, KEYWORD_FREE_EMERGENCY);
+
+      const call = await emergencyCall('gather-capped', 'CA-1212-gather-capped');
+      await gather(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      expect(call.session.costTracker.isExceeded).toBe(true);
+      const xml = await gather(call, KEYWORD_FREE_EMERGENCY);
+
+      expect(xml).not.toContain('I&apos;m connecting you with a team member who can assist you further.');
+      expect(call.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      const capped = await trail(call);
+      expect(capped.auditTypes).toContain('agent.calling.intent_capture.emergency_dispatch');
+      expect(capped.auditTypes.some((t) => t.endsWith('.cost_cap_exceeded'))).toBe(false);
+      expect(capped).toEqual(await trail(control));
+    });
+
+    it('Media Streams, unsupervised tenant: the capped turn dials on-call now (emergency_immediate_dial row), as an uncapped call does', async () => {
+      // Presence is stubbed here: an owner's default users.current_mode is
+      // 'supervisor', and the only product write path to change it is the
+      // /me/mode route.
+      setSupervisorPresenceLoader(async () => false);
+      const control = await emergencyCall('ms-unsupervised-control', 'CA-1212-ms-control');
+      await mediaStreamsTurn(control, 'um I have a question');
+      await mediaStreamsTurn(control, KEYWORD_FREE_EMERGENCY);
+
+      const call = await emergencyCall('ms-unsupervised-capped', 'CA-1212-ms-capped');
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      expect(call.session.costTracker.isExceeded).toBe(true);
+      const fx = await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+
+      expect(fx.some((f) => f.type === 'notify_oncall')).toBe(false);
+      const rows = await auditRepo.findRecentByTenant(call.tenant.tenantId, { limit: 200 });
+      const dial = rows.find((r) => r.eventType === 'emergency_immediate_dial');
+      expect(dial?.entityId).toBe(call.session.id);
+      expect(dial?.metadata).toMatchObject({ intent: 'emergency_dispatch', escalated: true });
+      const capped = await trail(call);
+      expect(capped.auditTypes.some((t) => t.endsWith('.cost_cap_exceeded'))).toBe(false);
+      expect(capped).toEqual(await trail(control));
+    });
+
+    it('Media Streams, supervised tenant (real presence query): the capped turn takes the FSM emergency path, as an uncapped call does', async () => {
+      setSupervisorPresenceLoader(pgSupervisorPresenceLoader(pool));
+      const control = await emergencyCall('ms-supervised-control', 'CA-1212-ms-sup-control');
+      await mediaStreamsTurn(control, 'um I have a question');
+      await mediaStreamsTurn(control, KEYWORD_FREE_EMERGENCY);
+
+      const call = await emergencyCall('ms-supervised-capped', 'CA-1212-ms-sup-capped');
+      await mediaStreamsTurn(call, 'um I have a question');
+      await runVulnerabilityGrader(call, 60);
+      const fx = await mediaStreamsTurn(call, KEYWORD_FREE_EMERGENCY);
+
+      expect(fx.filter((f) => f.type === 'notify_oncall').map((f) => f.payload.reason)).toEqual([
+        'emergency_dispatch',
+      ]);
+      const capped = await trail(call);
+      expect(capped.auditTypes).toContain('agent.calling.intent_capture.emergency_dispatch');
+      expect(capped.auditTypes).not.toContain('emergency_immediate_dial');
+      expect(capped.auditTypes.some((t) => t.endsWith('.cost_cap_exceeded'))).toBe(false);
+      expect(capped).toEqual(await trail(control));
+    });
+
+    it('T1 — neighbour tenant B (no rotation) gets none of the emergency rows and no proposals', async () => {
+      const neighbourAll = await auditRepo.findRecentByTenant(neighbour.tenantId, { limit: 200 });
+      expect(neighbourAll.every((r) => r.tenantId === neighbour.tenantId)).toBe(true);
+      expect(
+        neighbourAll.some(
+          (r) =>
+            r.eventType === 'emergency_immediate_dial' ||
+            r.eventType.endsWith('.emergency_dispatch') ||
+            r.eventType.startsWith('escalation.'),
+        ),
+      ).toBe(false);
+      expect(await proposalRepo.findByTenant(neighbour.tenantId)).toEqual([]);
+    });
   });
 });
