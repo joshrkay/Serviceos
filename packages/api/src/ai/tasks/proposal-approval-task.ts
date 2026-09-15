@@ -36,8 +36,10 @@
  *      minted through the EXISTING `routeUnsupervisedProposal` machinery.
  *      Max 3 failed challenge attempts per voice session — counted on
  *      `VoiceApprovalSessionState` (session level, survives dialogue
- *      cancel/restart); the 3rd failure locks money/irreversible
- *      approvals for the rest of the session.
+ *      cancel/restart) AND re-derived from the session's strike rows in
+ *      `audit_events` before every money-class step (survives a rebuilt
+ *      session, #1051; a failed lookup fails closed); the 3rd failure
+ *      locks money/irreversible approvals for the rest of the session.
  *   6. Pending-edit parity — approval is blocked while
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
@@ -65,7 +67,7 @@ import {
   createProposalSmsEvent,
 } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
-import { createAuditEvent, type AuditRepository } from '../../audit/audit';
+import { createAuditEvent, type AuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import {
@@ -371,6 +373,100 @@ function requiresChallenge(proposal: Proposal): boolean {
   return cls === 'money' || cls === 'irreversible';
 }
 
+// ─── #1051 — the three-strike lock, re-derived from audit_events ─────────────
+
+/** Wrong codes a voice session may speak before money/irreversible voice approval locks. */
+const MAX_CHALLENGE_ATTEMPTS = 3;
+/** Audit row for a wrong code that did not lock (strikes 1 … MAX-1). */
+const CHALLENGE_FAILED_EVENT = 'proposal.voice_approval_challenge_failed';
+/** Audit row for the wrong code that locked the session (strike MAX). */
+const CHALLENGE_LOCKOUT_EVENT = 'proposal.voice_challenge_lockout';
+
+interface ChallengeLock {
+  locked: boolean;
+  /** Strikes spent this session: the larger of the in-memory counter and the audit trail. */
+  failCount: number;
+  /** Why the session is locked — recorded on the refusal's audit row. */
+  source?: 'session' | 'audit_trail' | 'lookup_failed';
+  /**
+   * What the audit trail knows that the in-memory session state does not,
+   * handed back as `sessionState` so a rebuilt session parks its strikes
+   * again. Never set from a failed lookup: failing closed refuses THIS turn,
+   * it does not write a lock that would outlive the outage.
+   */
+  restored?: Partial<VoiceApprovalSessionState>;
+}
+
+/**
+ * #1051 — resolve the three-strike lock for this voice session.
+ *
+ * The in-memory counter on `VoiceApprovalSessionState` is gone whenever a
+ * session is rebuilt without it (restart, deploy, a reconnect onto another
+ * replica), which used to hand a stranger holding the owner's phone three
+ * fresh tries at the PIN. Every wrong code already lands a durable
+ * `audit_events` row through `audit()` above, correlated to the voice session
+ * id, so the strikes are re-counted from those rows — scoped to THIS tenant
+ * (tenant-scoped repository query under RLS) and THIS session (correlation
+ * id) — before every money-class step: the readback, the confirm that would
+ * prompt the challenge, and the challenge itself. Capture-class approvals
+ * never consult it.
+ *
+ * - Locked in memory → locked, no lookup.
+ * - No audit repository wired → `audit()` never recorded a strike, so there
+ *   is nothing to re-derive from; the in-memory counter stands alone.
+ * - Lookup error → FAIL CLOSED: locked for this turn, and logged.
+ */
+async function resolveChallengeLock(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+): Promise<ChallengeLock> {
+  const memoryCount = ref.sessionState?.challengeFailCount ?? 0;
+  if (ref.sessionState?.challengeLockedOut) {
+    return { locked: true, failCount: memoryCount, source: 'session' };
+  }
+  if (!deps.auditRepo) return { locked: false, failCount: memoryCount };
+
+  let rows: AuditEvent[];
+  try {
+    rows = await deps.auditRepo.findByCorrelation(ref.tenantId, ref.sessionId);
+  } catch (err) {
+    logger.error('voice approval challenge lock lookup failed — refusing money-class approval (fail closed)', {
+      tenantId: ref.tenantId,
+      sessionId: ref.sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { locked: true, failCount: memoryCount, source: 'lookup_failed' };
+  }
+
+  let strikes = 0;
+  let lockoutRecorded = false;
+  for (const row of rows) {
+    // Defense in depth: the query is already tenant- and session-scoped.
+    if (row.tenantId !== ref.tenantId || row.correlationId !== ref.sessionId) continue;
+    if (row.eventType === CHALLENGE_FAILED_EVENT) {
+      strikes += 1;
+    } else if (row.eventType === CHALLENGE_LOCKOUT_EVENT) {
+      strikes += 1;
+      lockoutRecorded = true;
+    }
+  }
+
+  const failCount = Math.max(memoryCount, strikes);
+  if (lockoutRecorded || strikes >= MAX_CHALLENGE_ATTEMPTS) {
+    return {
+      locked: true,
+      failCount,
+      source: 'audit_trail',
+      restored: { challengeFailCount: failCount, challengeLockedOut: true },
+    };
+  }
+  return {
+    locked: false,
+    failCount,
+    ...(strikes > memoryCount ? { restored: { challengeFailCount: failCount } } : {}),
+  };
+}
+
 /**
  * The resolved money-challenge state for a tenant. `enrolled` answers "does a
  * PIN exist?" (drives the unset → refuse + one-tap-SMS branch); `verify(u)`
@@ -552,6 +648,44 @@ async function sendOneTapFallback(
 }
 
 /**
+ * Refuse a money/irreversible voice approval in a locked session, without
+ * prompting a challenge. Send-once: the one-tap SMS is sent on the FIRST
+ * post-lockout refusal only — subsequent attempts get a "link already sent"
+ * message to avoid re-texting the owner on every repeated attempt.
+ */
+async function refuseChallengeLocked(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  proposal: Proposal,
+  lock: ChallengeLock,
+): Promise<VoiceApprovalTurnResult> {
+  const alreadySent = ref.sessionState?.oneTapSmsSentAfterLockout === true;
+  const smsSent = alreadySent ? false : await sendOneTapFallback(deps, ref, proposal);
+  await audit(deps, ref, 'proposal.voice_approve_refused_challenge_lockout', proposal.id, {
+    proposalType: proposal.proposalType,
+    oneTapSmsSent: smsSent,
+    smsSendSkippedAlreadySent: alreadySent,
+    lockSource: lock.source,
+  });
+  const sessionState: Partial<VoiceApprovalSessionState> = {
+    ...lock.restored,
+    ...(smsSent ? { oneTapSmsSentAfterLockout: true } : {}),
+  };
+  const speak = alreadySent
+    ? "For security, I can’t take that approval by voice this call. The text link was already sent."
+    : smsSent
+    ? "For security, I can’t take that approval by voice right now — I’ve sent you a text link instead."
+    : "For security, I can’t take that approval by voice right now. Use the app or your review queue.";
+  return {
+    speak,
+    pending: null,
+    outcome: 'challenge_lockout',
+    proposalId: proposal.id,
+    ...(Object.keys(sessionState).length > 0 ? { sessionState } : {}),
+  };
+}
+
+/**
  * Shared guard + readback step once a single target proposal is in hand.
  */
 async function prepareResolvedTarget(
@@ -576,32 +710,13 @@ async function prepareResolvedTarget(
     };
   }
 
-  // Challenge lockout — 3 failed attempts this session; refuse without prompting.
-  // Send-once: the one-tap SMS is sent on the FIRST post-lockout refusal only —
-  // subsequent attempts get a "link already sent" message to avoid re-texting
-  // the owner on every repeated attempt.
-  if (action === 'approve' && requiresChallenge(proposal) && ref.sessionState?.challengeLockedOut) {
-    const alreadySent = ref.sessionState.oneTapSmsSentAfterLockout === true;
-    const smsSent = alreadySent ? false : await sendOneTapFallback(deps, ref, proposal);
-    await audit(deps, ref, 'proposal.voice_approve_refused_challenge_lockout', proposal.id, {
-      proposalType: proposal.proposalType,
-      oneTapSmsSent: smsSent,
-      smsSendSkippedAlreadySent: alreadySent,
-    });
-    const sessionState: Partial<VoiceApprovalSessionState> | undefined =
-      smsSent ? { oneTapSmsSentAfterLockout: true } : undefined;
-    const speak = alreadySent
-      ? "For security, I can’t take that approval by voice this call. The text link was already sent."
-      : smsSent
-      ? "For security, I can’t take that approval by voice right now — I’ve sent you a text link instead."
-      : "For security, I can’t take that approval by voice right now. Use the app or your review queue.";
-    return {
-      speak,
-      pending: null,
-      outcome: 'challenge_lockout',
-      proposalId: proposal.id,
-      ...(sessionState ? { sessionState } : {}),
-    };
+  // Challenge lockout — 3 failed attempts this session (in memory, or on the
+  // audit trail of a rebuilt session, #1051); refuse without prompting.
+  let restored: Partial<VoiceApprovalSessionState> | undefined;
+  if (action === 'approve' && requiresChallenge(proposal)) {
+    const lock = await resolveChallengeLock(deps, ref);
+    if (lock.locked) return refuseChallengeLocked(deps, ref, proposal, lock);
+    restored = lock.restored;
   }
 
   // Money/irreversible approvals need the spoken challenge; without one
@@ -635,6 +750,7 @@ async function prepareResolvedTarget(
     pending: { action, stage: 'confirm', proposalId: proposal.id },
     outcome: 'readback',
     proposalId: proposal.id,
+    ...(restored ? { sessionState: restored } : {}),
   };
 }
 
@@ -1335,6 +1451,10 @@ export async function continueVoiceApproval(
 
     // decision === 'approve' — strict affirmative confirmed.
     if (pending.action === 'approve' && requiresChallenge(proposal)) {
+      // #1051 — re-check the lock before prompting: the session may have been
+      // rebuilt (or locked) since the readback.
+      const lock = await resolveChallengeLock(deps, input);
+      if (lock.locked) return refuseChallengeLocked(deps, input, proposal, lock);
       const challengeState = await readChallengeState(deps, input.tenantId);
       if (!challengeState.enrolled) {
         // Config disappeared between readback and confirm — refuse the
@@ -1359,6 +1479,7 @@ export async function continueVoiceApproval(
         pending: { ...pending, stage: 'challenge' },
         outcome: 'challenge_prompt',
         proposalId: proposal.id,
+        ...(lock.restored ? { sessionState: lock.restored } : {}),
       };
     }
 
@@ -1382,6 +1503,12 @@ export async function continueVoiceApproval(
     });
     return { speak: KEEP_FOR_LATER_LINE, pending: null, outcome: 'kept_for_later', proposalId: proposal.id };
   }
+
+  // #1051 — re-check the lock before verifying anything: a locked session (in
+  // memory or on the audit trail) approves nothing by voice, not even with the
+  // right code, and a failed lookup refuses rather than verifying.
+  const lock = await resolveChallengeLock(deps, input);
+  if (lock.locked) return refuseChallengeLocked(deps, input, proposal, lock);
 
   const challengeState = await readChallengeState(deps, input.tenantId);
   const matched = challengeState.verify(input.utterance);
@@ -1409,12 +1536,13 @@ export async function continueVoiceApproval(
     // not on the per-dialogue PendingVoiceApproval, so canceling and
     // restarting the dialogue cannot reset it — the 3rd wrong code in the
     // CALL trips the lockout, however many dialogues it was spread across.
-    const failCount = (input.sessionState?.challengeFailCount ?? 0) + 1;
-    const maxAttempts = 3;
-    if (failCount >= maxAttempts) {
+    // #1051 — `lock.failCount` also counts the strikes on the audit trail, so
+    // a rebuilt session cannot reset it either.
+    const failCount = lock.failCount + 1;
+    if (failCount >= MAX_CHALLENGE_ATTEMPTS) {
       // 3rd failure — lock the session and send the SMS fallback.
       const smsSent = await sendOneTapFallback(deps, input, proposal);
-      await audit(deps, input, 'proposal.voice_challenge_lockout', proposal.id, {
+      await audit(deps, input, CHALLENGE_LOCKOUT_EVENT, proposal.id, {
         attemptCount: failCount,
         oneTapSmsSent: smsSent,
       });
@@ -1428,7 +1556,7 @@ export async function continueVoiceApproval(
         sessionState: { challengeFailCount: failCount, challengeLockedOut: true },
       };
     }
-    await audit(deps, input, 'proposal.voice_approval_challenge_failed', proposal.id, {
+    await audit(deps, input, CHALLENGE_FAILED_EVENT, proposal.id, {
       attemptCount: failCount,
     });
     return {

@@ -30,17 +30,19 @@ import {
  * The invariant was previously proven in memory only
  * (`test/ai/tasks/proposal-approval-task.test.ts`, an InMemoryProposalRepository
  * + InMemoryAuditRepository). This file drives the SAME product seams —
- * `startVoiceApproval` (src/ai/tasks/proposal-approval-task.ts:794) and
- * `continueVoiceApproval` (…:1216) — against a real `PgProposalRepository`,
+ * `startVoiceApproval` (src/ai/tasks/proposal-approval-task.ts:910) and
+ * `continueVoiceApproval` (…:1332) — against a real `PgProposalRepository`,
  * `PgSettingsRepository` and `PgAuditRepository`, and reads every attempt's
  * audit row back through `PgAuditRepository.findByEntity`
  * (src/audit/pg-audit.ts:48).
  *
  * Seams under test:
- *   - challenge verify + session fail counter — proposal-approval-task.ts:1412
- *   - 3rd failure → lockout + one-tap SMS      — proposal-approval-task.ts:1414-1428
- *   - post-lockout refusal of money/irreversible — proposal-approval-task.ts:583
- *   - capture-class bypasses the challenge      — proposal-approval-task.ts:369 (requiresChallenge)
+ *   - challenge verify + session fail counter — proposal-approval-task.ts:1541
+ *   - 3rd failure → lockout + one-tap SMS      — proposal-approval-task.ts:1542-1557
+ *   - post-lockout refusal of money/irreversible — proposal-approval-task.ts:656 (refuseChallengeLocked)
+ *   - lock re-derived from audit_events (#1051) — proposal-approval-task.ts:419 (resolveChallengeLock),
+ *     checked at readback :717, confirm :1456 and challenge :1510
+ *   - capture-class bypasses the challenge      — proposal-approval-task.ts:371 (requiresChallenge)
  *
  * The SMS transport is stubbed (an external send, not a DB leg); every
  * proposal row, settings row and audit row in this file is real Postgres.
