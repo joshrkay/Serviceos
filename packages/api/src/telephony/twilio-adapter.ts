@@ -81,7 +81,10 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { OnCallRepository } from '../oncall/rotation';
 import type { TwilioCallControl } from './twilio-call-control';
-import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
+import {
+  EMERGENCY_INTENTS,
+  type DispatcherPhoneResolver,
+} from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
@@ -2495,7 +2498,10 @@ export class TwilioGatherAdapter {
           actorId: this.deps.systemActorId ?? 'calling-agent',
         });
         const capExceeded = this.processor.recordCost(session, classification.tokenUsage);
-        if (capExceeded) {
+        // #1212 — an emergency outcome wins over the cap end, as in the
+        // processor's speechTurn: the classified emergency takes the FSM's
+        // emergency fast-path below, and that hand-off is the one end.
+        if (capExceeded && !EMERGENCY_INTENTS.has(classification.intentType)) {
           classifierEvent = { type: 'cost_cap_exceeded' };
         } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
           classifiedIntentType = classification.intentType;
