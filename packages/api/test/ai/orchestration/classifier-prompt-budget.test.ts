@@ -41,6 +41,8 @@ import {
   formatVerticalForCallerPrompt,
 } from '../../../src/verticals/context-assembly';
 import { createHvacPack } from '../../../src/verticals/packs/hvac';
+import { formatCallerPlanForPrompt } from '../../../src/ai/orchestration/caller-plan-context';
+import { buildAccountContextPromptSection } from '../../../src/ai/agents/customer-calling/b2b-account-context';
 import {
   buildTrainingAssetPromptSection,
   MAX_PROMPT_ASSETS,
@@ -126,17 +128,74 @@ function worstCaseVerticalSection(): string {
   return `Tenant vertical context (use ONLY for entity recognition; do not change the JSON output schema):\n${merged}`;
 }
 
+/**
+ * #894 review — the per-caller sections the live turn ALSO sends
+ * (create-voice-turn-processor.ts speechTurn / twilio-adapter Gather classify:
+ * `planPromptSection`, `b2bAccountPromptSection`), wrapped exactly as
+ * classifyIntentRaw wraps them. The previous pin left both out.
+ *
+ * Realistic, not a ceiling: `formatCallerPlanForPrompt` has no cap on plan
+ * names, so a plan section is bounded only by what a tenant names its plans.
+ * Two plans with typical names + a next-service date. The B2B section is
+ * capped in code at MAX_PROMPTED_SUB_ACCOUNTS (8) names: a property manager
+ * with a parent portfolio and 12 managed properties (8 shown, "+4 more").
+ */
+function realisticPlanSection(): string {
+  const plan = formatCallerPlanForPrompt({
+    hasActivePlan: true,
+    planNames: ['Gold Comfort Club Membership', 'Spring & Fall HVAC Tune-Up Plan'],
+    earliestNextServiceDue: new Date('2026-10-01T15:00:00Z'),
+  });
+  return `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${plan}`;
+}
+
+function realisticB2bSection(): string {
+  const properties = [
+    'Maple Court Apartments', 'Riverside Commons Townhomes', 'Oak Hollow Senior Living',
+    'Canyon View Lofts', 'Desert Bloom Villas', 'Sunset Ridge Condominiums',
+    'Palo Verde Garden Homes', 'Camelback Terrace Flats', 'Mesa Vista Duplexes',
+    'Saguaro Pointe Residences', 'Copper Creek Studios', 'Ironwood Place',
+  ].map((displayName, i) => ({ customerId: `sub-${i}`, displayName, accountType: 'property_manager' as const }));
+  const b2b = buildAccountContextPromptSection({
+    customerId: 'pm-1',
+    accountType: 'property_manager',
+    priority: true,
+    parentAccount: { customerId: 'parent-1', displayName: 'Southwest Residential Portfolio Management LLC' },
+    parentMissing: false,
+    subAccounts: properties,
+  });
+  return `Caller account context (use to prioritize and inform tone; do not change the JSON output schema):\n${b2b}`;
+}
+
 describe('classifier prompt budget — per-profile first turn', () => {
-  const cases: Array<{ profile: ClassifierProfile; sections: string[] }> = [
+  const cases: Array<{ name: string; profile: ClassifierProfile; sections: string[] }> = [
     // Live telephony always appends customer protection for callers; every
     // S1 profile also carries the #894 caller-utterance fence rule.
-    { profile: 'caller', sections: [CUSTOMER_PROTECTION_PROMPT_SECTION, CALLER_UTTERANCE_FENCE_PROMPT_SECTION] },
-    // field_tech gets no protection/extended section — only the #894 fence rule.
-    { profile: 'field_tech', sections: [CALLER_UTTERANCE_FENCE_PROMPT_SECTION] },
+    {
+      name: 'caller',
+      profile: 'caller',
+      sections: [CUSTOMER_PROTECTION_PROMPT_SECTION, CALLER_UTTERANCE_FENCE_PROMPT_SECTION],
+    },
+    // #894 review — a business-account (property manager) caller on an active
+    // maintenance plan: the plan AND account sections ride the same turn.
+    {
+      name: 'caller on a plan with a property-manager account',
+      profile: 'caller',
+      sections: [
+        realisticPlanSection(),
+        realisticB2bSection(),
+        CUSTOMER_PROTECTION_PROMPT_SECTION,
+        CALLER_UTTERANCE_FENCE_PROMPT_SECTION,
+      ],
+    },
+    // field_tech gets no protection/extended section — only the #894 fence
+    // rule. (A caller-ID-resolved employee is not a customer, so no plan or
+    // account section is resolved for the turn.)
+    { name: 'field_tech', profile: 'field_tech', sections: [CALLER_UTTERANCE_FENCE_PROMPT_SECTION] },
   ];
 
   it.each(cases)(
-    '$profile worst first turn (prompt + sections + full HVAC pack + max training assets + fenced utterance) fits the per-turn budget with 15% margin',
+    '$name worst first turn (prompt + sections + full HVAC pack + max training assets + fenced utterance) fits the per-turn budget with 15% margin',
     ({ profile, sections }) => {
       const firstTurn =
         buildClassifierSystemPrompt(profile) +
@@ -150,6 +209,11 @@ describe('classifier prompt budget — per-profile first turn', () => {
       // against a ceiling every term of which is bounded by code.
       // Re-measured 2026-09-14 (#894 — fence rule + fenced utterance, ≈350
       // tok): caller ≈ 7,350, field_tech ≈ 7,148 — ≈3.9% / 6.6% slack.
+      // #894 review — with the plan + property-manager account sections the
+      // live turn also sends: ≈ 7,608 tok — 42 tok (≈0.5%) under the 7,650
+      // line. The line is NOT raised. The plan section has no cap in code
+      // (formatCallerPlanForPrompt lists every active plan name), so ~170
+      // more characters of plan names on this caller crosses it.
       expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * BUDGET_MARGIN);
     },
   );
