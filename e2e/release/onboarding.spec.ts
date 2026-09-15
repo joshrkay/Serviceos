@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { clerk, setupClerkTestingToken } from '@clerk/testing/playwright';
 import { randomUUID } from 'node:crypto';
-import { submitClerkEmailForm } from '../helpers/clerk-email-form';
+import { submitClerkEmailForm, enterClerkTestCode } from '../helpers/clerk-email-form';
 
 // Real Clerk + deployed Development API. No auth bypass, synthetic webhook,
 // database seed, provider purchase, invoice send or payment submission.
@@ -46,21 +46,14 @@ test('real signup -> tenant -> identity -> first draft estimate -> returning log
   await page.getByLabel(/password/i).first().fill(password);
   await submitClerkEmailForm(page);
   const code = page.getByRole('textbox', { name: /code|verification/i }).first();
-  // Optional verification is detected; failures entering/verifying the code
-  // are never swallowed as if signup had succeeded.
-  if (await code.isVisible().catch(() => false)) {
-    await code.fill('424242');
-    await submitClerkEmailForm(page);
-  } else {
-    await Promise.race([
-      code.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {}),
-      page.waitForURL(/\/(onboarding|assistant|estimates)(\/|$|\?)/, { timeout: 15000 }).catch(() => {}),
-    ]);
-    if (await code.isVisible()) {
-      await code.fill('424242');
-      await submitClerkEmailForm(page);
-    }
-  }
+  // Wait for the actual auth state; route changes can precede Clerk's form.
+  await expect.poll(async () => {
+    if (await code.isVisible()) return 'code';
+    return page.evaluate(() => (
+      (window as unknown as { Clerk?: { session?: unknown } }).Clerk?.session ? 'session' : 'waiting'
+    ));
+  }, { timeout: 30000 }).not.toBe('waiting');
+  if (await code.isVisible()) await enterClerkTestCode(page);
   await expect.poll(async () => page.evaluate(() => Boolean(
     (window as unknown as { Clerk?: { session?: unknown } }).Clerk?.session
   )), { timeout: 30000 }).toBe(true);

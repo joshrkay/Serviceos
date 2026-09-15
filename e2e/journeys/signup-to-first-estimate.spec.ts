@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { setupClerkTestingToken, hasClerkTestingCreds } from '../helpers/clerk-testing';
-import { submitClerkEmailForm } from '../helpers/clerk-email-form';
+import { submitClerkEmailForm, enterClerkTestCode } from '../helpers/clerk-email-form';
 
 /**
  * Legacy real-Clerk signup smoke. Requires an explicitly selected deployed
@@ -51,13 +51,8 @@ test.describe('Real Clerk signup smoke', () => {
     //    address the code is always `424242`. The input may not appear if
     //    Clerk has disabled email verification for the dev instance.
     const codeInput = page.getByRole('textbox', { name: /code|verification/i }).first();
-    try {
-      await codeInput.waitFor({ state: 'visible', timeout: 5_000 });
-      await codeInput.fill('424242');
-      await submitClerkEmailForm(page);
-    } catch {
-      // No verification step — Clerk progressed straight to a session.
-    }
+    const needsCode = await codeInput.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true, () => false);
+    if (needsCode) await enterClerkTestCode(page);
 
     // 5. Expect the app to redirect to an authenticated landing route.
     //    The current router sends authed users to `/` or `/onboarding`.
