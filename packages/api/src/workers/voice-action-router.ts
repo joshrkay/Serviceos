@@ -1945,6 +1945,53 @@ export function holdIfUntrustedSource(
 }
 
 /**
+ * #1231 — the router's own read of the DURABLE recording row: a transcript
+ * whose recording is caller audio (`source='inbound_call'`, RIVET I13) is
+ * voicemail-sourced whatever the queue job says.
+ *
+ * The transcription hook stamps `sourceChannel: 'voicemail'` on the jobs it
+ * builds, but a job is only as good as its enqueuer: the pre-#1231 retry
+ * path minted router jobs for caller voicemails with NO stamp, and those can
+ * still be sitting in the queue at deploy. Reading the row here makes the
+ * fence (`untrustedTranscript`) and the hold (`holdIfUntrustedSource`) key
+ * on the recording, not the job. The job stamp can only ADD restriction:
+ *
+ *   - job says 'voicemail'            → 'voicemail'
+ *   - no recordingId / no voiceRepo   → undefined (text-mode, legacy deps)
+ *   - row source='inbound_call'       → 'voicemail'
+ *   - row missing / lookup failed     → 'voicemail' (fail closed: fenced +
+ *                                        held, never dropped)
+ *   - any other row                   → undefined (in-app memo, unchanged)
+ *
+ * Exported for the chokepoint tests.
+ */
+export async function resolveRecordingSourceChannel(
+  voiceRepo: Pick<VoiceRepository, 'findById'> | undefined,
+  tenantId: string,
+  recordingId: string | undefined,
+  jobSourceChannel: 'voicemail' | undefined,
+  log: Logger,
+): Promise<'voicemail' | undefined> {
+  if (jobSourceChannel) return jobSourceChannel;
+  if (!recordingId || !voiceRepo) return undefined;
+  try {
+    const recording = await voiceRepo.findById(tenantId, recordingId);
+    if (recording && recording.source !== 'inbound_call') return undefined;
+    log.warn('voice-action-router: job carried no sourceChannel but the recording is untrusted caller audio — treating as voicemail', {
+      recordingId,
+      recordingSource: recording?.source ?? null,
+    });
+    return 'voicemail';
+  } catch (err) {
+    log.warn('voice-action-router: recording lookup failed — treating transcript as untrusted (voicemail)', {
+      recordingId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 'voicemail';
+  }
+}
+
+/**
  * Process a multi-action chain: classify each segment in order, link the
  * resulting proposals with a shared chainId, rewrite dependent payload
  * fields with symbolic reference tokens, and persist parents-first so a
@@ -2205,7 +2252,7 @@ export function createVoiceActionRouterWorker(
         recordingId,
         customerId,
         jobId,
-        sourceChannel,
+        sourceChannel: jobSourceChannel,
       } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
@@ -2265,6 +2312,17 @@ export function createVoiceActionRouterWorker(
         await stampAnswer('proposal');
         return;
       }
+
+      // #1231 — voicemail status from the recording row, not the job alone.
+      // Everything below (decomposer + classifier fence, proposal stamp +
+      // hold) keys on this value.
+      const sourceChannel = await resolveRecordingSourceChannel(
+        deps.voiceRepo,
+        tenantId,
+        recordingId,
+        jobSourceChannel,
+        log,
+      );
 
       // Cross-turn reference rewrite. Pronouns and "the X" references
       // get replaced with concrete referents from the most recent

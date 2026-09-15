@@ -1,6 +1,6 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
-import { VoiceRepository, TranscriptionProvider } from '../voice/voice-service';
+import { VoiceRepository, TranscriptionProvider, VoiceRecording } from '../voice/voice-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { encrypt } from '../integrations/crypto';
 
@@ -33,7 +33,12 @@ export interface TranscriptionJobPayload {
    * with older queue messages.
    */
   userId?: string;
-  /** U9 — present ONLY for voicemail-sourced jobs. */
+  /**
+   * U9 — present ONLY for voicemail-webhook jobs (carries the caller-ID).
+   * NOT the trust signal on its own (#1231): a re-enqueue such as the retry
+   * route omits it, so the worker re-derives voicemail status from the
+   * recording row (`voicemailContextFromRecording`).
+   */
   voicemail?: VoicemailJobContext;
 }
 
@@ -44,7 +49,11 @@ export interface TranscriptionCompletionEvent {
   conversationId?: string;
   userId?: string;
   jobId?: string;
-  /** U9 — threaded verbatim from the job payload for the router gate. */
+  /**
+   * U9 — voicemail context for the router gate. #1231: derived from the
+   * recording row (`source='inbound_call'`) as well as the job, so a retried
+   * voicemail is still a voicemail (`{}` when the caller-ID is unknown).
+   */
   voicemail?: VoicemailJobContext;
 }
 
@@ -75,6 +84,32 @@ export async function voicemailRouterEnqueueAllowed(
     });
     return false;
   }
+}
+
+/**
+ * #1231 — voicemail (untrusted-caller) status for a completed transcript,
+ * decided by the DURABLE recording row, never by the queue job alone.
+ *
+ * The voicemail webhook's job carries `voicemail` (with the caller-ID), but
+ * a re-enqueue — POST /voice/recordings/:id/retry — cannot and does not. A
+ * job-only check turned a retried caller voicemail into an in-app memo: no
+ * owner gate, no I13 fence, no hold. Every caller recording keeps
+ * `source = 'inbound_call'` (RIVET I13; the voicemail path never changes
+ * it), so the row decides. The job marker can only ADD restriction:
+ *
+ *   - job marker present          → that context (keeps the caller-ID)
+ *   - row source='inbound_call'   → `{}` (caller-ID unknown → the U9 gate
+ *                                    fails closed → notify-only)
+ *   - row missing / lookup failed → `{}` (fail closed)
+ *   - any other row               → undefined (in-app memo, unchanged)
+ */
+export function voicemailContextFromRecording(
+  recording: Pick<VoiceRecording, 'source'> | null | undefined,
+  jobVoicemail: VoicemailJobContext | undefined,
+): VoicemailJobContext | undefined {
+  if (jobVoicemail) return jobVoicemail;
+  if (!recording || recording.source === 'inbound_call') return {};
+  return undefined;
 }
 
 /**
@@ -364,6 +399,27 @@ export function createTranscriptionWorker(
           },
         });
 
+        // #1231 — read the durable row once: it decides voicemail status
+        // below (never the job alone) and gates the I13 provenance stamp.
+        // FAIL-CLOSED: a lookup error leaves `recording` null, which
+        // voicemailContextFromRecording treats as an untrusted caller.
+        let recording: VoiceRecording | null = null;
+        try {
+          recording = (await voiceRepository.findById(tenantId, recordingId)) ?? null;
+        } catch (err) {
+          logger.warn('recording lookup after transcription failed — treating as untrusted caller audio', {
+            recordingId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        const effectiveVoicemail = voicemailContextFromRecording(recording, voicemail);
+        if (effectiveVoicemail && !voicemail) {
+          logger.info('transcription job carried no voicemail marker; recording row marks it untrusted', {
+            recordingId,
+            recordingSource: recording?.source ?? null,
+          });
+        }
+
         // RIVET I13 — stamp provenance for the AUTHENTICATED in-app path.
         // This worker is the only place operator memos (source='inapp_voice',
         // created by the authenticated POST /voice/recordings routes) get
@@ -372,12 +428,9 @@ export function createTranscriptionWorker(
         // Without this, an operator memo's row stays unstamped and
         // classifyRecordingProvenance (fail-closed) would treat the operator's
         // own recording as untrusted. Guarded on source + failure-soft.
-        if (voiceRepository.stampProvenance) {
+        if (voiceRepository.stampProvenance && recording?.source === 'inapp_voice') {
           try {
-            const rec = await voiceRepository.findById(tenantId, recordingId);
-            if (rec?.source === 'inapp_voice') {
-              await voiceRepository.stampProvenance(tenantId, recordingId, 'operator');
-            }
+            await voiceRepository.stampProvenance(tenantId, recordingId, 'operator');
           } catch (err) {
             logger.warn('stampProvenance (transcription) failed', {
               recordingId,
@@ -403,7 +456,8 @@ export function createTranscriptionWorker(
                 ...(jobId ? { jobId } : {}),
                 // U9 — voicemail context rides through so the hook can gate
                 // the router enqueue on the caller's approver identity.
-                ...(voicemail ? { voicemail } : {}),
+                // #1231 — derived from the recording row, not the job alone.
+                ...(effectiveVoicemail ? { voicemail: effectiveVoicemail } : {}),
               },
               logger
             );
