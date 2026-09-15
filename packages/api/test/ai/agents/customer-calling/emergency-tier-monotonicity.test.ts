@@ -42,6 +42,12 @@ const INTENDED_DOWNGRADES: ReadonlyMap<string, { mainTier: Tier; expectedTier: T
   ['¿a cómo sale el propano en su compañía?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a company' }],
   ['¿cuánto sale el gas por aquí?', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a place' }],
   ['a cómo sale el gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source, no "¿" (confirmed in the #1253 round-2 review)' }],
+  ['a cómo sale el gas del tanque!', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source' }],
+  ['a como sale el gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source, no accent' }],
+  ['a cómo sale gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: '"a cómo" is only a price idiom, even without the article' }],
+  ['a cómo sale el gas de la estufa', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source' }],
+  ['a cómo sale el gas por la llave de la estufa', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source' }],
+  ['a cómo sale el gas del tanque ahorita', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source ("ahorita" = right now, a price today)' }],
   // #1253 round 2, rule 1: figurative / fiction / device / price readings are capped at E2, never E3.
   ['mi hijo está herido de amor', { mainTier: 'E1', expectedTier: 'E2', why: 'figurative: heartbroken' }],
   ['la película era sobre alguien inconsciente', { mainTier: 'E1', expectedTier: 'E2', why: 'fiction' }],
@@ -53,6 +59,8 @@ const INTENDED_DOWNGRADES: ReadonlyMap<string, { mainTier: Tier; expectedTier: T
   ['se cayó la tele y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
   ['se cayó la escalera y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
   ['se cayó el refrigerador y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
+  ['se cayó la tele y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
+  ['se cayó la escalera y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
 ]);
 
 /** The two approved benign-smoke rows: the only phrases allowed to land on E3 from a higher main tier. */
