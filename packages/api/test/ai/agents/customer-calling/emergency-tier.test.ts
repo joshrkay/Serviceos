@@ -472,6 +472,12 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['not-E1', 'hay llamas amarillas en el calentador, ¿está fuera de lo normal?', 'flame colour question; "fuera" is not spread'],
     ['not-E1', 'no me sale gas', 'denial: no gas supply'],
     ['not-E1', 'no nos sale gas de la estufa', 'denial: no gas supply'],
+    // A suppressor's context must share the clause with the phrase it
+    // suppresses; a quantity of gas is never a price.
+    ['E1', 'sale gas, what do I do?', 'Spanish leak + separate English question'],
+    ['E1', 'sale mucho gas, ¿cuánto cuesta la reparación?', 'leak + separate price question'],
+    ['E1', 'hay humo por primera vez', '"por primera vez" alone is not a benign cause'],
+    ['E1', 'hay humo, por primera vez pasa esto', 'benign cue in another clause'],
   ];
 
   it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {
