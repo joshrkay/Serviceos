@@ -113,7 +113,8 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
  *   "fuga de gas". Every entry is compiled behind {@link ES_NEGATION_GUARD}.
  * - Adjectives follow the noun: "veo llamas amarillas" is a flame-colour
  *   diagnostic, while English "seeing yellow flames" never contains
- *   "seeing flames". Colour and chimney exceptions are lookaheads on the entry.
+ *   "seeing flames". The flame-colour exception is `routineWhen`; pilot,
+ *   burner and chimney exceptions are lookaheads on the entry.
  * - Accents: `[oó]` covers the unaccented form STT often returns.
  *
  * `routineWhen` names an utterance-level exception (see
@@ -130,12 +131,22 @@ export interface SpanishHazardPattern {
   readonly keyword: string;
   /** Regex source, matched case-insensitively between Unicode word edges. */
   readonly pattern: string;
-  readonly routineWhen?: 'igniter_sparks' | 'co_device_request';
+  readonly routineWhen?: 'igniter_sparks' | 'co_device_request' | 'flame_colour';
+  /**
+   * The phrase carries its own "no" ("no puedo apagar el fuego"): it is an
+   * emergency, so it is compiled WITHOUT the negation guard — "no, no puedo
+   * apagar el fuego" (comma dropped by STT) must stay E1.
+   */
+  readonly carriesNegation?: true;
 }
 
 const HUELE_INTENSITY = '(?:(?:mucho|muy fuerte|fuerte|bastante|demasiado|como) )?';
 const NOT_CHIMNEY = '(?! (?:de|por) (?:la |mi )?chimenea)';
-const NOT_FLAME_COLOUR = '(?! (?:de color|amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?))';
+/** Where escaping gas comes from — the leak sense of "sale gas". */
+const GAS_SOURCE =
+  '(?:(?:la|el|los|las|mi|un|una) )?(?:estufa|tuber[ií]as?|tubos?|calentador|boiler|caldera|horno|secadora|medidor|tanque|cilindro|llave|v[aá]lvula|manguera|pared|piso|conexi[oó]n|l[ií]nea|parrilla|asador)';
+/** "¿cuánto (me) sale…?", "¿a cómo sale…?", "me sale el gas caro" are prices. */
+const NOT_PRICE_SALE = '(?<!(?<![\\p{L}\\p{N}])(?:cu[aá]nto|c[oó]mo|me|te|le|les|nos)\\s+)';
 
 export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   // Gas and propane
@@ -146,8 +157,16 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'huele a propano', pattern: `huele ${HUELE_INTENSITY}a propano` },
   { keyword: 'se huele gas', pattern: 'se huele (?:a )?(?:gas|propano)' },
   { keyword: 'olor a gas', pattern: 'olor (?:(?:muy )?(?:fuerte|intenso|raro) )?(?:a|de) (?:gas|propano)' },
-  // "¿cuánto sale el gas?" asks a price.
-  { keyword: 'sale gas', pattern: '(?<!cu[aá]nto )(?:sale|saliendo) (?:el )?(?:gas|propano)' },
+  { keyword: 'huelo gas', pattern: `huelo ${HUELE_INTENSITY}(?:a )?(?:gas|propano)` },
+  // Leak sense of "salir"/"escapar" only (#1234 review). Bare "sale gas" is a
+  // price ("¿cuánto me sale el gas?") and, in English, a sale ("on sale gas
+  // water heaters") — both hung up on routine callers.
+  { keyword: 'está saliendo gas', pattern: '(?:se )?est[aá] saliendo (?:el )?(?:gas|propano)' },
+  {
+    keyword: 'sale gas de',
+    pattern: `${NOT_PRICE_SALE}(?:sale|saliendo) (?:el )?(?:gas|propano) (?:de|del|por) ${GAS_SOURCE}`,
+  },
+  { keyword: 'se escapa el gas', pattern: 'se (?:est[aá] escapando|escapa|escap[oó]) (?:el )?(?:gas|propano)' },
   { keyword: 'huevo podrido', pattern: 'huevos? podridos?' },
   { keyword: 'olor a azufre', pattern: '(?:olor|huele) a azufre' },
   // Carbon monoxide
@@ -163,11 +182,26 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'agarró fuego', pattern: 'agarr[oó] fuego' },
   // A flame in the pilot or burner is how the appliance works.
   { keyword: 'hay fuego', pattern: 'hay fuego(?! en el (?:piloto|quemador))' },
-  { keyword: 'veo llamas', pattern: `(?:veo|salen|saliendo) llamas${NOT_FLAME_COLOUR}` },
+  // "veo/hay llamas amarillas en el calentador" is a flame-colour diagnostic
+  // (routineWhen). Flames coming OUT of something never are.
+  { keyword: 'veo llamas', pattern: 'veo llamas', routineWhen: 'flame_colour' },
+  { keyword: 'hay llamas', pattern: 'hay llamas(?! en el (?:piloto|quemador))', routineWhen: 'flame_colour' },
+  { keyword: 'salen llamas', pattern: '(?:salen|saliendo) llamas' },
+  {
+    keyword: 'no puedo apagar el fuego',
+    pattern: 'no (?:puedo|podemos|puede|pueden|se puede) apagar (?:el )?(?:fuego|incendio)',
+    carriesNegation: true,
+  },
+  {
+    keyword: 'no me deja respirar el humo',
+    pattern: '(?:el humo no (?:me|nos) deja respirar|no (?:me|nos) deja respirar el humo)',
+    carriesNegation: true,
+  },
   { keyword: 'huele a humo', pattern: '(?:huele|olor) a humo' },
   { keyword: 'sale humo', pattern: `(?:sale|salen|saliendo) humo${NOT_CHIMNEY}` },
   { keyword: 'humo saliendo', pattern: `humo saliendo${NOT_CHIMNEY}` },
   { keyword: 'humo en la casa', pattern: 'humo en (?:la|mi) casa' },
+  { keyword: 'hay humo', pattern: 'hay humo(?! (?:saliendo )?(?:de|por|en) (?:la |mi )?chimenea)' },
   { keyword: 'lleno de humo', pattern: 'llen(?:o|a|ando) de humo' },
   {
     keyword: 'se está quemando la casa',
@@ -178,6 +212,7 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'se están quemando los cables', pattern: 'se est[aá]n quemando los cables' },
   { keyword: 'los cables se están quemando', pattern: 'cables se est[aá]n quemando' },
   { keyword: 'plástico quemado', pattern: 'pl[aá]stico quemado' },
+  { keyword: 'huele a cable quemado', pattern: '(?:huele|olor) a cables? quemados?' },
   { keyword: 'huele a quemado', pattern: 'huele a quemado' },
   { keyword: 'cortocircuito', pattern: 'corto ?circuitos?' },
   {
@@ -252,17 +287,22 @@ function compile(phrases: ReadonlyArray<string>) {
  * gas", "no se huele gas". Only the words directly in front count, so
  * "no sé si hay fuga de gas" stays E1. "no" must be a whole word, so "bueno
  * huele a gas" stays E1. A comma breaks it: "no, huele a gas" stays E1.
+ *
+ * #1234 review — "se" is NOT a guard word: STT turns "no sé, hay fuego" into
+ * "no se hay fuego", which must stay E1. The one exception is "no se huele",
+ * which is a denial whatever the accent.
  */
 const ES_NEGATION_GUARD =
-  '(?<!(?<![\\p{L}\\p{N}])no\\s+(?:(?:hay|est[aá]n?|se|siento|tengo|noto)\\s+)?(?:(?:un|una|ning[uú]n|ninguna)\\s+)?)';
+  '(?<!(?<![\\p{L}\\p{N}])no\\s+(?:(?:hay|est[aá]n?|siento|tengo|noto)\\s+)?(?:(?:un|una|ning[uú]n|ninguna)\\s+)?)' +
+  '(?!(?<=(?<![\\p{L}\\p{N}])no\\s+se\\s+)huele)';
 
 /** Unicode word edges: JS `\b` is ASCII-only, so "se incendió" would never match. */
 function compileSpanish(entries: ReadonlyArray<SpanishHazardPattern>) {
-  return entries.map(({ keyword, pattern, routineWhen }) => ({
+  return entries.map(({ keyword, pattern, routineWhen, carriesNegation }) => ({
     keyword,
     routineWhen,
     regex: new RegExp(
-      `(?<![\\p{L}\\p{N}])${ES_NEGATION_GUARD}(?:${pattern})(?![\\p{L}\\p{N}])`,
+      `(?<![\\p{L}\\p{N}])${carriesNegation ? '' : ES_NEGATION_GUARD}(?:${pattern})(?![\\p{L}\\p{N}])`,
       'iu',
     ),
   }));
@@ -279,6 +319,13 @@ const ES_DEVICE_WORK_RE =
 const ES_ALARM_SOUNDING_RE =
   /(?<![\p{L}\p{N}])(?:sonando|suena|son[oó]|pitando|pita|pit[oó]|pitar|pitido|chillando|activ[oó]|activad[oa]|dispar[oó]|se prendi[oó]|mareos?|maread[oa]|dolor de cabeza|n[aá]useas)(?![\p{L}\p{N}])/iu;
 
+/** "veo/hay llamas <colour> en/del <appliance>" — a flame-colour diagnostic. */
+const ES_FLAME_COLOUR_DIAGNOSTIC_RE =
+  /(?<![\p{L}\p{N}])(?:veo|hay) (?:unas )?llamas (?:de color )?(?:amarillas?|anaranjadas?|naranjas?|azul(?:es)?|rojas?) (?:en|de|del)(?: el| la| los| las| mi)? (?:calentador|boiler|caldera|estufa|horno|quemador(?:es)?|piloto|hornillas?|calefacci[oó]n|secadora)(?![\p{L}\p{N}])/iu;
+/** Any other hazard word voids the flame-colour exception ("quemador" is not "quemado"). */
+const ES_OTHER_HAZARD_WORD_RE =
+  /(?<![\p{L}\p{N}])(?:humo|fuego|incendio|chispas?|quem(?!ador)\p{L}*|fugas?|escapes?|escapando|huele|huelo|olor|explot\p{L}*|mon[oó]xido|sale|salen|saliendo)(?![\p{L}\p{N}])/iu;
+
 /**
  * Utterance-level routine exceptions for a matched Spanish entry. Narrow on
  * purpose: anything short of a clearly routine call stays E1.
@@ -286,6 +333,8 @@ const ES_ALARM_SOUNDING_RE =
  *   prende") and no electrical location is.
  * - co_device_request: a detector/alarm is named with install, purchase or
  *   battery work, and nothing says it is sounding or anyone feels ill.
+ * - flame_colour: "veo/hay llamas amarillas en el calentador" and no other
+ *   hazard word anywhere in the utterance.
  */
 function isSpanishRoutineContext(
   kind: NonNullable<SpanishHazardPattern['routineWhen']>,
@@ -293,6 +342,9 @@ function isSpanishRoutineContext(
 ): boolean {
   if (kind === 'igniter_sparks') {
     return ES_IGNITER_RE.test(transcript) && !ES_ELECTRICAL_LOCATION_RE.test(transcript);
+  }
+  if (kind === 'flame_colour') {
+    return ES_FLAME_COLOUR_DIAGNOSTIC_RE.test(transcript) && !ES_OTHER_HAZARD_WORD_RE.test(transcript);
   }
   return (
     ES_CO_DEVICE_RE.test(transcript) &&
