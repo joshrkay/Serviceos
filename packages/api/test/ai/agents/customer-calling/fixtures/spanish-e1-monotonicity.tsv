@@ -1,8 +1,9 @@
 # #1239 review — Spanish E1 monotonicity corpus. One row per phrase: origin/main tier, TAB, phrase.
 # Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv;
 # third review: r1239b/corpus.txt and newprobes.txt; #1221: Spanish injury/medical phrases and controls).
-# Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 and #1245 rows (appended
-# last) with origin/main 859db9f94 (as merged in #1239). Do not regenerate against
+# Tiers recorded with origin/main efde3966e (classifier as merged in #1234); the #1221 and #1245 rows
+# (appended after them) with origin/main 859db9f94 (as merged in #1239); the #1245 round-2/#1241 rows (appended
+# last) with origin/main 9c9b1d868 (as merged in #1245). Do not regenerate against
 # a branch: the column is the baseline a change is measured against.
 E3	se sale el gas
 E3	le sale gas a la estufa
@@ -432,3 +433,68 @@ E3	el calentador se ahoga
 E3	a mi papá le dio un infarto
 E3	el control remoto no responde
 E3	hace años le dio una descarga el panel
+E3	mi hijo se cayó del techo, no se mueve
+E3	se cayó, no se puede levantar
+E3	mi mamá se cayó y no puede levantarse
+E3	se cayó y no se puede parar
+E3	lo encontré tirado y no se mueve
+E3	mi mamá se cayó, no se puede parar
+E3	se está electrocutando
+E3	le está dando la corriente
+E3	el enchufe que instalaron el mes pasado le dio la corriente a mi hijo
+E3	hace dos años le cambiaron el panel mi papá se electrocutó
+E2	mi hijo se electrocutó con el cable que dejó el técnico ayer
+E3	mi papa se desmayo ayer estaba bien
+E3	el año pasado se electrocutó mi primo y mi hijo se electrocutó
+E2	se electrocutó ayer y está temblando
+E3	tomó muchas pastillas ayer y está muy dormido
+E3	se desmayó anoche, está muy débil y confundido
+E3	tomó veneno
+E3	se tomó cloro
+E3	se tragó una pila
+E3	se tragó una moneda
+E3	se tragó un imán
+E3	le picó un alacrán y se está hinchando
+E3	está vomitando sangre
+E3	le falta el aire
+E3	se está asfixiando
+E3	se desvaneció
+E3	sangra de la cabeza
+E3	no tomó veneno
+E3	no le falta el aire
+E3	hace años se tragó una moneda
+E1	mi hijo está herido de amor
+E1	la película era sobre alguien inconsciente
+E1	se desmayó la señal del wifi
+E1	la cotización me dio convulsiones
+E1	el precio me dio un toque
+E3	se sale el gas what should I do
+E3	se salió el gas cuánto cuesta
+E3	sale gas por los dos lados cuánto cuesta
+E3	sale gas por 2 lados cuánto cuesta
+E3	gas saliendo de la estufa
+E3	hay gas en el aire
+E3	el tanque de gas está chiflando
+E3	la manguera del gas está rota
+E3	se rompió la tubería de gas
+E1	sale gas de la tienda
+E3	el gas sale por 50 dólares al mes
+E1	se cayó la tele y no se puede mover
+E3	se cayó el árbol, no se mueve
+E1	se cayó el niño y no se mueve
+E3	mi perro se tragó una moneda
+E3	mi hijo se tragó una moneda y el perro ladra
+E3	le mordió un perro y se está hinchando
+E3	hay gas en el aire acondicionado
+E1	¿cuánto sale el gas en Phoenix?
+E1	¿a cómo sale el gas en esta zona?
+E1	¿cuánto me sale el gas en la casa nueva?
+E1	cuánto sale gas del medidor
+E1	cómo sale gas del tanque
+E1	¿cuánto sale el gas del calentador? huele muy fuerte
+E1	¿a cuánto sale el gas del tanque?
+E1	¿a cómo sale el propano en su compañía?
+E1	¿cuánto sale el gas del calentador?
+E1	¿cuánto sale el gas del tanque de 20 libras?
+E1	¿cuánto sale el gas por aquí?
+E1	se cayó la tele y mi hijo no se puede mover

@@ -409,7 +409,7 @@ export interface SpanishInjuryPattern {
    * they always name a person.
    */
   readonly idiomWhen?: ReadonlyArray<
-    'price' | 'laugh' | 'excess' | 'device' | 'figurative' | 'fiction' | 'pet'
+    'price' | 'laugh' | 'excess' | 'device' | 'figurative' | 'fiction' | 'pet' | 'object_fall'
   >;
   /**
    * A RECENT past report (ayer, anoche, hace N ≤ 7 días) still leaves a live
@@ -427,7 +427,7 @@ const ES_BODY_PART =
   '(?:manos?|brazos?|piernas?|cara|pies?|piel|dedos?|espalda|cuerpo|cuello|pecho|ojos?|cabeza|rodillas?)';
 /** A fall, or someone found on the floor. */
 const ES_FALL =
-  `(?:se (?:(?:me|le|nos) )?(?:cay[oó]|ha ca[ií]do|cayeron)(?! (?:el|la|los|las|un|una) (?!(?:${ES_PERSON_NOUN})(?![\\p{L}\\p{N}]))[\\p{L}]+)|(?:l[oa]s?|le) encontr(?:[eé]|amos|aron) (?:tirad[oa]s?|en el (?:piso|suelo))|est[aá]n? tirad[oa]s?)`;
+  '(?:se (?:(?:me|le|nos) )?(?:cay[oó]|ha ca[ií]do|cayeron)|(?:l[oa]s?|le) encontr(?:[eé]|amos|aron) (?:tirad[oa]s?|en el (?:piso|suelo))|est[aá]n? tirad[oa]s?)';
 /** Cannot move or get up: "no se puede mover/levantar/parar", "no se mueve", "no puede levantarse". */
 const ES_CANNOT_GET_UP =
   'no (?:se (?:(?:puede|pueden) (?:mover|levantar|parar)|mueve|mueven|levanta|levantan|para|paran)|(?:puede|pueden) (?:moverse|levantarse|pararse))';
@@ -612,6 +612,7 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
     keyword: 'se cayó y no se puede mover',
     pattern: `${ES_FALL}[^.;!?]{0,60}?(?:,|\\sy)?\\s(?:ya |todav[ií]a )?${ES_CANNOT_GET_UP}`,
     aspect: 'state',
+    idiomWhen: ['object_fall'],
   },
   {
     keyword: 'no se puede levantar',
@@ -931,6 +932,11 @@ const ES_INJURY_IDIOM_RE: Record<InjuryIdiom, RegExp> = {
     /(?<![\p{L}\p{N}])(?:bomba|motor|calentador|boiler|caldera|planta|generador|carro|coche|m[aá]quina|compresor|carburador|equipo|termostato|control|pantalla|tel[eé]fono|celular|app|aplicaci[oó]n|sistema|aparato|aire|minisplit|estufa|horno|lavadora|secadora|refrigerador|breaker|interruptor|panel|sensor|detector|alarma|puerta|port[oó]n|timbre|focos?|l[aá]mparas?|bombillas?|luz|luces|computadora|laptop|tablet|televisi[oó]n|tele|router|m[oó]dem|internet|wifi|se[nñ]al|t[eé]cnico|plomero|electricista|oficina|empresa|compa[nñ][ií]a|mensajes?|llamadas?|correos?|whatsapp)(?![\p{L}\p{N}])/iu,
   figurative:
     /(?<![\p{L}\p{N}])(?:de amor|del coraz[oó]n|en su orgullo|en el orgullo|emocionalmente|sentimentalmente)(?![\p{L}\p{N}])/iu,
+  // A thing, not a person, is what fell ("se cayó la tele y no se puede mover"). Tested on the match itself.
+  object_fall: new RegExp(
+    `(?<![\\p{L}\\p{N}])se cay[oó] (?:el|la|los|las|un|una) (?!(?:${ES_PERSON_NOUN})(?![\\p{L}\\p{N}]))[\\p{L}]+`,
+    'iu',
+  ),
   pet: /(?<![\p{L}\p{N}])(?:perr[oa]s?|perrit[oa]s?|gat[oa]s?|gatit[oa]s?|mascotas?|cachorr[oa]s?)(?![\p{L}\p{N}])/iu,
   fiction:
     /(?<![\p{L}\p{N}])(?:pel[ií]cula|serie|novela|libro|historia|cuento|programa|video|sue[nñ]o|so[nñ][eé])(?: [\p{L}]+){0,3} (?:sobre|acerca de)(?![\p{L}\p{N}])/iu,
@@ -987,7 +993,7 @@ function isInjuryIdiom(
   const rest = withoutSpan(transcript, index, text.length);
   return kinds.some(
     (kind) =>
-      ES_INJURY_IDIOM_RE[kind].test(clauseRest) &&
+      ES_INJURY_IDIOM_RE[kind].test(kind === 'object_fall' ? text : clauseRest) &&
       !(ES_HARM_GATED_IDIOMS.has(kind) ? ES_HARM_ONLY_RE : ES_PERSON_OR_HARM_RE).test(rest),
   );
 }

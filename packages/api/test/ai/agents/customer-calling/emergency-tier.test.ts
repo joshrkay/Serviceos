@@ -744,6 +744,7 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     // Guards for the new patterns: objects that fall, pets, air conditioning.
     ['not-E1', 'se cayó la tele y no se puede mover', 'a TV fell'],
     ['not-E1', 'se cayó el árbol, no se mueve', 'a tree fell'],
+    ['E1', 'se cayó la tele y mi hijo no se puede mover', 'an object fell on a person'],
     ['E1', 'se cayó el niño y no se mueve', 'a child fell'],
     ['not-E1', 'mi perro se tragó una moneda', 'a pet'],
     ['E1', 'mi hijo se tragó una moneda y el perro ladra', 'a child, a pet nearby'],
