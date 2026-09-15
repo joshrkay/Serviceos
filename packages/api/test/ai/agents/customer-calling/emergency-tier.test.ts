@@ -683,6 +683,95 @@ describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
   });
 });
 
+// ─── #1245 round-2 + #1241 follow-ups ────────────────────────────────────────
+
+describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price questions (one table)', () => {
+  const FOLLOWUP_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // A1 — fell and cannot move, without "y" or a named subject
+    ['E1', 'mi hijo se cayó del techo, no se mueve', 'comma instead of "y"'],
+    ['E1', 'se cayó, no se puede levantar', 'comma, no subject'],
+    ['E1', 'mi mamá se cayó y no puede levantarse', 'enclitic'],
+    ['E1', 'se cayó y no se puede parar', '"parar" = stand up'],
+    ['E1', 'lo encontré tirado y no se mueve', 'found lying down'],
+    ['E1', 'mi mamá se cayó, no se puede parar', 'comma + "parar"'],
+    // A2 — ongoing shock
+    ['E1', 'se está electrocutando', 'ongoing electrocution'],
+    ['E1', 'le está dando la corriente', 'ongoing shock'],
+    // A3 — a past marker on a different verb does not downgrade the event
+    ['E1', 'el enchufe que instalaron el mes pasado le dio la corriente a mi hijo', 'marker on the relative clause'],
+    ['E1', 'hace dos años le cambiaron el panel mi papá se electrocutó', 'unpunctuated, marker on another verb'],
+    ['E1', 'mi hijo se electrocutó con el cable que dejó el técnico ayer', 'marker on the relative clause'],
+    ['E1', 'mi papa se desmayo ayer estaba bien', 'unpunctuated, no accents'],
+    // A4 — every match counts, not only the first
+    ['E1', 'el año pasado se electrocutó mi primo y mi hijo se electrocutó', 'second event is present'],
+    // A5 — a present symptom after a past event
+    ['E1', 'se electrocutó ayer y está temblando', 'trembling now'],
+    ['E1', 'tomó muchas pastillas ayer y está muy dormido', 'drowsy now'],
+    ['E1', 'se desmayó anoche, está muy débil y confundido', 'weak and confused now'],
+    // A6 — missing classes
+    ['E1', 'tomó veneno', 'poison'],
+    ['E1', 'se tomó cloro', 'poison (bleach)'],
+    ['E1', 'se tragó una pila', 'swallowed a battery'],
+    ['E1', 'se tragó una moneda', 'swallowed a coin'],
+    ['E1', 'se tragó un imán', 'swallowed a magnet'],
+    ['E1', 'le picó un alacrán y se está hinchando', 'sting with swelling'],
+    ['E1', 'está vomitando sangre', 'vomiting blood'],
+    ['E1', 'le falta el aire', 'short of breath'],
+    ['E1', 'se está asfixiando', 'suffocating'],
+    ['E1', 'se desvaneció', 'fainted'],
+    ['E1', 'sangra de la cabeza', 'head bleeding'],
+    ['not-E1', 'no tomó veneno', 'negated'],
+    ['not-E1', 'no le falta el aire', 'negated'],
+    ['not-E1', 'hace años se tragó una moneda', 'clearly past'],
+    // A7 — figurative / non-person readings
+    ['not-E1', 'mi hijo está herido de amor', 'heartbroken'],
+    ['not-E1', 'la película era sobre alguien inconsciente', 'fiction'],
+    ['not-E1', 'se desmayó la señal del wifi', 'wifi signal'],
+    ['not-E1', 'la cotización me dio convulsiones', 'price reaction'],
+    ['not-E1', 'el precio me dio un toque', 'price reaction'],
+    // B — #1241 gas leak grammar
+    ['E1', 'se sale el gas what should I do', 'sourceless reflexive + English question'],
+    ['E1', 'se salió el gas cuánto cuesta', 'sourceless reflexive + price question'],
+    ['E1', 'sale gas por los dos lados cuánto cuesta', 'a number without a currency is not a price'],
+    ['E1', 'sale gas por 2 lados cuánto cuesta', 'a digit without a currency is not a price'],
+    ['E1', 'gas saliendo de la estufa', 'subject-first gerund'],
+    ['E1', 'hay gas en el aire', 'gas in the air'],
+    ['E1', 'el tanque de gas está chiflando', 'hissing tank'],
+    ['E1', 'la manguera del gas está rota', 'broken gas hose'],
+    ['E1', 'se rompió la tubería de gas', 'broken gas pipe'],
+    ['E1', 'sale gas de la tienda', 'accepted (#1241 item 3)'],
+    ['not-E1', 'el gas sale por 50 dólares al mes', 'a number with a currency is a price'],
+  ];
+
+  it.each(FOLLOWUP_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+    } else {
+      expect(r.tier).not.toBe('E1');
+    }
+  });
+
+  // C — Josh's decision: a price question ("a cómo / cuánto (me/le) sale el
+  // gas …") with no leak or harm signal is E2 (human check). A named source or
+  // place is not a leak signal there. Bare leak grammar with no article stays E1.
+  it.each([
+    ['¿a cómo sale el gas por la tubería nueva?', 'E2'],
+    ['¿cuánto sale el gas del calentador nuevo?', 'E2'],
+    ['¿cuánto sale el gas en Phoenix?', 'E2'],
+    ['¿a cómo sale el gas en esta zona?', 'E2'],
+    ['¿cuánto me sale el gas en la casa nueva?', 'E2'],
+    ['¿cuánto me sale el gas?', 'E2'],
+    ['¿a cómo sale el propano?', 'E2'],
+    ['cuánto sale gas del medidor', 'E1'],
+    ['cómo sale gas del tanque', 'E1'],
+    ['¿cuánto sale el gas del calentador? huele muy fuerte', 'E1'],
+  ] as const)('price question: %j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+});
+
 // ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
 
 describe('e1ScriptReadiness (boot gate)', () => {
