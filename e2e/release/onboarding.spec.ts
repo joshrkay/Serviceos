@@ -6,6 +6,10 @@ import { submitClerkEmailForm, enterClerkTestCode } from '../helpers/clerk-email
 // Real Clerk + deployed Development API. No auth bypass, synthetic webhook,
 // database seed, provider purchase, invoice send or payment submission.
 async function token(page: Page): Promise<string> {
+  await expect.poll(() => page.evaluate(() => {
+    const auth = (window as unknown as { Clerk?: { loaded?: boolean; session?: unknown } }).Clerk;
+    return Boolean(auth?.loaded && auth.session);
+  }), { timeout: 30000, message: 'Clerk must restore the authenticated session after navigation' }).toBe(true);
   const value = await page.evaluate(async () => {
     const auth = (window as unknown as { Clerk?: { session?: { getToken(options: { template: string; skipCache: boolean }): Promise<string | null> } } }).Clerk;
     return await auth?.session?.getToken({ template: 'serviceos', skipCache: true });
