@@ -445,6 +445,33 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['E1', 'hay llamas amarillas en la estufa y se prendió la cortina', 'fire spread'],
     ['E1', 'hay llamas naranjas en el horno y en la pared', 'flames outside the appliance'],
     ['E1', 'veo llamas rojas en la secadora', 'a dryer has no visible flame'],
+    // #1239 review — suppressors (price/bill/sale, benign smoke, flame colour,
+    // English-word count) may apply only when nothing else in the utterance
+    // signals a leak or danger.
+    ['E1', 'sale gas del tanque, what do I do', 'English words + a gas source'],
+    ['E1', 'sale gas de la estufa and it smells bad', 'English words + a gas source'],
+    ['E1', 'ya pagué el recibo pero sale gas del medidor', 'bill word + a gas source'],
+    ['E1', 'le sale gas al boiler, tengo la factura aquí', 'bill word + a gas source'],
+    ['E1', 'prendí la calefacción por primera vez y hay humo en toda la casa', 'first heat + whole house'],
+    ['E1', 'hay humo de la parrilla y los niños están tosiendo', 'barbecue + children coughing'],
+    ['E1', 'hay humo del asador y se prendió la cerca', 'barbecue + fire spread'],
+    ['E1', 'hay humo por primera vez y me arden los ojos', 'first heat + burning eyes'],
+    ['E1', 'llamas amarillas y me siento mareado', 'flame colour + dizziness'],
+    ['E1', 'flama amarilla en el calentador y me duele la cabeza', 'flame colour + headache'],
+    ['E1', 'se siente el gas', 'gas smell, impersonal'],
+    ['E1', '¿sale gas del calentador si lo instalan?', 'accepted: a gas source resolves upward'],
+    ['E1', '¿no se puede apagar el fuego con agua?', 'accepted: may be a live fire'],
+    ['E1', 'sale el gas', 'accepted: no price context'],
+    ['not-E1', '¿qué tan caro me sale el gas?', 'price, "sale" not next to cuánto'],
+    ['not-E1', '¿y cuánto es lo que me sale el gas al mes?', 'price'],
+    ['not-E1', '¿con ustedes me sale el gas más barato?', 'price'],
+    ['not-E1', 'el gas sale por cincuenta dólares al mes', 'price idiom "sale por <amount>"'],
+    ['not-E1', 'el propano sale por tres dólares el galón', 'price idiom "sale por <amount>"'],
+    ['not-E1', 'yard sale gas line', 'English: "yard sale"'],
+    ['not-E1', 'sale gas prices', 'English: "sale gas prices"'],
+    ['not-E1', 'hay llamas amarillas en el calentador, ¿está fuera de lo normal?', 'flame colour question; "fuera" is not spread'],
+    ['not-E1', 'no me sale gas', 'denial: no gas supply'],
+    ['not-E1', 'no nos sale gas de la estufa', 'denial: no gas supply'],
   ];
 
   it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {

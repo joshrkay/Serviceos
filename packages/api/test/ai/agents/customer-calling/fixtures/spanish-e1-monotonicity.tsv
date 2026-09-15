@@ -1,0 +1,171 @@
+# #1239 review — Spanish E1 monotonicity corpus. One row per phrase: origin/main tier, TAB, phrase.
+# Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv).
+# Tiers recorded with origin/main efde3966e (classifier as merged in #1234). Do not regenerate against
+# a branch: the column is the baseline a change is measured against.
+E3	se sale el gas
+E3	le sale gas a la estufa
+E3	a la estufa le sale gas
+E3	me sale gas de la estufa
+E3	sale gas por la hornilla
+E3	sale gas de la cocina
+E3	el gas se escapa
+E3	el gas se está saliendo
+E3	el gas está saliendo
+E3	está escapando gas
+E3	salió gas de la estufa
+E3	sale mucho gas de la estufa
+E1	hay humo cuando prendo la calefacción por primera vez
+E1	hay humo de la carne asada en el patio
+E3	hay llamas amarillas en el calentador y me duele la cabeza
+E3	hay llamas amarillas en el calentador y estamos mareados
+E3	hay llamas amarillas en la estufa y se prendió la cortina
+E3	hay llamas naranjas en el horno y en la pared
+E3	veo llamas rojas en la secadora
+E3	on sale gas water heaters
+E3	¿cuánto me sale el gas?
+E3	¿sale gas en la factura?
+E3	el recibo me sale el gas muy caro
+E3	¿a cómo sale el propano?
+E3	I bought a gas grill at a yard sale gas line needs hookup
+E3	yard sale gas line
+E1	a mi estufa le está saliendo gas
+E3	nos sale gas
+E3	te sale gas?
+E3	le sale mucho gas al boiler
+E1	sale olor a gas
+E3	se siente el gas
+E3	¿cuánto le sale el gas al mes?
+E3	me sale caro el gas
+E3	sale más barato el gas
+E3	garage sale gas grill
+E3	gas on sale
+E1	sale humo del horno cuando cocino
+E1	hay humo negro saliendo del calentador
+E1	hay humo en toda la casa
+E1	hay humo cuando prendo la calefacción y huele a quemado
+E3	llamas amarillas y me siento mareado
+E3	flama amarilla en la estufa
+E1	la alarma de CO sonó y me duele la cabeza
+E1	¿sale gas del calentador si lo instalan?
+E1	¿no se puede apagar el fuego con agua?
+E3	no se está escapando el gas
+E1	no se está saliendo el gas
+E2	no se huele a gas
+E3	sale el gas
+E3	¿y cuánto es lo que me sale el gas al mes?
+E3	¿qué tan caro me sale el gas?
+E3	¿con ustedes me sale el gas más barato?
+E3	el gas sale por cincuenta dólares al mes
+E3	el propano sale por tres dólares el galón
+E1	ya pagué el recibo pero sale gas del medidor
+E3	le sale gas al boiler, tengo la factura aquí
+E1	sale gas del tanque, what do I do
+E1	sale gas de la estufa and it smells bad
+E3	the stove is leaking, sale mucho gas
+E1	sale gas del tanque
+E1	prendí la calefacción por primera vez y hay humo en toda la casa
+E1	por primera vez hay humo en la casa y no para
+E1	hay humo del asador y se prendió la cerca
+E1	hay humo de la parrilla y los niños están tosiendo
+E1	hay humo por primera vez y me arden los ojos
+E3	no me sale gas
+E3	no nos sale gas de la estufa
+E3	no se me sale el gas
+E3	no se le sale gas a la estufa
+E3	no sé, le sale gas a la estufa
+E3	flama amarilla en el calentador y me duele la cabeza
+E3	hay llamas amarillas en el calentador, ¿está fuera de lo normal?
+E3	hay llamas azules en la estufa
+E3	sale gas prices
+E1	se está saliendo el gas
+E1	está saliendo el gas del tanque
+E3	la estufa está botando gas
+E1	se escapó el gas
+E3	big summer sale gas grills in stock
+E3	la venta de gas
+E3	¿cuánto sale el gas natural?
+E3	gas sale
+E3	big sale on gas grills
+E3	¿cuánto sale el gas del calentador nuevo?
+E3	¿a cómo sale el gas por la tubería nueva?
+E1	no puedo apagar el fuego de la parrilla
+E3	no puedo apagar la alarma de humo porque estoy cocinando
+E1	el humo no me deja respirar
+E1	hay llamas amarillas en el calentador y huele a gas
+E3	veo llamas naranjas en el calentador
+E3	no se huele gas
+E1	no se, huele a gas
+E1	no se está saliendo gas
+E1	no, no se está saliendo el gas
+E1	no se sale el gas de la estufa
+E3	no se escapa el gas
+E2	no se está quemando la casa
+E3	no se quemó el enchufe
+E3	no se está incendiando nada
+E3	no se prendió fuego
+E1	no se hay fuego
+E1	no se sale humo del enchufe
+E1	I smell gas
+E1	my house is on fire
+E1	carbon monoxide alarm
+E1	my carbon monoxide alarm is going off
+E3	do you have any on sale gas water heaters
+E1	there is no gas smell
+E1	I need a new carbon monoxide detector installed
+E3	there are yellow flames on my water heater and I have a headache
+E3	I see orange flames in the dryer
+E3	there's smoke when I turn on the furnace
+E1	hay fuego en la cocina
+E1	se está quemando la casa
+E1	hay humo saliendo del enchufe
+E1	los cables se están quemando
+E1	cortocircuito
+E1	huele a quemado
+E1	huele mucho a gas
+E1	hay un olor fuerte a gas
+E1	se huele gas
+E1	está saliendo gas de la estufa
+E1	huele a propano
+E1	hay monóxido en la casa
+E1	el detector de CO está sonando
+E1	el agua huele a huevo podrido
+E1	el agua caliente huele a azufre
+E1	bueno huele a gas en la cocina
+E3	veo llamas amarillas en el calentador
+E3	el encendedor echa chispas pero no prende
+E3	chispas de la estufa al prender
+E3	sale humo de la chimenea
+E3	necesito instalar un detector de monóxido
+E2	no huele a gas
+E2	no hay fuga de gas
+E3	no sale humo
+E2	no hay una fuga de gas
+E3	no hay fuego en la cocina
+E3	no huele a quemado
+E3	no está saliendo gas de la estufa
+E3	no hay monóxido en la casa
+E3	no hay humo en la casa
+E3	any sale gas furnaces this month
+E1	está saliendo gas
+E1	sale gas de la estufa
+E1	sale gas de la tubería
+E1	sale gas del calentador
+E1	huelo gas
+E1	huelo a gas
+E1	hay llamas en la cocina
+E1	hay humo en la cocina
+E1	se está escapando el gas
+E1	se escapa el gas
+E1	no puedo apagar el fuego
+E1	no me deja respirar el humo
+E1	no, no puedo apagar el fuego
+E1	no no puedo apagar el fuego
+E1	huele a cable quemado
+E1	no puedo respirar, hay humo
+E3	no huelo gas
+E3	no hay llamas en la cocina
+E3	no hay humo en la cocina
+E3	no huele a cable quemado
+E3	hay humo saliendo de la chimenea
+E1	salen llamas amarillas y humo negro del calentador
+E1	veo llamas amarillas y humo en el calentador
