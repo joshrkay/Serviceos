@@ -1362,7 +1362,7 @@ function isS1CallerProfile(profile: ClassifierProfile): boolean {
  * path, which keeps the operator taxonomy). Both inputs come from session /
  * job provenance, never from the text itself.
  */
-export function isUntrustedClassifierInput(
+function isUntrustedClassifierInput(
   profile: ClassifierProfile,
   untrustedTranscript?: boolean,
 ): boolean {

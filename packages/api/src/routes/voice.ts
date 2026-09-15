@@ -660,6 +660,10 @@ export function createVoiceRouter(
           recordingId: existing.id,
           audioUrl: body.audioUrl,
           conversationId: existing.conversationId,
+          // #1231 — deliberately NO voicemail/trust field: the worker derives
+          // untrusted status from the recording row. retryRequestedBy is
+          // audit attribution only (#1244 review).
+          retryRequestedBy: req.auth!.userId,
         },
         `${req.auth!.tenantId}:${existing.id}:transcription:retry`
       );

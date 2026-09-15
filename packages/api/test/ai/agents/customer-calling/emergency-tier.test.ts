@@ -404,7 +404,6 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['not-E1', 'no huelo gas', 'negated: I do not smell gas'],
     ['not-E1', 'no hay llamas en la cocina', 'negated flames'],
     ['not-E1', 'no hay humo en la cocina', 'negated smoke'],
-    ['not-E1', 'no se está escapando el gas', 'negated gas escaping'],
     ['not-E1', 'no huele a cable quemado', 'negated burning wire smell'],
     ['not-E1', 'hay humo saliendo de la chimenea', 'chimney smoke is normal'],
     // Second review, finding 3 — the flame-colour exception is only
@@ -416,6 +415,96 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['E1', 'no se hay fuego', '"no sé, hay fuego"'],
     ['E1', 'no se sale humo del enchufe', '"no sé, sale humo del enchufe"'],
     ['not-E1', 'no se huele a gas', '"no se huele" is still a denial'],
+    // Re-review, finding 1 — the leak sense of "salir"/"escapar" in every
+    // word order, with an appliance as indirect object ("le sale gas").
+    ['E1', 'se sale el gas', 'gas escaping'],
+    ['E1', 'le sale gas a la estufa', 'the stove is leaking gas'],
+    ['E1', 'a la estufa le sale gas', 'the stove is leaking gas'],
+    ['E1', 'me sale gas de la estufa', 'gas coming out of my stove'],
+    ['E1', 'sale gas por la hornilla', 'gas from the burner'],
+    ['E1', 'sale gas de la cocina', 'gas from the kitchen'],
+    ['E1', 'el gas se escapa', 'subject first'],
+    ['E1', 'el gas se está saliendo', 'subject first'],
+    ['E1', 'el gas está saliendo', 'subject first'],
+    ['E1', 'está escapando gas', 'gas escaping'],
+    ['E1', 'salió gas de la estufa', 'past tense'],
+    ['E1', 'sale mucho gas de la estufa', 'a lot of gas'],
+    ['E1', 'la estufa está botando gas', '"botar gas" = leaking gas'],
+    ['not-E1', 'on sale gas water heaters', 'English: "on sale"'],
+    ['not-E1', 'I bought a gas grill at a yard sale gas line needs hookup', 'English: "yard sale"'],
+    ['not-E1', '¿sale gas en la factura?', 'bill'],
+    ['not-E1', 'el gas sale muy caro', 'price, subject first'],
+    ['not-E1', 'no le sale gas a la estufa', 'negated: the stove gets no gas'],
+    // Re-review, finding 2 — smoke with an ordinary cause.
+    ['not-E1', 'hay humo cuando prendo la calefacción por primera vez', 'first heat of the season'],
+    ['not-E1', 'hay humo de la carne asada en el patio', 'barbecue'],
+    // Re-review, finding 3 — flame colour plus CO symptoms, spread or a
+    // dryer is not a colour diagnostic.
+    ['E1', 'hay llamas amarillas en el calentador y me duele la cabeza', 'CO symptom'],
+    ['E1', 'hay llamas amarillas en el calentador y estamos mareados', 'CO symptom'],
+    ['E1', 'hay llamas amarillas en la estufa y se prendió la cortina', 'fire spread'],
+    ['E1', 'hay llamas naranjas en el horno y en la pared', 'flames outside the appliance'],
+    ['E1', 'veo llamas rojas en la secadora', 'a dryer has no visible flame'],
+    // #1239 review — suppressors (price/bill/sale, benign smoke, flame colour,
+    // English-word count) may apply only when nothing else in the utterance
+    // signals a leak or danger.
+    ['E1', 'sale gas del tanque, what do I do', 'English words + a gas source'],
+    ['E1', 'sale gas de la estufa and it smells bad', 'English words + a gas source'],
+    ['E1', 'ya pagué el recibo pero sale gas del medidor', 'bill word + a gas source'],
+    ['E1', 'le sale gas al boiler, tengo la factura aquí', 'bill word + a gas source'],
+    ['E1', 'prendí la calefacción por primera vez y hay humo en toda la casa', 'first heat + whole house'],
+    ['E1', 'hay humo de la parrilla y los niños están tosiendo', 'barbecue + children coughing'],
+    ['E1', 'hay humo del asador y se prendió la cerca', 'barbecue + fire spread'],
+    ['E1', 'hay humo por primera vez y me arden los ojos', 'first heat + burning eyes'],
+    ['E1', 'llamas amarillas y me siento mareado', 'flame colour + dizziness'],
+    ['E1', 'flama amarilla en el calentador y me duele la cabeza', 'flame colour + headache'],
+    ['E1', 'se siente el gas', 'gas smell, impersonal'],
+    ['E1', '¿sale gas del calentador si lo instalan?', 'accepted: a gas source resolves upward'],
+    ['E1', '¿no se puede apagar el fuego con agua?', 'accepted: may be a live fire'],
+    ['E1', 'sale el gas', 'accepted: no price context'],
+    ['not-E1', '¿qué tan caro me sale el gas?', 'price, "sale" not next to cuánto'],
+    ['not-E1', '¿y cuánto es lo que me sale el gas al mes?', 'price'],
+    ['not-E1', '¿con ustedes me sale el gas más barato?', 'price'],
+    ['not-E1', 'el gas sale por cincuenta dólares al mes', 'price idiom "sale por <amount>"'],
+    ['not-E1', 'el propano sale por tres dólares el galón', 'price idiom "sale por <amount>"'],
+    ['not-E1', 'yard sale gas line', 'English: "yard sale"'],
+    ['not-E1', 'sale gas prices', 'English: "sale gas prices"'],
+    ['not-E1', 'hay llamas amarillas en el calentador, ¿está fuera de lo normal?', 'flame colour question; "fuera" is not spread'],
+    ['not-E1', 'no me sale gas', 'denial: no gas supply'],
+    ['not-E1', 'no nos sale gas de la estufa', 'denial: no gas supply'],
+    // A suppressor's context must share the clause with the phrase it
+    // suppresses; a quantity of gas is never a price.
+    ['E1', 'sale gas, what do I do?', 'Spanish leak + separate English question'],
+    ['E1', 'sale mucho gas, ¿cuánto cuesta la reparación?', 'leak + separate price question'],
+    ['E1', 'hay humo por primera vez', '"por primera vez" alone is not a benign cause'],
+    ['E1', 'hay humo, por primera vez pasa esto', 'benign cue in another clause'],
+    // Third #1239 review, finding 1 — leak grammar "(sale|escapa…) (el) gas
+    // (de|del|por|en|a) <source>" is never suppressed. STT drops the
+    // punctuation, so a price word or an English question shares the clause.
+    ['E1', 'sale gas del horno what do I do', 'leak grammar + English question'],
+    ['E1', 'sale gas de la llave what do I do', 'leak grammar + English question'],
+    ['E1', 'sale gas de la manguera what should I do', 'leak grammar + English question'],
+    ['E1', 'sale gas de la válvula is that normal', 'leak grammar + English question'],
+    ['E1', 'sale gas de la conexión what do I do', 'leak grammar + English question'],
+    ['E1', 'sale gas por la llave de paso cuánto cuesta cambiarla', 'leak grammar + price question'],
+    ['E1', 'sale gas por la línea cuánto cuesta', 'leak grammar + price question'],
+    // Finding 2 — grill or incense smoke indoors is a CO risk.
+    ['E1', 'hay humo del asador adentro de la casa', 'indoor grill smoke'],
+    ['E1', 'hay humo del asador en el garaje', 'grill smoke in the garage'],
+    ['E1', 'hay humo de la parrilla dentro de la casa', 'indoor grill smoke'],
+    ['E1', 'hay humo del incienso en el cuarto', 'smoke in a room'],
+    // Finding 3 — cuánto/cómo in front of leak grammar is not a price.
+    ['E1', 'cómo me sale gas de la estufa, huele muy fuerte', '"cómo" + leak grammar'],
+    ['E1', 'cómo sale gas del tanque', '"cómo" + leak grammar'],
+    ['E1', 'cuánto sale gas del medidor', '"cuánto" + leak grammar'],
+    ['E1', '¿cuánto tiempo sale gas antes de explotar?', 'explosion'],
+    // Finding 4 — an appliance, a room or children alone are context, not danger.
+    ['not-E1', 'el encendedor de la estufa echa chispas pero no prende', 'igniter sparks on a stove'],
+    ['not-E1', 'quiero instalar un detector de monóxido en el cuarto de los niños', 'CO detector install'],
+    ['E1', 'hay humo de la parrilla y los niños tosen', 'children + a harm verb'],
+    // Finding 5 — the reviewer's keep-E1 rows.
+    ['E1', 'cuánto cobran por revisar una fuga de gas', 'a leak named with a price question'],
+    ['E1', 'ayer hubo una fuga de gas pero ya la arreglaron', 'past leak: resolves upward'],
   ];
 
   it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {
@@ -430,6 +519,24 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     }
   });
 
+  // Third #1239 review, finding 5 — English "gas leak" stays E1 even in a quote
+  // request (English table unchanged; kept upward on the reviewer's advice).
+  it('"I need a quote for a gas leak detector" stays E1', () => {
+    expect(classifyCallerSafety('I need a quote for a gas leak detector', {}).tier).toBe('E1');
+  });
+
+  // Re-review, finding 4 — deliberate tie-breaks. STT cannot tell "no se …"
+  // from "no sé, …", so a leak verb after "no se" resolves upward (E1). Only
+  // "no se huele" stays a denial; it still reaches E2 via the backstop.
+  it.each([
+    ['no se está saliendo el gas', 'E1'],
+    ['no se escapa el gas', 'E1'],
+    ['no se está escapando el gas', 'E1'],
+    ['no se huele a gas', 'E2'],
+  ] as const)('tie-break: %j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+
   // Finding 5 — STT and copy-paste can deliver decomposed accents (NFD).
   it.each([
     'la alarma de monóxido está sonando',
@@ -438,6 +545,141 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     const decomposed = utterance.normalize('NFD');
     expect(decomposed).not.toBe(utterance);
     expect(classifyCallerSafety(decomposed, {}).tier).toBe('E1');
+  });
+});
+
+// ─── #1221 — Spanish injury and medical emergencies are E1 ──────────────────
+
+describe('#1221 — Spanish injury and medical emergencies (one table)', () => {
+  const SPANISH_INJURY_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // Unconscious / unresponsive (English: unconscious, unresponsive, passed out, won't wake up)
+    ['E1', 'mi papá está inconsciente', 'unconscious'],
+    ['E1', 'mi esposa está desmayada', 'passed out'],
+    ['E1', 'mi hijo se desmayó', 'passed out'],
+    ['E1', 'mi abuela no responde', 'unresponsive, person subject'],
+    // Not breathing (English: not breathing, stopped breathing)
+    ['E1', 'mi bebé no respira', 'not breathing'],
+    ['E1', 'mi mamá no puede respirar', 'cannot breathe'],
+    ['E1', 'no puedo respirar', 'cannot breathe (was E2 via the backstop)'],
+    ['E1', 'no no puede respirar', 'a leading "no" does not negate it'],
+    ['E1', 'dejó de respirar', 'stopped breathing'],
+    // Chest pain / heart attack
+    ['E1', 'tiene dolor en el pecho', 'chest pain'],
+    ['E1', 'me duele mucho el pecho', 'chest pain'],
+    ['E1', 'creo que le está dando un infarto', 'heart attack'],
+    ['E1', 'le dio un ataque al corazón', 'heart attack'],
+    // Severe bleeding
+    ['E1', 'sangra mucho de la cabeza', 'severe bleeding'],
+    ['E1', 'hay mucha sangre', 'severe bleeding'],
+    ['E1', 'está sangrando mucho', 'severe bleeding'],
+    // Electrocution / shock (English: electrocuted, got shocked, electric shock)
+    ['E1', 'el electricista se electrocutó', 'electrocuted'],
+    ['E1', 'le dio la corriente', 'electric shock'],
+    ['E1', 'me dio un toque el enchufe', 'got shocked'],
+    // Seizure
+    ['E1', 'le está dando una convulsión', 'seizure'],
+    ['E1', 'está convulsionando', 'seizure'],
+    // Choking
+    ['E1', 'mi hijo se está ahogando', 'choking / drowning'],
+    ['E1', 'la niña está atragantada', 'choking'],
+    // Overdose, stroke
+    ['E1', 'creo que es una sobredosis', 'overdose'],
+    ['E1', 'le dio un derrame cerebral', 'stroke'],
+    // Fell and cannot move
+    ['E1', 'se cayó y no se puede mover', 'fell, cannot move'],
+    ['E1', 'mi papá se cayó de la escalera y no se puede mover', 'fell from a ladder, cannot move'],
+    ['E1', 'ayer se cayó y todavía no se puede mover', 'past fall, present urgency'],
+    // Burned (injury sense; English: badly burned, severe burn)
+    ['E1', 'se quemó la mano con aceite', 'burned hand'],
+    ['E1', 'se me quemó el brazo con agua hirviendo', 'scalded arm'],
+    ['E1', 'tiene quemaduras graves', 'severe burns'],
+    // Someone hurt (English: someone is hurt / injured)
+    ['E1', 'alguien está herido', 'someone is hurt'],
+    // Negations
+    ['not-E1', 'no está inconsciente', 'negated'],
+    ['not-E1', 'ya respira bien', 'breathing again'],
+    ['not-E1', 'no se desmayó', 'negated'],
+    ['not-E1', 'no tiene dolor en el pecho', 'negated'],
+    ['not-E1', 'no sangra mucho', 'negated'],
+    ['not-E1', 'no está convulsionando', 'negated'],
+    // Routine controls
+    ['not-E1', 'el técnico se cayó de la lista', 'fell off the list'],
+    ['not-E1', 'me duele el pecho de risa', 'laughing'],
+    ['not-E1', 'necesito un electricista porque me dio un toque el enchufe ayer', 'past, resolved shock'],
+    ['not-E1', 'el agua está hirviendo', 'boiling water'],
+    ['not-E1', 'se me quemó la comida', 'burned food'],
+    ['not-E1', 'el técnico no responde mis mensajes', 'an unresponsive technician'],
+    ['not-E1', 'el pintor le dio un toque final a la pared', 'finishing touch'],
+    ['not-E1', 'el drenaje no respira', 'plumbing vent'],
+    ['not-E1', 'se ahoga el motor de la planta', 'engine flooding'],
+    ['not-E1', 'se desmayó hace dos años', 'clearly past'],
+    // #1245 review, finding 1 — a present symptom is never downgraded by a
+    // past or hypothetical marker elsewhere; "desde ayer" is ongoing.
+    ['E1', 'mi papá está inconsciente, ayer estaba bien', 'present state + past elsewhere'],
+    ['E1', 'mi papá no responde desde ayer', '"desde ayer" is ongoing'],
+    ['E1', 'tiene dolor en el pecho desde ayer', '"desde ayer" is ongoing'],
+    ['E1', 'mi abuela se cayó anoche y no se puede levantar', 'past fall, present state'],
+    ['E1', 'mi hijo no respira, no sé si alguien puede venir', '"si alguien" is not hypothetical here'],
+    ['E1', 'mi hijo está convulsionando, de chico tenía epilepsia', 'present state + history'],
+    ['E1', 'ayer se desmayo y otra vez no responde', 'no accent; present state'],
+    // Finding 2 — the E2 fallback never wins over a present symptom.
+    ['E1', 'se electrocutó ayer y está inconsciente', 'past shock, present unconsciousness'],
+    // Finding 3 — missed phrasings.
+    ['E1', 'tomó muchas pastillas', 'overdose'],
+    ['E1', 'se le paralizó la cara', 'stroke sign'],
+    ['E1', 'se cayó de la escalera y no se mueve', 'fell, not moving'],
+    ['E1', 'se cayó de la escalera y no se levanta', 'fell, cannot get up'],
+    ['E1', 'está desangrándose', 'enclitic'],
+    ['E1', 'no sé qué le pasa, no responde', 'unresponsive, no named subject'],
+    ['E1', 'se golpeó la cabeza y no responde', 'head injury, unresponsive'],
+    ['E1', 'mi hijo está herido', 'hurt'],
+    ['E1', 'no tiene pulso', 'no pulse'],
+    ['E1', 'me electrocuté', 'first-person electrocution'],
+    ['E1', 'le dio un derrame', 'stroke'],
+    // Finding 4 — idioms with no person or symptom.
+    ['not-E1', 'el precio es un infarto', 'price idiom'],
+    ['not-E1', 'los precios están de infarto', 'price idiom'],
+    ['not-E1', 'tengo convulsiones de risa', 'laughing'],
+    ['not-E1', 'sobredosis de café', 'too much coffee'],
+    ['not-E1', 'la bomba se ahogó', 'pump flooded'],
+    ['not-E1', 'el calentador se ahoga', 'heater flooding'],
+    ['E1', 'a mi papá le dio un infarto', 'the idiom word with a person'],
+    ['not-E1', 'el control remoto no responde', 'a device, not a person'],
+    // Idiom readings must never swallow how someone got hurt, or reach across
+    // a clause into a separate price remark.
+    ['E1', 'tocó el enchufe y no responde', 'touched a live outlet, unresponsive'],
+    ['E1', 'le dio un infarto y la cuenta del hospital es cara', 'heart attack + a separate price remark'],
+    ['not-E1', 'el foco no responde', 'a light bulb'],
+  ];
+
+  it.each(SPANISH_INJURY_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+      expect(r.language).toBe('es');
+    } else {
+      expect(r.tier).not.toBe('E1');
+    }
+  });
+
+  // A shock yesterday is not a life-safety call any more, but the outlet that
+  // shocked the caller is still live: urgent same-day dispatch (E2), not a
+  // routine booking.
+  it('a past, resolved shock is E2: the caller is fine, the outlet is still a hazard', () => {
+    expect(
+      classifyCallerSafety('necesito un electricista porque me dio un toque el enchufe ayer', {}).tier,
+    ).toBe('E2');
+  });
+
+  // #1245 review, finding 5 — the recent-shock E2 fallback is for ayer /
+  // anteayer / anoche / hace N días (N ≤ 7) only.
+  it('an old shock ("hace años le dio una descarga el panel") is routine E3, not E2', () => {
+    expect(classifyCallerSafety('hace años le dio una descarga el panel', {}).tier).toBe('E3');
+  });
+
+  it('decomposed accents still classify E1: "se desmayó" in NFD', () => {
+    expect(classifyCallerSafety('mi hijo se desmayó'.normalize('NFD'), {}).tier).toBe('E1');
   });
 });
 
