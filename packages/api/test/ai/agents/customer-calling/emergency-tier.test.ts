@@ -331,6 +331,77 @@ describe('#1056 — Spanish hazard reports classify E1 (runtime hot path, no rul
   });
 });
 
+// ─── #1220 review follow-up (#1056) — Spanish phrasing coverage ─────────────
+
+describe('#1220 review — Spanish E1 phrasing, false positives and negation (one table)', () => {
+  // Bucket E1: the caller reports a live hazard. Bucket not-E1: a routine
+  // trade call or a denial of the hazard. An E1 false positive hangs up on the
+  // customer; an E1 miss leaves a caller in a gas-filled house.
+  const SPANISH_E1_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // Finding 3 — fire, smoke and electrical phrasings that returned no E1.
+    ['E1', 'hay fuego en la cocina', 'fire'],
+    ['E1', 'se está quemando la casa', 'house burning'],
+    ['E1', 'hay humo saliendo del enchufe', 'smoke from an outlet'],
+    ['E1', 'los cables se están quemando', 'wires burning'],
+    ['E1', 'cortocircuito', 'short circuit'],
+    ['E1', 'huele a quemado', 'burning smell (verb form)'],
+    // Finding 3 — gas.
+    ['E1', 'huele mucho a gas', 'strong gas smell'],
+    ['E1', 'hay un olor fuerte a gas', 'strong gas smell'],
+    ['E1', 'se huele gas', 'gas smell, impersonal'],
+    ['E1', 'está saliendo gas de la estufa', 'gas escaping from the stove'],
+    ['E1', 'huele a propano', 'propane smell'],
+    // Finding 3 — carbon monoxide.
+    ['E1', 'hay monóxido en la casa', 'CO present'],
+    ['E1', 'el detector de CO está sonando', 'CO alarm sounding'],
+    // English parity (question for Josh): English "rotten eggs" / "sulfur
+    // smell" are E1 on main even when the water smells, so these stay E1.
+    ['E1', 'el agua huele a huevo podrido', 'English parity: rotten eggs'],
+    ['E1', 'el agua caliente huele a azufre', 'English parity: sulfur smell'],
+    // Negation guard control: "bueno" ends in "no" but is not a negation.
+    ['E1', 'bueno huele a gas en la cocina', '"bueno" is not "no"'],
+    // Finding 4 — routine trade calls that must not hang up.
+    ['not-E1', 'veo llamas amarillas en el calentador', 'flame colour diagnostic'],
+    ['not-E1', 'el encendedor echa chispas pero no prende', 'igniter sparks, no ignition'],
+    ['not-E1', 'chispas de la estufa al prender', 'stove igniter sparks'],
+    ['not-E1', 'sale humo de la chimenea', 'chimney smoke is normal'],
+    ['not-E1', 'necesito instalar un detector de monóxido', 'CO detector install'],
+    // Finding 3 — negations of Spanish hazard phrases.
+    ['not-E1', 'no huele a gas', 'negated gas smell'],
+    ['not-E1', 'no hay fuga de gas', 'negated gas leak'],
+    ['not-E1', 'no sale humo', 'negated smoke'],
+    ['not-E1', 'no hay una fuga de gas', 'negated gas leak with article'],
+    ['not-E1', 'no hay fuego en la cocina', 'negated fire'],
+    ['not-E1', 'no huele a quemado', 'negated burning smell'],
+    ['not-E1', 'no se huele gas', 'negated impersonal gas smell'],
+    ['not-E1', 'no está saliendo gas de la estufa', 'negated gas escaping'],
+    ['not-E1', 'no hay monóxido en la casa', 'negated CO'],
+    ['not-E1', 'no hay humo en la casa', 'negated smoke in the house'],
+  ];
+
+  it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+      expect(r.language).toBe('es');
+    } else {
+      expect(r.tier).not.toBe('E1');
+      expect(r.requiresEvacuation).toBe(false);
+    }
+  });
+
+  // Finding 5 — STT and copy-paste can deliver decomposed accents (NFD).
+  it.each([
+    'la alarma de monóxido está sonando',
+    'el calentador se prendió fuego',
+  ])('decomposed accents still classify E1: %j', (utterance) => {
+    const decomposed = utterance.normalize('NFD');
+    expect(decomposed).not.toBe(utterance);
+    expect(classifyCallerSafety(decomposed, {}).tier).toBe('E1');
+  });
+});
+
 // ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
 
 describe('e1ScriptReadiness (boot gate)', () => {
