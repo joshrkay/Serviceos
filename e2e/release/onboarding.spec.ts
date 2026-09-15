@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { clerk, setupClerkTestingToken } from '@clerk/testing/playwright';
 import { randomUUID } from 'node:crypto';
+import { submitClerkEmailForm } from '../helpers/clerk-email-form';
 
 // Real Clerk + deployed Development API. No auth bypass, synthetic webhook,
 // database seed, provider purchase, invoice send or payment submission.
@@ -43,13 +44,13 @@ test('real signup -> tenant -> identity -> first draft estimate -> returning log
   await page.goto('/signup');
   await page.getByLabel(/email/i).first().fill(email);
   await page.getByLabel(/password/i).first().fill(password);
-  await page.getByRole('button', { name: /continue|sign up|create account/i }).first().click();
+  await submitClerkEmailForm(page);
   const code = page.getByRole('textbox', { name: /code|verification/i }).first();
   // Optional verification is detected; failures entering/verifying the code
   // are never swallowed as if signup had succeeded.
   if (await code.isVisible().catch(() => false)) {
     await code.fill('424242');
-    await page.getByRole('button', { name: /continue|verify/i }).first().click();
+    await submitClerkEmailForm(page);
   } else {
     await Promise.race([
       code.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {}),
@@ -57,7 +58,7 @@ test('real signup -> tenant -> identity -> first draft estimate -> returning log
     ]);
     if (await code.isVisible()) {
       await code.fill('424242');
-      await page.getByRole('button', { name: /continue|verify/i }).first().click();
+      await submitClerkEmailForm(page);
     }
   }
   await expect.poll(async () => page.evaluate(() => Boolean(
