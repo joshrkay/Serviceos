@@ -2428,6 +2428,80 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
     expect(twiml).toContain('<Hangup/>');
   });
 
+  // #1056 — a Spanish hazard report takes the same E1 close. No reviewed
+  // Spanish E1 script exists (O-2), so the English evacuation script (which
+  // leads with 911) is spoken, then the call hangs up.
+  it('#1056 handleGather: a Spanish gas leak ("fuga de gas") is E1 — evacuation script with 911, then <Hangup/>', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-1' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-1',
+      speechResult: 'hay una fuga de gas en mi casa, huele muy fuerte',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    for (const [arg] of (gateway.complete as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(JSON.stringify(arg)).toMatch(/Summarize the customer service call/i);
+    }
+    expect(session.machine.currentState).toBe('terminated');
+    expect(session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(twiml).toContain('leave the building immediately');
+    expect(twiml).toContain('call 911');
+    expect(twiml).toContain('<Hangup/>');
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('on-call dispatcher');
+  });
+
+  it('#1056 processCallerUtterance: a Spanish carbon-monoxide alarm is E1 — closes with no LLM call and no dispatcher bridge', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-2' });
+
+    const sideEffects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-es-2',
+      speechResult: 'la alarma de monoxido de carbono esta sonando',
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('terminated');
+    const tts = sideEffects.filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]?.payload as { text: string; tier?: string }).tier).toBe('E1');
+    expect((tts[0]?.payload as { text: string }).text).toContain('911');
+    expect(sideEffects.some((fx) => fx.type === 'notify_oncall')).toBe(false);
+    expect(sideEffects.some((fx) => fx.type === 'revoke_pending_bookings')).toBe(true);
+  });
+
+  it('#1056 handleGather: a Spanish non-hazard call ("no hay agua caliente") is not E1 — no evacuation, no hangup', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-3' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      tenantId: 'tenant-t1',
+      callSid: 'CA-em-es-3',
+      from: '+15125550100',
+      to: '+15125550999',
+    });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-3',
+      speechResult: 'no hay agua caliente',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect(session.machine.currentState).not.toBe('terminated');
+    expect(session.machine.currentContext.escalationReason).not.toBe('life_safety_e1');
+    expect(twiml).not.toContain('leave the building');
+    expect(twiml).not.toContain('<Hangup/>');
+  });
+
   it('ANS-001: the 911 TwiML returns even when the E1 tenant-alert SMS hangs forever', async () => {
     // The E1 effect list fans out to a third-party SMS provider. Awaiting that
     // fan-out before building the TwiML puts the 911 script behind a socket we

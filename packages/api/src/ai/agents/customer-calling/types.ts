@@ -201,6 +201,8 @@ export type CallingAgentEvent =
    *          revoke any in-progress booking, notify the tenant on every
    *          channel, and CLOSE without a dispatcher bridge (no data capture).
    * `responseScript` is the reviewed tier script to speak (E1 evacuation copy).
+   * `language` (#1056) is the matched phrase's language, stamped on the E1
+   * audit row.
    */
   | {
       type: 'emergency_detected';
@@ -208,6 +210,7 @@ export type CallingAgentEvent =
       utterance: string;
       tier?: 'E1' | 'E2';
       responseScript?: string;
+      language?: 'en' | 'es';
     };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
