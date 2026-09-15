@@ -7,6 +7,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL } from '../../src/audit/pg-audit';
 import { createAuditEvent } from '../../src/audit/audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { ensureTenantSettings, DEFAULT_ESCALATION_SETTINGS } from '../../src/settings/settings';
 import { hashVoiceApprovalPin } from '../../src/settings/voice-approval-pin';
 import { createSettingsRouter } from '../../src/routes/settings';
@@ -39,7 +40,12 @@ import { createProposal, type Proposal, type ProposalType } from '../../src/prop
  *   - a PIN change through the real `PUT /api/settings/voice-approval-pin`
  *     resets the count (a weak PIN is refused by that route);
  *   - strikes older than 24h, or from before the PIN change, do not count;
- *   - the strike lookup's SQL is served by migration 279's partial index.
+ *   - #1233 review: parallel calls cannot buy a 6th guess — each code is
+ *     reserved before it is compared, and refused uncompared over the budget;
+ *   - #1233 review: the owner alert is claimed in voice_approval_pin_lock_alerts
+ *     (migration 279, primary key tenant + lock episode) before it is sent;
+ *   - the strike lookup is served by migration 245's
+ *     idx_audit_events_tenant_created_at (no index is built on audit_events).
  *
  * The SMS transport is stubbed (an external send); every proposal, settings
  * and audit row here is real Postgres, and the file deliberately leaves its
@@ -52,6 +58,8 @@ const NEW_PIN = '5382';
 const HOUR = 60 * 60 * 1000;
 
 const STRIKE_FAILED = 'proposal.voice_approval_challenge_failed';
+const PIN_ATTEMPT = 'proposal.voice_approval_pin_attempt';
+const PIN_ATTEMPT_CLEARED = 'proposal.voice_approval_pin_attempt_cleared';
 const STRIKE_LOCKOUT = 'proposal.voice_challenge_lockout';
 const TENANT_LOCK_ALERTED = 'proposal.voice_approval_tenant_lock_alerted';
 const REFUSED = 'proposal.voice_approve_refused_challenge_lockout';
@@ -89,6 +97,7 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
         auditRepo,
         settingsRepo,
         smsEventRepo: { hasUnappliedEditRequest: async () => false },
+        pinLockAlertRepo: new PgVoiceApprovalPinLockAlertRepository(pool),
         oneTapFallback: {
           sendSms: async (to, body) => {
             sent.push({ to, body });
@@ -162,7 +171,7 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
       tenantId,
       actorId: VOICE_APPROVAL_ACTOR_ID,
       actorRole: 'system',
-      eventType: STRIKE_FAILED,
+      eventType: PIN_ATTEMPT,
       entityType: 'proposal',
       entityId: sessionId,
       correlationId: sessionId,
@@ -198,8 +207,23 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
   }
 
   async function rowsOfType(tenantId: string, eventType: string) {
-    const rows = await auditRepo.findVoiceApprovalPinLockEvents(tenantId, new Date(Date.now() - 48 * HOUR));
+    const rows = await auditRepo.findRecentByTenant(tenantId, { limit: 200 });
     return rows.filter((r) => r.eventType === eventType);
+  }
+
+  /** Reserved attempts not cleared, read through the real tenant lookup. */
+  async function countedAttempts(tenantId: string): Promise<number> {
+    const rows = await auditRepo.findVoiceApprovalPinLockEvents(tenantId, new Date(Date.now() - 25 * HOUR));
+    const cleared = new Set(rows.filter((r) => r.eventType === PIN_ATTEMPT_CLEARED).map((r) => r.metadata?.attemptId));
+    return rows.filter((r) => r.eventType === PIN_ATTEMPT && !cleared.has(r.id)).length;
+  }
+
+  async function alertClaims(tenantId: string) {
+    const { rows } = await pool.query(
+      `SELECT tenant_id, episode_key, session_id, strike_count FROM voice_approval_pin_lock_alerts WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    return rows;
   }
 
   const hasLink = (body: string) => /https?:\/\/|token=/.test(body);
@@ -266,6 +290,13 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     expect(new Set(strikes.map((r) => r.correlationId))).toEqual(new Set(['i3t-call-1', 'i3t-call-2']));
     expect(strikes.some((r) => r.metadata?.tenantLockEngaged === true && r.metadata?.tenantStrikeCount === 5)).toBe(true);
     expect(await rowsOfType(tenant.tenantId, TENANT_LOCK_ALERTED)).toHaveLength(1);
+    expect(await countedAttempts(tenant.tenantId)).toBe(5);
+    // The alert was claimed exactly once, keyed by the attempt that engaged the lock.
+    const claims = await alertClaims(tenant.tenantId);
+    expect(claims).toHaveLength(1);
+    const attempts = await rowsOfType(tenant.tenantId, PIN_ATTEMPT);
+    const engaging = attempts.filter((r) => r.correlationId === 'i3t-call-2').sort((a, b) => +a.createdAt - +b.createdAt).pop();
+    expect(claims[0]).toMatchObject({ episode_key: engaging!.id, session_id: 'i3t-call-2', strike_count: 5 });
     const refusals = (await auditRepo.findByEntity(tenant.tenantId, 'proposal', acme.id)).filter(
       (r) => r.eventType === REFUSED,
     );
@@ -299,9 +330,15 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     const since = new Date(Date.now() - 48 * HOUR);
     const ourRows = await auditRepo.findVoiceApprovalPinLockEvents(tenant.tenantId, since);
     const theirRows = await auditRepo.findVoiceApprovalPinLockEvents(neighbour.tenantId, since);
-    expect(ourRows).toHaveLength(0);
-    expect(theirRows.length).toBeGreaterThanOrEqual(6); // 5 strikes + the alert
+    // Ours: the one right code — reserved, then cleared as passed.
+    expect(ourRows.map((r) => r.eventType).sort()).toEqual([PIN_ATTEMPT, PIN_ATTEMPT_CLEARED]);
+    expect(ourRows.every((r) => r.tenantId === tenant.tenantId)).toBe(true);
+    expect(await countedAttempts(tenant.tenantId)).toBe(0);
+    expect(theirRows.filter((r) => r.eventType === PIN_ATTEMPT)).toHaveLength(5);
     expect(theirRows.every((r) => r.tenantId === neighbour.tenantId)).toBe(true);
+    expect(await countedAttempts(neighbour.tenantId)).toBe(5);
+    expect(await alertClaims(tenant.tenantId)).toHaveLength(0);
+    expect(await alertClaims(neighbour.tenantId)).toHaveLength(1);
   });
 
   it('a PIN change through the real PUT /api/settings/voice-approval-pin resets the count — a weak PIN is refused there — and the locked tenant approves with the new PIN', async () => {
@@ -352,12 +389,108 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     expect(r.outcomes).toEqual(['challenge_failed', 'challenge_lockout']);
   });
 
-  it('migration 279’s partial index exists and serves the strike lookup SQL', async () => {
-    const { rows: idx } = await pool.query<{ indexdef: string }>(
-      `SELECT indexdef FROM pg_indexes WHERE tablename = 'audit_events' AND indexname = 'idx_audit_events_voice_pin_lock'`,
+  it('#1233 review — PARALLEL wrong codes at 4 strikes: at most ONE is compared and a 6th guess never gets through', async () => {
+    const tenant = await freshTenant();
+    expect((await enrollViaRoute(tenant, PIN)).status).toBe(204);
+    const { deps, sent } = makeDeps('+15125550206');
+    const warmup = { tenantId: tenant.tenantId, ownerSession: true } as const;
+
+    // 4 strikes through the real flow: 3 in one call, 1 in another.
+    await seedMoney(tenant.tenantId, 'Warmup Co', 1000);
+    expect((await callWithCodes(deps, { ...warmup, sessionId: 'i3t-race-warm-1' }, 'the Warmup payment', ['0000', '1111', '9999'])).outcomes).toEqual([
+      'challenge_failed',
+      'challenge_failed',
+      'challenge_lockout',
+    ]);
+    expect((await callWithCodes(deps, { ...warmup, sessionId: 'i3t-race-warm-2' }, 'the Warmup payment', ['2222'])).outcomes).toEqual([
+      'challenge_failed',
+    ]);
+    expect(await countedAttempts(tenant.tenantId)).toBe(4);
+
+    // Eight spoofed calls, each parked at the challenge prompt for its own item.
+    const calls = Array.from({ length: 8 }, (_, i) => `i3t-race-${i + 1}`);
+    const pendings = [];
+    for (const [i, sessionId] of calls.entries()) {
+      await seedMoney(tenant.tenantId, `Race ${i + 1}`, 2000 + i);
+      const ref = { ...warmup, sessionId };
+      const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: `the Race ${i + 1} payment` });
+      expect(start.outcome).toBe('readback');
+      const confirm = await continueVoiceApproval(deps, { ...ref, utterance: 'yes', pending: start.pending! });
+      expect(confirm.outcome).toBe('challenge_prompt');
+      pendings.push(confirm.pending!);
+    }
+
+    // All eight answer at once, on separate pooled connections.
+    const results = await Promise.all(
+      calls.map((sessionId, i) =>
+        continueVoiceApproval(deps, { ...warmup, sessionId, utterance: '3 3 3 3', pending: pendings[i] }),
+      ),
     );
-    expect(idx).toHaveLength(1);
-    expect(idx[0].indexdef).toContain('WHERE');
+
+    const comparedRows = [
+      ...(await rowsOfType(tenant.tenantId, STRIKE_FAILED)),
+      ...(await rowsOfType(tenant.tenantId, STRIKE_LOCKOUT)),
+    ].filter((r) => calls.includes(r.correlationId!));
+    expect(comparedRows.length).toBeLessThanOrEqual(1);
+    expect(await countedAttempts(tenant.tenantId)).toBe(4 + comparedRows.length);
+    expect(await countedAttempts(tenant.tenantId)).toBeLessThanOrEqual(5);
+    expect(results.every((r) => r.outcome === 'challenge_lockout' && r.pending === null)).toBe(true);
+    const refusedOverLimit = (await rowsOfType(tenant.tenantId, PIN_ATTEMPT_CLEARED)).filter(
+      (r) => calls.includes(r.correlationId!) && r.metadata?.reason === 'refused_over_limit',
+    );
+    expect(refusedOverLimit.length + comparedRows.length).toBeLessThanOrEqual(calls.length);
+    // No approval link went out during the burst; at most the one alert did.
+    expect(sent.slice(1).every((m) => !hasLink(m.body))).toBe(true);
+    expect((await alertClaims(tenant.tenantId)).length).toBeLessThanOrEqual(1);
+
+    // If the burst spent the 5th guess, the tenant is locked: the right code
+    // on yet another call approves nothing.
+    if (comparedRows.length === 1) {
+      const money = await seedMoney(tenant.tenantId, 'After Race', 3000);
+      const after = await callWithCodes(deps, { ...warmup, sessionId: 'i3t-race-after' }, 'the After Race payment', ['4271']);
+      expect(after.outcomes).toEqual(['challenge_lockout']);
+      expect((await proposalRepo.findById(tenant.tenantId, money.id))?.status).toBe('ready_for_review');
+    }
+  });
+
+  it('#1233 review — PARALLEL wrong codes from zero strikes: never more than 5 compared', async () => {
+    const tenant = await freshTenant();
+    expect((await enrollViaRoute(tenant, PIN)).status).toBe(204);
+    const { deps } = makeDeps('+15125550207');
+    const calls = Array.from({ length: 9 }, (_, i) => `i3t-race0-${i + 1}`);
+    const pendings = [];
+    for (const [i, sessionId] of calls.entries()) {
+      await seedMoney(tenant.tenantId, `Zero ${i + 1}`, 4000 + i);
+      const ref = { tenantId: tenant.tenantId, sessionId, ownerSession: true } as const;
+      const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: `the Zero ${i + 1} payment` });
+      const confirm = await continueVoiceApproval(deps, { ...ref, utterance: 'yes', pending: start.pending! });
+      expect(confirm.outcome).toBe('challenge_prompt');
+      pendings.push(confirm.pending!);
+    }
+    await Promise.all(
+      calls.map((sessionId, i) =>
+        continueVoiceApproval(deps, {
+          tenantId: tenant.tenantId,
+          sessionId,
+          ownerSession: true,
+          utterance: '8 8 8 8',
+          pending: pendings[i],
+        }),
+      ),
+    );
+    const compared = [
+      ...(await rowsOfType(tenant.tenantId, STRIKE_FAILED)),
+      ...(await rowsOfType(tenant.tenantId, STRIKE_LOCKOUT)),
+    ].filter((r) => calls.includes(r.correlationId!));
+    expect(compared.length).toBeLessThanOrEqual(5);
+    expect(await countedAttempts(tenant.tenantId)).toBeLessThanOrEqual(5);
+  });
+
+  it('#1233 review — no index is built on audit_events: the strike lookup uses migration 245’s idx_audit_events_tenant_created_at, and the alert claim table is RLS-forced', async () => {
+    const { rows: dropped } = await pool.query(
+      `SELECT 1 FROM pg_indexes WHERE tablename = 'audit_events' AND indexname = 'idx_audit_events_voice_pin_lock'`,
+    );
+    expect(dropped).toHaveLength(0);
 
     const client = await pool.connect();
     try {
@@ -365,13 +498,37 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
       await client.query('SET LOCAL enable_seqscan = off');
       await client.query(`PREPARE i3t_pin_lock AS ${VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL}`);
       const { rows: plan } = await client.query<{ 'QUERY PLAN': string }>(
-        `EXPLAIN EXECUTE i3t_pin_lock('${crypto.randomUUID()}', now() - interval '48 hours')`,
+        `EXPLAIN EXECUTE i3t_pin_lock('${crypto.randomUUID()}', ARRAY['${PIN_ATTEMPT}', '${PIN_ATTEMPT_CLEARED}'], now() - interval '25 hours')`,
       );
       await client.query('DEALLOCATE i3t_pin_lock');
       await client.query('ROLLBACK');
-      expect(plan.map((p) => p['QUERY PLAN']).join('\n')).toContain('idx_audit_events_voice_pin_lock');
+      expect(plan.map((p) => p['QUERY PLAN']).join('\n')).toContain('idx_audit_events_tenant_created_at');
     } finally {
       client.release();
     }
+
+    const { rows: table } = await pool.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      `SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'voice_approval_pin_lock_alerts'`,
+    );
+    expect(table).toEqual([{ relrowsecurity: true, relforcerowsecurity: true }]);
+    const { rows: pk } = await pool.query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conrelid = 'voice_approval_pin_lock_alerts'::regclass AND contype = 'p'`,
+    );
+    expect(pk).toEqual([{ def: 'PRIMARY KEY (tenant_id, episode_key)' }]);
+  });
+
+  it('#1233 review — the Pg alert claim is insert-if-absent per (tenant, episode), and tenant-isolated', async () => {
+    const a = await freshTenant();
+    const b = await freshTenant();
+    const repo = new PgVoiceApprovalPinLockAlertRepository(pool);
+    const claim = (tenantId: string, episodeKey: string) =>
+      repo.claim({ tenantId, episodeKey, sessionId: 'i3t-claim', strikeCount: 5 });
+    const results = await Promise.all([claim(a.tenantId, 'ep-1'), claim(a.tenantId, 'ep-1'), claim(a.tenantId, 'ep-1')]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await claim(b.tenantId, 'ep-1')).toBe(true);
+    expect(await claim(a.tenantId, 'ep-2')).toBe(true);
+    expect(await alertClaims(a.tenantId)).toHaveLength(2);
+    expect(await alertClaims(b.tenantId)).toHaveLength(1);
   });
 });

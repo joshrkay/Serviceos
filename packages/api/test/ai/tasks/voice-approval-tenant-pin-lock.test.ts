@@ -10,6 +10,13 @@
  * session and call. The owner gets ONE alert (never an approval link) when the
  * lock engages; capture-class items are untouched; a failed strike lookup
  * refuses money approval (fail closed).
+ *
+ * #1233 review — the budget is enforced on RESERVED attempts: every code is
+ * reserved durably before it is compared, re-counted including itself, and
+ * refused uncompared when over the limit; a correct code, a cancel or a refusal
+ * clears its reservation. Parallel calls therefore cannot buy a 6th guess, and
+ * an attempt that cannot be reserved is never compared. The owner alert is
+ * claimed (tenant + lock episode) before it is sent.
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
@@ -42,6 +49,9 @@ const OWNER_PHONE = '+15125550100';
 const HOUR = 60 * 60 * 1000;
 
 const STRIKE_FAILED = 'proposal.voice_approval_challenge_failed';
+const STRIKE_LOCKOUT = 'proposal.voice_challenge_lockout';
+const PIN_ATTEMPT = 'proposal.voice_approval_pin_attempt';
+const PIN_ATTEMPT_CLEARED = 'proposal.voice_approval_pin_attempt_cleared';
 const TENANT_LOCK_ALERTED = 'proposal.voice_approval_tenant_lock_alerted';
 const REFUSED = 'proposal.voice_approve_refused_challenge_lockout';
 
@@ -63,34 +73,76 @@ class TenantLookupDownAuditRepository extends InMemoryAuditRepository {
   }
 }
 
+/** Loses every write of the listed event types. */
+class LosesWritesAuditRepository extends InMemoryAuditRepository {
+  constructor(private readonly lost: readonly string[]) {
+    super();
+  }
+  async create(event: AuditEvent): Promise<AuditEvent> {
+    if (this.lost.includes(event.eventType)) throw new Error(`audit write lost: ${event.eventType}`);
+    return super.create(event);
+  }
+}
+
+interface AlertClaim {
+  tenantId: string;
+  episodeKey: string;
+  sessionId?: string;
+  strikeCount: number;
+}
+
+interface ClaimStore {
+  claim(input: AlertClaim): Promise<boolean>;
+}
+
+/** Insert-if-absent on (tenant, episode), like the Pg table's primary key. */
+function claimStore(rows: AlertClaim[]): ClaimStore {
+  return {
+    claim: async (input) => {
+      if (rows.some((r) => r.tenantId === input.tenantId && r.episodeKey === input.episodeKey)) return false;
+      rows.push(input);
+      return true;
+    },
+  };
+}
+
 interface Harness {
   deps: VoiceApprovalDeps;
   proposalRepo: InMemoryProposalRepository;
   auditRepo: InMemoryAuditRepository;
   sent: { to: string; body: string }[];
+  claims: AlertClaim[];
 }
 
 function makeHarness(
-  opts: { pinChangedAt?: Date; auditRepo?: InMemoryAuditRepository } = {},
+  opts: {
+    pinChangedAt?: Date;
+    auditRepo?: InMemoryAuditRepository | null;
+    alertRepo?: ClaimStore;
+    sendSms?: (to: string, body: string) => Promise<void>;
+  } = {},
 ): Harness {
   const proposalRepo = new InMemoryProposalRepository();
-  const auditRepo = opts.auditRepo ?? new InMemoryAuditRepository();
+  const auditRepo = opts.auditRepo === null ? undefined : (opts.auditRepo ?? new InMemoryAuditRepository());
   const sent: { to: string; body: string }[] = [];
-  const deps: VoiceApprovalDeps = {
+  const claims: AlertClaim[] = [];
+  const deps = {
     proposalRepo,
     auditRepo,
     settingsRepo: settingsRepo(opts.pinChangedAt),
     smsEventRepo: { hasUnappliedEditRequest: async () => false },
+    pinLockAlertRepo: opts.alertRepo ?? claimStore(claims),
     oneTapFallback: {
-      sendSms: async (to, body) => {
+      sendSms: async (to: string, body: string) => {
+        if (opts.sendSms) await opts.sendSms(to, body);
         sent.push({ to, body });
       },
       secret: 'test-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
       resolveOwnerPhone: async () => OWNER_PHONE,
     },
-  };
-  return { deps, proposalRepo, auditRepo, sent };
+  } as VoiceApprovalDeps;
+  return { deps, proposalRepo, auditRepo: auditRepo as InMemoryAuditRepository, sent, claims };
 }
 
 async function seed(
@@ -121,7 +173,10 @@ const seedCapture = (repo: InMemoryProposalRepository, customerName: string) =>
     summary: `Estimate for ${customerName} — water heater`,
   });
 
-/** A durable strike row, as a wrong code in ANOTHER call (session) would leave it. */
+/**
+ * A durable strike, as a wrong code in ANOTHER call (session) leaves it: a
+ * reserved attempt that was never cleared.
+ */
 async function strikeRow(
   auditRepo: InMemoryAuditRepository,
   opts: { tenantId?: string; sessionId: string; at?: Date; eventType?: string },
@@ -130,7 +185,7 @@ async function strikeRow(
     tenantId: opts.tenantId ?? TENANT,
     actorId: VOICE_APPROVAL_ACTOR_ID,
     actorRole: 'system',
-    eventType: opts.eventType ?? STRIKE_FAILED,
+    eventType: opts.eventType ?? PIN_ATTEMPT,
     entityType: 'proposal',
     entityId: 'p-earlier-call',
     correlationId: opts.sessionId,
@@ -182,6 +237,12 @@ async function toConfirmOutcome(
 
 function eventsOf(h: Harness, eventType: string): AuditEvent[] {
   return h.auditRepo.getAll().filter((e) => e.eventType === eventType);
+}
+
+/** Reserved attempts not cleared — what the tenant budget counts. */
+function countedAttempts(h: Harness): number {
+  const cleared = new Set(eventsOf(h, PIN_ATTEMPT_CLEARED).map((e) => e.metadata?.attemptId));
+  return eventsOf(h, PIN_ATTEMPT).filter((e) => !cleared.has(e.id)).length;
 }
 
 function linkTexts(h: Harness): string[] {
@@ -384,6 +445,195 @@ describe('#1051 tenant-wide PIN lock — the lock decision at the task seam', ()
   });
 });
 
+describe('#1233 review — the budget is enforced on attempts reserved BEFORE the PIN is compared', () => {
+  /** Six calls, each already at the challenge prompt for its own money item. */
+  async function sixCallsAtTheChallenge(h: Harness) {
+    const calls = ['burst-1', 'burst-2', 'burst-3', 'burst-4', 'burst-5', 'burst-6'];
+    const pendings = [];
+    for (const [i, sessionId] of calls.entries()) {
+      await seedMoney(h.proposalRepo, `Burst Customer ${i + 1}`, 1000 + i);
+      const { confirm } = await toConfirmOutcome(h, sessionId, `the Burst Customer ${i + 1} payment`);
+      expect(confirm!.outcome).toBe('challenge_prompt');
+      pendings.push(confirm!.pending!);
+    }
+    return { calls, pendings };
+  }
+
+  it('parallel wrong codes at 4 strikes: at most ONE is compared, the rest are refused uncompared, and the count never reaches a 6th guess', async () => {
+    const h = makeHarness();
+    await strikesInOtherCalls(h.auditRepo, 4);
+    const { calls, pendings } = await sixCallsAtTheChallenge(h);
+
+    const results = await Promise.all(
+      calls.map((sessionId, i) =>
+        continueVoiceApproval(h.deps, { ...call(sessionId), utterance: '0 0 0 0', pending: pendings[i] }),
+      ),
+    );
+
+    // A wrong code leaves a failed/lockout row only once it has been compared.
+    const compared = h.auditRepo
+      .getAll()
+      .filter((e) => (e.eventType === STRIKE_FAILED || e.eventType === STRIKE_LOCKOUT) && calls.includes(e.correlationId!));
+    expect(compared.length).toBeLessThanOrEqual(1);
+    expect(countedAttempts(h)).toBe(4 + compared.length);
+    expect(countedAttempts(h)).toBeLessThanOrEqual(5);
+    expect(results.every((r) => r.outcome === 'challenge_lockout')).toBe(true);
+    // Every call that was not compared was refused on the tenant lock.
+    const refusals = eventsOf(h, REFUSED).filter((e) => calls.includes(e.correlationId!));
+    expect(refusals).toHaveLength(calls.length - compared.length);
+    expect(refusals.every((e) => e.metadata?.lockSource === 'tenant_lock')).toBe(true);
+  });
+
+  it('parallel wrong codes from ZERO strikes: never more than 5 compared', async () => {
+    const h = makeHarness();
+    const { calls, pendings } = await sixCallsAtTheChallenge(h);
+    await Promise.all(
+      calls.map((sessionId, i) =>
+        continueVoiceApproval(h.deps, { ...call(sessionId), utterance: '0 0 0 0', pending: pendings[i] }),
+      ),
+    );
+    const compared = h.auditRepo
+      .getAll()
+      .filter((e) => (e.eventType === STRIKE_FAILED || e.eventType === STRIKE_LOCKOUT) && calls.includes(e.correlationId!));
+    expect(compared.length).toBeLessThanOrEqual(5);
+    expect(countedAttempts(h)).toBeLessThanOrEqual(5);
+  });
+
+  it('a correct code clears its reservation — it never counts as a strike', async () => {
+    const h = makeHarness();
+    await strikesInOtherCalls(h.auditRepo, 4);
+    const acme = await seedMoney(h.proposalRepo, 'Acme Corp');
+    await seedMoney(h.proposalRepo, 'Beta Corp', 5000);
+
+    const { confirm } = await toConfirmOutcome(h, 'call-right', 'the Acme payment');
+    const ok = await continueVoiceApproval(h.deps, {
+      ...call('call-right'),
+      utterance: '4271',
+      pending: confirm!.pending!,
+    });
+    expect(ok.outcome).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, acme.id))?.status).toBe('approved');
+    const reserved = eventsOf(h, PIN_ATTEMPT).find((e) => e.correlationId === 'call-right');
+    const cleared = eventsOf(h, PIN_ATTEMPT_CLEARED).find((e) => e.correlationId === 'call-right');
+    expect(cleared?.metadata).toMatchObject({ attemptId: reserved!.id, reason: 'passed' });
+    expect(countedAttempts(h)).toBe(4);
+
+    // The next call still has its 5th guess.
+    const { confirm: next } = await toConfirmOutcome(h, 'call-next', 'the Beta payment');
+    expect(next!.outcome).toBe('challenge_prompt');
+  });
+
+  it('"cancel" at the challenge clears its reservation — no strike is spent', async () => {
+    const h = makeHarness();
+    await strikesInOtherCalls(h.auditRepo, 4);
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+    const { confirm } = await toConfirmOutcome(h, 'call-cancel', 'the Acme payment');
+    const kept = await continueVoiceApproval(h.deps, {
+      ...call('call-cancel'),
+      utterance: 'cancel',
+      pending: confirm!.pending!,
+    });
+    expect(kept.outcome).toBe('kept_for_later');
+    expect(countedAttempts(h)).toBe(4);
+  });
+
+  it('an attempt that cannot be RESERVED is refused without comparing — the right code approves nothing and no strike row is written', async () => {
+    const h = makeHarness({ auditRepo: new LosesWritesAuditRepository([PIN_ATTEMPT]) });
+    const money = await seedMoney(h.proposalRepo, 'Acme Corp');
+    const { confirm } = await toConfirmOutcome(h, 'call-nowrite', 'the Acme payment');
+    expect(confirm!.outcome).toBe('challenge_prompt');
+
+    const right = await quietly(() =>
+      continueVoiceApproval(h.deps, {
+        ...call('call-nowrite'),
+        utterance: 'four two seven one',
+        pending: confirm!.pending!,
+      }),
+    );
+    expect(right.outcome).toBe('challenge_lockout');
+    expect(right.pending).toBeNull();
+    expect((await h.proposalRepo.findById(TENANT, money.id))?.status).toBe('ready_for_review');
+    expect(eventsOf(h, 'proposal.voice_approval_challenge_passed')).toHaveLength(0);
+    const refusal = eventsOf(h, REFUSED).find((e) => e.correlationId === 'call-nowrite');
+    expect(refusal?.metadata).toMatchObject({ lockSource: 'reservation_failed' });
+
+    const wrong = await quietly(() =>
+      continueVoiceApproval(h.deps, {
+        ...call('call-nowrite'),
+        utterance: '0 0 0 0',
+        pending: confirm!.pending!,
+      }),
+    );
+    expect(wrong.outcome).toBe('challenge_lockout');
+    expect(eventsOf(h, STRIKE_FAILED)).toHaveLength(0);
+  });
+
+  it('no audit repository wired → nothing can be reserved → the challenge refuses, even with the right code', async () => {
+    const h = makeHarness({ auditRepo: null });
+    const money = await seedMoney(h.proposalRepo, 'Acme Corp');
+    const refused = await quietly(() =>
+      continueVoiceApproval(h.deps, {
+        ...call('call-noaudit'),
+        utterance: 'four two seven one',
+        pending: { action: 'approve', stage: 'challenge', proposalId: money.id },
+      }),
+    );
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect((await h.proposalRepo.findById(TENANT, money.id))?.status).toBe('ready_for_review');
+  });
+});
+
+describe('#1233 review — the owner alert is CLAIMED before it is sent', () => {
+  async function engageTheLock(h: Harness, sessionId = 'call-engage') {
+    await strikesInOtherCalls(h.auditRepo, 4);
+    await seedMoney(h.proposalRepo, 'Acme Corp');
+    const { confirm } = await toConfirmOutcome(h, sessionId, 'the Acme payment');
+    const r = await continueVoiceApproval(h.deps, {
+      ...call(sessionId),
+      utterance: '0 0 0 0',
+      pending: confirm!.pending!,
+    });
+    expect(r.outcome).toBe('challenge_lockout');
+  }
+
+  it('a claim another call already holds → nothing is sent', async () => {
+    const h = makeHarness({ alertRepo: { claim: async () => false } });
+    await engageTheLock(h);
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it('a claim store that errors → nothing is sent (it could not be deduplicated)', async () => {
+    const h = makeHarness({
+      alertRepo: {
+        claim: async () => {
+          throw new Error('claim store down');
+        },
+      },
+    });
+    await quietly(() => engageTheLock(h));
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it('a send that fails after winning the claim is NOT retried by later refusals — no re-texting at the caller’s pace', async () => {
+    let attempts = 0;
+    const h = makeHarness({
+      sendSms: async () => {
+        attempts += 1;
+        throw new Error('sms provider down');
+      },
+    });
+    await quietly(() => engageTheLock(h));
+    for (const sessionId of ['call-later-1', 'call-later-2', 'call-later-3']) {
+      const r = await quietly(() =>
+        startVoiceApproval(h.deps, { ...call(sessionId), action: 'approve', reference: 'the Acme payment' }),
+      );
+      expect(r.outcome).toBe('challenge_lockout');
+    }
+    expect(attempts).toBe(1);
+    expect(h.claims).toHaveLength(1);
+  });
+});
+
 describe('#1051 tenant-wide PIN lock — the owner alert', () => {
   it('when the lock first engages the owner gets exactly ONE alert, with no approval link — and no one-tap link goes out while locked', async () => {
     const h = makeHarness();
@@ -415,6 +665,11 @@ describe('#1051 tenant-wide PIN lock — the owner alert', () => {
     expect(h.sent[0].body).not.toMatch(/https?:\/\/|token=|approve\?/i);
     expect(h.sent[0].body.toLowerCase()).toContain('locked');
     expect(eventsOf(h, TENANT_LOCK_ALERTED)).toHaveLength(1);
+    // Claimed once, keyed by the attempt that engaged the lock (this call's 3rd code).
+    const engaging = eventsOf(h, PIN_ATTEMPT).filter((e) => e.correlationId === 'call-attack').pop();
+    expect(h.claims).toEqual([
+      expect.objectContaining({ tenantId: TENANT, episodeKey: engaging!.id, strikeCount: 5 }),
+    ]);
 
     // More attempts while it stays locked: the same call, and new calls.
     await startVoiceApproval(h.deps, {
@@ -435,6 +690,7 @@ describe('#1051 tenant-wide PIN lock — the owner alert', () => {
     expect(h.sent).toHaveLength(1); // still the one alert
     expect(linkTexts(h)).toEqual([]); // never an approval link
     expect(eventsOf(h, TENANT_LOCK_ALERTED)).toHaveLength(1);
+    expect(h.claims).toHaveLength(1);
     for (const p of [acme, beta]) {
       expect((await h.proposalRepo.findById(TENANT, p.id))?.status).toBe('ready_for_review');
     }

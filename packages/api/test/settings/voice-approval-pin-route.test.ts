@@ -219,4 +219,61 @@ describe('WS21a — voice-approval PIN enrollment route', () => {
       new Date(set.voice_approval_pin_changed_at!).getTime(),
     );
   });
+
+  // ── #1233 review — the generic settings PUT is not a PIN path ────────────
+  it('GET /api/settings does not expose voice_approval_pin_changed_at', async () => {
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '4271' });
+    const res = await request(app).get('/api/settings');
+    expect(res.status).toBe(200);
+    expect(res.body.voiceApprovalPinEnrolled).toBe(true);
+    expect(res.body.escalationSettings).toBeDefined();
+    expect(res.body.escalationSettings.voice_approval_pin_changed_at).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain('voice_approval_pin_changed_at');
+  });
+
+  it('the generic PUT /api/settings cannot set a plaintext PIN — a weak "1234" is not enrolled that way', async () => {
+    const res = await request(app)
+      .put('/api/settings')
+      .send({ escalationSettings: { channel_sms: false, voice_approval_challenge: '1234' } });
+    expect(res.status).toBe(200);
+    const stored = (await settingsRepo.findByTenant(tenantId))!.escalationSettings ?? {};
+    expect(stored.voice_approval_challenge).toBeUndefined();
+    expect(stored.channel_sms).toBe(false);
+    const got = await request(app).get('/api/settings');
+    expect(got.body.voiceApprovalPinEnrolled).toBe(false);
+  });
+
+  it('the generic PUT /api/settings never drops an enrolled PIN or its change stamp, and cannot overwrite them', async () => {
+    await request(app).put('/api/settings/voice-approval-pin').send({ pin: '4271' });
+    const before = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+
+    const res = await request(app)
+      .put('/api/settings')
+      .send({
+        escalationSettings: {
+          channel_sms: false,
+          voice_approval_challenge: '1234',
+          voice_approval_pin_hash: 'deadbeef',
+          voice_approval_pin_changed_at: '2099-01-01T00:00:00.000Z',
+        },
+      });
+    expect(res.status).toBe(200);
+
+    const after = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    expect(after.channel_sms).toBe(false);
+    expect(after.voice_approval_pin_hash).toBe(before.voice_approval_pin_hash);
+    expect(after.voice_approval_pin_changed_at).toBe(before.voice_approval_pin_changed_at);
+    expect(after.voice_approval_challenge).toBeUndefined();
+  });
+
+  it('the generic PUT keeps a legacy tenant’s existing plaintext challenge (never silently un-enrolls it)', async () => {
+    await settingsRepo.update(tenantId, {
+      escalationSettings: { voice_approval_challenge: '5830' } as never,
+    });
+    const res = await request(app).put('/api/settings').send({ escalationSettings: { channel_whisper: false } });
+    expect(res.status).toBe(200);
+    const after = (await settingsRepo.findByTenant(tenantId))!.escalationSettings!;
+    expect(after.voice_approval_challenge).toBe('5830');
+    expect(after.channel_whisper).toBe(false);
+  });
 });
