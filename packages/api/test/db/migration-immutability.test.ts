@@ -540,6 +540,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['276_dispatch_analytics_event_type_en_route', 'e3635f6dfcaa29a6e7b01a96724d81db84a7ccae1bfff08714234fa40a29a11b'],
   // #975 U8 (renumbered 278 after #1188's 277): call_transcript_turns gains call_sid/session_id; voice_recording_id nullable
   ['278_call_transcript_turns_call_sid', '10b6695fe7b6da9106c56fa21f0445d46b41c7125ef2670d891701efafaf5e5a'],
+  // #1051 follow-up / #1233 review — owner-alert claim table for the tenant-wide voice PIN lock
+  // (replaces the never-merged 279_audit_events_voice_pin_lock_index)
+  ['279_create_voice_approval_pin_lock_alerts', '35edd5ee8f1f8c0cf011fa8ae30f947e2e1deaca760b5b4ccef69584ce18dce8'],
 ];
 
 function hashMigration(value: string): string {

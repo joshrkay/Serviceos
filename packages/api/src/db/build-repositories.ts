@@ -265,6 +265,8 @@ import {
 } from '../verticals/pg-training-assets';
 import { InMemoryCallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { PgCallMeBackRepository } from '../voice/call-me-back/pg-call-me-back';
+import { InMemoryVoiceApprovalPinLockAlertRepository } from '../settings/voice-approval-pin-lock-alert';
+import { PgVoiceApprovalPinLockAlertRepository } from '../settings/pg-voice-approval-pin-lock-alert';
 import { InMemoryCallTranscriptTurnRepository } from '../voice/call-transcript-turn';
 import { PgCallTranscriptTurnRepository } from '../voice/pg-call-transcript-turn';
 import { PgVoiceRepository } from '../voice/pg-voice';
@@ -443,6 +445,12 @@ export function buildRepositories(
   const callMeBackRepo = pool
     ? new PgCallMeBackRepository(pool)
     : new InMemoryCallMeBackRepository();
+
+  // #1051 / #1233 review — claims the tenant voice PIN-lock owner alert
+  // (voice_approval_pin_lock_alerts, migration 279) before it is sent.
+  const voiceApprovalPinLockAlertRepo = pool
+    ? new PgVoiceApprovalPinLockAlertRepository(pool)
+    : new InMemoryVoiceApprovalPinLockAlertRepository();
 
   // Mobile push-token store (POST/DELETE /api/devices, the proposal/owner
   // push notifiers bound further down, and account deletion's token purge) +
@@ -724,6 +732,7 @@ export function buildRepositories(
     noteRepo,
     conversationRepo,
     callMeBackRepo,
+    voiceApprovalPinLockAlertRepo,
     deviceTokenRepo,
     lookupEventRepo,
     agreementRepo,

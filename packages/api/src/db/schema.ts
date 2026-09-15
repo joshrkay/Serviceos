@@ -6890,6 +6890,32 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
       ON call_transcript_turns (tenant_id, call_sid);
   `,
+
+  // #1051 follow-up / #1233 review — the owner alert for the tenant-wide voice
+  // money-approval PIN lock is CLAIMED here before it is sent: one row per
+  // (tenant, lock episode), inserted with ON CONFLICT DO NOTHING, and only the
+  // caller whose insert lands sends the text (settings/pg-voice-approval-pin-
+  // lock-alert.ts). A NEW, empty, tiny table — deliberately NOT an index on
+  // audit_events: a blocking index build on that large table could outrun the
+  // migration statement timeout (migrate.ts) and fail the deploy. The attempt
+  // lookup itself is served by 245's idx_audit_events_tenant_created_at.
+  // The primary key is the claim; no other index is needed (every read and
+  // write is by (tenant_id, episode_key)). Idempotent; drops nothing.
+  '279_create_voice_approval_pin_lock_alerts': `
+    CREATE TABLE IF NOT EXISTS voice_approval_pin_lock_alerts (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      episode_key TEXT NOT NULL,
+      session_id TEXT,
+      strike_count INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, episode_key)
+    );
+    ALTER TABLE voice_approval_pin_lock_alerts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_approval_pin_lock_alerts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_approval_pin_lock_alerts ON voice_approval_pin_lock_alerts;
+    CREATE POLICY tenant_isolation_voice_approval_pin_lock_alerts ON voice_approval_pin_lock_alerts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

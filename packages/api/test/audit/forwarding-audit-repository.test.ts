@@ -114,6 +114,16 @@ describe('ForwardingAuditRepository', () => {
     expect(inner.findRecentByTenant).toHaveBeenCalledWith('t', { limit: 5 });
   });
 
+  it('#1051 — delegates the tenant-wide voice PIN strike lookup verbatim (the lock must not go dark through the wrap)', async () => {
+    const since = new Date('2026-09-14T12:00:00Z');
+    const inner = new InMemoryAuditRepository();
+    const spy = vi.spyOn(inner, 'findVoiceApprovalPinLockEvents').mockResolvedValue([]);
+    const repo = new ForwardingAuditRepository(inner);
+
+    await expect(repo.findVoiceApprovalPinLockEvents('t', since)).resolves.toEqual([]);
+    expect(spy).toHaveBeenCalledWith('t', since);
+  });
+
   it('does not advertise findRecentByTenant when the inner repo lacks it', () => {
     const inner: AuditRepository = {
       create: vi.fn(),
