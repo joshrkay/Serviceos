@@ -217,6 +217,11 @@ export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
     fileId: input.fileId ?? undefined,
     conversationId: input.conversationId,
     idempotencyKey: input.idempotencyKey,
+    // #1244 review — the authenticated in-app path. Mirrors the
+    // voice_recordings.source column DEFAULT (PgVoiceRepository.create never
+    // writes source); in-memory repos otherwise keep it undefined, which the
+    // #1231 allowlist treats as untrusted caller audio.
+    source: 'inapp_voice',
     status: 'pending',
     // U3 — the in-app memo path starts its routed-outcome lifecycle at
     // 'pending' so clients can distinguish "router hasn't landed yet"

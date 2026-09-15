@@ -225,13 +225,27 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
     await page.screenshot({ path: join(SCREENSHOT_DIR, '7.3-uncatalogued-badge.png') });
 
     // ── 7.2 on the real surface (report-only row, observed here for free):
-    //    the uncatalogued line caps confidence below the auto-approve floor
-    //    and the card's Approve is DISABLED until the operator resolves it —
-    //    the product refuses the one-tap approve. Run 2 of this spec tried
-    //    to click it and timed out on `disabled`; that is the product being
-    //    right. So: no second estimate row is expected — the durable proof
-    //    for THIS leg is the proposal row itself. ────────────────────────
-    await expect(approveBtn2).toBeDisabled();
+    //    an AI-estimated (uncatalogued) line blocks AUTO-approve, never
+    //    MANUAL approve. By design (#1242, Josh's call 2026-09-15):
+    //      - catalog-resolver.ts keeps uncatalogued lines OUT of
+    //        `missingFields` (an uncatalogued line has no candidates to pick,
+    //        so a missingFields entry would deadlock approval forever) and
+    //        sets `requiresReview` instead — a structural, threshold-
+    //        independent hard block on auto-approve only;
+    //      - estimate-task.ts stamps `payload._meta.overallConfidence = 'low'`
+    //        whenever any line is uncatalogued, which auto-approve.ts treats
+    //        as blocking regardless of score or tenant threshold;
+    //      - AIProposalCard.tsx disables Approve ONLY for `missingFields`, so
+    //        the owner — who sees the per-line "AI-estimated" badge and the
+    //        "not in the tenant catalog" doubt above — may still approve it
+    //        by hand.
+    //    So the guarantee asserted here is: the button stays ENABLED (manual
+    //    approval allowed; this spec never clicks it), and the proposal row
+    //    carries the 'low' stamp and stays `ready_for_review` — never
+    //    auto-approved or executed, and no estimate row is created for it —
+    //    across a few seconds of polling. (An earlier version asserted the
+    //    button was disabled; that expectation was stale — see #1242.) ─────
+    await expect(approveBtn2).toBeEnabled();
 
     let proposalRow: Record<string, unknown> | undefined;
     for (let i = 0; i < 100 && !proposalRow; i++) {
@@ -250,12 +264,54 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
       proposalRow = rows[0];
       if (!proposalRow) await page.waitForTimeout(100);
     }
-    logRows('7.3 uncatalogued draft — proposals row (line pricingSource, capped confidence, NOT approved)', proposalRow);
+    logRows('7.2/7.3 uncatalogued draft — proposals row (line pricingSource, low stamp, capped confidence, NOT approved)', proposalRow);
     expect(proposalRow, 'the uncatalogued draft persisted as a proposal').toBeTruthy();
     expect(proposalRow!.line_pricing_source).toBe('uncatalogued');
-    expect(proposalRow!.status).not.toBe('approved');
+    // The persisted auto-approve block: any uncatalogued line stamps 'low'.
+    expect(proposalRow!.overall_confidence).toBe('low');
     // Cap: strictly below the 0.9 auto-approve floor (catalog-resolver.ts).
     expect(Number(proposalRow!.confidence_score)).toBeLessThan(0.9);
+
+    // Never auto-approves: poll ~5s — the proposal stays ready_for_review, no
+    // approval/execution audit lands for it, and no estimate row is created
+    // for Priya's job (only the owner's click could do that, and this spec
+    // never clicks).
+    const uncataloguedProposalId = proposalRow!.id as string;
+    let pollSnapshot: Record<string, unknown> = {};
+    for (let i = 0; i < 10; i++) {
+      const [statusRow] = await queryAsTenant(
+        tenantA.tenantId,
+        `SELECT status FROM proposals WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, uncataloguedProposalId],
+      );
+      const approvalAudit = await queryAsTenant(
+        tenantA.tenantId,
+        `SELECT event_type FROM audit_events
+          WHERE tenant_id = $1 AND entity_id = $2
+            AND event_type IN ('proposal.approved', 'proposal.executed')`,
+        [tenantA.tenantId, uncataloguedProposalId],
+      );
+      const priyaEstimates = await queryAsTenant(
+        tenantA.tenantId,
+        `SELECT e.id
+           FROM estimates e
+           JOIN jobs j ON j.id = e.job_id
+           JOIN customers c ON c.id = j.customer_id
+          WHERE e.tenant_id = $1 AND c.first_name = 'Priya'`,
+        [tenantA.tenantId],
+      );
+      pollSnapshot = {
+        poll: i + 1,
+        status: statusRow?.status,
+        approvalAuditRows: approvalAudit.length,
+        priyaEstimateRows: priyaEstimates.length,
+      };
+      expect(statusRow?.status, `poll ${i + 1}: the uncatalogued draft must stay ready_for_review`).toBe('ready_for_review');
+      expect(approvalAudit, `poll ${i + 1}: no approval/execution audit for the uncatalogued draft`).toHaveLength(0);
+      expect(priyaEstimates, `poll ${i + 1}: no estimate row for the uncatalogued draft`).toHaveLength(0);
+      await page.waitForTimeout(500);
+    }
+    logRows('7.2 uncatalogued draft — after ~5s of polling (never auto-approved)', pollSnapshot);
 
     // ── 7.3: the DB CHECK refuses an invalid pricing_source on a raw
     //    UPDATE (estimate_line_items_pricing_source_check, migration
