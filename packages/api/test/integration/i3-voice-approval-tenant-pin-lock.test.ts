@@ -7,7 +7,6 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL } from '../../src/audit/pg-audit';
 import { createAuditEvent } from '../../src/audit/audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
-import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { ensureTenantSettings, DEFAULT_ESCALATION_SETTINGS } from '../../src/settings/settings';
 import { hashVoiceApprovalPin } from '../../src/settings/voice-approval-pin';
 import { createSettingsRouter } from '../../src/routes/settings';
@@ -66,12 +65,19 @@ const REFUSED = 'proposal.voice_approve_refused_challenge_lockout';
 
 type Sent = { to: string; body: string };
 
+/** Distinct customer names, so a spoken reference resolves to exactly one item. */
+const TREES = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Fir', 'Ginkgo', 'Hazel', 'Ironwood'];
+
 describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () => {
   let pool: Pool;
   let proposalRepo: PgProposalRepository;
   let auditRepo: PgAuditRepository;
   let settingsRepo: PgSettingsRepository;
   let previousSecret: string | undefined;
+  // RED-phase shim: loaded dynamically so the behavioural tests run (and fail
+  // on behaviour) before the claim repository exists.
+  type ClaimRepo = { claim(input: { tenantId: string; episodeKey: string; sessionId?: string; strikeCount: number }): Promise<boolean> };
+  let PgVoiceApprovalPinLockAlertRepository: new (pool: Pool) => ClaimRepo;
 
   beforeAll(async () => {
     previousSecret = process.env.TENANT_ENCRYPTION_KEY;
@@ -80,6 +86,17 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     proposalRepo = new PgProposalRepository(pool);
     auditRepo = new PgAuditRepository(pool);
     settingsRepo = new PgSettingsRepository(pool);
+    try {
+      ({ PgVoiceApprovalPinLockAlertRepository } = await import(
+        '../../src/settings/pg-voice-approval-pin-lock-alert'
+      ));
+    } catch {
+      PgVoiceApprovalPinLockAlertRepository = class {
+        async claim(): Promise<boolean> {
+          throw new Error('PgVoiceApprovalPinLockAlertRepository does not exist yet');
+        }
+      } as unknown as new (pool: Pool) => ClaimRepo;
+    }
   });
 
   afterAll(async () => {
@@ -411,9 +428,9 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     const calls = Array.from({ length: 8 }, (_, i) => `i3t-race-${i + 1}`);
     const pendings = [];
     for (const [i, sessionId] of calls.entries()) {
-      await seedMoney(tenant.tenantId, `Race ${i + 1}`, 2000 + i);
+      await seedMoney(tenant.tenantId, `${TREES[i]} Landscaping`, 2000 + i);
       const ref = { ...warmup, sessionId };
-      const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: `the Race ${i + 1} payment` });
+      const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: `the ${TREES[i]} payment` });
       expect(start.outcome).toBe('readback');
       const confirm = await continueVoiceApproval(deps, { ...ref, utterance: 'yes', pending: start.pending! });
       expect(confirm.outcome).toBe('challenge_prompt');
@@ -460,9 +477,10 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     const calls = Array.from({ length: 9 }, (_, i) => `i3t-race0-${i + 1}`);
     const pendings = [];
     for (const [i, sessionId] of calls.entries()) {
-      await seedMoney(tenant.tenantId, `Zero ${i + 1}`, 4000 + i);
+      await seedMoney(tenant.tenantId, `${TREES[i]} Roofing`, 4000 + i);
       const ref = { tenantId: tenant.tenantId, sessionId, ownerSession: true } as const;
-      const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: `the Zero ${i + 1} payment` });
+      const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: `the ${TREES[i]} payment` });
+      expect(start.outcome).toBe('readback');
       const confirm = await continueVoiceApproval(deps, { ...ref, utterance: 'yes', pending: start.pending! });
       expect(confirm.outcome).toBe('challenge_prompt');
       pendings.push(confirm.pending!);

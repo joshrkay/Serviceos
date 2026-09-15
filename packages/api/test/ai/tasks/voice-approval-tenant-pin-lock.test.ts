@@ -47,6 +47,8 @@ const NEIGHBOUR = 't-pin-lock-neighbour';
 const PIN = '4271';
 const OWNER_PHONE = '+15125550100';
 const HOUR = 60 * 60 * 1000;
+/** Distinct customer names, so a spoken reference resolves to exactly one item. */
+const TREES = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Fir', 'Ginkgo', 'Hazel', 'Ironwood'];
 
 const STRIKE_FAILED = 'proposal.voice_approval_challenge_failed';
 const STRIKE_LOCKOUT = 'proposal.voice_challenge_lockout';
@@ -451,8 +453,8 @@ describe('#1233 review — the budget is enforced on attempts reserved BEFORE th
     const calls = ['burst-1', 'burst-2', 'burst-3', 'burst-4', 'burst-5', 'burst-6'];
     const pendings = [];
     for (const [i, sessionId] of calls.entries()) {
-      await seedMoney(h.proposalRepo, `Burst Customer ${i + 1}`, 1000 + i);
-      const { confirm } = await toConfirmOutcome(h, sessionId, `the Burst Customer ${i + 1} payment`);
+      await seedMoney(h.proposalRepo, `${TREES[i]} Landscaping`, 1000 + i);
+      const { confirm } = await toConfirmOutcome(h, sessionId, `the ${TREES[i]} payment`);
       expect(confirm!.outcome).toBe('challenge_prompt');
       pendings.push(confirm!.pending!);
     }
