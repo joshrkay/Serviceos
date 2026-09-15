@@ -13,6 +13,7 @@ import {
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
 } from '../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { CALLER_UTTERANCE_FENCE_PROMPT_SECTION } from '../../src/ai/orchestration/intent-classifier';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
 import {
   InMemoryOnCallRepository,
@@ -1867,7 +1868,9 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
     // Customer protection still on; owner lookups off when flag resolver fails.
-    expect(systemMessages.length).toBe(2);
+    // #894 — plus the caller-utterance fence rule every S1 caller turn carries.
+    expect(systemMessages.length).toBe(3);
+    expect(systemMessages[2].content).toBe(CALLER_UTTERANCE_FENCE_PROMPT_SECTION);
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
     ).toBe(false);

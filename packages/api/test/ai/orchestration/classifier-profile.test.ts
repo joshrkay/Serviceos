@@ -20,6 +20,7 @@ import {
   type ClassifierProfile,
 } from '../../../src/ai/orchestration/classifier-profile';
 import {
+  CALLER_UTTERANCE_FENCE_PROMPT_SECTION,
   classifyIntent,
   CUSTOMER_PROTECTION_PROMPT_SECTION,
   EXTENDED_INTENTS_PROMPT_SECTION,
@@ -232,9 +233,11 @@ describe('classifyIntent — profile wiring', () => {
       gateway,
     );
     const system = systemMessagesOf(gateway);
-    expect(system).toHaveLength(2);
+    expect(system).toHaveLength(3);
     expect(system[0].content).toBe(buildClassifierSystemPrompt('caller'));
     expect(system[1].content).toBe(CUSTOMER_PROTECTION_PROMPT_SECTION);
+    // #894 — the fenced caller utterance's data-not-instructions rule, last.
+    expect(system[2].content).toBe(CALLER_UTTERANCE_FENCE_PROMPT_SECTION);
     expect(result.intentType).toBe('lookup_balance');
   });
 
@@ -251,8 +254,10 @@ describe('classifyIntent — profile wiring', () => {
       gateway,
     );
     const system = systemMessagesOf(gateway);
-    expect(system).toHaveLength(1);
+    // #894 — field_tech is S1: its only extra message is the caller-utterance fence rule.
+    expect(system).toHaveLength(2);
     expect(system[0].content).toBe(buildClassifierSystemPrompt('field_tech'));
+    expect(system[1].content).toBe(CALLER_UTTERANCE_FENCE_PROMPT_SECTION);
   });
 
   it("owner_line keeps owner + protection + extended sections", async () => {
