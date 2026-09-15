@@ -44,9 +44,6 @@ const INTENDED_DOWNGRADES: ReadonlyMap<string, { mainTier: Tier; expectedTier: T
   ['a cómo sale el gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source, no "¿" (confirmed in the #1253 round-2 review)' }],
   ['a cómo sale el gas del tanque!', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source' }],
   ['a como sale el gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source, no accent' }],
-  ['a cómo sale gas del tanque', { mainTier: 'E1', expectedTier: 'E2', why: '"a cómo" is only a price idiom, even without the article' }],
-  ['a cómo sale el gas de la estufa', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source' }],
-  ['a cómo sale el gas por la llave de la estufa', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source' }],
   ['a cómo sale el gas del tanque ahorita', { mainTier: 'E1', expectedTier: 'E2', why: 'price question naming a source ("ahorita" = right now, a price today)' }],
   // #1253 round 2, rule 1: figurative / fiction / device / price readings are capped at E2, never E3.
   ['mi hijo está herido de amor', { mainTier: 'E1', expectedTier: 'E2', why: 'figurative: heartbroken' }],
@@ -57,10 +54,29 @@ const INTENDED_DOWNGRADES: ReadonlyMap<string, { mainTier: Tier; expectedTier: T
   ['casi me infarto con la cotización', { mainTier: 'E1', expectedTier: 'E2', why: 'a reaction to a quote' }],
   // #1253 round 2, rule 2: the exact shape "se cayó <article> <household object> (y|,) <cannot-move>" is E2.
   ['se cayó la tele y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
-  ['se cayó la escalera y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
   ['se cayó el refrigerador y no se puede mover', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
+  ['se cayó la tele y no se mueve.', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['¡Se cayó la tele y no se mueve!', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayo la tele y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['SE CAYÓ LA TELE Y NO SE MUEVE', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó la tele   y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó el refri y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó el mueble y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó la puerta y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó la estufa y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó el calentador y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó la caja y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó la tele y no se mueve..', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['se cayó la tele y no se mueve?', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  ['"se cayó la tele y no se mueve"', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape (r3 probe variant: case, punctuation, spacing, household object)' }],
+  // #1253 round 2, rule 3: a device as the subject right after desmayó/desvaneció is E2.
+  ['se desmayó la señal', { mainTier: 'E1', expectedTier: 'E2', why: 'device subject right after the verb (rule 3)' }],
+  ['se desmayó la tele', { mainTier: 'E1', expectedTier: 'E2', why: 'device subject right after the verb (rule 3)' }],
+  ['se desmayó el wifi', { mainTier: 'E1', expectedTier: 'E2', why: 'device subject right after the verb (rule 3)' }],
+  ['se desmayó la radio', { mainTier: 'E1', expectedTier: 'E2', why: 'device subject right after the verb (rule 3)' }],
+  ['se desmayó mi tablet', { mainTier: 'E1', expectedTier: 'E2', why: 'device subject right after the verb (rule 3)' }],
+  ['se desmayó el sistema', { mainTier: 'E1', expectedTier: 'E2', why: 'device subject right after the verb (rule 3)' }],
   ['se cayó la tele y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
-  ['se cayó la escalera y no se mueve', { mainTier: 'E1', expectedTier: 'E2', why: 'exact object-fall shape' }],
 ]);
 
 /** The two approved benign-smoke rows: the only phrases allowed to land on E3 from a higher main tier. */

@@ -742,7 +742,7 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['E1', 'sale gas de la tienda', 'accepted (#1241 item 3)'],
     ['not-E1', 'el gas sale por 50 dólares al mes', 'a number with a currency is a price'],
     // Guards for the new patterns: objects that fall, pets, air conditioning.
-    ['not-E1', 'se cayó la tele y no se puede mover', 'a TV fell'],
+    ['not-E1', 'se cayó la tele y no se puede mover', 'a TV fell (exact shape → E2)'],
     ['E1', 'se cayó el árbol, no se mueve', 'not a household object and not the exact shape (#1253 round 2)'],
     ['E1', 'se cayó la tele y mi hijo no se puede mover', 'an object fell on a person'],
     ['E1', 'se cayó el niño y no se mueve', 'a child fell'],
@@ -822,7 +822,7 @@ describe('#1245 round 2 + #1241 — injury follow-ups, gas leak grammar, price q
     ['se cayó la tele y no se puede mover', 'E2'],
     ['mi perro se tragó una moneda', 'E2'],
     ['mi gato se tomó el anticongelante', 'E2'],
-    ['se cayó la escalera y no se puede mover', 'E2'],
+    ['se cayó la escalera y no se puede mover', 'E1'],
     ['se cayó el refrigerador y no se puede mover', 'E2'],
     ['a cómo sale el gas del tanque', 'E2'],
   ] as const)('price question / human-check row: %j is %s', (utterance, tier) => {
@@ -870,7 +870,7 @@ describe('#1253 round 2 — E2 floor for heuristic suppressors, exact object-fal
     ['hay humo de la carne asada en el patio', 'E3'],
     // Rule 2 — object fall is E2 only as the exact utterance shape.
     ['se cayó el refrigerador y no se puede mover', 'E2'],
-    ['se cayó la escalera y no se puede mover', 'E2'],
+    ['se cayó la escalera y no se puede mover', 'E1'],
     ['se cayó la tele y no se mueve', 'E2'],
     ['se cayó la tele sobre la nena y no se mueve', 'E1'],
     ['se cayó la puerta y no se mueve mi viejo', 'E1'],
@@ -909,6 +909,105 @@ describe('#1253 round 2 — E2 floor for heuristic suppressors, exact object-fal
     ['quedó atrapado debajo del mueble', 'E1'],
   ] as const)('%j is %s', (utterance, tier) => {
     expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+});
+
+
+// ─── #1253 round 3 ───────────────────────────────────────────────────────────
+
+describe('#1253 round 3 — falling objects on people, gas smell words, leak path after a price question, entrapment, one E2 floor', () => {
+  it.each([
+    // 1 — something falls on a person, in either word order
+    ['se cayó la tele encima del niño', 'E1'],
+    ['la tele se cayó sobre mi hijo', 'E1'],
+    ['se le vino encima el estante', 'E1'],
+    ['se cayó el librero sobre el niño', 'E1'],
+    ['se cayó el mueble encima de mi hija', 'E1'],
+    ['se derrumbó el techo encima de él', 'E1'],
+    // 2 — standalone gas-smell wording (main misses these too)
+    ['apesta a gas', 'E1'],
+    ['huele feo a gas', 'E1'],
+    ['hay un olorcito a gas', 'E1'],
+    ['it stinks of gas', 'E1'],
+    ['smells bad like gas', 'E1'],
+    // 3 — "el" is required; a leak path after the question is a leak
+    ['mira a cómo sale el gas de la estufa', 'E1'],
+    ['a cómo sale el gas de la estufa, no le puedo cerrar', 'E1'],
+    ['a cómo sale gas del tanque', 'E1'],
+    ['a cómo sale el gas por la llave de la estufa', 'E1'],
+    ['a cómo sale el gas de la estufa', 'E1'],
+    ['cuánto sale el gas del tanque, ya no le puedo cerrar', 'E1'],
+    ['a cómo sale el gas del tanque', 'E2'],
+    ['¿a cómo sale el gas por la tubería nueva?', 'E2'],
+    ['¿cuánto sale el gas del calentador nuevo?', 'E2'],
+    // 4 — escalera, ventana, silla and mesa are not in the exact object-fall shape
+    ['se cayó la escalera y no se mueve', 'E1'],
+    ['se cayó la ventana y no se mueve', 'E1'],
+    ['se cayó la silla y no se mueve', 'E1'],
+    ['se cayó la mesa y no se mueve', 'E1'],
+    ['se cayó la tele y no se mueve', 'E2'],
+    ['se cayó el refri y no se mueve', 'E2'],
+    // 5 — falls, entrapment, water, unresponsiveness (main misses these too)
+    ['se cayó por las escaleras', 'E1'],
+    ['rodó por las escaleras', 'E1'],
+    ['se cayó del tejado', 'E1'],
+    ['se callo del techo', 'E1'],
+    ['quedó prensado debajo del carro', 'E1'],
+    ['quedó atorado debajo del carro', 'E1'],
+    ['el niño quedó atrapado en la secadora', 'E1'],
+    ['se cayó a la alberca', 'E1'],
+    ['el niño se cayó a la alberca', 'E1'],
+    ['no contesta', 'E1'],
+    ['mi papá no contesta', 'E1'],
+    ['está atrapado en el elevador', 'E2'],
+    ['el técnico no contesta', 'E2'],
+  ] as const)('%j is %s', (utterance, tier) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe(tier);
+  });
+
+  // 7 — ONE E2 floor: every heuristic reading that lowers an E1 phrase lands on
+  // E2, never E3. The only E3 readings are the two approved smoke shapes (and the
+  // #1234 routine igniter/CO-device readings, which are not heuristic suppressors).
+  it.each([
+    ['gas price question', '¿cuánto sale el gas en Phoenix?'],
+    ['bare price / English sentence', 'el recibo me sale el gas muy caro'],
+    ['flame colour', 'veo llamas amarillas en el calentador'],
+    ['benign smoke outside the approved shapes', 'hay humo de la parrilla'],
+    ['injury idiom: price', 'el precio es un infarto'],
+    ['injury idiom: laugh', 'tengo convulsiones de risa'],
+    ['injury idiom: excess', 'sobredosis de café'],
+    ['injury idiom: device', 'el control remoto no responde'],
+    ['injury idiom: device subject', 'se desmayó la señal del wifi'],
+    ['injury idiom: unanswered', 'el técnico no contesta'],
+    ['injury idiom: figurative', 'mi hijo está herido de amor'],
+    ['injury idiom: fiction', 'la película era sobre alguien inconsciente'],
+    ['injury idiom: pet', 'mi perro se tragó una moneda'],
+    ['injury idiom: stuck', 'está atrapado en el elevador'],
+    ['exact object-fall shape', 'se cayó la tele y no se mueve'],
+  ])('the E2 floor holds for %s: %j', (_suppressor, utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E2');
+  });
+
+  it.each([
+    'hay humo cuando prendo la calefacción por primera vez',
+    'hay humo de la carne asada en el patio',
+  ])('the approved smoke shape %j is the only heuristic reading at E3', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E3');
+  });
+
+  // 6 — the approved-smoke check was quadratic on a flood of "asador".
+  it('classifies a 32k-character barbecue-smoke flood in under 40 ms', () => {
+    const long = 'hay humo del asador '.repeat(1600);
+    expect(long.length).toBeGreaterThanOrEqual(32000);
+    classifyCallerSafety(`${long}warm-up`, {});
+    let best = Infinity;
+    for (let i = 0; i < 3; i += 1) {
+      const transcript = `${long}${' '.repeat(i + 1)}en el patio`;
+      const t0 = performance.now();
+      classifyCallerSafety(transcript, {});
+      best = Math.min(best, performance.now() - t0);
+    }
+    expect(best).toBeLessThan(40);
   });
 });
 
