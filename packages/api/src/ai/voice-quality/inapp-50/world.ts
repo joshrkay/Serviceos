@@ -195,7 +195,15 @@ export function referenceDayIso(
   // so the anchor makes the phrase resolvable without changing what it names.
   const resolved = resolveDateTime(`${match[0]} at 12:00 pm`, { timezone, now });
   if (!resolved.ok) return undefined;
-  return DateTime.fromISO(resolved.startUtc, { zone: timezone }).toISODate() ?? undefined;
+  const day = DateTime.fromISO(resolved.startUtc, { zone: timezone });
+  // A bare WEEKDAY never names today here: the seed it has to meet
+  // (`nextTuesdayAt14`) is always 1..7 days ahead, never today, so on a
+  // Tuesday morning "Tuesday" must mean next week's — otherwise the register's
+  // Tuesday cases fail every Tuesday before noon for reasons that have nothing
+  // to do with the code under test. "today" keeps meaning today.
+  const isWeekday = !/^(today|tomorrow)$/i.test(match[0]);
+  const today = DateTime.fromJSDate(now, { zone: timezone }).toISODate();
+  return (isWeekday && day.toISODate() === today ? day.plus({ days: 7 }) : day).toISODate() ?? undefined;
 }
 
 const INV_NUMBER_RE = /\bINV-\d+\b/i;
