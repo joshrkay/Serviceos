@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildUntrustedContentSection,
-  MAX_UNTRUSTED_CONTENT_CHARS,
   UNTRUSTED_CONTENT_BLOCK_BEGIN,
   UNTRUSTED_CONTENT_BLOCK_END,
 } from '../../src/ai/untrusted-content';
+import { MAX_UNTRUSTED_CONTENT_CHARS } from '../../src/ai/untrusted-text-matching';
 import { hasLiveFenceMarker } from '../support/model-reads';
 
 /**

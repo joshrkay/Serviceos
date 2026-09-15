@@ -241,8 +241,9 @@ export function buildRecentMessagesPromptSections(
     trustedLines,
     ...(untrusted.length > 0
       ? {
+          // One segment per message: each is capped on its own (#1229 re-review).
           untrustedBlock: buildUntrustedContentSection(
-            untrusted.join('\n'),
+            untrusted,
             'Customer messages in this conversation',
           ),
         }
