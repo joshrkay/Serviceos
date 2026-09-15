@@ -234,11 +234,12 @@ export const E1_HAZARD_PATTERNS_ES: ReadonlyArray<SpanishHazardPattern> = [
   { keyword: 'gas saliendo', pattern: '(?:gas|propano) (?:est[aá] )?saliendo (?:de|del|por)' },
   {
     keyword: 'hay gas en el aire',
-    pattern: 'hay (?:mucho )?(?:gas|propano) en (?:el aire|el ambiente|la casa|toda la casa|la cocina|el cuarto|el s[oó]tano)',
+    pattern:
+      'hay (?:mucho )?(?:gas|propano) en (?:el aire(?! acondicionado)|el ambiente|la casa|toda la casa|la cocina|el cuarto|el s[oó]tano)',
   },
   {
     keyword: 'gas está chiflando',
-    pattern: '(?:gas|propano)(?: [\\p{L}]+){0,2} (?:est[aá] )?(?:chiflando|silbando|chifla|silba|zumbando)',
+    pattern: '(?:gas|propano)(?: [\\p{L}]+){0,2} (?:est[aá] )?(?:chiflando|silbando|chifla|silba)',
   },
   {
     keyword: 'tubería de gas rota',
@@ -407,7 +408,9 @@ export interface SpanishInjuryPattern {
    * película sobre alguien inconsciente") only without a harm signal, since
    * they always name a person.
    */
-  readonly idiomWhen?: ReadonlyArray<'price' | 'laugh' | 'excess' | 'device' | 'figurative' | 'fiction'>;
+  readonly idiomWhen?: ReadonlyArray<
+    'price' | 'laugh' | 'excess' | 'device' | 'figurative' | 'fiction' | 'pet'
+  >;
   /**
    * A RECENT past report (ayer, anoche, hace N ≤ 7 días) still leaves a live
    * hazard: a shock yesterday means the outlet is still energised. Such a
@@ -424,7 +427,7 @@ const ES_BODY_PART =
   '(?:manos?|brazos?|piernas?|cara|pies?|piel|dedos?|espalda|cuerpo|cuello|pecho|ojos?|cabeza|rodillas?)';
 /** A fall, or someone found on the floor. */
 const ES_FALL =
-  '(?:se (?:(?:me|le|nos) )?(?:cay[oó]|ha ca[ií]do|cayeron)|(?:l[oa]s?|le) encontr(?:[eé]|amos|aron) (?:tirad[oa]s?|en el (?:piso|suelo))|est[aá]n? tirad[oa]s?)';
+  `(?:se (?:(?:me|le|nos) )?(?:cay[oó]|ha ca[ií]do|cayeron)(?! (?:el|la|los|las|un|una) (?!(?:${ES_PERSON_NOUN})(?![\\p{L}\\p{N}]))[\\p{L}]+)|(?:l[oa]s?|le) encontr(?:[eé]|amos|aron) (?:tirad[oa]s?|en el (?:piso|suelo))|est[aá]n? tirad[oa]s?)`;
 /** Cannot move or get up: "no se puede mover/levantar/parar", "no se mueve", "no puede levantarse". */
 const ES_CANNOT_GET_UP =
   'no (?:se (?:(?:puede|pueden) (?:mover|levantar|parar)|mueve|mueven|levanta|levantan|para|paran)|(?:puede|pueden) (?:moverse|levantarse|pararse))';
@@ -570,6 +573,7 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
     pattern:
       '(?:se )?(?:tom[oó]|bebi[oó]|trag[oó]) (?:(?:un poco de|mucho|mucha) )?(?:veneno|cloro|lej[ií]a|blanqueador|thinner|tiner|gasolina|anticongelante|raticida|matarratas|insecticida|pesticida|destapacaños|destapacanos|sosa c[aá]ustica|[aá]cido|amon[ií]aco)',
     aspect: 'event',
+    idiomWhen: ['pet'],
   },
   { keyword: 'envenenado', pattern: 'envenenad[oa]s?|intoxicad[oa]s?', aspect: 'state' },
   {
@@ -577,12 +581,14 @@ export const E1_INJURY_PATTERNS_ES: ReadonlyArray<SpanishInjuryPattern> = [
     pattern:
       'se (?:(?:me|le|te|nos) )?trag[oó] (?:(?:una|un|unas|unos) )?(?:pilas?|bater[ií]as?|monedas?|im[aá]n(?:es)?|imanes|clavos?|tornillos?|aretes?|anillos?|canicas?|botones?|alfileres?|vidrios?)',
     aspect: 'event',
+    idiomWhen: ['pet'],
   },
   {
     keyword: 'picadura con hinchazón',
     pattern:
       '(?:me|le|te|nos|les) (?:pic[oó]|mordi[oó]) (?:un |una )?(?:alacr[aá]n|escorpi[oó]n|ara[nñ]a|abeja|avispa|v[ií]bora|serpiente|culebra|hormigas?|perro|gato)[^.;!?]{0,40}?(?:se (?:(?:le|me) )?est[aá] hinchando|se (?:(?:le|me) )?hinch[oó]|hinchad[oa]|inflamad[oa]|no puede respirar|le cuesta respirar)',
     aspect: 'state',
+    idiomWhen: ['pet'],
   },
   {
     keyword: 'tomó muchas pastillas',
@@ -925,6 +931,7 @@ const ES_INJURY_IDIOM_RE: Record<InjuryIdiom, RegExp> = {
     /(?<![\p{L}\p{N}])(?:bomba|motor|calentador|boiler|caldera|planta|generador|carro|coche|m[aá]quina|compresor|carburador|equipo|termostato|control|pantalla|tel[eé]fono|celular|app|aplicaci[oó]n|sistema|aparato|aire|minisplit|estufa|horno|lavadora|secadora|refrigerador|breaker|interruptor|panel|sensor|detector|alarma|puerta|port[oó]n|timbre|focos?|l[aá]mparas?|bombillas?|luz|luces|computadora|laptop|tablet|televisi[oó]n|tele|router|m[oó]dem|internet|wifi|se[nñ]al|t[eé]cnico|plomero|electricista|oficina|empresa|compa[nñ][ií]a|mensajes?|llamadas?|correos?|whatsapp)(?![\p{L}\p{N}])/iu,
   figurative:
     /(?<![\p{L}\p{N}])(?:de amor|del coraz[oó]n|en su orgullo|en el orgullo|emocionalmente|sentimentalmente)(?![\p{L}\p{N}])/iu,
+  pet: /(?<![\p{L}\p{N}])(?:perr[oa]s?|perrit[oa]s?|gat[oa]s?|gatit[oa]s?|mascotas?|cachorr[oa]s?)(?![\p{L}\p{N}])/iu,
   fiction:
     /(?<![\p{L}\p{N}])(?:pel[ií]cula|serie|novela|libro|historia|cuento|programa|video|sue[nñ]o|so[nñ][eé])(?: [\p{L}]+){0,3} (?:sobre|acerca de)(?![\p{L}\p{N}])/iu,
 };
