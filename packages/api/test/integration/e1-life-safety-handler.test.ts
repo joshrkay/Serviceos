@@ -24,29 +24,20 @@
  * legs that lane does not: the English/Spanish language pair, the booking
  * revocation, the never-books clause, and T1.
  *
- * TEST-ONLY. The E1 script text (decision O-2) and
- * `ai/agents/customer-calling/emergency-tier.ts` semantics are NOT touched —
- * which is why the Spanish leg below SURFACES a defect instead of fixing it.
+ * The E1 script text (decision O-2) is NOT touched.
  *
- * ─── GAP FOUND, NOT FIXED (see the last two tests) ────────────────────────
- * A Spanish gas-leak report does NOT reach the E1 life-safety path. It
- * classifies E2 (urgent dispatch): the caller hears the generic dispatcher
- * line instead of the evacuation script, the call does NOT terminate, and a
- * booking drafted earlier in the call is NOT revoked. Cause:
- * `classifyCallerSafety` derives E1 only from the English-only
- * `E1_HAZARD_PHRASES` table; the Spanish phrases ("fuga de gas",
- * "huele a gas", "escape de gas", "olor a gas") exist only in
- * `emergency-detector.ts`'s `SPANISH_EMERGENCY_KEYWORDS`, which
- * `classifyCallerSafety` folds in as the `backstop` candidate at tier E2
- * unconditionally — discarding the `language` field `detectEmergency`
- * already returns. `emergency-detector.ts:28` documents the opposite
- * intent ("a Spanish speaker on an 'English' call still says 'fuga de gas',
- * and the life-safety path must fire either way").
- * Fixing it means changing emergency-tier.ts semantics, which this lane is
- * forbidden from doing, and it is a life-safety change that needs a named
- * owner. Pinned below both ways: the current behaviour as a passing
- * characterization, and the DESIRED behaviour as an `it.fails` that will
- * start failing (and so demand a row update) the day it is fixed.
+ * ─── #1056 — the Spanish leg (the last two tests) ─────────────────────────
+ * This file first pinned a gap: a Spanish gas-leak report classified E2, so
+ * the caller heard the dispatcher line instead of the evacuation script, the
+ * call did not terminate, and a booking drafted earlier stayed live.
+ * `classifyCallerSafety` derived E1 only from the English-only
+ * `E1_HAZARD_PHRASES` table and folded the Spanish backstop keywords in at E2.
+ * #1056 adds the Spanish hazard table and carries the matched phrase's
+ * language onto the classification, so "fuga de gas" now takes the E1
+ * terminal path. No reviewed Spanish E1 script exists, so the English
+ * evacuation script (which leads with 911) is spoken; the Spanish text
+ * awaits sign-off (O-2). The companion test pins that a Spanish NON-hazard
+ * call is not dragged onto the E1 path.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
@@ -66,8 +57,10 @@ import type { VoiceSession } from '../../src/ai/agents/customer-calling/types';
 
 /** English E1 gas report — matches E1_HAZARD_PHRASES ('smell gas'). */
 const EN_GAS = 'I smell gas in my kitchen and it is getting stronger';
-/** Spanish E1 gas report — matches SPANISH_EMERGENCY_KEYWORDS ('fuga de gas'). */
+/** Spanish E1 gas report — matches the Spanish E1 hazard table ('fuga de gas'). */
 const ES_GAS = 'hay una fuga de gas en mi casa, huele muy fuerte';
+/** Spanish routine report (no hot water) — no hazard, must NOT be E1. */
+const ES_NO_HOT_WATER = 'no hay agua caliente';
 
 const EMERGENCY_EVENT_SUFFIX = '.emergency_detected';
 const BOOKING_REVOKED_EVENT = 'agent.calling.e1_booking_revoked';
@@ -364,34 +357,22 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
   });
 
   /**
-   * GAP, PINNED — this test documents what the product does TODAY for a
-   * Spanish gas-leak report. It is deliberately a passing characterization,
-   * not an aspiration: see the file header. Read it together with the
-   * `it.fails` below, which states the behaviour the row actually needs.
+   * #1056 control — a Spanish call with NO hazard must not be dragged onto the
+   * E1 path by the new Spanish table: no emergency row, no evacuation script,
+   * no hang-up, and the booking drafted on the call stays live.
    */
-  it('SPANISH — GAP (surfaced on #1014, NOT fixed here): "fuga de gas" classifies E2, so the E1 terminal path never runs', async () => {
+  it('SPANISH non-hazard: "no hay agua caliente" is not E1 — the call continues and its booking stays live', async () => {
     const c = await inboundCall(tenantB.tenantId);
     const bookingId = await bookThroughTheCall(c);
 
-    const twiml = await turn(c, ES_GAS);
+    const twiml = await turn(c, ES_NO_HOT_WATER);
 
-    // The keyword IS detected — as the E2 backstop, not E1.
-    const row = emergencyRow(await sessionAudit(c.tenantId, c.session.id));
-    expect(row).toBeDefined();
-    expect(row?.metadata).toMatchObject({ keyword: 'fuga de gas' });
-    // No tier is recorded, because the E2 branch does not stamp one.
-    expect((row?.metadata as Record<string, unknown>).tier).toBeUndefined();
-
-    // The consequences, all three of them:
-    // 1. the call does NOT close on the life-safety script…
+    expect(emergencyRow(await sessionAudit(c.tenantId, c.session.id))).toBeUndefined();
     expect(c.session.machine.currentState).not.toBe('terminated');
-    expect(c.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
-    // 2. …the caller hears the dispatcher-bridge copy instead of the
-    //    evacuation direction ("leave the building…without using light
-    //    switches"), and
+    expect(c.session.machine.currentContext.escalationReason).not.toBe('life_safety_e1');
     expect(twiml).not.toContain('leave the building');
-    expect(twiml).toContain('on-call dispatcher');
-    // 3. the booking drafted on this call is STILL LIVE.
+    expect(twiml).not.toContain('<Hangup/>');
+    // Give a (wrongly) detached revocation the same window the E1 test polls in.
     await new Promise((r) => {
       setTimeout(r, 600);
     });
@@ -402,27 +383,38 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
   });
 
   /**
-   * DESIRED behaviour for the Spanish leg — NOT met today. Marked `.fails` so
-   * the suite stays honest (no red CI for a defect this lane is forbidden to
-   * fix) while still breaking loudly the day someone DOES fix it, which is
-   * the signal to delete this test, promote the assertions into the English
-   * test above, and re-grade row 2.5.
-   *
-   * Assertions are the exact English ones, in Spanish.
+   * DESIRED behaviour for the Spanish leg (#1056), flipped from `it.fails`.
+   * The English assertions, in Spanish: tier E1, `terminated`, the evacuation
+   * script with 911 and `<Hangup/>`, and the drafted booking revoked with its
+   * own audit row. T1: tenant A's proposals are untouched by tenant B's call.
    */
-  it.fails(
-    'SPANISH — DESIRED (currently FAILS, see the GAP above): "fuga de gas" must reach the E1 terminal path and revoke the booking',
+  it(
+    'SPANISH — DESIRED: "fuga de gas" must reach the E1 terminal path and revoke the booking',
     async () => {
       const c = await inboundCall(tenantB.tenantId);
       const bookingId = await bookThroughTheCall(c);
+      const tenantAProposalsBefore = (await proposalRepo.findByTenant(tenantA.tenantId))
+        .map((p) => `${p.id}:${p.status}`)
+        .sort();
 
       const twiml = await turn(c, ES_GAS);
 
       const row = emergencyRow(await sessionAudit(c.tenantId, c.session.id));
-      expect(row?.metadata).toMatchObject({ tier: 'E1', reason: 'life_safety_e1' });
+      expect(row?.metadata).toMatchObject({
+        tier: 'E1',
+        reason: 'life_safety_e1',
+        keyword: 'fuga de gas',
+        language: 'es',
+      });
       expect(c.session.machine.currentState).toBe('terminated');
       expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+      // The evacuation script (English until the Spanish text is signed off,
+      // O-2), 911, then the hang-up — no further <Gather>, no dispatcher bridge.
+      expect(twiml).toContain('leave the building immediately');
+      expect(twiml).toContain('911');
       expect(twiml).toContain('<Hangup/>');
+      expect(twiml).not.toContain('<Gather');
+      expect(twiml).not.toContain('on-call dispatcher');
 
       const booking = await waitFor(
         () => proposalRepo.findById(c.tenantId, bookingId),
@@ -430,6 +422,29 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
         'spanish E1 booking revoked',
       );
       expect(booking?.rejectionReason).toBe('life_safety_emergency');
+      // The revocation's audit leg is written after the status flip, still
+      // detached, so it is polled too.
+      const revokeRows = await waitFor(
+        () => auditRepo.findByEntity(c.tenantId, 'proposal', bookingId),
+        (rows) => rows.some((e) => e.eventType === BOOKING_REVOKED_EVENT),
+        'spanish E1 revocation audit row',
+      );
+      expect(revokeRows.map((e) => e.eventType)).toContain(BOOKING_REVOKED_EVENT);
+      expect(revokeRows.find((e) => e.eventType === BOOKING_REVOKED_EVENT)?.metadata).toMatchObject({
+        proposalType: 'create_appointment',
+        fromStatus: 'draft',
+        reason: 'life_safety_e1',
+      });
+
+      // T1 — nothing of tenant A's moved, and B's revocation row is not under A.
+      const tenantAProposalsAfter = (await proposalRepo.findByTenant(tenantA.tenantId))
+        .map((p) => `${p.id}:${p.status}`)
+        .sort();
+      expect(tenantAProposalsAfter).toEqual(tenantAProposalsBefore);
+      expect(await auditRepo.findByEntity(tenantA.tenantId, 'proposal', bookingId)).toHaveLength(0);
+      console.log(
+        `#1056 spanish E1: tenantB=${c.tenantId} session=${c.session.id} booking=${bookingId} tenantA=${tenantA.tenantId}`,
+      );
     },
   );
 });

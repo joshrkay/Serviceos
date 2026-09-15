@@ -314,6 +314,73 @@ describe('RV-071 — owner approval over Gather (end to end)', () => {
     expect((await h.proposalRepo.findById(TENANT, estimate.id))?.status).toBe('approved');
   });
 
+  it('#1051 — a locked session REBUILT with its in-memory approval state gone still refuses money approval over Gather, and the re-derived lock lands back on the session', async () => {
+    const approvePayment = (reference: string) =>
+      JSON.stringify({
+        intentType: 'approve_proposal',
+        confidence: 0.95,
+        extractedEntities: { proposalReference: reference },
+      });
+    const gateway = gatewayReturning([
+      approvePayment('the Acme payment'), // start the money dialogue
+      approvePayment('the payment'), // after the rebuild
+      APPROVE_CLASSIFICATION, // capture-class Henderson estimate
+    ]);
+    const h = makeHarness({ gateway, challenge: '4271' });
+    const estimate = await seedPending(h.proposalRepo); // capture-class
+    const payment = createProposal({
+      tenantId: TENANT,
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+      createdBy: 'voice',
+    });
+    await h.proposalRepo.create(payment);
+    await h.proposalRepo.updateStatus(TENANT, payment.id, 'ready_for_review');
+    const sessionId = await startCall(h, OWNER_PHONE, 'CA-lock-rebuild');
+    const turn = (speechResult: string) =>
+      h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-lock-rebuild',
+        speechResult,
+        confidence: 0.9,
+        tenantId: TENANT,
+      });
+
+    expect(await turn('approve the Acme payment')).toContain('Acme Corp');
+    expect(await turn('yes')).toContain('approval code');
+    expect(await turn('0 0 0 0')).toContain('didn’t match');
+    expect(await turn('1 1 1 1')).toContain('didn’t match');
+    expect(await turn('2 2 2 2')).toContain('Too many incorrect codes');
+    const session = h.store.get(sessionId)!;
+    expect(session.voiceApprovalState).toMatchObject({ challengeLockedOut: true });
+
+    // REBUILD: the session keeps its id and tenant, but the adapter-side
+    // approval state is gone — what a restart / replica hop leaves behind.
+    session.voiceApprovalState = undefined;
+    session.pendingVoiceApproval = undefined;
+
+    const refusedTwiml = await turn('approve the payment');
+    expect(refusedTwiml.toLowerCase()).toContain('security');
+    expect(refusedTwiml).not.toContain('approval code');
+    expect(session.pendingVoiceApproval).toBeUndefined();
+    // The processor merged the audit-derived lock back onto the session.
+    expect(session.voiceApprovalState).toMatchObject({
+      challengeLockedOut: true,
+      challengeFailCount: 3,
+    });
+    const refusedEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_approve_refused_challenge_lockout');
+    expect(refusedEvent?.metadata).toMatchObject({ lockSource: 'audit_trail', sessionId });
+    expect((await h.proposalRepo.findById(TENANT, payment.id))?.status).toBe('ready_for_review');
+
+    // Capture-class approval in the rebuilt, locked session still works.
+    expect(await turn('approve the Henderson estimate')).toContain('Henderson Family LLC');
+    expect(await turn('yes')).toContain('Approved');
+    expect((await h.proposalRepo.findById(TENANT, estimate.id))?.status).toBe('approved');
+  });
+
   it('WS19 — "what\'s waiting" walks the whole queue over Gather (batch)', async () => {
     // "what's waiting" classifies as approve_proposal on an owner line; the
     // deterministic batch trigger (reference/utterance) starts a batch walk.
