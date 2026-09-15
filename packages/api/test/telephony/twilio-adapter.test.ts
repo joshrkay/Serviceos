@@ -12,6 +12,7 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
 } from '../../src/ai/agents/customer-calling/tts-copy';
+import { EMERGENCY_SAFETY_LINE } from '../../src/ai/agents/customer-calling/emergency-detector';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { CALLER_UTTERANCE_FENCE_PROMPT_SECTION } from '../../src/ai/orchestration/intent-classifier';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
@@ -2503,6 +2504,73 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
     expect(session.machine.currentContext.escalationReason).not.toBe('life_safety_e1');
     expect(twiml).not.toContain('leave the building');
     expect(twiml).not.toContain('<Hangup/>');
+  });
+
+  // #1220 review — before #1220 a Spanish gas leak was E2 and the caller heard
+  // the 911 line in Spanish. E1 must not take that away: a Spanish caller
+  // (matched phrase OR session language) hears the EXISTING Spanish 911 line
+  // first, in the Spanish voice, then the English evacuation script. No new
+  // wording — the line is the catalogued RV-142 translation.
+  const ES_911_LINE = renderTtsText(EMERGENCY_SAFETY_LINE, {}, 'es');
+
+  it('#1220 review handleGather: a Spanish gas leak on an English session hears the Spanish 911 line (Spanish voice) BEFORE the English E1 script', async () => {
+    expect(ES_911_LINE).toBe('Si alguien está en peligro inmediato, cuelgue y llame al 911.');
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-911-1' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-911-1',
+      speechResult: 'hay una fuga de gas en mi casa',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    const spanishSay = `<Say voice="Polly.Mia-Neural">${ES_911_LINE}</Say>`;
+    expect(twiml).toContain(spanishSay);
+    expect(twiml.split(ES_911_LINE)).toHaveLength(2); // spoken exactly once
+    expect(twiml.indexOf(spanishSay)).toBeLessThan(twiml.indexOf('leave the building immediately'));
+    // The English script keeps the English voice on an English session.
+    expect(twiml).toMatch(/<Say voice="Polly\.Joanna">If anyone is in immediate danger[^<]*leave the building immediately/);
+    expect(twiml).toContain('<Hangup/>');
+  });
+
+  it('#1220 review handleGather: a Spanish-session caller reporting in English ("I smell gas") still hears the Spanish 911 line first', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-es-911-2' });
+    session.language = 'es';
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-es-911-2',
+      speechResult: 'I smell gas in the kitchen',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect(session.machine.currentState).toBe('terminated');
+    expect(twiml).toContain(`<Say voice="Polly.Mia-Neural">${ES_911_LINE}</Say>`);
+    expect(twiml.indexOf(ES_911_LINE)).toBeLessThan(twiml.indexOf('leave the building immediately'));
+    expect(twiml).toContain('<Hangup/>');
+  });
+
+  it('#1220 review handleGather: an English caller on an English session hears no Spanish line (English E1 unchanged)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-en-911-3' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-en-911-3',
+      speechResult: 'I smell gas in the kitchen',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect(session.machine.currentState).toBe('terminated');
+    expect(twiml).not.toContain(ES_911_LINE);
+    expect(twiml).not.toContain('Polly.Mia-Neural');
+    expect(twiml.match(/<Say /g)).toHaveLength(1);
+    expect(twiml).toContain('leave the building immediately');
   });
 
   it('ANS-001: the 911 TwiML returns even when the E1 tenant-alert SMS hangs forever', async () => {

@@ -408,6 +408,11 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
       });
       expect(c.session.machine.currentState).toBe('terminated');
       expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+      // #1220 review — the catalogued Spanish 911 line comes FIRST, in the
+      // Spanish voice, as it did on the E2 path before #1220.
+      const es911 = '<Say voice="Polly.Mia-Neural">Si alguien está en peligro inmediato, cuelgue y llame al 911.</Say>';
+      expect(twiml).toContain(es911);
+      expect(twiml.indexOf(es911)).toBeLessThan(twiml.indexOf('leave the building immediately'));
       // The evacuation script (English until the Spanish text is signed off,
       // O-2), 911, then the hang-up — no further <Gather>, no dispatcher bridge.
       expect(twiml).toContain('leave the building immediately');

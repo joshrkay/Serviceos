@@ -34,6 +34,8 @@ import {
   normalizeEnrollmentPin,
   hashVoiceApprovalPin,
   resolveVoiceApprovalPinSecret,
+  weakPinReason,
+  type WeakPinReason,
   MIN_PIN_DIGITS,
   MAX_PIN_DIGITS,
 } from '../settings/voice-approval-pin';
@@ -114,6 +116,17 @@ const voiceApprovalPinSchema = z.object({
   pin: z.string().min(1).max(32),
 });
 
+// #1051 follow-up — the refusal copy for a guessable PIN. Deliberately free of
+// example digits: the response must never echo (or hint at) the PIN sent.
+const WEAK_PIN_MESSAGES: Record<WeakPinReason, string> = {
+  repeated_digits:
+    'That PIN is too easy to guess: it repeats a single digit. Choose a less predictable PIN.',
+  sequence:
+    'That PIN is too easy to guess: it is a straight run of digits. Choose a less predictable PIN.',
+  common:
+    'That PIN is too easy to guess: it is one of the most commonly used PINs. Choose a less predictable PIN.',
+};
+
 /**
  * WS21a — strip the money-approval PIN credential out of any settings payload
  * returned to a client. Both the HMAC hash and the deprecated plaintext
@@ -134,6 +147,8 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
     const {
       voice_approval_pin_hash: _hash,
       voice_approval_challenge: _legacy,
+      // #1233 review — when the PIN last changed is not the client's business either.
+      voice_approval_pin_changed_at: _changedAt,
       ...rest
     } = escalation;
     redactedEscalation = rest;
@@ -143,6 +158,32 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
     ...(redactedEscalation ? { escalationSettings: redactedEscalation } : {}),
     voiceApprovalPinEnrolled: enrolled,
   };
+}
+
+/**
+ * #1233 review — the escalation keys only `PUT /api/settings/voice-approval-pin`
+ * may write. The generic settings PUT replaces the whole `escalation_settings`
+ * blob, so it carries these over from the stored row: it can never drop an
+ * enrolled PIN (or a legacy plaintext challenge, or the change stamp), and —
+ * because the request schema strips them — never set one.
+ */
+const PIN_CREDENTIAL_KEYS = [
+  'voice_approval_pin_hash',
+  'voice_approval_pin_changed_at',
+  'voice_approval_challenge',
+] as const;
+
+function carryPinCredential(
+  next: Partial<EscalationSettings>,
+  stored: Partial<EscalationSettings> | undefined,
+): Partial<EscalationSettings> {
+  const merged: Partial<EscalationSettings> = { ...next };
+  for (const key of PIN_CREDENTIAL_KEYS) {
+    delete merged[key];
+    const value = stored?.[key];
+    if (typeof value === 'string' && value.length > 0) merged[key] = value;
+  }
+  return merged;
 }
 
 interface SettingsRouterDependencies {
@@ -477,6 +518,16 @@ export function createSettingsRouter(
           }
         }
 
+        // #1233 review — the escalation blob is replaced wholesale; keep the
+        // PIN credential exactly as stored (see carryPinCredential).
+        if (parsed.escalationSettings) {
+          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
+          parsed.escalationSettings = carryPinCredential(
+            parsed.escalationSettings,
+            stored?.escalationSettings,
+          ) as typeof parsed.escalationSettings;
+        }
+
         const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo);
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
@@ -530,6 +581,16 @@ export function createSettingsRouter(
             { field: 'pin' },
           );
         }
+        const digits = normalizeEnrollmentPin(pin);
+        // #1051 follow-up — a guessable PIN would spend the tenant-wide
+        // 5-strikes-a-day budget in one call; refuse it before anything is stored.
+        const weakness = weakPinReason(digits);
+        if (weakness) {
+          throw new ValidationError(WEAK_PIN_MESSAGES[weakness], {
+            field: 'pin',
+            reason: weakness,
+          });
+        }
         const secret = resolveVoiceApprovalPinSecret();
         if (!secret) {
           // No server secret configured — refuse rather than store an
@@ -539,7 +600,6 @@ export function createSettingsRouter(
             { field: 'pin' },
           );
         }
-        const digits = normalizeEnrollmentPin(pin);
         const hash = hashVoiceApprovalPin(digits, tenantId, secret);
 
         // Merge into the existing escalation blob (the JSONB write REPLACES
@@ -549,6 +609,9 @@ export function createSettingsRouter(
         const nextEscalation: Partial<EscalationSettings> = {
           ...(existing.escalationSettings ?? {}),
           voice_approval_pin_hash: hash,
+          // #1051 follow-up — same write as the hash: the tenant-wide PIN lock
+          // counts only strikes after this instant, so a change resets it.
+          voice_approval_pin_changed_at: new Date().toISOString(),
         };
         delete nextEscalation.voice_approval_challenge;
         const updated = await updateSettings(
@@ -601,7 +664,12 @@ export function createSettingsRouter(
         // cleared PIN can never fall back to a stale legacy credential. After
         // this, money/irreversible voice approvals refuse with the one-tap SMS.
         const escalation = resolveEscalationSettings(existing);
-        const nextEscalation: Partial<EscalationSettings> = { ...escalation };
+        const nextEscalation: Partial<EscalationSettings> = {
+          ...escalation,
+          // #1051 follow-up — clearing is a PIN change too: strikes spent
+          // against the old PIN stop counting toward the tenant-wide lock.
+          voice_approval_pin_changed_at: new Date().toISOString(),
+        };
         delete nextEscalation.voice_approval_pin_hash;
         delete nextEscalation.voice_approval_challenge;
         const updated = await updateSettings(
