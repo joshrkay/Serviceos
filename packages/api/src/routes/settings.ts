@@ -147,6 +147,8 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
     const {
       voice_approval_pin_hash: _hash,
       voice_approval_challenge: _legacy,
+      // #1233 review — when the PIN last changed is not the client's business either.
+      voice_approval_pin_changed_at: _changedAt,
       ...rest
     } = escalation;
     redactedEscalation = rest;
@@ -156,6 +158,32 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
     ...(redactedEscalation ? { escalationSettings: redactedEscalation } : {}),
     voiceApprovalPinEnrolled: enrolled,
   };
+}
+
+/**
+ * #1233 review — the escalation keys only `PUT /api/settings/voice-approval-pin`
+ * may write. The generic settings PUT replaces the whole `escalation_settings`
+ * blob, so it carries these over from the stored row: it can never drop an
+ * enrolled PIN (or a legacy plaintext challenge, or the change stamp), and —
+ * because the request schema strips them — never set one.
+ */
+const PIN_CREDENTIAL_KEYS = [
+  'voice_approval_pin_hash',
+  'voice_approval_pin_changed_at',
+  'voice_approval_challenge',
+] as const;
+
+function carryPinCredential(
+  next: Partial<EscalationSettings>,
+  stored: Partial<EscalationSettings> | undefined,
+): Partial<EscalationSettings> {
+  const merged: Partial<EscalationSettings> = { ...next };
+  for (const key of PIN_CREDENTIAL_KEYS) {
+    delete merged[key];
+    const value = stored?.[key];
+    if (typeof value === 'string' && value.length > 0) merged[key] = value;
+  }
+  return merged;
 }
 
 interface SettingsRouterDependencies {
@@ -488,6 +516,16 @@ export function createSettingsRouter(
               errors: validationErrors,
             });
           }
+        }
+
+        // #1233 review — the escalation blob is replaced wholesale; keep the
+        // PIN credential exactly as stored (see carryPinCredential).
+        if (parsed.escalationSettings) {
+          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
+          parsed.escalationSettings = carryPinCredential(
+            parsed.escalationSettings,
+            stored?.escalationSettings,
+          ) as typeof parsed.escalationSettings;
         }
 
         const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo);

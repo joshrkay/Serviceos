@@ -667,11 +667,15 @@ describe('#1051 tenant-wide PIN lock — the owner alert', () => {
     expect(h.sent[0].body).not.toMatch(/https?:\/\/|token=|approve\?/i);
     expect(h.sent[0].body.toLowerCase()).toContain('locked');
     expect(eventsOf(h, TENANT_LOCK_ALERTED)).toHaveLength(1);
-    // Claimed once, keyed by the attempt that engaged the lock (this call's 3rd code).
-    const engaging = eventsOf(h, PIN_ATTEMPT).filter((e) => e.correlationId === 'call-attack').pop();
+    // Claimed once, keyed by the attempt that engaged the lock: the 5th counted
+    // attempt ordered by (createdAt, id) — attempts in one call can share a millisecond.
+    const ordered = eventsOf(h, PIN_ATTEMPT).sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
     expect(h.claims).toEqual([
-      expect.objectContaining({ tenantId: TENANT, episodeKey: engaging!.id, strikeCount: 5 }),
+      expect.objectContaining({ tenantId: TENANT, episodeKey: ordered[4].id, strikeCount: 5 }),
     ]);
+    expect(ordered[4].correlationId).toBe('call-attack');
 
     // More attempts while it stays locked: the same call, and new calls.
     await startVoiceApproval(h.deps, {

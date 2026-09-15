@@ -43,9 +43,12 @@
  *      Tenant-wide (#1051 follow-up): 5 strikes for the TENANT inside a
  *      rolling 24h window — across every session and call, only strikes
  *      after the latest PIN change — lock voice money approval for the whole
- *      tenant (voice-approval-tenant-lock.ts). The owner gets ONE link-free
- *      alert when it engages, and no one-tap approval link is minted while
- *      it holds.
+ *      tenant (voice-approval-tenant-lock.ts). Every spoken code is RESERVED
+ *      durably before it is compared and re-counted including itself, so
+ *      parallel calls cannot buy a 6th guess (#1233 review); an attempt that
+ *      cannot be reserved is never compared. The owner gets ONE link-free
+ *      alert when it engages (claimed before it is sent), and no one-tap
+ *      approval link is minted while it holds.
  *   6. Pending-edit parity — approval is blocked while
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
@@ -73,7 +76,14 @@ import {
   createProposalSmsEvent,
 } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
-import { createAuditEvent, type AuditEvent, type AuditRepository } from '../../audit/audit';
+import {
+  createAuditEvent,
+  type AuditEvent,
+  type AuditRepository,
+  VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT,
+  VOICE_APPROVAL_PIN_ATTEMPT_EVENT,
+} from '../../audit/audit';
+import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import {
@@ -82,9 +92,11 @@ import {
 } from '../../settings/voice-approval-pin';
 import { ValidationError } from '../../shared/errors';
 import {
+  attemptWithinBudget,
   decideTenantPinLock,
   TENANT_PIN_STRIKE_LIMIT,
   TENANT_PIN_STRIKE_WINDOW_MS,
+  type ReservedPinAttempt,
   type TenantPinLockDecision,
 } from './voice-approval-tenant-lock';
 import { createLogger } from '../../logging/logger';
@@ -273,6 +285,12 @@ export interface VoiceApprovalDeps {
    * instruction is recorded instead of applied — never a silent guess.
    */
   editInterpreter?: ProposalEditInterpreter;
+  /**
+   * #1233 review — claims the tenant PIN-lock owner alert (insert-if-absent per
+   * tenant + lock episode) before it is sent. Absent → no alert is sent: one
+   * that cannot be deduplicated could be re-sent on every refusal.
+   */
+  pinLockAlertRepo?: VoiceApprovalPinLockAlertRepository;
 }
 
 export interface VoiceApprovalSessionRef {
@@ -417,7 +435,7 @@ interface ChallengeLock {
    */
   tenantStrikes: number;
   /** Why the session is locked — recorded on the refusal's audit row. */
-  source?: 'session' | 'audit_trail' | 'lookup_failed' | 'tenant_lock';
+  source?: 'session' | 'audit_trail' | 'lookup_failed' | 'tenant_lock' | 'reservation_failed';
   /**
    * What the audit trail knows that the in-memory session state does not,
    * handed back as `sessionState` so a rebuilt session parks its strikes
@@ -482,6 +500,8 @@ async function resolveChallengeLock(
 
   let strikes = 0;
   let lockoutRecorded = false;
+  const reserved: string[] = [];
+  const cleared = new Set<string>();
   for (const row of rows) {
     // Defense in depth: the query is already tenant- and session-scoped.
     if (row.tenantId !== ref.tenantId || row.correlationId !== ref.sessionId) continue;
@@ -490,8 +510,16 @@ async function resolveChallengeLock(
     } else if (row.eventType === CHALLENGE_LOCKOUT_EVENT) {
       strikes += 1;
       lockoutRecorded = true;
+    } else if (row.eventType === VOICE_APPROVAL_PIN_ATTEMPT_EVENT) {
+      reserved.push(row.id);
+    } else if (row.eventType === VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT) {
+      const attemptId = row.metadata?.attemptId;
+      if (typeof attemptId === 'string') cleared.add(attemptId);
     }
   }
+  // #1233 review — a reserved attempt that was never cleared is a spent guess
+  // even when its strike row (and the marker) were lost.
+  strikes = Math.max(strikes, reserved.filter((id) => !cleared.has(id)).length);
 
   const failCount = Math.max(memoryCount, strikes);
   if (lockoutRecorded || failCount >= MAX_CHALLENGE_ATTEMPTS) {
@@ -517,22 +545,22 @@ async function resolveChallengeLock(
   return { locked: false, failCount, tenantStrikes, ...restored };
 }
 
-// ─── #1051 follow-up — the tenant-wide PIN lock, from the same strike rows ───
+// ─── #1051 follow-up — the tenant-wide PIN lock, over reserved attempts ─────
 
-/** The owner alert written once per tenant lock episode (see voice-approval-tenant-lock.ts). */
+/** Audit trail of the owner alert (the dedupe itself is the claim, #1233 review). */
 const TENANT_LOCK_ALERT_EVENT = 'proposal.voice_approval_tenant_lock_alerted';
 
 type TenantPinLockState =
-  /** No audit repository wired — no strike was ever recorded, so no tenant lock. */
+  /** No audit repository wired — nothing can be reserved or counted. */
   | { status: 'unrecorded' }
-  /** The strike lookup failed — callers refuse (fail closed). */
+  /** The attempt lookup failed — callers refuse (fail closed). */
   | { status: 'lookup_failed' }
   | { status: 'resolved'; decision: TenantPinLockDecision };
 
 /**
  * When the tenant's voice-approval PIN last changed (set, changed or cleared —
  * stamped by the PIN route). Unknown or unreadable → null, which counts every
- * strike in the window: the stricter reading.
+ * attempt in the window: the stricter reading.
  */
 async function readPinChangedAt(deps: VoiceApprovalDeps, tenantId: string): Promise<Date | null> {
   if (!deps.settingsRepo) return null;
@@ -547,11 +575,11 @@ async function readPinChangedAt(deps: VoiceApprovalDeps, tenantId: string): Prom
 }
 
 /**
- * #1051 follow-up — resolve the TENANT-wide lock: this tenant's strike rows
- * (and owner-alert rows) across every voice session, read through the
- * tenant-scoped repository under RLS, then decided by `decideTenantPinLock`.
- * Rows from two windows back are read so the decision can tell whether the
- * last alert still covers a continuous lock episode.
+ * #1051 follow-up — resolve the TENANT-wide lock: this tenant's reserved and
+ * cleared attempt rows across every voice session, read through the
+ * tenant-scoped repository under RLS (served by migration 245's
+ * idx_audit_events_tenant_created_at), then decided by `decideTenantPinLock`.
+ * Called after an attempt is reserved, the count includes that attempt.
  */
 async function resolveTenantPinLock(
   deps: VoiceApprovalDeps,
@@ -564,7 +592,7 @@ async function resolveTenantPinLock(
   try {
     rows = await auditRepo.findVoiceApprovalPinLockEvents(
       tenantId,
-      new Date(now.getTime() - 2 * TENANT_PIN_STRIKE_WINDOW_MS),
+      new Date(now.getTime() - TENANT_PIN_STRIKE_WINDOW_MS),
     );
   } catch (err) {
     logger.error(
@@ -573,21 +601,22 @@ async function resolveTenantPinLock(
     );
     return { status: 'lookup_failed' };
   }
-  const strikes: Date[] = [];
-  const alerts: Date[] = [];
+  const attempts: ReservedPinAttempt[] = [];
+  const clearedIds = new Set<string>();
   for (const row of rows) {
     // Defense in depth: the query is already tenant-scoped.
     if (row.tenantId !== tenantId) continue;
-    if (row.eventType === CHALLENGE_FAILED_EVENT || row.eventType === CHALLENGE_LOCKOUT_EVENT) {
-      strikes.push(row.createdAt);
-    } else if (row.eventType === TENANT_LOCK_ALERT_EVENT) {
-      alerts.push(row.createdAt);
+    if (row.eventType === VOICE_APPROVAL_PIN_ATTEMPT_EVENT) {
+      attempts.push({ id: row.id, at: row.createdAt });
+    } else if (row.eventType === VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT) {
+      const attemptId = row.metadata?.attemptId;
+      if (typeof attemptId === 'string') clearedIds.add(attemptId);
     }
   }
   const pinChangedAt = await readPinChangedAt(deps, tenantId);
   return {
     status: 'resolved',
-    decision: decideTenantPinLock({ strikes, alerts, pinChangedAt, now }),
+    decision: decideTenantPinLock({ attempts, clearedIds, pinChangedAt, now }),
   };
 }
 
@@ -601,13 +630,90 @@ async function tenantPinLockWithholdsLinks(
 }
 
 /**
+ * #1233 review — reserve a PIN attempt durably BEFORE the spoken code is
+ * compared. The reservation counts against the tenant (and this session) until
+ * it is cleared, so a guess whose outcome is never recorded — a crash, a lost
+ * strike write — still spends the budget. No audit repository, or a failed
+ * write → `failed`: the caller refuses and never compares the code.
+ *
+ * Correctness relies on the reservation being COMMITTED before the count that
+ * follows it; voice approval runs on the Twilio webhook path, outside any
+ * request-scoped transaction, so each audit write commits on its own.
+ */
+async function reservePinAttempt(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  proposalId: string,
+): Promise<{ status: 'reserved'; attemptId: string } | { status: 'failed' }> {
+  const context = { tenantId: ref.tenantId, sessionId: ref.sessionId, proposalId };
+  if (!deps.auditRepo) {
+    logger.error('voice approval PIN attempt cannot be reserved (no audit repository) — refusing without comparing', context);
+    return { status: 'failed' };
+  }
+  try {
+    const saved = await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId: ref.tenantId,
+        actorId: VOICE_APPROVAL_ACTOR_ID,
+        actorRole: 'system',
+        eventType: VOICE_APPROVAL_PIN_ATTEMPT_EVENT,
+        entityType: 'proposal',
+        entityId: proposalId || ref.sessionId,
+        correlationId: ref.sessionId,
+        metadata: { channel: 'voice', sessionId: ref.sessionId },
+      }),
+    );
+    return { status: 'reserved', attemptId: saved.id };
+  } catch (err) {
+    logger.error('voice approval PIN attempt reservation failed — refusing without comparing (fail closed)', {
+      ...context,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { status: 'failed' };
+  }
+}
+
+type PinAttemptClearReason = 'passed' | 'cancelled' | 'refused_over_limit' | 'lookup_failed';
+
+/**
+ * #1233 review — clear a reserved attempt that must not count: the right code,
+ * a cancel, or an attempt refused before comparison. A lost clearing write
+ * leaves the attempt counting (fail closed) and is logged.
+ */
+async function clearPinAttempt(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  proposalId: string,
+  attemptId: string,
+  reason: PinAttemptClearReason,
+): Promise<void> {
+  try {
+    await writeAudit(deps, ref, VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT, proposalId, {
+      attemptId,
+      reason,
+    });
+  } catch (err) {
+    logger.error('voice approval PIN attempt could not be cleared — it keeps counting against the tenant (fail closed)', {
+      tenantId: ref.tenantId,
+      sessionId: ref.sessionId,
+      proposalId,
+      attemptId,
+      reason,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * #1051 follow-up — tell the owner, ONCE per lock episode, that voice money
  * approval is locked. The text carries NO approval link: someone is guessing
- * the PIN, so the alert must not hand out another way to approve. Re-resolves
- * the lock from the durable rows (the strike that engaged it is already
- * written), sends only when an alert is due, and records the alert row that
- * suppresses the next one. A failed or unroutable send records nothing, so a
- * later refusal retries it.
+ * the PIN, so the alert must not hand out another way to approve.
+ *
+ * #1233 review — the alert is CLAIMED before it is sent: insert-if-absent keyed
+ * by (tenant, the attempt that engaged this episode). Only the claim winner
+ * sends. A lost claim, a claim that errors, or no claim store → nothing is
+ * sent; a send that fails after winning is logged and never retried, so
+ * nobody can make the owner's phone buzz by calling again.
  */
 async function alertOwnerOfTenantPinLock(
   deps: VoiceApprovalDeps,
@@ -615,39 +721,55 @@ async function alertOwnerOfTenantPinLock(
   proposalId: string,
 ): Promise<void> {
   const tenant = await resolveTenantPinLock(deps, ref.tenantId);
-  if (tenant.status !== 'resolved' || !tenant.decision.alertDue) return;
-  const { strikeCount } = tenant.decision;
-  const context = { tenantId: ref.tenantId, sessionId: ref.sessionId, proposalId, strikeCount };
-  const sendSms = deps.oneTapFallback?.sendSms;
+  if (tenant.status !== 'resolved' || !tenant.decision.engagingAttemptId) return;
+  const { strikeCount, engagingAttemptId } = tenant.decision;
+  const context = { tenantId: ref.tenantId, sessionId: ref.sessionId, proposalId, strikeCount, episodeKey: engagingAttemptId };
+  if (!deps.pinLockAlertRepo) {
+    logger.warn('voice approval tenant PIN lock engaged — no alert claim store wired, so no alert is sent', context);
+    return;
+  }
+  let won: boolean;
   try {
-    const ownerPhone = await deps.oneTapFallback?.resolveOwnerPhone?.(ref.tenantId);
-    if (!sendSms || !ownerPhone) {
-      logger.warn('voice approval tenant PIN lock engaged — no owner SMS route for the alert', context);
-      return;
-    }
-    await sendSms(
-      ownerPhone,
-      `Security alert: voice approval of money items is locked on your account after ${strikeCount} incorrect approval codes in 24 hours. Nothing was approved. Approve pending items in the app, and if those calls were not you, change your voice approval PIN.`,
-    );
+    won = await deps.pinLockAlertRepo.claim({
+      tenantId: ref.tenantId,
+      episodeKey: engagingAttemptId,
+      sessionId: ref.sessionId,
+      strikeCount,
+    });
   } catch (err) {
-    logger.warn('voice approval tenant PIN lock alert failed to send', {
+    logger.error('voice approval tenant PIN lock alert claim failed — no alert sent', {
       ...context,
       error: err instanceof Error ? err.message : String(err),
     });
     return;
   }
+  if (!won) return;
+
+  let smsSent = false;
   try {
-    await writeAudit(deps, ref, TENANT_LOCK_ALERT_EVENT, proposalId, {
-      strikeCount,
-      windowHours: TENANT_PIN_STRIKE_WINDOW_MS / (60 * 60 * 1000),
-      smsSent: true,
-    });
+    const sendSms = deps.oneTapFallback?.sendSms;
+    const ownerPhone = await deps.oneTapFallback?.resolveOwnerPhone?.(ref.tenantId);
+    if (!sendSms || !ownerPhone) {
+      logger.warn('voice approval tenant PIN lock engaged — no owner SMS route for the alert', context);
+    } else {
+      await sendSms(
+        ownerPhone,
+        `Security alert: voice approval of money items is locked on your account after ${strikeCount} incorrect approval codes in 24 hours. Nothing was approved. Approve pending items in the app, and if those calls were not you, change your voice approval PIN.`,
+      );
+      smsSent = true;
+    }
   } catch (err) {
-    logger.error('voice approval tenant PIN lock alert sent but its audit row was lost — a later refusal may alert again', {
+    logger.error('voice approval tenant PIN lock alert failed to send — claimed, so it is not retried', {
       ...context,
       error: err instanceof Error ? err.message : String(err),
     });
   }
+  await audit(deps, ref, TENANT_LOCK_ALERT_EVENT, proposalId, {
+    episodeKey: engagingAttemptId,
+    strikeCount,
+    windowHours: TENANT_PIN_STRIKE_WINDOW_MS / (60 * 60 * 1000),
+    smsSent,
+  });
 }
 
 /**
@@ -920,7 +1042,9 @@ async function refuseChallengeLocked(
     // A lookup-failure refusal is not a lockout: marking its link as "the
     // lockout link" would make a later real lockout claim "already sent" for a
     // proposal that never got one.
-    ...(smsSent && lock.source !== 'lookup_failed' ? { oneTapSmsSentAfterLockout: true } : {}),
+    ...(smsSent && lock.source !== 'lookup_failed' && lock.source !== 'reservation_failed'
+      ? { oneTapSmsSentAfterLockout: true }
+      : {}),
   };
   const speak = tenantLocked
     ? 'For security, money approvals by voice are locked on your account after too many incorrect codes. Approve it in the app instead.'
@@ -1763,6 +1887,35 @@ export async function continueVoiceApproval(
   const lock = await resolveChallengeLock(deps, input);
   if (lock.locked) return refuseChallengeLocked(deps, input, proposal, lock);
 
+  // #1233 review — reserve this attempt durably BEFORE comparing, then re-count
+  // the tenant's attempts INCLUDING it. Parallel calls cannot each read "4":
+  // of any set of concurrent reservations, the one that counts last sees them
+  // all. Over the budget → refused uncompared (and cleared, so a refusal is not
+  // a strike). No reservation, or no count → refused uncompared.
+  const reservation = await reservePinAttempt(deps, input, proposal.id);
+  if (reservation.status === 'failed') {
+    return refuseChallengeLocked(deps, input, proposal, {
+      ...lock,
+      locked: true,
+      source: 'reservation_failed',
+    });
+  }
+  const attemptId = reservation.attemptId;
+  const gate = await resolveTenantPinLock(deps, input.tenantId);
+  if (gate.status !== 'resolved') {
+    await clearPinAttempt(deps, input, proposal.id, attemptId, 'lookup_failed');
+    return refuseChallengeLocked(deps, input, proposal, { ...lock, locked: true, source: 'lookup_failed' });
+  }
+  if (!attemptWithinBudget(gate.decision)) {
+    await clearPinAttempt(deps, input, proposal.id, attemptId, 'refused_over_limit');
+    return refuseChallengeLocked(deps, input, proposal, {
+      ...lock,
+      locked: true,
+      source: 'tenant_lock',
+      tenantStrikes: gate.decision.strikeCount - 1,
+    });
+  }
+
   const challengeState = await readChallengeState(deps, input.tenantId);
   const matched = challengeState.verify(input.utterance);
   if (!matched) {
@@ -1774,6 +1927,7 @@ export async function continueVoiceApproval(
       spokenDigits(input.utterance).length === 0 &&
       classifyVoiceApproval(input.utterance) === 'cancel'
     ) {
+      await clearPinAttempt(deps, input, proposal.id, attemptId, 'cancelled');
       await audit(deps, input, 'proposal.voice_approval_declined', proposal.id, {
         action: pending.action,
         stage: 'challenge',
@@ -1792,10 +1946,10 @@ export async function continueVoiceApproval(
     // #1051 — `lock.failCount` also counts the strikes on the audit trail, so
     // a rebuilt session cannot reset it either.
     const failCount = lock.failCount + 1;
-    // #1051 follow-up — the same wrong code is a strike against the TENANT's
-    // rolling budget. When it is the one that exhausts it, the whole tenant
-    // locks: no retry, no one-tap link, and the owner's one alert.
-    const tenantStrikeCount = lock.tenantStrikes + 1;
+    // #1051 follow-up — this wrong code's reservation stays counted against the
+    // TENANT's rolling budget. When it is the one that exhausts it, the whole
+    // tenant locks: no retry, no one-tap link, and the owner's one alert.
+    const tenantStrikeCount = gate.decision.strikeCount;
     if (tenantStrikeCount >= TENANT_PIN_STRIKE_LIMIT) {
       const sessionLocks = failCount >= MAX_CHALLENGE_ATTEMPTS;
       const strikeRecorded = await recordStrike(
@@ -1805,6 +1959,7 @@ export async function continueVoiceApproval(
         proposal.id,
         {
           attemptCount: failCount,
+          attemptId,
           tenantStrikeCount,
           tenantLockEngaged: true,
           ...(sessionLocks ? { oneTapSmsSent: false } : {}),
@@ -1829,6 +1984,7 @@ export async function continueVoiceApproval(
       // Already locking; a lost write is retried as the durable marker.
       await recordStrike(deps, input, CHALLENGE_LOCKOUT_EVENT, proposal.id, {
         attemptCount: failCount,
+        attemptId,
         oneTapSmsSent: smsSent,
       });
       return {
@@ -1843,6 +1999,7 @@ export async function continueVoiceApproval(
     }
     const strikeRecorded = await recordStrike(deps, input, CHALLENGE_FAILED_EVENT, proposal.id, {
       attemptCount: failCount,
+      attemptId,
     });
     return {
       speak: 'That code didn’t match — try again.',
@@ -1857,6 +2014,7 @@ export async function continueVoiceApproval(
       },
     };
   }
+  await clearPinAttempt(deps, input, proposal.id, attemptId, 'passed');
   await audit(deps, input, 'proposal.voice_approval_challenge_passed', proposal.id);
   return executeApprove(deps, input, proposal.id);
 }

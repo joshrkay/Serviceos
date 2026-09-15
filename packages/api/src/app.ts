@@ -968,6 +968,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     revenueBySourceRepo,
     notificationPreferenceRepo,
     onboardingSessionRepo,
+    voiceApprovalPinLockAlertRepo,
   } = { ...buildRepositories(pool, directPool, overrides), ...overrides };
   const webhookSettingsRepo = settingsRepo;
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
@@ -3551,6 +3552,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       recordSmsEvent: recordProposalSmsRender,
     },
+    // #1051 / #1233 review — the tenant PIN-lock owner alert is claimed
+    // (insert-if-absent per tenant + lock episode) before it is sent.
+    voiceApprovalPinLockAlertRepo,
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {

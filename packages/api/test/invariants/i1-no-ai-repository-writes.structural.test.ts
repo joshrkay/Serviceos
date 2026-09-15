@@ -240,6 +240,10 @@ const AI_PLANE_REPOS: ReadonlyArray<{ receiver: string; why: string }> = [
     why: 'Stamps the call OUTCOME on the voice-call record (`stampOutcomeByCallSid`) — telephony session bookkeeping, not an operational entity.',
   },
   {
+    receiver: 'pinLockAlertRepo',
+    why: '#1051 / #1233 review — claims the tenant voice PIN-lock owner alert (voice_approval_pin_lock_alerts, insert-if-absent per tenant + lock episode) before it is sent. Security bookkeeping of the approval rail, never an operational entity.',
+  },
+  {
     receiver: 'smsEventRepo',
     why: 'RV-225 — records a voice edit request in the proposal approval-rail event store so it blocks approval exactly like an SMS EDIT. Approval-rail bookkeeping on the proposal, not an operational entity.',
   },
@@ -343,11 +347,11 @@ const KNOWN_VIOLATIONS: ReadonlyArray<{ at: string; why: string }> = [
     why: 'callMeBackRepo.create — creates an owner call-back task row directly from the AI skill.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2692',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2695',
     why: 'callMeBackRepo.create — same entity from the voice-turn processor.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2857',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2860',
     why: 'appointmentRepo.update — the E1 revoke path CANCELS a held appointment (`status: canceled`) without a proposal. The strongest of the six: a state-changing write to a scheduled entity.',
   },
   {

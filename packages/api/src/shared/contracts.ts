@@ -557,17 +557,15 @@ export const updateSettingsSchema = z.object({
       trigger_llm_sentiment: z.boolean(),
       llm_sentiment_threshold: z.number().min(0).max(1),
       after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
-      // RV-071 — spoken challenge (PIN/passphrase) gating money/
-      // irreversible VOICE approvals on the recognized owner line
-      // (caller-ID match; see approver-identity.ts).
-      // DEPRECATED (WS21a) — plaintext-at-rest. Enroll via
-      // `PUT /api/settings/voice-approval-pin` instead, which hashes the PIN
-      // (HMAC) and stores only `voice_approval_pin_hash`. This field is kept
-      // for back-compat (the verify seam falls back to it) but should not be
-      // written by new clients. `voice_approval_pin_hash` is intentionally
-      // NOT in this schema, so a raw hash can never be injected via the
-      // generic settings PUT (unknown keys are stripped by `.partial()`).
-      voice_approval_challenge: z.string().min(4).max(64),
+      // The money-approval PIN is NOT writable here. `PUT
+      // /api/settings/voice-approval-pin` is its only writer: it hashes the PIN,
+      // rejects weak ones and stamps the change time. None of
+      // `voice_approval_pin_hash`, `voice_approval_pin_changed_at` or the
+      // DEPRECATED plaintext `voice_approval_challenge` is in this schema, so the
+      // object's default strip discards them (#1233 review: the plaintext field
+      // used to be accepted here, enrolling any 4+ character PIN unchecked);
+      // the route also carries the stored PIN keys over this blob-replacing
+      // write so it can never drop them.
     })
     .partial()
     .optional(),

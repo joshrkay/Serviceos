@@ -7,6 +7,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL } from '../../src/audit/pg-audit';
 import { createAuditEvent } from '../../src/audit/audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { ensureTenantSettings, DEFAULT_ESCALATION_SETTINGS } from '../../src/settings/settings';
 import { hashVoiceApprovalPin } from '../../src/settings/voice-approval-pin';
 import { createSettingsRouter } from '../../src/routes/settings';
@@ -74,10 +75,6 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
   let auditRepo: PgAuditRepository;
   let settingsRepo: PgSettingsRepository;
   let previousSecret: string | undefined;
-  // RED-phase shim: loaded dynamically so the behavioural tests run (and fail
-  // on behaviour) before the claim repository exists.
-  type ClaimRepo = { claim(input: { tenantId: string; episodeKey: string; sessionId?: string; strikeCount: number }): Promise<boolean> };
-  let PgVoiceApprovalPinLockAlertRepository: new (pool: Pool) => ClaimRepo;
 
   beforeAll(async () => {
     previousSecret = process.env.TENANT_ENCRYPTION_KEY;
@@ -86,17 +83,6 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     proposalRepo = new PgProposalRepository(pool);
     auditRepo = new PgAuditRepository(pool);
     settingsRepo = new PgSettingsRepository(pool);
-    try {
-      ({ PgVoiceApprovalPinLockAlertRepository } = await import(
-        '../../src/settings/pg-voice-approval-pin-lock-alert'
-      ));
-    } catch {
-      PgVoiceApprovalPinLockAlertRepository = class {
-        async claim(): Promise<boolean> {
-          throw new Error('PgVoiceApprovalPinLockAlertRepository does not exist yet');
-        }
-      } as unknown as new (pool: Pool) => ClaimRepo;
-    }
   });
 
   afterAll(async () => {
@@ -311,9 +297,12 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     // The alert was claimed exactly once, keyed by the attempt that engaged the lock.
     const claims = await alertClaims(tenant.tenantId);
     expect(claims).toHaveLength(1);
-    const attempts = await rowsOfType(tenant.tenantId, PIN_ATTEMPT);
-    const engaging = attempts.filter((r) => r.correlationId === 'i3t-call-2').sort((a, b) => +a.createdAt - +b.createdAt).pop();
-    expect(claims[0]).toMatchObject({ episode_key: engaging!.id, session_id: 'i3t-call-2', strike_count: 5 });
+    // The 5th attempt ordered by (createdAt, id) — attempts can share a millisecond.
+    const ordered = (await rowsOfType(tenant.tenantId, PIN_ATTEMPT)).sort(
+      (a, b) => +a.createdAt - +b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+    expect(ordered[4].correlationId).toBe('i3t-call-2');
+    expect(claims[0]).toMatchObject({ episode_key: ordered[4].id, session_id: 'i3t-call-2', strike_count: 5 });
     const refusals = (await auditRepo.findByEntity(tenant.tenantId, 'proposal', acme.id)).filter(
       (r) => r.eventType === REFUSED,
     );

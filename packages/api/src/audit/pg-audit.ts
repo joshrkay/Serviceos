@@ -1,19 +1,18 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { AuditEvent, AuditRepository } from './audit';
+import { AuditEvent, AuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES } from './audit';
 
 /**
- * #1051 follow-up — the tenant-wide voice PIN lock lookup. The event types are
- * inlined as literals (they are `VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES`) rather
- * than bound as `ANY($2)`: the planner can only prove a query predicate implies
- * the partial index predicate (migration 279, `idx_audit_events_voice_pin_lock`)
- * when both are constant lists. Exported so the integration test EXPLAINs the
- * exact SQL that runs.
+ * #1051 follow-up / #1233 review — the tenant-wide voice PIN lock lookup:
+ * $1 tenant, $2 event types, $3 since. Served by migration 245's
+ * `idx_audit_events_tenant_created_at` (tenant_id, created_at DESC) — a range
+ * scan over the tenant's recent rows, filtered by type. Exported so the
+ * integration test EXPLAINs the exact SQL that runs.
  */
 export const VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL = `SELECT * FROM audit_events
        WHERE tenant_id = $1
-         AND event_type IN ('proposal.voice_approval_challenge_failed', 'proposal.voice_challenge_lockout', 'proposal.voice_approval_tenant_lock_alerted')
-         AND created_at >= $2
+         AND event_type = ANY($2::text[])
+         AND created_at >= $3
        ORDER BY created_at ASC`;
 
 function mapRow(row: Record<string, unknown>): AuditEvent {
@@ -81,7 +80,11 @@ export class PgAuditRepository extends PgBaseRepository implements AuditReposito
 
   async findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]> {
     return this.withTenant(tenantId, async (client) => {
-      const result = await client.query(VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL, [tenantId, since]);
+      const result = await client.query(VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL, [
+        tenantId,
+        [...VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES],
+        since,
+      ]);
       return result.rows.map(mapRow);
     });
   }

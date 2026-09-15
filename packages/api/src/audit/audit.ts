@@ -25,16 +25,18 @@ export interface AuditEventInput {
 }
 
 /**
- * #1051 follow-up — the audit rows the tenant-wide voice money-approval PIN lock
- * is derived from: a wrong code that did not lock its session, the wrong code
- * that did, and the owner alert sent when the tenant lock engages. The Pg
- * lookup inlines these literals so the migration-279 partial index
- * (`idx_audit_events_voice_pin_lock`) serves it — change them in both places.
+ * #1051 follow-up / #1233 review — the audit rows the tenant-wide voice
+ * money-approval PIN lock is derived from: an attempt RESERVED before a spoken
+ * code is compared, and the row that clears one (a correct code, a cancel, a
+ * refusal over the budget). An attempt counts until it is cleared. Read by
+ * `findVoiceApprovalPinLockEvents`, served by migration 245's
+ * idx_audit_events_tenant_created_at.
  */
+export const VOICE_APPROVAL_PIN_ATTEMPT_EVENT = 'proposal.voice_approval_pin_attempt';
+export const VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT = 'proposal.voice_approval_pin_attempt_cleared';
 export const VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES = [
-  'proposal.voice_approval_challenge_failed',
-  'proposal.voice_challenge_lockout',
-  'proposal.voice_approval_tenant_lock_alerted',
+  VOICE_APPROVAL_PIN_ATTEMPT_EVENT,
+  VOICE_APPROVAL_PIN_ATTEMPT_CLEARED_EVENT,
 ] as const;
 
 export interface AuditRepository {

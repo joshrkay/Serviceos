@@ -4,71 +4,91 @@
  * The per-session three-strike lock (proposal-approval-task.ts) is re-derived
  * from a session's own strike rows, so a caller who hangs up and dials again
  * gets a fresh session — and, before this, fresh guesses. The tenant lock
- * counts the SAME durable strike rows across every session of the tenant:
- * `TENANT_PIN_STRIKE_LIMIT` strikes inside a rolling `TENANT_PIN_STRIKE_WINDOW_MS`
- * lock voice money approval for the whole tenant until enough of them age out
- * or the PIN changes (only strikes after the latest PIN change count).
+ * budgets guesses across every session of the tenant:
+ * `TENANT_PIN_STRIKE_LIMIT` counted attempts inside a rolling
+ * `TENANT_PIN_STRIKE_WINDOW_MS` lock voice money approval for the whole tenant
+ * until enough of them age out or the PIN changes (only attempts after the
+ * latest PIN change count).
  *
- * The owner is alerted ONCE per lock episode — a continuous stretch during
- * which the lock stays engaged. A strike aging out can release the lock; if it
- * later re-engages that is a new episode and a new alert is due.
+ * #1233 review — the budget is enforced on RESERVED attempts, not on strike
+ * rows written after the fact: every spoken code is reserved durably BEFORE it
+ * is compared and counts until it is cleared (a correct code, a cancel, or a
+ * refusal over the budget). A reserved attempt may be compared only while the
+ * count INCLUDING it is within the limit (`attemptWithinBudget`), so parallel
+ * calls cannot each read "4" and each guess: of any set of concurrent
+ * reservations, the one that counts last sees all of them.
  *
- * No I/O: the caller (proposal-approval-task.ts) reads the rows and the PIN
- * change time and hands in their timestamps.
+ * The owner is alerted ONCE per lock episode. The episode is identified by the
+ * attempt that engaged it — the `TENANT_PIN_STRIKE_LIMIT`-th counted attempt,
+ * oldest first. While the lock holds no new attempt is compared, so that
+ * attempt stays the same until one ages out (releasing the lock); a later
+ * re-engagement has a new engaging attempt, and therefore a new alert.
+ *
+ * No I/O: the caller reads the rows and the PIN change time and hands them in.
  */
 
-/** Strikes one tenant may spend inside the window before voice money approval locks. */
+/** Attempts one tenant may spend inside the window before voice money approval locks. */
 export const TENANT_PIN_STRIKE_LIMIT = 5;
-/** The rolling window strikes are counted over. */
+/** The rolling window attempts are counted over. */
 export const TENANT_PIN_STRIKE_WINDOW_MS = 24 * 60 * 60 * 1000;
+/**
+ * Replicas stamp attempts with their own clocks; an attempt stamped up to this
+ * far ahead of the deciding replica's `now` still counts.
+ */
+export const PIN_LOCK_CLOCK_SKEW_MS = 60 * 1000;
+
+export interface ReservedPinAttempt {
+  /** The reservation's audit row id — the key a clearing row refers to. */
+  id: string;
+  at: Date;
+}
 
 export interface TenantPinLockInput {
-  /** `createdAt` of this tenant's strike rows (failed-code + lockout), any order. */
-  strikes: readonly Date[];
-  /** `createdAt` of this tenant's owner-alert rows. */
-  alerts: readonly Date[];
-  /** Latest PIN set/change/clear; null when unknown (every strike in the window counts). */
+  /** This tenant's reserved attempts (any order). */
+  attempts: readonly ReservedPinAttempt[];
+  /** Ids of attempts that were cleared (passed, cancelled, refused over the budget). */
+  clearedIds: ReadonlySet<string>;
+  /** Latest PIN set/change/clear; null when unknown (every attempt in the window counts). */
   pinChangedAt: Date | null;
   now: Date;
 }
 
 export interface TenantPinLockDecision {
   locked: boolean;
-  /** Strikes that count right now (after the PIN change, inside the window). */
+  /** Attempts counting right now: reserved, not cleared, after the PIN change, inside the window. */
   strikeCount: number;
-  /** True when locked and no alert has been sent for THIS lock episode. */
-  alertDue: boolean;
+  /** When locked, the attempt that engaged this lock episode — the owner-alert claim key. */
+  engagingAttemptId: string | null;
 }
 
 export function decideTenantPinLock(input: TenantPinLockInput): TenantPinLockDecision {
   const now = input.now.getTime();
   const floor = input.pinChangedAt ? input.pinChangedAt.getTime() : Number.NEGATIVE_INFINITY;
-  const counts = (t: number) => t > floor && t <= now;
-  const strikes = input.strikes.map((d) => d.getTime()).filter(counts);
-
-  /** Strikes counting at instant `at`: inside (at - window, at]. */
-  const countAt = (at: number) =>
-    strikes.filter((s) => s > at - TENANT_PIN_STRIKE_WINDOW_MS && s <= at).length;
-
-  const strikeCount = countAt(now);
+  const counted = input.attempts
+    .filter((a) => {
+      const t = a.at.getTime();
+      return (
+        !input.clearedIds.has(a.id) &&
+        t > floor &&
+        t > now - TENANT_PIN_STRIKE_WINDOW_MS &&
+        t <= now + PIN_LOCK_CLOCK_SKEW_MS
+      );
+    })
+    .sort((a, b) => a.at.getTime() - b.at.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const strikeCount = counted.length;
   const locked = strikeCount >= TENANT_PIN_STRIKE_LIMIT;
-  if (!locked) return { locked, strikeCount, alertDue: false };
+  return {
+    locked,
+    strikeCount,
+    engagingAttemptId: locked ? counted[TENANT_PIN_STRIKE_LIMIT - 1].id : null,
+  };
+}
 
-  const alerts = input.alerts.map((d) => d.getTime()).filter(counts);
-  const lastAlert = alerts.length > 0 ? Math.max(...alerts) : null;
-  // A lock episode cannot outlast its own strikes by more than a window, so an
-  // alert older than that belongs to an earlier episode.
-  if (lastAlert === null || lastAlert <= now - TENANT_PIN_STRIKE_WINDOW_MS) {
-    return { locked, strikeCount, alertDue: true };
-  }
-  // The last alert covers this episode only if the lock was engaged when it was
-  // sent and never released since. The count only drops when a strike ages out
-  // (at strike + window), so those are the only instants to check.
-  const releasedSinceAlert =
-    countAt(lastAlert) < TENANT_PIN_STRIKE_LIMIT ||
-    strikes.some((s) => {
-      const agesOut = s + TENANT_PIN_STRIKE_WINDOW_MS;
-      return agesOut > lastAlert && agesOut <= now && countAt(agesOut) < TENANT_PIN_STRIKE_LIMIT;
-    });
-  return { locked, strikeCount, alertDue: releasedSinceAlert };
+/**
+ * The compare gate. `decision` must be taken AFTER this attempt was reserved,
+ * so its count includes the attempt itself: the 5th guess is within budget,
+ * a 6th never is.
+ */
+export function attemptWithinBudget(decision: TenantPinLockDecision): boolean {
+  return decision.strikeCount <= TENANT_PIN_STRIKE_LIMIT;
 }
