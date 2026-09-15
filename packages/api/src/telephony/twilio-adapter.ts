@@ -1725,6 +1725,7 @@ export class TwilioGatherAdapter {
       utterance: speechResult,
       tier: safety.tier,
       ...(responseScript ? { responseScript } : {}),
+      ...(safety.language ? { language: safety.language } : {}),
     });
     if (effects.length === 0) {
       // Idempotent-skip (already escalating for E2, or terminated) — fall
