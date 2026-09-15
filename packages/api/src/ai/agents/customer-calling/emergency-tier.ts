@@ -30,7 +30,7 @@ import {
   type UrgencyContext,
 } from '../../skills/classify-urgency-tier';
 import type { TriageRules } from '../../skills/triage-rules.schema';
-import { detectEmergency } from './emergency-detector';
+import { detectEmergency, type EmergencyLanguage } from './emergency-detector';
 
 export type SafetyTier = 'E1' | 'E2' | 'E3';
 
@@ -45,6 +45,11 @@ export type SafetyTier = 'E1' | 'E2' | 'E3';
  * the `emergency_detected` event: a per-tenant reviewed script (from voice
  * config) is passed there and overrides this default with no code change.
  * Deployment tooling should gate on `E1_SCRIPT_REVIEW_REQUIRED`.
+ *
+ * #1056 — there is NO Spanish E1 script. A Spanish hazard report is E1 and
+ * hears THIS script (911 first, then the evacuation direction) and the call
+ * hangs up: safer than the E2 dispatcher hand-off it used to get. The Spanish
+ * text must be sourced with the same standing (decision O-2), not written here.
  */
 export const LIFE_SAFETY_E1_SCRIPT =
   'If anyone is in immediate danger, hang up and call 911 now. ' +
@@ -90,6 +95,48 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
 ];
 
 /**
+ * #1056 — Spanish acute hazards, category for category with
+ * {@link E1_HAZARD_PHRASES}. Before this table a Spanish gas leak only hit the
+ * `detectEmergency` backstop, which is E2: the caller got the dispatcher line,
+ * the call stayed open and a drafted booking stayed live.
+ *
+ * Phrase-level like the English table, so every entry names a hazard. Bare
+ * "fuego"/"humo"/"llamas"/"chispas"/"incendio" are left out:
+ * - "las llamas del calentador están amarillas" is a routine diagnostic call.
+ * - "la alarma de incendio" is an inspection.
+ * - "olor a quemado" stays E2, the same as English "burning smell".
+ * "hay fuego" / "hay llamas" (there is a fire / there are flames) are left out
+ * too. Spanish negation keeps them whole: "no hay fuego en el piloto" is a
+ * routine no-flame repair call, while English "there is no fire" never
+ * contains "there is a fire". An E1 false positive hangs up on the customer.
+ * Phrases whose English twin carries the same negation risk ("sparks from",
+ * "seeing flames") are mirrored, the same way the English table accepts them.
+ * Unaccented variants are listed because STT drops diacritics. Matched with
+ * Unicode-aware word edges (see `compileUnicode`).
+ */
+export const E1_HAZARD_PHRASES_ES: ReadonlyArray<string> = [
+  // Gas
+  'fuga de gas', 'escape de gas', 'huele a gas', 'olor a gas', 'olor de gas',
+  'huevo podrido', 'huevos podridos', 'olor a azufre', 'huele a azufre',
+  // Carbon monoxide
+  'monóxido de carbono', 'monoxido de carbono',
+  'detector de monóxido', 'detector de monoxido', 'alarma de monóxido', 'alarma de monoxido',
+  // Fire / smoke
+  'hay un incendio', 'tenemos un incendio', 'se incendió', 'se incendio',
+  'se está incendiando', 'se esta incendiando', 'en llamas',
+  'se prendió fuego', 'se prendio fuego', 'agarró fuego', 'agarro fuego',
+  'veo llamas', 'salen llamas', 'saliendo llamas',
+  'huele a humo', 'olor a humo', 'sale humo', 'saliendo humo', 'humo en la casa',
+  'lleno de humo', 'llena de humo', 'llenando de humo',
+  // Electrical
+  'cables quemándose', 'cables quemandose',
+  'se están quemando los cables', 'se estan quemando los cables',
+  'plástico quemado', 'plastico quemado',
+  'echando chispas', 'echa chispas', 'saltan chispas', 'saltando chispas',
+  'salen chispas', 'saliendo chispas', 'chispas del', 'chispas de la', 'chispas cerca',
+];
+
+/**
  * Injury / medical-event phrasing. E1 by default (broad on purpose — a missed
  * injury can cost a life), BUT suppressed when the report is CLEARLY past or
  * hypothetical with no present-tense urgency (see the guards below), so
@@ -117,6 +164,7 @@ const COLLAPSED_PERSON_RE =
 /** Kept for callers/tests that want the full E1 vocabulary. */
 export const LIFE_SAFETY_E1_PHRASES: ReadonlyArray<string> = [
   ...E1_HAZARD_PHRASES,
+  ...E1_HAZARD_PHRASES_ES,
   ...E1_INJURY_PHRASES,
 ];
 
@@ -133,26 +181,45 @@ function compile(phrases: ReadonlyArray<string>) {
     return { keyword: kw, regex: new RegExp(`\\b${escaped}\\b`, 'i') };
   });
 }
+/**
+ * Unicode-aware word edges for the Spanish table. JS `\b` is ASCII-only, so a
+ * phrase with an accented edge ("se incendió") would never match. Same
+ * lookarounds as `emergency-detector.ts`. The English tables keep `\b`
+ * byte-for-byte.
+ */
+function compileUnicode(phrases: ReadonlyArray<string>) {
+  return phrases.map((kw) => {
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return {
+      keyword: kw,
+      regex: new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu'),
+    };
+  });
+}
 const HAZARD_REGEXES = compile(E1_HAZARD_PHRASES);
+const HAZARD_REGEXES_ES = compileUnicode(E1_HAZARD_PHRASES_ES);
 const INJURY_REGEXES = compile(E1_INJURY_PHRASES);
 
 /** Pure, synchronous, free — the embedded E1 life-safety scan. */
 export function detectLifeSafetyE1(
   transcript: string,
-): { matched: boolean; keyword?: string } {
+): { matched: boolean; keyword?: string; language?: EmergencyLanguage } {
   // Acute hazards: always E1.
   for (const { keyword, regex } of HAZARD_REGEXES) {
-    if (regex.test(transcript)) return { matched: true, keyword };
+    if (regex.test(transcript)) return { matched: true, keyword, language: 'en' };
+  }
+  for (const { keyword, regex } of HAZARD_REGEXES_ES) {
+    if (regex.test(transcript)) return { matched: true, keyword, language: 'es' };
   }
   // Injury: E1 unless clearly past/hypothetical AND no present-tense urgency.
   const clearlyNonAcute =
     PAST_OR_HYPOTHETICAL_RE.test(transcript) && !PRESENT_URGENCY_RE.test(transcript);
   if (!clearlyNonAcute) {
     for (const { keyword, regex } of INJURY_REGEXES) {
-      if (regex.test(transcript)) return { matched: true, keyword };
+      if (regex.test(transcript)) return { matched: true, keyword, language: 'en' };
     }
     if (COLLAPSED_PERSON_RE.test(transcript)) {
-      return { matched: true, keyword: 'collapsed' };
+      return { matched: true, keyword: 'collapsed', language: 'en' };
     }
   }
   return { matched: false };
@@ -200,6 +267,13 @@ export interface SafetyClassification {
   responseScript: string | null;
   /** Which layer decided the final tier — for post-incident review. */
   source: 'embedded' | 'engine' | 'backstop' | 'none';
+  /**
+   * #1056 — the language of the matched phrase, when a phrase table decided
+   * the tier. A Spanish phrase is the strongest sign the caller speaks Spanish.
+   * It rides the E1 audit row so a follow-up knows the caller heard the
+   * English script (no Spanish E1 script exists yet, O-2).
+   */
+  language?: EmergencyLanguage;
 }
 
 const RANK: Record<SafetyTier, number> = { E1: 3, E2: 2, E3: 1 };
@@ -248,9 +322,17 @@ export function classifyCallerSafety(
     source: SafetyClassification['source'];
     keyword?: string;
     script?: string | null;
+    language?: EmergencyLanguage;
   }> = [];
   if (e1.matched)
-    candidates.push({ tier: 'E1', source: 'embedded', keyword: e1.keyword });
+    candidates.push({
+      tier: 'E1',
+      source: 'embedded',
+      keyword: e1.keyword,
+      // #1056 — the backstop's detected language is carried into the E1
+      // candidate: Spanish anywhere in the hit means a Spanish speaker.
+      language: e1.language === 'es' || backstop.language === 'es' ? 'es' : e1.language,
+    });
   if (engineTier === 'E1')
     candidates.push({
       tier: 'E1',
@@ -261,9 +343,19 @@ export function classifyCallerSafety(
   if (engineTier === 'E2')
     candidates.push({ tier: 'E2', source: 'engine', keyword: engine!.matchedPhrases[0] });
   if (embeddedE2.matched)
-    candidates.push({ tier: 'E2', source: 'embedded', keyword: embeddedE2.keyword });
+    candidates.push({
+      tier: 'E2',
+      source: 'embedded',
+      keyword: embeddedE2.keyword,
+      language: 'en',
+    });
   if (backstop.matched)
-    candidates.push({ tier: 'E2', source: 'backstop', keyword: backstop.keyword });
+    candidates.push({
+      tier: 'E2',
+      source: 'backstop',
+      keyword: backstop.keyword,
+      ...(backstop.language ? { language: backstop.language } : {}),
+    });
   if (engineTier === 'E3') candidates.push({ tier: 'E3', source: 'engine' });
 
   if (candidates.length === 0) {
@@ -278,6 +370,8 @@ export function classifyCallerSafety(
 
   candidates.sort((a, b) => RANK[b.tier] - RANK[a.tier]);
   const winner = candidates[0]!;
+  // E1 speaks the same script whatever the language: there is no reviewed
+  // Spanish E1 script (see LIFE_SAFETY_E1_SCRIPT, #1056).
   const responseScript =
     winner.tier === 'E1'
       ? (winner.script ?? LIFE_SAFETY_E1_SCRIPT)
@@ -289,6 +383,7 @@ export function classifyCallerSafety(
     keyword: winner.keyword ?? 'unknown',
     responseScript,
     source: winner.source,
+    ...(winner.language ? { language: winner.language } : {}),
   };
 }
 

@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import type { AuditRepository } from '../../src/audit/audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { ensureTenantSettings, DEFAULT_ESCALATION_SETTINGS } from '../../src/settings/settings';
 import { hashVoiceApprovalPin } from '../../src/settings/voice-approval-pin';
@@ -12,6 +13,7 @@ import {
   spokenDigits,
   type VoiceApprovalDeps,
   type VoiceApprovalSessionState,
+  type VoiceApprovalTurnResult,
   type PendingVoiceApproval,
 } from '../../src/ai/tasks/proposal-approval-task';
 import {
@@ -28,36 +30,44 @@ import {
  * The invariant was previously proven in memory only
  * (`test/ai/tasks/proposal-approval-task.test.ts`, an InMemoryProposalRepository
  * + InMemoryAuditRepository). This file drives the SAME product seams —
- * `startVoiceApproval` (src/ai/tasks/proposal-approval-task.ts:794) and
- * `continueVoiceApproval` (…:1216) — against a real `PgProposalRepository`,
+ * `startVoiceApproval` (src/ai/tasks/proposal-approval-task.ts:987) and
+ * `continueVoiceApproval` (…:1409) — against a real `PgProposalRepository`,
  * `PgSettingsRepository` and `PgAuditRepository`, and reads every attempt's
  * audit row back through `PgAuditRepository.findByEntity`
  * (src/audit/pg-audit.ts:48).
  *
  * Seams under test:
- *   - challenge verify + session fail counter — proposal-approval-task.ts:1412
- *   - 3rd failure → lockout + one-tap SMS      — proposal-approval-task.ts:1414-1428
- *   - post-lockout refusal of money/irreversible — proposal-approval-task.ts:583
- *   - capture-class bypasses the challenge      — proposal-approval-task.ts:369 (requiresChallenge)
+ *   - challenge verify + session fail counter — proposal-approval-task.ts:1618
+ *   - 3rd failure → lockout + one-tap SMS      — proposal-approval-task.ts:1619-1635
+ *   - post-lockout refusal of money/irreversible — proposal-approval-task.ts:730 (refuseChallengeLocked)
+ *   - lock re-derived from audit_events (#1051) — proposal-approval-task.ts:433 (resolveChallengeLock),
+ *     checked at readback :794, confirm :1533 and challenge :1587
+ *   - a lost strike write locks (fail closed)   — proposal-approval-task.ts:506 (recordStrike)
+ *   - capture-class bypasses the challenge      — proposal-approval-task.ts:383 (requiresChallenge)
  *
  * The SMS transport is stubbed (an external send, not a DB leg); every
  * proposal row, settings row and audit row in this file is real Postgres.
  *
- * DURABILITY FINDING — see the final test (#1051): the lock lives ONLY on the
- * in-process voice session (`voice-session-store.ts:310` holds
- * `voiceApprovalState` on an in-memory `Map`; `voice-session-store.ts:5-7`
- * documents "single-process, in-memory map"). Nothing about the lockout is
- * persisted, so a session rebuilt from the real store — a mid-call reconnect
- * onto a second Railway replica, or a process restart — re-prompts the
- * challenge with the counter back at zero.
+ * DURABILITY (#1051) — see the `#1051` tests at the end of this file. The
+ * in-memory counter still lives on the voice session (`voiceApprovalState` on
+ * the single-process `VoiceSessionStore` Map), but it is no longer the only
+ * record: the task re-derives the three-strike lock from the strike rows
+ * already in `audit_events` (`proposal.voice_approval_challenge_failed` /
+ * `proposal.voice_challenge_lockout`, correlated to the voice session id,
+ * tenant-scoped) before every money-class step. A session rebuilt with the
+ * same id and no in-memory state — a restart, a deploy, another replica —
+ * therefore refuses money approval instead of re-prompting with the counter
+ * at zero, and a failed lookup fails CLOSED.
  *
  * WHAT THIS FILE DOES NOT REACH: the session boundary itself. Every test here
  * calls the task functions directly and hands them `sessionState` by hand, so
  * the binding of a session to its tenant and to its `voiceApprovalState`
- * (`voice-session-store.ts:310`, supplied at
- * `create-voice-turn-processor.ts:3054`) is never exercised. Two consequences
- * are called out at the tests they affect: the T1 lock-isolation claim, and
- * the conditional alarm on the #1051 test.
+ * (`voice-session-store.ts`, supplied by `create-voice-turn-processor.ts`
+ * as `sessionState: session.voiceApprovalState`) is never exercised at real
+ * Postgres. The #1051 rebuild is additionally driven through that boundary
+ * (Gather adapter → voice-turn processor → task) in
+ * `test/telephony/voice-approval-gather.test.ts`, with an in-memory audit
+ * repository.
  */
 
 const PIN_SECRET = 'i3-integration-pin-secret';
@@ -565,102 +575,508 @@ describe('I3 — money-class voice approval challenge + three-strike lock at rea
     );
   });
 
-  /**
-   * PRODUCT GAP, reported not fixed (test-only lane).
-   *
-   * The lockout is in-process state and nothing else. `challengeLockedOut`
-   * lives on `VoiceApprovalSessionState` (proposal-approval-task.ts:142),
-   * which the caller parks on the voice session
-   * (voice-session-store.ts:310 `voiceApprovalState`), and that store is a
-   * single-process in-memory `Map` (voice-session-store.ts:5-7). No column, no
-   * row, no audit-derived recovery: a session rebuilt from the real store —
-   * a mid-call reconnect landing on a second Railway replica, or an API
-   * restart — arrives with `sessionState` empty and re-prompts the challenge
-   * with the counter back at zero, even though three failures for this tenant
-   * are sitting in `audit_events`.
-   *
-   * This is an ORDINARY test that PINS the broken behaviour, not an
-   * `it.fails`. `it.fails` passes when ANY assertion in the body throws, so it
-   * would have swallowed a real I3 regression in the setup below — a failure
-   * to reach the challenge, to lock on the third attempt, or to persist the
-   * lockout row would all have read as "expected failure" and gone green.
-   * (Verified: breaking the `lockout.outcome` assertion below still reported
-   * `1 expected fail`.) Every setup assertion here is therefore live, and the
-   * gap itself is pinned as the CURRENT value.
-   *
-   * THE ALARM IS CONDITIONAL, and the condition matters. This test calls
-   * `startVoiceApproval` directly with no `sessionState`, which is NOT a
-   * faithful rebuild of a production session: the real rebuild goes through
-   * `VoiceSessionStore` (`voice-session-store.ts:310`) and the voice-turn
-   * processor, which is what supplies `sessionState`
-   * (`create-voice-turn-processor.ts:3054`). So:
-   *   - if #1051 is closed INSIDE this task function, the last two assertions
-   *     flip and this test goes red, as intended;
-   *   - if #1051 is closed at the SESSION BOUNDARY — restoring
-   *     `voiceApprovalState` when the session is reconstructed, which is the
-   *     more likely shape — this test still sees `readback` and stays green.
-   * Whoever closes #1051 must therefore extend or replace this test at the
-   * store/processor boundary rather than trusting it to fail on its own. That
-   * note is on #1051.
-   *
-   * Product code is deliberately untouched — closing this is a product
-   * decision, tracked as #1051 and sitting next to O-4/O-6 on #1000.
-   */
-  it(
-    'PRODUCT GAP (#1051) — the lock does not survive a session rebuilt from the real store: a restarted session re-prompts the challenge although three failures are already in audit_events',
-    async () => {
-      const { deps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550105');
-      const proposal = await seedPending(proposalRepo, tenantA.tenantId, {
-        proposalType: 'record_payment',
-        summary: 'Record $410 payment from Holloway',
-        payload: { customerName: 'Holloway Electric', amountCents: 41000 },
-      });
+  // ─── #1051 — the lock survives a session rebuilt from the store ──────────
+  //
+  // A REBUILT SESSION, as modelled here: the same tenant and the same voice
+  // session id, handed to the task with NO `sessionState` and NO in-memory
+  // strike count — exactly what a caller supplies once the adapter state is
+  // gone (API restart, deploy, a mid-call reconnect onto another replica). The
+  // lock is re-derived INSIDE the task functions, so this direct call is the
+  // seam every caller shares: `create-voice-turn-processor.ts` hands
+  // `session.voiceApprovalState` (undefined after a rebuild) straight through.
+  // The processor/store boundary itself is additionally driven over Gather in
+  // `test/telephony/voice-approval-gather.test.ts` (the #1051 test there).
 
-      const ref = {
-        tenantId: tenantA.tenantId,
-        sessionId: 'i3-sess-durability',
-        ownerSession: true,
-      } as const;
-
-      let pending = await reachChallengeStage(deps, ref, 'the Holloway payment');
-      let sessionState: VoiceApprovalSessionState | undefined;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const failed = await continueVoiceApproval(deps, {
-          ...ref,
-          ...(sessionState ? { sessionState } : {}),
-          utterance: '0 0 0 0',
-          pending,
-        });
-        pending = failed.pending!;
-        sessionState = { ...sessionState, ...failed.sessionState };
-      }
-      const lockout = await continueVoiceApproval(deps, {
+  /** Drive three wrong codes on a money proposal in `ref`'s session → locked. */
+  async function lockSession(
+    deps: VoiceApprovalDeps,
+    ref: { tenantId: string; sessionId: string; ownerSession: true },
+    reference: string,
+  ): Promise<VoiceApprovalTurnResult> {
+    let pending = await reachChallengeStage(deps, ref, reference);
+    let sessionState: VoiceApprovalSessionState | undefined;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const failed = await continueVoiceApproval(deps, {
         ...ref,
-        sessionState,
+        ...(sessionState ? { sessionState } : {}),
         utterance: '0 0 0 0',
         pending,
       });
-      expect(lockout.outcome).toBe('challenge_lockout');
+      expect(failed.outcome).toBe('challenge_failed');
+      pending = failed.pending!;
+      sessionState = { ...sessionState, ...failed.sessionState };
+    }
+    const lockout = await continueVoiceApproval(deps, {
+      ...ref,
+      sessionState,
+      utterance: '0 0 0 0',
+      pending,
+    });
+    expect(lockout.outcome).toBe('challenge_lockout');
+    return lockout;
+  }
 
-      // The lockout IS in real Postgres — it just isn't read back.
-      const types = await eventTypesFor(auditRepo, tenantA.tenantId, proposal.id);
-      expect(types).toContain('proposal.voice_challenge_lockout');
+  async function refusalRows(tenantId: string, proposalId: string) {
+    const rows = await auditRepo.findByEntity(tenantId, 'proposal', proposalId);
+    return rows.filter((r) => r.eventType === 'proposal.voice_approve_refused_challenge_lockout');
+  }
 
-      // The call continues on a rebuilt session: same tenant, same call, but
-      // the in-memory session state is gone (replica hop / process restart).
-      const rebuilt = await startVoiceApproval(deps, {
+  it('#1051 — three wrong codes lock the session; a session REBUILT from the store refuses money approval without a new challenge, and capture-class still approves', async () => {
+    const { deps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550105');
+    const ref = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-durability',
+      ownerSession: true,
+    } as const;
+    const money = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $410 payment from Holloway',
+      payload: { customerName: 'Holloway Electric', amountCents: 41000 },
+    });
+
+    await lockSession(deps, ref, 'the Holloway payment');
+    const lockedTypes = await eventTypesFor(auditRepo, tenantA.tenantId, money.id);
+    expect(lockedTypes).toContain('proposal.voice_challenge_lockout');
+    const promptsBeforeRebuild = lockedTypes.filter(
+      (t) => t === 'proposal.voice_approval_challenge_prompted',
+    ).length;
+
+    // The call continues on a REBUILT session — same tenant, same session id,
+    // in-memory state gone.
+    const rebuilt = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Holloway payment',
+    });
+    expect(rebuilt.outcome).toBe('challenge_lockout');
+    expect(rebuilt.pending).toBeNull();
+    // The re-derived strikes are handed back for the caller to park on the
+    // rebuilt session, so later turns see the lock without another lookup.
+    expect(rebuilt.sessionState).toMatchObject({ challengeFailCount: 3, challengeLockedOut: true });
+    expect((await proposalRepo.findById(tenantA.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+    const refusals = await refusalRows(tenantA.tenantId, money.id);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].metadata).toMatchObject({
+      lockSource: 'audit_trail',
+      sessionId: ref.sessionId,
+    });
+
+    // A dialogue parked at the CONFIRM stage is re-checked before the
+    // challenge is prompted: "yes" is refused, not answered with a prompt.
+    const atConfirm = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: { action: 'approve', stage: 'confirm', proposalId: money.id },
+    });
+    expect(atConfirm.outcome).toBe('challenge_lockout');
+
+    // A dialogue parked at the CHALLENGE stage is re-checked before the code
+    // is verified: even the CORRECT code approves nothing in a locked session.
+    const atChallenge = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'four two seven one',
+      pending: { action: 'approve', stage: 'challenge', proposalId: money.id },
+    });
+    expect(atChallenge.outcome).toBe('challenge_lockout');
+    expect((await proposalRepo.findById(tenantA.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    // No new challenge was ever prompted after the rebuild, and none passed.
+    const afterTypes = await eventTypesFor(auditRepo, tenantA.tenantId, money.id);
+    expect(
+      afterTypes.filter((t) => t === 'proposal.voice_approval_challenge_prompted'),
+    ).toHaveLength(promptsBeforeRebuild);
+    expect(afterTypes).not.toContain('proposal.voice_approval_challenge_passed');
+    expect(await refusalRows(tenantA.tenantId, money.id)).toHaveLength(3);
+
+    // Capture-class approval still works in the rebuilt, locked session.
+    const capture = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'add_note',
+      summary: 'Note for Juniper — side gate sticks',
+      payload: { customerName: 'Juniper Residence', note: 'side gate sticks' },
+    });
+    const captureStart = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Juniper note',
+    });
+    expect(captureStart.outcome).toBe('readback');
+    const captureApproved = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: captureStart.pending!,
+    });
+    expect(captureApproved.outcome).toBe('approved');
+    expect((await proposalRepo.findById(tenantA.tenantId, capture.id))?.status).toBe('approved');
+  });
+
+  it('#1051 — a rebuild after TWO strikes grants no fresh tries: the next wrong code in the rebuilt session is the third, and locks', async () => {
+    const { deps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550107');
+    const ref = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-rebuild-two-strikes',
+      ownerSession: true,
+    } as const;
+    const money = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $330 payment from Kestrel',
+      payload: { customerName: 'Kestrel Masonry', amountCents: 33000 },
+    });
+
+    let pending = await reachChallengeStage(deps, ref, 'the Kestrel payment');
+    let sessionState: VoiceApprovalSessionState | undefined;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const failed = await continueVoiceApproval(deps, {
+        ...ref,
+        ...(sessionState ? { sessionState } : {}),
+        utterance: '5 5 5 5',
+        pending,
+      });
+      expect(failed.outcome).toBe('challenge_failed');
+      pending = failed.pending!;
+      sessionState = { ...sessionState, ...failed.sessionState };
+    }
+
+    // Rebuilt: two strikes are in audit_events, none in memory. Two is under
+    // the cap, so the dialogue still reaches the challenge…
+    const rebuiltPending = await reachChallengeStage(deps, ref, 'the Kestrel payment');
+    // …but the next wrong code is strike THREE, not strike one.
+    const third = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: '6 6 6 6',
+      pending: rebuiltPending,
+    });
+    expect(third.outcome).toBe('challenge_lockout');
+    expect(third.sessionState).toMatchObject({ challengeFailCount: 3, challengeLockedOut: true });
+    expect((await proposalRepo.findById(tenantA.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    const rows = await auditRepo.findByEntity(tenantA.tenantId, 'proposal', money.id);
+    expect(
+      rows.filter((r) => r.eventType === 'proposal.voice_approval_challenge_failed'),
+    ).toHaveLength(2);
+    const lockoutRows = rows.filter((r) => r.eventType === 'proposal.voice_challenge_lockout');
+    expect(lockoutRows).toHaveLength(1);
+    expect(lockoutRows[0].metadata).toMatchObject({ attemptCount: 3 });
+  });
+
+  it('#1051 T1 within tenant — another voice session of the SAME tenant is not locked by this session’s audit trail', async () => {
+    const { deps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550108');
+    const lockedRef = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-t1-locked',
+      ownerSession: true,
+    } as const;
+    const otherRef = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-t1-other',
+      ownerSession: true,
+    } as const;
+    const lockedMoney = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $120 payment from Lindqvist',
+      payload: { customerName: 'Lindqvist Carpentry', amountCents: 12000 },
+    });
+    const otherMoney = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $240 payment from Marlowe',
+      payload: { customerName: 'Marlowe Glass', amountCents: 24000 },
+    });
+
+    await lockSession(deps, lockedRef, 'the Lindqvist payment');
+
+    // The locked session, rebuilt, still refuses…
+    const stillLocked = await startVoiceApproval(deps, {
+      ...lockedRef,
+      action: 'approve',
+      reference: 'the Marlowe payment',
+    });
+    expect(stillLocked.outcome).toBe('challenge_lockout');
+
+    // …while a DIFFERENT session of the same tenant reaches the challenge and
+    // approves with the right code.
+    const pending = await reachChallengeStage(deps, otherRef, 'the Marlowe payment');
+    const approved = await continueVoiceApproval(deps, {
+      ...otherRef,
+      utterance: 'four two seven one',
+      pending,
+    });
+    expect(approved.outcome).toBe('approved');
+    expect((await proposalRepo.findById(tenantA.tenantId, otherMoney.id))?.status).toBe(
+      'approved',
+    );
+    expect((await proposalRepo.findById(tenantA.tenantId, lockedMoney.id))?.status).toBe(
+      'ready_for_review',
+    );
+  });
+
+  it('#1051 T1 across tenants — tenant B, in a session carrying the SAME session id as tenant A’s locked one, is not locked', async () => {
+    const aHarness = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550109');
+    const bHarness = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550110');
+    const SHARED_SESSION_ID = 'i3-sess-shared-id-1051';
+    const refA = {
+      tenantId: tenantA.tenantId,
+      sessionId: SHARED_SESSION_ID,
+      ownerSession: true,
+    } as const;
+    const refB = {
+      tenantId: tenantB.tenantId,
+      sessionId: SHARED_SESSION_ID,
+      ownerSession: true,
+    } as const;
+
+    const moneyA = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $560 payment from Norwood',
+      payload: { customerName: 'Norwood Fencing', amountCents: 56000 },
+    });
+    // Divergent data: tenant B's own proposal, customer, amount and PIN.
+    const moneyB = await seedPending(proposalRepo, tenantB.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $875 payment from Oakhurst',
+      payload: { customerName: 'Oakhurst Pools', amountCents: 87500 },
+    });
+
+    await lockSession(aHarness.deps, refA, 'the Norwood payment');
+
+    // Tenant B is not locked by tenant A's rows under the same session id: it
+    // reaches the challenge and approves with ITS OWN code.
+    const pendingB = await reachChallengeStage(bHarness.deps, refB, 'the Oakhurst payment');
+    const approvedB = await continueVoiceApproval(bHarness.deps, {
+      ...refB,
+      utterance: 'five three eight two',
+      pending: pendingB,
+    });
+    expect(approvedB.outcome).toBe('approved');
+    expect((await proposalRepo.findById(tenantB.tenantId, moneyB.id))?.status).toBe('approved');
+
+    // Tenant A's rebuilt session is still locked, and its proposal untouched.
+    const rebuiltA = await startVoiceApproval(aHarness.deps, {
+      ...refA,
+      action: 'approve',
+      reference: 'the Norwood payment',
+    });
+    expect(rebuiltA.outcome).toBe('challenge_lockout');
+    expect((await proposalRepo.findById(tenantA.tenantId, moneyA.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    // The trail the lock is derived from is tenant-scoped: under the shared
+    // session id, tenant B reads no strike rows and tenant A reads its three.
+    const strikeTypes = new Set([
+      'proposal.voice_approval_challenge_failed',
+      'proposal.voice_challenge_lockout',
+    ]);
+    const bRows = await auditRepo.findByCorrelation(tenantB.tenantId, SHARED_SESSION_ID);
+    const aRows = await auditRepo.findByCorrelation(tenantA.tenantId, SHARED_SESSION_ID);
+    expect(bRows.filter((r) => strikeTypes.has(r.eventType))).toHaveLength(0);
+    expect(bRows.every((r) => r.tenantId === tenantB.tenantId)).toBe(true);
+    expect(aRows.filter((r) => strikeTypes.has(r.eventType))).toHaveLength(3);
+  });
+
+  it('#1051 — an audit-lookup failure FAILS CLOSED: money approval refused and logged, never unlocked; capture-class still approves', async () => {
+    const outage = new Error('simulated audit_events lookup outage');
+    // Real Postgres for every write and every other read; only the lock's
+    // correlation lookup is made to fail.
+    const lookupDown: AuditRepository = {
+      create: (event) => auditRepo.create(event),
+      findByEntity: (tenantId, entityType, entityId) =>
+        auditRepo.findByEntity(tenantId, entityType, entityId),
+      findByCorrelation: async () => {
+        throw outage;
+      },
+    };
+    const { deps: healthyDeps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550111');
+    const deps: VoiceApprovalDeps = { ...healthyDeps, auditRepo: lookupDown };
+    const ref = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-lookup-down',
+      ownerSession: true,
+    } as const;
+    const money = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $190 payment from Prescott',
+      payload: { customerName: 'Prescott Tile', amountCents: 19000 },
+    });
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let refused: VoiceApprovalTurnResult;
+    let atChallenge: VoiceApprovalTurnResult;
+    let logged: string;
+    try {
+      // A FRESH session with zero strikes — it is the failed lookup, not a
+      // strike count, that refuses.
+      refused = await startVoiceApproval(deps, {
         ...ref,
         action: 'approve',
-        reference: 'the Holloway payment',
+        reference: 'the Prescott payment',
       });
+      atChallenge = await continueVoiceApproval(deps, {
+        ...ref,
+        utterance: 'four two seven one',
+        pending: { action: 'approve', stage: 'challenge', proposalId: money.id },
+      });
+      logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
 
-      // DESIRED: 'challenge_lockout' — the lock re-derived from the real
-      // store. ACTUAL today: 'readback' — the challenge is re-prompted and an
-      // attacker gets three fresh tries. Pinned both ways so the assertion
-      // cannot quietly pass for the wrong reason and so closing #1051 turns
-      // this red.
-      expect(rebuilt.outcome).toBe('readback');
-      expect(rebuilt.outcome).not.toBe('challenge_lockout');
-    },
-  );
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect(refused.pending).toBeNull();
+    // Even the correct code approves nothing while the lock cannot be read.
+    expect(atChallenge.outcome).toBe('challenge_lockout');
+    expect((await proposalRepo.findById(tenantA.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+    const refusals = await refusalRows(tenantA.tenantId, money.id);
+    expect(refusals).toHaveLength(2);
+    expect(refusals.every((r) => r.metadata?.lockSource === 'lookup_failed')).toBe(true);
+
+    // Logged, tenant- and session-tagged.
+    expect(logged).toContain('voice approval challenge lock lookup failed');
+    expect(logged).toContain(tenantA.tenantId);
+    expect(logged).toContain(ref.sessionId);
+    expect(logged).toContain(outage.message);
+
+    // The refusal is per-turn, not a lock written onto the session: nothing
+    // tells the caller to park `challengeLockedOut`.
+    expect(refused.sessionState?.challengeLockedOut).toBeUndefined();
+    // …and the link sent on this refusal is NOT marked as "the lockout link
+    // already sent", so a later real lockout still texts the owner (#1217 review).
+    expect(refused.sessionState?.oneTapSmsSentAfterLockout).toBeUndefined();
+
+    // Capture-class approval does not depend on the lookup and still works.
+    const capture = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'add_note',
+      summary: 'Note for Quillon — dog in the yard',
+      payload: { customerName: 'Quillon Residence', note: 'dog in the yard' },
+    });
+    const captureStart = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Quillon note',
+    });
+    expect(captureStart.outcome).toBe('readback');
+    const captureApproved = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: captureStart.pending!,
+    });
+    expect(captureApproved.outcome).toBe('approved');
+    expect((await proposalRepo.findById(tenantA.tenantId, capture.id))?.status).toBe('approved');
+
+    // Once the lookup works again, the same session (zero strikes) is NOT
+    // locked: the fail-closed refusal left no false lock behind.
+    const recovered = await startVoiceApproval(healthyDeps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Prescott payment',
+    });
+    expect(recovered.outcome).toBe('readback');
+  });
+
+  it('#1051 — a LOST strike write fails closed: the wrong code whose audit row cannot be written locks money approval in memory, a durable marker locks the rebuilt session, and capture still approves', async () => {
+    const lostWrite = new Error('simulated audit_events insert failure');
+    // Real Postgres for every read and every other write; only the
+    // failed-code strike INSERT is lost.
+    const strikeWriteLost: AuditRepository = {
+      create: async (event) => {
+        if (event.eventType === 'proposal.voice_approval_challenge_failed') throw lostWrite;
+        return auditRepo.create(event);
+      },
+      findByEntity: (tenantId, entityType, entityId) =>
+        auditRepo.findByEntity(tenantId, entityType, entityId),
+      findByCorrelation: (tenantId, correlationId) =>
+        auditRepo.findByCorrelation(tenantId, correlationId),
+    };
+    const { deps: healthyDeps } = makeDeps(proposalRepo, auditRepo, settingsRepo, '+15125550112');
+    const deps: VoiceApprovalDeps = { ...healthyDeps, auditRepo: strikeWriteLost };
+    const ref = {
+      tenantId: tenantA.tenantId,
+      sessionId: 'i3-sess-strike-write-lost',
+      ownerSession: true,
+    } as const;
+    const money = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'record_payment',
+      summary: 'Record $270 payment from Rowan',
+      payload: { customerName: 'Rowan Drywall', amountCents: 27000 },
+    });
+
+    const pending = await reachChallengeStage(deps, ref, 'the Rowan payment');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let lost: VoiceApprovalTurnResult;
+    let logged: string;
+    try {
+      lost = await continueVoiceApproval(deps, { ...ref, utterance: '0 0 0 0', pending });
+      logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    // The turn itself is unchanged (wrong code, try again) — but the session is
+    // locked for money-class approval, and the loss is logged.
+    expect(lost.outcome).toBe('challenge_failed');
+    expect(lost.sessionState).toMatchObject({ challengeFailCount: 1, challengeLockedOut: true });
+    expect(logged).toContain('voice approval strike audit write failed');
+    expect(logged).toContain(tenantA.tenantId);
+    expect(logged).toContain(ref.sessionId);
+    expect(logged).toContain(lostWrite.message);
+
+    // In memory: the kept challenge refuses even the correct code.
+    const inMemory = await continueVoiceApproval(deps, {
+      ...ref,
+      sessionState: { ...lost.sessionState },
+      utterance: 'four two seven one',
+      pending: lost.pending!,
+    });
+    expect(inMemory.outcome).toBe('challenge_lockout');
+    expect((await proposalRepo.findById(tenantA.tenantId, money.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    // Real Postgres: no strike row, one durable lockout marker for this session.
+    const trail = await auditRepo.findByCorrelation(tenantA.tenantId, ref.sessionId);
+    expect(trail.filter((r) => r.eventType === 'proposal.voice_approval_challenge_failed')).toHaveLength(0);
+    const markers = trail.filter((r) => r.eventType === 'proposal.voice_challenge_lockout');
+    expect(markers).toHaveLength(1);
+    expect(markers[0].metadata).toMatchObject({
+      attemptCount: 1,
+      reason: 'strike_write_failed',
+      lostEventType: 'proposal.voice_approval_challenge_failed',
+    });
+
+    // Rebuilt session (no in-memory state) → locked from the marker.
+    const rebuilt = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Rowan payment',
+    });
+    expect(rebuilt.outcome).toBe('challenge_lockout');
+    const refusals = await refusalRows(tenantA.tenantId, money.id);
+    expect(refusals.map((r) => r.metadata?.lockSource).sort()).toEqual(['audit_trail', 'session']);
+
+    // Capture-class still approves in the locked, rebuilt session.
+    const capture = await seedPending(proposalRepo, tenantA.tenantId, {
+      proposalType: 'add_note',
+      summary: 'Note for Sorrel — back door code changed',
+      payload: { customerName: 'Sorrel Residence', note: 'back door code changed' },
+    });
+    const captureStart = await startVoiceApproval(deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Sorrel note',
+    });
+    expect(captureStart.outcome).toBe('readback');
+    const captureApproved = await continueVoiceApproval(deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: captureStart.pending!,
+    });
+    expect(captureApproved.outcome).toBe('approved');
+    expect((await proposalRepo.findById(tenantA.tenantId, capture.id))?.status).toBe('approved');
+  });
 });

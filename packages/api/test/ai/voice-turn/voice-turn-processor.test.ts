@@ -7,7 +7,7 @@
  * `test/telephony/twilio-adapter.test.ts` and should continue to pass
  * because the adapter now delegates here.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
   createVoiceTurnProcessor,
@@ -38,6 +38,13 @@ import {
 } from '../../../src/settings/settings';
 import type { CurrentQuoteResolver } from '../../../src/conversations/negotiation/current-quote-resolver';
 import type { TaskHandler } from '../../../src/ai/tasks/task-handlers';
+import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../../src/ai/supervisor-presence';
+import { classifyCallerSafety } from '../../../src/ai/agents/customer-calling/emergency-tier';
+import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -119,6 +126,9 @@ function makeCtx(opts: {
   ownerSession?: boolean;
   /** A46 — respond_to_review's drafting dep. */
   respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
+  /** #1212 — on-call rotation + dispatcher phone for the P12-004 immediate Dial. */
+  onCallRepo?: InMemoryOnCallRepository;
+  dispatcherPhoneResolver?: () => Promise<string>;
 } = {
   gateway: makeGatewayReturning('{}'),
   withRepos: true,
@@ -163,6 +173,10 @@ function makeCtx(opts: {
       : {}),
     ...(opts.respondToReviewTaskHandler
       ? { respondToReviewTaskHandler: opts.respondToReviewTaskHandler }
+      : {}),
+    ...(opts.onCallRepo ? { onCallRepo: opts.onCallRepo } : {}),
+    ...(opts.dispatcherPhoneResolver
+      ? { dispatcherPhoneResolver: opts.dispatcherPhoneResolver }
       : {}),
   });
 
@@ -1078,6 +1092,178 @@ describe('createVoiceTurnProcessor — #1204 token cap crossed between turns', (
     expect(outcome.capAudits).toEqual([]);
     expect(outcome.capTerminations).toBe(0);
     expect(outcome).toEqual(capOutcome(control, controlFx, controlTerminations));
+  });
+
+  // ─── #1212: an emergency outcome wins over the cap end ────────────────────
+  describe('#1212 — on the turn that would end for the cap, an emergency outcome wins', () => {
+    // Keyword-free: the deterministic safety scan does not match it, so only
+    // the classifier can call it an emergency.
+    const KEYWORD_FREE_EMERGENCY =
+      'my water heater just split open and scalding water is pouring across the garage floor';
+    const EMERGENCY = JSON.stringify({
+      intentType: 'emergency_dispatch',
+      confidence: 0.94,
+      reasoning: 'active scalding-water release, needs someone now',
+      extractedEntities: {},
+    });
+    const EMERGENCY_HANDOFF_LINE =
+      "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.";
+
+    /** What the caller hears and every row the call left, minus the cap-event count. */
+    async function emergencyOutcome(
+      ctx: BuiltCtx,
+      sideEffects: SideEffect[],
+      terminations: { count: () => number },
+    ) {
+      const { capTerminations: _capTerminations, ...rest } = capOutcome(
+        ctx,
+        sideEffects,
+        terminations,
+      );
+      return {
+        ...rest,
+        audits: ctx.auditRepo.getAll().map((a) => a.eventType),
+        proposals: (await ctx.proposalRepo.findByTenant('tenant-abc')).map(
+          (p) => p.proposalType,
+        ),
+      };
+    }
+
+    afterEach(() => {
+      _resetSupervisorPresenceCache();
+      setSupervisorPresenceLoader(null);
+    });
+
+    it('the utterance carries no safety keyword, so only the classifier can catch it', () => {
+      expect(classifyCallerSafety(KEYWORD_FREE_EMERGENCY, {}).tier).toBe('E3');
+    });
+
+    it('FSM emergency path: a keyword-free emergency on the capped turn escalates as an emergency, as on an uncapped call', async () => {
+      const script = () =>
+        makeGatewayScript([
+          { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+          { content: EMERGENCY, output: 1 },
+        ]);
+      // Control: the same call with no classifier spend between turns.
+      const control = makeCtx({ gateway: script(), withRepos: true });
+      const controlTerminations = watchTerminations(control.session);
+      await turn(control, 'um I have a question');
+      const controlFx = await turn(control, KEYWORD_FREE_EMERGENCY);
+
+      const ctx = makeCtx({ gateway: script(), withRepos: true });
+      const terminations = watchTerminations(ctx.session);
+      await turn(ctx, 'um I have a question');
+      await runSentimentClassifier(ctx.session, 60);
+      expect(ctx.session.costTracker.isExceeded).toBe(true);
+
+      const fx = await turn(ctx, KEYWORD_FREE_EMERGENCY);
+
+      const outcome = await emergencyOutcome(ctx, fx, terminations);
+      expect(outcome).toMatchObject({
+        state: 'escalating',
+        escalationReason: 'emergency_dispatch',
+        tts: [EMERGENCY_SAFETY_LINE, EMERGENCY_HANDOFF_LINE],
+        notifyReasons: ['emergency_dispatch'],
+        capAudits: [],
+      });
+      expect(outcome.tts).not.toContain(CAP_WRAP_UP);
+      expect(outcome).toEqual(
+        await emergencyOutcome(control, controlFx, controlTerminations),
+      );
+    });
+
+    it('immediate Dial (unsupervised tenant with an on-call rotation): the capped emergency turn dials now, as on an uncapped call', async () => {
+      setSupervisorPresenceLoader(async () => false);
+      const build = () =>
+        makeCtx({
+          gateway: makeGatewayScript([
+            { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+            { content: EMERGENCY, output: 1 },
+          ]),
+          withRepos: true,
+          onCallRepo: new InMemoryOnCallRepository(
+            new Map([['tenant-abc', [{ id: 'rot-1', userId: 'u-dispatcher', orderIndex: 0 }]]]),
+          ),
+          dispatcherPhoneResolver: async () => '+15125550111',
+        });
+      const control = build();
+      const controlTerminations = watchTerminations(control.session);
+      await turn(control, 'um I have a question');
+      const controlFx = await turn(control, KEYWORD_FREE_EMERGENCY);
+
+      const ctx = build();
+      const terminations = watchTerminations(ctx.session);
+      await turn(ctx, 'um I have a question');
+      await runSentimentClassifier(ctx.session, 60);
+      expect(ctx.session.costTracker.isExceeded).toBe(true);
+
+      const fx = await turn(ctx, KEYWORD_FREE_EMERGENCY);
+
+      const outcome = await emergencyOutcome(ctx, fx, terminations);
+      expect(outcome.audits).toContain('emergency_immediate_dial');
+      expect(outcome.tts).toHaveLength(1);
+      expect(outcome.tts[0]).toContain('Emergency escalation in progress');
+      expect(outcome.notifyReasons).toEqual([]);
+      expect(outcome.capAudits).toEqual([]);
+      const dial = ctx.auditRepo.getAll().find((a) => a.eventType === 'emergency_immediate_dial');
+      expect(dial?.metadata).toMatchObject({ intent: 'emergency_dispatch', escalated: true });
+      expect(outcome).toEqual(
+        await emergencyOutcome(control, controlFx, controlTerminations),
+      );
+    });
+
+    it('the call still ends once: the emergency takes the one end, and a later classify turn adds no cost-cap end', async () => {
+      const ctx = makeCtx({
+        gateway: makeGatewayScript([
+          { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+          { content: EMERGENCY, output: 1 },
+          { content: DRAFT_ESTIMATE, output: 1 },
+        ]),
+        withRepos: true,
+      });
+      const terminations = watchTerminations(ctx.session);
+      await turn(ctx, 'um I have a question');
+      await runSentimentClassifier(ctx.session, 60);
+      await turn(ctx, KEYWORD_FREE_EMERGENCY);
+      expect(ctx.session.machine.currentState).toBe('escalating');
+      expect(ctx.session.machine.currentContext.escalationReason).toBe('emergency_dispatch');
+      // recordCost still spends the session's one cap end on this turn.
+      expect(terminations.count()).toBe(1);
+
+      // Back on a classify branch, still over the cap.
+      ctx.session.machine.dispatch({ type: 'proposal_queued', proposalId: 'p-1' });
+      expect(ctx.session.machine.currentState).toBe('closing');
+      const later = await turn(ctx, 'and a quote for a furnace too');
+
+      const outcome = capOutcome(ctx, later, terminations);
+      expect(outcome.notifyReasons).not.toContain('cost_cap_exceeded');
+      expect(outcome.tts).not.toContain(CAP_WRAP_UP);
+      expect(outcome.capAudits).toEqual([]);
+      expect(outcome.capTerminations).toBe(1);
+    });
+
+    it('a non-emergency capped turn still ends for the cap, once (unchanged)', async () => {
+      const ctx = makeCtx({
+        gateway: makeGatewayScript([
+          { content: LOW_CONFIDENCE_UNKNOWN, output: 1450 },
+          { content: DRAFT_ESTIMATE, output: 1 },
+        ]),
+        withRepos: true,
+      });
+      const terminations = watchTerminations(ctx.session);
+      await turn(ctx, 'um I have a question');
+      await runSentimentClassifier(ctx.session, 60);
+      const fx = await turn(ctx, 'I would like a quote for a water heater');
+
+      expect(capOutcome(ctx, fx, terminations)).toEqual({
+        state: 'escalating',
+        escalationReason: 'cost_cap_exceeded',
+        tts: [CAP_WRAP_UP],
+        notifyReasons: ['cost_cap_exceeded'],
+        capAudits: ['agent.calling.intent_capture.cost_cap_exceeded'],
+        capTerminations: 1,
+      });
+    });
   });
 });
 

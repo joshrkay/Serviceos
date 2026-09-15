@@ -4671,7 +4671,12 @@ export function createVoiceTurnProcessor(
           actorId: deps.systemActorId ?? 'calling-agent',
         });
         const capExceeded = recordCost(session, classification.tokenUsage);
-        if (capExceeded) {
+        // #1212 — an emergency outcome wins over the cap end. A keyword-free
+        // emergency is only ever caught here, by the classifier, so ending
+        // this turn for the cap would drop it. The classified event takes
+        // the emergency path below exactly as on an uncapped call, and that
+        // hand-off is the session's one end (recordCost never fires again).
+        if (capExceeded && !EMERGENCY_INTENTS.has(classification.intentType)) {
           classifierEvent = { type: 'cost_cap_exceeded' };
         } else if (
           classification.confidence >= TAU_INT &&
