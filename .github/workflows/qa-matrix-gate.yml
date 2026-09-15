@@ -15,9 +15,12 @@ name: QA Matrix Gate
 
 on:
   workflow_dispatch:
-  schedule:
-    # Nightly against Railway dev (02:00 UTC)
-    - cron: '0 2 * * *'
+  # Nightly schedule PAUSED 2026-09-15 (#1225): the 11 secrets above are not
+  # set, so every scheduled run failed at the secret preflight and kept
+  # #1225 red without testing anything. Re-enable once the secrets exist:
+  # schedule:
+  #   # Nightly against Railway dev (02:00 UTC)
+  #   - cron: '0 2 * * *'
 
 # `contents: read` is mandatory: a permissions block drops every unlisted
 # scope to none and actions/checkout needs it. `issues: write` is for the
