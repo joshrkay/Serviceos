@@ -75,7 +75,7 @@ import {
   MAX_CALL_DURATION_WRAP_UP_COPY,
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
-import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
+import { classifyCallerSafety } from '../../ai/agents/customer-calling/emergency-tier';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
@@ -760,6 +760,15 @@ interface RuntimeState {
    */
   interimEmergencyFired: boolean;
   /**
+   * #1220 review — barge-in hold for a `holdBargeInUntilPlayed` line (the
+   * Spanish 911 line on a Spanish E1). Set to the line's turn id when it
+   * starts; while set, caller speech does not cancel outbound audio. Cleared
+   * when Twilio acks a `silence-arm-${n}` mark with n >= this id, i.e. the
+   * line has actually played through once (audio queued is not audio heard),
+   * or when the line's synthesis fails (nothing to protect).
+   */
+  bargeInHoldFromTurnId: number | null;
+  /**
    * UB-C1 — the language the LIVE Deepgram session is listening in.
    * Distinct from `session.language` (the spoken/TTS language, which the
    * host may also set from tenant defaults): this field tracks what the
@@ -1028,6 +1037,7 @@ export class TwilioMediaStreamAdapter {
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
+      bargeInHoldFromTurnId: null,
       language: 'en',
       sttKeywords: [],
       languageSwitchCount: 0,
@@ -1135,6 +1145,14 @@ export class TwilioMediaStreamAdapter {
           // calls enableCapture('disclosure_played') on the first turn. Here we
           // only arm the T2-F05 silence countdown.
           this.armSilenceRepromptTimer(turnId);
+        }
+        // #1220 review — a held line's end-of-utterance ack means the caller
+        // has heard it once: caller speech may barge in again.
+        if (isSilenceArmMark && this.state.bargeInHoldFromTurnId !== null) {
+          const ackedTurnId = Number(frame.mark?.name?.slice('silence-arm-'.length));
+          if (Number.isFinite(ackedTurnId) && ackedTurnId >= this.state.bargeInHoldFromTurnId) {
+            this.state.bargeInHoldFromTurnId = null;
+          }
         }
         // Mark-ack is the cue to drain any backpressured outbound work.
         void this.flushQueue();
@@ -2184,8 +2202,10 @@ export class TwilioMediaStreamAdapter {
     // opt-in gate is applied here (only detectLanguage gates internally).
     if (!isLanguageSupported(target, session.supportedLanguages ?? null)) return false;
     // Life-safety first: "hay una fuga de gas, en español por favor" must
-    // run the emergency pipeline, not be consumed by a language ack.
-    if (detectEmergency(transcript).matched) return false;
+    // run the emergency pipeline, not be consumed by a language ack. The
+    // full tier classifier, not the backstop keywords alone (#1220 review):
+    // "¿Habla español? La casa está llena de humo" is E1 with no backstop hit.
+    if (classifyCallerSafety(transcript, {}).tier !== 'E3') return false;
 
     const switched = await this.switchLanguage(target, 'explicit_request');
     if (!switched) return false;
@@ -2485,7 +2505,12 @@ export class TwilioMediaStreamAdapter {
       // stripped once the text is no longer the placeholder. The
       // 'confirm_intent' hint stays: its payload carries `intent`, making
       // the re-render lossless (and it's what localizes the confirm).
-      const lang = this.currentSpokenLanguage();
+      // #1220 review — a line tagged with its own language (the Spanish 911
+      // line spoken on an E1, whatever the session language) is synthesized
+      // in that language's voice.
+      const lineLanguage = (fx.payload as { language?: unknown }).language;
+      const lang: SessionLanguage =
+        lineLanguage === 'es' || lineLanguage === 'en' ? lineLanguage : this.currentSpokenLanguage();
       const templateHint = (fx.payload as { template?: unknown }).template;
       const isSubstitutedGreeting =
         (templateHint === 'greeting' || templateHint === 'greeting_with_disclosure') &&
@@ -2496,6 +2521,10 @@ export class TwilioMediaStreamAdapter {
       const text = renderTtsText(rawText, renderPayload, lang);
       let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
+      // #1220 review — a life-safety line the caller must hear once is held
+      // against barge-in until its end-of-utterance mark is acked.
+      const holdBargeIn = (fx.payload as { holdBargeInUntilPlayed?: unknown }).holdBargeInUntilPlayed === true;
+      if (holdBargeIn) this.state.bargeInHoldFromTurnId = turnId;
       // Consent ordering — scope the completion flag + byte count to THIS turn.
       this.state.turnRealAudioComplete = false;
       this.state.turnAudioBytes = 0;
@@ -2507,6 +2536,8 @@ export class TwilioMediaStreamAdapter {
         logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
         });
+        // Nothing played, so there is nothing to protect.
+        if (holdBargeIn) this.state.bargeInHoldFromTurnId = null;
       } finally {
         if (turnId === this.state.outboundTurnId) {
           this.state.agentSpeaking = false;
@@ -3150,6 +3181,9 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    // #1220 review — a held life-safety line (the Spanish 911 line) plays
+    // through once, even over a caller who keeps talking.
+    if (this.state.bargeInHoldFromTurnId !== null) return;
     this.clearSilenceRepromptTimer();
     this.clearEarlyFillerTimerOnly();
     this.state.earlyFillerTurnId = null;

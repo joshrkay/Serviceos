@@ -50,6 +50,8 @@ export type SafetyTier = 'E1' | 'E2' | 'E3';
  * hears THIS script (911 first, then the evacuation direction) and the call
  * hangs up: safer than the E2 dispatcher hand-off it used to get. The Spanish
  * text must be sourced with the same standing (decision O-2), not written here.
+ * #1220 review — a Spanish caller first hears the already-catalogued Spanish
+ * 911 line (the FSM's E1 branch in transitions.ts), then this script.
  */
 export const LIFE_SAFETY_E1_SCRIPT =
   'If anyone is in immediate danger, hang up and call 911 now. ' +
@@ -478,8 +480,9 @@ export function classifyCallerSafety(
 
   candidates.sort((a, b) => RANK[b.tier] - RANK[a.tier]);
   const winner = candidates[0]!;
-  // E1 speaks the same script whatever the language: there is no reviewed
-  // Spanish E1 script (see LIFE_SAFETY_E1_SCRIPT, #1056).
+  // E1 carries the same script whatever the language: there is no reviewed
+  // Spanish E1 script (see LIFE_SAFETY_E1_SCRIPT, #1056). The Spanish 911
+  // line that precedes it for a Spanish caller is added by the FSM.
   const responseScript =
     winner.tier === 'E1'
       ? (winner.script ?? LIFE_SAFETY_E1_SCRIPT)

@@ -861,6 +861,8 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
     pending[1]!();
     await turn;
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('passes vertical keywords to Deepgram openSession when terminologyProvider yields them', async () => {
@@ -1924,6 +1926,8 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     expect(
       synth.mock.calls.filter((c) => (c[0] as TtsSynthesizeInput).text === ES_911_LINE),
     ).toHaveLength(1);
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('DISCLOSURE_INIT_FAILED — emits logger.error with stable greppable code when initializeSession throws', async () => {
@@ -2352,6 +2356,8 @@ describe('UB-C1 — language threading + live switching', () => {
     // No language acknowledgement was spoken in its place.
     const spoken = tts.synthesize.mock.calls.map((c) => c[0].text);
     expect(spoken).not.toContain(LANGUAGE_SWITCH_ACK.es);
+    // Release the tenant connection slot (tenant_connection_cap is per tenant).
+    ws.close();
   });
 
   it('a classified language_switch intent (audit_log) flips the language as a fallback', async () => {

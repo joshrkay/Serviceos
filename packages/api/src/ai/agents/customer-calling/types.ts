@@ -202,7 +202,9 @@ export type CallingAgentEvent =
    *          channel, and CLOSE without a dispatcher bridge (no data capture).
    * `responseScript` is the reviewed tier script to speak (E1 evacuation copy).
    * `language` (#1056) is the matched phrase's language, stamped on the E1
-   * audit row.
+   * audit row. `sessionLanguage` (#1220 review) is the session's spoken
+   * language. Either one being 'es' puts the Spanish 911 line in front of
+   * the E1 script.
    */
   | {
       type: 'emergency_detected';
@@ -211,6 +213,7 @@ export type CallingAgentEvent =
       tier?: 'E1' | 'E2';
       responseScript?: string;
       language?: 'en' | 'es';
+      sessionLanguage?: 'en' | 'es';
     };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
