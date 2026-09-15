@@ -1,5 +1,6 @@
 # #1239 review — Spanish E1 monotonicity corpus. One row per phrase: origin/main tier, TAB, phrase.
-# Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv).
+# Sources: the life-safety reviewers' probes (r1239/probe.txt, r1234/probe/adv.tsv and table.tsv;
+# third review: r1239b/corpus.txt and newprobes.txt).
 # Tiers recorded with origin/main efde3966e (classifier as merged in #1234). Do not regenerate against
 # a branch: the column is the baseline a change is measured against.
 E3	se sale el gas
@@ -169,3 +170,186 @@ E3	no huele a cable quemado
 E3	hay humo saliendo de la chimenea
 E1	salen llamas amarillas y humo negro del calentador
 E1	veo llamas amarillas y humo en el calentador
+E2	ya no huele a gas
+E1	no sé qué hacer, huele a gas
+E1	no sé qué hacer huele a gas
+E1	no puedo respirar hay humo en la casa
+E1	no, hay fuego en la cocina
+E1	creo que no, pero huele a gas
+E1	creo que no pero huele a gas
+E1	HAY FUEGO EN LA COCINA
+E1	HUELE A GAS
+E1	se esta quemando la casa
+E1	hay monoxido en la casa
+E1	el detector de co esta sonando
+E1	no se que hacer huele a gas
+E2	no no huele a gas
+E1	no tengo luz y huele a gas
+E1	no hay nadie y hay fuego en la cocina
+E1	no hay luz hay fuego en la cocina
+E1	no se está quemando la casa pero sale humo del enchufe
+E2	no hay un incendio
+E1	no hay un incendio pero hay humo en la casa
+E1	no hay humo pero hay fuego en la cocina
+E1	no puedo salir hay fuego
+E1	se prendió fuego la estufa
+E1	la estufa está en llamas
+E1	hay llamas saliendo del horno
+E1	la alarma de monóxido está sonando y tengo dolor de cabeza
+E1	el detector de monóxido está pitando
+E1	necesito cambiar las pilas del detector de monóxido porque está sonando
+E3	la alarma de humo está sonando
+E3	huele raro como a gas
+E1	huele como a gas
+E1	huele a gas en la casa y me siento mareado
+E1	siento olor a gas
+E1	hay olor a gas
+E1	tengo olor a gas en la cocina
+E1	se siente olor a gas
+E3	hay gas en la casa
+E1	hay un escape de gas
+E1	está pitando la alarma de monóxido
+E3	mi hijo se desmayó
+E1	el calentador echa chispas y huele a quemado
+E1	el panel eléctrico echa chispas
+E1	el encendedor echa chispas y el enchufe también
+E1	el encendedor del calentador y sale humo del enchufe
+E1	el enchufe está echando chispas
+E1	está saliendo humo del breaker
+E1	hay chispas en el enchufe
+E1	salen chispas del tomacorriente
+E3	se quemó el enchufe
+E3	se está derritiendo el cable
+E1	huele a plástico quemado
+E1	no huele a gas pero sale humo del enchufe
+E3	¿cuánto sale el gas?
+E3	cuanto sale el gas
+E3	is the on sale gas furnace still available
+E3	hablo español
+E3	en español por favor
+E1	¿habla español? la casa está llena de humo
+E2	¿habla español? no hay fuga de gas, necesito una cita
+E3	I can't breathe there's smoke
+E1	there are flames in the kitchen
+E3	flames coming out of the oven
+E3	the smoke alarm is going off
+E3	gas is leaking
+E3	there's gas in the house
+E1	my son passed out
+E3	I can't put out the fire
+E3	the outlet is melting
+E1	no se hay fuego en la cocina
+E1	no sé hay fuego en la cocina
+E1	no se en llamas la estufa
+E2	no tengo un incendio
+E3	no noto humo en la casa
+E1	no hay nadie en casa y sale humo
+E2	¿no huele a gas?
+E1	yo digo que no huele a gas pero mi esposa sí huele a gas
+E3	no están quemando los cables
+E3	no se me prendió fuego la estufa
+E2	no hay ningún escape de gas
+E1	huele a gas no
+E1	no hay luz y huele a gas
+E1	no hay luz huele a gas
+E3	no está saliendo gas
+E1	no hay tiempo hay fuego
+E1	no hay agua hay fuego
+E1	no se ve bien hay humo en la casa
+E1	tengo miedo no se hay humo en la casa
+E1	no se que pasa sale humo del enchufe
+E1	hay una fuga de gas
+E1	hay un incendio en la casa de al lado
+E1	huele a gas en la calle
+E3	¿en cuánto sale el gas?
+E1	huelo gas en la cocina
+E1	creo que hay una fuga de gas
+E3	the gas grill is on sale gas included
+E3	no hay fuego en el piloto del calentador
+E1	no se hay humo en el cuarto
+E1	la alarma de monóxido está sonando
+E1	se prendió fuego
+E1	sale gas del tanque what do I do
+E1	el recibo me sale caro pero sale gas del medidor
+E1	el recibo me sale caro, pero sale gas del medidor
+E1	hay humo por la calefacción nueva, hay humo en toda la casa
+E1	hay humo por la calefacción nueva y los niños están tosiendo
+E1	hay humo por la calefacción nueva, los niños están tosiendo
+E1	hay humo de la carne asada y se prendió la cerca
+E1	hay humo del asador y me arden los ojos
+E3	veo llamas amarillas en el calentador, ¿está fuera de lo normal?
+E1	¿cuánto sale el gas? porque sale gas de la estufa
+E3	cómo me sale gas de la estufa, huele muy fuerte
+E3	cómo me sale gas de la estufa huele muy fuerte
+E3	¿cuánto tiempo sale gas antes de explotar?
+E3	cuánto tiempo sale gas antes de explotar
+E1	garage sale gas smell
+E1	yard sale — gas leak in the garage
+E1	sale gas water heater leaking gas
+E1	hay humo por la calefacción nueva pero todo bien y los niños tosen
+E1	el recibo me sale caro y sale gas del medidor
+E1	el recibo me sale caro sale gas del medidor
+E1	hay humo por la calefacción por primera vez los niños tosen
+E3	me sale gas de la estufa cuánto cuesta arreglarla
+E1	huele a gas en el cuarto del bebé
+E3	se escucha un silbido y huele raro en la estufa
+E3	mi detector de gas está pitando
+E1	la estufa está prendida y no hay llama y huele a gas
+E1	hay un olor como a huevo podrido en la cocina
+E1	el piloto se apagó y huele a gas
+E3	la chimenea está echando humo adentro de la casa
+E2	se está quemando el enchufe
+E3	quiero una cotización para una estufa de gas
+E3	necesito cambiar el tanque de gas
+E3	el gas de la estufa no prende
+E1	cuánto cobran por revisar una fuga de gas
+E1	ayer hubo una fuga de gas pero ya la arreglaron
+E1	I need a quote for a gas leak detector
+E3	me sale gas del horno cuánto cuesta arreglarlo
+E1	sale gas del horno, cuánto cuesta arreglarlo
+E1	sale gas del horno what do I do
+E1	sale gas del horno is it dangerous
+E1	sale gas de la llave what do I do
+E1	sale gas por la llave de paso cuánto cuesta cambiarla
+E1	sale gas de la manguera what should I do
+E1	sale gas de la válvula is that normal
+E3	le sale gas al horno cuánto me cobran
+E3	sale gas del regulador del tanque what do I do
+E3	sale gas del regulador what do I do
+E3	el gas sale por la llave de paso cuánto cobran
+E3	el gas sale por el horno cuánto cobran
+E3	¿cuánto gas sale de la estufa?
+E3	cómo sale gas de la estufa
+E3	cómo sale gas del horno
+E1	¿cómo? sale gas de la estufa
+E1	cómo, sale gas de la estufa
+E1	on sale gas stove smells like gas
+E1	the gas stove is on sale gas smell everywhere
+E3	cuánto sale gas del horno
+E3	cuanto sale gas por la llave
+E1	hay humo del asador adentro de la casa
+E1	hay humo del asador en el garaje
+E1	hay humo de la parrilla dentro de la casa
+E1	hay humo del carbón del asador en la sala y me duele la cabeza
+E1	hay humo del incienso en el cuarto
+E1	hay humo del cigarro y huele a quemado
+E3	el encendedor de la estufa echa chispas pero no prende
+E3	quiero instalar un detector de monóxido en el cuarto de los niños
+E1	sale gas del horno
+E1	sale gas de la llave
+E1	sale gas del horno y cuánto cuesta
+E1	hay olor a huevo podrido
+E3	se prendió la estufa sola y sale mucho gas
+E1	sale gas del boiler what do I do
+E3	bota gas el horno what do I do
+E3	se siente el gas en la cocina cuánto cuesta
+E3	the garage sale gas can is leaking
+E1	we had a yard sale gas smell in the garage now
+E1	sale gas del medidor the bill is high
+E3	sale gas the stove is hissing
+E3	sale gas my stove what do I do
+E1	there is smoke in the house
+E1	gas leak
+E1	carbon monoxide alarm is going off
+E3	el gas sale muy caro
+E3	no le sale gas a la estufa

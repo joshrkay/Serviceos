@@ -478,6 +478,33 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
     ['E1', 'sale mucho gas, ¿cuánto cuesta la reparación?', 'leak + separate price question'],
     ['E1', 'hay humo por primera vez', '"por primera vez" alone is not a benign cause'],
     ['E1', 'hay humo, por primera vez pasa esto', 'benign cue in another clause'],
+    // Third #1239 review, finding 1 — leak grammar "(sale|escapa…) (el) gas
+    // (de|del|por|en|a) <source>" is never suppressed. STT drops the
+    // punctuation, so a price word or an English question shares the clause.
+    ['E1', 'sale gas del horno what do I do', 'leak grammar + English question'],
+    ['E1', 'sale gas de la llave what do I do', 'leak grammar + English question'],
+    ['E1', 'sale gas de la manguera what should I do', 'leak grammar + English question'],
+    ['E1', 'sale gas de la válvula is that normal', 'leak grammar + English question'],
+    ['E1', 'sale gas de la conexión what do I do', 'leak grammar + English question'],
+    ['E1', 'sale gas por la llave de paso cuánto cuesta cambiarla', 'leak grammar + price question'],
+    ['E1', 'sale gas por la línea cuánto cuesta', 'leak grammar + price question'],
+    // Finding 2 — grill or incense smoke indoors is a CO risk.
+    ['E1', 'hay humo del asador adentro de la casa', 'indoor grill smoke'],
+    ['E1', 'hay humo del asador en el garaje', 'grill smoke in the garage'],
+    ['E1', 'hay humo de la parrilla dentro de la casa', 'indoor grill smoke'],
+    ['E1', 'hay humo del incienso en el cuarto', 'smoke in a room'],
+    // Finding 3 — cuánto/cómo in front of leak grammar is not a price.
+    ['E1', 'cómo me sale gas de la estufa, huele muy fuerte', '"cómo" + leak grammar'],
+    ['E1', 'cómo sale gas del tanque', '"cómo" + leak grammar'],
+    ['E1', 'cuánto sale gas del medidor', '"cuánto" + leak grammar'],
+    ['E1', '¿cuánto tiempo sale gas antes de explotar?', 'explosion'],
+    // Finding 4 — an appliance, a room or children alone are context, not danger.
+    ['not-E1', 'el encendedor de la estufa echa chispas pero no prende', 'igniter sparks on a stove'],
+    ['not-E1', 'quiero instalar un detector de monóxido en el cuarto de los niños', 'CO detector install'],
+    ['E1', 'hay humo de la parrilla y los niños tosen', 'children + a harm verb'],
+    // Finding 5 — the reviewer's keep-E1 rows.
+    ['E1', 'cuánto cobran por revisar una fuga de gas', 'a leak named with a price question'],
+    ['E1', 'ayer hubo una fuga de gas pero ya la arreglaron', 'past leak: resolves upward'],
   ];
 
   it.each(SPANISH_E1_TABLE)('%s: %j (%s)', (bucket, utterance) => {
@@ -490,6 +517,12 @@ describe('#1220 review — Spanish E1 phrasing, false positives and negation (on
       expect(r.tier).not.toBe('E1');
       expect(r.requiresEvacuation).toBe(false);
     }
+  });
+
+  // Third #1239 review, finding 5 — English "gas leak" stays E1 even in a quote
+  // request (English table unchanged; kept upward on the reviewer's advice).
+  it('"I need a quote for a gas leak detector" stays E1', () => {
+    expect(classifyCallerSafety('I need a quote for a gas leak detector', {}).tier).toBe('E1');
   });
 
   // Re-review, finding 4 — deliberate tie-breaks. STT cannot tell "no se …"
