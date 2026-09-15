@@ -28,6 +28,9 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   CALLER_UTTERANCE_FENCE_PROMPT_SECTION,
   classifyIntent,
+  CUSTOMER_PROTECTION_PROMPT_SECTION,
+  EXTENDED_INTENTS_PROMPT_SECTION,
+  SYSTEM_PROMPT,
 } from '../../../src/ai/orchestration/intent-classifier';
 import type { ClassifierProfile } from '../../../src/ai/orchestration/classifier-profile';
 import {
@@ -159,7 +162,7 @@ describe('#894 — S1 caller transcript is fenced before it reaches the classifi
   });
 
   it.each([
-    { name: 'no profile (operator: in-app / chat / memo worker / evals)', ctx: {} },
+    { name: 'no profile (operator: in-app memo / chat / evals)', ctx: {} },
     { name: "explicit 'operator'", ctx: { classifierProfile: 'operator' as const } },
     {
       name: "'owner_line' (verified owner line)",
@@ -177,6 +180,48 @@ describe('#894 — S1 caller transcript is fenced before it reaches the classifi
       expect(s).not.toContain(UNTRUSTED_CONTENT_BLOCK_BEGIN);
       expect(s).not.toBe(CALLER_UTTERANCE_FENCE_PROMPT_SECTION);
     }
+  });
+});
+
+describe('#894 review — untrustedTranscript: caller text on the OPERATOR taxonomy (voicemail → memo router)', () => {
+  it('operator profile + untrustedTranscript: fenced user content and the rule, while the FULL operator taxonomy is kept', async () => {
+    const { gateway, requests } = recordingGateway(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+    );
+    await classifyIntent(
+      INJECTED_TRANSCRIPT,
+      { tenantId: TENANT, untrustedTranscript: true, customerProtectionIntents: true, extendedIntents: true },
+      gateway,
+    );
+    expect(requests).toHaveLength(1);
+    const req = requests[0];
+    const user = userContentOf(req);
+    expect(user.startsWith(UNTRUSTED_CONTENT_BLOCK_BEGIN)).toBe(true);
+    expect(user.trimEnd().endsWith(UNTRUSTED_CONTENT_BLOCK_END)).toBe(true);
+    expect(occurrences(user, INJECTION)).toBe(1);
+    const at = user.indexOf(INJECTION);
+    expect(at).toBeGreaterThan(user.indexOf(UNTRUSTED_CONTENT_BLOCK_BEGIN));
+    expect(at + INJECTION.length).toBeLessThanOrEqual(user.indexOf(UNTRUSTED_CONTENT_BLOCK_END));
+
+    const systems = systemContentsOf(req);
+    // The taxonomy is NOT narrowed: the base message is the historical
+    // operator prompt, and the operator-surface sections still ride along.
+    expect(systems[0]).toBe(SYSTEM_PROMPT);
+    expect(systems).toContain(CUSTOMER_PROTECTION_PROMPT_SECTION);
+    expect(systems).toContain(EXTENDED_INTENTS_PROMPT_SECTION);
+    // …plus the data-not-instructions rule, last, and no caller words in any system slot.
+    expect(systems[systems.length - 1]).toBe(CALLER_UTTERANCE_FENCE_PROMPT_SECTION);
+    for (const s of systems) expect(s).not.toContain(INJECTION);
+  });
+
+  it('untrustedTranscript: false / absent leaves the operator request byte-identical (in-app memos, chat)', async () => {
+    const a = recordingGateway(JSON.stringify({ intentType: 'unknown', confidence: 0.2 }));
+    const b = recordingGateway(JSON.stringify({ intentType: 'unknown', confidence: 0.2 }));
+    await classifyIntent(INJECTED_TRANSCRIPT, { tenantId: TENANT }, a.gateway);
+    await classifyIntent(INJECTED_TRANSCRIPT, { tenantId: TENANT, untrustedTranscript: false }, b.gateway);
+    expect(userContentOf(a.requests[0])).toBe(INJECTED_TRANSCRIPT);
+    expect(b.requests[0].messages).toEqual(a.requests[0].messages);
+    expect(systemContentsOf(a.requests[0])).toEqual([SYSTEM_PROMPT]);
   });
 });
 

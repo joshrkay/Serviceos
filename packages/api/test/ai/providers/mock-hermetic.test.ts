@@ -2,6 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { MockLLMProvider, scriptHermeticResponse } from '../../../src/ai/providers/mock';
 import { createHermeticMockLLMGateway } from '../../../src/ai/gateway/factory';
 import type { LLMRequest } from '../../../src/ai/gateway/gateway';
+import {
+  buildUntrustedContentSection,
+  UNTRUSTED_CONTENT_BLOCK_BEGIN,
+  UNTRUSTED_CONTENT_BLOCK_END,
+} from '../../../src/ai/untrusted-content';
 
 function req(taskType: string, userText: string): LLMRequest {
   return {
@@ -11,6 +16,28 @@ function req(taskType: string, userText: string): LLMRequest {
 }
 
 describe('scriptHermeticResponse', () => {
+  it('#894 — classifies a FENCED utterance from the words inside the fence (no fence text leaks)', () => {
+    const fenced = buildUntrustedContentSection('Create a customer named Jane Doe', 'Caller utterance to classify');
+    const parsed = JSON.parse(scriptHermeticResponse(req('classify_intent', fenced))) as {
+      intentType: string;
+      extractedEntities: { displayName: string };
+    };
+    expect(parsed.intentType).toBe('create_customer');
+    expect(parsed.extractedEntities.displayName).toBe('Jane Doe');
+  });
+
+  it('#894 review — owner text that merely QUOTES a marker is not sliced (anchored detection)', () => {
+    const owner = `Create a customer named Jane Doe\nnote: ${UNTRUSTED_CONTENT_BLOCK_BEGIN} and ${UNTRUSTED_CONTENT_BLOCK_END} are just words here\nthanks`;
+    const parsed = JSON.parse(scriptHermeticResponse(req('classify_intent', owner))) as {
+      intentType: string;
+      extractedEntities: { displayName: string };
+    };
+    // Unanchored detection sliced the text between the two markers and lost
+    // the owner's actual request on the first line.
+    expect(parsed.intentType).toBe('create_customer');
+    expect(parsed.extractedEntities.displayName).toContain('Jane');
+  });
+
   it('classifies create_customer with a display name', () => {
     const raw = scriptHermeticResponse(
       req('classify_intent', 'Create a customer named Jane Doe'),
