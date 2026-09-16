@@ -16,6 +16,13 @@ export interface VoiceUsageBillingServiceDeps {
   stripeApiKey: string;
   fetchFn?: typeof fetch;
   settlementRepo: VoiceUsageSettlementRepository;
+  onAlert?: (alert: VoiceUsageBillingAlert) => void | Promise<void>;
+}
+
+export interface VoiceUsageBillingAlert {
+  rule: "voice_cost_incomplete" | "voice_settlement_failed" | "voice_markup_invariant";
+  tenantId: string;
+  message: string;
 }
 
 export type VoiceUsageSettlement = AiVoiceUsagePrice & {
@@ -117,6 +124,10 @@ export class PgVoiceUsageSettlementRepository
 export class VoiceUsageBillingService {
   constructor(private readonly deps: VoiceUsageBillingServiceDeps) {}
 
+  private alert(alert: VoiceUsageBillingAlert): void {
+    void Promise.resolve(this.deps.onAlert?.(alert)).catch(() => undefined);
+  }
+
   async previewCurrentPeriod(tenantId: string) {
     const tenant = await this.deps.pool.query<{
       stripe_subscription_id: string | null;
@@ -215,16 +226,35 @@ export class VoiceUsageBillingService {
       (provider) => !summary.providers.includes(provider),
     );
     if (summary.usageSeconds > 0 && missingProviders.length > 0) {
+      this.alert({
+        rule: "voice_cost_incomplete",
+        tenantId: input.tenantId,
+        message: `Missing provider costs: ${missingProviders.join(", ")}`,
+      });
       throw new ValidationError(
         `AI voice provider cost data is incomplete; missing: ${missingProviders.join(", ")}`,
       );
     }
     if (summary.incompleteSessionCount > 0) {
+      this.alert({
+        rule: "voice_cost_incomplete",
+        tenantId: input.tenantId,
+        message: `${summary.incompleteSessionCount} session(s) have incomplete provider costs`,
+      });
       throw new ValidationError(
         `AI voice provider cost data is incomplete for ${summary.incompleteSessionCount} session(s)`,
       );
     }
     const price = priceAiVoiceUsage(summary);
+    if (
+      price.billableProviderCostMicroCents > 0 &&
+      BigInt(price.customerChargeMicroCents) * 10_000n <
+        BigInt(price.billableProviderCostMicroCents) * 13_000n
+    ) {
+      const message = "AI voice customer charge fell below the required 30% markup";
+      this.alert({ rule: "voice_markup_invariant", tenantId: input.tenantId, message });
+      throw new Error(message);
+    }
     if (price.customerChargeCents === 0)
       return { ...price, invoiceItemId: null };
 
@@ -281,6 +311,7 @@ export class VoiceUsageBillingService {
     });
     if (!response.ok) {
       const message = `Stripe voice overage invoice item failed (${response.status}): ${await response.text()}`;
+      this.alert({ rule: "voice_settlement_failed", tenantId: input.tenantId, message });
       await this.deps.settlementRepo.fail(
         input.tenantId,
         settlement.id,
@@ -291,6 +322,7 @@ export class VoiceUsageBillingService {
     const created = (await response.json()) as { id?: string };
     if (!created.id) {
       const message = "Stripe voice overage invoice item returned no id";
+      this.alert({ rule: "voice_settlement_failed", tenantId: input.tenantId, message });
       await this.deps.settlementRepo.fail(
         input.tenantId,
         settlement.id,

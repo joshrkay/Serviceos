@@ -1031,6 +1031,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           usageRepo: voiceUsageCostRepo,
           settlementRepo: voiceUsageSettlementRepo,
           stripeApiKey: process.env.STRIPE_SECRET_KEY,
+          onAlert: (alert) => {
+            sentryClient.captureMessage(
+              `[VOICE_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
+              'error',
+            );
+          },
         })
       : undefined;
 
@@ -2446,6 +2452,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           mediaStreamsCentsPerHour: Number(
             process.env.TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR,
           ),
+          onRepeatedFailure: (failure) => {
+            sentryClient.captureMessage(
+              `[VOICE_BILLING:twilio_reconciliation_repeated] tenant=${failure.tenantId} callSid=${failure.callSid} attempts=${failure.attempts} error=${failure.error}`,
+              'error',
+            );
+          },
         });
       }).catch((err) => {
         workerLogger.error('Voice-cost reconciliation sweep failed', {

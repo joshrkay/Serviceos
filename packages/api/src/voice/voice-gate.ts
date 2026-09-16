@@ -57,6 +57,21 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
       });
     }
 
+    const safetyRes = await deps.pool.query<{ e1_reviewed_script: string | null }>(
+      `SELECT e1_reviewed_script FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const reviewedScript = safetyRes.rows[0]?.e1_reviewed_script?.trim();
+    if (!reviewedScript) {
+      return block(deps, {
+        tenantId,
+        callSid,
+        reason: 'e1_script_unreviewed',
+        rawStatus,
+        usage: null,
+      });
+    }
+
     const usage = await loadTrialUsage(deps.pool, tenantId);
     const evalResult = evaluateTrialCap({
       status,
@@ -89,6 +104,8 @@ async function block(
       ? 'voice_blocked_no_billing'
       : input.reason === 'not_live'
         ? 'voice_blocked_not_live'
+        : input.reason === 'e1_script_unreviewed'
+          ? 'voice_blocked_e1_script_unreviewed'
         : 'voice_blocked_trial_cap';
 
   try {

@@ -71,8 +71,10 @@ describe('#1156 — default voice greeting uses the CALLED tenant\'s own busines
     // No voice_greeting — this is the "never wrote a custom greeting" case
     // row 2.1 is about. business_name IS set, from onboarding.
     await pool.query(
-      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region, voice_agent_live_at)
-       VALUES ($1, $2, $3, 'America/Chicago', 'TX', NOW())`,
+      `INSERT INTO tenant_settings
+         (id, tenant_id, business_name, timezone, region, voice_agent_live_at, e1_reviewed_script)
+       VALUES ($1, $2, $3, 'America/Chicago', 'TX', NOW(),
+               'If this is an emergency, hang up and call 911.')`,
       [crypto.randomUUID(), tenantId, opts.businessName],
     );
     const client = await pool.connect();

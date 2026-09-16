@@ -136,6 +136,22 @@ describe('POST /api/telephony/voice — §10 voiceGate', () => {
     expect(store.size()).toBe(0);
   });
 
+  it('returns safety-setup voicemail when the E1 script is unreviewed', async () => {
+    const voiceGate: VoiceGate = vi.fn(async () => ({
+      allowed: false,
+      reason: 'e1_script_unreviewed' as const,
+    }));
+    const { app, store } = buildHarness(voiceGate);
+
+    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-e1' });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('safety setup');
+    expect(res.text).toContain('<Record');
+    expect(res.text).not.toContain('<Gather');
+    expect(store.size()).toBe(0);
+  });
+
   it('returns voicemail TwiML when Gate B blocks (trial_cap_daily)', async () => {
     const voiceGate: VoiceGate = vi.fn(async () => ({
       allowed: false,

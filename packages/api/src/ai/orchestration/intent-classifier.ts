@@ -2275,7 +2275,9 @@ function clamp01(n: number): number {
 export function parseClassifierJson(content: string): IntentClassification | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    const trimmed = content.trim();
+    const fenced = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed);
+    parsed = JSON.parse((fenced?.[1] ?? trimmed).trim());
   } catch {
     return null;
   }
