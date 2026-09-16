@@ -361,6 +361,34 @@ export const E1_INJURY_PHRASES: ReadonlyArray<string> = [
   'chest pain', 'chest pains', 'seizure',
 ];
 
+interface EnglishInjuryPattern {
+  keyword: string;
+  pattern: string;
+  carriesNegation?: true;
+}
+
+/**
+ * #1246 — English injury classes that require grammar rather than a bare-word
+ * lookup. Bare `stroke`, `choked`, and `fell` are intentionally absent: those
+ * forms also describe time, completed routine events, and fallen equipment.
+ */
+const E1_INJURY_PATTERNS_EN: ReadonlyArray<EnglishInjuryPattern> = [
+  { keyword: "can't breathe", pattern: "(?:can(?:not|'t)|unable to)\\s+breathe", carriesNegation: true },
+  {
+    keyword: 'severe bleeding',
+    pattern: "(?:severe\\s+bleeding|bleeding\\s+(?:severely|heavily|badly)|bleeding\\s+(?:will|won't)\\s+stop)",
+  },
+  { keyword: 'choking', pattern: 'choking' },
+  { keyword: 'overdose', pattern: "(?:overdosed|overdosing|an?\\s+overdose)" },
+  { keyword: 'stroke', pattern: "(?:(?:is\\s+)?having|has|had)\\s+(?:a\\s+)?stroke" },
+  {
+    keyword: "fell and can't move",
+    pattern:
+      "(?:someone|somebody|he|she|they|my\\s+(?:husband|wife|son|daughter|mom|dad|mother|father|kid|child|baby|brother|sister|friend|neighbor|roommate|tenant|grandma|grandpa|grandmother|grandfather|coworker|worker|customer))\\s+(?:(?:has|had|just)\\s+)?(?:fell|fallen)\\b.{0,40}\\b(?:can(?:not|'t)|unable to)\\s+move",
+    carriesNegation: true,
+  },
+];
+
 /**
  * "collapsed" is a trade homonym ("my sewer line collapsed" is a routine,
  * high-value plumbing complaint) — an E1 false positive now costs the entire
@@ -746,7 +774,7 @@ export const LIFE_SAFETY_E1_PHRASES: ReadonlyArray<string> = [
 
 /** Clearly past / hypothetical framing — a non-acute injury report. */
 const PAST_OR_HYPOTHETICAL_RE =
-  /\b(?:years?|months?|weeks?|days?)\s+ago\b|\blast\s+(?:year|month|week)\b|\bused to\b|\bin the past\b|\bhistory of\b|\ba while (?:back|ago)\b|\bif\s+(?:someone|somebody|anyone|anybody)\b|\bwhat if\b/i;
+  /\b(?:years?|months?|weeks?|days?)\s+ago\b|\bearlier\b|\blast\s+(?:year|month|week)\b|\bused to\b|\bin the past\b|\bhistory of\b|\ba while (?:back|ago)\b|\bif\s+(?:someone|somebody|anyone|anybody)\b|\bwhat if\b/i;
 /** Present-tense urgency that OVERRIDES a past/hypothetical marker → stays E1. */
 const PRESENT_URGENCY_RE =
   /\b(?:now|just|right now|currently|happening|help|hurry|911)\b|\b(?:is|isn'?t|not)\s+breathing\b|\b(?:he|she|they|someone|somebody)(?:'s| is| just)\b/i;
@@ -994,6 +1022,10 @@ const HAZARD_REGEXES_ES = compileSpanish(E1_HAZARD_PATTERNS_ES).map((entry) => (
   regexAll: new RegExp(entry.regex.source, 'giu'),
 }));
 const INJURY_REGEXES = compile(E1_INJURY_PHRASES);
+const INJURY_REGEXES_EN = E1_INJURY_PATTERNS_EN.map((entry) => ({
+  ...entry,
+  regex: new RegExp(`\\b(?:${entry.pattern})\\b`, 'i'),
+}));
 const INJURY_REGEXES_ES = compileSpanish(E1_INJURY_PATTERNS_ES).map((entry) => ({
   ...entry,
   regexAll: new RegExp(entry.regex.source, 'giu'),
@@ -1666,6 +1698,17 @@ function scanLifeSafetyUncached(transcript: string): LifeSafetyScan {
   if (!clearlyNonAcute) {
     for (const { keyword, regex } of INJURY_REGEXES) {
       if (regex.test(transcript)) return { e1: { keyword, language: 'en' } };
+    }
+    for (const { keyword, regex, carriesNegation } of INJURY_REGEXES_EN) {
+      const match = regex.exec(transcript);
+      if (!match) continue;
+      const prefix = transcript.slice(Math.max(0, match.index - 32), match.index);
+      if (
+        !carriesNegation &&
+        /\b(?:no|not|never|isn'?t|wasn'?t|no longer|no (?:one|body) is)\s*$/i.test(prefix)
+      )
+        continue;
+      return { e1: { keyword, language: 'en' } };
     }
     if (COLLAPSED_PERSON_RE.test(transcript)) {
       return { e1: { keyword: 'collapsed', language: 'en' } };
