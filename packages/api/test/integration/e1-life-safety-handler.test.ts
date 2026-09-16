@@ -356,6 +356,45 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     expect(underA).toHaveLength(0);
   });
 
+  async function expectEnglishE1(c: Call, twiml: string, phrase: string): Promise<void> {
+    const row = emergencyRow(await sessionAudit(c.tenantId, c.session.id));
+    expect(row?.metadata, phrase).toMatchObject({ tier: 'E1', reason: 'life_safety_e1', language: 'en' });
+    expect(c.session.machine.currentState, phrase).toBe('terminated');
+    expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(twiml, phrase).toContain('911');
+    expect(twiml).toContain('<Hangup/>');
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('on-call dispatcher');
+  }
+
+  it.each([
+    ["can't breathe", "my wife can't breathe"],
+    ['not breathing', 'my baby is not breathing'],
+    ['severe bleeding', 'he is bleeding severely from his head'],
+    ['choking', 'my child is choking'],
+    ['overdose', 'I think she overdosed'],
+    ['stroke', 'my father is having a stroke'],
+    ["fell and can't move", "my mother fell and can't move"],
+  ])('#1246 ENGLISH %s: %j is E1 at the real handler — 911 direction and hang-up', async (_class, phrase) => {
+    const c = await inboundCall(tenantA.tenantId);
+    const twiml = await turn(c, phrase);
+    await expectEnglishE1(c, twiml, phrase);
+  });
+
+  it.each([
+    ['my breath smells bad'],
+    ['I choked on my coffee earlier'],
+    ['we will meet at the stroke of midnight'],
+    ['my father had a stroke two years ago'],
+    ['she is not choking'],
+  ])('#1246 ENGLISH control: %j is not E1', async (phrase) => {
+    const c = await inboundCall(tenantA.tenantId);
+    const twiml = await turn(c, phrase);
+    expect(emergencyRow(await sessionAudit(c.tenantId, c.session.id)), phrase).toBeUndefined();
+    expect(c.session.machine.currentState, phrase).not.toBe('terminated');
+    expect(twiml, phrase).not.toContain('<Hangup/>');
+  });
+
   /**
    * #1056 control — a Spanish call with NO hazard must not be dragged onto the
    * E1 path by the new Spanish table: no emergency row, no evacuation script,

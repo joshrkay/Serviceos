@@ -12,11 +12,14 @@
  * Runs only under `npm run test:integration` (vitest globalSetup starts the
  * Postgres testcontainer and sets TEST_DB_URL).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, createTestFile, closeSharedTestDb } from './shared';
 import { PgVoiceRepository } from '../../src/voice/pg-voice';
 import { classifyRecordingProvenance } from '../../src/ai/content-provenance';
+import { PgQueue } from '../../src/queues/pg-queue';
+import { createTranscriptionWorker, type TranscriptionJobPayload } from '../../src/workers/transcription';
+import type { Logger } from '../../src/logging/logger';
 
 describe('Postgres integration — voice recording provenance stamp (I13)', () => {
   let pool: Pool;
@@ -77,6 +80,62 @@ describe('Postgres integration — voice recording provenance stamp (I13)', () =
 
     const second = await voiceRepo.stampProvenance(tenant.tenantId, id, 'operator');
     expect((second!.transcriptMetadata as Record<string, unknown>).provenance).toBe('operator');
+  });
+
+  it('preserves an existing provenance stamp when completion metadata is written on retry', async () => {
+    const id = await makeRecording();
+    await voiceRepo.stampProvenance(tenant.tenantId, id, 'operator');
+
+    const completed = await voiceRepo.updateStatus(tenant.tenantId, id, 'completed', {
+      transcript: 'retry completed',
+      metadata: { sanitization_version: 'v1' },
+    });
+
+    expect(completed!.transcriptMetadata).toMatchObject({
+      provenance: 'operator',
+      sanitization_version: 'v1',
+    });
+  });
+
+  it('keeps a real PgQueue redelivery pending, then completes it without losing provenance', async () => {
+    const id = await makeRecording();
+    const queue = new PgQueue(pool, { maxRetries: 3, visibilityTimeout: 0 });
+    const provider = {
+      transcribe: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('temporary provider outage'))
+        .mockResolvedValueOnce({ transcript: 'retry succeeded', metadata: { provider: 'test' } }),
+    };
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    } as unknown as Logger;
+    const worker = createTranscriptionWorker(voiceRepo, provider);
+    const payload: TranscriptionJobPayload = {
+      tenantId: tenant.tenantId,
+      recordingId: id,
+      audioUrl: 'https://audio.test/operator-note.wav',
+    };
+
+    await queue.send('transcription', payload, `${tenant.tenantId}:${id}:redelivery-proof`);
+    const first = await queue.receive<TranscriptionJobPayload>();
+    expect(first).toMatchObject({ id: expect.any(String), attempts: 1, maxAttempts: 3 });
+    await expect(worker.handle(first!, logger)).rejects.toThrow('temporary provider outage');
+    expect((await voiceRepo.findById(tenant.tenantId, id))!.status).toBe('pending');
+
+    const second = await queue.receive<TranscriptionJobPayload>();
+    expect(second).toMatchObject({ id: first!.id, attempts: 2, maxAttempts: 3 });
+    await worker.handle(second!, logger);
+    await queue.delete(second!.id);
+
+    const completed = await voiceRepo.findById(tenant.tenantId, id);
+    expect(completed).toMatchObject({ status: 'completed', transcript: 'retry succeeded' });
+    expect(completed!.transcriptMetadata).toMatchObject({
+      provenance: 'operator',
+      provider: 'test',
+    });
   });
 
   it('is tenant-isolated: stamping under another tenant touches nothing', async () => {

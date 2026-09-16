@@ -430,6 +430,10 @@ export function createTranscriptionWorker(
           metadata: {
             ...result.metadata,
             ...correctionMetadata,
+            // I13 / #1251 — provenance is part of the completion write so
+            // there is no completed-but-unstamped window, and a retry cannot
+            // replace the metadata before a second best-effort stamp lands.
+            ...(recording?.source === 'inapp_voice' ? { provenance: 'operator' } : {}),
             sanitization_version: TRANSCRIPT_SANITIZATION_VERSION,
             canonical_transcript_field: 'transcript',
             prompt_rehydration_policy: 'sanitized_only',
@@ -441,25 +445,6 @@ export function createTranscriptionWorker(
               : null,
           },
         });
-
-        // RIVET I13 — stamp provenance for the AUTHENTICATED in-app path.
-        // This worker is the only place operator memos (source='inapp_voice',
-        // created by the authenticated POST /voice/recordings routes) get
-        // transcribed; the telephony path runs through transcript-ingestion-
-        // worker, which stamps caller/mixed/operator from per-turn speakers.
-        // Without this, an operator memo's row stays unstamped and
-        // classifyRecordingProvenance (fail-closed) would treat the operator's
-        // own recording as untrusted. Guarded on source + failure-soft.
-        if (voiceRepository.stampProvenance && recording?.source === 'inapp_voice') {
-          try {
-            await voiceRepository.stampProvenance(tenantId, recordingId, 'operator');
-          } catch (err) {
-            logger.warn('stampProvenance (transcription) failed', {
-              recordingId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
 
         logger.info('Transcription completed', {
           recordingId,
@@ -506,7 +491,11 @@ export function createTranscriptionWorker(
         const error = err instanceof Error ? err : new Error(String(err));
         logger.error('Transcription failed', { recordingId, error: error.message });
 
-        await voiceRepository.updateStatus(tenantId, recordingId, 'failed', {
+        // Queue attempts are 1-based when delivered. Until the final attempt,
+        // return the recording to pending so polling clients do not stop while
+        // the queue is about to redeliver it.
+        const retryable = message.attempts < message.maxAttempts;
+        await voiceRepository.updateStatus(tenantId, recordingId, retryable ? 'pending' : 'failed', {
           error: error.message,
         });
 
