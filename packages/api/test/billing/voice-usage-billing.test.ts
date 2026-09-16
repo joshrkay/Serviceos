@@ -125,12 +125,14 @@ describe("VoiceUsageBillingService", () => {
       markCompleted: vi.fn(),
       fail: vi.fn(),
     };
+    const onAlert = vi.fn();
     const service = new VoiceUsageBillingService({
       pool: pool as never,
       usageRepo,
       stripeApiKey: "sk_test",
       fetchFn,
       settlementRepo: settlementRepo as never,
+      onAlert,
     });
 
     const result = await service.settlePeriod({
@@ -144,6 +146,7 @@ describe("VoiceUsageBillingService", () => {
       customerChargeCents: 0,
     });
     expect(fetchFn).not.toHaveBeenCalled();
+    expect(onAlert).not.toHaveBeenCalled();
   });
 
   it("reports an unused period as complete without requiring provider rows", async () => {
@@ -188,12 +191,14 @@ describe("VoiceUsageBillingService", () => {
       markCompleted: vi.fn(),
       fail: vi.fn(),
     };
+    const onAlert = vi.fn();
     const service = new VoiceUsageBillingService({
       pool: pool as never,
       usageRepo,
       stripeApiKey: "sk_test",
       fetchFn,
       settlementRepo: settlementRepo as never,
+      onAlert,
     });
 
     await expect(
@@ -204,6 +209,9 @@ describe("VoiceUsageBillingService", () => {
       }),
     ).rejects.toThrow(/incomplete.*stt.*tts/i);
     expect(fetchFn).not.toHaveBeenCalled();
+    expect(onAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: "voice_cost_incomplete", tenantId: TENANT }),
+    );
   });
 
   it("records a failed settlement when Stripe omits the invoice item id", async () => {
@@ -230,12 +238,14 @@ describe("VoiceUsageBillingService", () => {
       markCompleted: vi.fn(),
       fail: vi.fn(async () => undefined),
     };
+    const onAlert = vi.fn();
     const service = new VoiceUsageBillingService({
       pool: pool as never,
       usageRepo,
       stripeApiKey: "sk_test",
       fetchFn: vi.fn().mockResolvedValue(response({})),
       settlementRepo,
+      onAlert,
     });
 
     await expect(
@@ -249,6 +259,9 @@ describe("VoiceUsageBillingService", () => {
       TENANT,
       "set_1",
       expect.stringMatching(/no id/),
+    );
+    expect(onAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: "voice_settlement_failed", tenantId: TENANT }),
     );
   });
 });

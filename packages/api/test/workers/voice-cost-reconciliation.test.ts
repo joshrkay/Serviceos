@@ -33,7 +33,7 @@ describe("voice cost reconciliation", () => {
       mediaStreamsCentsPerHour: 24,
       now: new Date("2026-09-15T00:00:00Z"),
     });
-    expect(result).toEqual({ completed: 1, deferred: 0 });
+    expect(result).toEqual({ completed: 1, deferred: 0, repeatedFailures: [] });
     expect(repo.record).toHaveBeenCalledWith(
       expect.objectContaining({
         provider: "twilio",
@@ -77,8 +77,41 @@ describe("voice cost reconciliation", () => {
       mediaStreamsCentsPerHour: 24,
       now: new Date(),
     });
-    expect(result).toEqual({ completed: 0, deferred: 1 });
+    expect(result).toEqual({ completed: 0, deferred: 1, repeatedFailures: [] });
     expect(repo.record).not.toHaveBeenCalled();
     expect(repo.deferTwilio).toHaveBeenCalled();
+  });
+
+  it("alerts after five failed reconciliation attempts", async () => {
+    const row = {
+      id: "r5",
+      tenantId: "t1",
+      sessionId: "s1",
+      callSid: "CA5",
+      accountSid: "AC1",
+      usageSeconds: 60,
+      mediaStreamsUsed: false,
+      occurredAt: new Date(),
+      attempts: 4,
+    };
+    const onRepeatedFailure = vi.fn(async () => undefined);
+    const result = await runVoiceCostReconciliationSweep({
+      tenantIds: ["t1"],
+      repo: {
+        findDueTwilio: vi.fn(async () => [row]),
+        record: vi.fn(),
+        completeTwilio: vi.fn(),
+        deferTwilio: vi.fn(async () => undefined),
+      },
+      resolveAuthToken: async () => "token",
+      fetchFn: vi.fn(async () => ({ ok: true, json: async () => ({ price: null }) }) as Response),
+      mediaStreamsCentsPerHour: 24,
+      onRepeatedFailure,
+    });
+
+    expect(result.repeatedFailures).toEqual([
+      expect.objectContaining({ tenantId: "t1", callSid: "CA5", attempts: 5 }),
+    ]);
+    expect(onRepeatedFailure).toHaveBeenCalledOnce();
   });
 });

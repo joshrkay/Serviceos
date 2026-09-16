@@ -9,6 +9,7 @@ function mockPool(opts: {
   dailyMinutes?: number;
   totalMinutes?: number;
   concurrent?: number;
+  e1ReviewedScript?: string | null;
 }): Pool {
   const liveAt = opts.voiceAgentLiveAt === undefined ? new Date() : opts.voiceAgentLiveAt;
   return {
@@ -18,6 +19,16 @@ function mockPool(opts: {
       }
       if (sql.includes('voice_agent_live_at')) {
         return { rows: [{ voice_agent_live_at: liveAt }] };
+      }
+      if (sql.includes('e1_reviewed_script')) {
+        return {
+          rows: [{
+            e1_reviewed_script:
+              opts.e1ReviewedScript === undefined
+                ? 'Reviewed safety script'
+                : opts.e1ReviewedScript,
+          }],
+        };
       }
       if (sql.includes('FROM voice_sessions')) {
         return {
@@ -126,6 +137,32 @@ describe('createVoiceGate', () => {
     expect(auditRepo.create).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: 'voice_blocked_not_live' }),
     );
+  });
+
+  it('blocks before AI routing when the tenant has no reviewed E1 safety script', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({ subscriptionStatus: 'active', e1ReviewedScript: null }),
+      auditRepo,
+    });
+
+    const result = await gate({ tenantId: 't1', callSid: 'CA-E1' });
+
+    expect(result).toEqual({ allowed: false, reason: 'e1_script_unreviewed' });
+    expect(auditRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'voice_blocked_e1_script_unreviewed' }),
+    );
+  });
+
+  it('treats a whitespace-only E1 script as unreviewed', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({ subscriptionStatus: 'active', e1ReviewedScript: '   ' }),
+      auditRepo,
+    });
+
+    expect(await gate({ tenantId: 't1', callSid: 'CA-E1-SPACE' })).toEqual({
+      allowed: false,
+      reason: 'e1_script_unreviewed',
+    });
   });
 
   it('treats unknown subscription_status as no_billing', async () => {
