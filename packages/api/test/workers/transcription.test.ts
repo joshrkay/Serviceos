@@ -21,12 +21,17 @@ function makeVoiceRepo(): VoiceRepository {
 function makeMessage(overrides: Partial<TranscriptionJobPayload> = {}): QueueMessage<TranscriptionJobPayload> {
   return {
     id: 'msg-1',
+    type: 'transcription',
     payload: {
       tenantId: 'tenant-1',
       recordingId: 'rec-1',
       audioUrl: 'https://example.com/audio.mp3',
       ...overrides,
     },
+    attempts: 1,
+    maxAttempts: 3,
+    idempotencyKey: 'tenant-1:rec-1:transcription',
+    createdAt: new Date().toISOString(),
   } as unknown as QueueMessage<TranscriptionJobPayload>;
 }
 
@@ -252,7 +257,7 @@ describe('createTranscriptionWorker — correction pass wiring', () => {
   });
 });
 
-describe('createTranscriptionWorker — RIVET I13 provenance stamp (Codex)', () => {
+describe('createTranscriptionWorker — RIVET I13 atomic provenance', () => {
   function repoWith(source: string | undefined): VoiceRepository & {
     stampProvenance: ReturnType<typeof vi.fn>;
   } {
@@ -267,10 +272,18 @@ describe('createTranscriptionWorker — RIVET I13 provenance stamp (Codex)', () 
     transcribe: vi.fn().mockResolvedValue({ transcript: 'note to self, order the capacitor', metadata: {} }),
   };
 
-  it("stamps 'operator' for an authenticated in-app memo (source='inapp_voice')", async () => {
+  it("persists 'operator' in the same completion write for an authenticated in-app memo", async () => {
     const voiceRepo = repoWith('inapp_voice');
     await createTranscriptionWorker(voiceRepo, provider).handle(makeMessage(), logger);
-    expect(voiceRepo.stampProvenance).toHaveBeenCalledWith('tenant-1', 'rec-1', 'operator');
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      'tenant-1',
+      'rec-1',
+      'completed',
+      expect.objectContaining({
+        metadata: expect.objectContaining({ provenance: 'operator' }),
+      }),
+    );
+    expect(voiceRepo.stampProvenance).not.toHaveBeenCalled();
   });
 
   it("does NOT stamp 'operator' for a non-in-app recording (telephony/batch go elsewhere)", async () => {
@@ -279,18 +292,45 @@ describe('createTranscriptionWorker — RIVET I13 provenance stamp (Codex)', () 
     expect(voiceRepo.stampProvenance).not.toHaveBeenCalled();
   });
 
-  it('is failure-soft: a stamp error never fails transcription', async () => {
-    const voiceRepo = repoWith('inapp_voice');
-    voiceRepo.stampProvenance.mockRejectedValueOnce(new Error('db down'));
+});
+
+describe('createTranscriptionWorker — retry-visible status', () => {
+  const failure = new Error('provider unavailable');
+  const provider: TranscriptionProvider = {
+    transcribe: vi.fn().mockRejectedValue(failure),
+  };
+
+  it('returns a retryable attempt to pending instead of exposing a terminal failure', async () => {
+    const voiceRepo = makeVoiceRepo();
     await expect(
-      createTranscriptionWorker(voiceRepo, provider).handle(makeMessage(), logger),
-    ).resolves.not.toThrow();
-    // Transcription still completed.
-    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      createTranscriptionWorker(voiceRepo, provider).handle(
+        { ...makeMessage(), attempts: 1, maxAttempts: 3 },
+        logger,
+      ),
+    ).rejects.toThrow('provider unavailable');
+
+    expect(voiceRepo.updateStatus).toHaveBeenLastCalledWith(
       'tenant-1',
       'rec-1',
-      'completed',
-      expect.anything(),
+      'pending',
+      { error: 'provider unavailable' },
+    );
+  });
+
+  it('exposes failed only after the final queue attempt', async () => {
+    const voiceRepo = makeVoiceRepo();
+    await expect(
+      createTranscriptionWorker(voiceRepo, provider).handle(
+        { ...makeMessage(), attempts: 3, maxAttempts: 3 },
+        logger,
+      ),
+    ).rejects.toThrow('provider unavailable');
+
+    expect(voiceRepo.updateStatus).toHaveBeenLastCalledWith(
+      'tenant-1',
+      'rec-1',
+      'failed',
+      { error: 'provider unavailable' },
     );
   });
 });

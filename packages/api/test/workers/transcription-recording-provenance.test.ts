@@ -127,7 +127,13 @@ describe('#1231 — transcription worker: voicemail status comes from the record
     const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, source: 'inapp_voice' }));
     const event = await completionEvent(voiceRepo, job());
     expect('voicemail' in event).toBe(false);
-    expect(voiceRepo.stampProvenance).toHaveBeenCalledWith(TENANT, REC, 'operator');
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      TENANT,
+      REC,
+      'completed',
+      expect.objectContaining({ metadata: expect.objectContaining({ provenance: 'operator' }) }),
+    );
+    expect(voiceRepo.stampProvenance).not.toHaveBeenCalled();
   });
 
   it("the job marker can only ADD restriction: an 'inapp_voice' row with a voicemail job stays voicemail", async () => {
