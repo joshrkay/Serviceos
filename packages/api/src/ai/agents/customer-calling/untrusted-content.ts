@@ -22,11 +22,7 @@
  * metadata layer — see .rivet/answering_state.json for that follow-up.
  */
 
-import {
-  capUntrustedText,
-  findForgedSpans,
-  replaceForgedSpans,
-} from '../../untrusted-text-matching';
+import { capUntrustedText, neutralizeForgedText } from '../../untrusted-text-matching';
 
 /** The stable provenance tag carried with caller-originated content. */
 export const UNTRUSTED_PROVENANCE = 'untrusted' as const;
@@ -74,15 +70,18 @@ export function detectPromptInjection(text: string): InjectionMatch {
   return { matched: false };
 }
 
+/** Replaces a role tag or bracket delimiter. No delimiter characters, so it can never close a forged `[…` / `<…`. */
+const REDACTED_MARKER_TOKEN = '(redacted-marker)';
+
 /**
  * Strip chat-role / markup markers from caller text so it cannot forge a turn
  * boundary or instruction block when echoed into a prompt. Ordinary prose is
  * returned unchanged, byte-for-byte.
  *
  * Two shapes are redacted, each as one whole span:
- *   - a chat-role tag: `<`, optional `/`, a role word (system, assistant,
- *     developer, instruction, prompt, tool, function — prefix match), up to
- *     the next `>`;
+ *   - a chat-role tag: `<`, separators, a role word as the first word
+ *     (system, assistant, developer, instruction, prompt, tool, function —
+ *     prefix match), up to the next `>`;
  *   - a square-bracket fence delimiter: `[BEGIN …]` / `[END …]` on one line.
  *     `fenceUntrusted` below wraps a block with literal `[BEGIN ...]` /
  *     `[END ...]` lines; a caller-supplied `[END <label>]` inside the block
@@ -96,15 +95,21 @@ export function detectPromptInjection(text: string): InjectionMatch {
  * `&lt;system&gt;` and `［END …］` are redacted here instead of slipping
  * through and being re-assembled downstream. The text is capped first
  * (`capUntrustedText`, visible truncation).
+ *
+ * #1229 re-review: an invisible character between `END` and the next word is
+ * a word break (as main's `\b` treated it), `<to Olivia>` is not a tag, and
+ * replacement runs to a fixpoint with a bracket-free token — the old
+ * `[redacted-marker]` token's own `]` could close a forged
+ * `[END UNTRUSTED CALL TRANSCRIPT <tool>` delimiter.
  */
 export function neutralizeUntrusted(text: string): string {
-  const capped = capUntrustedText(text);
-  return replaceForgedSpans(
-    capped,
-    findForgedSpans(capped, ['role-tag', 'bracket-delimiter']),
-    '[redacted-marker]',
+  return neutralizeForgedText(
+    capUntrustedText(text),
+    ['role-tag', 'bracket-delimiter'],
+    REDACTED_MARKER_TOKEN,
   );
 }
+
 
 /**
  * Wrap untrusted caller content in an explicit data-only fence with a

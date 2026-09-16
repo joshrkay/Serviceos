@@ -323,10 +323,8 @@ import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
-import {
-  createTranscriptionWorker,
-  voicemailRouterEnqueueAllowed,
-} from './workers/transcription';
+import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
 import { isApproverPhone } from './proposals/approver-identity';
@@ -353,7 +351,7 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
-import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
+import { createVoiceActionRouterWorker, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { AliasFirstEntityResolver } from './ai/resolution/alias-first-entity-resolver';
 import { PgEntityAliasRepository } from './learning/entity-aliases/pg-entity-alias';
@@ -1525,81 +1523,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ...(config.AI_PROVIDER_API_KEY
         ? { gateway: llmGateway, glossary: transcriptionGlossaryProvider }
         : {}),
-      onTranscribed: async (event, hookLogger) => {
-        // U9 — voicemail transcripts reach the action router ONLY when the
-        // caller-ID matches the tenant's approver set (owner_phone / backup
-        // supervisor — resolveOwnerSession precedent, fail-closed). Every
-        // other caller keeps today's notify-only voicemail (lead + audit,
-        // no router). Non-voicemail events (in-app memos) pass untouched.
-        const routerAllowed = await voicemailRouterEnqueueAllowed(
-          event,
-          {
-            isApproverPhone: (tenantId, phone) =>
-              isApproverPhone({ settingsRepo, userRepo }, tenantId, phone ?? null),
-          },
-          hookLogger,
-        );
-        if (event.voicemail) {
-          // Audit the gate decision (repo invariant: new pipeline legs
-          // audit). Best-effort — never blocks the enqueue path.
-          try {
-            await auditRepo.create(
-              createAuditEvent({
-                tenantId: event.tenantId,
-                actorId: 'voicemail_webhook',
-                actorRole: 'system',
-                eventType: 'voicemail.router_gate',
-                entityType: 'voice_recording',
-                entityId: event.recordingId,
-                metadata: {
-                  callerVerified: routerAllowed,
-                  enqueued: routerAllowed,
-                },
-              }),
-            );
-          } catch (auditErr) {
-            hookLogger.warn('voicemail router gate audit failed', {
-              recordingId: event.recordingId,
-              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-            });
-          }
-        }
-        if (!routerAllowed) {
-          hookLogger.info('voicemail transcript: caller not in approver set — notify-only', {
-            recordingId: event.recordingId,
-          });
-          return;
-        }
-        // Enqueue the downstream voice-action-router job. A separate
-        // poll loop (below) picks it up and runs intent classification.
-        // Keeping it on the queue instead of running inline means:
-        //   1) transcription success isn't blocked by classifier latency
-        //   2) router failures are retried by the queue, not stalled
-        //   3) transcription and router workers can scale independently
-        const routerPayload: VoiceActionRouterPayload = {
-          tenantId: event.tenantId,
-          userId: event.userId ?? 'system',
-          transcript: event.transcript,
-          conversationId: event.conversationId,
-          recordingId: event.recordingId,
-          ...(event.jobId ? { jobId: event.jobId } : {}),
-          // U9 — the router stamps sourceContext.sourceChannel and force-
-          // holds every voicemail-sourced proposal for human review
-          // (holdIfUntrustedSource): the recording keeps untrusted
-          // provenance (source='inbound_call'), so the owner caller-ID
-          // gates only WHETHER this enqueue happens — never trust.
-          ...(event.voicemail ? { sourceChannel: 'voicemail' as const } : {}),
-        };
-        await queue.send(
-          'voice_action_router',
-          routerPayload,
-          `${event.tenantId}:${event.recordingId}:voice_action_router`
-        );
-        hookLogger.info('voice_action_router enqueued', {
-          recordingId: event.recordingId,
-          ...(event.voicemail ? { sourceChannel: 'voicemail' } : {}),
-        });
-      },
+      // U9 — the transcript → voice-action-router handoff (voicemail owner
+      // gate + gate audit + router enqueue). Lives in
+      // workers/transcription-router-handoff.ts so tests drive the real hook.
+      onTranscribed: createTranscriptionRouterHandoff({
+        queue,
+        auditRepo,
+        isApproverPhone: (tenantId, phone) =>
+          isApproverPhone({ settingsRepo, userRepo }, tenantId, phone ?? null),
+      }),
       // Blocker 12 — encrypt retained raw transcripts at rest. Prefer a
       // dedicated TRANSCRIPT_ENCRYPTION_KEY but fall back to the
       // already-provisioned TENANT_ENCRYPTION_KEY so encryption is active in

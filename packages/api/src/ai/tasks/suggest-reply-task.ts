@@ -170,7 +170,7 @@ export class SuggestReplyTask {
     }
     if (customerLines.length > 0) {
       userSections.push(
-        buildUntrustedContentSection(customerLines.join('\n'), 'Customer message thread'),
+        buildUntrustedContentSection(customerLines, 'Customer message thread'),
       );
     }
     userSections.push(
