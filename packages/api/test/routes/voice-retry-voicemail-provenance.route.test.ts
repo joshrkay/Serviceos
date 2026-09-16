@@ -82,6 +82,7 @@ async function retryAndTranscribe(opts: {
   recordingId: string;
   transcript: string;
   actingTenant?: string;
+  spoofedRetryRequestedBy?: string;
 }) {
   const voiceRepo = new InMemoryVoiceRepository();
   await seed(voiceRepo, {
@@ -98,7 +99,12 @@ async function retryAndTranscribe(opts: {
 
   const res = await request(appFor(voiceRepo, queue, opts.actingTenant ?? TENANT_A))
     .post(`/api/voice/recordings/${opts.recordingId}/retry`)
-    .send({ audioUrl: 'https://s3.test/retry.mp3' });
+    .send({
+      audioUrl: 'https://s3.test/retry.mp3',
+      ...(opts.spoofedRetryRequestedBy
+        ? { retryRequestedBy: opts.spoofedRetryRequestedBy }
+        : {}),
+    });
 
   const transcriptionJobs = (await drain(queue)).filter((m) => m.type === 'transcription');
   const worker = createTranscriptionWorker(
@@ -176,6 +182,21 @@ describe('#1231 — POST /voice/recordings/:id/retry: a retried caller voicemail
     });
     expect('sourceChannel' in routerJobs[0].payload).toBe(false);
     expect(await auditRepo.findByEntity(TENANT_A, 'voice_recording', MEMO_ID)).toEqual([]);
+  });
+
+  it('ignores a spoofed retryRequestedBy body field and attributes the retry to the session user', async () => {
+    const { res, transcriptionJobs } = await retryAndTranscribe({
+      recordingId: VOICEMAIL_ID,
+      transcript: CALLER_TEXT,
+      spoofedRetryRequestedBy: 'attacker-controlled-user',
+    });
+
+    expect(res.status).toBe(202);
+    expect(transcriptionJobs).toHaveLength(1);
+    expect(transcriptionJobs[0].payload).toMatchObject({ retryRequestedBy: 'owner-a' });
+    expect(transcriptionJobs[0].payload).not.toMatchObject({
+      retryRequestedBy: 'attacker-controlled-user',
+    });
   });
 
   it("T1 — tenant B cannot retry tenant A's recording id: 404, nothing queued, A's row untouched", async () => {

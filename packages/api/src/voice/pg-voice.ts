@@ -105,7 +105,8 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
         `UPDATE voice_recordings
          SET status = $1,
              transcript = COALESCE($2, transcript),
-             transcript_metadata = COALESCE($3::jsonb, transcript_metadata),
+             transcript_metadata = COALESCE(transcript_metadata, '{}'::jsonb)
+                                   || COALESCE($3::jsonb, '{}'::jsonb),
              error_message = COALESCE($4, error_message),
              updated_at = $5
          WHERE id = $6 AND tenant_id = $7
