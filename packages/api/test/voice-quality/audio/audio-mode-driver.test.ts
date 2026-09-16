@@ -167,6 +167,9 @@ describe('VQ2-008 — AudioModeDriver', () => {
     expect((sendArgs[0] as Buffer).toString()).toContain('PCM:');
     // Second arg is the per-turn index (starts at 0).
     expect(sendArgs[1]).toBe(0);
+    // Third arg bridges the scripted transcript into the Layer-2 streaming
+    // provider so the production adapter, not the timing bus, starts the turn.
+    expect(sendArgs[2]).toBe('hello agent');
 
     // 3. Whisper got the emulator's agentAudio buffer.
     expect(whisper.transcribeBuffer).toHaveBeenCalledTimes(1);

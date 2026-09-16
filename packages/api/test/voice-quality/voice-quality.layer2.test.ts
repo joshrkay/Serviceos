@@ -85,13 +85,18 @@ import {
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import { createRealLayerTwoGateway } from '../../src/ai/gateway/real-layer-two-factory';
 import { OpenAiTtsProvider } from '../../src/ai/tts/tts-provider';
+import type { TtsProvider } from '../../src/ai/tts/tts-provider';
+import { mp3ToPcm16Mono16k } from '../../src/ai/voice-quality/audio/pcm-codec';
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import {
   attachMediaStreamServer,
   MEDIA_STREAM_PATH,
 } from '../../src/telephony/media-streams/twilio-mediastream-server';
-import type { StreamingTranscriptionProvider } from '../../src/voice/transcription-providers';
+import type {
+  StreamingTranscriptCallback,
+  StreamingTranscriptionProvider,
+} from '../../src/voice/transcription-providers';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
@@ -190,6 +195,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
     suiteCostTracker: SuiteCostTracker;
     perScriptResults: RunScriptLayer2Result[];
     suiteCapTripped: boolean;
+    deliverFinalTranscript: ((transcript: string) => void) | null;
   } = {
     httpServer: null,
     serverUrl: '',
@@ -198,6 +204,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
     suiteCostTracker: makeSuiteCostTracker(),
     perScriptResults: [],
     suiteCapTripped: false,
+    deliverFinalTranscript: null,
   };
 
   beforeAll(async () => {
@@ -217,15 +224,47 @@ describe('Voice Quality Layer 2 — corpus', () => {
       startInterval: false,
     });
 
-    // Streaming STT provider stub. The production path uses Deepgram;
-    // the harness leaves it as a no-op since the emulator simulates
-    // `transcript_received` directly (see twilio-stream-emulator.ts).
+    // Streaming STT bridge. Caller audio still traverses the real WebSocket
+    // and media decoder, while the known corpus transcript substitutes for
+    // Deepgram. Crucially, it is emitted through the provider callback so the
+    // production adapter invokes speechTurn; a bus-only timing event does not.
+    let activeTranscriptCallback: StreamingTranscriptCallback | null = null;
     const streamingProvider: StreamingTranscriptionProvider = {
-      async openSession() {
+      async openSession(onEvent) {
+        activeTranscriptCallback = onEvent;
         return {
           send: () => {},
           finish: () => {},
-          destroy: () => {},
+          destroy: () => {
+            activeTranscriptCallback = null;
+          },
+        };
+      },
+    };
+    suiteState.deliverFinalTranscript = (transcript) => {
+      if (!activeTranscriptCallback) {
+        throw new Error('Layer 2 streaming transcript bridge is not open');
+      }
+      activeTranscriptCallback({
+        type: 'final',
+        transcript,
+        confidence: 1,
+        isFinal: true,
+      });
+    };
+
+    // The media adapter only accepts raw PCM16@16k for buffered output.
+    // OpenAI returns MP3, so adapt it explicitly instead of either omitting
+    // TTS (silent agent) or feeding compressed bytes to the μ-law encoder.
+    const openAiTts = new OpenAiTtsProvider(process.env.OPENAI_API_KEY!);
+    const layerTwoTtsProvider: TtsProvider = {
+      async synthesize(input) {
+        const result = await openAiTts.synthesize(input);
+        return {
+          ...result,
+          audio: await mp3ToPcm16Mono16k(result.audio),
+          contentType: 'audio/pcm',
+          provider: `${result.provider}-pcm16k`,
         };
       },
     };
@@ -282,6 +321,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,
       streamingProvider,
+      ttsProvider: layerTwoTtsProvider,
       // VQ2-FOLLOWUP — replaces the no-op stub with the real agent loop
       // extracted from TwilioGatherAdapter#processCallerUtterance. The
       // factory closure-captures all helpers (cost, audit, proposal,
@@ -550,6 +590,7 @@ async function buildAudioModeDriverDeps(
     serverUrl: string;
     voiceSessionStore: VoiceSessionStore | null;
     suiteCostTracker: SuiteCostTracker;
+    deliverFinalTranscript: ((transcript: string) => void) | null;
   },
 ): Promise<BuiltDriverDeps> {
   const openaiKey = process.env.OPENAI_API_KEY!;
@@ -578,6 +619,12 @@ async function buildAudioModeDriverDeps(
   const emulator = new TwilioStreamEmulator({
     serverUrl: suiteState.serverUrl,
     bus,
+    deliverFinalTranscript: (transcript) => {
+      if (!suiteState.deliverFinalTranscript) {
+        throw new Error('Layer 2 streaming transcript bridge is unavailable');
+      }
+      suiteState.deliverFinalTranscript(transcript);
+    },
   });
 
   const gateway = createRealLayerTwoGateway({

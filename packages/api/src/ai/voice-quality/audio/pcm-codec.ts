@@ -94,6 +94,21 @@ export async function mp3ToPcm16Mono8k(mp3: Buffer): Promise<Buffer> {
   ]);
 }
 
+/**
+ * Decode provider audio into the raw PCM16 mono 16 kHz format consumed by
+ * the production media-stream adapter for agent-to-caller audio.
+ */
+export async function mp3ToPcm16Mono16k(mp3: Buffer): Promise<Buffer> {
+  return spawnFfmpegConvert(mp3, [
+    '-i', 'pipe:0',
+    '-f', 's16le',
+    '-acodec', 'pcm_s16le',
+    '-ac', '1',
+    '-ar', '16000',
+    'pipe:1',
+  ]);
+}
+
 // ─── Twilio frame slicing ────────────────────────────────────────────────────
 
 /**
