@@ -46,10 +46,6 @@ interface CreateVoiceRecordingBody {
 /** U11 — bound on the client idempotency key length (UUID today; generous headroom). */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
-interface RetryTranscriptionBody {
-  audioUrl: string;
-}
-
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const JOB_ID_SCHEMA = z.string().uuid();
 
@@ -628,12 +624,6 @@ export function createVoiceRouter(
     requirePermission('files:upload'),
     notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const body = req.body as RetryTranscriptionBody;
-      if (!body?.audioUrl) {
-        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'audioUrl is required' });
-        return;
-      }
-
       const existing = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
       if (!existing) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
@@ -652,13 +642,49 @@ export function createVoiceRouter(
         return;
       }
 
+      // #1248 — retry audio is server-selected. Accepting an audioUrl in the
+      // request lets an authenticated caller make the worker fetch an
+      // arbitrary URL (SSRF) or substitute different audio under the original
+      // recording owner's trust. Resolve the tenant-scoped files row attached
+      // to this recording and mint a fresh download URL instead.
+      if (!opts?.fileRepo || !opts.storage) {
+        res.status(503).json({
+          error: 'NOT_CONFIGURED',
+          message: 'Recording retry storage is not configured',
+        });
+        return;
+      }
+      if (!existing.fileId) {
+        res.status(404).json({
+          error: 'NOT_FOUND',
+          message: 'Recording has no stored audio file',
+        });
+        return;
+      }
+      const file = await opts.fileRepo.findById(req.auth!.tenantId, existing.fileId);
+      if (!file) {
+        res.status(404).json({
+          error: 'NOT_FOUND',
+          message: 'Recording audio file not found',
+        });
+        return;
+      }
+      if (!isAllowedMimeType(file.contentType)) {
+        res.status(409).json({
+          error: 'INVALID_RECORDING_AUDIO',
+          message: 'Recording file is not audio',
+        });
+        return;
+      }
+      const audioUrl = await opts.storage.generateDownloadUrl(file.storageBucket, file.storageKey);
+
       await voiceRepo.updateStatus(req.auth!.tenantId, existing.id, 'pending');
       const queueMessageId = await queue.send(
         'transcription',
         {
           tenantId: req.auth!.tenantId,
           recordingId: existing.id,
-          audioUrl: body.audioUrl,
+          audioUrl,
           conversationId: existing.conversationId,
           // #1231 — deliberately NO voicemail/trust field: the worker derives
           // untrusted status from the recording row. retryRequestedBy is

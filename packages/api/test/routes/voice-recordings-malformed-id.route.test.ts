@@ -112,7 +112,7 @@ describe('voice recordings: malformed :id never reaches Postgres as a raw uuid c
     });
   }
 
-  it('a valid id is unaffected — read, audio (501 unconfigured) and retry still reach the handler', async () => {
+  it('a valid id is unaffected — read, audio and retry still reach their configuration guards', async () => {
     const id = uuidv4();
     await repo.create({
       id,
@@ -137,7 +137,7 @@ describe('voice recordings: malformed :id never reaches Postgres as a raw uuid c
     const retry = await request(app)
       .post(`/api/voice/recordings/${id}/retry`)
       .send({ audioUrl: 'https://s3.test/rec/CA-1.mp3' });
-    expect(retry.status).toBe(202);
+    expect(retry.status).toBe(503);
   });
 
   it('auth ordering: a caller whose role grants nothing gets 403 before any existence signal', async () => {
