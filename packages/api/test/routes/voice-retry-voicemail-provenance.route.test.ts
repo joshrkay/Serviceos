@@ -24,6 +24,7 @@ import {
 } from '../../src/workers/transcription';
 import { createTranscriptionRouterHandoff } from '../../src/workers/transcription-router-handoff';
 import type { Logger } from '../../src/logging/logger';
+import type { FileRepository, StorageProvider } from '../../src/files/file-service';
 
 const TENANT_A = '0b3c1f52-7e0d-4d1a-9a8e-12310000000a';
 const TENANT_B = '0b3c1f52-7e0d-4d1a-9a8e-12310000000b';
@@ -52,13 +53,38 @@ function appFor(voiceRepo: InMemoryVoiceRepository, queue: InMemoryQueue, tenant
     } as AuthenticatedRequest['auth'];
     next();
   });
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  const fileRepo = {
+    findById: vi.fn(async (requestedTenant: string, fileId: string) =>
+      requestedTenant === TENANT_A
+        ? {
+            id: fileId,
+            tenantId: requestedTenant,
+            filename: 'retry.m4a',
+            contentType: 'audio/mp4',
+            sizeBytes: 1024,
+            storageBucket: 'voice',
+            storageKey: `${requestedTenant}/${fileId}/retry.m4a`,
+            uploadedBy: 'owner-a',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          }
+        : null,
+    ),
+  } as unknown as FileRepository;
+  const storage = {
+    generateDownloadUrl: vi.fn(async (bucket: string, key: string) => `https://storage.test/${bucket}/${key}`),
+  } as unknown as StorageProvider;
+  app.use(
+    '/api/voice',
+    createVoiceRouter(voiceRepo, queue, undefined, undefined, undefined, { fileRepo, storage }),
+  );
   return app;
 }
 
 async function seed(voiceRepo: InMemoryVoiceRepository, rec: Partial<VoiceRecording> & { id: string }) {
   await voiceRepo.create({
     tenantId: TENANT_A,
+    fileId: `${rec.id}-file`,
     status: 'failed',
     errorMessage: 'whisper 503',
     createdBy: 'voicemail_webhook',

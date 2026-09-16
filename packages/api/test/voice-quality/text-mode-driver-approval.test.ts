@@ -24,6 +24,7 @@ import {
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { SettingsRepository } from '../../src/settings/settings';
 import { hashVoiceApprovalPin, normalizeEnrollmentPin } from '../../src/settings/voice-approval-pin';
+import { REDACTED_CHALLENGE_TEXT } from '../../src/ai/voice-turn/transcript-append';
 
 const TENANT = 't-ws21b';
 const OWNER_PHONE = '+15125550100';
@@ -159,6 +160,9 @@ describe('WS21b — TextModeDriver owner voice approval', () => {
     const done = await h.driver.speak(sessionId, 'four two seven one');
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
     expect(done.agentResponse.length).toBeGreaterThan(0);
+    const transcript = h.store.snapshot(sessionId)?.transcript ?? [];
+    expect(transcript).toContain(`caller: ${REDACTED_CHALLENGE_TEXT}`);
+    expect(transcript).not.toContain('caller: four two seven one');
   });
 
   it('wrong PIN keeps the proposal pending (challenge fails, dialogue continues)', async () => {

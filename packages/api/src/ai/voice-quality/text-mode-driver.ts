@@ -103,6 +103,7 @@ import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
 } from '../voice-turn/create-voice-turn-processor';
+import { callerTranscriptText } from '../voice-turn/transcript-append';
 import {
   intentClassifiedEvent,
   lookupExecutedEvent,
@@ -651,7 +652,7 @@ export class TextModeDriver implements AgentDriver {
     //    transcript) sees what was said.
     this.deps.voiceSessionStore.appendTranscript(sessionId, {
       speaker: 'caller',
-      text: callerTranscript,
+      text: callerTranscriptText(session, callerTranscript),
       ts: Date.now(),
     });
 
