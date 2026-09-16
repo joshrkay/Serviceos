@@ -9,7 +9,7 @@
  * so the review card's edit path takes over instead of a dead end.
  */
 import { describe, it, expect } from 'vitest';
-import { approveProposal } from '../../src/proposals/actions';
+import { approveProposal, approveChainSet } from '../../src/proposals/actions';
 import {
   InMemoryProposalRepository,
   createProposal,
@@ -18,6 +18,7 @@ import {
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { buildInvoice } from '../factories/invoice.factory';
 import { invoiceReferenceCheck } from '../../src/proposals/approval-reference-checks';
+import { buildChainRefToken } from '../../src/proposals/chain';
 import { ValidationError } from '../../src/shared/errors';
 
 const tenantId = 'tenant-ast04';
@@ -62,5 +63,35 @@ describe('approveProposal — approval-time reference check (AST-04 belt and bra
       referenceChecks: [invoiceReferenceCheck(invoiceRepo)],
     });
     expect(approved.status).toBe('approved');
+  });
+
+  // Codex review on PR #1311 — chained send_invoice tails carry a symbolic
+  // reference until resolveChainReferences replaces it at execution time;
+  // the check must not read that token as an id and refuse a legitimate chain.
+  it('leaves a chain-reference token alone (it resolves at execution, not at approval)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = createProposal(sendInvoiceInput(buildChainRefToken(0, 'invoiceId')));
+    await repo.create(proposal);
+    const invoiceRepo = new InMemoryInvoiceRepository(); // nothing to find — and nothing should be looked up
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner', undefined, 'ui', {
+      referenceChecks: [invoiceReferenceCheck(invoiceRepo)],
+    });
+    expect(approved.status).toBe('approved');
+  });
+
+  // Codex review on PR #1311 — the voice approval path goes through
+  // approveChainSet, which must carry the same checks as the dashboard route.
+  it('approveChainSet applies the reference checks to the head it approves', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = createProposal(sendInvoiceInput(JOB_ID)); // not chained → approveChainSet approves the head directly
+    await repo.create(proposal);
+    const invoiceRepo = new InMemoryInvoiceRepository();
+
+    const attempt = approveChainSet(repo, tenantId, proposal.id, actorId, 'owner', undefined, 'voice', undefined, {
+      referenceChecks: [invoiceReferenceCheck(invoiceRepo)],
+    });
+    await expect(attempt).rejects.toMatchObject({ details: { missingFields: ['invoiceId'] } });
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('draft');
   });
 });

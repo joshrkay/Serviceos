@@ -47,6 +47,7 @@
 
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import type { Pool } from 'pg';
+import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import {
   classifyIntent,
@@ -859,6 +860,8 @@ export interface VoiceTurnProcessorDeps {
    * the voice edit dialogue record edit_request / reapproval_rendered
    * events so unapplied voice edits block approval on every channel.
    */
+  /** Approval-time reference checks, forwarded to voice approval (see VoiceApprovalDeps). */
+  approvalReferenceChecks?: ApprovalReferenceCheck[];
   smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'> &
     Partial<Pick<ProposalSmsEventRepository, 'create'>>;
   /**
@@ -3223,6 +3226,7 @@ export function createVoiceTurnProcessor(
       ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
       ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
       ...(deps.smsEventRepo ? { smsEventRepo: deps.smsEventRepo } : {}),
+      ...(deps.approvalReferenceChecks ? { approvalReferenceChecks: deps.approvalReferenceChecks } : {}),
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
       ...(deps.voiceApprovalOneTap ? { oneTapFallback: deps.voiceApprovalOneTap } : {}),
       ...(deps.voiceApprovalPinLockAlertRepo

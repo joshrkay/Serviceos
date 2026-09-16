@@ -254,6 +254,7 @@ describe('SendInvoiceTaskHandler — a UUID reference is only an invoiceId if it
       findById: vi.fn().mockResolvedValue(null),
       findByJob: vi.fn().mockResolvedValue([{ id: INV, invoiceNumber: 'INV-0101', status: 'open' }]),
     };
+    // 'open' = issued and unpaid: the one status family send_invoice may act on.
     const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
       ctx({ message: MESSAGE, existingEntities: { jobReference: JOB_ID, sendChannel: 'sms' } }),
     );
@@ -273,7 +274,7 @@ describe('SendInvoiceTaskHandler — a UUID reference is only an invoiceId if it
     expect(provider.lastDispatch).toMatchObject({ tenantId: 't-1', invoiceId: INV, channel: 'sms' });
   });
 
-  it('a job UUID with TWO invoices keeps the gate and offers exactly those invoices as candidates', async () => {
+  it('a job UUID with TWO sendable invoices keeps the gate and offers exactly those invoices as candidates', async () => {
     const INV_A = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
     const INV_B = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
     const invoiceRepo = {
@@ -281,7 +282,7 @@ describe('SendInvoiceTaskHandler — a UUID reference is only an invoiceId if it
       findById: vi.fn().mockResolvedValue(null),
       findByJob: vi.fn().mockResolvedValue([
         { id: INV_A, invoiceNumber: 'INV-0201', status: 'open' },
-        { id: INV_B, invoiceNumber: 'INV-0202', status: 'draft' },
+        { id: INV_B, invoiceNumber: 'INV-0202', status: 'partially_paid' },
       ]),
     };
     const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
@@ -294,7 +295,27 @@ describe('SendInvoiceTaskHandler — a UUID reference is only an invoiceId if it
     expect(sc.entityReference).toBe(JOB_ID);
     expect(sc.entityCandidates).toEqual([
       { id: INV_A, kind: 'invoice', label: 'INV-0201', hint: 'open', score: 1 },
-      { id: INV_B, kind: 'invoice', label: 'INV-0202', hint: 'draft', score: 1 },
+      { id: INV_B, kind: 'invoice', label: 'INV-0202', hint: 'partially_paid', score: 1 },
     ]);
+  });
+
+  // Codex review on PR #1311 — a job whose only invoice is still a draft (or
+  // void / canceled) must not lift the gate: send_invoice makes the invoice
+  // customer-visible, and D-023 keeps issuance a separate human tap. The
+  // draft is still offered as a candidate so the card is not a dead end.
+  it('a job UUID whose only invoice is a DRAFT keeps the gate and offers it as a candidate', async () => {
+    const INV = 'abababab-abab-4bab-8bab-abababababab';
+    const invoiceRepo = {
+      findByTenant: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockResolvedValue(null),
+      findByJob: vi.fn().mockResolvedValue([{ id: INV, invoiceNumber: 'INV-0301', status: 'draft' }]),
+    };
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
+      ctx({ message: MESSAGE, existingEntities: { jobReference: JOB_ID } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    const sc = res.proposal.sourceContext as Record<string, unknown>;
+    expect(sc.entityCandidates).toEqual([{ id: INV, kind: 'invoice', label: 'INV-0301', hint: 'draft', score: 1 }]);
   });
 });

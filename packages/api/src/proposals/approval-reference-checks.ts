@@ -18,6 +18,7 @@
  */
 import type { Proposal, ProposalType } from './proposal';
 import type { InvoiceRepository } from '../invoices/invoice';
+import { isChainRefToken } from './chain';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
 
@@ -39,6 +40,9 @@ export function invoiceReferenceCheck(
     if (!INVOICE_ID_PROPOSAL_TYPES.has(proposal.proposalType)) return [];
     const id = proposal.payload.invoiceId;
     if (typeof id !== 'string' || id.length === 0) return [];
+    // A chained tail carries `$ref:chain[n].invoiceId` until
+    // resolveChainReferences fills it at execution time — not an id yet.
+    if (isChainRefToken(id)) return [];
     const invoice = await invoiceRepo.findById(tenantId, id);
     return invoice ? [] : ['invoiceId'];
   };

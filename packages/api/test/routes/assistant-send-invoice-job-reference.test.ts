@@ -97,7 +97,9 @@ describe('POST /api/assistant/chat — send_invoice for a job UUID (AST-04)', ()
   it('the job has ONE invoice: the draft carries that invoice through the verified-id scrub, and approve succeeds', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const invoiceRepo = new InMemoryInvoiceRepository();
-    await invoiceRepo.create(buildInvoice({ id: INVOICE_ID, tenantId: TEST_TENANT, jobId: JOB_ID }));
+    // An ISSUED invoice (status open): the factory default is draft, which
+    // send_invoice may not act on (D-023 keeps issuance a separate tap).
+    await invoiceRepo.create(buildInvoice({ id: INVOICE_ID, tenantId: TEST_TENANT, jobId: JOB_ID, status: 'open' }));
     const app = buildApp({
       gateway: gatewayReplying(classifierReply('send_invoice', { jobReference: JOB_ID, sendChannel: 'sms' })),
       proposalRepo,

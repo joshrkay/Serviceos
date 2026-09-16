@@ -187,6 +187,7 @@ export async function approveProposalsBatch(
   actorRole: Role,
   auditRepo?: AuditRepository,
   channel?: ApprovalChannel,
+  options?: ApprovalOptions,
 ): Promise<BatchApproveResult> {
   const approved: string[] = [];
   const failed: { id: string; reason: string }[] = [];
@@ -204,7 +205,7 @@ export async function approveProposalsBatch(
         failed.push({ id, reason: 'BATCH_NON_CAPTURE' });
         continue;
       }
-      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo, channel);
+      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo, channel, options);
       approved.push(id);
     } catch (err) {
       // Surface the error code when available (e.g. NOT_FOUND, FORBIDDEN,
@@ -400,6 +401,7 @@ export async function approveChainSet(
   auditRepo?: AuditRepository,
   channel?: ApprovalChannel,
   hasPendingEdit?: PendingEditChecker,
+  options?: ApprovalOptions,
 ): Promise<ApproveChainSetResult> {
   const head = await proposalRepo.findById(tenantId, headId);
   if (!head) throw new NotFoundError('Proposal', headId);
@@ -413,7 +415,7 @@ export async function approveChainSet(
       actorId,
       actorRole,
       auditRepo,
-      channel,
+      channel, options,
     );
     return { approved: [approved], skipped: [] };
   }
@@ -425,7 +427,7 @@ export async function approveChainSet(
     actorId,
     actorRole,
     auditRepo,
-    channel,
+    channel, options,
   );
   const approved: Proposal[] = [approvedHead];
   const skipped: ApproveChainSetResult['skipped'] = [];
@@ -489,7 +491,7 @@ export async function approveChainSet(
         actorId,
         actorRole,
         auditRepo,
-        channel,
+        channel, options,
       );
       approved.push(updated);
     } catch (err) {

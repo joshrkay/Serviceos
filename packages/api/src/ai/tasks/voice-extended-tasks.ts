@@ -664,6 +664,9 @@ export class AddNoteTaskHandler implements TaskHandler {
 // → payload, gate lifts; free-text reference that never resolved → gate +
 // B2 candidates (unchanged); nothing → gate. Comms class is untouched — a
 // fully-resolved draft still lands in 'draft' and waits for a human tap.
+/** Invoice statuses `send_invoice` can act on: issued and not settled. */
+const SENDABLE_INVOICE_STATUSES: ReadonlySet<Invoice['status']> = new Set(['open', 'partially_paid']);
+
 export interface SendInvoiceTaskDeps {
   /**
    * B2 — optional. When present, a gated free-text invoiceReference is
@@ -728,9 +731,11 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       if (literal.verified) {
         extraSourceContext = { verifiedIds: { invoiceId: literal.invoiceId } };
       }
-    } else if (literal && literal.jobInvoices.length > 1) {
-      // A JOB id with several invoices: gate, and offer exactly those invoices
-      // to the review card's picker — a foreign-key fact, not an ILIKE guess.
+    } else if (literal && literal.jobInvoices.length > 0) {
+      // A JOB id whose invoices cannot be resolved to one sendable invoice
+      // (several, or only drafts / void / canceled): gate, and offer exactly
+      // those invoices to the review card's picker — a foreign-key fact, not
+      // an ILIKE guess.
       payload.invoiceReference = reference;
       missing.push('invoiceId');
       extraSourceContext = {
@@ -801,8 +806,12 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       const invoice = await repo.findById(tenantId, id);
       if (invoice) return { invoiceId: invoice.id, verified: true, jobInvoices: [] };
       const jobInvoices = repo.findByJob ? await repo.findByJob(tenantId, id) : [];
-      return jobInvoices.length === 1
-        ? { invoiceId: jobInvoices[0].id, verified: true, jobInvoices }
+      // Only an issued invoice can be sent: a draft is not customer-visible
+      // until its own issue_invoice tap (D-023), and void / canceled / paid
+      // have nothing to send. Exactly one sendable invoice lifts the gate.
+      const sendable = jobInvoices.filter((inv) => SENDABLE_INVOICE_STATUSES.has(inv.status));
+      return sendable.length === 1
+        ? { invoiceId: sendable[0].id, verified: true, jobInvoices }
         : { verified: false, jobInvoices };
     } catch {
       return { verified: false, jobInvoices: [] };

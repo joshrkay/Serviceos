@@ -321,6 +321,7 @@ export function createProposalsRouter(
         req.auth!.role as Role,
         auditRepo,
         'ui', // RV-073 — batch approvals come from the inbox screen
+        { referenceChecks: approvalReferenceChecks },
       );
       res.json(result);
     }),
