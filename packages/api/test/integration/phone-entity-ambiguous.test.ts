@@ -138,7 +138,7 @@ describe('#1118 — the phone asks when two customers share a name (real Postgre
       `INSERT INTO tenant_settings
          (id, tenant_id, business_name, timezone, region, voice_agent_live_at, owner_phone, e1_reviewed_script)
        VALUES ($1, $2, '1118 Disambiguation Shop', 'America/Chicago', 'TX', NOW(), $3,
-               'Test-reviewed E1 script')`,
+               'If this is an emergency, hang up and call 911.')`,
       [crypto.randomUUID(), tenantId, opts.ownerPhone],
     );
     const client = await pool.connect();
