@@ -144,6 +144,29 @@ describe('VQ2-008 — AudioModeDriver', () => {
     expect(emulator.start).toHaveBeenCalledWith(session!.callSid);
   });
 
+  it('VQ2-008 — runs session lifecycle hooks for Layer-2 processor routing', async () => {
+    const onSessionCreated = vi.fn().mockResolvedValue(undefined);
+    const onSessionEnded = vi.fn();
+    const { deps, emulator, voiceSessionStore } = makeDeps({
+      onSessionCreated,
+      onSessionEnded,
+    });
+    cleanups.push(() => voiceSessionStore.dispose());
+    const driver = new AudioModeDriver(deps);
+
+    const { sessionId } = await driver.startSession(START_OPTS);
+
+    expect(onSessionCreated).toHaveBeenCalledTimes(1);
+    expect(onSessionCreated.mock.calls[0]![0].id).toBe(sessionId);
+    expect(onSessionCreated.mock.calls[0]![1]).toEqual(START_OPTS);
+    expect(onSessionCreated.mock.invocationCallOrder[0]).toBeLessThan(
+      emulator.start.mock.invocationCallOrder[0]!,
+    );
+
+    await driver.endSession(sessionId);
+    expect(onSessionEnded).toHaveBeenCalledWith(sessionId);
+  });
+
   it('VQ2-008 — speak() synthesizes caller audio, decodes MP3 → PCM, streams via emulator, transcribes agent audio via Whisper', async () => {
     const { deps, emulator, whisper, ttsCache, decodeTtsAudio, voiceSessionStore } = makeDeps();
     cleanups.push(() => voiceSessionStore.dispose());
