@@ -1,17 +1,17 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 const configSchema = z.object({
   NODE_ENV: z
-    .enum(["dev", "staging", "prod", "development", "production", "test"])
-    .default("dev")
+    .enum(['dev', 'staging', 'prod', 'development', 'production', 'test'])
+    .default('dev')
     .transform((v) => {
-      if (v === "development") return "dev";
-      if (v === "production") return "prod";
-      return v as "dev" | "staging" | "prod" | "test";
+      if (v === 'development') return 'dev';
+      if (v === 'production') return 'prod';
+      return v as 'dev' | 'staging' | 'prod' | 'test';
     }),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1).optional(),
-  DB_HOST: z.string().default("localhost"),
+  DB_HOST: z.string().default('localhost'),
   DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_NAME: z.string().optional(),
   DB_USER: z.string().optional(),
@@ -29,7 +29,7 @@ const configSchema = z.object({
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
-  R2_BUCKET: z.string().default("serviceos-uploads"),
+  R2_BUCKET: z.string().default('serviceos-uploads'),
   R2_PUBLIC_URL: z.string().url().optional(),
   AI_PROVIDER_API_KEY: z.string().min(1).optional(),
   AI_PROVIDER_BASE_URL: z.string().url().optional(),
@@ -39,7 +39,7 @@ const configSchema = z.object({
   AI_FALLBACK_LIGHTWEIGHT_MODEL: z.string().min(1).optional(),
   AI_FALLBACK_STANDARD_MODEL: z.string().min(1).optional(),
   AI_FALLBACK_COMPLEX_MODEL: z.string().min(1).optional(),
-  AI_DEFAULT_MODEL: z.string().default("gpt-4o-mini"),
+  AI_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
   SENTRY_DSN: z.string().optional(),
   // U10 — Langfuse LLM trace export (ai/gateway/trace-exporter.ts). BOTH keys
   // present ⇒ every gateway completion (success / failure / cache hit) is
@@ -50,17 +50,17 @@ const configSchema = z.object({
   // for a self-hosted instance. No prod hard-requirement.
   LANGFUSE_PUBLIC_KEY: z.string().min(1).optional(),
   LANGFUSE_SECRET_KEY: z.string().min(1).optional(),
-  LANGFUSE_BASE_URL: z.string().url().default("https://cloud.langfuse.com"),
+  LANGFUSE_BASE_URL: z.string().url().default('https://cloud.langfuse.com'),
   LANGFUSE_CAPTURE_CONTENT: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((v) => v === "true"),
-  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   WEBHOOK_SIGNING_SECRET: z.string().optional(),
   CORS_ORIGIN: z.string().optional(),
   STRIPE_API_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
-  WEB_URL: z.string().url().optional().default("http://localhost:5173"),
+  WEB_URL: z.string().url().optional().default('http://localhost:5173'),
   // DEPRECATED — legacy single-plan trial price, superseded by the
   // explicit basic/enterprise plan selection below. Kept only for
   // scripts/provision-tenant.ts and createTrialCheckoutSession's legacy
@@ -78,7 +78,7 @@ const configSchema = z.object({
   // but still places the call (observability); 'block' refuses calls to numbers
   // without express consent on file. Off-by-default so production behavior is
   // unchanged until an operator explicitly opts in.
-  TCPA_CONSENT_ENFORCEMENT: z.enum(["off", "warn", "block"]).default("off"),
+  TCPA_CONSENT_ENFORCEMENT: z.enum(['off', 'warn', 'block']).default('off'),
   // WS2 — process-role split. One image, up to three Railway services: 'web'
   // serves the HTTP/voice/WS surface only, 'worker' runs the background sweeps
   // + queue poll loop only, 'all' (default) runs both — byte-for-byte
@@ -105,19 +105,19 @@ const configSchema = z.object({
   // domain; unset ⇒ single/two-service topology ⇒ falls back to the job's
   // baseUrl (PUBLIC_API_URL at enqueue time). SMS + Vapi webhooks always stay
   // on the web domain. See docs/deployment.md + docs/prod-env-checklist.md.
-  PROCESS_ROLE: z.enum(["web", "worker", "voice", "all"]).default("all"),
+  PROCESS_ROLE: z.enum(['web', 'worker', 'voice', 'all']).default('all'),
   // SEC-01 / WS1 — Postgres RLS runtime-role enforcement flag. Read raw today
   // by db/rls-runtime-role.ts (isRlsRuntimeRoleEnabled); declared here so it is
   // part of the validated config surface. The HARD prod/staging requirement
   // (must be 'true') is enforced in validateFeatureRequiredConfig above — this
   // schema entry only types/normalizes the value.
-  RLS_RUNTIME_ROLE: z.enum(["true", "false"]).optional(),
+  RLS_RUNTIME_ROLE: z.enum(['true', 'false']).optional(),
   // D-015 amendment — platform-wide kill switch for the autonomous booking
   // lane. 'true' short-circuits evaluateAutonomousBookingLane before the
   // per-tenant opt-in check, regardless of any tenant's
   // autonomous_booking_enabled setting. Absent/'false' preserves today's
   // per-tenant-only gating — no prod requirement.
-  AUTONOMOUS_BOOKING_DISABLED: z.enum(["true", "false"]).optional(),
+  AUTONOMOUS_BOOKING_DISABLED: z.enum(['true', 'false']).optional(),
   // D-018 → DEPRECATED by D-019 (QUALITY-2026-07-12 WS2). There is no longer
   // any autonomous CLOSE execution to disable — the on-call close only ever
   // STAGES proposals for owner one-tap approval (nothing is system-approved or
@@ -126,7 +126,7 @@ const configSchema = z.object({
   // 'true' short-circuits evaluateAutonomousCloseLane so the affirmative falls
   // back to the plain owner-finalizes interim. Absent/'false' is the default —
   // no prod requirement.
-  AUTONOMOUS_CLOSE_DISABLED: z.enum(["true", "false"]).optional(),
+  AUTONOMOUS_CLOSE_DISABLED: z.enum(['true', 'false']).optional(),
   // ── WS15 — platform SLO monitor thresholds (workers/slo-monitor.ts). All
   // optional with safe defaults; documented in .env.production.example and
   // docs/runbooks/slo-alerts.md. No prod hard-requirement — the monitor runs
@@ -159,11 +159,7 @@ const configSchema = z.object({
   // the session age on every turn. The call is wrapped up and ended with
   // terminal reason `max_call_duration`. Default 15 min; 0/negative is
   // rejected at boot — an unbounded call is never a valid configuration.
-  VOICE_MAX_CALL_DURATION_MS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(15 * 60 * 1000),
+  VOICE_MAX_CALL_DURATION_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   // ── FAIL-VIS — silent-failure monitor (workers/failure-rate-monitor.ts).
   // Watches `ai_runs` and `proposals` for the failure shapes that shipped
   // SILENTLY (a 26,894-call task that completed zero times; estimate
@@ -186,19 +182,12 @@ const configSchema = z.object({
   FAILURE_MONITOR_MIN_RUNS: z.coerce.number().int().positive().default(20),
   // Cap on task-failure pages per tick so a platform-wide outage (every task
   // type breaching at once) cannot turn the monitor into its own storm.
-  FAILURE_MONITOR_MAX_TASK_ALERTS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(3),
+  FAILURE_MONITOR_MAX_TASK_ALERTS: z.coerce.number().int().positive().default(3),
   // Minutes a proposal may sit in `executing` before it counts as stalled.
   FAILURE_MONITOR_PROPOSAL_STALE_MIN: z.coerce.number().positive().default(15),
   // Lookback (hours) for proposals that reached `execution_failed` with a
   // NULL `execution_error` — a terminal failure state carrying no reason.
-  FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS: z.coerce
-    .number()
-    .positive()
-    .default(24),
+  FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS: z.coerce.number().positive().default(24),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer
@@ -214,9 +203,7 @@ export type AppConfig = z.infer<typeof configSchema>;
 
 let cachedConfig: AppConfig | null = null;
 
-export function loadConfig(
-  env: Record<string, string | undefined> = process.env,
-): AppConfig {
+export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   if (cachedConfig) return cachedConfig;
 
   // GitHub Actions injects unset `secrets.*` references as empty strings
@@ -226,15 +213,15 @@ export function loadConfig(
   // as variable-not-set.
   const normalized: Record<string, string | undefined> = {};
   for (const [k, v] of Object.entries(env)) {
-    normalized[k] = v === "" ? undefined : v;
+    normalized[k] = v === '' ? undefined : v;
   }
 
   const result = configSchema.safeParse(normalized);
   if (!result.success) {
     const issues = result.error.issues.map(
-      (i) => `  ${i.path.join(".")}: ${i.message}`,
+      (i) => `  ${i.path.join('.')}: ${i.message}`
     );
-    throw new Error(`Configuration validation failed:\n${issues.join("\n")}`);
+    throw new Error(`Configuration validation failed:\n${issues.join('\n')}`);
   }
 
   cachedConfig = result.data;
@@ -245,14 +232,14 @@ export function loadConfig(
   // prod/staging, resolve to 'block'. An explicit 'off' (or 'warn') is honored.
   // This same value drives BOTH the voice consent gate and the SMS gate.
   if (
-    (cachedConfig.NODE_ENV === "prod" || cachedConfig.NODE_ENV === "staging") &&
+    (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') &&
     normalized.TCPA_CONSENT_ENFORCEMENT === undefined
   ) {
-    cachedConfig.TCPA_CONSENT_ENFORCEMENT = "block";
+    cachedConfig.TCPA_CONSENT_ENFORCEMENT = 'block';
   }
 
   // Enforce required config in production environments
-  if (cachedConfig.NODE_ENV === "prod" || cachedConfig.NODE_ENV === "staging") {
+  if (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') {
     validateProductionConfig(cachedConfig);
     validateFeatureRequiredConfig(env);
   }
@@ -269,17 +256,17 @@ function validateProductionConfig(config: AppConfig): void {
 
   // Database — must have either DATABASE_URL or explicit host/name/user/password
   if (!config.DATABASE_URL) {
-    if (!config.DB_HOST) missing.push("DB_HOST (or DATABASE_URL)");
-    if (!config.DB_NAME) missing.push("DB_NAME (or DATABASE_URL)");
-    if (!config.DB_USER) missing.push("DB_USER (or DATABASE_URL)");
-    if (!config.DB_PASSWORD) missing.push("DB_PASSWORD (or DATABASE_URL)");
+    if (!config.DB_HOST) missing.push('DB_HOST (or DATABASE_URL)');
+    if (!config.DB_NAME) missing.push('DB_NAME (or DATABASE_URL)');
+    if (!config.DB_USER) missing.push('DB_USER (or DATABASE_URL)');
+    if (!config.DB_PASSWORD) missing.push('DB_PASSWORD (or DATABASE_URL)');
   }
 
   // Auth — both keys are required. The publishable key is used at request time
   // to derive the Clerk JWKS host; without it every authenticated request 401s
   // (P0-033). Fail fast at startup instead of waiting for the first request.
-  if (!config.CLERK_SECRET_KEY) missing.push("CLERK_SECRET_KEY");
-  if (!config.CLERK_PUBLISHABLE_KEY) missing.push("CLERK_PUBLISHABLE_KEY");
+  if (!config.CLERK_SECRET_KEY) missing.push('CLERK_SECRET_KEY');
+  if (!config.CLERK_PUBLISHABLE_KEY) missing.push('CLERK_PUBLISHABLE_KEY');
 
   // Webhooks — signing secrets required to verify inbound webhooks.
   // SEC-43: CLERK gates tenant bootstrap; STRIPE gates payment confirmation
@@ -288,14 +275,14 @@ function validateProductionConfig(config: AppConfig): void {
   // event, so Stripe shows "paid" while the invoice never settles. Fail fast
   // at boot instead. (WISETACK_WEBHOOK_SECRET is financing-gated — see the
   // feature-required gate below — because financing is opt-in per tenant.)
-  if (!config.CLERK_WEBHOOK_SECRET) missing.push("CLERK_WEBHOOK_SECRET");
-  if (!config.STRIPE_WEBHOOK_SECRET) missing.push("STRIPE_WEBHOOK_SECRET");
+  if (!config.CLERK_WEBHOOK_SECRET) missing.push('CLERK_WEBHOOK_SECRET');
+  if (!config.STRIPE_WEBHOOK_SECRET) missing.push('STRIPE_WEBHOOK_SECRET');
 
   // AI provider
-  if (!config.AI_PROVIDER_API_KEY) missing.push("AI_PROVIDER_API_KEY");
+  if (!config.AI_PROVIDER_API_KEY) missing.push('AI_PROVIDER_API_KEY');
 
   // CORS — must be an explicit origin, not the wildcard fallback
-  if (!config.CORS_ORIGIN) missing.push("CORS_ORIGIN");
+  if (!config.CORS_ORIGIN) missing.push('CORS_ORIGIN');
 
   // NOTE (P5-017): Stripe payment-link key (STRIPE_SECRET_KEY / STRIPE_API_KEY)
   // is enforced at boot by `createPaymentLinkProvider` in
@@ -305,8 +292,8 @@ function validateProductionConfig(config: AppConfig): void {
 
   if (missing.length > 0) {
     throw new Error(
-      `Production configuration is missing required values:\n  ${missing.join("\n  ")}\n` +
-        "Set these environment variables before starting in production.",
+      `Production configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
+        'Set these environment variables before starting in production.'
     );
   }
 }
@@ -324,14 +311,12 @@ function validateProductionConfig(config: AppConfig): void {
  * flag. The error message names every missing var so an operator can
  * fix it directly.
  */
-function validateFeatureRequiredConfig(
-  env: Record<string, string | undefined>,
-): void {
+function validateFeatureRequiredConfig(env: Record<string, string | undefined>): void {
   const missing: string[] = [];
 
-  const telephonyEnabled = env.TELEPHONY_ENABLED !== "false";
-  const emailEnabled = env.EMAIL_ENABLED !== "false";
-  const storageEnabled = env.STORAGE_ENABLED !== "false";
+  const telephonyEnabled = env.TELEPHONY_ENABLED !== 'false';
+  const emailEnabled = env.EMAIL_ENABLED !== 'false';
+  const storageEnabled = env.STORAGE_ENABLED !== 'false';
 
   // Twilio credentials are shared between telephony (voice + SMS) and
   // the email path. TwilioDeliveryProvider in app.ts couples SMS +
@@ -343,10 +328,10 @@ function validateFeatureRequiredConfig(
   if (telephonyEnabled || emailEnabled) {
     const optOut =
       telephonyEnabled && emailEnabled
-        ? "(or set both TELEPHONY_ENABLED=false and EMAIL_ENABLED=false)"
+        ? '(or set both TELEPHONY_ENABLED=false and EMAIL_ENABLED=false)'
         : telephonyEnabled
-          ? "(or set TELEPHONY_ENABLED=false)"
-          : "(or set EMAIL_ENABLED=false)";
+          ? '(or set TELEPHONY_ENABLED=false)'
+          : '(or set EMAIL_ENABLED=false)';
     if (!env.TWILIO_ACCOUNT_SID) missing.push(`TWILIO_ACCOUNT_SID ${optOut}`);
     if (!env.TWILIO_AUTH_TOKEN) missing.push(`TWILIO_AUTH_TOKEN ${optOut}`);
     if (!env.TWILIO_FROM_NUMBER) missing.push(`TWILIO_FROM_NUMBER ${optOut}`);
@@ -356,39 +341,23 @@ function validateFeatureRequiredConfig(
   // calls resolve to a tenant before the multi-tenant phone-lookup
   // ships (B1 in the launch readiness plan).
   if (telephonyEnabled && !env.TWILIO_DEFAULT_TENANT_ID) {
-    missing.push("TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)");
+    missing.push('TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)');
   }
 
   // Customer voice overages are actual blended provider cost + markup. These
   // contracted rates cannot have safe defaults: stale or invented values can
-  // undercharge customers or destroy margin. TELEPHONY_ENABLED is the outbound
-  // SMS kill switch; it does not disable inbound voice or Media Streams. Gate
-  // on the effective Media Streams switch as well so production cannot run
-  // live AI voice unmetered merely because outbound SMS was disabled.
-  // Settlement separately fails closed if any per-session provider row is
-  // missing.
-  const voiceBillingMediaStreamsEnabled = resolveMediaStreamsEnabled(
-    env as NodeJS.ProcessEnv,
-  );
-  if (telephonyEnabled || voiceBillingMediaStreamsEnabled) {
-    const rateOptOut = voiceBillingMediaStreamsEnabled
-      ? "or set TWILIO_MEDIA_STREAMS_ENABLED=false and TELEPHONY_ENABLED=false"
-      : "or set TELEPHONY_ENABLED=false";
+  // undercharge customers or destroy margin. Require finite, non-negative
+  // values whenever telephony is live; settlement separately fails closed if
+  // any per-session provider ledger row is missing.
+  if (telephonyEnabled) {
     for (const name of [
-      "DEEPGRAM_COST_CENTS_PER_HOUR",
-      "ELEVENLABS_COST_CENTS_PER_1000_CHARS",
-      "TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR",
+      'DEEPGRAM_COST_CENTS_PER_HOUR',
+      'ELEVENLABS_COST_CENTS_PER_1000_CHARS',
+      'TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR',
     ] as const) {
       const value = env[name];
-      if (
-        value === undefined ||
-        value.trim() === "" ||
-        !Number.isFinite(Number(value)) ||
-        Number(value) < 0
-      ) {
-        missing.push(
-          `${name} (finite non-negative contracted rate; ${rateOptOut})`,
-        );
+      if (value === undefined || value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) {
+        missing.push(`${name} (finite non-negative contracted rate; or set TELEPHONY_ENABLED=false)`);
       }
     }
   }
@@ -410,14 +379,12 @@ function validateFeatureRequiredConfig(
       env.TWILIO_AUTH_TOKEN &&
       env.TWILIO_EMAIL_FROM_ADDRESS
     );
-    const sendgridConfigured = !!(
-      env.SENDGRID_API_KEY && env.SENDGRID_FROM_EMAIL
-    );
+    const sendgridConfigured = !!(env.SENDGRID_API_KEY && env.SENDGRID_FROM_EMAIL);
     if (!twilioEmailConfigured && !sendgridConfigured) {
       missing.push(
-        "an email sender — either TWILIO_EMAIL_FROM_ADDRESS (Twilio-native email; reuses " +
-          "TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN) or both SENDGRID_API_KEY and " +
-          "SENDGRID_FROM_EMAIL (or set EMAIL_ENABLED=false)",
+        'an email sender — either TWILIO_EMAIL_FROM_ADDRESS (Twilio-native email; reuses ' +
+          'TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN) or both SENDGRID_API_KEY and ' +
+          'SENDGRID_FROM_EMAIL (or set EMAIL_ENABLED=false)'
       );
     }
   }
@@ -427,12 +394,9 @@ function validateFeatureRequiredConfig(
   // falls back to presigned GET URLs when publicUrlBase is unset
   // (see files/storage-provider.ts:159), so storage works without it.
   if (storageEnabled) {
-    if (!env.R2_ACCOUNT_ID)
-      missing.push("R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)");
-    if (!env.R2_ACCESS_KEY_ID)
-      missing.push("R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)");
-    if (!env.R2_SECRET_ACCESS_KEY)
-      missing.push("R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)");
+    if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
+    if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
+    if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
   }
 
   // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable
@@ -444,18 +408,18 @@ function validateFeatureRequiredConfig(
   // only enforced when explicitly enabled. The createApp() boot guard
   // (assertTtsProviderSupportsMediaStreams) is a second, later layer; this
   // fails earlier and also catches the missing-key silent-no-audio case.
-  const mediaStreamsEnabled = env.TWILIO_MEDIA_STREAMS_ENABLED === "true";
+  const mediaStreamsEnabled = env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
   if (mediaStreamsEnabled) {
-    if (env.TTS_PROVIDER !== "elevenlabs") {
+    if (env.TTS_PROVIDER !== 'elevenlabs') {
       missing.push(
-        "TTS_PROVIDER=elevenlabs (required by TWILIO_MEDIA_STREAMS_ENABLED=true — only the " +
-          "ElevenLabs streaming provider emits raw PCM; OpenAI/unset returns mp3 that plays as " +
-          "static; or set TWILIO_MEDIA_STREAMS_ENABLED=false)",
+        'TTS_PROVIDER=elevenlabs (required by TWILIO_MEDIA_STREAMS_ENABLED=true — only the ' +
+          'ElevenLabs streaming provider emits raw PCM; OpenAI/unset returns mp3 that plays as ' +
+          'static; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
       );
     }
     if (!env.ELEVENLABS_API_KEY) {
       missing.push(
-        "ELEVENLABS_API_KEY (required by TWILIO_MEDIA_STREAMS_ENABLED=true; or set TWILIO_MEDIA_STREAMS_ENABLED=false)",
+        'ELEVENLABS_API_KEY (required by TWILIO_MEDIA_STREAMS_ENABLED=true; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
       );
     }
   }
@@ -470,12 +434,12 @@ function validateFeatureRequiredConfig(
   // it). Enabled when WISETACK_API_KEY is set, or explicitly via
   // FINANCING_ENABLED=true. Names the opt-out so an operator can fix it.
   const financingEnabled =
-    env.FINANCING_ENABLED === "true" || Boolean(env.WISETACK_API_KEY);
+    env.FINANCING_ENABLED === 'true' || Boolean(env.WISETACK_API_KEY);
   if (financingEnabled && !env.WISETACK_WEBHOOK_SECRET) {
     missing.push(
-      "WISETACK_WEBHOOK_SECRET (required when financing is enabled via " +
-        "WISETACK_API_KEY / FINANCING_ENABLED=true — verifies inbound Wisetack " +
-        "status webhooks; unset it only if you disable financing)",
+      'WISETACK_WEBHOOK_SECRET (required when financing is enabled via ' +
+        'WISETACK_API_KEY / FINANCING_ENABLED=true — verifies inbound Wisetack ' +
+        'status webhooks; unset it only if you disable financing)'
     );
   }
 
@@ -490,11 +454,11 @@ function validateFeatureRequiredConfig(
   // if the `rls_app_runtime` role is unprovisioned, so requiring the flag can
   // never silently ship a broken RLS state — provision the role first (migration
   // 217 / docs/runbooks/rls-runtime-role-rollout.md), then set the flag.
-  if (env.RLS_RUNTIME_ROLE !== "true") {
+  if (env.RLS_RUNTIME_ROLE !== 'true') {
     missing.push(
-      "RLS_RUNTIME_ROLE=true (Postgres RLS enforcement — makes tenant-isolation " +
-        "policies actually enforce; requires the rls_app_runtime role from migration " +
-        "217; see docs/runbooks/rls-runtime-role-rollout.md)",
+      'RLS_RUNTIME_ROLE=true (Postgres RLS enforcement — makes tenant-isolation ' +
+        'policies actually enforce; requires the rls_app_runtime role from migration ' +
+        '217; see docs/runbooks/rls-runtime-role-rollout.md)'
     );
   }
 
@@ -513,14 +477,14 @@ function validateFeatureRequiredConfig(
   // railway.toml's numReplicas); when it is >1 we require REDIS_URL so the
   // degradation can never ship silently. Absent/unparseable/≤1 → single
   // replica, unchanged (the current no-Redis prod deploy still boots).
-  const numReplicas = Number.parseInt(env.NUM_REPLICAS ?? "", 10);
+  const numReplicas = Number.parseInt(env.NUM_REPLICAS ?? '', 10);
   if (Number.isFinite(numReplicas) && numReplicas > 1 && !env.REDIS_URL) {
     missing.push(
       `REDIS_URL (required when NUM_REPLICAS=${numReplicas} — with more than one ` +
-        "replica and no shared Redis, rate limiting degrades to N× the configured " +
-        "limit, LLM tenant quota and WebSocket connection caps become per-process, " +
-        "and voice/dispatch fan-out stops crossing replicas, all silently; set " +
-        "REDIS_URL before raising numReplicas, or run a single replica)",
+        'replica and no shared Redis, rate limiting degrades to N× the configured ' +
+        'limit, LLM tenant quota and WebSocket connection caps become per-process, ' +
+        'and voice/dispatch fan-out stops crossing replicas, all silently; set ' +
+        'REDIS_URL before raising numReplicas, or run a single replica)'
     );
   }
 
@@ -540,28 +504,21 @@ function validateFeatureRequiredConfig(
   const HEX_64_KEY = /^[0-9a-f]{64}$/i;
   if (!env.TENANT_ENCRYPTION_KEY) {
     missing.push(
-      "TENANT_ENCRYPTION_KEY (required in prod/staging — a 64-char hex string; " +
-        "encrypts tenant integration credentials, calendar/accounting tokens, and, " +
-        "by fallback, call transcripts at rest)",
+      'TENANT_ENCRYPTION_KEY (required in prod/staging — a 64-char hex string; ' +
+        'encrypts tenant integration credentials, calendar/accounting tokens, and, ' +
+        'by fallback, call transcripts at rest)'
     );
   } else if (!HEX_64_KEY.test(env.TENANT_ENCRYPTION_KEY)) {
-    missing.push(
-      "TENANT_ENCRYPTION_KEY must be a 64-char hex string (32 bytes)",
-    );
+    missing.push('TENANT_ENCRYPTION_KEY must be a 64-char hex string (32 bytes)');
   }
-  if (
-    env.TRANSCRIPT_ENCRYPTION_KEY &&
-    !HEX_64_KEY.test(env.TRANSCRIPT_ENCRYPTION_KEY)
-  ) {
-    missing.push(
-      "TRANSCRIPT_ENCRYPTION_KEY must be a 64-char hex string (32 bytes) when set",
-    );
+  if (env.TRANSCRIPT_ENCRYPTION_KEY && !HEX_64_KEY.test(env.TRANSCRIPT_ENCRYPTION_KEY)) {
+    missing.push('TRANSCRIPT_ENCRYPTION_KEY must be a 64-char hex string (32 bytes) when set');
   }
 
   if (missing.length > 0) {
     throw new Error(
-      `Production feature configuration is missing required values:\n  ${missing.join("\n  ")}\n` +
-        "Set these env vars before starting, or opt the feature out with the named flag.",
+      `Production feature configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
+        'Set these env vars before starting, or opt the feature out with the named flag.'
     );
   }
 }
@@ -587,10 +544,10 @@ export function resetConfig(): void {
  */
 export function resolveMediaStreamsEnabled(env: NodeJS.ProcessEnv): boolean {
   const raw = env.TWILIO_MEDIA_STREAMS_ENABLED;
-  if (raw === "true") return true;
-  if (raw === "false") return false;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
   return (
-    env.TTS_PROVIDER === "elevenlabs" &&
+    env.TTS_PROVIDER === 'elevenlabs' &&
     Boolean(env.ELEVENLABS_API_KEY) &&
     Boolean(env.DEEPGRAM_API_KEY)
   );
@@ -613,19 +570,12 @@ export function resolveMediaStreamsEnabled(env: NodeJS.ProcessEnv): boolean {
 // become optional so that local boot does not require production secrets.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const envEnum = z.enum([
-  "development",
-  "dev",
-  "test",
-  "staging",
-  "production",
-  "prod",
-]);
+const envEnum = z.enum(['development', 'dev', 'test', 'staging', 'production', 'prod']);
 
 const baseEnvShape = {
-  NODE_ENV: envEnum.default("development"),
+  NODE_ENV: envEnum.default('development'),
   PORT: z.coerce.number().int().positive().default(8080),
-  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().min(1).optional(),
   STRIPE_SECRET_KEY: z.string().min(1).optional(),
   // P0-033 — legacy HMAC dev-token gate. Production refuses any value other
@@ -645,7 +595,7 @@ const devEnvSchema = z.object({
   // it still must be a valid URL.
   DATABASE_URL: z
     .string()
-    .url({ message: "must be a valid URL (e.g. postgres://user:pass@host/db)" })
+    .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' })
     .optional(),
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
@@ -658,7 +608,7 @@ const devEnvSchema = z.object({
 export function allowsClerkTestKeys(
   env: Record<string, string | undefined>,
 ): boolean {
-  return env.ALLOW_CLERK_TEST_KEYS === "true";
+  return env.ALLOW_CLERK_TEST_KEYS === 'true';
 }
 
 /** Reject pk_test_/sk_test_ in production unless ALLOW_CLERK_TEST_KEYS=true. */
@@ -666,71 +616,71 @@ export function assertClerkKeyPrefixesForProduction(
   env: Record<string, string | undefined>,
 ): void {
   if (allowsClerkTestKeys(env)) return;
-  const pub = env.CLERK_PUBLISHABLE_KEY ?? "";
-  const secret = env.CLERK_SECRET_KEY ?? "";
+  const pub = env.CLERK_PUBLISHABLE_KEY ?? '';
+  const secret = env.CLERK_SECRET_KEY ?? '';
   const problems: string[] = [];
-  if (pub.startsWith("pk_test_")) {
+  if (pub.startsWith('pk_test_')) {
     problems.push(
       "CLERK_PUBLISHABLE_KEY: production requires pk_live_ (got pk_test_). " +
-        "Use the Production Clerk instance, or set ALLOW_CLERK_TEST_KEYS=true for staging.",
+        'Use the Production Clerk instance, or set ALLOW_CLERK_TEST_KEYS=true for staging.',
     );
   }
-  if (secret.startsWith("sk_test_")) {
+  if (secret.startsWith('sk_test_')) {
     problems.push(
       "CLERK_SECRET_KEY: production requires sk_live_ (got sk_test_). " +
-        "Use the Production Clerk instance, or set ALLOW_CLERK_TEST_KEYS=true for staging.",
+        'Use the Production Clerk instance, or set ALLOW_CLERK_TEST_KEYS=true for staging.',
     );
   }
   if (problems.length > 0) {
     throw new Error(
-      `Environment validation failed:\n${problems.map((p) => `  - ${p}`).join("\n")}\n` +
-        "See docs/runbooks/clerk-setup.md.",
+      `Environment validation failed:\n${problems.map((p) => `  - ${p}`).join('\n')}\n` +
+        'See docs/runbooks/clerk-setup.md.',
     );
   }
 }
 
-const prodEnvSchema = z.object({
-  ...baseEnvShape,
-  DATABASE_URL: z.string({ required_error: "Required" }).url({
-    message: "must be a valid URL (e.g. postgres://user:pass@host/db)",
-  }),
-  CLERK_SECRET_KEY: z
-    .string({ required_error: "Required" })
-    .min(1, { message: "Required" }),
-  CLERK_PUBLISHABLE_KEY: z
-    .string({ required_error: "Required" })
-    .min(1, { message: "Required" }),
-  CORS_ORIGIN: z
-    .string({ required_error: "Required" })
-    .min(1, { message: "Required" })
-    .refine((v) => v !== "true", {
-      message: "Cannot be 'true' in production. Set a specific origin.",
-    }),
-  // P0-033 — must NOT be 'true' in production. Other values (absent,
-  // 'false', '0', anything else) are accepted as "off". The runtime gate
-  // in `verifyClerkSession` is also production-disabled as defense in
-  // depth, but failing fast at startup gives operators a clear signal.
-  CLERK_DEV_HMAC_TOKENS: z
-    .string()
-    .optional()
-    .refine((v) => v !== "true", {
-      message:
-        "CLERK_DEV_HMAC_TOKENS=true is forbidden in production. Unset or set to 'false' before starting.",
-    }),
-  DEV_AUTH_BYPASS: z
-    .string()
-    .optional()
-    .refine((v) => v !== "true", {
-      message:
-        "DEV_AUTH_BYPASS=true is forbidden in production. Unset or set to 'false' before starting.",
-    }),
-});
+const prodEnvSchema = z
+  .object({
+    ...baseEnvShape,
+    DATABASE_URL: z
+      .string({ required_error: 'Required' })
+      .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' }),
+    CLERK_SECRET_KEY: z
+      .string({ required_error: 'Required' })
+      .min(1, { message: 'Required' }),
+    CLERK_PUBLISHABLE_KEY: z
+      .string({ required_error: 'Required' })
+      .min(1, { message: 'Required' }),
+    CORS_ORIGIN: z
+      .string({ required_error: 'Required' })
+      .min(1, { message: 'Required' })
+      .refine((v) => v !== 'true', {
+        message: "Cannot be 'true' in production. Set a specific origin.",
+      }),
+    // P0-033 — must NOT be 'true' in production. Other values (absent,
+    // 'false', '0', anything else) are accepted as "off". The runtime gate
+    // in `verifyClerkSession` is also production-disabled as defense in
+    // depth, but failing fast at startup gives operators a clear signal.
+    CLERK_DEV_HMAC_TOKENS: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'true', {
+        message:
+          "CLERK_DEV_HMAC_TOKENS=true is forbidden in production. Unset or set to 'false' before starting.",
+      }),
+    DEV_AUTH_BYPASS: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'true', {
+        message:
+          "DEV_AUTH_BYPASS=true is forbidden in production. Unset or set to 'false' before starting.",
+      }),
+  });
 
-export type Env = z.infer<typeof devEnvSchema> &
-  Partial<z.infer<typeof prodEnvSchema>>;
+export type Env = z.infer<typeof devEnvSchema> & Partial<z.infer<typeof prodEnvSchema>>;
 
 function isProductionEnv(value: string | undefined): boolean {
-  return value === "production" || value === "prod";
+  return value === 'production' || value === 'prod';
 }
 
 /**
@@ -742,19 +692,19 @@ function isProductionEnv(value: string | undefined): boolean {
  *   Each line names the variable so an operator can fix it directly.
  */
 export function validateEnvSchema(
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = process.env
 ): Env {
   const schema = isProductionEnv(env.NODE_ENV) ? prodEnvSchema : devEnvSchema;
   const result = schema.safeParse(env);
 
   if (!result.success) {
     const lines = result.error.issues.map((issue) => {
-      const name = issue.path.join(".") || "(root)";
+      const name = issue.path.join('.') || '(root)';
       return `  - ${name}: ${issue.message}`;
     });
     throw new Error(
-      `Environment validation failed:\n${lines.join("\n")}\n` +
-        "Set these environment variables before starting the service.",
+      `Environment validation failed:\n${lines.join('\n')}\n` +
+        'Set these environment variables before starting the service.'
     );
   }
 
