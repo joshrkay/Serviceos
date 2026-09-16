@@ -85,7 +85,7 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
     expect(errors.some((e) => e.includes('Invalid audio content type'))).toBe(true);
   });
 
-  it('happy path — handles transcription failure', async () => {
+  it('handles transcription failure with retries left — stays pending for the next attempt (#1263)', async () => {
     const voiceRepo = new InMemoryVoiceRepository();
     const recording = createVoiceRecording({
       tenantId: 'tenant-1',
@@ -110,6 +110,44 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
         audioUrl: 'https://s3.example.com/audio.mp3',
       },
       attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-1',
+      createdAt: new Date().toISOString(),
+    };
+
+    await expect(worker.handle(msg, logger)).rejects.toThrow('Service unavailable');
+
+    const updated = await voiceRepo.findById('tenant-1', recording.id);
+    // Attempt 1 of 3: the worker keeps the recording retryable (workers/transcription.ts `retryable`).
+    expect(updated!.status).toBe('pending');
+    expect(updated!.errorMessage).toBe('Service unavailable');
+  });
+
+  it('handles transcription failure on the final attempt — marks the recording failed', async () => {
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recording = createVoiceRecording({
+      tenantId: 'tenant-1',
+      fileId: 'file-1',
+      createdBy: 'user-1',
+    });
+    await voiceRepo.create(recording);
+
+    const failingProvider = {
+      async transcribe(): Promise<never> {
+        throw new Error('Service unavailable');
+      },
+    };
+
+    const worker = createTranscriptionWorker(voiceRepo, failingProvider);
+    const msg: QueueMessage<any> = {
+      id: '1',
+      type: 'transcription',
+      payload: {
+        tenantId: 'tenant-1',
+        recordingId: recording.id,
+        audioUrl: 'https://s3.example.com/audio.mp3',
+      },
+      attempts: 3,
       maxAttempts: 3,
       idempotencyKey: 'idem-1',
       createdAt: new Date().toISOString(),
