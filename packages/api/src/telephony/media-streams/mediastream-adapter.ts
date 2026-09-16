@@ -1185,6 +1185,7 @@ export class TwilioMediaStreamAdapter {
       this.closeWs(1008, 'unknown_callsid');
       return;
     }
+    session.mediaStreamsUsed = true;
 
     const bound = this.deps.authenticatedCall;
     if ((bound && (callSid !== bound.callSid || frame.start.accountSid !== bound.accountSid ||
@@ -1652,6 +1653,7 @@ export class TwilioMediaStreamAdapter {
     try {
       const pcm16 = decodeTwilioInboundFrame(frame.media.payload);
       this.state.deepgram.send(pcm16);
+      if (this.state.session) this.state.session.sttAudioBytes += pcm16.length;
     } catch (err) {
       logger.warn('mediastream: failed to decode/forward inbound frame', {
         error: err instanceof Error ? err.message : String(err),
@@ -2779,6 +2781,7 @@ export class TwilioMediaStreamAdapter {
      */
     lang: SessionLanguage = 'en',
   ): Promise<number> {
+    if (this.state.session) this.state.session.ttsCharacters += text.length;
     const delayMs = this.deps.fillerDelayMs ?? 250;
     const engine = this.deps.fillerEngine;
     const cache = this.deps.fillerCache;

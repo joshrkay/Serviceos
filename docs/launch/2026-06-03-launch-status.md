@@ -51,7 +51,7 @@ should re-run and stay green.
 ### Product / code
 
 **Public landing page** — `packages/web/src/components/landing/LandingPage.tsx`
-- Hero, problem framing, 4-feature grid, Tuesday-comparison table, 3-step how-it-works, 4-pillar trust section, $297 pricing card, FAQ, final CTA
+- Hero, problem framing, 4-feature grid, Tuesday-comparison table, 3-step how-it-works, 4-pillar trust section, $50/$150 pricing cards, FAQ, final CTA
 - Mounted at `/` via `ProtectedRoute` wrapper (signed-out → landing, signed-in → dashboard)
 
 **Brand rebrand to Rivet** — auth pages, swagger spec, console logs, settings copy, README, calendar test events, OpenRouter `X-Title`, escalation SMS fallback host; npm scope + DB identifiers + Clerk JWT template intentionally kept as internal contracts
@@ -101,7 +101,7 @@ should re-run and stay green.
 | Confirm domain (`rivet.ai` recommended) | Founder | Drives DNS, Clerk URLs, Stripe webhooks, Twilio webhooks |
 | DNS + TLS for `rivet.ai`, `api.rivet.ai`, `app.rivet.ai` | Founder | Railway auto-cert handles TLS once DNS resolves |
 | Clerk application URLs & allowed origins | Founder | Update after domain is live |
-| Stripe product + recurring price | Founder | `$297/mo` with 14-day trial; copy price id into Railway `STRIPE_PRICE_ID` |
+| Stripe products + recurring prices | Founder | Basic `$50/mo`, Enterprise `$150/mo`, 14-day trial; copy both price ids into Railway |
 | Production env vars on Railway | Founder | Full list in `2026-06-03-rivet-launch-day-runbook.md` §Day 2 |
 | Voice-quality Layer 1 cassette refresh | Founder + engineer | Requires `ANTHROPIC_API_KEY` on a trusted machine; `npm run voice-quality:refresh` → `voice-quality` until `launchGate.pass === true` |
 | Voice-quality human sign-off | Founder | Record in `docs/superpowers/plans/2026-05-19-solo-owner-launch-audit.md` |

@@ -46,7 +46,7 @@ launch-week sequencing.
 - [ ] Update Clerk application URLs and allowed origins for the new domain
 - [ ] Update Stripe webhook URL to the new domain
 - [ ] Update Twilio webhook URL to the new domain
-- [ ] Set up Stripe product + recurring price ($297/mo, 14-day trial)
+- [ ] Set up Stripe products + recurring prices (Basic $50/mo, Enterprise $150/mo, 14-day trial)
 - [ ] Copy the Stripe price ID into Railway `STRIPE_PRICE_ID`
 
 ### Day 2 — Wednesday

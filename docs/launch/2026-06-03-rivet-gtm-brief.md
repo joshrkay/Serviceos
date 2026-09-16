@@ -78,23 +78,23 @@ Three things became true in the last 18 months:
 
 | | Rivet |
 |---|---|
-| **Price** | **$297 / month** |
+| **Price** | **Basic $50 / month; Enterprise $150 / month** |
 | **Free trial** | 14 days; card on file, nothing charged until day 15 |
 | **Includes** | Unlimited inbound calls, unlimited SMS, AI quoting, AI invoicing, payment chasing, review monitoring, end-of-day digest |
-| **AI voice minutes** | 500 / month included; $0.30 / min after |
+| **AI voice minutes** | 30 / month included; additional usage billed at actual provider cost + 30% |
 | **Phone number** | One US local number included |
 | **Onboarding** | Self-serve in 15 min, white-glove available |
 
 **Why this price**:
 - Anchored against the cost of a part-time dispatcher ($2,400+/mo) and
   the cost of one lost emergency job (~$500–1,500).
-- Single tier removes the "which plan should I pick" objection that
-  kills SMB conversions.
+- Two validated Stripe plans cover owner-operators and larger teams; checkout
+  displays the live plan name and price before purchase.
 - Margin: gross margin >70% at expected usage (200 mins/mo median per
   PRD §11 voice budget).
 
-**Stripe configuration**: one product, one price (`STRIPE_PRICE_ID` env
-var). 14-day trial baked into the Checkout Session. Webhook flips
+**Stripe configuration**: validated Basic and Enterprise monthly prices
+(`STRIPE_BASIC_PRICE_ID` / `STRIPE_ENTERPRISE_PRICE_ID`). 14-day trial baked into the Checkout Session. Webhook flips
 `tenants.subscription_status` to `active` on `checkout.session.completed`.
 
 ---
@@ -136,7 +136,7 @@ of gas a day."
 > a 102° day. We built Rivet because they shouldn't have to.
 > AI answers the phone, books the job, sends the quote, chases
 > the invoice. Owner approves what matters in 30 seconds a day.
-> $297/mo. 14-day trial. Link below.
+> Plans from $50/mo. 30 AI voice minutes included, then actual provider cost + 30%. 14-day trial. Link below.
 
 ### Sales / demo opener
 "I'm going to read you a typical Tuesday for a 2-truck HVAC shop.
@@ -221,7 +221,7 @@ re-evaluate before scaling channels.
 ### Must-have marketing (Day 2)
 - [ ] Public landing page at rivet.ai `/`
 - [ ] Rebrand cleanup (all user-facing "ServiceOS" → "Rivet")
-- [ ] Pricing visible on landing + Stripe Checkout configured to $297/mo
+- [ ] Pricing visible on landing + Stripe Checkout configured for Basic $50/mo and Enterprise $150/mo
 - [ ] PostHog wired with `signup`, `onboarding_step_completed`, `first_ai_call`, `trial_to_paid` events
 
 ### Must-have ops (Day 2–3)

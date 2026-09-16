@@ -43,6 +43,32 @@ describe('SettingsPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('shows current AI voice usage and the included 30 minutes', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/billing/voice-usage')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            usageSeconds: 1200,
+            includedMinutes: 30,
+            projectedChargeCents: 0,
+            complete: true,
+          }),
+        } as Response);
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/20 of 30 AI voice minutes used/)).toBeInTheDocument();
+  });
+
   it('surfaces an error with a retry when the main settings load fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();

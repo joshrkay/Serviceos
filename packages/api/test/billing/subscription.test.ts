@@ -776,8 +776,8 @@ describe('BillingService', () => {
         );
       const { plans } = await makeSvc().listPlans();
       expect(plans).toEqual([
-        { id: 'basic', name: 'Basic Plan', amountCents: 5_000, currency: 'usd', interval: 'month' },
-        { id: 'enterprise', name: 'Enterprise Plan', amountCents: 15_000, currency: 'usd', interval: 'month' },
+        { id: 'basic', name: 'Basic Plan', amountCents: 5_000, currency: 'usd', interval: 'month', includedAiVoiceMinutes: 30, aiVoiceCostMarkupPercent: 30 },
+        { id: 'enterprise', name: 'Enterprise Plan', amountCents: 15_000, currency: 'usd', interval: 'month', includedAiVoiceMinutes: 30, aiVoiceCostMarkupPercent: 30 },
       ]);
       const serialized = JSON.stringify(plans);
       expect(serialized).not.toMatch(/price_/);
