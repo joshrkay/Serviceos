@@ -11,6 +11,8 @@ interface BillingPlan {
   amountCents: number;
   currency: string;
   interval: string;
+  includedAiVoiceMinutes: number;
+  aiVoiceCostMarkupPercent: number;
 }
 
 /**
@@ -164,7 +166,7 @@ export function BillingStep() {
                     : 'border-slate-200 hover:border-slate-400'
                 } ${pending ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
               >
-                <span className="flex items-center gap-3">
+                <span className="flex items-start gap-3">
                   <input
                     type="radio"
                     id={inputId}
@@ -176,7 +178,15 @@ export function BillingStep() {
                     onKeyDown={(event) => handlePlanKeyDown(event, index)}
                     className="h-4 w-4 shrink-0"
                   />
-                  <span className="text-base font-medium text-slate-900">{plan.name}</span>
+                  <span>
+                    <span className="block text-base font-medium text-slate-900">{plan.name}</span>
+                    <span className="block text-xs text-slate-500">
+                      {plan.includedAiVoiceMinutes} AI voice minutes included
+                    </span>
+                    <span className="block text-xs text-slate-500">
+                      Then actual provider cost + {plan.aiVoiceCostMarkupPercent}%
+                    </span>
+                  </span>
                 </span>
                 <span className="text-sm text-slate-600">
                   {formatAmount(plan.amountCents, plan.currency)}/{plan.interval}

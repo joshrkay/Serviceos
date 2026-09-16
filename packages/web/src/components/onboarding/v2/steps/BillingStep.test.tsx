@@ -7,8 +7,8 @@ vi.mock('../../../../lib/apiClient', () => ({ useApiClient: () => apiFetchMock }
 import { BillingStep } from './BillingStep';
 
 const PLANS = [
-  { id: 'basic', name: 'Basic', amountCents: 5_000, currency: 'usd', interval: 'month' },
-  { id: 'enterprise', name: 'Enterprise', amountCents: 15_000, currency: 'usd', interval: 'month' },
+  { id: 'basic', name: 'Basic', amountCents: 5_000, currency: 'usd', interval: 'month', includedAiVoiceMinutes: 30, aiVoiceCostMarkupPercent: 30 },
+  { id: 'enterprise', name: 'Enterprise', amountCents: 15_000, currency: 'usd', interval: 'month', includedAiVoiceMinutes: 30, aiVoiceCostMarkupPercent: 30 },
 ];
 
 function mockPlansOk() {
@@ -36,6 +36,8 @@ describe('BillingStep — explicit plan selection', () => {
       expect(opt).not.toBeChecked();
     }
     expect(group).toBeInTheDocument();
+    expect(screen.getAllByText(/30 AI voice minutes included/i)).toHaveLength(2);
+    expect(screen.getAllByText(/actual provider cost \+ 30%/i)).toHaveLength(2);
   });
 
   it('renders real radio inputs with accessible labels meeting the 44px tap target', async () => {

@@ -464,7 +464,7 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
     expectSdk(speechSites.sort()).toEqual([
       'src/ai/tts/tts-provider.ts:94',
       'src/voice/transcription-providers.ts:166',
-      'src/voice/voice-service.ts:269',
+      'src/voice/voice-service.ts:274',
     ]);
   });
 

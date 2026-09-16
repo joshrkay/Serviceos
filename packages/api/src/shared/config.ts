@@ -344,6 +344,24 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     missing.push('TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)');
   }
 
+  // Customer voice overages are actual blended provider cost + markup. These
+  // contracted rates cannot have safe defaults: stale or invented values can
+  // undercharge customers or destroy margin. Require finite, non-negative
+  // values whenever telephony is live; settlement separately fails closed if
+  // any per-session provider ledger row is missing.
+  if (telephonyEnabled) {
+    for (const name of [
+      'DEEPGRAM_COST_CENTS_PER_HOUR',
+      'ELEVENLABS_COST_CENTS_PER_1000_CHARS',
+      'TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR',
+    ] as const) {
+      const value = env[name];
+      if (value === undefined || value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) {
+        missing.push(`${name} (finite non-negative contracted rate; or set TELEPHONY_ENABLED=false)`);
+      }
+    }
+  }
+
   // Email sender — invoice + estimate delivery email side. TWO acceptable
   // backends, mirroring `selectEmailProvider` in
   // notifications/twilio-email-delivery-provider.ts (which is what app.ts

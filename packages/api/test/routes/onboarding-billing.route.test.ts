@@ -106,8 +106,24 @@ describe('GET /api/onboarding/billing/plans', () => {
     const res = await request(buildApp(svc)).get('/api/onboarding/billing/plans');
     expect(res.status).toBe(200);
     expect(res.body.plans).toEqual([
-      { id: 'basic', name: 'Basic Plan', amountCents: 5_000, currency: 'usd', interval: 'month' },
-      { id: 'enterprise', name: 'Enterprise Plan', amountCents: 15_000, currency: 'usd', interval: 'month' },
+      {
+        id: 'basic',
+        name: 'Basic Plan',
+        amountCents: 5_000,
+        currency: 'usd',
+        interval: 'month',
+        includedAiVoiceMinutes: 30,
+        aiVoiceCostMarkupPercent: 30,
+      },
+      {
+        id: 'enterprise',
+        name: 'Enterprise Plan',
+        amountCents: 15_000,
+        currency: 'usd',
+        interval: 'month',
+        includedAiVoiceMinutes: 30,
+        aiVoiceCostMarkupPercent: 30,
+      },
     ]);
     expect(JSON.stringify(res.body)).not.toMatch(/price_(basic|enterprise)_live/);
   });

@@ -344,6 +344,27 @@ describe('P0-006 — Secrets/config framework', () => {
       ).not.toThrow();
     });
 
+    it('telephony — requires every contracted provider rate for cost-plus billing', () => {
+      const telephony = {
+        ...baseProdEnv,
+        EMAIL_ENABLED: 'false',
+        STORAGE_ENABLED: 'false',
+        TWILIO_ACCOUNT_SID: 'AC7x',
+        TWILIO_AUTH_TOKEN: 'tok',
+        TWILIO_FROM_NUMBER: '+15555550100',
+        TWILIO_DEFAULT_TENANT_ID: '11111111-1111-4111-8111-111111111111',
+      };
+      expect(() => loadConfig(telephony)).toThrow(
+        /DEEPGRAM_COST_CENTS_PER_HOUR[\s\S]*ELEVENLABS_COST_CENTS_PER_1000_CHARS[\s\S]*TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR/,
+      );
+      expect(() => loadConfig({
+        ...telephony,
+        DEEPGRAM_COST_CENTS_PER_HOUR: '29',
+        ELEVENLABS_COST_CENTS_PER_1000_CHARS: '18.5',
+        TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: '0',
+      })).not.toThrow();
+    });
+
     it('email — fails when SENDGRID_API_KEY missing and EMAIL_ENABLED not set to false', () => {
       expect(() =>
         loadConfig({
@@ -509,6 +530,9 @@ describe('P0-006 — Secrets/config framework', () => {
           TWILIO_AUTH_TOKEN: 't_x',
           TWILIO_FROM_NUMBER: '+15551234567',
           TWILIO_DEFAULT_TENANT_ID: 'tenant-1',
+          DEEPGRAM_COST_CENTS_PER_HOUR: '29',
+          ELEVENLABS_COST_CENTS_PER_1000_CHARS: '18',
+          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: '24',
           SENDGRID_API_KEY: 'SG.x',
           SENDGRID_FROM_EMAIL: 'noreply@example.com',
           R2_ACCOUNT_ID: 'r2acct',

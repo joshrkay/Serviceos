@@ -6,6 +6,7 @@ import { BillingService } from '../../src/billing/subscription';
 import { AppError } from '../../src/shared/errors';
 import { StripeConnectService } from '../../src/billing/stripe-connect';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import type { VoiceUsageBillingService } from '../../src/billing/voice-usage-billing';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 
@@ -14,6 +15,7 @@ function buildApp(opts: {
   email?: string;
   service?: BillingService;
   connectService?: StripeConnectService;
+  voiceUsageBillingService?: VoiceUsageBillingService;
 }) {
   const app = express();
   app.use(express.json());
@@ -38,10 +40,41 @@ function buildApp(opts: {
     createBillingRouter({
       billingService: opts.service,
       connectService: opts.connectService,
+      voiceUsageBillingService: opts.voiceUsageBillingService,
     }),
   );
   return app;
 }
+
+describe('GET /api/billing/voice-usage', () => {
+  it('returns usage for the current Stripe billing period', async () => {
+    const voiceUsageBillingService = {
+      previewCurrentPeriod: vi.fn(async () => ({
+        periodStart: '2026-09-01T00:00:00.000Z',
+        periodEnd: '2026-10-01T00:00:00.000Z',
+        usageSeconds: 1200,
+        includedMinutes: 30,
+        providerCostMicroCents: 1000,
+        projectedChargeCents: 0,
+        complete: true,
+        missingProviders: [],
+        incompleteSessionCount: 0,
+      })),
+    } as unknown as VoiceUsageBillingService;
+    const app = buildApp({ voiceUsageBillingService });
+
+    const res = await request(app).get('/api/billing/voice-usage');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ usageSeconds: 1200, includedMinutes: 30, complete: true });
+    expect(voiceUsageBillingService.previewCurrentPeriod).toHaveBeenCalledWith(TENANT);
+  });
+
+  it('returns 503 when voice usage billing is not configured', async () => {
+    const res = await request(buildApp({})).get('/api/billing/voice-usage');
+    expect(res.status).toBe(503);
+  });
+});
 
 function makeConnectService(overrides: Partial<StripeConnectService> = {}): StripeConnectService {
   return {
