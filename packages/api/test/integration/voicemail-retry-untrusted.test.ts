@@ -50,6 +50,8 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { isApproverPhone } from '../../src/proposals/approver-identity';
+import { PgFileRepository } from '../../src/files/pg-file';
+import type { StorageProvider } from '../../src/files/storage-provider';
 import {
   createTranscriptionWorker,
   type TranscriptionJobPayload,
@@ -160,7 +162,20 @@ describe('Postgres integration — #1231 transcription retry keeps voicemail tex
       } as AuthenticatedRequest['auth'];
       next();
     });
-    app.use('/api/voice', createVoiceRouter(voiceRepo, queue, undefined, auditRepo));
+    // #1248 (2c6ee0e5e) — the retry route derives the audio URL from the
+    // recording's stored file instead of trusting the request body, so it
+    // needs the file repo and a storage provider; without them it answers
+    // 503 NOT_CONFIGURED. Same stub shape as voice-retry-audio-source.route.test.ts.
+    const storage = {
+      generateDownloadUrl: async (bucket: string, key: string) => `https://storage.test/${bucket}/${key}`,
+    } as unknown as StorageProvider;
+    app.use(
+      '/api/voice',
+      createVoiceRouter(voiceRepo, queue, undefined, auditRepo, undefined, {
+        fileRepo: new PgFileRepository(pool),
+        storage,
+      }),
+    );
     return app;
   }
 
@@ -259,7 +274,9 @@ describe('Postgres integration — #1231 transcription retry keeps voicemail tex
       throw new Error('whisper 503');
     });
     for (const m of await claim<TranscriptionJobPayload>('transcription')) {
-      await expect(failing.handle(m, silentLogger())).rejects.toThrow('whisper 503');
+      // #1263 — the worker keeps a recording `pending` while attempts remain and
+      // marks it `failed` only on the final delivery; simulate that last attempt.
+      await expect(failing.handle({ ...m, attempts: m.maxAttempts }, silentLogger())).rejects.toThrow('whisper 503');
       await queue.delete(m.id); // retries exhausted
     }
     expect((await voiceRepo.findById(tenantA.tenantId, recId))?.status).toBe('failed');
