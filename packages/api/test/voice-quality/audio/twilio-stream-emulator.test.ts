@@ -169,7 +169,12 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
         mediaFormat: { encoding: 'audio/x-mulaw', sampleRate: 8000, channels: 1 },
       },
     });
-    expect(typeof (start as { streamSid?: unknown }).streamSid).toBe('string');
+    const typedStart = start as {
+      streamSid?: unknown;
+      start?: { streamSid?: unknown };
+    };
+    expect(typeof typedStart.streamSid).toBe('string');
+    expect(typedStart.start?.streamSid).toBe(typedStart.streamSid);
   });
 
   it('VQ2-006 — sendCallerUtterance frames the audio into 20ms chunks (50 frames per second of audio)', async () => {

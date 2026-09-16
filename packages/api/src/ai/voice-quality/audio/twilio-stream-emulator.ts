@@ -118,6 +118,10 @@ export class TwilioStreamEmulator {
               streamSid: this.streamSid,
               start: {
                 callSid,
+                // Twilio repeats the stream identifier inside `start`.
+                // The production adapter validates this canonical location
+                // before binding a call, so the emulator must do the same.
+                streamSid: this.streamSid,
                 accountSid: 'AC_TEST',
                 tracks: ['inbound'],
                 mediaFormat: {
