@@ -346,10 +346,19 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
 
   // Customer voice overages are actual blended provider cost + markup. These
   // contracted rates cannot have safe defaults: stale or invented values can
-  // undercharge customers or destroy margin. Require finite, non-negative
-  // values whenever telephony is live; settlement separately fails closed if
-  // any per-session provider ledger row is missing.
-  if (telephonyEnabled) {
+  // undercharge customers or destroy margin. TELEPHONY_ENABLED is the outbound
+  // SMS kill switch; it does not disable inbound voice or Media Streams. Gate
+  // on the effective Media Streams switch as well so production cannot run
+  // live AI voice unmetered merely because outbound SMS was disabled.
+  // Settlement separately fails closed if any per-session provider row is
+  // missing.
+  const voiceBillingMediaStreamsEnabled = resolveMediaStreamsEnabled(
+    env as NodeJS.ProcessEnv,
+  );
+  if (telephonyEnabled || voiceBillingMediaStreamsEnabled) {
+    const rateOptOut = voiceBillingMediaStreamsEnabled
+      ? 'or set TWILIO_MEDIA_STREAMS_ENABLED=false and TELEPHONY_ENABLED=false'
+      : 'or set TELEPHONY_ENABLED=false';
     for (const name of [
       'DEEPGRAM_COST_CENTS_PER_HOUR',
       'ELEVENLABS_COST_CENTS_PER_1000_CHARS',
@@ -357,7 +366,7 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     ] as const) {
       const value = env[name];
       if (value === undefined || value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) {
-        missing.push(`${name} (finite non-negative contracted rate; or set TELEPHONY_ENABLED=false)`);
+        missing.push(`${name} (finite non-negative contracted rate; ${rateOptOut})`);
       }
     }
   }

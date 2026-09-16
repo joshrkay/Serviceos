@@ -344,6 +344,26 @@ describe('P0-006 — Secrets/config framework', () => {
       ).not.toThrow();
     });
 
+    it('voice billing — still requires contracted rates when SMS is disabled but Media Streams is live', () => {
+      const liveVoiceWithSmsDisabled = {
+        ...baseProdEnv,
+        TELEPHONY_ENABLED: 'false',
+        EMAIL_ENABLED: 'false',
+        STORAGE_ENABLED: 'false',
+        TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+      };
+
+      expect(() => loadConfig(liveVoiceWithSmsDisabled)).toThrow(
+        /DEEPGRAM_COST_CENTS_PER_HOUR[\s\S]*ELEVENLABS_COST_CENTS_PER_1000_CHARS[\s\S]*TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR/,
+      );
+      expect(() => loadConfig({
+        ...liveVoiceWithSmsDisabled,
+        DEEPGRAM_COST_CENTS_PER_HOUR: '29',
+        ELEVENLABS_COST_CENTS_PER_1000_CHARS: '18.5',
+        TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: '24',
+      })).not.toThrow();
+    });
+
     it('telephony — requires every contracted provider rate for cost-plus billing', () => {
       const telephony = {
         ...baseProdEnv,
@@ -514,6 +534,9 @@ describe('P0-006 — Secrets/config framework', () => {
           TWILIO_MEDIA_STREAMS_ENABLED: 'true',
           TTS_PROVIDER: 'elevenlabs',
           ELEVENLABS_API_KEY: 'el_x',
+          DEEPGRAM_COST_CENTS_PER_HOUR: '29',
+          ELEVENLABS_COST_CENTS_PER_1000_CHARS: '18.5',
+          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: '24',
         })
       ).not.toThrow();
     });
