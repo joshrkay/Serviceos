@@ -16,6 +16,7 @@ import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
 import { clearSatisfiedMissingFields } from './missing-fields';
+import type { ApprovalOptions } from './approval-reference-checks';
 import {
   clearPendingReferencesForEdit,
   type EntityAliasCandidateCapture,
@@ -230,6 +231,7 @@ export async function approveProposal(
   actorRole: Role,
   auditRepo?: AuditRepository,
   channel?: ApprovalChannel,
+  options?: ApprovalOptions,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -311,6 +313,22 @@ export async function approveProposal(
       `Cannot approve proposal with unfilled required fields: ${missing.join(', ')}`,
       { missingFields: missing },
     );
+  }
+
+  // QA 2026-09-16 (AST-04) — an id that is present but names no record this
+  // tenant owns is an unfilled gate wearing a UUID. Refuse it the same way,
+  // so the review card's edit path takes over instead of an execution
+  // failure after the human's tap (see approval-reference-checks.ts).
+  if (options?.referenceChecks?.length) {
+    const dangling = (
+      await Promise.all(options.referenceChecks.map((check) => check(tenantId, proposal)))
+    ).flat();
+    if (dangling.length > 0) {
+      throw new ValidationError(
+        `Cannot approve proposal: ${dangling.join(', ')} does not name an existing record`,
+        { missingFields: dangling },
+      );
+    }
   }
 
   const transitioned = transitionProposal(proposal, 'approved', actorId);

@@ -130,6 +130,7 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
+import { invoiceReferenceCheck } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -5757,6 +5758,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // router uses, so grounding/summary/confidence stay identical.
       createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
       entityAliasCandidateCapture,
+      // QA 2026-09-16 (AST-04) — an approvable proposal must be an executable
+      // one: a payload invoiceId must name an invoice this tenant owns.
+      [invoiceReferenceCheck(invoiceRepo)],
     ),
   );
   if (entityAliasRepo) {

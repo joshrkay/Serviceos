@@ -22,6 +22,7 @@ import {
   reproposeProposal,
   type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
+import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
 import { resolveProposalLine } from '../proposals/resolve-line';
 import { resolveProposalEntity } from '../proposals/resolve-entity';
 import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
@@ -98,6 +99,9 @@ export function createProposalsRouter(
   // Tenant learning loop — grounded picker/edit flows emit deduped alias review
   // proposals. Failure-soft inside the action layer.
   entityAliasCandidateCapture?: EntityAliasCandidateCapture,
+  // QA 2026-09-16 (AST-04) — approval-time reference checks (an id in the
+  // payload must name a record this tenant owns). Absent → missingFields only.
+  approvalReferenceChecks?: ApprovalReferenceCheck[],
 ): Router {
   const router = Router();
 
@@ -336,6 +340,7 @@ export function createProposalsRouter(
         req.auth!.role as Role,
         auditRepo,
         'ui', // RV-073 — dashboard screen-tap approval
+        { referenceChecks: approvalReferenceChecks },
       );
       // Finding 2 — surface the undo window honestly. `approvedAt` already
       // serializes to an ISO string; derive `undoExpiresAt` (= approvedAt +
