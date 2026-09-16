@@ -363,9 +363,17 @@ export interface TwilioAdapterDeps {
    * the nudge check.
    */
   onSessionEnded?: (event: {
+    sessionId: string;
     tenantId: string;
     callSid?: string;
     channel: 'voice_inbound' | 'inapp_voice';
+    endedAt: Date;
+    usageSeconds: number;
+    llmCostMicroCents: number;
+    sttAudioSeconds: number;
+    ttsCharacters: number;
+    twilioAccountSid?: string;
+    mediaStreamsUsed: boolean;
   }) => Promise<void>;
   /**
    * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
@@ -3514,10 +3522,21 @@ export class TwilioGatherAdapter {
     }
     if (this.deps.onSessionEnded) {
       try {
+        const endedAt = new Date();
         await this.deps.onSessionEnded({
+          sessionId: session.id,
           tenantId: session.tenantId,
           channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
           ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+          endedAt,
+          usageSeconds: Math.max(0, Math.ceil((endedAt.getTime() - session.createdAt.getTime()) / 1000)),
+          llmCostMicroCents: session.costTracker.costMicroCents,
+          sttAudioSeconds: session.sttAudioBytes / (16_000 * 2),
+          ttsCharacters: session.ttsCharacters,
+          ...(session.twilioAccountSid !== undefined
+            ? { twilioAccountSid: session.twilioAccountSid }
+            : {}),
+          mediaStreamsUsed: session.mediaStreamsUsed,
         });
       } catch {
         /* swallow — nudge check must never block call end */

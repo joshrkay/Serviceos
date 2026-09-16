@@ -193,6 +193,12 @@ export interface VoiceSession {
   conversationId?: string;
   machine: CallingAgentStateMachine;
   costTracker: SessionCostTracker;
+  /** Raw 16kHz PCM bytes submitted to streaming STT for provider billing. */
+  sttAudioBytes: number;
+  /** Text characters submitted to TTS, counted once per requested utterance. */
+  ttsCharacters: number;
+  /** Set by the WebSocket transport so Twilio Media Streams cost is included. */
+  mediaStreamsUsed: boolean;
   /** Accumulated turns ("agent: ..." / "caller: ..."). Used by summarizeSession. */
   transcript: string[];
   proposalIds: string[];
@@ -597,6 +603,9 @@ export class VoiceSessionStore {
       conversationId: opts.conversationId,
       machine,
       costTracker,
+      sttAudioBytes: 0,
+      ttsCharacters: 0,
+      mediaStreamsUsed: false,
       transcript: [],
       proposalIds: [],
       ended: false,

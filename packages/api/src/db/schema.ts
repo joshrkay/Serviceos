@@ -6916,6 +6916,74 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_voice_approval_pin_lock_alerts ON voice_approval_pin_lock_alerts
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  '280_create_ai_voice_usage_costs': `
+    CREATE TABLE IF NOT EXISTS ai_voice_usage_costs (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'stt', 'tts', 'llm', 'infrastructure')),
+      usage_seconds INTEGER NOT NULL CHECK (usage_seconds >= 0),
+      provider_cost_micro_cents BIGINT NOT NULL CHECK (provider_cost_micro_cents >= 0),
+      occurred_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, provider, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_voice_usage_costs_period
+      ON ai_voice_usage_costs (tenant_id, occurred_at);
+    ALTER TABLE ai_voice_usage_costs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_voice_usage_costs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_ai_voice_usage_costs ON ai_voice_usage_costs;
+    CREATE POLICY tenant_isolation_ai_voice_usage_costs ON ai_voice_usage_costs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  '281_create_ai_voice_billing_state': `
+    CREATE TABLE IF NOT EXISTS ai_voice_cost_reconciliation (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id TEXT NOT NULL,
+      call_sid TEXT NOT NULL,
+      account_sid TEXT NOT NULL,
+      usage_seconds INTEGER NOT NULL CHECK (usage_seconds >= 0),
+      media_streams_used BOOLEAN NOT NULL DEFAULT FALSE,
+      occurred_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_error TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_voice_cost_reconciliation_due
+      ON ai_voice_cost_reconciliation (tenant_id, next_attempt_at)
+      WHERE status = 'pending';
+    ALTER TABLE ai_voice_cost_reconciliation ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_voice_cost_reconciliation FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_ai_voice_cost_reconciliation ON ai_voice_cost_reconciliation;
+    CREATE POLICY tenant_isolation_ai_voice_cost_reconciliation ON ai_voice_cost_reconciliation
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS ai_voice_usage_settlements (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      period_start TIMESTAMPTZ NOT NULL,
+      period_end TIMESTAMPTZ NOT NULL,
+      usage_seconds INTEGER NOT NULL,
+      provider_cost_micro_cents BIGINT NOT NULL,
+      customer_charge_cents INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+      stripe_invoice_item_id TEXT,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, period_start, period_end)
+    );
+    ALTER TABLE ai_voice_usage_settlements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_voice_usage_settlements FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_ai_voice_usage_settlements ON ai_voice_usage_settlements;
+    CREATE POLICY tenant_isolation_ai_voice_usage_settlements ON ai_voice_usage_settlements
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

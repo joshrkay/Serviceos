@@ -206,6 +206,11 @@ export class SessionCostTracker {
     return this._config.maxCostCents;
   }
 
+  /** Exact accumulated provider cost for durable billing attribution. */
+  get costMicroCents(): number {
+    return this._costMicroCents;
+  }
+
   reset(): void {
     this._inputTokens = 0;
     this._outputTokens = 0;

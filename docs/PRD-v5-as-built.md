@@ -3364,8 +3364,8 @@ the structural test now enforces even while the duplication remains.
 
 | Claim | Reality |
 |---|---|
-| **Pricing: the GTM brief says one tier at $297/month** | The code implements **two plans — basic at $50 and enterprise at $150** — with no functional differentiation between them anywhere: no plan value is read to gate any feature. This is the single largest strategy-to-code gap in the product and it needs a product decision, not a code change |
-| Trial caps | 60 min/day and 100 min total; an active subscription bypasses **all** caps. Paid plans are uncapped and unmetered — there is no usage metering or overage billing despite the brief's per-minute overage |
+| Pricing | **Resolved:** Basic is $50/month and Enterprise is $150/month. Both include 30 AI voice minutes; additional usage is billed at actual blended provider cost plus 30%. |
+| Trial and paid usage | Trial safety caps remain. Paid AI voice usage is durably metered by provider and settled onto the Stripe billing-cycle invoice after the included 30 minutes. |
 | "Supervisor reviews every quote" | Reviews voice-drafted quotes; photo- and wizard-drafted quotes are never reviewed |
 | "Delivery channel configurable per tenant" | Per-send choice only; no tenant-level setting |
 | "Estimate follow-up disableable" | No disable mechanism exists, per-estimate or globally |
@@ -3480,7 +3480,7 @@ approval median latency (<10 min in business hours).
 
 | # | Decision | Why it's blocked |
 |---|---|---|
-| **O-1** | **What is the price?** | Code says two tiers at $50/$150 with no differentiation; GTM says one tier at $297 with metered overage. Engineering cannot pick |
+| **O-1** | **What is the price?** | **Resolved:** Basic $50/month and Enterprise $150/month; 30 AI voice minutes included, then actual provider cost + 30%. |
 | **O-2** | **Who signs off on the E1 life-safety script?** | Flagged in code as requiring review. Not an engineering decision |
 | **O-3** | **Does the trust ladder ship?** | Three tier names exist and all behave identically. Either build the graduation ledger or delete the names |
 | **O-4** | **Per-approval voice codes, or accept static PIN exposure?** | Money-class voice approval should not be considered shipped until this resolves |

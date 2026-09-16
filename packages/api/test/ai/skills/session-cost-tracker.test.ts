@@ -315,6 +315,7 @@ describe('SessionCostTracker — micro-cent accumulation', () => {
     tracker.recordUsage({ inputTokens: 0, outputTokens: 0, costMicroCents: 400_000 });
     tracker.recordUsage({ inputTokens: 0, outputTokens: 0, costMicroCents: 400_000 });
     expect(tracker.totals.costCents).toBe(2);
+    expect(tracker.costMicroCents).toBe(2_000_000);
   });
 
   it('integer-cent callers and micro-cent callers accumulate into one total', () => {

@@ -45,7 +45,7 @@ waiting* names the §5/§8 rows and the rung they cannot reach until the answer 
 
 ## Open in §14 but blocking no row on this map
 
-O-1 (price: code says $50/$150 two tiers, GTM says one tier at $297 with metered overage) · O-3 (trust ladder: three tier names, one behaviour) · O-5 (e-signature as a legal claim needs a document hash and certificate) · O-7 (equipment history: named as a differentiator, no entity exists) · O-8 (north-star instrumentation — **gains a deadline the moment rung 6 is in play**: it must be answered before a tenant goes live).
+O-1 is resolved: Basic is $50/month and Enterprise is $150/month; both include 30 AI voice minutes, then actual provider cost + 30%. Remaining: O-3 (trust ladder: three tier names, one behaviour) · O-5 (e-signature as a legal claim needs a document hash and certificate) · O-7 (equipment history: named as a differentiator, no entity exists) · O-8 (north-star instrumentation — **gains a deadline the moment rung 6 is in play**: it must be answered before a tenant goes live).
 
 ---
 *Every blocker above was verified against `origin/main` at `2c2aa6d90` (PR #994 landed) or the research tickets named. When Josh answers, the answering session records the answer here, on the ticket, and in the row's Confirm cell — a status change is never one edit (PRD §11.0d).*

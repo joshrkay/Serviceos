@@ -64,6 +64,17 @@ import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
+import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
+import {
+  PgVoiceUsageSettlementRepository,
+  VoiceUsageBillingService,
+} from './billing/voice-usage-billing';
+import {
+  deepgramCostMicroCents,
+  elevenLabsCostMicroCents,
+  twilioPriceToMicroCents,
+} from './billing/provider-costs';
+import { randomUUID } from 'node:crypto';
 import { createPaymentRouter } from './routes/payments';
 import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
@@ -273,6 +284,7 @@ import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
+import { runVoiceCostReconciliationSweep } from './workers/voice-cost-reconciliation';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
@@ -1010,6 +1022,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // without a pool (tests/dev) so createWebhookRouter falls back to its
   // in-memory map. createWebhookRouter throws if this is missing in prod.
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
+  const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
+  const voiceUsageSettlementRepo = pool
+    ? new PgVoiceUsageSettlementRepository(pool)
+    : undefined;
+  const voiceUsageBillingService =
+    pool && process.env.STRIPE_SECRET_KEY && voiceUsageCostRepo && voiceUsageSettlementRepo
+      ? new VoiceUsageBillingService({
+          pool,
+          usageRepo: voiceUsageCostRepo,
+          settlementRepo: voiceUsageSettlementRepo,
+          stripeApiKey: process.env.STRIPE_SECRET_KEY,
+        })
+      : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
@@ -1046,6 +1071,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // status the GET /api/billing/subscription endpoint reads.
     // Wired only when both pool and STRIPE_SECRET_KEY exist.
     billingService,
+    voiceUsageBillingService,
     connectService,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     queue,
@@ -2279,6 +2305,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // per the collision discipline above; 590010 remains reserved by a
     // parallel track.
     moneyReconciliation: 590026,
+    voiceCostReconciliation: 590027,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -2475,6 +2502,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         failureMonitorInFlight = false;
       });
     }, FAILURE_MONITOR_INTERVAL_MS));
+  }
+
+  if (pool && shouldRunWorkers && voiceUsageCostRepo) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.voiceCostReconciliation, async () => {
+        await runVoiceCostReconciliationSweep({
+          tenantIds: await listAllTenantIds(pool),
+          repo: voiceUsageCostRepo,
+          resolveAuthToken: resolveTwilioAuthTokenForSubaccount,
+          mediaStreamsCentsPerHour: Number(
+            process.env.TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR,
+          ),
+        });
+      }).catch((err) => {
+        workerLogger.error('Voice-cost reconciliation sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 15 * 60_000));
   }
 
   const executionWorkerLogger = createLogger({
@@ -3659,12 +3705,87 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     ...(pool
       ? {
           onSessionEnded: async ({
+            sessionId,
             tenantId,
             channel,
+            endedAt,
+            usageSeconds,
+            llmCostMicroCents,
+            sttAudioSeconds,
+            ttsCharacters,
+            callSid,
+            twilioAccountSid,
+            mediaStreamsUsed,
           }: {
+            sessionId: string;
             tenantId: string;
             channel: 'voice_inbound' | 'inapp_voice';
+            endedAt: Date;
+            usageSeconds: number;
+            llmCostMicroCents: number;
+            sttAudioSeconds: number;
+            ttsCharacters: number;
+            callSid?: string;
+            twilioAccountSid?: string;
+            mediaStreamsUsed: boolean;
           }) => {
+            if (channel === 'voice_inbound' && voiceUsageCostRepo) {
+              const records: Array<Parameters<typeof voiceUsageCostRepo.record>[0]> = [
+                {
+                  id: randomUUID(), tenantId, sessionId,
+                  sourceId: `${sessionId}:llm-total`, provider: 'llm', usageSeconds,
+                  providerCostMicroCents: llmCostMicroCents, occurredAt: endedAt,
+                },
+              ];
+              const deepgramRate = Number(process.env.DEEPGRAM_COST_CENTS_PER_HOUR);
+              if (Number.isFinite(deepgramRate) && deepgramRate >= 0) records.push({
+                id: randomUUID(), tenantId, sessionId,
+                sourceId: `${sessionId}:deepgram-total`, provider: 'stt', usageSeconds,
+                providerCostMicroCents: deepgramCostMicroCents(sttAudioSeconds, deepgramRate),
+                occurredAt: endedAt,
+              });
+              const elevenRate = Number(process.env.ELEVENLABS_COST_CENTS_PER_1000_CHARS);
+              if (Number.isFinite(elevenRate) && elevenRate >= 0) records.push({
+                id: randomUUID(), tenantId, sessionId,
+                sourceId: `${sessionId}:elevenlabs-total`, provider: 'tts', usageSeconds,
+                providerCostMicroCents: elevenLabsCostMicroCents(ttsCharacters, elevenRate),
+                occurredAt: endedAt,
+              });
+              await Promise.all(records.map((record) => voiceUsageCostRepo.record(record)));
+
+              if (callSid && twilioAccountSid) {
+                const reconciliationId = await voiceUsageCostRepo.queueTwilioReconciliation({
+                  id: randomUUID(), tenantId, sessionId, callSid,
+                  accountSid: twilioAccountSid, usageSeconds, mediaStreamsUsed,
+                  occurredAt: endedAt,
+                });
+                const authToken = await resolveTwilioAuthTokenForSubaccount(twilioAccountSid);
+                if (authToken) {
+                  const basic = Buffer.from(`${twilioAccountSid}:${authToken}`).toString('base64');
+                  const response = await fetch(
+                    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(twilioAccountSid)}/Calls/${encodeURIComponent(callSid)}.json`,
+                    { headers: { Authorization: `Basic ${basic}` }, signal: AbortSignal.timeout(10_000) },
+                  );
+                  if (response.ok) {
+                    const call = (await response.json()) as { price?: string | null };
+                    const callCost = twilioPriceToMicroCents(call.price);
+                    const streamRate = Number(process.env.TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR);
+                    const hasStreamRate = Number.isFinite(streamRate) && streamRate >= 0;
+                    const streamCost = mediaStreamsUsed && hasStreamRate
+                      ? deepgramCostMicroCents(usageSeconds, streamRate)
+                      : 0;
+                    if (callCost !== null && (!mediaStreamsUsed || hasStreamRate)) {
+                      await voiceUsageCostRepo.record({
+                        id: randomUUID(), tenantId, sessionId,
+                        sourceId: callSid, provider: 'twilio', usageSeconds,
+                        providerCostMicroCents: callCost + streamCost, occurredAt: endedAt,
+                      });
+                      await voiceUsageCostRepo.completeTwilio(tenantId, reconciliationId);
+                    }
+                  }
+                }
+              }
+            }
             await checkAndFireUpgradeNudge({ pool }, tenantId);
             await maybeAutoGoLiveOnInboundEnd(
               { pool, auditRepo },
@@ -5068,7 +5189,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo, pool: pool ?? undefined }));
+  app.use('/api/billing', createBillingRouter({
+    billingService,
+    voiceUsageBillingService,
+    connectService,
+    auditRepo,
+    pool: pool ?? undefined,
+  }));
 
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
