@@ -95,5 +95,5 @@ duplicate owner push if a database commit has to be retried.
 From `packages/api`:
 
 - `npx vitest run test/seed/operator-voice-fixture-plan.test.ts`
-- `RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/operator-voice-fixtures.test.ts test/integration/operator-voice-fixture-idempotency.test.ts`
+- `RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.mts test/integration/operator-voice-fixtures.test.ts test/integration/operator-voice-fixture-idempotency.test.ts`
 - `npx tsc --project tsconfig.build.json --noEmit`

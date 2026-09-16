@@ -101,4 +101,27 @@ describe('runPathSmoke', () => {
     expect(report.gatePassed).toBe(false);
     expect(report.results[0]?.turns[0]?.error).toMatch(/provider down/);
   });
+
+  it('aborts before starting another provider call when the spend hook trips', async () => {
+    let classifyCalls = 0;
+    let completedTurns = 0;
+
+    await expect(
+      runPathSmoke({
+        gateway: mockGateway(),
+        cases: PATH_SMOKE_CASES,
+        classify: async () => {
+          classifyCalls += 1;
+          return { intentType: 'unknown', confidence: 0.1 };
+        },
+        afterTurn: () => {
+          completedTurns += 1;
+          throw new Error('actual cost cap exceeded');
+        },
+      }),
+    ).rejects.toThrow('actual cost cap exceeded');
+
+    expect(completedTurns).toBe(1);
+    expect(classifyCalls).toBe(1);
+  });
 });

@@ -60,6 +60,12 @@ export interface RunPathSmokeOptions {
     },
     gateway: LLMGateway,
   ) => Promise<{ intentType: string; confidence: number }>;
+  /**
+   * Optional post-turn guard used by live callers for budget enforcement.
+   * It runs outside the per-turn provider-error catch so a thrown fatal
+   * condition aborts the suite instead of being recorded and ignored.
+   */
+  afterTurn?: () => void;
 }
 
 async function defaultClassify(
@@ -149,6 +155,7 @@ export async function runPathSmoke(
           latencyMs: Date.now() - started,
         });
       }
+      opts.afterTurn?.();
     }
     const casePassed = turnResults.every((t) => t.passed);
     results.push({

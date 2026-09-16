@@ -89,7 +89,7 @@ Copy from design spec §8 and implementation plan Phases 0–4. Record each resu
   Or equivalently:
 
   ```bash
-  cd packages/api && npx vitest run -c vitest.voice-quality.config.ts
+  cd packages/api && npx vitest run -c vitest.voice-quality.config.mts
   ```
 
   Expected: `launchGate.pass === true` in output or `voice-quality-report.json` artifact.
@@ -257,7 +257,7 @@ Full cassette recording requires a live `ANTHROPIC_API_KEY`. Cloud agents and CI
 ```bash
 npm run voice-quality:refresh
 npm run voice-quality:check-cassettes
-npx vitest run -c vitest.voice-quality.config.ts
+npx vitest run -c vitest.voice-quality.config.mts
 ```
 
 1. `voice-quality:refresh` — re-records all cassettes against the current model (8–15 minutes).

@@ -1,6 +1,6 @@
 /**
  * Merge per-script verdict shards into `voice-quality-report.json`.
- * Invoked after `vitest run -c vitest.voice-quality.config.ts`.
+ * Invoked after `vitest run -c vitest.voice-quality.config.mts`.
  */
 import * as fs from 'fs';
 import * as path from 'path';

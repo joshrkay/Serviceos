@@ -6,7 +6,7 @@ export default defineConfig({
     globals: true,
     root: '.',
     include: ['test/**/*.test.ts'],
-    // Integration tests run under vitest.integration.config.ts, which owns
+    // Integration tests run under vitest.integration.config.mts, which owns
     // the testcontainer lifecycle via globalSetup. Excluding them here means
     // `npm test` (and `npm run test:coverage`) cover unit tests only and
     // don't need Docker.
@@ -14,7 +14,7 @@ export default defineConfig({
       'node_modules/**',
       'dist/**',
       'test/integration/**',
-      // Layer 1 corpus runner — only via vitest.voice-quality.config.ts + npm run voice-quality
+      // Layer 1 corpus runner — only via vitest.voice-quality.config.mts + npm run voice-quality
       'test/voice-quality/voice-quality.test.ts',
     ],
     coverage: {

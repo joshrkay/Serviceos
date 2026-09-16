@@ -749,7 +749,7 @@ export interface Layer2Report extends Layer1Report {
 
 **Files:**
 - Create: `.github/workflows/voice-quality-pre-deploy.yml`
-- Create: `packages/api/vitest.voice-quality-layer2.config.ts`
+- Create: `packages/api/vitest.voice-quality-layer2.config.mts`
 - Modify: `packages/api/package.json` — add scripts `voice-quality:layer2` and `voice-quality:layer2:weekly`
 
 **Workflow:**
@@ -800,7 +800,7 @@ jobs:
 
 **Steps:**
 - [ ] **Step 1: Author the workflow YAML.**
-- [ ] **Step 2: Author `vitest.voice-quality-layer2.config.ts`** with `pool: 'forks', poolOptions: { forks: { maxForks: 1, minForks: 1 } }`.
+- [ ] **Step 2: Author `vitest.voice-quality-layer2.config.mts`** with `pool: 'forks', poolOptions: { forks: { maxForks: 1, minForks: 1 } }`.
 - [ ] **Step 3: Add npm scripts.**
 - [ ] **Step 4: Local verification.** Run `npm run voice-quality:layer2` against a fresh checkout with real keys; assert: completes <30 min, produces report JSON, gate verdict matches expectation, total cost <$10.
 - [ ] **Step 5: Push to a `release/test-vq2-ci` branch; verify the workflow runs and gates correctly.**

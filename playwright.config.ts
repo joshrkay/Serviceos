@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { PLACEHOLDER_CLERK_PK } from './e2e/helpers/clerk-key';
 import type { DevAuthFixtures } from './e2e/helpers/dev-auth';
 
 /**
@@ -20,6 +21,14 @@ const legacyWebPort = process.env.E2E_WEB_PORT;
 const baseURL = process.env.E2E_BASE_URL ?? `http://localhost:${legacyWebPort ?? '5173'}`;
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
+
+// Local hermetic specs stub Clerk before the SPA loads. Give both the test
+// process and Vite the same syntactically valid non-secret key so a bare
+// `npm run e2e` exercises those specs instead of silently skipping them.
+// Deployed/real-Clerk runs continue to provide their own key.
+if (!skipWebServer && !process.env.VITE_CLERK_PUBLISHABLE_KEY) {
+  process.env.VITE_CLERK_PUBLISHABLE_KEY = PLACEHOLDER_CLERK_PK;
+}
 
 // issue #1086 — specs that need the DB-authoritative authorization loader
 // wired (i.e. must NOT run under a DEV_AUTH_BYPASS=true api webServer).

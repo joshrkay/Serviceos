@@ -1,8 +1,9 @@
 # ServiceOS Voice Corpus (`data/corpus/`)
 
-Launch-grade training/eval corpus for the inbound voice agent. Everything
-here is **synthetic** (no PII, no scraped copyrighted text) and **reproducible**
-from the seed files via the data pipeline.
+Launch-grade training/eval corpora for production/operator and inbound voice
+surfaces. Everything here is **synthetic** (no PII or scraped copyrighted
+text). Generated fixtures are reproducible from seed files; the reviewed
+English corpus is preserved as curated labeled data.
 
 ## Layout
 
@@ -12,30 +13,30 @@ change instead of hand-editing counts in either file.
 
 | File | What | Rows |
 |------|------|------|
-| `behaviors.yaml` | Intent/behavior taxonomy (source of truth, 35 behaviors) | — |
-| `utterances.jsonl` | English intent utterances — `utt_en_*` (generated) + `legacy-*` (T6-F01-migrated, frozen) | 4,853 |
+| `../behaviors.yaml` | Production/operator taxonomy, parity-checked against `SUPPORTED_INTENTS` | — |
+| `behaviors.yaml` | Inbound caller taxonomy used by the Spanish corpus | — |
+| `utterances.jsonl` | Reviewed English production/operator intent corpus | 3,033 |
 | `utterances_es.jsonl` | Spanish + code-switch utterances | 1,400 |
 | `edge_cases.jsonl` | Accent / panic / noise / repair / wrong-number fixtures | 157 |
 | `negatives.jsonl` | Telemarketer / employment / survey / kids (never book) | 62 |
 | `slot_fixtures/{address,time,phone,service}.jsonl` | Slot-extraction gold | 178 |
-| `seeds/` | Hand-authored templates + filler banks the generator expands | — |
+| `seeds/` | Spanish templates and filler banks expanded by the generator | — |
 
 ## Regenerate
 
 ```bash
-pnpm corpus:build        # generate utterances + merge frozen legacy rows + build fixtures
+pnpm corpus:build        # regenerate Spanish utterances + structural fixtures
+pnpm corpus:behaviors    # production taxonomy parity with classifier code
 pnpm test:corpus-schema  # schema + floors validate
 pnpm test:dedup          # no exact dupes; near-dupes flagged
 pnpm test:pii-leakage    # HARD STOP on any PII
 pnpm corpus:manifest     # regenerate CORPUS_MANIFEST.md from the real files
 ```
 
-`corpus:build` runs `corpus:generate` (regenerates the synthetic `utt_en_*`
-rows from seeds), then `corpus:merge` (folds the frozen `legacy-*` rows from
-the currently-committed `utterances.jsonl` back in — see
-`scripts/data-pipeline/merge-corpus.ts`), then `corpus:fixtures`. It is
-content-equivalent on every run, not byte-identical, since the `legacy-*`
-rows are preserved data rather than derived from seeds.
+`corpus:build` regenerates the Spanish inbound-call rows and structural
+fixtures. It deliberately does not rewrite `utterances.jsonl`: that file is
+the reviewed production/operator corpus, and the retired English generator's
+discourse-prefix variants were lower-fidelity near-duplicates.
 
 ## Evaluate
 
@@ -55,4 +56,5 @@ the held-out set never drifts and regressions are detectable.
 - Never overwrite labeled rows in place — version files (`utterances.v2.jsonl`).
 - No PII, ever. Phones must use a `555` block; addresses/names are synthetic.
 - Synthetic rows are not promoted to "reviewed" without `reviewed_by_human=true`.
-- New behaviors go through `TAXONOMY_GAPS.md` review before entering `behaviors.yaml`.
+- Production intents are added to `data/behaviors.yaml` in the same change as
+  `SUPPORTED_INTENTS`; inbound-only behavior changes remain reviewed here.

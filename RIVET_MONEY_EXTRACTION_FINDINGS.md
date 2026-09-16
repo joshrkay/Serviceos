@@ -704,8 +704,8 @@ exists in this codebase's history. `accounting_integrations` / `accounting_sync_
 `OR current_setting('app.system_lookup', true) = 'true'` bypass clause.
 
 **Test convention: CONFIRMED.** npm workspaces (`package.json:5-9`), Vitest
-(`packages/api/vitest.config.ts` unit, excludes `test/integration/**`;
-`vitest.integration.config.ts:12-14` Docker-gated, `globalSetup`, `pool:'forks', maxWorkers:1`),
+(`packages/api/vitest.config.mts` unit, excludes `test/integration/**`;
+`vitest.integration.config.mts:12-14` Docker-gated, `globalSetup`, `pool:'forks', maxWorkers:1`),
 testcontainers (`@testcontainers/postgresql@^11.13.0` via `getSharedTestDb()` in
 `test/integration/shared.ts`).
 

@@ -1,7 +1,7 @@
 /**
  * VQ2-016 — Vitest config for the Voice Quality v1 Layer 2 corpus runner.
  *
- * Distinct from `vitest.voice-quality.config.ts` (Layer 1) because:
+ * Distinct from `vitest.voice-quality.config.mts` (Layer 1) because:
  *   - Layer 2 uses the real LLM gateway + real Whisper + AudioModeDriver,
  *     so each script is an order of magnitude slower than Layer 1.
  *   - Per-script timeout bumped to 60s; a single script with real audio
@@ -30,7 +30,7 @@ export default defineConfig({
     // Only the Layer 2 corpus runner entry — NOT the unit tests in
     // `test/voice-quality/*.test.ts` (those run under the default
     // config) and NOT the Layer 1 corpus entry (that uses
-    // `vitest.voice-quality.config.ts`).
+    // `vitest.voice-quality.config.mts`).
     include: ['test/voice-quality/**/voice-quality.layer2.test.ts'],
     // Sequential: voting is inherently sequential per script; no benefit from
     // parallel forks at this layer. Vitest 4 removed `poolOptions`;
