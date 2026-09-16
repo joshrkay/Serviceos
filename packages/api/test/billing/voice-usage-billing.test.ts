@@ -214,6 +214,88 @@ describe("VoiceUsageBillingService", () => {
     );
   });
 
+  it("fails closed when a session has incomplete provider costs", async () => {
+    const onAlert = vi.fn();
+    const service = new VoiceUsageBillingService({
+      pool: {} as never,
+      usageRepo: {
+        summarizePeriod: vi.fn(async () => ({
+          usageSeconds: 2400,
+          providerCostMicroCents: 100_000_000,
+          providers: ["twilio", "stt", "tts", "llm"],
+          incompleteSessionCount: 1,
+        })),
+      },
+      stripeApiKey: "sk_test",
+      settlementRepo: {} as never,
+      onAlert,
+    });
+
+    await expect(
+      service.settlePeriod({
+        tenantId: TENANT,
+        periodStart: new Date("2026-09-01T00:00:00.000Z"),
+        periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      }),
+    ).rejects.toThrow(/incomplete for 1 session/i);
+    expect(onAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: "voice_cost_incomplete", tenantId: TENANT }),
+    );
+  });
+
+  it("records and alerts when Stripe rejects the invoice item", async () => {
+    const settlementRepo = {
+      ensurePending: vi.fn(async () => ({
+        id: "set_rejected",
+        tenantId: TENANT,
+        periodStart: new Date(),
+        periodEnd: new Date(),
+        status: "pending" as const,
+        stripeInvoiceItemId: null,
+      })),
+      markCompleted: vi.fn(),
+      fail: vi.fn(async () => undefined),
+    };
+    const onAlert = vi.fn();
+    const service = new VoiceUsageBillingService({
+      pool: {
+        query: vi.fn(async () => ({ rows: [{ stripe_customer_id: "cus_123" }] })),
+      } as never,
+      usageRepo: {
+        summarizePeriod: vi.fn(async () => ({
+          usageSeconds: 2400,
+          providerCostMicroCents: 400_000_000,
+          providers: ["twilio", "stt", "tts", "llm"],
+          incompleteSessionCount: 0,
+        })),
+      },
+      stripeApiKey: "sk_test",
+      fetchFn: vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        text: async () => "temporarily unavailable",
+      } as Response),
+      settlementRepo,
+      onAlert,
+    });
+
+    await expect(
+      service.settlePeriod({
+        tenantId: TENANT,
+        periodStart: new Date("2026-09-01T00:00:00.000Z"),
+        periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      }),
+    ).rejects.toThrow(/503.*temporarily unavailable/i);
+    expect(settlementRepo.fail).toHaveBeenCalledWith(
+      TENANT,
+      "set_rejected",
+      expect.stringMatching(/503/),
+    );
+    expect(onAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: "voice_settlement_failed", tenantId: TENANT }),
+    );
+  });
+
   it("records a failed settlement when Stripe omits the invoice item id", async () => {
     const pool = {
       query: vi.fn(async () => ({ rows: [{ stripe_customer_id: "cus_123" }] })),
