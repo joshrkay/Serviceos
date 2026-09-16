@@ -121,8 +121,10 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
       [userId, tenantId, userId, email],
     );
     await pool.query(
-      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region, voice_agent_live_at)
-       VALUES ($1, $2, '1072 Credential Binding Shop', 'America/Chicago', 'TX', NOW())`,
+      `INSERT INTO tenant_settings
+         (id, tenant_id, business_name, timezone, region, voice_agent_live_at, e1_reviewed_script)
+       VALUES ($1, $2, '1072 Credential Binding Shop', 'America/Chicago', 'TX', NOW(),
+               'Test-reviewed E1 script')`,
       [crypto.randomUUID(), tenantId],
     );
     const client = await pool.connect();
