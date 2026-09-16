@@ -3,6 +3,20 @@
 # Spanish table phrase added by #1221/#1241/#1253.
 # #1253 round 2: EVERY row regenerated with the real classifier on origin/main 9c9b1d868 (#1245 merged); round-3 rows likewise.
 # Do not regenerate against a branch: the column is the baseline a change is measured against.
+E2	my wife can't breathe
+E1	my baby is not breathing
+E3	he is bleeding severely from his head
+E3	my child is choking
+E3	I think she overdosed
+E3	my father is having a stroke
+E3	my mother fell and can't move
+E3	my breath smells bad
+E3	I choked on my coffee earlier
+E3	we will meet at the stroke of midnight
+E3	my father had a stroke two years ago
+E3	she is not choking
+E3	no one is choking
+E3	there is no severe bleeding
 E1	se sale el gas
 E1	le sale gas a la estufa
 E1	a la estufa le sale gas
