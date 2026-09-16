@@ -55,6 +55,19 @@ describe('intent-classifier — parseClassifierJson', () => {
     expect(parseClassifierJson('{"unclosed":')).toBeNull();
   });
 
+  it('parses JSON wrapped in a Markdown code fence', () => {
+    const content = [
+      '```json',
+      '{"intentType":"create_appointment","confidence":0.91}',
+      '```',
+    ].join('\n');
+
+    expect(parseClassifierJson(content)).toMatchObject({
+      intentType: 'create_appointment',
+      confidence: 0.91,
+    });
+  });
+
   it('returns null when intentType is not a supported value', () => {
     const out = parseClassifierJson(JSON.stringify({
       intentType: 'delete_everything',

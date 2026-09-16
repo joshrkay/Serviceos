@@ -306,18 +306,14 @@ class AnthropicCompatibleProvider implements LLMProvider {
         model,
         // Content may be a string or multimodal content-block array; cast at
         // the provider boundary (the gateway LLMMessage type is provider-agnostic).
-        // `ensureJsonModeMessages` is a strict no-op unless this is a JSON-mode
-        // request whose messages would trip the OpenAI-compatible
-        // "must contain the word 'json'" precondition on `json_object`.
+        // Anthropic's OpenAI compatibility endpoint rejects OpenAI's
+        // `json_object` response format. Preserve JSON intent in the prompt;
+        // callers still parse and validate the returned JSON downstream.
         messages: (request.responseFormat === 'json'
           ? ensureJsonModeMessages(request.messages)
           : request.messages) as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,
-        response_format:
-          request.responseFormat === 'json'
-            ? { type: 'json_object' }
-            : undefined,
       },
       request.signal ? { signal: request.signal } : undefined,
     );

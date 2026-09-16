@@ -141,6 +141,39 @@ describe('VQ2-005 — createRealLayerTwoGateway', () => {
     expect(openaiMock.createImpl).toHaveBeenCalledTimes(1);
   });
 
+  it('VQ2-005 — requests JSON via the prompt without sending unsupported response_format', async () => {
+    let observedRequest: {
+      messages?: Array<{ role: string; content: string }>;
+      response_format?: unknown;
+    } = {};
+    openaiMock.createImpl = async (req: unknown) => {
+      observedRequest = req as typeof observedRequest;
+      return fakeCompletion({});
+    };
+
+    const gateway = createRealLayerTwoGateway({
+      apiKey: 'sk-ant-test',
+      bus,
+      costTracker,
+    });
+
+    await gateway.complete({
+      taskType: 'voice.agent',
+      messages: [{ role: 'user', content: 'Classify this request.' }],
+      responseFormat: 'json',
+    });
+
+    // Anthropic's OpenAI compatibility endpoint does not support OpenAI's
+    // `json_object` mode. Sending it currently fails the whole request with
+    // HTTP 400, so JSON intent must be expressed in the prompt instead.
+    expect(observedRequest).not.toHaveProperty('response_format');
+    expect(
+      observedRequest.messages?.some(message =>
+        message.content.toLowerCase().includes('json'),
+      ),
+    ).toBe(true);
+  });
+
   it('VQ2-005 — wrapper emits cost_incurred event on successful response', async () => {
     openaiMock.createImpl = async () =>
       fakeCompletion({ promptTokens: 1_000_000, completionTokens: 0 });
