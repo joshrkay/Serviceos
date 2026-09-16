@@ -30,6 +30,7 @@ import {
 } from '../audio/audio-timings';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
+import { parseJsonResponse } from './parse-json-response';
 import type { LLMGateway } from '../../gateway/gateway';
 import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 
@@ -275,7 +276,7 @@ async function judgeOneTurn(input: RepromptDetectionInput, turnIdx: number): Pro
   });
 
   try {
-    const parsed = JSON.parse(response.content);
+    const parsed = parseJsonResponse(response.content) as { isReprompt?: unknown };
     return parsed.isReprompt === true;
   } catch {
     return false;

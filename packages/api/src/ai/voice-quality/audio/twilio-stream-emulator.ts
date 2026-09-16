@@ -56,6 +56,14 @@ export interface TwilioStreamEmulatorDeps {
   /** Bus the emulator writes synthetic `transcript_received` events to. */
   bus: AgentEventBus;
   /**
+   * Layer-2 STT bridge. The production adapter advances a turn only after
+   * its streaming provider emits a final transcript; recording a timing
+   * event on the quality bus is not sufficient. The live harness supplies
+   * this callback to deliver the known scripted transcript through that
+   * provider callback after the caller audio has been streamed.
+   */
+  deliverFinalTranscript?: (transcript: string) => void | Promise<void>;
+  /**
    * How long after the last received agent frame the emulator waits
    * before declaring the agent's response complete. Defaults to 1500 ms
    * per the plan; tests pass a much shorter value (e.g. 100 ms) for
@@ -192,6 +200,7 @@ export class TwilioStreamEmulator {
   async sendCallerUtterance(
     audio: Buffer,
     turnIndexOverride?: number,
+    callerTranscript?: string,
   ): Promise<TurnResult> {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -226,12 +235,22 @@ export class TwilioStreamEmulator {
       }),
     );
 
-    // Synthetic `transcript_received` — pairs with `audio_frame_emitted`
-    // (which the production adapter emits via VQ2-004 wiring) to compute
-    // TTFA. Stamped via performance.now() to match the receive timestamps
-    // we record in `onMessage`.
+    // In the live harness, deliver the known transcript through the
+    // streaming-provider callback. That makes the production adapter emit
+    // `transcript_received` and invoke speechTurn exactly as it does after a
+    // real Deepgram final. Standalone emulator tests have no adapter, so they
+    // retain the synthetic bus event as a timing fallback.
     const transcriptReceivedTs = performance.now();
-    this.deps.bus.record(transcriptReceivedEvent({ ts: transcriptReceivedTs }));
+    if (this.deps.deliverFinalTranscript) {
+      if (callerTranscript === undefined) {
+        throw new Error(
+          'TwilioStreamEmulator: callerTranscript is required when deliverFinalTranscript is configured',
+        );
+      }
+      await this.deps.deliverFinalTranscript(callerTranscript);
+    } else {
+      this.deps.bus.record(transcriptReceivedEvent({ ts: transcriptReceivedTs }));
+    }
 
     // Collect agent frames until `silenceWindowMs` elapses without a new
     // arrival. We start the clock from `transcriptReceivedTs` so a fully

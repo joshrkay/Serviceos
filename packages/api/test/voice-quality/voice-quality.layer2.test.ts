@@ -85,25 +85,24 @@ import {
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import { createRealLayerTwoGateway } from '../../src/ai/gateway/real-layer-two-factory';
 import { OpenAiTtsProvider } from '../../src/ai/tts/tts-provider';
+import type { TtsProvider } from '../../src/ai/tts/tts-provider';
+import { mp3ToPcm16Mono16k } from '../../src/ai/voice-quality/audio/pcm-codec';
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import {
   attachMediaStreamServer,
   MEDIA_STREAM_PATH,
 } from '../../src/telephony/media-streams/twilio-mediastream-server';
-import type { StreamingTranscriptionProvider } from '../../src/voice/transcription-providers';
+import type {
+  StreamingTranscriptCallback,
+  StreamingTranscriptionProvider,
+} from '../../src/voice/transcription-providers';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
-import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
-import { InMemoryCustomerRepository } from '../../src/customers/customer';
-import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
-import { InMemoryJobRepository } from '../../src/jobs/job';
-import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
-import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
-import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
+import type { SpeechTurnHandler } from '../../src/telephony/media-streams/mediastream-adapter';
+import { normalizePhone } from '../../src/compliance/dnc';
 
 const REPORT_PATH = path.resolve(
   __dirname,
@@ -190,6 +189,8 @@ describe('Voice Quality Layer 2 — corpus', () => {
     suiteCostTracker: SuiteCostTracker;
     perScriptResults: RunScriptLayer2Result[];
     suiteCapTripped: boolean;
+    deliverFinalTranscript: ((transcript: string) => void) | null;
+    speechTurns: Map<string, SpeechTurnHandler>;
   } = {
     httpServer: null,
     serverUrl: '',
@@ -198,6 +199,8 @@ describe('Voice Quality Layer 2 — corpus', () => {
     suiteCostTracker: makeSuiteCostTracker(),
     perScriptResults: [],
     suiteCapTripped: false,
+    deliverFinalTranscript: null,
+    speechTurns: new Map(),
   };
 
   beforeAll(async () => {
@@ -217,76 +220,66 @@ describe('Voice Quality Layer 2 — corpus', () => {
       startInterval: false,
     });
 
-    // Streaming STT provider stub. The production path uses Deepgram;
-    // the harness leaves it as a no-op since the emulator simulates
-    // `transcript_received` directly (see twilio-stream-emulator.ts).
+    // Streaming STT bridge. Caller audio still traverses the real WebSocket
+    // and media decoder, while the known corpus transcript substitutes for
+    // Deepgram. Crucially, it is emitted through the provider callback so the
+    // production adapter invokes speechTurn; a bus-only timing event does not.
+    let activeTranscriptCallback: StreamingTranscriptCallback | null = null;
     const streamingProvider: StreamingTranscriptionProvider = {
-      async openSession() {
+      async openSession(onEvent) {
+        activeTranscriptCallback = onEvent;
         return {
           send: () => {},
           finish: () => {},
-          destroy: () => {},
+          destroy: () => {
+            activeTranscriptCallback = null;
+          },
+        };
+      },
+    };
+    suiteState.deliverFinalTranscript = (transcript) => {
+      if (!activeTranscriptCallback) {
+        throw new Error('Layer 2 streaming transcript bridge is not open');
+      }
+      activeTranscriptCallback({
+        type: 'final',
+        transcript,
+        confidence: 1,
+        isFinal: true,
+      });
+    };
+
+    // The media adapter only accepts raw PCM16@16k for buffered output.
+    // OpenAI returns MP3, so adapt it explicitly instead of either omitting
+    // TTS (silent agent) or feeding compressed bytes to the μ-law encoder.
+    const openAiTts = new OpenAiTtsProvider(process.env.OPENAI_API_KEY!);
+    const layerTwoTtsProvider: TtsProvider = {
+      async synthesize(input) {
+        const result = await openAiTts.synthesize(input);
+        return {
+          ...result,
+          audio: await mp3ToPcm16Mono16k(result.audio),
+          contentType: 'audio/pcm',
+          provider: `${result.provider}-pcm16k`,
         };
       },
     };
 
-    // Build a Layer-2 LLM gateway for the agent loop. Agent calls share the
-    // suite tracker with Whisper, TTS, and judge calls so all live-provider
-    // spend contributes to the suite cap.
-    const agentGateway = createRealLayerTwoGateway({
-      apiKey: process.env.ANTHROPIC_API_KEY!,
-      bus: new AgentEventBus(),
-      costTracker: suiteState.suiteCostTracker,
-    });
-
-    // Real agent processor — replaces the no-op stub. Wires the in-memory
-    // repos the corpus exercises (audit + proposal + the read-only
-    // lookup family). Optional deps (pool, callControl, voicePersonaResolver,
-    // etc.) are left undefined; the processor's helpers degrade
-    // gracefully ("not wired" log + skip).
-    // Mutable holder so the onSessionTerminated hook (constructed below
-    // BEFORE the processor reference exists) can call back into the
-    // processor's `runSummary`. We can't reference `processor` directly
-    // inside the literal because the literal is the constructor arg.
-    const processorRef: { current: ReturnType<typeof createVoiceTurnProcessor> | null } = {
-      current: null,
-    };
-    const processor = createVoiceTurnProcessor({
-      store: suiteState.voiceSessionStore,
-      gateway: agentGateway,
-      auditRepo: new InMemoryAuditRepository(),
-      proposalRepo: new InMemoryProposalRepository(),
-      customerRepo: new InMemoryCustomerRepository(),
-      appointmentRepo: new InMemoryAppointmentRepository(),
-      jobRepo: new InMemoryJobRepository(),
-      invoiceRepo: new InMemoryInvoiceRepository(),
-      estimateRepo: new InMemoryEstimateRepository(),
-      leadRepo: new InMemoryLeadRepository(),
-      businessName: 'Test Tenant',
-      systemActorId: 'voice-quality-layer2',
-      // Codex P1 round 5 — `await` the summary so its agent gateway
-      // spend lands in `suiteState.suiteCostTracker` BEFORE speechTurn
-      // returns. The runner snapshots the tracker immediately after
-      // each speechTurn iteration to compute per-run `agentCents`; if
-      // the summary were fire-and-forget (production behavior in
-      // twilio-adapter), its cents would either miss the snapshot
-      // entirely or contaminate the next run's delta.
-      onSessionTerminated: async (session) => {
-        if (processorRef.current) {
-          await processorRef.current.runSummary(session);
-        }
-      },
-    });
-    processorRef.current = processor;
-
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,
       streamingProvider,
+      ttsProvider: layerTwoTtsProvider,
       // VQ2-FOLLOWUP — replaces the no-op stub with the real agent loop
       // extracted from TwilioGatherAdapter#processCallerUtterance. The
       // factory closure-captures all helpers (cost, audit, proposal,
       // FSM dispatch) so the harness exercises the production code path.
-      speechTurn: processor.speechTurn,
+      speechTurn: async (args) => {
+        const handler = suiteState.speechTurns.get(args.session.id);
+        if (!handler) {
+          throw new Error(`Layer 2 has no speech-turn handler for session ${args.session.id}`);
+        }
+        return handler(args);
+      },
       authTokenGetter: () => 'test-token-unused',
       authTestMode: true,
     });
@@ -350,8 +343,64 @@ describe('Voice Quality Layer 2 — corpus', () => {
       let result: RunScriptLayer2Result;
       try {
         result = await runScriptLayer2(script, {
-          driverFactory: (_factoryCtx: DriverFactoryContext): AgentDriver =>
-            new AudioModeDriver(driverDeps.deps),
+          driverFactory: (factoryCtx: DriverFactoryContext): AgentDriver => {
+            const processorRef: {
+              current: ReturnType<typeof createVoiceTurnProcessor> | null;
+            } = { current: null };
+            const processor = createVoiceTurnProcessor({
+              store: suiteState.voiceSessionStore!,
+              gateway: driverDeps.gateway,
+              auditRepo: factoryCtx.repos.auditRepo,
+              proposalRepo: factoryCtx.repos.proposalRepo,
+              customerRepo: factoryCtx.repos.customerRepo,
+              appointmentRepo: factoryCtx.repos.appointmentRepo,
+              jobRepo: factoryCtx.repos.jobRepo,
+              invoiceRepo: factoryCtx.repos.invoiceRepo,
+              estimateRepo: factoryCtx.repos.estimateRepo,
+              leadRepo: factoryCtx.repos.leadRepo,
+              businessName: 'Test Tenant',
+              systemActorId: 'voice-quality-layer2',
+              onSessionTerminated: async (session) => {
+                await processorRef.current?.runSummary(session);
+              },
+            });
+            processorRef.current = processor;
+
+            return new AudioModeDriver({
+              ...driverDeps.deps,
+              onSessionCreated: async (session, opts) => {
+                suiteState.speechTurns.set(session.id, processor.speechTurn);
+                session.machine.dispatch({
+                  type: 'session_started',
+                  userId: 'voice-quality-layer2',
+                  tenantId: session.tenantId,
+                  conversationId: session.conversationId ?? session.id,
+                });
+                session.machine.dispatch({ type: 'greeted_ok' });
+
+                const matches =
+                  !opts.callerIdBlocked && opts.callerId &&
+                  factoryCtx.repos.customerRepo.findByPhoneNormalized
+                    ? await factoryCtx.repos.customerRepo.findByPhoneNormalized(
+                        session.tenantId,
+                        normalizePhone(opts.callerId),
+                      )
+                    : [];
+                if (matches.length === 1) {
+                  session.customerId = matches[0]!.id;
+                  session.machine.dispatch({
+                    type: 'caller_known',
+                    customerId: matches[0]!.id,
+                  });
+                } else {
+                  session.machine.dispatch({ type: 'unknown_caller' });
+                }
+              },
+              onSessionEnded: (sessionId) => {
+                suiteState.speechTurns.delete(sessionId);
+              },
+            });
+          },
           repoMode: 'memory',
           gateway: driverDeps.gateway,
           suiteCostTracker: suiteState.suiteCostTracker,
@@ -550,6 +599,7 @@ async function buildAudioModeDriverDeps(
     serverUrl: string;
     voiceSessionStore: VoiceSessionStore | null;
     suiteCostTracker: SuiteCostTracker;
+    deliverFinalTranscript: ((transcript: string) => void) | null;
   },
 ): Promise<BuiltDriverDeps> {
   const openaiKey = process.env.OPENAI_API_KEY!;
@@ -578,6 +628,12 @@ async function buildAudioModeDriverDeps(
   const emulator = new TwilioStreamEmulator({
     serverUrl: suiteState.serverUrl,
     bus,
+    deliverFinalTranscript: (transcript) => {
+      if (!suiteState.deliverFinalTranscript) {
+        throw new Error('Layer 2 streaming transcript bridge is unavailable');
+      }
+      suiteState.deliverFinalTranscript(transcript);
+    },
   });
 
   const gateway = createRealLayerTwoGateway({

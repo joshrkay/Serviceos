@@ -23,6 +23,7 @@ import {
   frameForTwilio,
   decodeAgentOutbound,
   mp3ToPcm16Mono8k,
+  mp3ToPcm16Mono16k,
   pcm16ToMulaw,
   mulawToPcm16,
 } from '../../../src/ai/voice-quality/audio/pcm-codec';
@@ -150,7 +151,7 @@ describe('VQ2-003 — pcm-codec', () => {
     });
   });
 
-  describe('mp3ToPcm16Mono8k', () => {
+  describe('MP3 to raw PCM conversion', () => {
     const haveFfmpeg = ffmpegAvailable();
 
     // Skipped if ffmpeg isn't on PATH. Follow-up: ensure CI runner
@@ -186,6 +187,32 @@ describe('VQ2-003 — pcm-codec', () => {
         // Confirm something non-silent decoded.
         expect(peakAmplitude(pcm)).toBeGreaterThan(1000);
       }
+    );
+
+    (haveFfmpeg ? it : it.skip)(
+      'VQ2-003 — decodes provider audio into media-adapter PCM16 mono 16 kHz',
+      async () => {
+        const result = spawnSync(
+          'ffmpeg',
+          [
+            '-f', 'lavfi',
+            '-i', 'sine=frequency=1000:duration=0.1:sample_rate=22050',
+            '-f', 'mp3',
+            '-acodec', 'libmp3lame',
+            '-b:a', '32k',
+            'pipe:1',
+          ],
+          { encoding: 'buffer', maxBuffer: 10_000_000 },
+        );
+        expect(result.status).toBe(0);
+
+        const pcm = await mp3ToPcm16Mono16k(result.stdout);
+        // 16 kHz output should contain roughly twice the samples of the
+        // equivalent 8 kHz decode and remain aligned raw PCM16.
+        expect(pcm.length).toBeGreaterThan(1_600);
+        expect(pcm.length % 2).toBe(0);
+        expect(peakAmplitude(pcm)).toBeGreaterThan(1_000);
+      },
     );
 
     (haveFfmpeg ? it : it.skip)(

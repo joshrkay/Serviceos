@@ -47,6 +47,7 @@ import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { Proposal } from '../../../proposals/proposal';
+import { parseJsonResponse } from './parse-json-response';
 
 export interface DispositionLlmInput {
   observation: Observation;
@@ -275,7 +276,7 @@ async function callJudge(
 
   let raw: unknown;
   try {
-    raw = JSON.parse(response.content);
+    raw = parseJsonResponse(response.content);
   } catch (err) {
     throw new Error(
       `disposition-llm grader: judge returned invalid JSON: ${

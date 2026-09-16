@@ -39,6 +39,7 @@ import type { LLMGateway } from '../../gateway/gateway';
 import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
+import { parseJsonResponse } from './parse-json-response';
 
 export interface PerceivedCompletionInput {
   observation: Observation;
@@ -124,7 +125,7 @@ export async function gradePerceivedCompletion(
 
   let raw: unknown;
   try {
-    raw = JSON.parse(response.content);
+    raw = parseJsonResponse(response.content);
   } catch (err) {
     throw new Error(
       `perceived-completion grader: judge returned invalid JSON: ${

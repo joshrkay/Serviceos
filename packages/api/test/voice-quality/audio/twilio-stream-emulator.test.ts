@@ -229,6 +229,42 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
     expect(Number.isFinite(evt.ts)).toBe(true);
   });
 
+  it('VQ2-006 — delivers the caller transcript to the streaming STT bridge', async () => {
+    const delivered: string[] = [];
+    emulator = new TwilioStreamEmulator({
+      serverUrl: stub.url,
+      bus,
+      silenceWindowMs: 100,
+      deliverFinalTranscript: (transcript) => {
+        delivered.push(transcript);
+      },
+    });
+    await emulator.start('CA_TRANSCRIPT_BRIDGE');
+    await stub.waitForConnection();
+
+    await emulator.sendCallerUtterance(shortPcmSilence(), 0, 'book me for Friday');
+
+    expect(delivered).toEqual(['book me for Friday']);
+    // The adapter owns this event when the bridge is configured; emitting it
+    // here as well would double-count TTFA turns.
+    expect(bus.events().filter((event) => event.type === 'transcript_received')).toHaveLength(0);
+  });
+
+  it('VQ2-006 — rejects a bridged turn without its caller transcript', async () => {
+    emulator = new TwilioStreamEmulator({
+      serverUrl: stub.url,
+      bus,
+      silenceWindowMs: 100,
+      deliverFinalTranscript: () => {},
+    });
+    await emulator.start('CA_MISSING_TRANSCRIPT');
+    await stub.waitForConnection();
+
+    await expect(emulator.sendCallerUtterance(shortPcmSilence())).rejects.toThrow(
+      'callerTranscript is required',
+    );
+  });
+
   it('VQ2-006 — sendCallerUtterance collects inbound media frames into agentAudio Buffer', async () => {
     await emulator.start('CA_COLLECT');
     await stub.waitForConnection();

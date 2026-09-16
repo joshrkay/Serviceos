@@ -58,6 +58,7 @@ import type {
   AgentDriverSpeakResult,
   AgentDriverStartOpts,
 } from '../text-mode-driver';
+import type { VoiceSession } from '../../agents/customer-calling/voice-session-store';
 import type { AgentEventBus } from '../event-bus';
 import type { VoiceSessionStore } from '../../agents/customer-calling/voice-session-store';
 import { speechOutboundEvent } from '../events';
@@ -79,6 +80,13 @@ export interface AudioModeDriverDeps {
   ttsCache: TtsFixtureCache;
   bus: AgentEventBus;
   voiceSessionStore: VoiceSessionStore;
+  /** Harness hook used to register and bootstrap the production turn processor. */
+  onSessionCreated?: (
+    session: VoiceSession,
+    opts: AgentDriverStartOpts,
+  ) => void | Promise<void>;
+  /** Harness hook used to release per-session routing state. */
+  onSessionEnded?: (sessionId: string) => void;
   /**
    * Optional: pin voice for deterministic replay. When unset the driver
    * rotates alloy/nova/onyx across turns of a single script via
@@ -123,6 +131,8 @@ export class AudioModeDriver implements AgentDriver {
     // it into the harness observation log.
     this.deps.bus.subscribe(session);
 
+    await this.deps.onSessionCreated?.(session, opts);
+
     // Open the WS only after the session is in the store — otherwise
     // the production server's lookup-by-CallSid race-loses.
     await this.deps.emulator.start(callSid);
@@ -159,7 +169,11 @@ export class AudioModeDriver implements AgentDriver {
     //    so the eot-N marks in the WS log line up with our accounting.
     const turnIdx = this.turnIndex;
     this.turnIndex += 1;
-    const turn = await this.deps.emulator.sendCallerUtterance(pcm16, turnIdx);
+    const turn = await this.deps.emulator.sendCallerUtterance(
+      pcm16,
+      turnIdx,
+      callerTranscript,
+    );
 
     // 4. Whisper-decode the agent's audio response — this is what would
     //    reach a downstream tool transcription pipeline. Criterion 12
@@ -212,6 +226,7 @@ export class AudioModeDriver implements AgentDriver {
       this.deps.bus.unsubscribe(session);
       this.deps.voiceSessionStore.delete(sessionId);
     }
+    this.deps.onSessionEnded?.(sessionId);
     this.currentSessionId = null;
   }
 
