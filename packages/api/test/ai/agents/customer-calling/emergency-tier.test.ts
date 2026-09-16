@@ -78,6 +78,30 @@ describe('classifyCallerSafety — injury precision (present vs clearly-past)', 
     // "there was a gas leak" — we do not risk a miss disambiguating tense on gas/fire.
     expect(classifyCallerSafety('there was a gas leak here a while back', {}).tier).toBe('E1');
   });
+
+  it.each([
+    "my wife can't breathe",
+    'my baby is not breathing',
+    'he is bleeding severely from his head',
+    'my child is choking',
+    'I think she overdosed',
+    'my father is having a stroke',
+    "my mother fell and can't move",
+  ])('#1246 acute English medical report is E1: %j', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E1');
+  });
+
+  it.each([
+    'my breath smells bad',
+    'I choked on my coffee earlier',
+    'we will meet at the stroke of midnight',
+    'my father had a stroke two years ago',
+    'she is not choking',
+    'no one is choking',
+    'there is no severe bleeding',
+  ])('#1246 routine, negated, or clearly-past English report is not E1: %j', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).not.toBe('E1');
+  });
 });
 
 describe('classifyCallerSafety — E2 (urgent dispatch, never routine-booked)', () => {
