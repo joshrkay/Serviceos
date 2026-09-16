@@ -423,6 +423,11 @@ export async function runScriptLayer2(
       // reflects any partial spend the failed run incurred before the
       // throw — the caller-owned tracker survives the catch.
       if (err instanceof CostCapExceededError) throw err;
+      console.error(
+        `Layer 2 run failed before grading completed: script=${script.id} run=${runIdx + 1}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       runResult = failEverythingRun();
     }
 
