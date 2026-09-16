@@ -360,9 +360,12 @@ export function SettingsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void apiFetch('/api/billing/voice-usage')
+    // Some embedders/tests provide a deliberately partial API adapter that
+    // returns undefined for unknown endpoints. Treat that the same as an
+    // unavailable optional usage panel instead of crashing Settings.
+    void Promise.resolve(apiFetch('/api/billing/voice-usage'))
       .then(async (res) => {
-        if (!cancelled && res.ok) setVoiceUsage(await res.json());
+        if (!cancelled && res?.ok) setVoiceUsage(await res.json());
       })
       .catch(() => undefined);
     return () => {
