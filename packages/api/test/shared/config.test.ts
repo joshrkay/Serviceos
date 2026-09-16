@@ -4,374 +4,418 @@ import {
   EnvironmentSecretResolver,
   validateEnvSchema,
   resolveMediaStreamsEnabled,
-} from '../../src/shared/config';
+} from "../../src/shared/config";
 
-describe('P0-006 — Secrets/config framework', () => {
+describe("P0-006 — Secrets/config framework", () => {
   beforeEach(() => {
     resetConfig();
   });
 
-  it('happy path — loads config with defaults', () => {
-    const config = loadConfig({ NODE_ENV: 'dev' });
-    expect(config.NODE_ENV).toBe('dev');
+  it("happy path — loads config with defaults", () => {
+    const config = loadConfig({ NODE_ENV: "dev" });
+    expect(config.NODE_ENV).toBe("dev");
     expect(config.PORT).toBe(3000);
-    expect(config.DB_HOST).toBe('localhost');
-    expect(config.LOG_LEVEL).toBe('info');
+    expect(config.DB_HOST).toBe("localhost");
+    expect(config.LOG_LEVEL).toBe("info");
   });
 
-  it('happy path — loads config with custom values', () => {
+  it("happy path — loads config with custom values", () => {
     const config = loadConfig({
-      NODE_ENV: 'staging',
-      PORT: '8080',
-      DB_HOST: 'db.example.com',
-      DB_PORT: '5433',
-      DB_NAME: 'serviceos',
-      DB_USER: 'admin',
-      DB_PASSWORD: 'secret',
-      CLERK_SECRET_KEY: 'sk_test_staging',
-      CLERK_PUBLISHABLE_KEY: 'pk_test_staging',
-      CLERK_WEBHOOK_SECRET: 'whsec_test',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_test',
-      AI_PROVIDER_API_KEY: 'ak_test',
-      AI_PROVIDER_BASE_URL: 'https://ai.example.com',
-      CORS_ORIGIN: 'https://app.example.com',
-      LOG_LEVEL: 'debug',
+      NODE_ENV: "staging",
+      PORT: "8080",
+      DB_HOST: "db.example.com",
+      DB_PORT: "5433",
+      DB_NAME: "serviceos",
+      DB_USER: "admin",
+      DB_PASSWORD: "secret",
+      CLERK_SECRET_KEY: "sk_test_staging",
+      CLERK_PUBLISHABLE_KEY: "pk_test_staging",
+      CLERK_WEBHOOK_SECRET: "whsec_test",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_test",
+      AI_PROVIDER_API_KEY: "ak_test",
+      AI_PROVIDER_BASE_URL: "https://ai.example.com",
+      CORS_ORIGIN: "https://app.example.com",
+      LOG_LEVEL: "debug",
       // Opt features out so the feature-required gate doesn't fire;
       // its own behavior is covered by the dedicated tests below.
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
       // SEC-01 — required in prod/staging; covered on its own below.
-      RLS_RUNTIME_ROLE: 'true',
+      RLS_RUNTIME_ROLE: "true",
       // T4-F06 — required in prod/staging; covered on its own below.
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     });
-    expect(config.NODE_ENV).toBe('staging');
+    expect(config.NODE_ENV).toBe("staging");
     expect(config.PORT).toBe(8080);
-    expect(config.DB_HOST).toBe('db.example.com');
+    expect(config.DB_HOST).toBe("db.example.com");
     expect(config.DB_PORT).toBe(5433);
-    expect(config.LOG_LEVEL).toBe('debug');
+    expect(config.LOG_LEVEL).toBe("debug");
   });
 
-  it('validation — rejects invalid NODE_ENV', () => {
-    expect(() => loadConfig({ NODE_ENV: 'invalid' })).toThrow('Configuration validation failed');
-  });
-
-  it('validation — rejects invalid PORT', () => {
-    expect(() => loadConfig({ NODE_ENV: 'dev', PORT: '-1' })).toThrow(
-      'Configuration validation failed'
+  it("validation — rejects invalid NODE_ENV", () => {
+    expect(() => loadConfig({ NODE_ENV: "invalid" })).toThrow(
+      "Configuration validation failed",
     );
   });
 
-  it('validation — rejects invalid LOG_LEVEL', () => {
-    expect(() => loadConfig({ NODE_ENV: 'dev', LOG_LEVEL: 'trace' })).toThrow(
-      'Configuration validation failed'
+  it("validation — rejects invalid PORT", () => {
+    expect(() => loadConfig({ NODE_ENV: "dev", PORT: "-1" })).toThrow(
+      "Configuration validation failed",
     );
   });
 
-  it('coerces empty-string env values to undefined (GitHub Actions unset-secret behaviour)', () => {
+  it("validation — rejects invalid LOG_LEVEL", () => {
+    expect(() => loadConfig({ NODE_ENV: "dev", LOG_LEVEL: "trace" })).toThrow(
+      "Configuration validation failed",
+    );
+  });
+
+  it("coerces empty-string env values to undefined (GitHub Actions unset-secret behaviour)", () => {
     const config = loadConfig({
-      NODE_ENV: 'dev',
-      DATABASE_URL: '',
-      CLERK_SECRET_KEY: '',
-      AI_PROVIDER_API_KEY: '',
+      NODE_ENV: "dev",
+      DATABASE_URL: "",
+      CLERK_SECRET_KEY: "",
+      AI_PROVIDER_API_KEY: "",
     });
     expect(config.DATABASE_URL).toBeUndefined();
     expect(config.CLERK_SECRET_KEY).toBeUndefined();
     expect(config.AI_PROVIDER_API_KEY).toBeUndefined();
   });
 
-  it('happy path — config is cached after first load', () => {
-    const c1 = loadConfig({ NODE_ENV: 'dev' });
-    const c2 = loadConfig({ NODE_ENV: 'prod' });
+  it("happy path — config is cached after first load", () => {
+    const c1 = loadConfig({ NODE_ENV: "dev" });
+    const c2 = loadConfig({ NODE_ENV: "prod" });
     expect(c1).toBe(c2);
   });
 
-  it('happy path — EnvironmentSecretResolver resolves env vars', async () => {
-    process.env.TEST_SECRET = 'my-secret-value';
+  it("happy path — EnvironmentSecretResolver resolves env vars", async () => {
+    process.env.TEST_SECRET = "my-secret-value";
     const resolver = new EnvironmentSecretResolver();
-    const value = await resolver.resolve('TEST_SECRET');
-    expect(value).toBe('my-secret-value');
+    const value = await resolver.resolve("TEST_SECRET");
+    expect(value).toBe("my-secret-value");
     delete process.env.TEST_SECRET;
   });
 
-  it('validation — EnvironmentSecretResolver throws on missing secret', async () => {
+  it("validation — EnvironmentSecretResolver throws on missing secret", async () => {
     const resolver = new EnvironmentSecretResolver();
-    await expect(resolver.resolve('NONEXISTENT_SECRET')).rejects.toThrow('Secret not found');
+    await expect(resolver.resolve("NONEXISTENT_SECRET")).rejects.toThrow(
+      "Secret not found",
+    );
   });
 
-  it('AC#1 — production load fails when CLERK_SECRET_KEY is missing', () => {
+  it("AC#1 — production load fails when CLERK_SECRET_KEY is missing", () => {
     expect(() =>
       loadConfig({
-        NODE_ENV: 'prod',
-        DATABASE_URL: 'postgres://u:p@h/d',
-        CLERK_WEBHOOK_SECRET: 'whsec_x',
-        AI_PROVIDER_API_KEY: 'ak_x',
-        CORS_ORIGIN: 'https://app.example.com',
-      })
+        NODE_ENV: "prod",
+        DATABASE_URL: "postgres://u:p@h/d",
+        CLERK_WEBHOOK_SECRET: "whsec_x",
+        AI_PROVIDER_API_KEY: "ak_x",
+        CORS_ORIGIN: "https://app.example.com",
+      }),
     ).toThrow(/CLERK_SECRET_KEY/);
   });
 
-  it('AC#1 — production load fails when CORS_ORIGIN is missing', () => {
+  it("AC#1 — production load fails when CORS_ORIGIN is missing", () => {
     expect(() =>
       loadConfig({
-        NODE_ENV: 'prod',
-        DATABASE_URL: 'postgres://u:p@h/d',
-        CLERK_SECRET_KEY: 'sk_x',
-        CLERK_WEBHOOK_SECRET: 'whsec_x',
-        AI_PROVIDER_API_KEY: 'ak_x',
-      })
+        NODE_ENV: "prod",
+        DATABASE_URL: "postgres://u:p@h/d",
+        CLERK_SECRET_KEY: "sk_x",
+        CLERK_WEBHOOK_SECRET: "whsec_x",
+        AI_PROVIDER_API_KEY: "ak_x",
+      }),
     ).toThrow(/CORS_ORIGIN/);
   });
 
-  it('AC#1 — production load fails when DB credentials are missing', () => {
+  it("AC#1 — production load fails when DB credentials are missing", () => {
     expect(() =>
       loadConfig({
-        NODE_ENV: 'prod',
-        CLERK_SECRET_KEY: 'sk_x',
-        CLERK_WEBHOOK_SECRET: 'whsec_x',
-        AI_PROVIDER_API_KEY: 'ak_x',
-        CORS_ORIGIN: 'https://app.example.com',
-      })
+        NODE_ENV: "prod",
+        CLERK_SECRET_KEY: "sk_x",
+        CLERK_WEBHOOK_SECRET: "whsec_x",
+        AI_PROVIDER_API_KEY: "ak_x",
+        CORS_ORIGIN: "https://app.example.com",
+      }),
     ).toThrow(/DB_NAME|DB_USER|DB_PASSWORD/);
   });
 
-  it('AC#1 — production load succeeds when all required secrets present', () => {
+  it("AC#1 — production load succeeds when all required secrets present", () => {
     expect(() =>
       loadConfig({
-        NODE_ENV: 'prod',
-        DATABASE_URL: 'postgres://u:p@h/d',
-        CLERK_SECRET_KEY: 'sk_x',
-        CLERK_PUBLISHABLE_KEY: 'pk_x',
-        CLERK_WEBHOOK_SECRET: 'whsec_x',
-        STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-        AI_PROVIDER_API_KEY: 'ak_x',
-        CORS_ORIGIN: 'https://app.example.com',
+        NODE_ENV: "prod",
+        DATABASE_URL: "postgres://u:p@h/d",
+        CLERK_SECRET_KEY: "sk_x",
+        CLERK_PUBLISHABLE_KEY: "pk_x",
+        CLERK_WEBHOOK_SECRET: "whsec_x",
+        STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+        AI_PROVIDER_API_KEY: "ak_x",
+        CORS_ORIGIN: "https://app.example.com",
         // Opt features out so the feature-required gate doesn't fire.
         // The feature-required gate has its own dedicated tests below.
-        TELEPHONY_ENABLED: 'false',
-        EMAIL_ENABLED: 'false',
-        STORAGE_ENABLED: 'false',
+        TELEPHONY_ENABLED: "false",
+        EMAIL_ENABLED: "false",
+        STORAGE_ENABLED: "false",
         // SEC-01 — required in prod/staging; covered on its own below.
-        RLS_RUNTIME_ROLE: 'true',
+        RLS_RUNTIME_ROLE: "true",
         // T4-F06 — required in prod/staging; covered on its own below.
-        TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
-      })
+        TENANT_ENCRYPTION_KEY: "a".repeat(64),
+      }),
     ).not.toThrow();
   });
 
-  it('AC#1 — production load fails when CLERK_PUBLISHABLE_KEY is missing', () => {
+  it("AC#1 — production load fails when CLERK_PUBLISHABLE_KEY is missing", () => {
     expect(() =>
       loadConfig({
-        NODE_ENV: 'prod',
-        DATABASE_URL: 'postgres://u:p@h/d',
-        CLERK_SECRET_KEY: 'sk_x',
-        CLERK_WEBHOOK_SECRET: 'whsec_x',
-        AI_PROVIDER_API_KEY: 'ak_x',
-        CORS_ORIGIN: 'https://app.example.com',
-      })
+        NODE_ENV: "prod",
+        DATABASE_URL: "postgres://u:p@h/d",
+        CLERK_SECRET_KEY: "sk_x",
+        CLERK_WEBHOOK_SECRET: "whsec_x",
+        AI_PROVIDER_API_KEY: "ak_x",
+        CORS_ORIGIN: "https://app.example.com",
+      }),
     ).toThrow(/CLERK_PUBLISHABLE_KEY/);
   });
 
-  describe('SEC-43 — STRIPE_WEBHOOK_SECRET required in prod/staging', () => {
+  describe("SEC-43 — STRIPE_WEBHOOK_SECRET required in prod/staging", () => {
     const baseNoStripe = {
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
       // Isolate the Stripe requirement: opt features out, RLS on.
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
-      RLS_RUNTIME_ROLE: 'true',
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
+      RLS_RUNTIME_ROLE: "true",
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     };
 
-    it('prod — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
-      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'prod' })).toThrow(
-        /STRIPE_WEBHOOK_SECRET/
+    it("prod — fails fast naming STRIPE_WEBHOOK_SECRET when unset", () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: "prod" })).toThrow(
+        /STRIPE_WEBHOOK_SECRET/,
       );
     });
 
-    it('staging — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
-      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'staging' })).toThrow(
-        /STRIPE_WEBHOOK_SECRET/
-      );
-    });
-
-    it('prod — passes once STRIPE_WEBHOOK_SECRET is present', () => {
+    it("staging — fails fast naming STRIPE_WEBHOOK_SECRET when unset", () => {
       expect(() =>
-        loadConfig({ ...baseNoStripe, NODE_ENV: 'prod', STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x' })
+        loadConfig({ ...baseNoStripe, NODE_ENV: "staging" }),
+      ).toThrow(/STRIPE_WEBHOOK_SECRET/);
+    });
+
+    it("prod — passes once STRIPE_WEBHOOK_SECRET is present", () => {
+      expect(() =>
+        loadConfig({
+          ...baseNoStripe,
+          NODE_ENV: "prod",
+          STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+        }),
       ).not.toThrow();
     });
 
-    it('dev — no STRIPE_WEBHOOK_SECRET requirement (payments off locally is fine)', () => {
-      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'dev' })).not.toThrow();
+    it("dev — no STRIPE_WEBHOOK_SECRET requirement (payments off locally is fine)", () => {
+      expect(() =>
+        loadConfig({ ...baseNoStripe, NODE_ENV: "dev" }),
+      ).not.toThrow();
     });
   });
 
-  describe('SEC-43 — WISETACK_WEBHOOK_SECRET gated on financing being enabled', () => {
+  describe("SEC-43 — WISETACK_WEBHOOK_SECRET gated on financing being enabled", () => {
     const baseFinancing = {
-      NODE_ENV: 'prod',
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
-      RLS_RUNTIME_ROLE: 'true',
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      NODE_ENV: "prod",
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
+      RLS_RUNTIME_ROLE: "true",
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     };
 
-    it('financing off (no Wisetack config) — WISETACK_WEBHOOK_SECRET NOT required', () => {
+    it("financing off (no Wisetack config) — WISETACK_WEBHOOK_SECRET NOT required", () => {
       expect(() => loadConfig({ ...baseFinancing })).not.toThrow();
     });
 
-    it('financing enabled via WISETACK_API_KEY — fails naming WISETACK_WEBHOOK_SECRET', () => {
+    it("financing enabled via WISETACK_API_KEY — fails naming WISETACK_WEBHOOK_SECRET", () => {
       expect(() =>
-        loadConfig({ ...baseFinancing, WISETACK_API_KEY: 'wt_live_x' })
+        loadConfig({ ...baseFinancing, WISETACK_API_KEY: "wt_live_x" }),
       ).toThrow(/WISETACK_WEBHOOK_SECRET/);
     });
 
-    it('financing enabled via FINANCING_ENABLED=true — fails naming WISETACK_WEBHOOK_SECRET', () => {
+    it("financing enabled via FINANCING_ENABLED=true — fails naming WISETACK_WEBHOOK_SECRET", () => {
       expect(() =>
-        loadConfig({ ...baseFinancing, FINANCING_ENABLED: 'true' })
+        loadConfig({ ...baseFinancing, FINANCING_ENABLED: "true" }),
       ).toThrow(/WISETACK_WEBHOOK_SECRET/);
     });
 
-    it('financing enabled with WISETACK_WEBHOOK_SECRET present — passes', () => {
+    it("financing enabled with WISETACK_WEBHOOK_SECRET present — passes", () => {
       expect(() =>
         loadConfig({
           ...baseFinancing,
-          WISETACK_API_KEY: 'wt_live_x',
-          WISETACK_WEBHOOK_SECRET: 'wt_whsec_x',
-        })
+          WISETACK_API_KEY: "wt_live_x",
+          WISETACK_WEBHOOK_SECRET: "wt_whsec_x",
+        }),
       ).not.toThrow();
     });
   });
 
-  describe('ARCH-01 — REDIS_URL required when NUM_REPLICAS > 1', () => {
+  describe("ARCH-01 — REDIS_URL required when NUM_REPLICAS > 1", () => {
     const baseMultiReplica = {
-      NODE_ENV: 'prod',
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
+      NODE_ENV: "prod",
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
       // Isolate the Redis requirement: opt features out, RLS on.
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
-      RLS_RUNTIME_ROLE: 'true',
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
+      RLS_RUNTIME_ROLE: "true",
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     };
 
-    it('prod + NUM_REPLICAS=2 + no REDIS_URL — fails fast naming REDIS_URL', () => {
+    it("prod + NUM_REPLICAS=2 + no REDIS_URL — fails fast naming REDIS_URL", () => {
       expect(() =>
-        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2' })
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: "2" }),
       ).toThrow(/REDIS_URL/);
     });
 
-    it('prod + NUM_REPLICAS=2 + REDIS_URL set — passes', () => {
+    it("prod + NUM_REPLICAS=2 + REDIS_URL set — passes", () => {
       expect(() =>
-        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2', REDIS_URL: 'redis://cache:6379' })
+        loadConfig({
+          ...baseMultiReplica,
+          NUM_REPLICAS: "2",
+          REDIS_URL: "redis://cache:6379",
+        }),
       ).not.toThrow();
     });
 
-    it('prod + NUM_REPLICAS unset + no REDIS_URL — passes (current single-replica deploy still boots)', () => {
+    it("prod + NUM_REPLICAS unset + no REDIS_URL — passes (current single-replica deploy still boots)", () => {
       expect(() => loadConfig({ ...baseMultiReplica })).not.toThrow();
     });
 
-    it('prod + NUM_REPLICAS=1 explicit + no REDIS_URL — passes', () => {
-      expect(() => loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '1' })).not.toThrow();
-    });
-
-    it('prod + NUM_REPLICAS non-numeric + no REDIS_URL — treated as single replica, passes', () => {
-      expect(() => loadConfig({ ...baseMultiReplica, NUM_REPLICAS: 'auto' })).not.toThrow();
-    });
-
-    it('dev + NUM_REPLICAS=2 + no REDIS_URL — does not throw (guard is prod/staging only)', () => {
+    it("prod + NUM_REPLICAS=1 explicit + no REDIS_URL — passes", () => {
       expect(() =>
-        loadConfig({ ...baseMultiReplica, NODE_ENV: 'dev', NUM_REPLICAS: '2' })
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: "1" }),
+      ).not.toThrow();
+    });
+
+    it("prod + NUM_REPLICAS non-numeric + no REDIS_URL — treated as single replica, passes", () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: "auto" }),
+      ).not.toThrow();
+    });
+
+    it("dev + NUM_REPLICAS=2 + no REDIS_URL — does not throw (guard is prod/staging only)", () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NODE_ENV: "dev", NUM_REPLICAS: "2" }),
       ).not.toThrow();
     });
   });
 
-  describe('feature-required config gate (Sprint 1 / Story 1.5)', () => {
+  describe("feature-required config gate (Sprint 1 / Story 1.5)", () => {
     const baseProdEnv = {
-      NODE_ENV: 'prod',
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
+      NODE_ENV: "prod",
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
       // SEC-01 — RLS enforcement is a hard prod/staging requirement; set here so
       // these feature-gate tests isolate the var under test. The RLS requirement
       // has its own dedicated describe block below.
-      RLS_RUNTIME_ROLE: 'true',
+      RLS_RUNTIME_ROLE: "true",
       // T4-F06 — required in prod/staging; its own dedicated describe block below.
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     };
 
-    it('telephony — fails naming each missing TWILIO var when not opted out', () => {
+    it("telephony — fails naming each missing TWILIO var when not opted out", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          EMAIL_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-        })
-      ).toThrow(/TWILIO_ACCOUNT_SID[\s\S]*TWILIO_AUTH_TOKEN[\s\S]*TWILIO_FROM_NUMBER[\s\S]*TWILIO_DEFAULT_TENANT_ID/);
+          EMAIL_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+        }),
+      ).toThrow(
+        /TWILIO_ACCOUNT_SID[\s\S]*TWILIO_AUTH_TOKEN[\s\S]*TWILIO_FROM_NUMBER[\s\S]*TWILIO_DEFAULT_TENANT_ID/,
+      );
     });
 
-    it('telephony — passes when TELEPHONY_ENABLED=false even with no Twilio vars', () => {
+    it("telephony — passes when TELEPHONY_ENABLED=false even with no Twilio vars", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          EMAIL_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-        })
+          TELEPHONY_ENABLED: "false",
+          EMAIL_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+        }),
       ).not.toThrow();
     });
 
-    it('telephony — requires every contracted provider rate for cost-plus billing', () => {
+    it("voice billing — still requires contracted rates when SMS is disabled but Media Streams is live", () => {
+      const liveVoiceWithSmsDisabled = {
+        ...baseProdEnv,
+        TELEPHONY_ENABLED: "false",
+        EMAIL_ENABLED: "false",
+        STORAGE_ENABLED: "false",
+        TWILIO_MEDIA_STREAMS_ENABLED: "true",
+      };
+
+      expect(() => loadConfig(liveVoiceWithSmsDisabled)).toThrow(
+        /DEEPGRAM_COST_CENTS_PER_HOUR[\s\S]*ELEVENLABS_COST_CENTS_PER_1000_CHARS[\s\S]*TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR/,
+      );
+      expect(() =>
+        loadConfig({
+          ...liveVoiceWithSmsDisabled,
+          DEEPGRAM_COST_CENTS_PER_HOUR: "29",
+          ELEVENLABS_COST_CENTS_PER_1000_CHARS: "18.5",
+          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: "24",
+        }),
+      ).not.toThrow();
+    });
+
+    it("telephony — requires every contracted provider rate for cost-plus billing", () => {
       const telephony = {
         ...baseProdEnv,
-        EMAIL_ENABLED: 'false',
-        STORAGE_ENABLED: 'false',
-        TWILIO_ACCOUNT_SID: 'AC7x',
-        TWILIO_AUTH_TOKEN: 'tok',
-        TWILIO_FROM_NUMBER: '+15555550100',
-        TWILIO_DEFAULT_TENANT_ID: '11111111-1111-4111-8111-111111111111',
+        EMAIL_ENABLED: "false",
+        STORAGE_ENABLED: "false",
+        TWILIO_ACCOUNT_SID: "AC7x",
+        TWILIO_AUTH_TOKEN: "tok",
+        TWILIO_FROM_NUMBER: "+15555550100",
+        TWILIO_DEFAULT_TENANT_ID: "11111111-1111-4111-8111-111111111111",
       };
       expect(() => loadConfig(telephony)).toThrow(
         /DEEPGRAM_COST_CENTS_PER_HOUR[\s\S]*ELEVENLABS_COST_CENTS_PER_1000_CHARS[\s\S]*TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR/,
       );
-      expect(() => loadConfig({
-        ...telephony,
-        DEEPGRAM_COST_CENTS_PER_HOUR: '29',
-        ELEVENLABS_COST_CENTS_PER_1000_CHARS: '18.5',
-        TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: '0',
-      })).not.toThrow();
+      expect(() =>
+        loadConfig({
+          ...telephony,
+          DEEPGRAM_COST_CENTS_PER_HOUR: "29",
+          ELEVENLABS_COST_CENTS_PER_1000_CHARS: "18.5",
+          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: "0",
+        }),
+      ).not.toThrow();
     });
 
-    it('email — fails when SENDGRID_API_KEY missing and EMAIL_ENABLED not set to false', () => {
+    it("email — fails when SENDGRID_API_KEY missing and EMAIL_ENABLED not set to false", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-        })
+          TELEPHONY_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+        }),
       ).toThrow(/SENDGRID_API_KEY/);
     });
 
@@ -379,58 +423,58 @@ describe('P0-006 — Secrets/config framework', () => {
     // SMS + SendGrid. With TELEPHONY_ENABLED=false and EMAIL_ENABLED=true,
     // the gate must still require TWILIO_* — otherwise startup passes
     // but /invoices/:id/send + /estimates/:id/send 503 at runtime.
-    it('email — requires Twilio creds even with TELEPHONY_ENABLED=false (delivery coupling)', () => {
+    it("email — requires Twilio creds even with TELEPHONY_ENABLED=false (delivery coupling)", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-          SENDGRID_API_KEY: 'SG.x',
-          SENDGRID_FROM_EMAIL: 'noreply@example.com',
-        })
+          TELEPHONY_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+          SENDGRID_API_KEY: "SG.x",
+          SENDGRID_FROM_EMAIL: "noreply@example.com",
+        }),
       ).toThrow(
-        /TWILIO_ACCOUNT_SID[\s\S]*EMAIL_ENABLED=false[\s\S]*TWILIO_AUTH_TOKEN[\s\S]*TWILIO_FROM_NUMBER/
+        /TWILIO_ACCOUNT_SID[\s\S]*EMAIL_ENABLED=false[\s\S]*TWILIO_AUTH_TOKEN[\s\S]*TWILIO_FROM_NUMBER/,
       );
     });
 
     // The email gate accepts EITHER backend. Production has Twilio credentials
     // and NO SendGrid key, so demanding SENDGRID_* specifically hard-failed
     // boot for the deployment that actually exists.
-    it('email — Twilio-native email satisfies the gate with NO SendGrid key', () => {
+    it("email — Twilio-native email satisfies the gate with NO SendGrid key", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-          TWILIO_ACCOUNT_SID: 'AC7x',
-          TWILIO_AUTH_TOKEN: 'tok',
-          TWILIO_FROM_NUMBER: '+15555550100',
-          TWILIO_EMAIL_FROM_ADDRESS: 'support@acmehvac.com',
-        })
+          TELEPHONY_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+          TWILIO_ACCOUNT_SID: "AC7x",
+          TWILIO_AUTH_TOKEN: "tok",
+          TWILIO_FROM_NUMBER: "+15555550100",
+          TWILIO_EMAIL_FROM_ADDRESS: "support@acmehvac.com",
+        }),
       ).not.toThrow();
     });
 
-    it('email — TWILIO_EMAIL_FROM_ADDRESS alone is not enough (creds still required)', () => {
+    it("email — TWILIO_EMAIL_FROM_ADDRESS alone is not enough (creds still required)", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-          TWILIO_EMAIL_FROM_ADDRESS: 'support@acmehvac.com',
-        })
+          TELEPHONY_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+          TWILIO_EMAIL_FROM_ADDRESS: "support@acmehvac.com",
+        }),
       ).toThrow(/TWILIO_ACCOUNT_SID/);
     });
 
-    it('email — neither backend configured names BOTH options', () => {
+    it("email — neither backend configured names BOTH options", () => {
       let err: Error | undefined;
       try {
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-          TWILIO_ACCOUNT_SID: 'AC7x',
-          TWILIO_AUTH_TOKEN: 'tok',
-          TWILIO_FROM_NUMBER: '+15555550100',
+          TELEPHONY_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+          TWILIO_ACCOUNT_SID: "AC7x",
+          TWILIO_AUTH_TOKEN: "tok",
+          TWILIO_FROM_NUMBER: "+15555550100",
         });
       } catch (e) {
         err = e as Error;
@@ -440,40 +484,42 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(err?.message).toMatch(/EMAIL_ENABLED=false/);
     });
 
-    it('email + telephony off — no Twilio creds required', () => {
+    it("email + telephony off — no Twilio creds required", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          EMAIL_ENABLED: 'false',
-          STORAGE_ENABLED: 'false',
-        })
+          TELEPHONY_ENABLED: "false",
+          EMAIL_ENABLED: "false",
+          STORAGE_ENABLED: "false",
+        }),
       ).not.toThrow();
     });
 
-    it('storage — fails when R2 vars missing and STORAGE_ENABLED not set to false', () => {
+    it("storage — fails when R2 vars missing and STORAGE_ENABLED not set to false", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          EMAIL_ENABLED: 'false',
-        })
-      ).toThrow(/R2_ACCOUNT_ID[\s\S]*R2_ACCESS_KEY_ID[\s\S]*R2_SECRET_ACCESS_KEY/);
+          TELEPHONY_ENABLED: "false",
+          EMAIL_ENABLED: "false",
+        }),
+      ).toThrow(
+        /R2_ACCOUNT_ID[\s\S]*R2_ACCESS_KEY_ID[\s\S]*R2_SECRET_ACCESS_KEY/,
+      );
     });
 
-    it('storage — passes without R2_PUBLIC_URL (presigned-URL fallback)', () => {
+    it("storage — passes without R2_PUBLIC_URL (presigned-URL fallback)", () => {
       // S3StorageProvider falls back to presigned GET URLs when
       // publicUrlBase is unset, so R2_PUBLIC_URL is an optimization,
       // not a hard requirement.
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TELEPHONY_ENABLED: 'false',
-          EMAIL_ENABLED: 'false',
-          R2_ACCOUNT_ID: 'r2acct',
-          R2_ACCESS_KEY_ID: 'r2key',
-          R2_SECRET_ACCESS_KEY: 'r2secret',
-        })
+          TELEPHONY_ENABLED: "false",
+          EMAIL_ENABLED: "false",
+          R2_ACCOUNT_ID: "r2acct",
+          R2_ACCESS_KEY_ID: "r2key",
+          R2_SECRET_ACCESS_KEY: "r2secret",
+        }),
       ).not.toThrow();
     });
 
@@ -482,427 +528,476 @@ describe('P0-006 — Secrets/config framework', () => {
     // provider (raw PCM); OpenAI/default returns mp3 that plays as static.
     const mediaBaseEnv = {
       ...baseProdEnv,
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
     };
 
-    it('media streams — fails when enabled with TTS_PROVIDER unset (defaults to OpenAI/static)', () => {
+    it("media streams — fails when enabled with TTS_PROVIDER unset (defaults to OpenAI/static)", () => {
       expect(() =>
         loadConfig({
           ...mediaBaseEnv,
-          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
-          ELEVENLABS_API_KEY: 'el_x',
-        })
+          TWILIO_MEDIA_STREAMS_ENABLED: "true",
+          ELEVENLABS_API_KEY: "el_x",
+        }),
       ).toThrow(/TTS_PROVIDER=elevenlabs/);
     });
 
-    it('media streams — fails when enabled with TTS_PROVIDER=elevenlabs but no ELEVENLABS_API_KEY', () => {
+    it("media streams — fails when enabled with TTS_PROVIDER=elevenlabs but no ELEVENLABS_API_KEY", () => {
       expect(() =>
         loadConfig({
           ...mediaBaseEnv,
-          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
-          TTS_PROVIDER: 'elevenlabs',
-        })
+          TWILIO_MEDIA_STREAMS_ENABLED: "true",
+          TTS_PROVIDER: "elevenlabs",
+        }),
       ).toThrow(/ELEVENLABS_API_KEY/);
     });
 
-    it('media streams — passes when enabled with TTS_PROVIDER=elevenlabs + ELEVENLABS_API_KEY', () => {
+    it("media streams — passes when enabled with TTS_PROVIDER=elevenlabs + ELEVENLABS_API_KEY", () => {
       expect(() =>
         loadConfig({
           ...mediaBaseEnv,
-          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
-          TTS_PROVIDER: 'elevenlabs',
-          ELEVENLABS_API_KEY: 'el_x',
-        })
+          TWILIO_MEDIA_STREAMS_ENABLED: "true",
+          TTS_PROVIDER: "elevenlabs",
+          ELEVENLABS_API_KEY: "el_x",
+          DEEPGRAM_COST_CENTS_PER_HOUR: "29",
+          ELEVENLABS_COST_CENTS_PER_1000_CHARS: "18.5",
+          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: "24",
+        }),
       ).not.toThrow();
     });
 
-    it('media streams — off (opt-in): no TTS constraint even with default provider', () => {
+    it("media streams — off (opt-in): no TTS constraint even with default provider", () => {
       expect(() => loadConfig({ ...mediaBaseEnv })).not.toThrow();
     });
 
-    it('passes when all feature vars are set', () => {
+    it("passes when all feature vars are set", () => {
       expect(() =>
         loadConfig({
           ...baseProdEnv,
-          TWILIO_ACCOUNT_SID: 'AC_x',
-          TWILIO_AUTH_TOKEN: 't_x',
-          TWILIO_FROM_NUMBER: '+15551234567',
-          TWILIO_DEFAULT_TENANT_ID: 'tenant-1',
-          DEEPGRAM_COST_CENTS_PER_HOUR: '29',
-          ELEVENLABS_COST_CENTS_PER_1000_CHARS: '18',
-          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: '24',
-          SENDGRID_API_KEY: 'SG.x',
-          SENDGRID_FROM_EMAIL: 'noreply@example.com',
-          R2_ACCOUNT_ID: 'r2acct',
-          R2_ACCESS_KEY_ID: 'r2key',
-          R2_SECRET_ACCESS_KEY: 'r2secret',
-          R2_PUBLIC_URL: 'https://cdn.example.com',
-        })
+          TWILIO_ACCOUNT_SID: "AC_x",
+          TWILIO_AUTH_TOKEN: "t_x",
+          TWILIO_FROM_NUMBER: "+15551234567",
+          TWILIO_DEFAULT_TENANT_ID: "tenant-1",
+          DEEPGRAM_COST_CENTS_PER_HOUR: "29",
+          ELEVENLABS_COST_CENTS_PER_1000_CHARS: "18",
+          TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR: "24",
+          SENDGRID_API_KEY: "SG.x",
+          SENDGRID_FROM_EMAIL: "noreply@example.com",
+          R2_ACCOUNT_ID: "r2acct",
+          R2_ACCESS_KEY_ID: "r2key",
+          R2_SECRET_ACCESS_KEY: "r2secret",
+          R2_PUBLIC_URL: "https://cdn.example.com",
+        }),
       ).not.toThrow();
     });
 
-    it('dev environment skips the feature gate entirely', () => {
+    it("dev environment skips the feature gate entirely", () => {
       // Dev should never trip these — silent feature-off is the
       // intended local behavior.
-      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+      expect(() => loadConfig({ NODE_ENV: "dev" })).not.toThrow();
     });
   });
 
-  describe('SEC-01 — RLS_RUNTIME_ROLE required in prod/staging', () => {
+  describe("SEC-01 — RLS_RUNTIME_ROLE required in prod/staging", () => {
     // Base env that passes every OTHER prod gate, so these tests isolate the
     // RLS requirement (features opted out; RLS deliberately omitted).
     const baseNoRls = {
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     };
 
-    it('prod — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
-      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: 'prod' })).toThrow(
-        /RLS_RUNTIME_ROLE=true/
+    it("prod — fails fast naming RLS_RUNTIME_ROLE when unset", () => {
+      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: "prod" })).toThrow(
+        /RLS_RUNTIME_ROLE=true/,
       );
     });
 
-    it('staging — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
-      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: 'staging' })).toThrow(
-        /RLS_RUNTIME_ROLE=true/
+    it("staging — fails fast naming RLS_RUNTIME_ROLE when unset", () => {
+      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: "staging" })).toThrow(
+        /RLS_RUNTIME_ROLE=true/,
       );
     });
 
-    it('prod — fails when RLS_RUNTIME_ROLE is set to a non-true value', () => {
+    it("prod — fails when RLS_RUNTIME_ROLE is set to a non-true value", () => {
       expect(() =>
-        loadConfig({ ...baseNoRls, NODE_ENV: 'prod', RLS_RUNTIME_ROLE: 'false' })
+        loadConfig({
+          ...baseNoRls,
+          NODE_ENV: "prod",
+          RLS_RUNTIME_ROLE: "false",
+        }),
       ).toThrow(/RLS_RUNTIME_ROLE=true/);
     });
 
-    it('prod — passes when RLS_RUNTIME_ROLE=true', () => {
+    it("prod — passes when RLS_RUNTIME_ROLE=true", () => {
       expect(() =>
-        loadConfig({ ...baseNoRls, NODE_ENV: 'prod', RLS_RUNTIME_ROLE: 'true' })
+        loadConfig({
+          ...baseNoRls,
+          NODE_ENV: "prod",
+          RLS_RUNTIME_ROLE: "true",
+        }),
       ).not.toThrow();
     });
 
-    it('staging — passes when RLS_RUNTIME_ROLE=true', () => {
+    it("staging — passes when RLS_RUNTIME_ROLE=true", () => {
       expect(() =>
-        loadConfig({ ...baseNoRls, NODE_ENV: 'staging', RLS_RUNTIME_ROLE: 'true' })
+        loadConfig({
+          ...baseNoRls,
+          NODE_ENV: "staging",
+          RLS_RUNTIME_ROLE: "true",
+        }),
       ).not.toThrow();
     });
 
-    it('dev — no RLS requirement (RLS off locally is fine)', () => {
-      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+    it("dev — no RLS requirement (RLS off locally is fine)", () => {
+      expect(() => loadConfig({ NODE_ENV: "dev" })).not.toThrow();
       expect(() =>
-        loadConfig({ NODE_ENV: 'dev', RLS_RUNTIME_ROLE: 'false' })
+        loadConfig({ NODE_ENV: "dev", RLS_RUNTIME_ROLE: "false" }),
       ).not.toThrow();
     });
 
-    it('test — no RLS requirement (RLS off in test is fine)', () => {
-      expect(() => loadConfig({ NODE_ENV: 'test' })).not.toThrow();
+    it("test — no RLS requirement (RLS off in test is fine)", () => {
+      expect(() => loadConfig({ NODE_ENV: "test" })).not.toThrow();
     });
   });
 
-  describe('T4-F06 — TENANT_ENCRYPTION_KEY / TRANSCRIPT_ENCRYPTION_KEY required format in prod/staging', () => {
+  describe("T4-F06 — TENANT_ENCRYPTION_KEY / TRANSCRIPT_ENCRYPTION_KEY required format in prod/staging", () => {
     // Base env that passes every OTHER prod gate, so these tests isolate the
     // encryption-key requirement (features opted out; RLS on; encryption key
     // deliberately omitted here — set per-test).
     const baseNoEncKey = {
-      NODE_ENV: 'prod',
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
-      RLS_RUNTIME_ROLE: 'true',
+      NODE_ENV: "prod",
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
+      RLS_RUNTIME_ROLE: "true",
     };
 
-    it('prod — fails fast naming TENANT_ENCRYPTION_KEY when unset', () => {
-      expect(() => loadConfig({ ...baseNoEncKey })).toThrow(/TENANT_ENCRYPTION_KEY/);
+    it("prod — fails fast naming TENANT_ENCRYPTION_KEY when unset", () => {
+      expect(() => loadConfig({ ...baseNoEncKey })).toThrow(
+        /TENANT_ENCRYPTION_KEY/,
+      );
     });
 
-    it('prod — fails when TENANT_ENCRYPTION_KEY is the wrong length', () => {
+    it("prod — fails when TENANT_ENCRYPTION_KEY is the wrong length", () => {
       expect(() =>
-        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'x'.repeat(63) })
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: "x".repeat(63) }),
       ).toThrow(/TENANT_ENCRYPTION_KEY/);
     });
 
-    it('prod — fails when TENANT_ENCRYPTION_KEY is 64 chars but non-hex', () => {
+    it("prod — fails when TENANT_ENCRYPTION_KEY is 64 chars but non-hex", () => {
       expect(() =>
-        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'z'.repeat(64) })
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: "z".repeat(64) }),
       ).toThrow(/TENANT_ENCRYPTION_KEY/);
     });
 
-    it('prod — passes with a valid 64-char hex TENANT_ENCRYPTION_KEY', () => {
+    it("prod — passes with a valid 64-char hex TENANT_ENCRYPTION_KEY", () => {
       expect(() =>
-        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'a'.repeat(64) })
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: "a".repeat(64) }),
       ).not.toThrow();
     });
 
-    it('staging — fails fast naming TENANT_ENCRYPTION_KEY when unset', () => {
+    it("staging — fails fast naming TENANT_ENCRYPTION_KEY when unset", () => {
       expect(() =>
-        loadConfig({ ...baseNoEncKey, NODE_ENV: 'staging' })
+        loadConfig({ ...baseNoEncKey, NODE_ENV: "staging" }),
       ).toThrow(/TENANT_ENCRYPTION_KEY/);
     });
 
-    it('TRANSCRIPT_ENCRYPTION_KEY unset, TENANT_ENCRYPTION_KEY valid — does not throw (fallback preserved, transcript key stays optional)', () => {
+    it("TRANSCRIPT_ENCRYPTION_KEY unset, TENANT_ENCRYPTION_KEY valid — does not throw (fallback preserved, transcript key stays optional)", () => {
       expect(() =>
-        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'a'.repeat(64) })
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: "a".repeat(64) }),
       ).not.toThrow();
     });
 
-    it('TRANSCRIPT_ENCRYPTION_KEY set but malformed alongside a valid TENANT_ENCRYPTION_KEY — throws naming TRANSCRIPT_ENCRYPTION_KEY', () => {
+    it("TRANSCRIPT_ENCRYPTION_KEY set but malformed alongside a valid TENANT_ENCRYPTION_KEY — throws naming TRANSCRIPT_ENCRYPTION_KEY", () => {
       expect(() =>
         loadConfig({
           ...baseNoEncKey,
-          TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
-          TRANSCRIPT_ENCRYPTION_KEY: 'short',
-        })
+          TENANT_ENCRYPTION_KEY: "a".repeat(64),
+          TRANSCRIPT_ENCRYPTION_KEY: "short",
+        }),
       ).toThrow(/TRANSCRIPT_ENCRYPTION_KEY/);
     });
 
-    it('TRANSCRIPT_ENCRYPTION_KEY valid alongside a valid TENANT_ENCRYPTION_KEY — passes', () => {
+    it("TRANSCRIPT_ENCRYPTION_KEY valid alongside a valid TENANT_ENCRYPTION_KEY — passes", () => {
       expect(() =>
         loadConfig({
           ...baseNoEncKey,
-          TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
-          TRANSCRIPT_ENCRYPTION_KEY: 'b'.repeat(64),
-        })
+          TENANT_ENCRYPTION_KEY: "a".repeat(64),
+          TRANSCRIPT_ENCRYPTION_KEY: "b".repeat(64),
+        }),
       ).not.toThrow();
     });
 
-    it('dev — no encryption-key requirement (unset keys are fine locally)', () => {
-      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+    it("dev — no encryption-key requirement (unset keys are fine locally)", () => {
+      expect(() => loadConfig({ NODE_ENV: "dev" })).not.toThrow();
     });
   });
 
-  describe('WS1 — TCPA_CONSENT_ENFORCEMENT prod/staging coercion', () => {
+  describe("WS1 — TCPA_CONSENT_ENFORCEMENT prod/staging coercion", () => {
     // Full valid prod env (features opted out, RLS on) so loadConfig reaches the
     // end and we can inspect the resolved enforcement value.
     const baseProdValid = {
-      DATABASE_URL: 'postgres://u:p@h/d',
-      CLERK_SECRET_KEY: 'sk_x',
-      CLERK_PUBLISHABLE_KEY: 'pk_x',
-      CLERK_WEBHOOK_SECRET: 'whsec_x',
-      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
-      AI_PROVIDER_API_KEY: 'ak_x',
-      CORS_ORIGIN: 'https://app.example.com',
-      TELEPHONY_ENABLED: 'false',
-      EMAIL_ENABLED: 'false',
-      STORAGE_ENABLED: 'false',
-      RLS_RUNTIME_ROLE: 'true',
-      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      DATABASE_URL: "postgres://u:p@h/d",
+      CLERK_SECRET_KEY: "sk_x",
+      CLERK_PUBLISHABLE_KEY: "pk_x",
+      CLERK_WEBHOOK_SECRET: "whsec_x",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe_x",
+      AI_PROVIDER_API_KEY: "ak_x",
+      CORS_ORIGIN: "https://app.example.com",
+      TELEPHONY_ENABLED: "false",
+      EMAIL_ENABLED: "false",
+      STORAGE_ENABLED: "false",
+      RLS_RUNTIME_ROLE: "true",
+      TENANT_ENCRYPTION_KEY: "a".repeat(64),
     };
 
-    it('prod — unset resolves to block', () => {
-      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    it("prod — unset resolves to block", () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: "prod" });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("block");
     });
 
-    it('staging — unset resolves to block', () => {
-      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'staging' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    it("staging — unset resolves to block", () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: "staging" });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("block");
     });
 
-    it('prod — explicit off is honored (not overridden)', () => {
-      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod', TCPA_CONSENT_ENFORCEMENT: 'off' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    it("prod — explicit off is honored (not overridden)", () => {
+      const c = loadConfig({
+        ...baseProdValid,
+        NODE_ENV: "prod",
+        TCPA_CONSENT_ENFORCEMENT: "off",
+      });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("off");
     });
 
-    it('prod — explicit warn is honored', () => {
-      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod', TCPA_CONSENT_ENFORCEMENT: 'warn' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('warn');
+    it("prod — explicit warn is honored", () => {
+      const c = loadConfig({
+        ...baseProdValid,
+        NODE_ENV: "prod",
+        TCPA_CONSENT_ENFORCEMENT: "warn",
+      });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("warn");
     });
 
-    it('dev — unset stays off (zod default; no coercion)', () => {
-      const c = loadConfig({ NODE_ENV: 'dev' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    it("dev — unset stays off (zod default; no coercion)", () => {
+      const c = loadConfig({ NODE_ENV: "dev" });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("off");
     });
 
-    it('test — unset stays off', () => {
-      const c = loadConfig({ NODE_ENV: 'test' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    it("test — unset stays off", () => {
+      const c = loadConfig({ NODE_ENV: "test" });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("off");
     });
 
-    it('dev — explicit block is honored', () => {
-      const c = loadConfig({ NODE_ENV: 'dev', TCPA_CONSENT_ENFORCEMENT: 'block' });
-      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    it("dev — explicit block is honored", () => {
+      const c = loadConfig({
+        NODE_ENV: "dev",
+        TCPA_CONSENT_ENFORCEMENT: "block",
+      });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe("block");
     });
   });
 
-  describe('D-018 — AUTONOMOUS_CLOSE_DISABLED kill switch', () => {
-    it('defaults to undefined (per-tenant gating only)', () => {
-      expect(loadConfig({ NODE_ENV: 'dev' }).AUTONOMOUS_CLOSE_DISABLED).toBeUndefined();
+  describe("D-018 — AUTONOMOUS_CLOSE_DISABLED kill switch", () => {
+    it("defaults to undefined (per-tenant gating only)", () => {
+      expect(
+        loadConfig({ NODE_ENV: "dev" }).AUTONOMOUS_CLOSE_DISABLED,
+      ).toBeUndefined();
     });
 
     it("accepts 'true' / 'false' and is independent of AUTONOMOUS_BOOKING_DISABLED", () => {
       const c = loadConfig({
-        NODE_ENV: 'dev',
-        AUTONOMOUS_CLOSE_DISABLED: 'true',
-        AUTONOMOUS_BOOKING_DISABLED: 'false',
+        NODE_ENV: "dev",
+        AUTONOMOUS_CLOSE_DISABLED: "true",
+        AUTONOMOUS_BOOKING_DISABLED: "false",
       });
-      expect(c.AUTONOMOUS_CLOSE_DISABLED).toBe('true');
-      expect(c.AUTONOMOUS_BOOKING_DISABLED).toBe('false');
+      expect(c.AUTONOMOUS_CLOSE_DISABLED).toBe("true");
+      expect(c.AUTONOMOUS_BOOKING_DISABLED).toBe("false");
     });
 
-    it('rejects a non-boolean value', () => {
+    it("rejects a non-boolean value", () => {
       expect(() =>
-        loadConfig({ NODE_ENV: 'dev', AUTONOMOUS_CLOSE_DISABLED: 'maybe' }),
+        loadConfig({ NODE_ENV: "dev", AUTONOMOUS_CLOSE_DISABLED: "maybe" }),
       ).toThrow();
     });
   });
 
   describe('WS14 — PROCESS_ROLE widened to include "voice"', () => {
     it('accepts "voice" as a valid role', () => {
-      const c = loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'voice' });
-      expect(c.PROCESS_ROLE).toBe('voice');
+      const c = loadConfig({ NODE_ENV: "dev", PROCESS_ROLE: "voice" });
+      expect(c.PROCESS_ROLE).toBe("voice");
     });
 
-    it('still accepts the original three roles', () => {
-      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'web' }).PROCESS_ROLE).toBe('web');
+    it("still accepts the original three roles", () => {
+      expect(
+        loadConfig({ NODE_ENV: "dev", PROCESS_ROLE: "web" }).PROCESS_ROLE,
+      ).toBe("web");
       resetConfig();
-      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'worker' }).PROCESS_ROLE).toBe('worker');
+      expect(
+        loadConfig({ NODE_ENV: "dev", PROCESS_ROLE: "worker" }).PROCESS_ROLE,
+      ).toBe("worker");
       resetConfig();
-      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'all' }).PROCESS_ROLE).toBe('all');
+      expect(
+        loadConfig({ NODE_ENV: "dev", PROCESS_ROLE: "all" }).PROCESS_ROLE,
+      ).toBe("all");
     });
 
     it('unset still defaults to "all" (byte-for-byte back-compat)', () => {
-      const c = loadConfig({ NODE_ENV: 'dev' });
-      expect(c.PROCESS_ROLE).toBe('all');
+      const c = loadConfig({ NODE_ENV: "dev" });
+      expect(c.PROCESS_ROLE).toBe("all");
     });
 
-    it('rejects an invalid role', () => {
-      expect(() => loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'bogus' })).toThrow();
+    it("rejects an invalid role", () => {
+      expect(() =>
+        loadConfig({ NODE_ENV: "dev", PROCESS_ROLE: "bogus" }),
+      ).toThrow();
     });
   });
 
-  describe('WS26 — voice turn-latency SLO knobs', () => {
-    it('defaults: 3500ms P95 threshold, 30-turn sample floor', () => {
-      const c = loadConfig({ NODE_ENV: 'dev' });
+  describe("WS26 — voice turn-latency SLO knobs", () => {
+    it("defaults: 3500ms P95 threshold, 30-turn sample floor", () => {
+      const c = loadConfig({ NODE_ENV: "dev" });
       expect(c.SLO_TURN_LATENCY_P95_MS).toBe(3500);
       expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(30);
     });
 
-    it('coerces string overrides to numbers', () => {
+    it("coerces string overrides to numbers", () => {
       const c = loadConfig({
-        NODE_ENV: 'dev',
-        SLO_TURN_LATENCY_P95_MS: '2800',
-        SLO_TURN_LATENCY_MIN_SAMPLE: '50',
+        NODE_ENV: "dev",
+        SLO_TURN_LATENCY_P95_MS: "2800",
+        SLO_TURN_LATENCY_MIN_SAMPLE: "50",
       });
       expect(c.SLO_TURN_LATENCY_P95_MS).toBe(2800);
       expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(50);
     });
 
-    it('rejects a non-positive threshold and a non-integer sample floor', () => {
-      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_P95_MS: '0' })).toThrow();
+    it("rejects a non-positive threshold and a non-integer sample floor", () => {
+      expect(() =>
+        loadConfig({ NODE_ENV: "dev", SLO_TURN_LATENCY_P95_MS: "0" }),
+      ).toThrow();
       resetConfig();
       expect(() =>
-        loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_MIN_SAMPLE: '5.5' }),
+        loadConfig({ NODE_ENV: "dev", SLO_TURN_LATENCY_MIN_SAMPLE: "5.5" }),
       ).toThrow();
     });
   });
 
-  describe('U5 — VOICE_MAX_CALL_DURATION_MS', () => {
-    it('defaults to 15 minutes when unset', () => {
-      const c = loadConfig({ NODE_ENV: 'dev' });
+  describe("U5 — VOICE_MAX_CALL_DURATION_MS", () => {
+    it("defaults to 15 minutes when unset", () => {
+      const c = loadConfig({ NODE_ENV: "dev" });
       expect(c.VOICE_MAX_CALL_DURATION_MS).toBe(15 * 60 * 1000);
     });
 
-    it('coerces a string override to a number', () => {
-      const c = loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '600000' });
+    it("coerces a string override to a number", () => {
+      const c = loadConfig({
+        NODE_ENV: "dev",
+        VOICE_MAX_CALL_DURATION_MS: "600000",
+      });
       expect(c.VOICE_MAX_CALL_DURATION_MS).toBe(600000);
     });
 
-    it('rejects 0, negative and non-integer values at boot', () => {
-      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '0' })).toThrow();
+    it("rejects 0, negative and non-integer values at boot", () => {
+      expect(() =>
+        loadConfig({ NODE_ENV: "dev", VOICE_MAX_CALL_DURATION_MS: "0" }),
+      ).toThrow();
       resetConfig();
-      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '-1' })).toThrow();
+      expect(() =>
+        loadConfig({ NODE_ENV: "dev", VOICE_MAX_CALL_DURATION_MS: "-1" }),
+      ).toThrow();
       resetConfig();
-      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '1.5' })).toThrow();
+      expect(() =>
+        loadConfig({ NODE_ENV: "dev", VOICE_MAX_CALL_DURATION_MS: "1.5" }),
+      ).toThrow();
     });
   });
 });
 
-describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
+describe("P0-026 — validateEnvSchema (Zod startup validation)", () => {
   const fullProdEnv = {
-    NODE_ENV: 'production',
-    DATABASE_URL: 'postgres://u:p@h:5432/d',
-    CLERK_SECRET_KEY: 'sk_live_abc',
-    CLERK_PUBLISHABLE_KEY: 'pk_live_abc',
-    CORS_ORIGIN: 'https://app.example.com',
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://u:p@h:5432/d",
+    CLERK_SECRET_KEY: "sk_live_abc",
+    CLERK_PUBLISHABLE_KEY: "pk_live_abc",
+    CORS_ORIGIN: "https://app.example.com",
   };
 
-  it('happy path — all vars present, returns typed Env object', () => {
+  it("happy path — all vars present, returns typed Env object", () => {
     const env = validateEnvSchema(fullProdEnv);
-    expect(env.NODE_ENV).toBe('production');
-    expect(env.DATABASE_URL).toBe('postgres://u:p@h:5432/d');
-    expect(env.CLERK_SECRET_KEY).toBe('sk_live_abc');
-    expect(env.CLERK_PUBLISHABLE_KEY).toBe('pk_live_abc');
-    expect(env.CORS_ORIGIN).toBe('https://app.example.com');
+    expect(env.NODE_ENV).toBe("production");
+    expect(env.DATABASE_URL).toBe("postgres://u:p@h:5432/d");
+    expect(env.CLERK_SECRET_KEY).toBe("sk_live_abc");
+    expect(env.CLERK_PUBLISHABLE_KEY).toBe("pk_live_abc");
+    expect(env.CORS_ORIGIN).toBe("https://app.example.com");
     // Defaults applied:
     expect(env.PORT).toBe(8080);
-    expect(env.LOG_LEVEL).toBe('info');
+    expect(env.LOG_LEVEL).toBe("info");
   });
 
-  it('happy path — applies PORT and LOG_LEVEL defaults when omitted', () => {
-    const env = validateEnvSchema({ NODE_ENV: 'development' });
+  it("happy path — applies PORT and LOG_LEVEL defaults when omitted", () => {
+    const env = validateEnvSchema({ NODE_ENV: "development" });
     expect(env.PORT).toBe(8080);
-    expect(env.LOG_LEVEL).toBe('info');
+    expect(env.LOG_LEVEL).toBe("info");
   });
 
-  it('validateEnvSchema — missing CLERK_SECRET_KEY in production throws naming the var', () => {
+  it("validateEnvSchema — missing CLERK_SECRET_KEY in production throws naming the var", () => {
     const env = { ...fullProdEnv } as Record<string, string | undefined>;
     delete env.CLERK_SECRET_KEY;
     expect(() => validateEnvSchema(env)).toThrow(/CLERK_SECRET_KEY/);
   });
 
-  it('validateEnvSchema — missing DATABASE_URL in production throws naming the var', () => {
+  it("validateEnvSchema — missing DATABASE_URL in production throws naming the var", () => {
     const env = { ...fullProdEnv } as Record<string, string | undefined>;
     delete env.DATABASE_URL;
     expect(() => validateEnvSchema(env)).toThrow(/DATABASE_URL/);
   });
 
-  it('validateEnvSchema — missing CLERK_PUBLISHABLE_KEY in production throws naming the var', () => {
+  it("validateEnvSchema — missing CLERK_PUBLISHABLE_KEY in production throws naming the var", () => {
     const env = { ...fullProdEnv } as Record<string, string | undefined>;
     delete env.CLERK_PUBLISHABLE_KEY;
     expect(() => validateEnvSchema(env)).toThrow(/CLERK_PUBLISHABLE_KEY/);
   });
 
   it("validateEnvSchema — CORS_ORIGIN='true' in production throws with clear error", () => {
-    const env = { ...fullProdEnv, CORS_ORIGIN: 'true' };
+    const env = { ...fullProdEnv, CORS_ORIGIN: "true" };
     expect(() => validateEnvSchema(env)).toThrow(
-      /CORS_ORIGIN.*Cannot be 'true' in production/
+      /CORS_ORIGIN.*Cannot be 'true' in production/,
     );
   });
 
-  it('validateEnvSchema — development mode allows missing Clerk and DATABASE_URL', () => {
-    expect(() => validateEnvSchema({ NODE_ENV: 'development' })).not.toThrow();
-    const env = validateEnvSchema({ NODE_ENV: 'development' });
-    expect(env.NODE_ENV).toBe('development');
+  it("validateEnvSchema — development mode allows missing Clerk and DATABASE_URL", () => {
+    expect(() => validateEnvSchema({ NODE_ENV: "development" })).not.toThrow();
+    const env = validateEnvSchema({ NODE_ENV: "development" });
+    expect(env.NODE_ENV).toBe("development");
     expect(env.CLERK_SECRET_KEY).toBeUndefined();
     expect(env.DATABASE_URL).toBeUndefined();
   });
 
-  it('validateEnvSchema — invalid DATABASE_URL format throws clear error', () => {
-    const env = { ...fullProdEnv, DATABASE_URL: 'not-a-url' };
+  it("validateEnvSchema — invalid DATABASE_URL format throws clear error", () => {
+    const env = { ...fullProdEnv, DATABASE_URL: "not-a-url" };
     expect(() => validateEnvSchema(env)).toThrow(/DATABASE_URL/);
   });
 
-  it('validateEnvSchema — error message lists every missing var on its own line', () => {
+  it("validateEnvSchema — error message lists every missing var on its own line", () => {
     let thrown: Error | undefined;
     try {
-      validateEnvSchema({ NODE_ENV: 'production' });
+      validateEnvSchema({ NODE_ENV: "production" });
     } catch (err) {
       thrown = err as Error;
     }
@@ -914,10 +1009,12 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(msg).toMatch(/CLERK_PUBLISHABLE_KEY/);
     expect(msg).toMatch(/CORS_ORIGIN/);
     // Each missing var on its own line, prefixed with the var name.
-    expect(msg.split('\n').filter((l) => l.startsWith('  - ')).length).toBeGreaterThanOrEqual(4);
+    expect(
+      msg.split("\n").filter((l) => l.startsWith("  - ")).length,
+    ).toBeGreaterThanOrEqual(4);
   });
 
-  it('validateEnvSchema — returns equivalent typed object on a 2nd call (idempotent)', () => {
+  it("validateEnvSchema — returns equivalent typed object on a 2nd call (idempotent)", () => {
     const a = validateEnvSchema(fullProdEnv);
     const b = validateEnvSchema(fullProdEnv);
     expect(a).toEqual(b);
@@ -925,150 +1022,168 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(a).not.toBe(b);
   });
 
-  it('validateEnvSchema — coerces PORT from string', () => {
-    const env = validateEnvSchema({ ...fullProdEnv, PORT: '9090' });
+  it("validateEnvSchema — coerces PORT from string", () => {
+    const env = validateEnvSchema({ ...fullProdEnv, PORT: "9090" });
     expect(env.PORT).toBe(9090);
   });
 
-  it('validateEnvSchema — rejects invalid LOG_LEVEL', () => {
+  it("validateEnvSchema — rejects invalid LOG_LEVEL", () => {
     expect(() =>
-      validateEnvSchema({ ...fullProdEnv, LOG_LEVEL: 'trace' })
+      validateEnvSchema({ ...fullProdEnv, LOG_LEVEL: "trace" }),
     ).toThrow(/LOG_LEVEL/);
   });
 
   it("validateEnvSchema — CORS_ORIGIN='true' is allowed in development (relaxed)", () => {
     expect(() =>
-      validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
+      validateEnvSchema({ NODE_ENV: "development", CORS_ORIGIN: "true" }),
     ).not.toThrow();
   });
 
-  it('validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production', () => {
+  it("validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production", () => {
     expect(() =>
-      validateEnvSchema({ ...fullProdEnv, DEV_AUTH_BYPASS: 'true' }),
+      validateEnvSchema({ ...fullProdEnv, DEV_AUTH_BYPASS: "true" }),
     ).toThrow(/DEV_AUTH_BYPASS/);
   });
 
-  it('validateEnvSchema — CLERK_DEV_HMAC_TOKENS=true is forbidden in production', () => {
+  it("validateEnvSchema — CLERK_DEV_HMAC_TOKENS=true is forbidden in production", () => {
     expect(() =>
-      validateEnvSchema({ ...fullProdEnv, CLERK_DEV_HMAC_TOKENS: 'true' }),
+      validateEnvSchema({ ...fullProdEnv, CLERK_DEV_HMAC_TOKENS: "true" }),
     ).toThrow(/CLERK_DEV_HMAC_TOKENS/);
   });
 
-  it('validateEnvSchema — pk_test_ / sk_test_ refused in production by default', () => {
+  it("validateEnvSchema — pk_test_ / sk_test_ refused in production by default", () => {
     expect(() =>
       validateEnvSchema({
         ...fullProdEnv,
-        CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
-        CLERK_SECRET_KEY: 'sk_test_abc',
+        CLERK_PUBLISHABLE_KEY: "pk_test_abc",
+        CLERK_SECRET_KEY: "sk_test_abc",
       }),
     ).toThrow(/pk_live_/);
   });
 
-  it('validateEnvSchema — ALLOW_CLERK_TEST_KEYS=true permits test keys in production', () => {
+  it("validateEnvSchema — ALLOW_CLERK_TEST_KEYS=true permits test keys in production", () => {
     expect(() =>
       validateEnvSchema({
         ...fullProdEnv,
-        CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
-        CLERK_SECRET_KEY: 'sk_test_abc',
-        ALLOW_CLERK_TEST_KEYS: 'true',
+        CLERK_PUBLISHABLE_KEY: "pk_test_abc",
+        CLERK_SECRET_KEY: "sk_test_abc",
+        ALLOW_CLERK_TEST_KEYS: "true",
       }),
     ).not.toThrow();
   });
 });
 
-describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {
+describe("WS7 — resolveMediaStreamsEnabled (auto mode)", () => {
   const fullStack = {
-    TTS_PROVIDER: 'elevenlabs',
-    ELEVENLABS_API_KEY: 'el_x',
-    DEEPGRAM_API_KEY: 'dg_x',
+    TTS_PROVIDER: "elevenlabs",
+    ELEVENLABS_API_KEY: "el_x",
+    DEEPGRAM_API_KEY: "dg_x",
   };
 
   it("explicit 'true' → on", () => {
-    expect(resolveMediaStreamsEnabled({ TWILIO_MEDIA_STREAMS_ENABLED: 'true' })).toBe(true);
+    expect(
+      resolveMediaStreamsEnabled({ TWILIO_MEDIA_STREAMS_ENABLED: "true" }),
+    ).toBe(true);
   });
 
   it("explicit 'false' → off even with the full stack (kill switch)", () => {
     expect(
-      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'false' }),
+      resolveMediaStreamsEnabled({
+        ...fullStack,
+        TWILIO_MEDIA_STREAMS_ENABLED: "false",
+      }),
     ).toBe(false);
   });
 
-  it('unset + full stack → auto-on', () => {
+  it("unset + full stack → auto-on", () => {
     expect(resolveMediaStreamsEnabled({ ...fullStack })).toBe(true);
   });
 
   it("'auto' + full stack → on", () => {
     expect(
-      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'auto' }),
+      resolveMediaStreamsEnabled({
+        ...fullStack,
+        TWILIO_MEDIA_STREAMS_ENABLED: "auto",
+      }),
     ).toBe(true);
   });
 
-  it('unset + no keys → off', () => {
+  it("unset + no keys → off", () => {
     expect(resolveMediaStreamsEnabled({})).toBe(false);
   });
 
-  it('unset + missing DEEPGRAM_API_KEY → off (auto requires all three)', () => {
-    expect(
-      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'el_x' }),
-    ).toBe(false);
-  });
-
-  it('unset + missing ELEVENLABS_API_KEY → off', () => {
-    expect(
-      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', DEEPGRAM_API_KEY: 'dg_x' }),
-    ).toBe(false);
-  });
-
-  it('unset + TTS_PROVIDER not elevenlabs → off (never auto-enables a half-capable stack)', () => {
+  it("unset + missing DEEPGRAM_API_KEY → off (auto requires all three)", () => {
     expect(
       resolveMediaStreamsEnabled({
-        TTS_PROVIDER: 'openai',
-        ELEVENLABS_API_KEY: 'el_x',
-        DEEPGRAM_API_KEY: 'dg_x',
+        TTS_PROVIDER: "elevenlabs",
+        ELEVENLABS_API_KEY: "el_x",
+      }),
+    ).toBe(false);
+  });
+
+  it("unset + missing ELEVENLABS_API_KEY → off", () => {
+    expect(
+      resolveMediaStreamsEnabled({
+        TTS_PROVIDER: "elevenlabs",
+        DEEPGRAM_API_KEY: "dg_x",
+      }),
+    ).toBe(false);
+  });
+
+  it("unset + TTS_PROVIDER not elevenlabs → off (never auto-enables a half-capable stack)", () => {
+    expect(
+      resolveMediaStreamsEnabled({
+        TTS_PROVIDER: "openai",
+        ELEVENLABS_API_KEY: "el_x",
+        DEEPGRAM_API_KEY: "dg_x",
       }),
     ).toBe(false);
   });
 });
 
-describe('U10 — LANGFUSE_* trace export config', () => {
+describe("U10 — LANGFUSE_* trace export config", () => {
   beforeEach(() => {
     resetConfig();
   });
 
-  it('defaults: no keys, the Langfuse cloud base URL, content capture OFF', () => {
-    const config = loadConfig({ NODE_ENV: 'dev' });
+  it("defaults: no keys, the Langfuse cloud base URL, content capture OFF", () => {
+    const config = loadConfig({ NODE_ENV: "dev" });
     expect(config.LANGFUSE_PUBLIC_KEY).toBeUndefined();
     expect(config.LANGFUSE_SECRET_KEY).toBeUndefined();
-    expect(config.LANGFUSE_BASE_URL).toBe('https://cloud.langfuse.com');
+    expect(config.LANGFUSE_BASE_URL).toBe("https://cloud.langfuse.com");
     expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(false);
   });
 
-  it('reads both keys, a self-hosted base URL and the capture flag as a real boolean', () => {
+  it("reads both keys, a self-hosted base URL and the capture flag as a real boolean", () => {
     const config = loadConfig({
-      NODE_ENV: 'dev',
-      LANGFUSE_PUBLIC_KEY: 'pk-lf-live',
-      LANGFUSE_SECRET_KEY: 'sk-lf-live',
-      LANGFUSE_BASE_URL: 'https://langfuse.internal.example',
-      LANGFUSE_CAPTURE_CONTENT: 'true',
+      NODE_ENV: "dev",
+      LANGFUSE_PUBLIC_KEY: "pk-lf-live",
+      LANGFUSE_SECRET_KEY: "sk-lf-live",
+      LANGFUSE_BASE_URL: "https://langfuse.internal.example",
+      LANGFUSE_CAPTURE_CONTENT: "true",
     });
-    expect(config.LANGFUSE_PUBLIC_KEY).toBe('pk-lf-live');
-    expect(config.LANGFUSE_SECRET_KEY).toBe('sk-lf-live');
-    expect(config.LANGFUSE_BASE_URL).toBe('https://langfuse.internal.example');
+    expect(config.LANGFUSE_PUBLIC_KEY).toBe("pk-lf-live");
+    expect(config.LANGFUSE_SECRET_KEY).toBe("sk-lf-live");
+    expect(config.LANGFUSE_BASE_URL).toBe("https://langfuse.internal.example");
     expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
   });
 
-  it('empty-string keys are unset (an unset Railway secret never half-configures the exporter)', () => {
-    const config = loadConfig({ NODE_ENV: 'dev', LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' });
+  it("empty-string keys are unset (an unset Railway secret never half-configures the exporter)", () => {
+    const config = loadConfig({
+      NODE_ENV: "dev",
+      LANGFUSE_PUBLIC_KEY: "",
+      LANGFUSE_SECRET_KEY: "",
+    });
     expect(config.LANGFUSE_PUBLIC_KEY).toBeUndefined();
     expect(config.LANGFUSE_SECRET_KEY).toBeUndefined();
   });
 
-  it('rejects a non-URL base URL and a non-boolean capture flag', () => {
-    expect(() => loadConfig({ NODE_ENV: 'dev', LANGFUSE_BASE_URL: 'not a url' })).toThrow(
-      'Configuration validation failed',
-    );
-    expect(() => loadConfig({ NODE_ENV: 'dev', LANGFUSE_CAPTURE_CONTENT: 'yes' })).toThrow(
-      'Configuration validation failed',
-    );
+  it("rejects a non-URL base URL and a non-boolean capture flag", () => {
+    expect(() =>
+      loadConfig({ NODE_ENV: "dev", LANGFUSE_BASE_URL: "not a url" }),
+    ).toThrow("Configuration validation failed");
+    expect(() =>
+      loadConfig({ NODE_ENV: "dev", LANGFUSE_CAPTURE_CONTENT: "yes" }),
+    ).toThrow("Configuration validation failed");
   });
 });
