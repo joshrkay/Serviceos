@@ -130,6 +130,7 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
+import { invoiceReferenceCheck } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -980,6 +981,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     onboardingSessionRepo,
     voiceApprovalPinLockAlertRepo,
   } = { ...buildRepositories(pool, directPool, overrides), ...overrides };
+  // QA 2026-09-16 (AST-04) — approval-time reference checks, applied on every
+  // approval channel (dashboard single + batch, voice): an id in a payload must
+  // name a record this tenant owns (proposals/approval-reference-checks.ts).
+  const approvalReferenceChecks = [invoiceReferenceCheck(invoiceRepo)];
+
   const webhookSettingsRepo = settingsRepo;
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
@@ -3534,6 +3540,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // one-tap SMS fallback for refused money/irreversible approvals
     // (same secret/sender/URL/owner-phone wiring as P12-004).
     smsEventRepo: proposalSmsEventRepo,
+    approvalReferenceChecks,
     voiceApprovalOneTap: {
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
@@ -5757,6 +5764,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // router uses, so grounding/summary/confidence stay identical.
       createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
       entityAliasCandidateCapture,
+      // QA 2026-09-16 (AST-04) — an approvable proposal must be an executable
+      // one: a payload invoiceId must name an invoice this tenant owns.
+      approvalReferenceChecks,
     ),
   );
   if (entityAliasRepo) {

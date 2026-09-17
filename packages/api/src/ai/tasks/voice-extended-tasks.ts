@@ -24,7 +24,7 @@ import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import { MAX_UNIT_PRICE_CENTS } from '../../proposals/contracts/add-catalog-item';
-import type { InvoiceRepository } from '../../invoices/invoice';
+import type { Invoice, InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime } from '../scheduling/resolve-datetime';
@@ -36,7 +36,7 @@ import {
   DUNNING_MARKER_WINDOW_MS,
 } from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
-import { candidatesForReference } from '../resolution/reference-candidates';
+import { candidatesForReference, mapInvoicesToCandidates } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
@@ -664,6 +664,9 @@ export class AddNoteTaskHandler implements TaskHandler {
 // → payload, gate lifts; free-text reference that never resolved → gate +
 // B2 candidates (unchanged); nothing → gate. Comms class is untouched — a
 // fully-resolved draft still lands in 'draft' and waits for a human tap.
+/** Invoice statuses `send_invoice` can act on: issued and not settled. */
+const SENDABLE_INVOICE_STATUSES: ReadonlySet<Invoice['status']> = new Set(['open', 'partially_paid']);
+
 export interface SendInvoiceTaskDeps {
   /**
    * B2 — optional. When present, a gated free-text invoiceReference is
@@ -675,7 +678,8 @@ export interface SendInvoiceTaskDeps {
    * display-text match is not the entity resolver; only the resolver seam
    * or a literal UUID reference lifts it); see the class doc comment.
    */
-  invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'>;
+  invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'> &
+    Partial<Pick<InvoiceRepository, 'findById' | 'findByJob'>>;
 }
 
 export class SendInvoiceTaskHandler implements TaskHandler {
@@ -700,16 +704,45 @@ export class SendInvoiceTaskHandler implements TaskHandler {
     // existingEntities.invoiceId. That seam wins; a literal UUID reference
     // is next; only a reference that never resolved falls to the gate.
     const resolvedInvoiceId = resolvedInvoiceIdFrom(context);
+    // QA 2026-09-16 (AST-04) — a literal UUID reference lifts the gate only
+    // when it names an invoice THIS tenant owns. `jobReference` is the
+    // classifier's slot for "the document the operator pointed at", and on
+    // chat that can be a JOB id pasted verbatim ("send an invoice for job
+    // <uuid>"); promoting it unchecked produced an approvable proposal that
+    // died at execution with "Invoice not found". When the repo can check,
+    // check; a repo without findById keeps the literal-UUID trust.
+    const literal =
+      !resolvedInvoiceId && isUuid(reference)
+        ? await this.literalInvoiceLookup(context.tenantId, reference)
+        : undefined;
     if (resolvedInvoiceId) {
       payload.invoiceId = resolvedInvoiceId;
       // Keep the spoken reference for the review card's display.
       if (typeof reference === 'string' && !isUuid(reference)) {
         payload.invoiceReference = reference;
       }
-    } else if (isUuid(reference)) {
-      // Already a resolved id — the execution handler can use it directly,
-      // no review-time resolution needed.
-      payload.invoiceId = reference;
+    } else if (literal?.invoiceId) {
+      // A verified (or unverifiable) literal id — the execution handler can
+      // use it directly, no review-time resolution needed. An id THIS handler
+      // looked up in the repo is marked verified so routes/assistant.ts's
+      // `dropUnverifiedIds` keeps it (a job-resolved invoice id never appears
+      // in the operator's text); the unverifiable fallback is not marked.
+      payload.invoiceId = literal.invoiceId;
+      if (literal.verified) {
+        extraSourceContext = { verifiedIds: { invoiceId: literal.invoiceId } };
+      }
+    } else if (literal && literal.jobInvoices.length > 0) {
+      // A JOB id whose invoices cannot be resolved to one sendable invoice
+      // (several, or only drafts / void / canceled): gate, and offer exactly
+      // those invoices to the review card's picker — a foreign-key fact, not
+      // an ILIKE guess.
+      payload.invoiceReference = reference;
+      missing.push('invoiceId');
+      extraSourceContext = {
+        entityCandidates: mapInvoicesToCandidates(literal.jobInvoices),
+        entityKind: 'invoice',
+        entityReference: reference,
+      };
     } else {
       if (reference) payload.invoiceReference = reference;
       missing.push('invoiceId');
@@ -738,18 +771,51 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       }
     }
 
-    // NOTE deliberately NO verifiedIds stamping here: `existingEntities` can
-    // carry classifier output, and dropUnverifiedIds' allowlist must only
-    // ever be fed by code that itself performed the DB lookup (see the
-    // CRITICAL SECURITY note on IssueInvoiceTaskHandler). The chat surface
-    // (routes/assistant.ts) runs the entity resolver pre-draft and stamps
-    // `sourceContext.verifiedIds` from that resolver call directly.
+    // NOTE no verifiedIds stamping from `existingEntities`: it can carry
+    // classifier output, and dropUnverifiedIds' allowlist must only ever be
+    // fed by code that itself performed the DB lookup (see the CRITICAL
+    // SECURITY note on IssueInvoiceTaskHandler). The only stamp this handler
+    // writes is for an id `literalInvoiceLookup` fetched from the repo
+    // itself. The chat surface (routes/assistant.ts) runs the entity resolver
+    // pre-draft and stamps `sourceContext.verifiedIds` from that call.
     return {
       proposal: createProposal(
         inputFor(context, this.taskType, payload, missing, { sourceContext: extraSourceContext }),
       ),
       taskType: this.taskType,
     };
+  }
+
+  /**
+   * A literal UUID reference is only an invoiceId if the tenant owns an
+   * invoice with that id — or if it is a JOB id with exactly one invoice,
+   * which is a foreign-key fact rather than a fuzzy match and so, like the
+   * resolver seam, may lift the gate. When the repo cannot verify (no
+   * findById) the literal-UUID trust is kept. Nothing matching, several
+   * invoices under the job (returned as `jobInvoices` for the picker), or a
+   * failed lookup all leave `invoiceId` unset — i.e. fall to the gate
+   * (failure-soft, same as B2).
+   */
+  private async literalInvoiceLookup(
+    tenantId: string,
+    id: string,
+  ): Promise<{ invoiceId?: string; verified: boolean; jobInvoices: Invoice[] }> {
+    const repo = this.deps.invoiceRepo;
+    if (!repo?.findById) return { invoiceId: id, verified: false, jobInvoices: [] };
+    try {
+      const invoice = await repo.findById(tenantId, id);
+      if (invoice) return { invoiceId: invoice.id, verified: true, jobInvoices: [] };
+      const jobInvoices = repo.findByJob ? await repo.findByJob(tenantId, id) : [];
+      // Only an issued invoice can be sent: a draft is not customer-visible
+      // until its own issue_invoice tap (D-023), and void / canceled / paid
+      // have nothing to send. Exactly one sendable invoice lifts the gate.
+      const sendable = jobInvoices.filter((inv) => SENDABLE_INVOICE_STATUSES.has(inv.status));
+      return sendable.length === 1
+        ? { invoiceId: sendable[0].id, verified: true, jobInvoices }
+        : { verified: false, jobInvoices };
+    } catch {
+      return { verified: false, jobInvoices: [] };
+    }
   }
 }
 

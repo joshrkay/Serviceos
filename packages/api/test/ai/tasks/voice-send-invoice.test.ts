@@ -218,3 +218,104 @@ describe('SendInvoiceTaskHandler — U1 resolver-verified invoiceId', () => {
     expect(res.proposal.payload.invoiceReference).toBe('Henderson');
   });
 });
+
+// ── QA 2026-09-16 (matrix row AST-04) — a UUID reference must name an INVOICE ─
+//
+// Live dev: chat "Create and send an invoice for job c73844bd-… totaling $250"
+// classified as send_invoice with jobReference = the JOB's UUID. The handler's
+// "already a resolved id" branch promoted that UUID straight into
+// payload.invoiceId, the gate lifted, approval succeeded, and execution failed
+// with "Invoice not found" — an approvable proposal that can never execute,
+// the exact class the file header describes. A UUID says nothing about WHICH
+// entity it names; when a repo can check, the handler must check.
+describe('SendInvoiceTaskHandler — a UUID reference is only an invoiceId if it names an invoice', () => {
+  const JOB_ID = 'c73844bd-4928-4d1f-b8c5-f669ceb10018';
+  const MESSAGE = `Create and send an invoice for job ${JOB_ID} totaling $250.`;
+
+  it('a job UUID that is not an invoice id keeps the gate: no invoiceId, reference kept for review', async () => {
+    const invoiceRepo = {
+      findByTenant: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockResolvedValue(null),
+      findByJob: vi.fn().mockResolvedValue([]),
+    };
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
+      ctx({ message: MESSAGE, existingEntities: { jobReference: JOB_ID } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    expect(res.proposal.payload.invoiceReference).toBe(JOB_ID);
+    expect(res.proposal.status).toBe('draft');
+  });
+
+  it('a job UUID with exactly ONE invoice resolves to that invoice: gate lifted, and the drafted payload executes', async () => {
+    const INV = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const invoiceRepo = {
+      findByTenant: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockResolvedValue(null),
+      findByJob: vi.fn().mockResolvedValue([{ id: INV, invoiceNumber: 'INV-0101', status: 'open' }]),
+    };
+    // 'open' = issued and unpaid: the one status family send_invoice may act on.
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
+      ctx({ message: MESSAGE, existingEntities: { jobReference: JOB_ID, sendChannel: 'sms' } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBe(INV);
+    // A UUID is not display text — nothing is kept as invoiceReference.
+    expect(res.proposal.payload.invoiceReference).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    expect(res.proposal.status).toBe('draft'); // comms class still never auto-approves
+    expect(sendInvoicePayloadSchema.safeParse(res.proposal.payload).success).toBe(true);
+
+    const provider = new NoopInvoiceDeliveryProvider();
+    const exec = await new SendInvoiceExecutionHandler(provider).execute(res.proposal, {
+      tenantId: 't-1',
+      executedBy: 'u-1',
+    });
+    expect(exec.success).toBe(true);
+    expect(provider.lastDispatch).toMatchObject({ tenantId: 't-1', invoiceId: INV, channel: 'sms' });
+  });
+
+  it('a job UUID with TWO sendable invoices keeps the gate and offers exactly those invoices as candidates', async () => {
+    const INV_A = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const INV_B = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const invoiceRepo = {
+      findByTenant: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockResolvedValue(null),
+      findByJob: vi.fn().mockResolvedValue([
+        { id: INV_A, invoiceNumber: 'INV-0201', status: 'open' },
+        { id: INV_B, invoiceNumber: 'INV-0202', status: 'partially_paid' },
+      ]),
+    };
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
+      ctx({ message: MESSAGE, existingEntities: { jobReference: JOB_ID } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    const sc = res.proposal.sourceContext as Record<string, unknown>;
+    expect(sc.entityKind).toBe('invoice');
+    expect(sc.entityReference).toBe(JOB_ID);
+    expect(sc.entityCandidates).toEqual([
+      { id: INV_A, kind: 'invoice', label: 'INV-0201', hint: 'open', score: 1 },
+      { id: INV_B, kind: 'invoice', label: 'INV-0202', hint: 'partially_paid', score: 1 },
+    ]);
+  });
+
+  // Codex review on PR #1311 — a job whose only invoice is still a draft (or
+  // void / canceled) must not lift the gate: send_invoice makes the invoice
+  // customer-visible, and D-023 keeps issuance a separate human tap. The
+  // draft is still offered as a candidate so the card is not a dead end.
+  it('a job UUID whose only invoice is a DRAFT keeps the gate and offers it as a candidate', async () => {
+    const INV = 'abababab-abab-4bab-8bab-abababababab';
+    const invoiceRepo = {
+      findByTenant: vi.fn().mockResolvedValue([]),
+      findById: vi.fn().mockResolvedValue(null),
+      findByJob: vi.fn().mockResolvedValue([{ id: INV, invoiceNumber: 'INV-0301', status: 'draft' }]),
+    };
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: invoiceRepo as never }).handle(
+      ctx({ message: MESSAGE, existingEntities: { jobReference: JOB_ID } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    const sc = res.proposal.sourceContext as Record<string, unknown>;
+    expect(sc.entityCandidates).toEqual([{ id: INV, kind: 'invoice', label: 'INV-0301', hint: 'draft', score: 1 }]);
+  });
+});

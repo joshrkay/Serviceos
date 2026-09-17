@@ -53,6 +53,7 @@
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
+import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { actionClassForProposalType } from '../../proposals/proposal';
 import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import {
@@ -265,6 +266,12 @@ export interface OneTapFallbackDeps {
 export interface VoiceApprovalDeps {
   proposalRepo: ProposalRepository;
   auditRepo?: AuditRepository;
+  /**
+   * Approval-time reference checks (proposals/approval-reference-checks.ts):
+   * an id in the payload must name a record this tenant owns. The same
+   * checks the dashboard route applies — voice approval is not a side door.
+   */
+  approvalReferenceChecks?: ApprovalReferenceCheck[];
   settingsRepo?: SettingsRepository;
   /**
    * Pending-edit parity guard — same repo method SMS reply and one-tap use.
@@ -1190,6 +1197,7 @@ async function executeApprove(
       deps.smsEventRepo
         ? (tenantId, id) => deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, id)
         : undefined,
+      { referenceChecks: deps.approvalReferenceChecks },
     );
     const summary = summarizeChainSetResult(result);
     approved = result.approved[0];
