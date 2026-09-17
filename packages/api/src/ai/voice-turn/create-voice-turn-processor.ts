@@ -221,6 +221,7 @@ import {
 import { getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { buildVoiceProposalPayload } from '../../proposals/voice-payload';
+import { extractBrandVoiceProposalFields } from '../tasks/brand-voice-task';
 import {
   intentToProposalType,
   voiceProposalSummary,
@@ -1986,106 +1987,122 @@ export function createVoiceTurnProcessor(
       let degradedFromContract = false;
       let payloadConfidence: number | undefined;
       let contractMissingFields: string[] = [];
+      let brandVoiceSummary: string | undefined;
 
       if (surfaceAllowed) {
-        const built = await buildVoiceProposalPayload(
-          {
-            intent,
-            proposalType: effectiveProposalType,
-            // POST-resolution: `entities` already carries whatever
-            // `resolveTurnEntityEvent` folded onto the FSM context this turn.
-            entities,
-            envelope: {
-              sessionId: session.id,
-              ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
-              ...(typeof fx.payload.conversationId === 'string'
-                ? { conversationId: fx.payload.conversationId }
+        if (intent === 'update_brand_voice') {
+          const spoken = [entities.brandVoiceInstruction, fx.payload.utterance]
+            .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            ?.trim() ?? '';
+          const brandVoiceFields = await extractBrandVoiceProposalFields(
+            deps.gateway,
+            tenantId,
+            spoken,
+          );
+          payload = brandVoiceFields.payload;
+          payloadConfidence = brandVoiceFields.confidenceScore;
+          contractMissingFields = brandVoiceFields.missingFields;
+          brandVoiceSummary = brandVoiceFields.summary;
+        } else {
+          const built = await buildVoiceProposalPayload(
+            {
+              intent,
+              proposalType: effectiveProposalType,
+              // POST-resolution: `entities` already carries whatever
+              // `resolveTurnEntityEvent` folded onto the FSM context this turn.
+              entities,
+              envelope: {
+                sessionId: session.id,
+                ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+                ...(typeof fx.payload.conversationId === 'string'
+                  ? { conversationId: fx.payload.conversationId }
+                  : {}),
+              },
+              ...(typeof fx.payload.customerId === 'string' && fx.payload.customerId
+                ? { callerCustomerId: fx.payload.customerId }
+                : session.customerId
+                  ? { callerCustomerId: session.customerId }
+                  : {}),
+              // The caller's words for the REQUEST turn (the FSM parks them on
+              // `context.lastUtterance` at intent_classified and threads them
+              // back here — transitions.ts). Same reason and same single reader
+              // as the in-app leg: a contract field the classifier never
+              // extracts, like update_job's spoken status. Threaded on BOTH
+              // voice surfaces so they cannot drift apart again.
+              ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
+                ? { utterance: fx.payload.utterance }
                 : {}),
             },
-            ...(typeof fx.payload.customerId === 'string' && fx.payload.customerId
-              ? { callerCustomerId: fx.payload.customerId }
-              : session.customerId
-                ? { callerCustomerId: session.customerId }
-                : {}),
-            // The caller's words for the REQUEST turn (the FSM parks them on
-            // `context.lastUtterance` at intent_classified and threads them
-            // back here — transitions.ts). Same reason and same single reader
-            // as the in-app leg: a contract field the classifier never
-            // extracts, like update_job's spoken status. Threaded on BOTH
-            // voice surfaces so they cannot drift apart again.
-            ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
-              ? { utterance: fx.payload.utterance }
-              : {}),
-          },
-          {
-            tenantId,
-            // WS5 — the catalog grounding is INJECTED (proposals/ must not
-            // import ai/resolution/*). `groundVoiceQuote` already ran above for
-            // the read-back the caller heard; hand back that exact outcome so
-            // the spoken quote and the stored payload can never disagree.
-            ...(estimateQuote ? { groundLineItems: async () => estimateQuote } : {}),
-          },
-        );
-        payloadConfidence = built.confidence;
-        if (built.ok) {
-          payload = built.payload;
-          // A payload can satisfy its Zod contract and still be unapprovable:
-          // `updateCustomerPayloadSchema` requires only `customerId`, so an
-          // edit naming no new value validates and then executes as a silent
-          // no-op. `missingFieldPaths` is therefore read independently of
-          // `ok` — see voice-payload.ts `namedContractGap`.
-          contractMissingFields = built.missingFieldPaths;
-        } else {
-          const gateable =
-            effectiveProposalType !== 'voice_clarification' &&
-            built.missingFieldPaths.length > 0;
-          if (gateable) {
+            {
+              tenantId,
+              // WS5 — the catalog grounding is INJECTED (proposals/ must not
+              // import ai/resolution/*). `groundVoiceQuote` already ran above for
+              // the read-back the caller heard; hand back that exact outcome so
+              // the spoken quote and the stored payload can never disagree.
+              ...(estimateQuote ? { groundLineItems: async () => estimateQuote } : {}),
+            },
+          );
+          payloadConfidence = built.confidence;
+          if (built.ok) {
             payload = built.payload;
+            // A payload can satisfy its Zod contract and still be unapprovable:
+            // `updateCustomerPayloadSchema` requires only `customerId`, so an
+            // edit naming no new value validates and then executes as a silent
+            // no-op. `missingFieldPaths` is therefore read independently of
+            // `ok` — see voice-payload.ts `namedContractGap`.
             contractMissingFields = built.missingFieldPaths;
           } else {
-            degradedFromContract = true;
-            payloadProposalType = 'voice_clarification';
-            payloadConfidence = undefined;
-            payload = buildContractFailureClarification(
-              session,
-              intent,
-              entities,
-              requestedProposalType,
-            );
-          }
-          // Always diagnosable: the operator-visible outcome differs, the log
-          // and the audit row do not.
-          logger.warn('voice payload failed its proposal contract', {
-            sessionId: session.id,
-            tenantId,
-            intent: intent ?? null,
-            requestedProposalType,
-            outcome: gateable ? 'gated_with_missing_fields' : 'degraded_to_clarification',
-            errors: built.errors,
-          });
-          if (deps.auditRepo) {
-            try {
-              await deps.auditRepo.create(
-                createAuditEvent({
-                  tenantId,
-                  actorId: deps.systemActorId ?? 'calling-agent',
-                  actorRole: 'system',
-                  eventType: 'voice.payload_contract_failed',
-                  entityType: 'voice_session',
-                  entityId: session.id,
-                  metadata: {
-                    intent: intent ?? null,
-                    requestedProposalType,
-                    outcome: gateable
-                      ? 'gated_with_missing_fields'
-                      : 'degraded_to_clarification',
-                    errors: built.errors,
-                    missingFields: built.missingFieldPaths,
-                  },
-                }),
+            const gateable =
+              effectiveProposalType !== 'voice_clarification' &&
+              built.missingFieldPaths.length > 0;
+            if (gateable) {
+              payload = built.payload;
+              contractMissingFields = built.missingFieldPaths;
+            } else {
+              degradedFromContract = true;
+              payloadProposalType = 'voice_clarification';
+              payloadConfidence = undefined;
+              payload = buildContractFailureClarification(
+                session,
+                intent,
+                entities,
+                requestedProposalType,
               );
-            } catch {
-              /* audit is best-effort */
+            }
+            // Always diagnosable: the operator-visible outcome differs, the log
+            // and the audit row do not.
+            logger.warn('voice payload failed its proposal contract', {
+              sessionId: session.id,
+              tenantId,
+              intent: intent ?? null,
+              requestedProposalType,
+              outcome: gateable ? 'gated_with_missing_fields' : 'degraded_to_clarification',
+              errors: built.errors,
+            });
+            if (deps.auditRepo) {
+              try {
+                await deps.auditRepo.create(
+                  createAuditEvent({
+                    tenantId,
+                    actorId: deps.systemActorId ?? 'calling-agent',
+                    actorRole: 'system',
+                    eventType: 'voice.payload_contract_failed',
+                    entityType: 'voice_session',
+                    entityId: session.id,
+                    metadata: {
+                      intent: intent ?? null,
+                      requestedProposalType,
+                      outcome: gateable
+                        ? 'gated_with_missing_fields'
+                        : 'degraded_to_clarification',
+                      errors: built.errors,
+                      missingFields: built.missingFieldPaths,
+                    },
+                  }),
+                );
+              } catch {
+                /* audit is best-effort */
+              }
             }
           }
         }
@@ -2222,7 +2239,7 @@ export function createVoiceTurnProcessor(
         summary: surfaceAllowed
           ? degradedFromContract
             ? `Caller's '${intent ?? 'unknown'}' request needs a human — details were incomplete`
-            : voiceProposalSummary(intent, entities)
+            : brandVoiceSummary ?? voiceProposalSummary(intent, entities)
           : `Caller requested an operator-only action (${intent ?? 'unknown'})`,
         sourceContext: {
           source: 'calling-agent',
