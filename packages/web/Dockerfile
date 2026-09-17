@@ -30,6 +30,7 @@ FROM nginx:alpine
 ENV API_URL=http://localhost:3000
 COPY --from=builder /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY packages/web/security-headers.conf /etc/nginx/security-headers.conf
 COPY packages/web/env.js.template /etc/nginx/templates/env.js.template
 COPY packages/web/render-runtime-config.sh /docker-entrypoint.d/40-render-runtime-config.sh
 COPY packages/web/start.sh /start.sh

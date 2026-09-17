@@ -3,6 +3,9 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Repeated in locations with their own add_header directives; see snippet.
+    include /etc/nginx/security-headers.conf;
+
     # Websocket auth is carried in the query string because browser WebSocket
     # clients cannot set an Authorization header. The default nginx access log
     # records the full request target, including that bearer token, so suppress
@@ -64,6 +67,7 @@ server {
     # Content-hashed build assets (Vite emits new filenames on every deploy)
     # are safe to cache forever — a redeploy can never serve stale code here.
     location /assets/ {
+        include /etc/nginx/security-headers.conf;
         add_header Cache-Control "public, max-age=31536000, immutable";
     }
 
@@ -90,15 +94,18 @@ server {
     # "no-cache" allows the browser to store the response but forces revalidation
     # via ETag before use — do NOT use "no-store" (it disables back/forward cache).
     location = /index.html {
+        include /etc/nginx/security-headers.conf;
         add_header Cache-Control "no-cache" always;
     }
 
     location = /env.js {
+        include /etc/nginx/security-headers.conf;
         add_header Cache-Control "no-cache, must-revalidate";
     }
 
     location /health {
         return 200 'ok';
+        include /etc/nginx/security-headers.conf;
         add_header Content-Type text/plain;
     }
 }

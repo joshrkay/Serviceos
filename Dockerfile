@@ -47,6 +47,7 @@ RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --projec
 FROM nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY packages/web/security-headers.conf /etc/nginx/security-headers.conf
 EXPOSE 80
 
 # API production image — used by @serviceos/api (last stage = Railway default)
