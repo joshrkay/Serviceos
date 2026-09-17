@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { Field, Input, Select, Textarea, Button } from '../../components/ui';
+import { formatApiErrorMessage } from '../../utils/api-errors';
 
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
@@ -158,12 +159,14 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
       const body = {
         firstName: form.firstName.trim(),
         lastName: form.lastName.trim(),
-        companyName: form.companyName.trim(),
-        primaryPhone: form.primaryPhone.trim(),
-        secondaryPhone: form.secondaryPhone.trim(),
-        email: form.email.trim(),
+        ...(customerId || form.companyName.trim() ? { companyName: form.companyName.trim() } : {}),
+        ...(customerId || form.primaryPhone.trim() ? { primaryPhone: form.primaryPhone.trim() } : {}),
+        ...(customerId || form.secondaryPhone.trim() ? { secondaryPhone: form.secondaryPhone.trim() } : {}),
+        ...(customerId || form.email.trim() ? { email: form.email.trim() } : {}),
         preferredChannel: form.preferredChannel,
-        communicationNotes: form.communicationNotes.trim(),
+        ...(customerId || form.communicationNotes.trim()
+          ? { communicationNotes: form.communicationNotes.trim() }
+          : {}),
         // D4: Include SMS consent in update
         smsConsent: form.smsConsent,
         // #1155 — only a chosen classification is sent.
@@ -183,7 +186,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
-          throw new Error(json?.message ?? `HTTP ${res.status}`);
+          throw new Error(formatApiErrorMessage(json, `HTTP ${res.status}`));
         }
         const saved = await res.json();
         onSaved?.(customerId ?? saved.id);

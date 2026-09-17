@@ -82,6 +82,17 @@ describe('POST /api/customers', () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.body).toHaveProperty('error');
   });
+
+  it('rejects an overlong multibyte customer name as a field validation error', async () => {
+    const res = await createCustomer(app, { firstName: '👩🏽‍🔧'.repeat(101) });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      error: 'VALIDATION_ERROR',
+      message: 'Invalid request data',
+    });
+    expect(res.body.details.fields.firstName).toEqual(expect.arrayContaining([expect.stringMatching(/100/)]));
+  });
 });
 
 describe('GET /api/customers', () => {
