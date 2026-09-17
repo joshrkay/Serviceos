@@ -288,6 +288,28 @@ describe('CustomerEdit — create mode (no customerId)', () => {
     expect(body.lastName).toBe('Hopper');
   });
 
+  it('omits blank optional fields from the create request', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 'c-new', firstName: 'Grace', lastName: 'Hopper' }),
+    } as unknown as Response);
+
+    render(<CustomerEdit onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Grace' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(vi.mocked(apiFetch).mock.calls[0][1]?.body as string);
+    expect(body).not.toHaveProperty('companyName');
+    expect(body).not.toHaveProperty('primaryPhone');
+    expect(body).not.toHaveProperty('secondaryPhone');
+    expect(body).not.toHaveProperty('email');
+    expect(body).not.toHaveProperty('communicationNotes');
+  });
+
   it('shows a first-name-required error on a fully blank submit', () => {
     render(<CustomerEdit />);
     fireEvent.click(screen.getByRole('button', { name: /create/i }));
@@ -327,6 +349,27 @@ describe('CustomerEdit — create mode (no customerId)', () => {
     fireEvent.click(screen.getByRole('button', { name: /create/i }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('firstName and lastName are required');
+  });
+
+  it('shows field-level validation details from the create API', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: 'VALIDATION_ERROR',
+        message: 'Invalid request data',
+        details: { fields: { firstName: ['Must contain at most 100 characters'] } },
+      }),
+    } as unknown as Response);
+
+    render(<CustomerEdit />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'G'.repeat(101) } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'First name: Must contain at most 100 characters',
+    );
   });
 
   it('Cancel and Create controls are present and full-size for the create form', () => {

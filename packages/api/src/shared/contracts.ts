@@ -142,9 +142,9 @@ const lineItemSchema = z.object({
 });
 
 export const createCustomerSchema = z.object({
-  firstName: z.string().min(1),
-  lastName: z.string().min(1),
-  companyName: z.string().min(1).optional(),
+  firstName: z.string().min(1).max(100),
+  lastName: z.string().min(1).max(100),
+  companyName: z.string().min(1).max(200).optional(),
   primaryPhone: z.string().min(1).optional(),
   secondaryPhone: z.string().min(1).optional(),
   email: z.string().email().optional(),
