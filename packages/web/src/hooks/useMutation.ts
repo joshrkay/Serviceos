@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { toast } from 'sonner';
 import { useApiClient } from '../lib/apiClient';
+import { formatApiErrorMessage } from '../utils/api-errors';
 
 /**
  * Built-in success/error toast copy keyed by common entity actions used
@@ -58,14 +59,7 @@ export interface MutationHttpError extends Error {
 async function extractApiErrorMessage(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json();
-    if (
-      body &&
-      typeof body === 'object' &&
-      typeof (body as { message?: unknown }).message === 'string' &&
-      (body as { message: string }).message.trim().length > 0
-    ) {
-      return (body as { message: string }).message;
-    }
+    return formatApiErrorMessage(body, `HTTP ${response.status}`);
   } catch {
     // Non-JSON or empty error body (e.g. a proxy/edge 502 HTML page) —
     // fall through to the generic status-based message below.

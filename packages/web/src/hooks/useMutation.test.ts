@@ -165,6 +165,25 @@ describe('useMutation — basic behavior', () => {
     );
   });
 
+  it('surfaces field-level validation details instead of the generic validation message', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: 'VALIDATION_ERROR',
+        message: 'Invalid request data',
+        details: { fields: { firstName: ['Must contain at most 100 characters'] } },
+      }),
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('POST', '/api/customers'));
+    await act(async () => {
+      await expect(result.current.mutate({})).rejects.toThrow(
+        'First name: Must contain at most 100 characters',
+      );
+    });
+  });
+
   it('falls back to the generic HTTP status when the error body has no message field', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: false,
