@@ -45,6 +45,8 @@ import {
 } from '../../../src/ai/supervisor-presence';
 import { classifyCallerSafety } from '../../../src/ai/agents/customer-calling/emergency-tier';
 import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
+import { UpdateBrandVoiceExecutionHandler } from '../../../src/proposals/execution/brand-voice-handler';
+import { InMemoryBrandVoiceRepository } from '../../../src/tenants/brand/in-memory-brand-voice-repository';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -286,7 +288,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
       }),
       JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
     ]);
-    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+    const { processor, session, proposalRepo } = makeCtx({
       gateway,
       withRepos: true,
     });
@@ -357,7 +359,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
       }),
       JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
     ]);
-    const { processor, session, proposalRepo } = makeCtx({
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
       gateway,
       withRepos: true,
       ownerSession: true,
@@ -655,6 +657,58 @@ describe('createVoiceTurnProcessor.executeSideEffects', () => {
     const proposals = await proposalRepo.findByTenant('tenant-abc');
     expect(proposals.length).toBe(1);
     expect(proposals[0]!.aiRunId).toBe(realRunId);
+  });
+
+  it('maps a phone brand-voice instruction onto executable typed fields', async () => {
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning(
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, Acme Plumbing',
+          confidence_score: 0.92,
+        }),
+      ),
+      withRepos: true,
+      ownerSession: true,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'update_brand_voice',
+            entities: {
+              brandVoiceInstruction: 'sound friendly and sign off Thanks, Acme Plumbing',
+            },
+            utterance: 'sound friendly and sign off Thanks, Acme Plumbing',
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('update_brand_voice');
+    expect(proposals[0]!.payload).toMatchObject({
+      register: 'friendly',
+      signoff: 'Thanks, Acme Plumbing',
+    });
+    expect(missingFieldsFor(proposals[0]!)).toEqual([]);
+
+    const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+    const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+      proposals[0]!,
+      { tenantId: 'tenant-abc', executedBy: 'owner-1' },
+    );
+    expect(result.success).toBe(true);
+    const state = await brandVoiceRepo.getState('tenant-abc');
+    expect(state.config).toMatchObject({
+      register: 'friendly',
+      signoff: 'Thanks, Acme Plumbing',
+    });
   });
 });
 
