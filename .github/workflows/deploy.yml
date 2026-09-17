@@ -23,6 +23,8 @@ jobs:
       - run: npm ci
       - name: Deployment helper regression tests
         run: bash scripts/ci/test/run-tests.sh
+      - name: Web security header contract
+        run: npm run test:web-security-headers
 
       - name: Type check API (build config)
         run: npx tsc --project tsconfig.build.json --noEmit

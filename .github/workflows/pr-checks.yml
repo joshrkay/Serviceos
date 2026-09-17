@@ -34,6 +34,9 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
+      - name: Web security header contract
+        run: npm run test:web-security-headers
+
       - name: Type check API (build config)
         run: npx tsc --project tsconfig.build.json --noEmit
         working-directory: packages/api
