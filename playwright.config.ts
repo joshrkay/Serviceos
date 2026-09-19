@@ -352,6 +352,10 @@ export default defineConfig<DevAuthFixtures>({
             name: 'qa-matrix',
             testDir: './e2e/qa-matrix',
             testIgnore: [],
+            // Voice rows chain start → input → confirm → approve → execution
+            // poll against real LLM calls; the 30 s default cut VOX-05 and
+            // SCH-03 off mid-poll (#1268). Row-level deadlines still apply.
+            timeout: 90_000,
             // testMatch order is for readability, NOT a guaranteed run order
             // (under workers:1 Playwright may order files alphabetically). Specs
             // are written to be self-contained — each seeds its own

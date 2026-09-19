@@ -33,15 +33,18 @@ section() {
 load_qa_env
 apply_qa_defaults
 
-section "Step 1/5 — qa-matrix doctor (env + reachability)"
+section "Step 1/6 — qa-matrix doctor (env + reachability)"
 npx tsx --no-warnings scripts/qa-matrix-doctor.ts
 
-section "Step 2/5 — smoke-tools (Playwright / Stripe / tsx)"
+section "Step 2/6 — smoke-tools (Playwright / Stripe / tsx)"
 npx tsx --no-warnings scripts/qa-smoke-tools.ts
 
-section "Step 3/5 — seed Tenant A + Tenant B"
+section "Step 3/6 — seed Tenant A + Tenant B"
 # The seeder requires E2E_DB_URL_READWRITE; doctor already verified it.
-# Seeder is idempotent on owner_id, so re-runs are safe.
+# Seeder is idempotent on owner_id (qa:<prefix>-A / qa:<prefix>-B), so re-runs
+# are safe — but they accumulate rows on the same tenants. Set
+# QA_MATRIX_SEED_PREFIX to a per-run value for fresh tenants (runbook §B.1).
+echo "Seed prefix: ${QA_MATRIX_SEED_PREFIX:-qa-matrix} (owner_id qa:${QA_MATRIX_SEED_PREFIX:-qa-matrix}-A/B)"
 npx tsx e2e/qa-matrix/fixtures/seed.ts
 
 section "Step 4/6 — run the QA matrix"

@@ -267,8 +267,9 @@ matrixTest('VOX-12', 'callerPhone with no matching customer falls through unchan
 matrixTest('VOX-13', 'callerPhone matching two customers falls through unchanged', async (h) => {
   // QA-2026-07-26 — companion regression guard: a callerPhone matching TWO
   // customers on the same tenant (seeded by fixtures/seed.ts as
-  // `${slug}-ambiguous-1` / `${slug}-ambiguous-2`, both on '555-0200', kept
-  // distinct from the primary customer's '555-0100' used by SCH-02/SMS-01)
+  // "Riley Twinsley" / "Rowan Twinsley", both on '555-0200', kept distinct
+  // from the primary customer's '555-0100' used by SCH-02/SMS-01 and named
+  // so they never collide with "QA Matrix" lookups — #1268)
   // must also leave the caller unresolved — the adapter never guesses among
   // ambiguous matches (0 or 2+ matches take the same unresolved branch).
   const ambiguousPhone = '555-0200';
