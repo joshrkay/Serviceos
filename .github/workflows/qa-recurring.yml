@@ -32,11 +32,7 @@ jobs:
       - name: Run QA suite
         run: |
           chmod +x ./scripts/qa-comparison.sh
-          PREVIOUS_ARG=""
-          if [[ -n "${{ github.event.inputs.previous_run }}" ]]; then
-            PREVIOUS_ARG="--previous ${{ github.event.inputs.previous_run }}"
-          fi
-          ./scripts/qa-comparison.sh --verbose $PREVIOUS_ARG
+          ./scripts/qa-comparison.sh --verbose
 
       - name: Upload QA reports
         if: always()
