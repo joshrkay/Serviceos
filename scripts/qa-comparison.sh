@@ -186,16 +186,16 @@ echo ""
 
 # 3. Linting
 echo "[3/8] Linting..."
-LINT_OUTPUT=$(npm run lint:eslint 2>&1 || true)
-echo "$LINT_OUTPUT" > "$REPORT_DIR/$TODAY/lint-report.txt"
-LINT_ERRORS=$(echo "$LINT_OUTPUT" | grep -oP '\b(\d+) error' | grep -oP '\d+' | tail -1)
-LINT_WARNINGS=$(echo "$LINT_OUTPUT" | grep -oP '\b(\d+) warning' | grep -oP '\d+' | tail -1)
-LINT_ERRORS=${LINT_ERRORS:-0}
-LINT_WARNINGS=${LINT_WARNINGS:-0}
-if [[ "$LINT_ERRORS" -eq 0 ]]; then
-  record_result "lint:eslint" "pass" "$LINT_WARNINGS warnings" true
+npm run lint:eslint > "$REPORT_DIR/$TODAY/lint-report.txt" 2>&1
+LINT_EXIT=$?
+if [[ $LINT_EXIT -eq 0 ]]; then
+  record_result "lint:eslint" "pass" "0 errors" true
 else
-  record_result "lint:eslint" "fail" "$LINT_ERRORS errors, $LINT_WARNINGS warnings" true
+  # Extract error and warning counts from ESLint output (summary line format: "N error" or "0 errors")
+  LINT_OUTPUT=$(cat "$REPORT_DIR/$TODAY/lint-report.txt")
+  LINT_ERRORS=$(echo "$LINT_OUTPUT" | grep -oP '^\s*\d+\s+error' | grep -oP '\d+' | head -1)
+  LINT_ERRORS=${LINT_ERRORS:-1}
+  record_result "lint:eslint" "fail" "$LINT_ERRORS errors found" true
 fi
 
 echo ""
