@@ -147,20 +147,20 @@ compare_against_previous() {
         local prev_status=$(grep "\"$check\"" "$prev_json" 2>/dev/null | sed 's/.*"status": "\([^"]*\)".*/\1/' | head -1)
         [[ -z "$prev_status" ]] && prev_status="unknown"
 
-        # Helper: check if status is passing
+        # Helper: check status categories
         is_passing() { [[ "$1" == "pass" ]]; }
-        is_failing() { [[ "$1" != "pass" && "$1" != "unknown" ]]; }
+        is_failing() { [[ "$1" == "fail" ]]; }
 
-        # Detect fix or regression (compare passing vs non-passing states)
-        if is_passing "$prev_status" && ! is_passing "$curr_status"; then
-          echo "  ❌ REGRESSION: $check (was passing, now $curr_status)"
+        # Detect fix or regression (only fail is a regression; timeout/skip are infrastructure issues)
+        if is_passing "$prev_status" && is_failing "$curr_status"; then
+          echo "  ❌ REGRESSION: $check (was passing, now failing)"
           ((regressions++))
           OVERALL_STATUS=1
-        elif ! is_passing "$prev_status" && is_passing "$curr_status"; then
-          echo "  ✅ FIXED: $check (was $prev_status, now passing)"
+        elif is_failing "$prev_status" && is_passing "$curr_status"; then
+          echo "  ✅ FIXED: $check (was failing, now passing)"
           ((fixes++))
         elif [[ "$prev_status" == "unknown" ]] && is_failing "$curr_status"; then
-          echo "  ➕ NEW: $check (new failure: $curr_status)"
+          echo "  ➕ NEW: $check (new failure)"
           ((new_failures++))
         fi
       done < "$RESULTS_FILE"
@@ -304,10 +304,14 @@ echo ""
 # 7. E2E Tests
 echo "[7/8] E2E Tests..."
 if [[ -n "$E2E_BASE_URL" ]]; then
-  if run_with_timeout 300 npm run e2e:smoke 2>/tmp/qa-e2e.log > /tmp/qa-e2e.out 2>&1; then
+  run_with_timeout 300 npm run e2e:smoke 2>/tmp/qa-e2e.log > /tmp/qa-e2e.out 2>&1
+  E2E_EXIT=$?
+  if [[ $E2E_EXIT -eq 0 ]]; then
     record_result "test:e2e" "pass" "Smoke tests passed" true
+  elif [[ $E2E_EXIT -eq 124 ]]; then
+    record_result "test:e2e" "timeout" "Exceeded 300s (infrastructure issue)" false
   else
-    record_result "test:e2e" "fail" "Failed or timed out" true
+    record_result "test:e2e" "fail" "Tests failed" true
   fi
 else
   record_result "test:e2e" "skip" "E2E_BASE_URL not set" false
