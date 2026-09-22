@@ -1,0 +1,61 @@
+name: QA — Recurring Every 48 Hours
+
+on:
+  schedule:
+    # Every 2 days at 04:00 UTC
+    - cron: '0 4 */2 * *'
+  workflow_dispatch:
+    inputs:
+      previous_run:
+        description: 'Previous run date (YYYY-MM-DD) for comparison'
+        required: false
+        type: string
+
+jobs:
+  qa-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run QA suite
+        run: |
+          chmod +x ./scripts/qa-comparison.sh
+          ./scripts/qa-comparison.sh --verbose
+        env:
+          QA_RUN_DATE: ${{ github.event.inputs.previous_run || 'auto' }}
+
+      - name: Upload QA reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-reports-${{ github.run_id }}
+          path: qa/reports/*/
+          retention-days: 90
+
+      - name: Check QA results
+        run: |
+          # Exit with error if any critical checks failed
+          if [ -f qa/reports/*/qa-status.json ]; then
+            # Will be implemented when comparison logic is complete
+            echo "QA results recorded"
+          fi
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Optional: Post QA results summary as a comment
+            // Implementation depends on report format

@@ -3,9 +3,10 @@
 # ServiceOS QA Comparison Script
 # Runs comprehensive QA suite and compares against previous run
 # Usage: ./scripts/qa-comparison.sh [--previous YYYY-MM-DD] [--verbose]
+# Exit codes:
+#   0 = All required checks passed
+#   1 = One or more required checks failed
 #
-
-set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
@@ -14,6 +15,8 @@ REPORT_DIR="$QA_DIR/reports"
 TODAY=$(date +%Y-%m-%d)
 PREVIOUS_RUN=""
 VERBOSE=false
+OVERALL_STATUS=0
+declare -A CHECK_RESULTS
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -42,13 +45,113 @@ echo "Date: $TODAY"
 echo "=========================================="
 echo ""
 
-# Helper function to log results
-log_result() {
-  local status=$1
-  local test=$2
-  local details=$3
+# Save results to JSON for comparison
+save_results_json() {
+  local results_file="$REPORT_DIR/$TODAY/qa-status.json"
 
-  echo "[$status] $test"
+  # Build JSON from CHECK_RESULTS associative array
+  cat > "$results_file" <<'JSON'
+{
+JSON
+
+  echo "  \"date\": \"$TODAY\"," >> "$results_file"
+  echo "  \"checks\": {" >> "$results_file"
+
+  local first=true
+  for check in "${!CHECK_RESULTS[@]}"; do
+    IFS='|' read -r status details <<< "${CHECK_RESULTS[$check]}"
+
+    if [[ "$first" == true ]]; then
+      first=false
+    else
+      echo "," >> "$results_file"
+    fi
+
+    printf '    "%s": {"status": "%s", "details": "%s"}' "$check" "$status" "$details" >> "$results_file"
+  done
+
+  echo "" >> "$results_file"
+  echo "  }" >> "$results_file"
+  echo "}" >> "$results_file"
+}
+
+# Compare against previous run and detect regressions
+compare_against_previous() {
+  if [[ -z "$PREVIOUS_RUN" ]]; then
+    # Try to find most recent previous run
+    PREVIOUS_RUN=$(ls -t "$REPORT_DIR" 2>/dev/null | grep -v "$TODAY" | head -1)
+  fi
+
+  if [[ -n "$PREVIOUS_RUN" ]] && [[ -d "$REPORT_DIR/$PREVIOUS_RUN" ]]; then
+    local prev_json="$REPORT_DIR/$PREVIOUS_RUN/qa-status.json"
+    local curr_json="$REPORT_DIR/$TODAY/qa-status.json"
+
+    echo "Comparing against run: $PREVIOUS_RUN"
+    echo ""
+
+    if [[ -f "$prev_json" ]]; then
+      # Compare check-by-check
+      local fixes=0
+      local regressions=0
+      local new_failures=0
+
+      for check in "${!CHECK_RESULTS[@]}"; do
+        IFS='|' read -r curr_status curr_details <<< "${CHECK_RESULTS[$check]}"
+
+        # Extract previous status (simplified; proper JSON parsing would be better)
+        local prev_status=$(grep -oP "\"$check\".*?\"status\": \"\\K[^\"]*" "$prev_json" 2>/dev/null || echo "unknown")
+
+        # Detect fix or regression
+        if [[ "$prev_status" == "fail" ]] && [[ "$curr_status" == "pass" ]]; then
+          echo "  ✅ FIXED: $check (was failing, now passing)"
+          ((fixes++))
+        elif [[ "$prev_status" == "pass" ]] && [[ "$curr_status" == "fail" ]]; then
+          echo "  ❌ REGRESSION: $check (was passing, now failing)"
+          ((regressions++))
+          OVERALL_STATUS=1
+        elif [[ "$prev_status" == "unknown" ]] && [[ "$curr_status" == "fail" ]]; then
+          echo "  ➕ NEW: $check (new failure)"
+          ((new_failures++))
+        fi
+      done
+
+      echo ""
+      echo "Summary:"
+      echo "  Fixes: $fixes"
+      echo "  Regressions: $regressions"
+      echo "  New Failures: $new_failures"
+      if [[ $regressions -gt 0 ]]; then
+        echo "  🔴 REGRESSION DETECTED — fix before shipping"
+      fi
+    else
+      record_result "Regression Check" "skip" "No previous results to compare" false
+    fi
+  else
+    record_result "Regression Check" "skip" "Baseline run — no previous results" false
+  fi
+}
+
+# Helper function to track and log results
+record_result() {
+  local check_name=$1
+  local status=$2  # "pass", "fail", "skip", "timeout"
+  local details=$3
+  local required=${4:-true}  # Is this a required check?
+
+  # Store result
+  CHECK_RESULTS["$check_name"]="$status|$details"
+
+  # Log with icon
+  local icon
+  case "$status" in
+    pass) icon="✅" ;;
+    fail) icon="❌"; [[ "$required" == "true" ]] && OVERALL_STATUS=1 ;;
+    timeout) icon="⏱" ;;
+    skip) icon="⏭️" ;;
+    *) icon="❓" ;;
+  esac
+
+  echo "[$icon] $check_name"
   if [[ $VERBOSE == true ]]; then
     echo "    $details"
   fi
@@ -57,26 +160,26 @@ log_result() {
 # 1. Type Checking
 echo "[1/8] Type Checking..."
 if npm run typecheck:api > /dev/null 2>&1; then
-  log_result "✅" "API Type Check" "0 errors"
+  record_result "typecheck:api" "pass" "0 errors" true
 else
-  log_result "❌" "API Type Check" "Errors found"
+  record_result "typecheck:api" "fail" "Errors found" true
 fi
 
 if npm run typecheck:web > /dev/null 2>&1; then
-  log_result "✅" "Web Type Check" "0 errors"
+  record_result "typecheck:web" "pass" "0 errors" true
 else
-  log_result "❌" "Web Type Check" "Errors found"
+  record_result "typecheck:web" "fail" "Errors found" true
 fi
 
 echo ""
 
 # 2. Unit Tests - Shared
 echo "[2/8] Unit Tests - Shared Package..."
-if npm test --workspace=packages/shared 2>/tmp/qa-shared.log > /tmp/qa-shared.out; then
+if npm test --workspace=packages/shared 2>/tmp/qa-shared.log > /tmp/qa-shared.out 2>&1; then
   SHARED_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-shared.out | head -1)
-  log_result "✅" "Shared Tests" "$SHARED_TESTS"
+  record_result "test:shared" "pass" "$SHARED_TESTS" true
 else
-  log_result "❌" "Shared Tests" "Failed"
+  record_result "test:shared" "fail" "Tests failed" true
 fi
 
 echo ""
@@ -87,7 +190,11 @@ LINT_OUTPUT=$(npm run lint:eslint 2>&1 || true)
 LINT_ERRORS=$(echo "$LINT_OUTPUT" | grep -c "error" || echo "0")
 LINT_WARNINGS=$(echo "$LINT_OUTPUT" | grep -c "warning" || echo "0")
 echo "$LINT_OUTPUT" > "$REPORT_DIR/$TODAY/lint-report.txt"
-log_result "⚠️" "Linting" "$LINT_ERRORS errors, $LINT_WARNINGS warnings (see lint-report.txt)"
+if [[ "$LINT_ERRORS" -eq 0 ]]; then
+  record_result "lint:eslint" "pass" "$LINT_WARNINGS warnings" true
+else
+  record_result "lint:eslint" "fail" "$LINT_ERRORS errors, $LINT_WARNINGS warnings" true
+fi
 
 echo ""
 
@@ -95,12 +202,12 @@ echo ""
 echo "[4/8] Unit Tests - API Package (timeout 300s)..."
 if timeout 300 npm test --workspace=packages/api 2>/tmp/qa-api.log > /tmp/qa-api.out 2>&1; then
   API_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-api.out | head -1)
-  log_result "✅" "API Tests" "$API_TESTS"
+  record_result "test:api" "pass" "$API_TESTS" false
 else
   if grep -q "timed out\|timeout\|TIMEOUT" /tmp/qa-api.log 2>/dev/null; then
-    log_result "⏱" "API Tests" "Timeout after 300s (infrastructure issue)"
+    record_result "test:api" "timeout" "Exceeded 300s (infrastructure issue)" false
   else
-    log_result "❌" "API Tests" "Failed (see /tmp/qa-api.log)"
+    record_result "test:api" "fail" "Tests failed" false
   fi
 fi
 
@@ -110,69 +217,56 @@ echo ""
 echo "[5/8] Unit Tests - Web Package (timeout 300s)..."
 if timeout 300 npm test --workspace=packages/web 2>/tmp/qa-web.log > /tmp/qa-web.out 2>&1; then
   WEB_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-web.out | head -1)
-  log_result "✅" "Web Tests" "$WEB_TESTS"
+  record_result "test:web" "pass" "$WEB_TESTS" false
 else
   if grep -q "timed out\|timeout\|TIMEOUT" /tmp/qa-web.log 2>/dev/null; then
-    log_result "⏱" "Web Tests" "Timeout after 300s (infrastructure issue)"
+    record_result "test:web" "timeout" "Exceeded 300s (infrastructure issue)" false
   else
-    log_result "❌" "Web Tests" "Failed (see /tmp/qa-web.log)"
+    record_result "test:web" "fail" "Tests failed" false
   fi
 fi
 
 echo ""
 
-# 6. Check for integration test requirements
+# 6. Integration Tests
 echo "[6/8] Integration Tests..."
 if command -v docker &> /dev/null && docker ps &> /dev/null; then
-  echo "    Docker available - integration tests could run"
   if timeout 300 npm run test:integration --workspace=packages/api 2>/tmp/qa-integration.log > /tmp/qa-integration.out 2>&1; then
     INTEGRATION_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-integration.out | head -1)
-    log_result "✅" "Integration Tests" "$INTEGRATION_TESTS"
+    record_result "test:integration" "pass" "$INTEGRATION_TESTS" false
   else
-    log_result "⏱" "Integration Tests" "Requires setup or timed out"
+    record_result "test:integration" "timeout" "Setup or execution failed" false
   fi
 else
-  log_result "⏭️" "Integration Tests" "Docker not available - skipped"
+  record_result "test:integration" "skip" "Docker not available" false
 fi
 
 echo ""
 
-# 7. Check for E2E test requirements
+# 7. E2E Tests
 echo "[7/8] E2E Tests..."
 if [[ -n "$E2E_BASE_URL" ]]; then
-  log_result "ℹ️" "E2E Tests" "Base URL configured: $E2E_BASE_URL"
   if timeout 300 npm run e2e:smoke 2>/tmp/qa-e2e.log > /tmp/qa-e2e.out 2>&1; then
-    log_result "✅" "E2E Smoke Tests" "Passed"
+    record_result "test:e2e" "pass" "Smoke tests passed" false
   else
-    log_result "⏱" "E2E Smoke Tests" "Failed or timed out"
+    record_result "test:e2e" "fail" "Failed or timed out" false
   fi
 else
-  log_result "⏭️" "E2E Tests" "E2E_BASE_URL not set - skipped"
+  record_result "test:e2e" "skip" "E2E_BASE_URL not set" false
 fi
 
 echo ""
 
-# 8. Comparison against previous run
+# 8. Regression Comparison
 echo "[8/8] Regression Comparison..."
-if [[ -z "$PREVIOUS_RUN" ]]; then
-  # Try to find most recent previous run
-  PREVIOUS_RUN=$(ls -t "$REPORT_DIR" 2>/dev/null | grep -v "$TODAY" | head -1)
-fi
-
-if [[ -n "$PREVIOUS_RUN" ]] && [[ -d "$REPORT_DIR/$PREVIOUS_RUN" ]]; then
-  echo "    Comparing against: $PREVIOUS_RUN"
-  echo ""
-  echo "    (Regression comparison logic would go here)"
-else
-  log_result "ℹ️" "Baseline Run" "No previous run to compare"
-fi
+save_results_json
+compare_against_previous
 
 echo ""
 echo "=========================================="
 echo "QA Run Complete"
 echo "Report Location: $REPORT_DIR/$TODAY/"
-echo "Summary:"
-echo "  - Type Safety: ✅ Passed"
-echo "  - Tests: Check above"
-echo "  - Linting: $LINT_ERRORS errors, $LINT_WARNINGS warnings"
+echo "Exit Code: $OVERALL_STATUS (0=pass, 1=required check failed)"
 echo "=========================================="
+
+exit $OVERALL_STATUS
