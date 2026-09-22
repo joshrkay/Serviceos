@@ -1,4 +1,30 @@
-# QA Matrix — 4-agent swarm harness
+# ServiceOS QA — Recurring Process + Matrix Harness
+
+## 🚀 Start Here: Recurring QA Process (Every 48 Hours)
+
+**NEW:** Automated QA runs every 2 days to catch regressions and ensure product quality.
+
+| Document | Purpose | Frequency |
+|---|---|---|
+| **[QA-PROCESS-README.md](QA-PROCESS-README.md)** | How to run QA, interpret results, escalate | Reference |
+| **[QA-QUICK-REFERENCE.md](QA-QUICK-REFERENCE.md)** | One-page cheatsheet (print this!) | Daily use |
+| **[QA-LOG.md](QA-LOG.md)** | Comparison log across cycles (regressions tracked) | Updated every cycle |
+| **[QA-FINDINGS-YYYY-MM-DD.md](QA-FINDINGS-2026-09-22.md)** | Detailed findings + risk assessment | New each cycle |
+| **[QA-MANUAL-CHECKLIST.md](QA-MANUAL-CHECKLIST.md)** | What to test manually (100+ checkboxes) | During testing |
+| **[scripts/qa-comparison.sh](../scripts/qa-comparison.sh)** | Automated test runner | Run at start of each cycle |
+
+**Quick Start:**
+```bash
+# Run every 2 days
+./scripts/qa-comparison.sh --verbose
+
+# Then manual testing (2–3 hours)
+# See: qa/QA-MANUAL-CHECKLIST.md
+```
+
+---
+
+## 📊 QA Matrix — 4-Agent Swarm Harness (Pre-Launch Gate)
 
 **Unblock the matrix:** [docs/runbooks/qa-full-matrix-unblock.md](../docs/runbooks/qa-full-matrix-unblock.md)
 — `npm run qa:setup` from a filled `.env.qa`, then `npm run qa:matrix:run` or
