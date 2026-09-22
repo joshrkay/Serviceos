@@ -31,8 +31,8 @@ jobs:
 
       - name: Download previous artifacts
         uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
         with:
-          if_no_artifact_found: ignore
           path: qa/reports-temp
 
       - name: Restore previous reports
