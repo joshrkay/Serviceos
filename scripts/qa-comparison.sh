@@ -187,9 +187,11 @@ echo ""
 # 3. Linting
 echo "[3/8] Linting..."
 LINT_OUTPUT=$(npm run lint:eslint 2>&1 || true)
-LINT_ERRORS=$(echo "$LINT_OUTPUT" | grep -c "error" || echo "0")
-LINT_WARNINGS=$(echo "$LINT_OUTPUT" | grep -c "warning" || echo "0")
 echo "$LINT_OUTPUT" > "$REPORT_DIR/$TODAY/lint-report.txt"
+LINT_ERRORS=$(echo "$LINT_OUTPUT" | grep -oP '\b(\d+) error' | grep -oP '\d+' | tail -1)
+LINT_WARNINGS=$(echo "$LINT_OUTPUT" | grep -oP '\b(\d+) warning' | grep -oP '\d+' | tail -1)
+LINT_ERRORS=${LINT_ERRORS:-0}
+LINT_WARNINGS=${LINT_WARNINGS:-0}
 if [[ "$LINT_ERRORS" -eq 0 ]]; then
   record_result "lint:eslint" "pass" "$LINT_WARNINGS warnings" true
 else
@@ -200,30 +202,30 @@ echo ""
 
 # 4. API Unit Tests (with timeout)
 echo "[4/8] Unit Tests - API Package (timeout 300s)..."
-if timeout 300 npm test --workspace=packages/api 2>/tmp/qa-api.log > /tmp/qa-api.out 2>&1; then
+timeout 300 npm test --workspace=packages/api > /tmp/qa-api.out 2>&1
+API_EXIT=$?
+if [[ $API_EXIT -eq 0 ]]; then
   API_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-api.out | head -1)
   record_result "test:api" "pass" "$API_TESTS" false
+elif [[ $API_EXIT -eq 124 ]]; then
+  record_result "test:api" "timeout" "Exceeded 300s (infrastructure issue)" false
 else
-  if grep -q "timed out\|timeout\|TIMEOUT" /tmp/qa-api.log 2>/dev/null; then
-    record_result "test:api" "timeout" "Exceeded 300s (infrastructure issue)" false
-  else
-    record_result "test:api" "fail" "Tests failed" false
-  fi
+  record_result "test:api" "fail" "Tests failed" false
 fi
 
 echo ""
 
 # 5. Web Unit Tests (with timeout)
 echo "[5/8] Unit Tests - Web Package (timeout 300s)..."
-if timeout 300 npm test --workspace=packages/web 2>/tmp/qa-web.log > /tmp/qa-web.out 2>&1; then
+timeout 300 npm test --workspace=packages/web > /tmp/qa-web.out 2>&1
+WEB_EXIT=$?
+if [[ $WEB_EXIT -eq 0 ]]; then
   WEB_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-web.out | head -1)
   record_result "test:web" "pass" "$WEB_TESTS" false
+elif [[ $WEB_EXIT -eq 124 ]]; then
+  record_result "test:web" "timeout" "Exceeded 300s (infrastructure issue)" false
 else
-  if grep -q "timed out\|timeout\|TIMEOUT" /tmp/qa-web.log 2>/dev/null; then
-    record_result "test:web" "timeout" "Exceeded 300s (infrastructure issue)" false
-  else
-    record_result "test:web" "fail" "Tests failed" false
-  fi
+  record_result "test:web" "fail" "Tests failed" false
 fi
 
 echo ""
@@ -231,11 +233,15 @@ echo ""
 # 6. Integration Tests
 echo "[6/8] Integration Tests..."
 if command -v docker &> /dev/null && docker ps &> /dev/null; then
-  if timeout 300 npm run test:integration --workspace=packages/api 2>/tmp/qa-integration.log > /tmp/qa-integration.out 2>&1; then
+  timeout 300 npm run test:integration --workspace=packages/api > /tmp/qa-integration.out 2>&1
+  INTEGRATION_EXIT=$?
+  if [[ $INTEGRATION_EXIT -eq 0 ]]; then
     INTEGRATION_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-integration.out | head -1)
     record_result "test:integration" "pass" "$INTEGRATION_TESTS" false
+  elif [[ $INTEGRATION_EXIT -eq 124 ]]; then
+    record_result "test:integration" "timeout" "Exceeded 300s" false
   else
-    record_result "test:integration" "timeout" "Setup or execution failed" false
+    record_result "test:integration" "fail" "Setup or execution failed" false
   fi
 else
   record_result "test:integration" "skip" "Docker not available" false

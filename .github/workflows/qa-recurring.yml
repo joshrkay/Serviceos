@@ -29,12 +29,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Download previous artifacts
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          if_no_artifact_found: ignore
+          path: qa/reports-temp
+
+      - name: Restore previous reports
+        run: |
+          if [ -d "qa/reports-temp" ]; then
+            find qa/reports-temp -type d -maxdepth 1 | tail -n +2 | while read dir; do
+              date_dir=$(basename "$dir")
+              mkdir -p "qa/reports/$date_dir"
+              cp "$dir"/* "qa/reports/$date_dir/" 2>/dev/null || true
+            done
+          fi
+
       - name: Run QA suite
         run: |
           chmod +x ./scripts/qa-comparison.sh
-          ./scripts/qa-comparison.sh --verbose
-        env:
-          QA_RUN_DATE: ${{ github.event.inputs.previous_run || 'auto' }}
+          PREVIOUS_ARG=""
+          if [[ -n "${{ github.event.inputs.previous_run }}" ]]; then
+            PREVIOUS_ARG="--previous ${{ github.event.inputs.previous_run }}"
+          fi
+          ./scripts/qa-comparison.sh --verbose $PREVIOUS_ARG
 
       - name: Upload QA reports
         if: always()
