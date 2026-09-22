@@ -191,11 +191,7 @@ LINT_EXIT=$?
 if [[ $LINT_EXIT -eq 0 ]]; then
   record_result "lint:eslint" "pass" "0 errors" true
 else
-  # Extract error and warning counts from ESLint output (summary line format: "N error" or "0 errors")
-  LINT_OUTPUT=$(cat "$REPORT_DIR/$TODAY/lint-report.txt")
-  LINT_ERRORS=$(echo "$LINT_OUTPUT" | grep -oP '^\s*\d+\s+error' | grep -oP '\d+' | head -1)
-  LINT_ERRORS=${LINT_ERRORS:-1}
-  record_result "lint:eslint" "fail" "$LINT_ERRORS errors found" true
+  record_result "lint:eslint" "fail" "ESLint errors found" true
 fi
 
 echo ""
