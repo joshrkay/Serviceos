@@ -36,6 +36,38 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Check if enough time has elapsed since last run (48 hours)
+check_elapsed_time() {
+  if [[ -z "$PREVIOUS_RUN" ]]; then
+    # Try to find most recent previous run
+    PREVIOUS_RUN=$(ls -t "$REPORT_DIR" 2>/dev/null | grep -v "$TODAY" | head -1)
+  fi
+
+  if [[ -n "$PREVIOUS_RUN" ]] && [[ -d "$REPORT_DIR/$PREVIOUS_RUN" ]]; then
+    # Parse dates: YYYY-MM-DD format
+    prev_epoch=$(date -d "$PREVIOUS_RUN" +%s 2>/dev/null || echo 0)
+    today_epoch=$(date -d "$TODAY" +%s 2>/dev/null || echo 0)
+
+    if [[ $prev_epoch -gt 0 ]] && [[ $today_epoch -gt 0 ]]; then
+      elapsed=$((today_epoch - prev_epoch))
+      threshold=$((48 * 3600))  # 48 hours in seconds
+
+      if [[ $elapsed -lt $threshold ]]; then
+        echo "=========================================="
+        echo "ServiceOS QA Skipped"
+        echo "=========================================="
+        echo "Last run: $PREVIOUS_RUN"
+        echo "Elapsed: $((elapsed / 3600)) hours (< 48 hours required)"
+        echo "Next run: $(date -d "$PREVIOUS_RUN + 48 hours" +%Y-%m-%d 2>/dev/null || echo 'unknown')"
+        echo "=========================================="
+        exit 0
+      fi
+    fi
+  fi
+}
+
+check_elapsed_time
+
 # Create today's report directory
 mkdir -p "$REPORT_DIR/$TODAY"
 

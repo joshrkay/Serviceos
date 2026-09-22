@@ -26,6 +26,8 @@ jobs:
         run: |
           chmod +x ./scripts/qa-comparison.sh
           ./scripts/qa-comparison.sh --verbose
+        env:
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
 
       - name: Upload QA reports
         if: always()
