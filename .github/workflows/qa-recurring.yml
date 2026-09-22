@@ -29,22 +29,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Download previous artifacts
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          path: qa/reports-temp
-        continue-on-error: true
-
-      - name: Restore previous reports
-        run: |
-          if [ -d "qa/reports-temp" ]; then
-            find qa/reports-temp -type d -maxdepth 1 | tail -n +2 | while read dir; do
-              date_dir=$(basename "$dir")
-              mkdir -p "qa/reports/$date_dir"
-              cp "$dir"/* "qa/reports/$date_dir/" 2>/dev/null || true
-            done
-          fi
-
       - name: Run QA suite
         run: |
           chmod +x ./scripts/qa-comparison.sh
