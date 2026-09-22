@@ -1,9 +1,9 @@
-name: QA Recurring Every 48 Hours
+name: QA Recurring Daily
 
 on:
   schedule:
-    # Every 2 days at 04:00 UTC
-    - cron: '0 4 */2 * *'
+    # Every day at 04:00 UTC (true recurring interval across month boundaries)
+    - cron: '0 4 * * *'
   workflow_dispatch:
     inputs:
       previous_run:
