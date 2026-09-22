@@ -1,4 +1,4 @@
-name: QA — Recurring Every 48 Hours
+name: QA Recurring Every 48 Hours
 
 on:
   schedule:
@@ -46,16 +46,10 @@ jobs:
 
       - name: Check QA results
         run: |
-          # Exit with error if any critical checks failed
-          if [ -f qa/reports/*/qa-status.json ]; then
-            # Will be implemented when comparison logic is complete
-            echo "QA results recorded"
+          # Verify QA reports were created
+          if [ -d "qa/reports" ]; then
+            echo "QA reports directory created"
+            find qa/reports -name "qa-status.json" | head -5
+          else
+            echo "Warning: QA reports directory not found"
           fi
-
-      - name: Comment on PR (if applicable)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Optional: Post QA results summary as a comment
-            // Implementation depends on report format
