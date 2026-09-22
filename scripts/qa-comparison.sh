@@ -36,8 +36,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Check if enough time has elapsed since last run (48 hours)
-check_elapsed_time() {
+# Check if enough time has elapsed since last run (48 hours, CI only)
+check_elapsed_time_ci() {
+  # Only enforce 48-hour cadence in CI (GitHub Actions)
+  if [[ "$GITHUB_ACTIONS" != "true" ]]; then
+    return 0  # Skip check for local/manual runs
+  fi
+
   if [[ -z "$PREVIOUS_RUN" ]]; then
     # Try to find most recent previous run
     PREVIOUS_RUN=$(ls -t "$REPORT_DIR" 2>/dev/null | grep -v "$TODAY" | head -1)
@@ -54,7 +59,7 @@ check_elapsed_time() {
 
       if [[ $elapsed -lt $threshold ]]; then
         echo "=========================================="
-        echo "ServiceOS QA Skipped"
+        echo "ServiceOS QA Skipped (CI cadence check)"
         echo "=========================================="
         echo "Last run: $PREVIOUS_RUN"
         echo "Elapsed: $((elapsed / 3600)) hours (< 48 hours required)"
@@ -66,7 +71,7 @@ check_elapsed_time() {
   fi
 }
 
-check_elapsed_time
+check_elapsed_time_ci
 
 # Create today's report directory
 mkdir -p "$REPORT_DIR/$TODAY"
