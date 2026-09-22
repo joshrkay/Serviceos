@@ -147,16 +147,20 @@ compare_against_previous() {
         local prev_status=$(grep "\"$check\"" "$prev_json" 2>/dev/null | sed 's/.*"status": "\([^"]*\)".*/\1/' | head -1)
         [[ -z "$prev_status" ]] && prev_status="unknown"
 
-        # Detect fix or regression
-        if [[ "$prev_status" == "fail" ]] && [[ "$curr_status" == "pass" ]]; then
-          echo "  ✅ FIXED: $check (was failing, now passing)"
-          ((fixes++))
-        elif [[ "$prev_status" == "pass" ]] && [[ "$curr_status" == "fail" ]]; then
-          echo "  ❌ REGRESSION: $check (was passing, now failing)"
+        # Helper: check if status is passing
+        is_passing() { [[ "$1" == "pass" ]]; }
+        is_failing() { [[ "$1" != "pass" && "$1" != "unknown" ]]; }
+
+        # Detect fix or regression (compare passing vs non-passing states)
+        if is_passing "$prev_status" && ! is_passing "$curr_status"; then
+          echo "  ❌ REGRESSION: $check (was passing, now $curr_status)"
           ((regressions++))
           OVERALL_STATUS=1
-        elif [[ "$prev_status" == "unknown" ]] && [[ "$curr_status" == "fail" ]]; then
-          echo "  ➕ NEW: $check (new failure)"
+        elif ! is_passing "$prev_status" && is_passing "$curr_status"; then
+          echo "  ✅ FIXED: $check (was $prev_status, now passing)"
+          ((fixes++))
+        elif [[ "$prev_status" == "unknown" ]] && is_failing "$curr_status"; then
+          echo "  ➕ NEW: $check (new failure: $curr_status)"
           ((new_failures++))
         fi
       done < "$RESULTS_FILE"
@@ -215,6 +219,12 @@ if npm run typecheck:web > /dev/null 2>&1; then
   record_result "typecheck:web" "pass" "0 errors" true
 else
   record_result "typecheck:web" "fail" "Errors found" true
+fi
+
+if npm run typecheck:corpus > /dev/null 2>&1; then
+  record_result "typecheck:corpus" "pass" "0 errors" true
+else
+  record_result "typecheck:corpus" "fail" "Errors found" true
 fi
 
 echo ""
@@ -295,9 +305,9 @@ echo ""
 echo "[7/8] E2E Tests..."
 if [[ -n "$E2E_BASE_URL" ]]; then
   if run_with_timeout 300 npm run e2e:smoke 2>/tmp/qa-e2e.log > /tmp/qa-e2e.out 2>&1; then
-    record_result "test:e2e" "pass" "Smoke tests passed" false
+    record_result "test:e2e" "pass" "Smoke tests passed" true
   else
-    record_result "test:e2e" "fail" "Failed or timed out" false
+    record_result "test:e2e" "fail" "Failed or timed out" true
   fi
 else
   record_result "test:e2e" "skip" "E2E_BASE_URL not set" false
