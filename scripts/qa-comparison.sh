@@ -262,7 +262,7 @@ if [[ $API_EXIT -eq 0 ]]; then
 elif [[ $API_EXIT -eq 124 ]]; then
   record_result "test:api" "timeout" "Exceeded 300s (infrastructure issue)" false
 else
-  record_result "test:api" "fail" "Tests failed" false
+  record_result "test:api" "fail" "Tests failed" true
 fi
 
 echo ""
@@ -277,7 +277,7 @@ if [[ $WEB_EXIT -eq 0 ]]; then
 elif [[ $WEB_EXIT -eq 124 ]]; then
   record_result "test:web" "timeout" "Exceeded 300s (infrastructure issue)" false
 else
-  record_result "test:web" "fail" "Tests failed" false
+  record_result "test:web" "fail" "Tests failed" true
 fi
 
 echo ""
