@@ -18,6 +18,18 @@ VERBOSE=false
 OVERALL_STATUS=0
 RESULTS_FILE="/tmp/qa-results-$$.txt"  # Bash 3.2 compatible (no associative arrays)
 
+# Portable timeout wrapper (GNU timeout not available on macOS)
+run_with_timeout() {
+  local timeout_secs=$1
+  shift
+  if command -v timeout &> /dev/null; then
+    timeout "$timeout_secs" "$@"
+  else
+    # No timeout available; run without timeout (macOS fallback)
+    "$@"
+  fi
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -131,8 +143,9 @@ compare_against_previous() {
       local new_failures=0
 
       while IFS='|' read -r check curr_status curr_details; do
-        # Extract previous status (simplified; proper JSON parsing would be better)
-        local prev_status=$(grep -oP "\"$check\".*?\"status\": \"\\K[^\"]*" "$prev_json" 2>/dev/null || echo "unknown")
+        # Extract previous status (portable: grep + sed instead of GNU grep -P)
+        local prev_status=$(grep "\"$check\"" "$prev_json" 2>/dev/null | sed 's/.*"status": "\([^"]*\)".*/\1/' | head -1)
+        [[ -z "$prev_status" ]] && prev_status="unknown"
 
         # Detect fix or regression
         if [[ "$prev_status" == "fail" ]] && [[ "$curr_status" == "pass" ]]; then
@@ -231,7 +244,7 @@ echo ""
 
 # 4. API Unit Tests (with timeout)
 echo "[4/8] Unit Tests - API Package (timeout 300s)..."
-timeout 300 npm test --workspace=packages/api > /tmp/qa-api.out 2>&1
+run_with_timeout 300 npm test --workspace=packages/api > /tmp/qa-api.out 2>&1
 API_EXIT=$?
 if [[ $API_EXIT -eq 0 ]]; then
   API_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-api.out | head -1)
@@ -246,7 +259,7 @@ echo ""
 
 # 5. Web Unit Tests (with timeout)
 echo "[5/8] Unit Tests - Web Package (timeout 300s)..."
-timeout 300 npm test --workspace=packages/web > /tmp/qa-web.out 2>&1
+run_with_timeout 300 npm test --workspace=packages/web > /tmp/qa-web.out 2>&1
 WEB_EXIT=$?
 if [[ $WEB_EXIT -eq 0 ]]; then
   WEB_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-web.out | head -1)
@@ -262,7 +275,7 @@ echo ""
 # 6. Integration Tests
 echo "[6/8] Integration Tests..."
 if command -v docker &> /dev/null && docker ps &> /dev/null; then
-  timeout 300 npm run test:integration --workspace=packages/api > /tmp/qa-integration.out 2>&1
+  run_with_timeout 300 npm run test:integration --workspace=packages/api > /tmp/qa-integration.out 2>&1
   INTEGRATION_EXIT=$?
   if [[ $INTEGRATION_EXIT -eq 0 ]]; then
     INTEGRATION_TESTS=$(grep -oP 'Tests\s+\K[^ ]+' /tmp/qa-integration.out | head -1)
@@ -281,7 +294,7 @@ echo ""
 # 7. E2E Tests
 echo "[7/8] E2E Tests..."
 if [[ -n "$E2E_BASE_URL" ]]; then
-  if timeout 300 npm run e2e:smoke 2>/tmp/qa-e2e.log > /tmp/qa-e2e.out 2>&1; then
+  if run_with_timeout 300 npm run e2e:smoke 2>/tmp/qa-e2e.log > /tmp/qa-e2e.out 2>&1; then
     record_result "test:e2e" "pass" "Smoke tests passed" false
   else
     record_result "test:e2e" "fail" "Failed or timed out" false

@@ -14,8 +14,9 @@
 # 1. Run automated QA suite
 ./scripts/qa-comparison.sh --verbose
 
-# 2. Open findings report
-cat qa/QA-FINDINGS-$(date +%Y-%m-%d).md
+# 2. Review automated results
+cat qa/reports/$(date +%Y-%m-%d)/qa-status.json
+cat qa/reports/$(date +%Y-%m-%d)/lint-report.txt
 
 # 3. Manual testing (reference checklist)
 # Follow qa/QA-MANUAL-CHECKLIST.md
