@@ -23,7 +23,6 @@ jobs:
         run: npm ci
 
       - name: Install Playwright Chromium
-        if: secrets.E2E_BASE_URL != ''
         run: npx playwright install --with-deps chromium
 
       - name: Run QA suite
