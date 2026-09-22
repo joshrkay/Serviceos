@@ -16,7 +16,7 @@ TODAY=$(date +%Y-%m-%d)
 PREVIOUS_RUN=""
 VERBOSE=false
 OVERALL_STATUS=0
-declare -A CHECK_RESULTS
+RESULTS_FILE="/tmp/qa-results-$$.txt"  # Bash 3.2 compatible (no associative arrays)
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -86,7 +86,7 @@ echo ""
 save_results_json() {
   local results_file="$REPORT_DIR/$TODAY/qa-status.json"
 
-  # Build JSON from CHECK_RESULTS associative array
+  # Build JSON from RESULTS_FILE (Bash 3.2 compatible)
   cat > "$results_file" <<'JSON'
 {
 JSON
@@ -95,9 +95,7 @@ JSON
   echo "  \"checks\": {" >> "$results_file"
 
   local first=true
-  for check in "${!CHECK_RESULTS[@]}"; do
-    IFS='|' read -r status details <<< "${CHECK_RESULTS[$check]}"
-
+  while IFS='|' read -r check status details; do
     if [[ "$first" == true ]]; then
       first=false
     else
@@ -105,7 +103,7 @@ JSON
     fi
 
     printf '    "%s": {"status": "%s", "details": "%s"}' "$check" "$status" "$details" >> "$results_file"
-  done
+  done < "$RESULTS_FILE"
 
   echo "" >> "$results_file"
   echo "  }" >> "$results_file"
@@ -132,9 +130,7 @@ compare_against_previous() {
       local regressions=0
       local new_failures=0
 
-      for check in "${!CHECK_RESULTS[@]}"; do
-        IFS='|' read -r curr_status curr_details <<< "${CHECK_RESULTS[$check]}"
-
+      while IFS='|' read -r check curr_status curr_details; do
         # Extract previous status (simplified; proper JSON parsing would be better)
         local prev_status=$(grep -oP "\"$check\".*?\"status\": \"\\K[^\"]*" "$prev_json" 2>/dev/null || echo "unknown")
 
@@ -150,7 +146,7 @@ compare_against_previous() {
           echo "  ➕ NEW: $check (new failure)"
           ((new_failures++))
         fi
-      done
+      done < "$RESULTS_FILE"
 
       echo ""
       echo "Summary:"
@@ -175,8 +171,8 @@ record_result() {
   local details=$3
   local required=${4:-true}  # Is this a required check?
 
-  # Store result
-  CHECK_RESULTS["$check_name"]="$status|$details"
+  # Store result (Bash 3.2 compatible: write to file instead of associative array)
+  echo "$check_name|$status|$details" >> "$RESULTS_FILE"
 
   # Log with icon
   local icon

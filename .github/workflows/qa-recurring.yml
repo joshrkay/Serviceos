@@ -22,12 +22,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Playwright Chromium
+        if: secrets.E2E_BASE_URL != ''
+        run: npx playwright install --with-deps chromium
+
       - name: Run QA suite
         run: |
           chmod +x ./scripts/qa-comparison.sh
           ./scripts/qa-comparison.sh --verbose
         env:
           E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_API_URL: ${{ secrets.E2E_API_URL }}
 
       - name: Upload QA reports
         if: always()
