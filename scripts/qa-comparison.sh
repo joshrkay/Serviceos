@@ -293,7 +293,7 @@ if command -v docker &> /dev/null && docker ps &> /dev/null; then
   elif [[ $INTEGRATION_EXIT -eq 124 ]]; then
     record_result "test:integration" "timeout" "Exceeded 300s" false
   else
-    record_result "test:integration" "fail" "Setup or execution failed" false
+    record_result "test:integration" "fail" "Setup or execution failed" true
   fi
 else
   record_result "test:integration" "skip" "Docker not available" false
