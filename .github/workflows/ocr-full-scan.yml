@@ -1,0 +1,164 @@
+# Open Code Review — full repository scan (not just the PR diff)
+# Uses `ocr scan` and uploads JSON + a summary comment on a tracking issue.
+
+name: OpenCodeReview Full Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: Path to scan (empty = whole repo; e.g. packages/api)
+        required: false
+        default: ''
+      effort:
+        description: Review effort (low | medium | high)
+        required: false
+        default: high
+  schedule:
+    # Mondays 9:14 AM America/Phoenix ≈ 16:14 UTC
+    - cron: '14 16 * * 1'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ocr-full-scan
+  cancel-in-progress: true
+
+jobs:
+  full-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Open Code Review
+        run: npm install -g @alibaba-group/open-code-review@1.12.9
+
+      - name: Configure LLM
+        env:
+          OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+          OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+        run: |
+          set -euo pipefail
+          test -n "${OCR_LLM_URL:-}" || { echo "Missing secret OCR_LLM_URL"; exit 1; }
+          test -n "${OCR_LLM_TOKEN:-}" || { echo "Missing secret OCR_LLM_AUTH_TOKEN"; exit 1; }
+          test -n "${OCR_LLM_MODEL:-}" || { echo "Missing variable OCR_LLM_MODEL"; exit 1; }
+          test -n "${OCR_USE_ANTHROPIC:-}" || { echo "Missing variable OCR_LLM_USE_ANTHROPIC"; exit 1; }
+          ocr config set llm.url "$OCR_LLM_URL"
+          ocr config set llm.token "$OCR_LLM_TOKEN"
+          ocr config set llm.model "$OCR_LLM_MODEL"
+          if [[ "${OCR_USE_ANTHROPIC}" =~ ^(true|TRUE|1|yes|YES)$ ]]; then
+            ocr config set llm.protocol anthropic
+          else
+            ocr config set llm.protocol openai
+          fi
+          ocr config set language English
+          ocr config set llm.extra_body '{"thinking":{"type":"disabled"}}'
+
+      - name: Run full scan
+        id: scan
+        env:
+          SCAN_PATH: ${{ github.event.inputs.path || '' }}
+          EFFORT: ${{ github.event.inputs.effort || 'high' }}
+        run: |
+          set -euo pipefail
+          ARGS=(scan --format json --output ocr-full-scan.json --effort "$EFFORT")
+          if [[ -n "${SCAN_PATH}" ]]; then
+            ARGS+=(--path "$SCAN_PATH")
+          fi
+          echo "Running: ocr ${ARGS[*]}"
+          ocr "${ARGS[@]}" || true
+          if [[ ! -f ocr-full-scan.json ]]; then
+            echo "No result file produced"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, pathlib
+          data = json.loads(pathlib.Path("ocr-full-scan.json").read_text())
+          # Tolerate a few shapes
+          findings = data.get("findings") or data.get("comments") or data.get("issues") or []
+          if isinstance(data, list):
+              findings = data
+          by_sev = {}
+          for f in findings if isinstance(findings, list) else []:
+              sev = (f.get("severity") or f.get("level") or "unknown").lower()
+              by_sev[sev] = by_sev.get(sev, 0) + 1
+          summary = f"Findings: {len(findings) if isinstance(findings, list) else 'n/a'} | " + ", ".join(f"{k}={v}" for k,v in sorted(by_sev.items()))
+          pathlib.Path("ocr-full-scan-summary.txt").write_text(summary + "\n")
+          print(summary)
+          PY
+
+      - name: Upload scan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-full-scan
+          path: |
+            ocr-full-scan.json
+            ocr-full-scan-summary.txt
+          if-no-files-found: error
+
+      - name: Post / update tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.existsSync('ocr-full-scan-summary.txt')
+              ? fs.readFileSync('ocr-full-scan-summary.txt', 'utf8').trim()
+              : 'Scan finished (see artifact).';
+            const pathLabel = '${{ github.event.inputs.path || "whole repo" }}';
+            const title = 'Open Code Review — full scan results';
+            const body = [
+              '## Full-repo Open Code Review scan',
+              '',
+              `- Run: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              `- Path: \`${pathLabel}\``,
+              `- Effort: \`${'${{ github.event.inputs.effort || "high" }}'}\``,
+              `- ${summary}`,
+              '',
+              'Download the `ocr-full-scan` artifact on the workflow run for the full JSON.',
+              '',
+              '<!-- ocr-full-scan-tracker -->'
+            ].join('\n');
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            const existing = issues.find(i => (i.body || '').includes('<!-- ocr-full-scan-tracker -->'));
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `New full scan posted.\n\n${summary}`
+              });
+              core.info(`Updated issue #${existing.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: []
+              });
+              core.info(`Opened issue #${created.data.number}`);
+            }
