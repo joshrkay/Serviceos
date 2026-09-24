@@ -409,7 +409,9 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
     const publicPaths = [
       '/login',
       '/signup',
-      '/onboarding',
+      // '/onboarding' is deliberately NOT here: it is the post-sign-up landing
+      // page and the Stripe checkout return target, so it sits under the
+      // guard (see internalPaths) and a signed-out visit bounces to /login.
       '/e/:id',
       '/pay/:id',
       '/intake',
@@ -429,6 +431,7 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
     // dispatcher route under the guard is verified, and a route that
     // accidentally moves OUT of the guarded subtree fails the test.
     const internalPaths = [
+      'onboarding',
       'assistant',
       'jobs',
       'schedule',
