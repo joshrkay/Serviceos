@@ -98,3 +98,38 @@ Gotchas:
 
 ## Teardown
 `fuser -k 5173/tcp 3000/tcp` and `rm packages/web/.env.local`.
+
+## Signed-out flows and the nginx edge (added 2026-09-23)
+
+The dev shim above is always signed in, so it cannot show a signed-out path
+(auth-guard redirects, `/login` bounces). For those, boot vite against the
+real Clerk **development** instance instead — it accepts localhost origins:
+
+```
+# packages/web/.env.local
+VITE_CLERK_PUBLISHABLE_KEY=pk_test_cm9tYW50aWMtbGFyay00OC5jbGVyay5hY2NvdW50cy5kZXYk
+VITE_API_URL=https://serviceosapi-development.up.railway.app
+```
+`npx vite --port 5173 --host 127.0.0.1` (no `VITE_AUTH_MODE`), then load the
+route in a browser; `history.state.usr.from` shows what the guard preserved.
+Never type a password/code into a real browser for this — the signed-out
+observation is the point.
+
+Response headers (CSP, HSTS) come from **nginx**, not vite, so verify them on
+the real image. Docker needs Colima here (`colima start`), then build straight
+from a branch without touching the working tree:
+
+```bash
+git archive --format=tar <branch> | docker build -t web-verify -f packages/web/Dockerfile -
+docker run -d --rm --name web-verify -p 127.0.0.1:8089:8080 -e PORT=8080 \
+  -e API_URL=https://serviceosapi-production.up.railway.app \
+  -e VITE_CLERK_PUBLISHABLE_KEY=<key under test> -e VITE_STRIPE_PUBLISHABLE_KEY=x \
+  -e VITE_ONBOARDING_V2_ENABLED= -e VITE_POSTHOG_KEY= -e VITE_POSTHOG_HOST= web-verify
+curl -sI http://127.0.0.1:8089/signup | grep -i content-security-policy
+```
+With the **production** Clerk key from localhost, a loaded Clerk shows
+`Clerk: Production Keys are only allowed for domain "therivetapp.com"` — that
+error is the success signal (script + Frontend API reached); a CSP block shows
+`failed_to_load_clerk_js` and `window.Clerk` stays undefined. For an A/B at the
+same surface, hot-swap the header snippet and reload nginx:
+`git show <ref>:packages/web/security-headers.conf | docker exec -i web-verify sh -c 'cat > /etc/nginx/security-headers.conf' && docker exec web-verify nginx -s reload`.
