@@ -6,6 +6,7 @@ import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toErrorResponse } from '../shared/errors';
+import { publicUrl } from '../shared/public-origins';
 import { SettingsRepository } from '../settings/settings';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -871,12 +872,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
 
-        const webUrl =
-          process.env.WEB_URL ??
-          process.env.APP_PUBLIC_URL ??
-          'http://localhost:5173';
-        const successUrl = `${webUrl}/onboarding?billing=ok`;
-        const cancelUrl = `${webUrl}/onboarding?billing=cancel`;
+        // Where the customer lands after Stripe: the SPA (web origin), never
+        // the API host. Resolved once by loadConfig(); see config.publicOrigins.
+        const successUrl = publicUrl('web', '/onboarding', { billing: 'ok' });
+        const cancelUrl = publicUrl('web', '/onboarding', { billing: 'cancel' });
 
         const result = await billingService.createTrialCheckoutSession({
           tenantId,
