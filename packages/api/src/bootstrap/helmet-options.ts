@@ -32,9 +32,18 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
             scriptSrc: [
               "'self'",
               'https://js.stripe.com',
+              // Clerk Frontend API host encoded in the pk_live_ publishable key
+              // (a custom domain — *.clerk.com / *.clerk.accounts.dev do not
+              // match it). clerk-js is served from here; omit it and every
+              // auth page renders blank. Keep in sync with
+              // packages/web/security-headers.conf (the nginx edge).
+              'https://clerk.therivetapp.com',
               'https://*.clerk.com',
               'https://*.clerk.accounts.dev',
               'https://clerk.com',
+              // Clerk sign-up bot protection (Cloudflare Turnstile).
+              'https://challenges.cloudflare.com',
+              'https://*.protect.clerk.com',
               'https://sdk.twilio.com',
               'https://media.twiliocdn.com',
               // PostHog analytics: posthog-js lazy-loads optional modules
@@ -51,9 +60,11 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
             connectSrc: [
               "'self'",
               'https://api.stripe.com',
+              'https://clerk.therivetapp.com',
               'https://*.clerk.com',
               'https://clerk.com',
               'https://*.clerk.accounts.dev',
+              'https://*.protect.clerk.com:*',
               'wss://*.twilio.com',
               'https://*.twilio.com',
               // Live voice dictation streams mic audio from the browser
@@ -79,6 +90,8 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               'https://js.stripe.com',
               'https://hooks.stripe.com',
               'https://*.clerk.com',
+              'https://challenges.cloudflare.com',
+              'https://*.protect.clerk.com',
             ],
             workerSrc: ["'self'", 'blob:'],
             objectSrc: ["'none'"],
