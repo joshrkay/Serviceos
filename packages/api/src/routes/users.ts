@@ -52,9 +52,7 @@ export interface UsersRouteDeps {
   clerkSecretKey?: string;
   /** Defaults to global fetch. Tests inject a stub. */
   clerkFetch?: typeof fetch;
-  /** Public web URL used as the redirect target after accept. */
-  appBaseUrl?: string;
-  /**
+  /** Public web URL used as the redirect target after accept. */  /**
    * Account deletion purges the user's push tokens server-side — the
    * client's own sign-out cleanup can't run once its credentials are dead.
    */

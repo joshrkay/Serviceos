@@ -16,13 +16,12 @@
  */
 import { PendingInvitation, PendingInvitationRepository } from './pending-invitation';
 import { UserRole } from './user';
+import { publicUrl } from '../shared/public-origins';
 
 export interface ClerkInvitationConfig {
   clerkSecretKey?: string;
   /** Defaults to global fetch. Tests inject a stub. */
   clerkFetch?: typeof fetch;
-  /** Public web URL used as the redirect target after accept. */
-  appBaseUrl?: string;
 }
 
 export interface InviteTeamMemberInput {
@@ -53,7 +52,9 @@ export async function inviteTeamMember(
   if (clerk.clerkSecretKey) {
     try {
       const fetchFn = clerk.clerkFetch ?? fetch;
-      const redirectUrl = `${clerk.appBaseUrl ?? ''}/accept-invitation?invitation_id=${encodeURIComponent(invitation.id)}`;
+      // Where the invitee lands after Clerk sign-up: the SPA (web origin),
+      // never the API host. Resolved once by loadConfig().
+      const redirectUrl = publicUrl('web', '/accept-invitation', { invitation_id: invitation.id });
       const clerkRes = await fetchFn('https://api.clerk.com/v1/invitations', {
         method: 'POST',
         headers: {

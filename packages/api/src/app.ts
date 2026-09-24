@@ -1968,7 +1968,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     pendingInvitationRepo,
     clerkInvitationConfig: {
       clerkSecretKey: process.env.CLERK_SECRET_KEY,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     },
     // B1.18 — update_brand_voice writes through the SAME versioned path
     // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
@@ -5120,7 +5119,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // accept side reads what the invite side wrote.
         pendingInvitationRepo,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
-        appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
         // Account deletion purges the user's push tokens server-side.
         deviceTokenRepo,
       },
