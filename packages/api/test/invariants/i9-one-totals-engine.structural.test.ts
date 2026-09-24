@@ -43,7 +43,7 @@
  * as the P0-2 bug it was written to close.
  *
  * Two MORE unrounded copies sit on the SPOKEN quote readback
- * (`ai/voice-turn/quote-readback.ts:82`, `create-voice-turn-processor.ts:444`),
+ * (formerly `ai/voice-turn/quote-readback.ts:82` and `create-voice-turn-processor.ts:444`; the readback now derives from the engine),
  * so the total the owner hears is recomputed rather than read from the engine
  * and need not equal the persisted one. Both surfaced in review round 4: the
  * sweep matched only `quantity * unitPrice`, and multiplication commutes.
@@ -221,16 +221,6 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     at: 'src/proposals/execution/handlers.ts:838',
     as: 'violation',
     why: "`Math.round(quantity * unitPriceCents)` in the execution line-item normalizer duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap.",
-  },
-  {
-    at: 'src/ai/voice-turn/quote-readback.ts:82',
-    as: 'violation',
-    why: "`(li.unitPrice ?? 0) * qty` — a line total with NO rounding, feeding the SPOKEN quote readback. Same defect class as calculateEstimateTotal, on the surface the customer hears: a fractional quantity makes the spoken total a non-integer number of cents that need not equal the persisted total. Found in review round 4; the sweep matched only `quantity * unitPrice`, and multiplication commutes.",
-  },
-  {
-    at: 'src/ai/voice-turn/create-voice-turn-processor.ts:444',
-    as: 'violation',
-    why: "`sum + li.unitPrice * qty` — an unrounded SUBTOTAL over readback lines. The spoken quote total is recomputed here rather than read from the engine, so it can diverge from the proposal's own total. I3′-adjacent: a readback should derive from the payload, not recalculate it.",
   },
   {
     at: 'src/proposals/resolve-line.ts:237',

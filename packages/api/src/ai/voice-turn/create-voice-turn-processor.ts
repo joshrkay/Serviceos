@@ -239,7 +239,7 @@ import {
   type SchedulingEntityResolution,
 } from '../agents/customer-calling/entity-resolution';
 import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
-import { buildQuoteReadback, type QuoteReadbackLine } from './quote-readback';
+import { buildQuoteReadback, quoteReadbackTotalCents, type QuoteReadbackLine } from './quote-readback';
 import { parseLeadingQuantity } from './quantity-parse';
 import type { LLMGateway } from '../gateway/gateway';
 import type {
@@ -437,12 +437,10 @@ function finalizeGroundedQuote(
     ...(typeof li.description === 'string' ? { description: li.description } : {}),
   }));
   const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
-  // WS18 — the spoken total (integer cents; formatCents divides by 100). Sum of
-  // each line's unit price × quantity, exactly what buildQuoteReadback recites.
-  const totalCents = readbackLines.reduce((sum, li) => {
-    const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
-    return sum + (typeof li.unitPrice === 'number' ? li.unitPrice * qty : 0);
-  }, 0);
+  // WS18 — the spoken total (integer cents): the SAME number buildQuoteReadback
+  // recites, derived from the billing engine's per-line rule inside the
+  // readback module. Never recomputed here (I9′: one totals engine).
+  const totalCents = quoteReadbackTotalCents(readbackLines);
 
   return {
     lineItems,
