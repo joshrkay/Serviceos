@@ -60,4 +60,39 @@ for (const [name, dockerfile] of [
   );
 }
 
+const cspValue = snippet.match(/add_header Content-Security-Policy "([^"]+)"/)?.[1];
+assert.ok(cspValue, 'CSP header must be present');
+const directives = new Map(
+  cspValue
+    .split(';')
+    .map((d) => d.trim())
+    .filter(Boolean)
+    .map((d) => {
+      const [name, ...sources] = d.split(/\s+/);
+      return [name, sources];
+    }),
+);
+
+// Clerk loads clerk-js and talks to its Frontend API from the instance's FAPI
+// host. In production that host is the custom domain encoded in the pk_live_
+// publishable key (clerk.therivetapp.com), NOT a *.clerk.com / *.clerk.accounts.dev
+// host — leaving it out blanked /login and /signup in prod (2026-09-17..23).
+// Sign-up bot protection is Cloudflare Turnstile, which needs its script and
+// iframe origins. See https://clerk.com/docs/guides/secure/best-practices/csp-headers
+const clerkRequirements = [
+  ['script-src', 'https://clerk.therivetapp.com'],
+  ['connect-src', 'https://clerk.therivetapp.com'],
+  ['script-src', 'https://challenges.cloudflare.com'],
+  ['frame-src', 'https://challenges.cloudflare.com'],
+  ['script-src', 'https://*.protect.clerk.com'],
+  ['connect-src', 'https://*.protect.clerk.com:*'],
+  ['frame-src', 'https://*.protect.clerk.com'],
+];
+for (const [directive, origin] of clerkRequirements) {
+  assert.ok(
+    directives.get(directive)?.includes(origin),
+    `${directive} must allow ${origin} (Clerk production FAPI / Turnstile)`,
+  );
+}
+
 console.log('PASS: both web hosts emit the approved security-header contract');
