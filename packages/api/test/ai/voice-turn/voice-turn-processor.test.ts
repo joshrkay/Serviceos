@@ -288,7 +288,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
       }),
       JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
     ]);
-    const { processor, session, proposalRepo } = makeCtx({
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
       gateway,
       withRepos: true,
     });
