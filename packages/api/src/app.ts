@@ -1433,7 +1433,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const feedbackDispatcher = messageDelivery
     ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
     : new NoopFeedbackDispatcher();
-  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const publicBaseUrl = config.publicOrigins.web;
   const sendService = messageDelivery
     ? new SendService({
         delivery: messageDelivery,
@@ -1629,7 +1629,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // ── Onboarding lifecycle emails. The frontend origin backs the CTA links
   // (/onboarding, /settings) and the support address backs the footer ask;
   // shared by the welcome worker (below) and the setup/trial sweeps.
-  const lifecycleEmailAppBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const lifecycleEmailAppBaseUrl = config.publicOrigins.web;
   const lifecycleEmailSupportEmail =
     process.env.SUPPORT_EMAIL ?? process.env.SENDGRID_REPLY_TO_EMAIL ?? 'support@rivet.ai';
   const lifecycleEmailWorker = createLifecycleEmailWorker({
@@ -2775,7 +2775,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
-    publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    publicBaseUrl: config.publicOrigins.web,
   });
   workerRegistry.set(
     feedbackSendWorker.type,
@@ -3155,9 +3155,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     syncService: calendarSyncService,
     // appBaseUrl is the FRONTEND URL we redirect the operator's
     // browser back to after OAuth completes. The API/callback URL is
-    // separate (googleApiUrl). 5173 is the Vite dev default; matches
-    // publicBaseUrl elsewhere in this file.
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    // separate (googleApiUrl). The origin is config.publicOrigins.web,
+    // resolved once by loadConfig() (see shared/config.ts).
+    appBaseUrl: config.publicOrigins.web,
     // D2-1d: emit calendar_integration.{connected,disconnected,
     // callback_consumed} for the per-user Google OAuth lifecycle. The
     // callback uses `system:google-oauth-callback` because there is no
@@ -3182,7 +3182,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     integrationRepo: googleBusinessIntegrationRepo,
     stateRepo: oauthStateRepo,
     googleConfig: googleBusinessOAuthConfig,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    appBaseUrl: config.publicOrigins.web,
     auditRepo,
     // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
     // credential (failed refresh) degrades visibly in Settings.
@@ -3205,7 +3205,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     customerRepo,
     jobRepo,
     qboConfig,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    appBaseUrl: config.publicOrigins.web,
     auditRepo,
     logger: createLogger({
       service: 'accounting-integrations',
@@ -4164,7 +4164,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // (outbound-call-service uses PUBLIC_API_URL ?? publicBaseUrl); otherwise
       // the signed URL and the reconstructed URL diverge when PUBLIC_API_URL is
       // unset and every callback 403s.
-      publicBaseUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+      publicBaseUrl: config.publicOrigins.api,
     }),
   );
 

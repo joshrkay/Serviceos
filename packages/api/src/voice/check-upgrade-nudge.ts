@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { loadConfig } from '../shared/config';
 
 /**
  * Cumulative trial minutes at which we surface the early-upgrade nudge.
@@ -75,7 +76,7 @@ export async function checkAndFireUpgradeNudge(
 
   if (deps.sendEmail && tenant.owner_email) {
     try {
-      const webUrl = deps.webUrl ?? process.env.WEB_URL ?? '';
+      const webUrl = deps.webUrl ?? loadConfig().publicOrigins.web;
       await deps.sendEmail({
         to: tenant.owner_email,
         subject: "Your AI agent is earning — lock in your subscription",
