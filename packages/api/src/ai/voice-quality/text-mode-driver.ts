@@ -451,10 +451,7 @@ export class TextModeDriver implements AgentDriver {
       ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
       ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
-      ...(deps.invoiceRepo ? { invoiceRepo: deps.invoiceRepo } : {}),
-      ...(deps.estimateRepo ? { estimateRepo: deps.estimateRepo } : {}),
       ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
-      ...(deps.leadRepo ? { leadRepo: deps.leadRepo } : {}),
       ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
       // P0 voice-safety — the harness resolves spoken references through the
       // same resolver the driver already hands the voice-action-router, so a
