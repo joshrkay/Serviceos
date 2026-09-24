@@ -625,6 +625,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
 
+  // Non-fatal configuration findings (deprecated variables such as
+  // APP_PUBLIC_URL). Logged once at boot so an operator sees them in the
+  // deploy log; the fatal cases already threw inside loadConfig().
+  if (config.warnings.length > 0) {
+    const configBootLogger = createLogger({
+      service: 'api-boot',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    for (const warning of config.warnings) {
+      configBootLogger.warn('configuration warning', { warning });
+    }
+  }
+
   // FIX 10(i) (ANS-001) — boot-time readiness gate for the E1 life-safety
   // script. This is the ONE consumer of E1_SCRIPT_REVIEW_REQUIRED; without
   // it a placeholder life-safety script could ship silently forever. Purely

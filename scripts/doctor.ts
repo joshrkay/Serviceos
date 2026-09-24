@@ -302,6 +302,45 @@ export function checkEnvVars(
   };
 }
 
+/**
+ * Public origins (config.publicOrigins). The API refuses to boot in prod when
+ * WEB_URL / PUBLIC_API_URL are missing, equal or not https; this is the same
+ * rule as a pre-flight warning, plus the deprecation of APP_PUBLIC_URL, which
+ * boot only warns about.
+ */
+export function checkPublicOrigins(
+  env: NodeJS.ProcessEnv = process.env,
+): CheckResult {
+  const problems: string[] = [];
+  if (env.APP_PUBLIC_URL) {
+    problems.push(
+      'APP_PUBLIC_URL is deprecated (alias for WEB_URL; never the API origin)',
+    );
+  }
+  if (!env.WEB_URL && !env.APP_PUBLIC_URL) problems.push('WEB_URL unset');
+  if (!env.PUBLIC_API_URL) problems.push('PUBLIC_API_URL unset');
+  const web = env.WEB_URL ?? env.APP_PUBLIC_URL;
+  if (web && env.PUBLIC_API_URL && web.replace(/\/$/, '') === env.PUBLIC_API_URL.replace(/\/$/, '')) {
+    problems.push('WEB_URL and PUBLIC_API_URL are the same origin');
+  }
+  if (problems.length === 0) {
+    return {
+      name: 'public origins',
+      status: 'OK',
+      detail: `web=${web} api=${env.PUBLIC_API_URL}`,
+      required: false,
+    };
+  }
+  return {
+    name: 'public origins',
+    status: 'warn',
+    detail: problems.join('; '),
+    remedy:
+      'Set WEB_URL (where humans open the app) and PUBLIC_API_URL (where Twilio/Stripe/OAuth call back); drop APP_PUBLIC_URL.',
+    required: false,
+  };
+}
+
 export async function runDoctor(
   opts: { integration?: boolean; root?: string } = {},
 ): Promise<CheckResult[]> {
@@ -336,6 +375,7 @@ export async function runDoctor(
     ...checkInstallLocations(root),
     checkDocker(opts.integration === true),
     checkEnvVars(root),
+    checkPublicOrigins(),
   ];
 }
 
