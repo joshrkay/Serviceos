@@ -21,6 +21,8 @@ import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
+import type { CallPlanId } from '../billing/call-usage-pricing';
+import { planIncludesQuickBooks, quickBooksUpgradeRequired } from '../billing/plan-features';
 
 /**
  * F17 / P15-001 — Per-tenant accounting integrations.
@@ -45,6 +47,16 @@ export interface IntegrationsRouteDeps {
   appBaseUrl?: string;
   auditRepo?: AuditRepository;
   logger?: Logger;
+  /** The tenant's Rivet plan; QuickBooks connect/sync is Growth-only. */
+  planForTenant?: (tenantId: string) => Promise<CallPlanId | null>;
+}
+
+/** Throws PLAN_UPGRADE_REQUIRED unless the tenant's plan includes QuickBooks. */
+async function assertQuickBooksPlan(deps: IntegrationsRouteDeps, tenantId: string): Promise<void> {
+  if (!deps.planForTenant) return;
+  if (!planIncludesQuickBooks(await deps.planForTenant(tenantId))) {
+    throw quickBooksUpgradeRequired();
+  }
 }
 
 function isSafeRelativePath(value: string | undefined): value is string {
@@ -171,6 +183,7 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
       if (!deps.qboConfig) {
         throw new ValidationError('QuickBooks integration is not configured');
       }
+      await assertQuickBooksPlan(deps, req.auth!.tenantId);
       const rawRedirect =
         typeof req.body?.redirectAfter === 'string' ? req.body.redirectAfter : undefined;
       const redirectAfter = isSafeRelativePath(rawRedirect) ? rawRedirect : undefined;
@@ -247,6 +260,7 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
       if (!deps.qboConfig || !deps.logger) {
         throw new ValidationError('QuickBooks sync is not configured');
       }
+      await assertQuickBooksPlan(deps, req.auth!.tenantId);
       const integration = await deps.integrationRepo.findByTenant(
         req.auth!.tenantId,
         'quickbooks',

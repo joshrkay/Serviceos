@@ -69,6 +69,7 @@ import { PgCallUsageRepository } from './billing/call-usage-events';
 import { PgSeatUsageReader } from './users/seat-limit';
 import { PgOverageCapStore } from './billing/overage-cap';
 import { AiUsageReader } from './billing/ai-usage';
+import { readTenantPlanId } from './billing/plan-features';
 import {
   CallUsageBillingService,
   PgCallUsageSettlementRepository,
@@ -3204,6 +3205,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     qboConfig,
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
     auditRepo,
+    // QuickBooks connect/sync is Growth-only (billing/plan-features.ts).
+    ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
     logger: createLogger({
       service: 'accounting-integrations',
       environment: process.env.NODE_ENV ?? 'development',
@@ -6499,6 +6502,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           qboConfig,
           logger: accountingSyncLogger,
+          ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
         });
       }).catch((err) => {
         accountingSyncLogger.error('Accounting sync sweep failed', {
