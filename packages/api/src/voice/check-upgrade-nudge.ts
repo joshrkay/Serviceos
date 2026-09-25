@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { recordFunnelEvent } from '../analytics/posthog';
 import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { TRIAL_MINUTE_LIMITS } from './trial-limits';
 
@@ -34,8 +35,12 @@ export async function checkAndFireUpgradeNudge(
 ): Promise<{ fired: boolean }> {
   const { pool } = deps;
 
-  const tenantRes = await pool.query<{ subscription_status: string | null; owner_email: string | null }>(
-    `SELECT subscription_status, owner_email FROM tenants WHERE id = $1`,
+  const tenantRes = await pool.query<{
+    subscription_status: string | null;
+    owner_email: string | null;
+    owner_id: string | null;
+  }>(
+    `SELECT subscription_status, owner_email, owner_id FROM tenants WHERE id = $1`,
     [tenantId],
   );
   const tenant = tenantRes.rows[0];
@@ -66,6 +71,12 @@ export async function checkAndFireUpgradeNudge(
     [tenantId],
   );
   if ((updateRes.rowCount ?? 0) === 0) return { fired: false };
+
+  recordFunnelEvent({
+    distinctId: tenant.owner_id ?? tenantId,
+    event: 'trial_minutes_milestone',
+    properties: { tenant_id: tenantId, trial_minutes_used: Math.floor(billableSeconds / 60) },
+  });
 
   if (deps.sendEmail && tenant.owner_email) {
     try {

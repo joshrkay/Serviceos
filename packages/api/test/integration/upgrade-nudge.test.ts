@@ -8,10 +8,25 @@ import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
 import { checkAndFireUpgradeNudge } from '../../src/voice/check-upgrade-nudge';
 import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
 
 const OWNER_PHONE = '+14805550100';
+
+/** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
+function capturePostHog() {
+  const capture = vi.fn();
+  process.env.POSTHOG_API_KEY = 'phc_test';
+  __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
+  return {
+    events: () => capture.mock.calls.map((c) => c[0] as { event: string; properties: Record<string, unknown> }),
+    restore: () => {
+      __resetAnalyticsForTests();
+      delete process.env.POSTHOG_API_KEY;
+    },
+  };
+}
 
 describe('Postgres integration — trial upgrade nudge', () => {
   let pool: Pool;
@@ -73,5 +88,23 @@ describe('Postgres integration — trial upgrade nudge', () => {
     await use(tenantId, 50 * 60, OWNER_PHONE);
 
     expect(await checkAndFireUpgradeNudge({ pool }, tenantId)).toEqual({ fired: false });
+  });
+
+  it('records a trial_minutes_milestone funnel event when the nudge fires', async () => {
+    const posthog = capturePostHog();
+    try {
+      const tenantId = await trialTenant();
+      await use(tenantId, 40 * 60);
+      await checkAndFireUpgradeNudge({ pool }, tenantId);
+
+      expect(posthog.events()).toContainEqual(
+        expect.objectContaining({
+          event: 'trial_minutes_milestone',
+          properties: expect.objectContaining({ tenant_id: tenantId, trial_minutes_used: 40 }),
+        }),
+      );
+    } finally {
+      posthog.restore();
+    }
   });
 });

@@ -38,6 +38,15 @@ stamps the four fields uniformly. The server activation event passes them in
 | 11 | `first_real_call_received` **[ACTIVATION]** | `api/.../voice/activation.ts` (called from `app.ts onSessionEnded`) | server | first real inbound call after go-live (idempotent once/tenant) | `inbound_call_count` |
 | 12 | `trial_to_paid` **[CONVERSION]** | `api/.../webhooks/routes.ts` (Stripe `customer.subscription.updated`, trialing→active) | server | trial converts to a paid subscription | `priorStatus` |
 
+### Pricing events (software + metered AI minutes — `docs/plans/per-call-pricing.md`)
+
+| Event | Where it fires | Client/Server | Trigger | Extra props |
+|---|---|---|---|---|
+| `plan_selected` | `api/.../routes/onboarding.ts` (`POST /billing/checkout-session`) | server | owner picks Starter/Growth and a checkout session is minted | `plan` |
+| `trial_minutes_milestone` | `api/.../voice/check-upgrade-nudge.ts` (call end) | server | trial reaches 40 billable AI minutes — the upgrade nudge fires (once/tenant) | `trial_minutes_used` |
+| `overage_threshold` | `api/.../billing/usage-alerts.ts` (call end) | server | paid period first reaches 80% / 100% of included minutes or the overage cap (once/threshold/period) | `threshold`, `plan`, `used_minutes` |
+| `minute_overage_invoiced` | `api/.../billing/call-usage-billing.ts` (Stripe `invoice.created`) | server | settlement creates an AI-minute overage invoice item | `plan`, `overage_minutes`, `charge_cents` |
+
 ### Generic per-step events (drive abandonment)
 
 | Event | Where | Trigger | Extra |

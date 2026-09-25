@@ -9,7 +9,23 @@ import { randomUUID } from 'crypto';
 
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
+import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
 import { checkUsageAlerts } from '../../src/billing/usage-alerts';
+
+
+/** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
+function capturePostHog() {
+  const capture = vi.fn();
+  process.env.POSTHOG_API_KEY = 'phc_test';
+  __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
+  return {
+    events: () => capture.mock.calls.map((c) => c[0] as { event: string; properties: Record<string, unknown> }),
+    restore: () => {
+      __resetAnalyticsForTests();
+      delete process.env.POSTHOG_API_KEY;
+    },
+  };
+}
 
 const OCT = [new Date(Date.UTC(2026, 9, 1)), new Date(Date.UTC(2026, 10, 1))] as const;
 const NOV = [new Date(Date.UTC(2026, 10, 1)), new Date(Date.UTC(2026, 11, 1))] as const;
@@ -117,5 +133,23 @@ describe('Postgres integration — AI minute usage alerts', () => {
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('records an overage_threshold event for each newly reached threshold', async () => {
+    const posthog = capturePostHog();
+    try {
+      const tenantId = await paidTenant(OCT);
+      await use(tenantId, 25);
+      await checkUsageAlerts({ pool, appBaseUrl: 'https://app.test' }, tenantId);
+      await checkUsageAlerts({ pool, appBaseUrl: 'https://app.test' }, tenantId);
+
+      const thresholds = posthog
+        .events()
+        .filter((e) => e.event === 'overage_threshold')
+        .map((e) => e.properties.threshold);
+      expect(thresholds).toEqual(['included_80', 'included_100']);
+    } finally {
+      posthog.restore();
+    }
   });
 });

@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { recordFunnelEvent } from "../analytics/posthog";
 import { randomUUID } from "node:crypto";
 import { ValidationError } from "../shared/errors";
 import { PgBaseRepository } from "../db/pg-base";
@@ -187,8 +188,11 @@ export class CallUsageBillingService {
       return { ...result, invoiceItemId: null };
     }
 
-    const customer = await this.deps.pool.query<{ stripe_customer_id: string | null }>(
-      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
+    const customer = await this.deps.pool.query<{
+      stripe_customer_id: string | null;
+      owner_id: string | null;
+    }>(
+      `SELECT stripe_customer_id, owner_id FROM tenants WHERE id = $1`,
       [input.tenantId],
     );
     const customerId = customer.rows[0]?.stripe_customer_id;
@@ -222,6 +226,16 @@ export class CallUsageBillingService {
       throw new Error(message);
     }
     await this.deps.settlementRepo.markCompleted(input.tenantId, settlement.id, created.id);
+    recordFunnelEvent({
+      distinctId: customer.rows[0]?.owner_id ?? input.tenantId,
+      event: 'minute_overage_invoiced',
+      properties: {
+        tenant_id: input.tenantId,
+        plan: planId,
+        overage_minutes: settlement.overageMinutes,
+        charge_cents: settlement.customerChargeCents,
+      },
+    });
     return { ...result, invoiceItemId: created.id };
   }
 }

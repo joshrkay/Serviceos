@@ -7,6 +7,7 @@
  * only the highest is emailed and the lower ones are marked sent.
  * Trials are covered by the upgrade nudge instead.
  */
+import { recordFunnelEvent } from '../analytics/posthog';
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { AiUsageReader } from './ai-usage';
@@ -51,8 +52,12 @@ function dollars(cents: number): string {
 }
 
 export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): Promise<void> {
-  const tenant = await deps.pool.query<{ subscription_status: string | null; owner_email: string | null }>(
-    `SELECT subscription_status, owner_email FROM tenants WHERE id = $1`,
+  const tenant = await deps.pool.query<{
+    subscription_status: string | null;
+    owner_email: string | null;
+    owner_id: string | null;
+  }>(
+    `SELECT subscription_status, owner_email, owner_id FROM tenants WHERE id = $1`,
     [tenantId],
   );
   if (tenant.rows[0]?.subscription_status !== 'active') return;
@@ -69,6 +74,18 @@ export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): 
   if (reached.length === 0) return;
 
   const claimed = await new PgUsageAlertLedger(deps.pool).claim(tenantId, usage.periodStart, reached);
+  for (const threshold of claimed) {
+    recordFunnelEvent({
+      distinctId: tenant.rows[0]?.owner_id ?? tenantId,
+      event: 'overage_threshold',
+      properties: {
+        tenant_id: tenantId,
+        threshold,
+        plan: usage.planId,
+        used_minutes: usage.usedMinutes,
+      },
+    });
+  }
   const highest = claimed[claimed.length - 1];
   const to = tenant.rows[0]?.owner_email;
   if (!highest || !to || !deps.sendEmail) return;
