@@ -7055,6 +7055,23 @@ export const MIGRATIONS = {
         CHECK (ai_overage_cap_cents IS NULL OR ai_overage_cap_cents >= 0),
       ADD COLUMN IF NOT EXISTS ai_overage_uncapped BOOLEAN NOT NULL DEFAULT false;
   `,
+  // At-most-once ledger for AI-minute usage alerts (80% / 100% of the
+  // included minutes, overage cap reached) per tenant and billing period.
+  '287_create_usage_alerts': `
+    CREATE TABLE IF NOT EXISTS usage_alerts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      period_start TIMESTAMPTZ NOT NULL,
+      threshold TEXT NOT NULL CHECK (threshold IN ('included_80', 'included_100', 'cap_reached')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, period_start, threshold)
+    );
+    ALTER TABLE usage_alerts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE usage_alerts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_usage_alerts ON usage_alerts;
+    CREATE POLICY tenant_isolation_usage_alerts ON usage_alerts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
