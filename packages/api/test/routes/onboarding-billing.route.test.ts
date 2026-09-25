@@ -190,6 +190,34 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
     expect(body.get('subscription_data[metadata][plan_id]')).toBe('starter');
   });
 
+  it('builds the Stripe success and cancel URLs from config.publicOrigins.web, not raw env', async () => {
+    // The route used to read WEB_URL ?? APP_PUBLIC_URL straight from
+    // process.env with a localhost fallback. The origin now comes from the
+    // config seam, so a deployment whose config resolves the web origin
+    // returns the customer to the app domain regardless of what process.env
+    // happens to hold.
+    const { loadConfig, resetConfig } = await import('../../src/shared/config');
+    resetConfig();
+    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.example.com' });
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(validPrice({ unit_amount: 5_000 }))
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2' }));
+      const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
+
+      const res = await request(buildApp(svc))
+        .post('/api/onboarding/billing/checkout-session')
+        .send({ planId: 'basic' });
+      expect(res.status).toBe(200);
+      const body = fetchFn.mock.calls[1][1].body as URLSearchParams;
+      expect(body.get('success_url')).toBe('https://app.example.com/onboarding?billing=ok');
+      expect(body.get('cancel_url')).toBe('https://app.example.com/onboarding?billing=cancel');
+    } finally {
+      resetConfig();
+    }
+  });
+
   it('surfaces a misconfigured plan as an actionable 400/500 without charging', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetchFn = vi.fn().mockResolvedValueOnce(validPrice({ unit_amount: 1 }));

@@ -22,6 +22,7 @@
  *       --business-name "QA HVAC Co" --pack hvac --region CA
  */
 import { createPool } from '../src/db/pool';
+import { publicUrl } from '../src/shared/public-origins';
 import { createLogger } from '../src/logging/logger';
 import { PgTenantRepository } from '../src/auth/pg-tenant';
 import { PgSettingsRepository } from '../src/settings/pg-settings';
@@ -164,12 +165,12 @@ async function main(): Promise<void> {
     const stripeKey = process.env.STRIPE_SECRET_KEY;
     if (stripeKey && process.env.STRIPE_PRICE_ID) {
       const billing = new BillingService({ pool, config: { apiKey: stripeKey } });
-      const webUrl = process.env.WEB_URL ?? 'http://localhost:5173';
+      // Where the owner lands after Stripe: the SPA (config.publicOrigins.web).
       const { url } = await billing.createTrialCheckoutSession({
         tenantId,
         ownerEmail: args.ownerEmail!,
-        successUrl: `${webUrl}/onboarding?billing=ok`,
-        cancelUrl: `${webUrl}/onboarding?billing=cancel`,
+        successUrl: publicUrl('web', '/onboarding', { billing: 'ok' }),
+        cancelUrl: publicUrl('web', '/onboarding', { billing: 'cancel' }),
       });
       out(`5/6 Stripe trial checkout — open this to enter a card:\n     ${url}`);
     } else {

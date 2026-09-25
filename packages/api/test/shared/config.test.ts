@@ -35,6 +35,9 @@ describe('P0-006 — Secrets/config framework', () => {
       AI_PROVIDER_API_KEY: 'ak_test',
       AI_PROVIDER_BASE_URL: 'https://ai.example.com',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       LOG_LEVEL: 'debug',
       // Opt features out so the feature-required gate doesn't fire;
       // its own behavior is covered by the dedicated tests below.
@@ -108,6 +111,9 @@ describe('P0-006 — Secrets/config framework', () => {
         CLERK_WEBHOOK_SECRET: 'whsec_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
+        // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+        WEB_URL: 'https://app.example.com',
+        PUBLIC_API_URL: 'https://api.example.com',
       })
     ).toThrow(/CLERK_SECRET_KEY/);
   });
@@ -132,6 +138,9 @@ describe('P0-006 — Secrets/config framework', () => {
         CLERK_WEBHOOK_SECRET: 'whsec_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
+        // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+        WEB_URL: 'https://app.example.com',
+        PUBLIC_API_URL: 'https://api.example.com',
       })
     ).toThrow(/DB_NAME|DB_USER|DB_PASSWORD/);
   });
@@ -147,6 +156,9 @@ describe('P0-006 — Secrets/config framework', () => {
         STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
+        // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+        WEB_URL: 'https://app.example.com',
+        PUBLIC_API_URL: 'https://api.example.com',
         // Opt features out so the feature-required gate doesn't fire.
         // The feature-required gate has its own dedicated tests below.
         TELEPHONY_ENABLED: 'false',
@@ -169,6 +181,9 @@ describe('P0-006 — Secrets/config framework', () => {
         CLERK_WEBHOOK_SECRET: 'whsec_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
+        // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+        WEB_URL: 'https://app.example.com',
+        PUBLIC_API_URL: 'https://api.example.com',
       })
     ).toThrow(/CLERK_PUBLISHABLE_KEY/);
   });
@@ -181,6 +196,9 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_WEBHOOK_SECRET: 'whsec_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       // Isolate the Stripe requirement: opt features out, RLS on.
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
@@ -222,6 +240,9 @@ describe('P0-006 — Secrets/config framework', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
@@ -266,6 +287,9 @@ describe('P0-006 — Secrets/config framework', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       // Isolate the Redis requirement: opt features out, RLS on.
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
@@ -315,6 +339,9 @@ describe('P0-006 — Secrets/config framework', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       // SEC-01 — RLS enforcement is a hard prod/staging requirement; set here so
       // these feature-gate tests isolate the var under test. The RLS requirement
       // has its own dedicated describe block below.
@@ -584,6 +611,9 @@ describe('P0-006 — Secrets/config framework', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
@@ -645,6 +675,9 @@ describe('P0-006 — Secrets/config framework', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
@@ -721,6 +754,9 @@ describe('P0-006 — Secrets/config framework', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
@@ -864,6 +900,9 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     CLERK_SECRET_KEY: 'sk_live_abc',
     CLERK_PUBLISHABLE_KEY: 'pk_live_abc',
     CORS_ORIGIN: 'https://app.example.com',
+    // Public origins — required in prod/staging; covered in config.public-origins.test.ts.
+    WEB_URL: 'https://app.example.com',
+    PUBLIC_API_URL: 'https://api.example.com',
   };
 
   it('happy path — all vars present, returns typed Env object', () => {
