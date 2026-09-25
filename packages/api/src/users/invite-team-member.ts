@@ -17,6 +17,7 @@
 import { PendingInvitation, PendingInvitationRepository } from './pending-invitation';
 import { UserRole } from './user';
 import { assertSeatAvailable, type SeatUsageReader } from './seat-limit';
+import { publicUrl } from '../shared/public-origins';
 
 export interface ClerkInvitationConfig {
   clerkSecretKey?: string;
