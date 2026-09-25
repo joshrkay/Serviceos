@@ -63,12 +63,16 @@ import {
 import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
-import { BillingService } from './billing/subscription';
+import { BillingService, planIdForStripePrice } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
+import { PgCallUsageRepository } from './billing/call-usage-events';
+import { PgSeatUsageReader } from './users/seat-limit';
+import { PgOverageCapStore } from './billing/overage-cap';
+import { AiUsageReader } from './billing/ai-usage';
 import {
-  PgVoiceUsageSettlementRepository,
-  VoiceUsageBillingService,
-} from './billing/voice-usage-billing';
+  CallUsageBillingService,
+  PgCallUsageSettlementRepository,
+} from './billing/call-usage-billing';
 import {
   deepgramCostMicroCents,
   elevenLabsCostMicroCents,
@@ -1040,19 +1044,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // in-memory map. createWebhookRouter throws if this is missing in prod.
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
   const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
-  const voiceUsageSettlementRepo = pool
-    ? new PgVoiceUsageSettlementRepository(pool)
-    : undefined;
-  const voiceUsageBillingService =
-    pool && process.env.STRIPE_SECRET_KEY && voiceUsageCostRepo && voiceUsageSettlementRepo
-      ? new VoiceUsageBillingService({
+  const callUsageRepo = pool ? new PgCallUsageRepository(pool) : undefined;
+  // Per-plan user limit — shared by the invite route and the onboarding
+  // team-member proposal so neither path can exceed the plan.
+  const seatUsage = pool ? new PgSeatUsageReader(pool) : undefined;
+  const callUsageBillingService =
+    pool && process.env.STRIPE_SECRET_KEY && callUsageRepo
+      ? new CallUsageBillingService({
           pool,
-          usageRepo: voiceUsageCostRepo,
-          settlementRepo: voiceUsageSettlementRepo,
+          settlementRepo: new PgCallUsageSettlementRepository(pool),
+          callUsage: callUsageRepo,
+          overageCaps: new PgOverageCapStore(pool),
           stripeApiKey: process.env.STRIPE_SECRET_KEY,
+          planForPriceId: planIdForStripePrice,
           onAlert: (alert) => {
             sentryClient.captureMessage(
-              `[VOICE_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
+              `[CALL_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
               'error',
             );
           },
@@ -1094,7 +1101,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // status the GET /api/billing/subscription endpoint reads.
     // Wired only when both pool and STRIPE_SECRET_KEY exist.
     billingService,
-    voiceUsageBillingService,
+    callUsageBillingService,
     connectService,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     queue,
@@ -1969,6 +1976,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     clerkInvitationConfig: {
       clerkSecretKey: process.env.CLERK_SECRET_KEY,
     },
+    seatUsage,
     // B1.18 — update_brand_voice writes through the SAME versioned path
     // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
     // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
@@ -3677,6 +3685,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sttAudioSeconds,
             ttsCharacters,
             callSid,
+            callerPhone,
             twilioAccountSid,
             mediaStreamsUsed,
           }: {
@@ -3689,9 +3698,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sttAudioSeconds: number;
             ttsCharacters: number;
             callSid?: string;
+            callerPhone?: string;
             twilioAccountSid?: string;
             mediaStreamsUsed: boolean;
           }) => {
+            // AI answering usage ledger — every ended session gets a row
+            // (billable or not); idempotent per (tenant, session).
+            if (callUsageRepo) {
+              await callUsageRepo
+                .recordCallEnded({
+                  tenantId, callId: sessionId, channel, endedAt, usageSeconds,
+                  ...(callerPhone ? { callerPhone } : {}),
+                })
+                .catch((err: unknown) => {
+                  requestLogger.warn('call usage ledger write failed', {
+                    sessionId,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                });
+            }
             if (channel === 'voice_inbound' && voiceUsageCostRepo) {
               const records: Array<Parameters<typeof voiceUsageCostRepo.record>[0]> = [
                 {
@@ -5118,6 +5143,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // Same instance the Clerk webhook reads on user.created — the
         // accept side reads what the invite side wrote.
         pendingInvitationRepo,
+        seatUsage,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
         // Account deletion purges the user's push tokens server-side.
         deviceTokenRepo,
@@ -5153,10 +5179,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the same instance.
   app.use('/api/billing', createBillingRouter({
     billingService,
-    voiceUsageBillingService,
     connectService,
     auditRepo,
     pool: pool ?? undefined,
+    aiUsage: pool ? new AiUsageReader(pool) : undefined,
+    overageCaps: pool ? new PgOverageCapStore(pool) : undefined,
   }));
 
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(

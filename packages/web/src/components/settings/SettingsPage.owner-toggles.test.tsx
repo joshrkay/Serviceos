@@ -18,6 +18,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 
 const apiFetchMock = vi.fn();
+// The AI minutes card fetches its own endpoint on mount (AiMinutesCard.test
+// covers it); stub it so these ordered apiFetch seeds stay about toggles.
+vi.mock('./AiMinutesCard', () => ({ AiMinutesCard: () => null }));
+
 vi.mock('../../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));

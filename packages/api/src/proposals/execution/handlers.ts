@@ -1,3 +1,4 @@
+import type { SeatUsageReader } from '../../users/seat-limit';
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import {
@@ -1300,6 +1301,8 @@ export function createExecutionHandlerRegistry(deps?: {
    * its own is intent, not an invitation.
    */
   clerkInvitationConfig?: ClerkInvitationConfig;
+  /** Per-plan user limit for that invitation (same reader as the route). */
+  seatUsage?: SeatUsageReader;
   templateRepo?: EstimateTemplateRepository;
   packSeedDeps?: SeedPackDefaultsDeps;
   // B1.18 — update_brand_voice writes through the SAME versioned path the
@@ -1548,6 +1551,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.pendingInvitationRepo,
       requiredAuditRepo,
       deps?.clerkInvitationConfig,
+      deps?.seatUsage,
     ),
     new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
     // B1.18 — update_brand_voice: writes through the SAME versioned

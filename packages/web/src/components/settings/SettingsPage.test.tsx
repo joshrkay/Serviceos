@@ -43,17 +43,15 @@ describe('SettingsPage', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows current AI voice usage and the included 30 minutes', async () => {
+  it('shows AI answering minutes for the current period', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/api/billing/voice-usage')) {
+      if (url.includes('/api/billing/ai-usage')) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            usageSeconds: 1200,
-            includedMinutes: 30,
-            projectedChargeCents: 0,
-            complete: true,
+            kind: 'period', usedMinutes: 12, includedMinutes: 20, overageMinutes: 0,
+            overageCentsPerMinute: 125, projectedChargeCents: 0, capCents: 7900,
           }),
         } as Response);
       }
@@ -66,7 +64,7 @@ describe('SettingsPage', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/20 of 30 AI voice minutes used/)).toBeInTheDocument();
+    expect(await screen.findByText('12 of 20 AI minutes used')).toBeInTheDocument();
   });
 
   it('surfaces an error with a retry when the main settings load fails', async () => {

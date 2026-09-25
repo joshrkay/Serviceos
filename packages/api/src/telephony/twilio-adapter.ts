@@ -67,12 +67,6 @@ import type {
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
 import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
-// Aliased to avoid name collision with the private `deriveCallOutcome` method
-// on this class — see line 1828. The imported function takes the typed
-// options object (DeriveOutcomeInput); the instance method takes a
-// VoiceSession. They are NOT interchangeable. Pre-existing fix from cf76752
-// that got reverted in a subsequent merge to main.
-import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
@@ -366,6 +360,8 @@ export interface TwilioAdapterDeps {
     sessionId: string;
     tenantId: string;
     callSid?: string;
+    /** Caller-ID (E.164) from the inbound webhook; absent when blocked. */
+    callerPhone?: string;
     channel: 'voice_inbound' | 'inapp_voice';
     endedAt: Date;
     usageSeconds: number;
@@ -832,6 +828,8 @@ export class TwilioGatherAdapter {
    * "missing" (never recorded) from "explicitly blocked".
    */
   private readonly callerIdBySession = new Map<string, string>();
+  /** Sessions whose `onSessionEnded` hook already fired (weak: no leak). */
+  private readonly sessionEndedEmitted = new WeakSet<VoiceSession>();
 
   /**
    * RV-130 / C5 — pending implicit recording-consent ledger writes, keyed by
@@ -941,6 +939,7 @@ export class TwilioGatherAdapter {
         // speechTurn path bypasses the adapter wrapper), so stamp the
         // durable recovery context here.
         this.scheduleDurableRecoveryContext(session);
+        void this.emitSessionEnded(session);
         void this.processor.runSummary(session).catch(() => {
           /* swallow — summary is best-effort */
         });
@@ -3439,22 +3438,7 @@ export class TwilioGatherAdapter {
     // dedupes on (tenant, voice_session_id)) and swallow-on-error inside the
     // scheduler, so this never disturbs the terminal path.
     this.scheduleDurableRecoveryContext(session);
-    if (session.terminalOutcome) return;
-    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
-    const reason =
-      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
-        ? endSessionEffect.payload.reason
-        : undefined) ?? fallbackReason;
-    const outcome = deriveCallOutcomeFromState({
-      finalState: session.machine.currentState,
-      endedReason: reason,
-      context: session.machine.currentContext,
-      transcript: session.transcript,
-      proposalIds: session.proposalIds,
-    });
-    session.terminalOutcome = outcome;
-    session.terminalReason = reason;
-    void this.persistSessionEnded(session, reason, outcome);
+    void this.emitSessionEnded(session);
   }
 
   /**
@@ -3491,43 +3475,25 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
-   * fire-and-forget; errors are swallowed (outcome stamping is
-   * best-effort, never breaks a call flow).
+   * Fires the host's `onSessionEnded` hook (usage ledger, provider costs,
+   * upgrade nudge, activation) exactly once per session. Both end paths call
+   * it: the adapter-driven `finalizeTerminatedSession` wrapper and the
+   * processor's internal speechTurn path via `onSessionTerminated`. The
+   * processor owns `markEnded`, so this is the only adapter-side end work.
    */
-  private async persistSessionEnded(
-    session: VoiceSession,
-    endedReason: string,
-    outcome: CallOutcome,
-  ): Promise<void> {
-    if (!this.deps.voiceSessionRepo) return;
+  private async emitSessionEnded(session: VoiceSession): Promise<void> {
+    if (!this.deps.onSessionEnded || this.sessionEndedEmitted.has(session)) return;
+    this.sessionEndedEmitted.add(session);
+    // Empty string = blocked caller-id (see callerIdBySession).
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
     try {
-      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
-        endedAt: new Date(),
-        endedReason,
-        outcome,
-        state: session.machine.currentState,
-        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
-        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
-        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
-        // can surface the full conversation without relying on the
-        // process-scoped VoiceSessionStore.
-        transcript: session.transcript.length > 0 ? [...session.transcript] : undefined,
-        // Stamp the customer FK so the interactions list can join to
-        // the customers table and surface the linked customer.
-        ...(session.customerId !== undefined ? { customerId: session.customerId } : {}),
-      });
-    } catch {
-      /* swallow — outcome stamping is best-effort */
-    }
-    if (this.deps.onSessionEnded) {
-      try {
         const endedAt = new Date();
         await this.deps.onSessionEnded({
           sessionId: session.id,
           tenantId: session.tenantId,
           channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
           ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+          ...(callerPhone ? { callerPhone } : {}),
           endedAt,
           usageSeconds: Math.max(0, Math.ceil((endedAt.getTime() - session.createdAt.getTime()) / 1000)),
           llmCostMicroCents: session.costTracker.costMicroCents,
@@ -3538,9 +3504,8 @@ export class TwilioGatherAdapter {
             : {}),
           mediaStreamsUsed: session.mediaStreamsUsed,
         });
-      } catch {
-        /* swallow — nudge check must never block call end */
-      }
+    } catch {
+      /* swallow — end-of-call hooks must never block call end */
     }
   }
 

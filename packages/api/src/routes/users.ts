@@ -1,3 +1,4 @@
+import type { SeatUsageReader } from '../users/seat-limit';
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
@@ -49,6 +50,8 @@ const setPhoneSchema = z.object({
  */
 export interface UsersRouteDeps {
   pendingInvitationRepo?: PendingInvitationRepository;
+  /** Per-plan user limit, checked before an invitation is created. */
+  seatUsage?: SeatUsageReader;
   clerkSecretKey?: string;
   /** Defaults to global fetch. Tests inject a stub. */
   clerkFetch?: typeof fetch;
@@ -727,6 +730,7 @@ export function createUsersRouter(
           },
           deps.pendingInvitationRepo,
           deps,
+          deps.seatUsage,
         );
 
         // D2-1c — audit-log the invitation. Entity id is the local pending

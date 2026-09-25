@@ -221,6 +221,8 @@ export interface TelephonyRouterDeps {
   voiceGate?: (input: { tenantId: string; callSid: string }) => Promise<{
     allowed: boolean;
     reason?: GateReason;
+    /** Usage caps: ring this owner phone (null → voicemail). */
+    forwardTo?: string | null;
   }>;
   /**
    * Optional health snapshot factory. When set, mounts a public
@@ -420,7 +422,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // §10 voice gates — subscription, go-live, trial caps. Voicemail on block.
+    // §10 voice gates — subscription, go-live, usage caps. Voicemail on a
+    // setup block; usage caps ring the owner first (forwardToOwnerTwiml).
     if (deps.voiceGate) {
       // Point at /recording, NOT /voicemail-status. Only /recording actually
       // persists: it downloads RecordingUrl, uploads to storage and inserts
@@ -441,7 +444,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           res
             .status(200)
             .type('text/xml')
-            .send(voicemailTwimlForGateReason(gate.reason, gateCallback));
+            .send(
+              gate.forwardTo
+                ? forwardToOwnerTwiml(gate.forwardTo, gateCallback)
+                : voicemailTwimlForGateReason(gate.reason, gateCallback),
+            );
           return;
         }
       } catch (err) {
@@ -1396,6 +1403,23 @@ async function resolveInboundTenantId(opts: {
 }
 
 /** Voicemail TwiML when inbound voice gates block AI routing. */
+/**
+ * A usage cap (trial minutes, trial concurrency, paid overage cap) rings the
+ * owner instead of the AI answering. If the Dial ends unanswered Twilio runs
+ * the next verbs, so the caller still reaches voicemail — never a dead line.
+ */
+export function forwardToOwnerTwiml(ownerPhone: string, recordingStatusCallback?: string): string {
+  const callbackAttr = recordingStatusCallback
+    ? ` recordingStatusCallback="${xmlEscape(recordingStatusCallback)}" recordingStatusCallbackMethod="POST"`
+    : '';
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    `<Dial timeout="20">${xmlEscape(ownerPhone)}</Dial>` +
+    `<Say voice="Polly.Joanna">${xmlEscape("Sorry we couldn't take your call. Please leave a message after the tone.")}</Say>` +
+    `<Record maxLength="120" playBeep="true"${callbackAttr}/><Hangup/></Response>`
+  );
+}
+
 export function voicemailTwimlForGateReason(
   reason: GateReason | undefined,
   recordingStatusCallback?: string,

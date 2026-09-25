@@ -194,24 +194,19 @@ import {
   buildAndPersistComplaintProposal,
 } from '../../proposals/guardrails/voice-protection-proposal';
 import type { CurrentQuoteResolver } from '../../conversations/negotiation/current-quote-resolver';
-import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { TwilioCallControl } from '../../telephony/twilio-call-control';
 import { maskPhone } from '../../telephony/twilio-call-control';
 import type { DispatcherPhoneResolver } from '../skills/escalate-to-human';
-import type { TenantCredentialResolver } from '../../integrations/credentials';
 import type { JobRepository } from '../../jobs/job';
 import type { AppointmentRepository } from '../../appointments/appointment';
-import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
 import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
 import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
-import type { EstimateRepository } from '../../estimates/estimate';
-import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import {
   groundLineItemPricing,
@@ -239,14 +234,13 @@ import {
   type SchedulingEntityResolution,
 } from '../agents/customer-calling/entity-resolution';
 import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
-import { buildQuoteReadback, type QuoteReadbackLine } from './quote-readback';
+import { buildQuoteReadback, quoteReadbackTotalCents, type QuoteReadbackLine } from './quote-readback';
 import { parseLeadingQuantity } from './quantity-parse';
 import type { LLMGateway } from '../gateway/gateway';
 import type {
   VoiceRepository,
   CallOutcome,
 } from '../../voice/voice-service';
-import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import { isRuntimeTimezone } from '../../shared/timezone';
@@ -437,12 +431,10 @@ function finalizeGroundedQuote(
     ...(typeof li.description === 'string' ? { description: li.description } : {}),
   }));
   const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
-  // WS18 — the spoken total (integer cents; formatCents divides by 100). Sum of
-  // each line's unit price × quantity, exactly what buildQuoteReadback recites.
-  const totalCents = readbackLines.reduce((sum, li) => {
-    const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
-    return sum + (typeof li.unitPrice === 'number' ? li.unitPrice * qty : 0);
-  }, 0);
+  // WS18 — the spoken total (integer cents): the SAME number buildQuoteReadback
+  // recites, derived from the billing engine's per-line rule inside the
+  // readback module. Never recomputed here (I9′: one totals engine).
+  const totalCents = quoteReadbackTotalCents(readbackLines);
 
   return {
     lineItems,
@@ -667,7 +659,6 @@ export interface VoiceTurnProcessorDeps {
    * warning (never a silent clarification card).
    */
   enRoute?: PhoneEnRouteDeps;
-  leadRepo?: LeadRepository;
   /**
    * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
    * enriched with the caller's LTV/recency (resolved via the session customerId).
@@ -726,10 +717,8 @@ export interface VoiceTurnProcessorDeps {
   callControl?: TwilioCallControl;
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
   businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
-  recordingCallbackPath?: string;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
-  invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
   /** Customer tags for escalation CRM hydration (handoff context pack). */
@@ -742,7 +731,6 @@ export interface VoiceTurnProcessorDeps {
    * fall back to the retry/escalate path.
    */
   conversationRepo?: ConversationRepository;
-  estimateRepo?: EstimateRepository;
   /**
    * WS5 — tenant catalog repo for in-call grounded quoting. When wired, a
    * drafted estimate's spoken line items are resolved against the tenant's
@@ -781,8 +769,6 @@ export interface VoiceTurnProcessorDeps {
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
   };
-  lookupEvents?: LookupEventService;
-  credentialResolver?: TenantCredentialResolver;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   callerPlanResolver?: (
     tenantId: string,
@@ -795,7 +781,6 @@ export interface VoiceTurnProcessorDeps {
   >;
   voiceSessionRepo?: VoiceSessionRepository;
   voiceRepo?: VoiceRepository;
-  voicePersonaResolver?: VoicePersonaResolver;
   /**
    * Optional shared map. When the host (TwilioGatherAdapter) provides
    * its own Map instance, the processor reads/writes the same instance

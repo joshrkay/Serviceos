@@ -80,8 +80,8 @@ const configSchema = z.object({
   // BILLING_PLAN_IDS). Each id maps to its own Stripe recurring monthly USD
   // price, validated live against Stripe before every checkout — never
   // trusted at face value from env alone.
-  STRIPE_BASIC_PRICE_ID: z.string().optional(),
-  STRIPE_ENTERPRISE_PRICE_ID: z.string().optional(),
+  STRIPE_STARTER_PRICE_ID: z.string().optional(),
+  STRIPE_GROWTH_PRICE_ID: z.string().optional(),
   // TCPA/DNC express-consent enforcement for the outbound calling path.
   // 'off' (default) preserves prior behavior exactly (DNC opt-out check only);
   // 'warn' runs the per-customer consent gate and audits+logs a would-be block
