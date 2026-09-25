@@ -3,7 +3,7 @@ import { Check, ArrowRight, Loader2 } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
 
-type PlanId = 'basic' | 'enterprise';
+type PlanId = 'starter' | 'growth';
 
 interface BillingPlan {
   id: PlanId;

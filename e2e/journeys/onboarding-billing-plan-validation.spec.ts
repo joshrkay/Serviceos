@@ -19,7 +19,7 @@ import { API_URL, bootstrapOwner } from '../fixtures/onboarding-hermetic-lane';
  * This spec drives the REAL `/onboarding` billing step through the browser
  * against real Postgres, with NO plan price env vars configured — the
  * ACTUAL current production state of this deployment (no
- * STRIPE_BASIC_PRICE_ID / STRIPE_ENTERPRISE_PRICE_ID are set; see
+ * STRIPE_STARTER_PRICE_ID / STRIPE_GROWTH_PRICE_ID are set; see
  * docs/audit/blocked-on-josh.md's launch-flags notes). `resolvePlanPriceId`
  * fails closed for each plan BEFORE any Stripe call
  * (subscription.ts:59-70), `listPlans()` (subscription.ts:374+) then finds
@@ -45,12 +45,12 @@ test.describe('onboarding billing plan validation (1.7) — real Postgres, real 
     !process.env.E2E_BASE_URL &&
     hasViteClerkKey() &&
     process.env.E2E_USE_TEST_DB === 'true' &&
-    !process.env.STRIPE_BASIC_PRICE_ID &&
-    !process.env.STRIPE_ENTERPRISE_PRICE_ID;
+    !process.env.STRIPE_STARTER_PRICE_ID &&
+    !process.env.STRIPE_GROWTH_PRICE_ID;
   test.skip(
     !canRun,
     'Requires the local webServer pair against a real Postgres (E2E_USE_TEST_DB=true) with NO ' +
-      'STRIPE_BASIC_PRICE_ID / STRIPE_ENTERPRISE_PRICE_ID set — this spec proves the fail-closed ' +
+      'STRIPE_STARTER_PRICE_ID / STRIPE_GROWTH_PRICE_ID set — this spec proves the fail-closed ' +
       'omission at the CURRENT (unconfigured) production state.',
   );
 

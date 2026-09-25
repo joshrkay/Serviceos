@@ -7,8 +7,8 @@ vi.mock('../../../../lib/apiClient', () => ({ useApiClient: () => apiFetchMock }
 import { BillingStep } from './BillingStep';
 
 const PLANS = [
-  { id: 'basic', name: 'Basic', amountCents: 5_000, currency: 'usd', interval: 'month' },
-  { id: 'enterprise', name: 'Enterprise', amountCents: 15_000, currency: 'usd', interval: 'month' },
+  { id: 'starter', name: 'Starter', amountCents: 7_900, currency: 'usd', interval: 'month', includedUsers: 2, includedAiMinutes: 20, overageCentsPerAiMinute: 125 },
+  { id: 'growth', name: 'Growth', amountCents: 19_900, currency: 'usd', interval: 'month', includedUsers: 5, includedAiMinutes: 60, overageCentsPerAiMinute: 125 },
 ];
 
 function mockPlansOk() {
@@ -61,23 +61,23 @@ describe('BillingStep — explicit plan selection', () => {
     render(<BillingStep />);
     await screen.findByRole('radiogroup');
 
-    const basic = screen.getByRole('radio', { name: /basic/i });
-    const enterprise = screen.getByRole('radio', { name: /enterprise/i });
+    const starter = screen.getByRole('radio', { name: /starter/i });
+    const growth = screen.getByRole('radio', { name: /growth/i });
 
-    basic.focus();
-    fireEvent.keyDown(basic, { key: 'ArrowDown' });
-    expect(enterprise).toBeChecked();
-    expect(basic).not.toBeChecked();
+    starter.focus();
+    fireEvent.keyDown(starter, { key: 'ArrowDown' });
+    expect(growth).toBeChecked();
+    expect(starter).not.toBeChecked();
 
-    fireEvent.keyDown(enterprise, { key: 'ArrowUp' });
-    expect(basic).toBeChecked();
-    expect(enterprise).not.toBeChecked();
+    fireEvent.keyDown(growth, { key: 'ArrowUp' });
+    expect(starter).toBeChecked();
+    expect(growth).not.toBeChecked();
 
-    fireEvent.keyDown(basic, { key: 'ArrowRight' });
-    expect(enterprise).toBeChecked();
+    fireEvent.keyDown(starter, { key: 'ArrowRight' });
+    expect(growth).toBeChecked();
 
-    fireEvent.keyDown(enterprise, { key: 'ArrowLeft' });
-    expect(basic).toBeChecked();
+    fireEvent.keyDown(growth, { key: 'ArrowLeft' });
+    expect(starter).toBeChecked();
   });
 
   it('disables the continue button until a plan is selected', async () => {
@@ -88,7 +88,7 @@ describe('BillingStep — explicit plan selection', () => {
     const continueBtn = screen.getByRole('button', { name: /start 14-day free trial/i });
     expect(continueBtn).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('radio', { name: /basic/i }));
+    fireEvent.click(screen.getByRole('radio', { name: /starter/i }));
     expect(continueBtn).not.toBeDisabled();
   });
 
@@ -103,11 +103,11 @@ describe('BillingStep — explicit plan selection', () => {
 
     render(<BillingStep />);
     await screen.findByRole('radiogroup');
-    fireEvent.click(screen.getByRole('radio', { name: /enterprise/i }));
+    fireEvent.click(screen.getByRole('radio', { name: /growth/i }));
 
     apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path === '/api/onboarding/billing/checkout-session') {
-        expect(JSON.parse(init!.body as string)).toEqual({ planId: 'enterprise' });
+        expect(JSON.parse(init!.body as string)).toEqual({ planId: 'growth' });
         return { ok: true, json: async () => ({ url: 'https://checkout.stripe.com/pay/x' }) };
       }
       return { ok: true, json: async () => ({ plans: PLANS }) };
@@ -123,7 +123,7 @@ describe('BillingStep — explicit plan selection', () => {
     mockPlansOk();
     render(<BillingStep />);
     await screen.findByRole('radiogroup');
-    fireEvent.click(screen.getByRole('radio', { name: /basic/i }));
+    fireEvent.click(screen.getByRole('radio', { name: /starter/i }));
 
     let resolveCheckout: (value: unknown) => void = () => {};
     apiFetchMock.mockImplementation(async (path: string) => {

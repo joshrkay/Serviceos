@@ -575,7 +575,7 @@ describe('BillingService', () => {
     });
   });
 
-  describe('plan-based checkout (basic/enterprise allowlist)', () => {
+  describe('plan-based checkout (starter/growth allowlist)', () => {
     const INPUT = {
       tenantId: TENANT,
       ownerEmail: 'owner@example.com',
@@ -589,16 +589,16 @@ describe('BillingService', () => {
         active: true,
         currency: 'usd',
         type: 'recurring',
-        unit_amount: 5_000,
+        unit_amount: 7_900,
         recurring: { interval: 'month', interval_count: 1, usage_type: 'licensed' },
-        product: { id: 'prod_basic', active: true, name: 'Basic Plan' },
+        product: { id: 'prod_starter', active: true, name: 'Rivet Starter' },
         ...overrides,
       });
     }
 
     beforeEach(() => {
-      vi.stubEnv('STRIPE_BASIC_PRICE_ID', 'price_basic_live');
-      vi.stubEnv('STRIPE_ENTERPRISE_PRICE_ID', 'price_enterprise_live');
+      vi.stubEnv('STRIPE_STARTER_PRICE_ID', 'price_starter_live');
+      vi.stubEnv('STRIPE_GROWTH_PRICE_ID', 'price_growth_live');
       pool = makePool({ stripe_customer_id: 'cus_existing', subscription_status: null });
     });
 
@@ -610,70 +610,70 @@ describe('BillingService', () => {
       return new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
     }
 
-    it('maps planId=basic to STRIPE_BASIC_PRICE_ID and validates $50.00/month before checkout', async () => {
+    it('maps planId=starter to STRIPE_STARTER_PRICE_ID and validates $79.00/month before checkout', async () => {
       fetchFn
         .mockResolvedValueOnce(
-          validPrice({ unit_amount: 5_000, product: { id: 'prod_basic', active: true, name: 'Basic Plan' } }),
+          validPrice({ unit_amount: 7_900, product: { id: 'prod_starter', active: true, name: 'Rivet Starter' } }),
         )
-        .mockResolvedValueOnce(jsonOk({ id: 'cs_basic', url: 'https://checkout.stripe.com/c/pay/cs_basic' }));
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_starter', url: 'https://checkout.stripe.com/c/pay/cs_starter' }));
 
-      const result = await makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'basic' });
-      expect(result.url).toBe('https://checkout.stripe.com/c/pay/cs_basic');
+      const result = await makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'starter' });
+      expect(result.url).toBe('https://checkout.stripe.com/c/pay/cs_starter');
 
       // First call is the live Stripe price lookup for the BASIC price id —
-      // never the enterprise one, and bounded by a 10s timeout so a
+      // never the growth one, and bounded by a 10s timeout so a
       // hanging Stripe response can't hang checkout forever.
       expect(fetchFn.mock.calls[0][0]).toBe(
-        'https://api.stripe.com/v1/prices/price_basic_live?expand[]=product',
+        'https://api.stripe.com/v1/prices/price_starter_live?expand[]=product',
       );
       expect(fetchFn.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
       // Second call is the checkout session, using that SAME validated price
       // id — the submitted plan matches the price actually charged.
       expect(fetchFn.mock.calls[1][0]).toBe('https://api.stripe.com/v1/checkout/sessions');
       const body = fetchFn.mock.calls[1][1].body as URLSearchParams;
-      expect(body.get('line_items[0][price]')).toBe('price_basic_live');
-      expect(body.get('subscription_data[metadata][plan_id]')).toBe('basic');
+      expect(body.get('line_items[0][price]')).toBe('price_starter_live');
+      expect(body.get('subscription_data[metadata][plan_id]')).toBe('starter');
       expect(body.get('subscription_data[metadata][tenant_id]')).toBe(TENANT);
       // #4 — canonical Stripe price/product ids are stamped on the
       // subscription so a webhook or support lookup can reconcile the
       // charged plan without re-deriving it from the env var.
-      expect(body.get('subscription_data[metadata][stripe_price_id]')).toBe('price_basic_live');
-      expect(body.get('subscription_data[metadata][stripe_product_id]')).toBe('prod_basic');
+      expect(body.get('subscription_data[metadata][stripe_price_id]')).toBe('price_starter_live');
+      expect(body.get('subscription_data[metadata][stripe_product_id]')).toBe('prod_starter');
       expect(body.get('client_reference_id')).toBe(TENANT);
       expect(body.get('billing_address_collection')).toBe('required');
       expect(body.get('customer_update[name]')).toBe('auto');
       expect(body.get('customer_update[address]')).toBe('auto');
     });
 
-    it('maps planId=enterprise to STRIPE_ENTERPRISE_PRICE_ID and validates $150.00/month', async () => {
+    it('maps planId=growth to STRIPE_GROWTH_PRICE_ID and validates $199.00/month', async () => {
       fetchFn
         .mockResolvedValueOnce(
           validPrice({
-            unit_amount: 15_000,
-            product: { id: 'prod_enterprise', active: true, name: 'Enterprise Plan' },
+            unit_amount: 19_900,
+            product: { id: 'prod_growth', active: true, name: 'Rivet Growth' },
           }),
         )
         .mockResolvedValueOnce(jsonOk({ id: 'cs_ent', url: 'https://checkout.stripe.com/c/pay/cs_ent' }));
 
-      const result = await makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'enterprise' });
+      const result = await makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'growth' });
       expect(result.url).toBe('https://checkout.stripe.com/c/pay/cs_ent');
       expect(fetchFn.mock.calls[0][0]).toBe(
-        'https://api.stripe.com/v1/prices/price_enterprise_live?expand[]=product',
+        'https://api.stripe.com/v1/prices/price_growth_live?expand[]=product',
       );
       const body = fetchFn.mock.calls[1][1].body as URLSearchParams;
-      expect(body.get('line_items[0][price]')).toBe('price_enterprise_live');
-      expect(body.get('subscription_data[metadata][plan_id]')).toBe('enterprise');
-      expect(body.get('subscription_data[metadata][stripe_price_id]')).toBe('price_enterprise_live');
-      expect(body.get('subscription_data[metadata][stripe_product_id]')).toBe('prod_enterprise');
+      expect(body.get('line_items[0][price]')).toBe('price_growth_live');
+      expect(body.get('subscription_data[metadata][plan_id]')).toBe('growth');
+      expect(body.get('subscription_data[metadata][stripe_price_id]')).toBe('price_growth_live');
+      expect(body.get('subscription_data[metadata][stripe_product_id]')).toBe('prod_growth');
     });
 
     it('rejects an unconfigured plan without calling Stripe (fails closed, non-secret message)', async () => {
-      vi.stubEnv('STRIPE_BASIC_PRICE_ID', '');
+      vi.stubEnv('STRIPE_STARTER_PRICE_ID', '');
       const err = await makeSvc()
-        .createTrialCheckoutSession({ ...INPUT, planId: 'basic' })
+        .createTrialCheckoutSession({ ...INPUT, planId: 'starter' })
         .catch((e: unknown) => e);
-      expect((err as Error).message).toMatch(/basic/i);
-      expect((err as Error).message).toMatch(/STRIPE_BASIC_PRICE_ID/);
+      expect((err as Error).message).toMatch(/starter/i);
+      expect((err as Error).message).toMatch(/STRIPE_STARTER_PRICE_ID/);
       expect((err as Error).message).not.toMatch(/sk_test/);
       expect(fetchFn).not.toHaveBeenCalled();
     });
@@ -690,17 +690,17 @@ describe('BillingService', () => {
       // #1 — a metered price has no fixed unit_amount to sell as a flat
       // monthly plan; must be rejected even if unit_amount happens to match.
       ['metered usage_type (not licensed)', { recurring: { interval: 'month', interval_count: 1, usage_type: 'metered' } }],
-      ['inactive product', { product: { id: 'prod_basic', active: false, name: 'Basic Plan' } }],
+      ['inactive product', { product: { id: 'prod_starter', active: false, name: 'Rivet Starter' } }],
       // #4 — product expanded but with an empty id (defensive: Stripe
       // should never send this, but the check must not silently pass).
-      ['empty expanded product id', { product: { id: '', active: true, name: 'Basic Plan' } }],
+      ['empty expanded product id', { product: { id: '', active: true, name: 'Rivet Starter' } }],
       // Bad upstream shape: product never expanded (still just an id string).
       ['unexpanded product', { product: 'prod_123' }],
     ])('fails closed on a misconfigured live price (%s), never reaching checkout', async (_label, overrides) => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       fetchFn.mockResolvedValueOnce(validPrice(overrides));
       const err = await makeSvc()
-        .createTrialCheckoutSession({ ...INPUT, planId: 'basic' })
+        .createTrialCheckoutSession({ ...INPUT, planId: 'starter' })
         .catch((e: unknown) => e);
       expect((err as Error).message).toMatch(/misconfigured/i);
       // Only the price lookup happened — no checkout session was created,
@@ -709,7 +709,7 @@ describe('BillingService', () => {
       // A safe diagnostic was logged (phase + plan id), no full response body.
       expect(errorSpy).toHaveBeenCalled();
       const [, logged] = errorSpy.mock.calls[0]!;
-      expect(logged).toMatchObject({ phase: 'plan_price_validation', planId: 'basic' });
+      expect(logged).toMatchObject({ phase: 'plan_price_validation', planId: 'starter' });
       errorSpy.mockRestore();
     });
 
@@ -717,7 +717,7 @@ describe('BillingService', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       fetchFn.mockResolvedValueOnce(jsonErr(404, { error: { message: 'No such price', code: 'resource_missing' } }));
       const err = await makeSvc()
-        .createTrialCheckoutSession({ ...INPUT, planId: 'enterprise' })
+        .createTrialCheckoutSession({ ...INPUT, planId: 'growth' })
         .catch((e: unknown) => e);
       expect((err as Error).message).toMatch(/misconfigured/i);
       expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -730,7 +730,7 @@ describe('BillingService', () => {
       });
       fetchFn.mockResolvedValueOnce(validPrice());
       await expect(
-        makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'basic' }),
+        makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'starter' }),
       ).rejects.toThrow(/already active/);
       // Price validation happened, but the checkout session was never created.
       expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -743,16 +743,16 @@ describe('BillingService', () => {
         active: true,
         currency: 'usd',
         type: 'recurring',
-        unit_amount: 5_000,
+        unit_amount: 7_900,
         recurring: { interval: 'month', interval_count: 1, usage_type: 'licensed' },
-        product: { id: 'prod_basic', active: true, name: 'Basic Plan' },
+        product: { id: 'prod_starter', active: true, name: 'Rivet Starter' },
         ...overrides,
       });
     }
 
     beforeEach(() => {
-      vi.stubEnv('STRIPE_BASIC_PRICE_ID', 'price_basic_live');
-      vi.stubEnv('STRIPE_ENTERPRISE_PRICE_ID', 'price_enterprise_live');
+      vi.stubEnv('STRIPE_STARTER_PRICE_ID', 'price_starter_live');
+      vi.stubEnv('STRIPE_GROWTH_PRICE_ID', 'price_growth_live');
     });
 
     afterEach(() => {
@@ -763,21 +763,24 @@ describe('BillingService', () => {
       return new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
     }
 
-    it('returns validated display data (no price ids/secrets) for both configured plans', async () => {
+    it('offers Starter and Growth with their AI-minute bundles (no price ids/secrets)', async () => {
       fetchFn
         .mockResolvedValueOnce(
-          validPrice({ unit_amount: 5_000, product: { id: 'prod_basic', active: true, name: 'Basic Plan' } }),
+          validPrice({ unit_amount: 7_900, product: { id: 'prod_starter', active: true, name: 'Rivet Starter' } }),
         )
         .mockResolvedValueOnce(
-          validPrice({
-            unit_amount: 15_000,
-            product: { id: 'prod_enterprise', active: true, name: 'Enterprise Plan' },
-          }),
+          validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
         );
       const { plans } = await makeSvc().listPlans();
       expect(plans).toEqual([
-        { id: 'basic', name: 'Basic Plan', amountCents: 5_000, currency: 'usd', interval: 'month' },
-        { id: 'enterprise', name: 'Enterprise Plan', amountCents: 15_000, currency: 'usd', interval: 'month' },
+        {
+          id: 'starter', name: 'Rivet Starter', amountCents: 7_900, currency: 'usd', interval: 'month',
+          includedUsers: 2, includedAiMinutes: 20, overageCentsPerAiMinute: 125,
+        },
+        {
+          id: 'growth', name: 'Rivet Growth', amountCents: 19_900, currency: 'usd', interval: 'month',
+          includedUsers: 5, includedAiMinutes: 60, overageCentsPerAiMinute: 125,
+        },
       ]);
       const serialized = JSON.stringify(plans);
       expect(serialized).not.toMatch(/price_/);
@@ -786,22 +789,22 @@ describe('BillingService', () => {
     });
 
     it('omits a plan whose env var is unset', async () => {
-      vi.stubEnv('STRIPE_ENTERPRISE_PRICE_ID', '');
+      vi.stubEnv('STRIPE_GROWTH_PRICE_ID', '');
       fetchFn.mockResolvedValueOnce(validPrice());
       const { plans } = await makeSvc().listPlans();
-      expect(plans.map((p) => p.id)).toEqual(['basic']);
+      expect(plans.map((p) => p.id)).toEqual(['starter']);
       expect(fetchFn).toHaveBeenCalledTimes(1);
     });
 
     it('omits a plan whose live price fails validation instead of throwing', async () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       fetchFn
-        .mockResolvedValueOnce(validPrice({ unit_amount: 999 })) // basic: wrong amount
+        .mockResolvedValueOnce(validPrice({ unit_amount: 999 })) // starter: wrong amount
         .mockResolvedValueOnce(
-          validPrice({ unit_amount: 15_000, product: { id: 'prod_enterprise', active: true, name: 'Enterprise' } }),
+          validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
         );
       const { plans } = await makeSvc().listPlans();
-      expect(plans.map((p) => p.id)).toEqual(['enterprise']);
+      expect(plans.map((p) => p.id)).toEqual(['growth']);
       errorSpy.mockRestore();
     });
 
