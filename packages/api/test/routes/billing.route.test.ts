@@ -14,6 +14,9 @@ function buildApp(opts: {
   email?: string;
   service?: BillingService;
   connectService?: StripeConnectService;
+  aiUsage?: { getUsage: (tenantId: string) => Promise<unknown> };
+  overageCaps?: { set: (tenantId: string, capCents: number | null) => Promise<void> };
+  auditRepo?: { create: (e: unknown) => Promise<unknown> };
 }) {
   const app = express();
   app.use(express.json());
@@ -38,6 +41,9 @@ function buildApp(opts: {
     createBillingRouter({
       billingService: opts.service,
       connectService: opts.connectService,
+      aiUsage: opts.aiUsage as never,
+      overageCaps: opts.overageCaps as never,
+      auditRepo: opts.auditRepo as never,
     }),
   );
   return app;
@@ -289,5 +295,50 @@ describe('Stripe Connect routes — Tier 4 Payment methods (PR 1)', () => {
     const app = buildApp({ connectService, role: 'dispatcher' });
     const res = await request(app).delete('/api/billing/connect');
     expect(res.status).toBe(403);
+  });
+});
+
+describe('AI minute usage + overage cap routes', () => {
+  it('GET /api/billing/ai-usage returns the tenant usage summary', async () => {
+    const summary = { kind: 'period', usedMinutes: 25, includedMinutes: 20 };
+    const aiUsage = { getUsage: vi.fn(async () => summary) };
+
+    const res = await request(buildApp({ aiUsage })).get('/api/billing/ai-usage');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(summary);
+    expect(aiUsage.getUsage).toHaveBeenCalledWith(TENANT);
+  });
+
+  it('GET /api/billing/ai-usage is 503 when usage is not wired', async () => {
+    expect((await request(buildApp({})).get('/api/billing/ai-usage')).status).toBe(503);
+  });
+
+  it('PUT /api/billing/ai-overage-cap lets the owner raise the cap or remove it, and audits it', async () => {
+    const overageCaps = { set: vi.fn(async () => undefined) };
+    const auditRepo = { create: vi.fn(async () => undefined) };
+    const app = buildApp({ overageCaps, auditRepo });
+
+    expect((await request(app).put('/api/billing/ai-overage-cap').send({ capCents: 20_000 })).status).toBe(200);
+    expect((await request(app).put('/api/billing/ai-overage-cap').send({ capCents: null })).status).toBe(200);
+
+    expect(overageCaps.set).toHaveBeenNthCalledWith(1, TENANT, 20_000);
+    expect(overageCaps.set).toHaveBeenNthCalledWith(2, TENANT, null);
+    expect(auditRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'ai_overage_cap_updated', tenantId: TENANT }),
+    );
+  });
+
+  it('PUT /api/billing/ai-overage-cap rejects bad amounts and non-owners', async () => {
+    const overageCaps = { set: vi.fn(async () => undefined) };
+    for (const capCents of [-1, 12.5, '7900']) {
+      const res = await request(buildApp({ overageCaps })).put('/api/billing/ai-overage-cap').send({ capCents });
+      expect(res.status).toBe(400);
+    }
+    const tech = await request(buildApp({ overageCaps, role: 'technician' }))
+      .put('/api/billing/ai-overage-cap')
+      .send({ capCents: 20_000 });
+    expect(tech.status).toBe(403);
+    expect(overageCaps.set).not.toHaveBeenCalled();
   });
 });

@@ -12,6 +12,7 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { createVoiceGate } from '../../src/voice/voice-gate';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
+import { PgOverageCapStore } from '../../src/billing/overage-cap';
 
 const OWNER_PHONE = '+14805550100';
 const PERIOD_START = new Date(Date.UTC(2026, 9, 1));
@@ -122,5 +123,20 @@ describe('Postgres integration — voice gate usage caps', () => {
       reason: 'trial_cap_total',
       forwardTo: null,
     });
+  });
+
+  it("uses the owner's cap: keeps answering past $79 when raised, never forwards when removed", async () => {
+    const caps = new PgOverageCapStore(pool);
+    const raised = await liveTenant({ status: 'active', planId: 'starter' });
+    await caps.set(raised, 20_000);
+    await useSeconds(raised, 84 * 60); // $80.00 of overage — past the default cap
+    expect(await check(raised)).toEqual({ allowed: true });
+    await useSeconds(raised, 116 * 60); // 200 min: $225.00 — past the raised cap
+    expect(await check(raised)).toMatchObject({ allowed: false, reason: 'overage_cap' });
+
+    const removed = await liveTenant({ status: 'active', planId: 'starter' });
+    await caps.set(removed, null);
+    await useSeconds(removed, 1_000 * 60);
+    expect(await check(removed)).toEqual({ allowed: true });
   });
 });

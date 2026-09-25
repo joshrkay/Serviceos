@@ -8,6 +8,8 @@ import { toErrorResponse, NotFoundError } from '../shared/errors';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import type { AiUsageReader } from '../billing/ai-usage';
+import type { PgOverageCapStore } from '../billing/overage-cap';
 
 /**
  * Tier 4 (Subscription — Rivet billing). Endpoints for the SaaS
@@ -45,11 +47,79 @@ export interface BillingRouteDeps {
   auditRepo?: AuditRepository;
   /** Used to resolve owner email when the JWT has no email claim. */
   pool?: Pool;
+  /** AI-minute usage summary for the settings page. */
+  aiUsage?: Pick<AiUsageReader, 'getUsage'>;
+  /** Owner-set AI-minute overage cap. */
+  overageCaps?: Pick<PgOverageCapStore, 'set'>;
 }
 
 export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
   const { billingService, connectService, auditRepo, pool } = deps;
   const router = Router();
+
+  router.get(
+    '/ai-usage',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.aiUsage) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'AI minute usage is not configured',
+          });
+          return;
+        }
+        res.json(await deps.aiUsage.getUsage(req.auth!.tenantId));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // Owner-only: how much AI-minute overage may be charged per period
+  // before calls forward to the owner. null removes the cap.
+  const overageCapSchema = z.object({
+    capCents: z.number().int().nonnegative().max(10_000_000).nullable(),
+  });
+  router.put(
+    '/ai-overage-cap',
+    requireAuth,
+    requireTenant,
+    requirePermission('tenant:manage'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.overageCaps) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'AI minute overage cap is not configured',
+          });
+          return;
+        }
+        const { capCents } = overageCapSchema.parse(req.body ?? {});
+        await deps.overageCaps.set(req.auth!.tenantId, capCents);
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'ai_overage_cap_updated',
+              entityType: 'tenant_settings',
+              entityId: req.auth!.tenantId,
+              metadata: { capCents },
+            }),
+          );
+        }
+        res.json({ capCents });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
 
   router.get(
     '/subscription',

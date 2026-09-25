@@ -12,6 +12,7 @@ import {
   CallUsageBillingService,
   PgCallUsageSettlementRepository,
 } from "../../src/billing/call-usage-billing";
+import { PgOverageCapStore } from "../../src/billing/overage-cap";
 
 const STARTER_PRICE = "price_starter_test";
 const GROWTH_PRICE = "price_growth_test";
@@ -76,6 +77,7 @@ describe("Postgres integration — AI minute overage settlement", () => {
       pool,
       settlementRepo: new PgCallUsageSettlementRepository(pool),
       callUsage: ledger,
+      overageCaps: new PgOverageCapStore(pool),
       stripeApiKey: "sk_test",
       fetchFn: stripe.fetchFn,
       planForPriceId: (priceId) =>
@@ -204,5 +206,28 @@ describe("Postgres integration — AI minute overage settlement", () => {
       await client.query("ROLLBACK");
       client.release();
     }
+  });
+
+  it("charges past the default cap when the owner raised it, and everything when they removed it", async () => {
+    // 100 calls x 2 min = 200 minutes on Starter: 180 over x $1.25 = $225.
+    await recordTwoMinuteCalls(100);
+    const caps = new PgOverageCapStore(pool);
+    await pool.query(
+      `INSERT INTO tenant_settings (tenant_id, business_name) VALUES ($1, 'Cap Plumbing')
+       ON CONFLICT (tenant_id) DO NOTHING`,
+      [tenant.tenantId],
+    );
+
+    await caps.set(tenant.tenantId, 20_000);
+    expect(await settle()).toMatchObject({ overageMinutes: 180, customerChargeCents: 20_000 });
+
+    periodIndex += 1;
+    period = {
+      start: new Date(Date.UTC(2026, periodIndex, 1)),
+      end: new Date(Date.UTC(2026, periodIndex + 1, 1)),
+    };
+    await recordTwoMinuteCalls(100);
+    await caps.set(tenant.tenantId, null);
+    expect(await settle()).toMatchObject({ overageMinutes: 180, customerChargeCents: 22_500 });
   });
 });

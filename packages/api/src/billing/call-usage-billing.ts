@@ -4,6 +4,7 @@ import { ValidationError } from "../shared/errors";
 import { PgBaseRepository } from "../db/pg-base";
 import { priceMinuteUsage, type CallPlanId } from "./call-usage-pricing";
 import type { PgCallUsageRepository } from "./call-usage-events";
+import type { OverageCapStore } from "./overage-cap";
 
 export interface CallUsageSettlementRow {
   id: string;
@@ -113,6 +114,7 @@ export interface CallUsageBillingServiceDeps {
   pool: Pool;
   settlementRepo: CallUsageSettlementRepository;
   callUsage: Pick<PgCallUsageRepository, "sumBillableSeconds">;
+  overageCaps: OverageCapStore;
   stripeApiKey: string;
   fetchFn?: typeof fetch;
   /** Maps the invoice's subscription price to a plan; null when unknown. */
@@ -155,7 +157,11 @@ export class CallUsageBillingService {
       input.periodStart,
       input.periodEnd,
     );
-    const price = priceMinuteUsage({ planId, billableSeconds });
+    const price = priceMinuteUsage({
+      planId,
+      billableSeconds,
+      overageCapCents: await this.deps.overageCaps.get(input.tenantId),
+    });
     const settlement = await this.deps.settlementRepo.ensurePending({
       id: randomUUID(),
       tenantId: input.tenantId,

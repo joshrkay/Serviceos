@@ -300,11 +300,13 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /quickbooks/sync
 072  authenticated use    /api/billing    [router: router]
          └─ DELETE /connect
+         └─ GET /ai-usage
          └─ GET /connect
          └─ GET /subscription
          └─ POST /connect/onboarding
          └─ POST /end-trial-now
          └─ POST /portal-session
+         └─ PUT /ai-overage-cap
 073  authenticated use    /api/reports    [router: router]
          └─ GET /customer-profit/:customerId
          └─ GET /hfcr

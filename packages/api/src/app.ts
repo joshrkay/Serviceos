@@ -67,6 +67,8 @@ import { BillingService, planIdForStripePrice } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
 import { PgCallUsageRepository } from './billing/call-usage-events';
 import { PgSeatUsageReader } from './users/seat-limit';
+import { PgOverageCapStore } from './billing/overage-cap';
+import { AiUsageReader } from './billing/ai-usage';
 import {
   CallUsageBillingService,
   PgCallUsageSettlementRepository,
@@ -1039,6 +1041,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           pool,
           settlementRepo: new PgCallUsageSettlementRepository(pool),
           callUsage: callUsageRepo,
+          overageCaps: new PgOverageCapStore(pool),
           stripeApiKey: process.env.STRIPE_SECRET_KEY,
           planForPriceId: planIdForStripePrice,
           onAlert: (alert) => {
@@ -5168,6 +5171,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     connectService,
     auditRepo,
     pool: pool ?? undefined,
+    aiUsage: pool ? new AiUsageReader(pool) : undefined,
+    overageCaps: pool ? new PgOverageCapStore(pool) : undefined,
   }));
 
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(

@@ -7047,6 +7047,14 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
   `,
+  // The owner's AI-minute overage cap. NULL cents = the plan-price default;
+  // ai_overage_uncapped = the owner removed the cap.
+  '286_add_ai_overage_cap': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_overage_cap_cents INTEGER
+        CHECK (ai_overage_cap_cents IS NULL OR ai_overage_cap_cents >= 0),
+      ADD COLUMN IF NOT EXISTS ai_overage_uncapped BOOLEAN NOT NULL DEFAULT false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -5,6 +5,7 @@ import { voiceBlocksTotal } from '../monitoring/metrics';
 import { loadVoiceAgentLiveAt } from './go-live';
 import { decideTrialCall, type GateReason, type SubscriptionStatus } from './trial-limits';
 import { PgCallUsageRepository } from '../billing/call-usage-events';
+import { PgOverageCapStore } from '../billing/overage-cap';
 import { CALL_PLAN_USAGE, priceMinuteUsage, type CallPlanId } from '../billing/call-usage-pricing';
 
 export interface VoiceGateInput {
@@ -37,6 +38,7 @@ export interface VoiceGateDeps {
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   const ledger = new PgCallUsageRepository(deps.pool);
+  const overageCaps = new PgOverageCapStore(deps.pool);
   return async ({ tenantId, callSid }) => {
     const subRes = await deps.pool.query<{
       subscription_status: string | null;
@@ -120,9 +122,11 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
       });
     }
 
-    // Paid: forward once this period's overage has reached the cap (one
-    // plan price by default). Without a mirrored period, nothing to measure.
-    if (tenant?.current_period_start && tenant.current_period_end) {
+    // Paid: forward once this period's overage has reached the owner's cap
+    // (one plan price by default; none if they removed it). Without a
+    // mirrored period, nothing to measure.
+    const cap = await overageCaps.get(tenantId);
+    if (cap !== null && tenant?.current_period_start && tenant.current_period_end) {
       const planId = tenant.plan_id ?? 'starter';
       const billableSeconds = await ledger.sumBillableSeconds(
         tenantId,
@@ -130,7 +134,7 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
         new Date(tenant.current_period_end),
       );
       const uncapped = priceMinuteUsage({ planId, billableSeconds, overageCapCents: null });
-      if (uncapped.customerChargeCents >= CALL_PLAN_USAGE[planId].monthlyPriceCents) {
+      if (uncapped.customerChargeCents >= (cap ?? CALL_PLAN_USAGE[planId].monthlyPriceCents)) {
         return block(deps, {
           tenantId,
           callSid,
