@@ -65,6 +65,7 @@ import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
+import { PgCallUsageRepository } from './billing/call-usage-events';
 import {
   PgVoiceUsageSettlementRepository,
   VoiceUsageBillingService,
@@ -1027,6 +1028,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // in-memory map. createWebhookRouter throws if this is missing in prod.
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
   const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
+  const callUsageRepo = pool ? new PgCallUsageRepository(pool) : undefined;
   const voiceUsageSettlementRepo = pool
     ? new PgVoiceUsageSettlementRepository(pool)
     : undefined;
@@ -3665,6 +3667,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sttAudioSeconds,
             ttsCharacters,
             callSid,
+            callerPhone,
             twilioAccountSid,
             mediaStreamsUsed,
           }: {
@@ -3677,9 +3680,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sttAudioSeconds: number;
             ttsCharacters: number;
             callSid?: string;
+            callerPhone?: string;
             twilioAccountSid?: string;
             mediaStreamsUsed: boolean;
           }) => {
+            // Per-call billing ledger — every ended session gets a row
+            // (billable or not); idempotent per (tenant, session).
+            if (callUsageRepo) {
+              await callUsageRepo
+                .recordCallEnded({
+                  tenantId, callId: sessionId, channel, endedAt, usageSeconds,
+                  ...(callerPhone ? { callerPhone } : {}),
+                })
+                .catch((err: unknown) => {
+                  requestLogger.warn('call usage ledger write failed', {
+                    sessionId,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                });
+            }
             if (channel === 'voice_inbound' && voiceUsageCostRepo) {
               const records: Array<Parameters<typeof voiceUsageCostRepo.record>[0]> = [
                 {
