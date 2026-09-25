@@ -125,7 +125,10 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
     // Paid: forward once this period's overage has reached the owner's cap
     // (one plan price by default; none if they removed it). Without a
     // mirrored period, nothing to measure.
-    const cap = await overageCaps.get(tenantId);
+    const cap =
+      tenant?.current_period_start && tenant.current_period_end
+        ? await overageCaps.get(tenantId)
+        : null;
     if (cap !== null && tenant?.current_period_start && tenant.current_period_end) {
       const planId = tenant.plan_id ?? 'starter';
       const billableSeconds = await ledger.sumBillableSeconds(
