@@ -26,6 +26,7 @@ import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrat
 import { WelcomeWalkthrough } from '../walkthrough/WelcomeWalkthrough';
 import { WhatsNewModal } from '../walkthrough/WhatsNewModal';
 import { PastDueBanner } from '../billing/PastDueBanner';
+import { UsageBanner } from '../billing/UsageBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -406,6 +407,7 @@ function ShellInner() {
       {/* Payment problem — renders only when the Stripe subscription is
           past_due. Blocking, not dismissible. */}
       <PastDueBanner />
+      <UsageBanner />
 
       {/* Activation celebration — one-time "first real call" banner, fires
           when tenant_settings.activated_at is set (< 7 days, not dismissed). */}
