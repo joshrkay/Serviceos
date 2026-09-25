@@ -56,14 +56,14 @@ export function evaluateTrialCap(input: TrialCapInput): TrialCapResult {
   return { allowed: true };
 }
 
-export const TRIAL_CALL_LIMITS = {
-  UPGRADE_NUDGE_CALLS: 15,
-  TRIAL_TOTAL_CALLS: 25,
+export const TRIAL_MINUTE_LIMITS = {
+  UPGRADE_NUDGE_SECONDS: 40 * 60,
+  TRIAL_TOTAL_SECONDS: 60 * 60,
 } as const;
 
 export interface TrialCallInput {
-  /** Billable calls already completed during this trial. */
-  billableCallsUsed: number;
+  /** Billable AI answering seconds already used during this trial. */
+  billableSecondsUsed: number;
   concurrentCalls: number;
 }
 
@@ -78,8 +78,8 @@ export type TrialCallDecision =
 
 export function decideTrialCall(input: TrialCallInput): TrialCallDecision {
   const upgradeNudgeDue =
-    input.billableCallsUsed >= TRIAL_CALL_LIMITS.UPGRADE_NUDGE_CALLS;
-  if (input.billableCallsUsed >= TRIAL_CALL_LIMITS.TRIAL_TOTAL_CALLS) {
+    input.billableSecondsUsed >= TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS;
+  if (input.billableSecondsUsed >= TRIAL_MINUTE_LIMITS.TRIAL_TOTAL_SECONDS) {
     return { action: 'forward_to_owner', reason: 'trial_cap_total', upgradeNudgeDue };
   }
   if (input.concurrentCalls >= TRIAL_LIMITS.CONCURRENT_CALLS) {

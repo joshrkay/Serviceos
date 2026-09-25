@@ -13,7 +13,7 @@ const APP_ROLE = "call_usage_rls_runtime";
 const PERIOD_START = new Date("2026-09-01T00:00:00.000Z");
 const PERIOD_END = new Date("2026-10-01T00:00:00.000Z");
 
-describe("Postgres integration — per-call usage ledger", () => {
+describe("Postgres integration — AI answering usage ledger", () => {
   let pool: Pool;
   let tenantA: TestTenant;
   let tenantB: TestTenant;
@@ -40,7 +40,7 @@ describe("Postgres integration — per-call usage ledger", () => {
     await closeSharedTestDb();
   });
 
-  it("counts a billable call once even when its end is recorded twice", async () => {
+  it("counts a call's seconds once even when its end is recorded twice", async () => {
     const call = {
       tenantId: tenantA.tenantId,
       callId: "session-once",
@@ -53,14 +53,14 @@ describe("Postgres integration — per-call usage ledger", () => {
     await repo.recordCallEnded(call);
 
     expect(
-      await repo.countBillableCalls(tenantA.tenantId, PERIOD_START, PERIOD_END),
-    ).toBe(1);
+      await repo.sumBillableSeconds(tenantA.tenantId, PERIOD_START, PERIOD_END),
+    ).toBe(120);
   });
 
-  it("treats a same-number callback within 10 minutes as the same call", async () => {
+  it("counts a same-number callback in full — minutes are minutes", async () => {
     const caller = "+16025550202";
     const tenantId = tenantA.tenantId;
-    const before = await repo.countBillableCalls(tenantId, PERIOD_START, PERIOD_END);
+    const before = await repo.sumBillableSeconds(tenantId, PERIOD_START, PERIOD_END);
 
     // First call 13:00:00-13:02:00.
     await repo.recordCallEnded({
@@ -72,15 +72,15 @@ describe("Postgres integration — per-call usage ledger", () => {
       tenantId, callId: "session-callback", channel: "voice_inbound", callerPhone: caller,
       endedAt: new Date("2026-09-11T13:12:00.000Z"), usageSeconds: 60,
     });
-    // Next call starts 13:23:00 — 21 minutes after the last counted call ended.
+    // Next call starts 13:23:00.
     await repo.recordCallEnded({
       tenantId, callId: "session-later", channel: "voice_inbound", callerPhone: caller,
       endedAt: new Date("2026-09-11T13:24:00.000Z"), usageSeconds: 60,
     });
 
     expect(
-      (await repo.countBillableCalls(tenantId, PERIOD_START, PERIOD_END)) - before,
-    ).toBe(2);
+      (await repo.sumBillableSeconds(tenantId, PERIOD_START, PERIOD_END)) - before,
+    ).toBe(120 + 60 + 60);
   });
 
   it("does not count the owner's onboarding test call", async () => {
@@ -91,7 +91,7 @@ describe("Postgres integration — per-call usage ledger", () => {
        ON CONFLICT (tenant_id) DO UPDATE SET owner_phone = EXCLUDED.owner_phone`,
       [tenantId, "+14805550100"],
     );
-    const before = await repo.countBillableCalls(tenantId, PERIOD_START, PERIOD_END);
+    const before = await repo.sumBillableSeconds(tenantId, PERIOD_START, PERIOD_END);
 
     await repo.recordCallEnded({
       tenantId, callId: "session-owner-test", channel: "voice_inbound",
@@ -99,7 +99,7 @@ describe("Postgres integration — per-call usage ledger", () => {
       endedAt: new Date("2026-09-12T09:03:00.000Z"), usageSeconds: 180,
     });
 
-    expect(await repo.countBillableCalls(tenantId, PERIOD_START, PERIOD_END)).toBe(before);
+    expect(await repo.sumBillableSeconds(tenantId, PERIOD_START, PERIOD_END)).toBe(before);
   });
 
   it("RLS prevents another tenant from reading the call ledger", async () => {

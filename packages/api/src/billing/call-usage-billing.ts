@@ -2,14 +2,14 @@ import type { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { ValidationError } from "../shared/errors";
 import { PgBaseRepository } from "../db/pg-base";
-import { priceCallUsage, type CallPlanId } from "./call-usage-pricing";
+import { priceMinuteUsage, type CallPlanId } from "./call-usage-pricing";
 import type { PgCallUsageRepository } from "./call-usage-events";
 
 export interface CallUsageSettlementRow {
   id: string;
   status: "pending" | "completed" | "failed";
-  billableCalls: number;
-  overageCalls: number;
+  billableMinutes: number;
+  overageMinutes: number;
   customerChargeCents: number;
   stripeInvoiceItemId: string | null;
 }
@@ -25,8 +25,9 @@ export interface CallUsageSettlementRepository {
     periodStart: Date;
     periodEnd: Date;
     planId: CallPlanId;
-    billableCalls: number;
-    overageCalls: number;
+    billableSeconds: number;
+    billableMinutes: number;
+    overageMinutes: number;
     customerChargeCents: number;
   }): Promise<CallUsageSettlementRow>;
   markCompleted(tenantId: string, id: string, stripeInvoiceItemId: string | null): Promise<void>;
@@ -47,9 +48,9 @@ export class PgCallUsageSettlementRepository
     return this.withTenant(input.tenantId, async (client) => {
       const result = await client.query<Record<string, unknown>>(
         `INSERT INTO call_usage_settlements
-           (id, tenant_id, period_start, period_end, plan_id, billable_calls,
-            overage_calls, customer_charge_cents, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+           (id, tenant_id, period_start, period_end, plan_id, billable_seconds,
+            billable_minutes, overage_minutes, customer_charge_cents, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
          ON CONFLICT (tenant_id, period_start, period_end) DO UPDATE SET updated_at = NOW()
          RETURNING *`,
         [
@@ -58,8 +59,9 @@ export class PgCallUsageSettlementRepository
           input.periodStart,
           input.periodEnd,
           input.planId,
-          input.billableCalls,
-          input.overageCalls,
+          input.billableSeconds,
+          input.billableMinutes,
+          input.overageMinutes,
           input.customerChargeCents,
         ],
       );
@@ -67,8 +69,8 @@ export class PgCallUsageSettlementRepository
       return {
         id: row.id as string,
         status: row.status as CallUsageSettlementRow["status"],
-        billableCalls: Number(row.billable_calls),
-        overageCalls: Number(row.overage_calls),
+        billableMinutes: Number(row.billable_minutes),
+        overageMinutes: Number(row.overage_minutes),
         customerChargeCents: Number(row.customer_charge_cents),
         stripeInvoiceItemId: (row.stripe_invoice_item_id as string | null) ?? null,
       };
@@ -110,7 +112,7 @@ export class PgCallUsageSettlementRepository
 export interface CallUsageBillingServiceDeps {
   pool: Pool;
   settlementRepo: CallUsageSettlementRepository;
-  callUsage: Pick<PgCallUsageRepository, "countBillableCalls">;
+  callUsage: Pick<PgCallUsageRepository, "sumBillableSeconds">;
   stripeApiKey: string;
   fetchFn?: typeof fetch;
   /** Maps the invoice's subscription price to a plan; null when unknown. */
@@ -126,13 +128,13 @@ export interface CallUsageBillingAlert {
 
 export interface CallUsageSettlement {
   planId: CallPlanId;
-  billableCalls: number;
-  overageCalls: number;
+  billableMinutes: number;
+  overageMinutes: number;
   customerChargeCents: number;
   invoiceItemId: string | null;
 }
 
-/** Converts one closed billing period's call ledger into a Stripe overage item. */
+/** Converts one closed billing period's AI minutes into a Stripe overage item. */
 export class CallUsageBillingService {
   constructor(private readonly deps: CallUsageBillingServiceDeps) {}
 
@@ -148,26 +150,27 @@ export class CallUsageBillingService {
     if (!planId) {
       throw new ValidationError(`Unknown subscription price ${input.subscriptionPriceId}`);
     }
-    const billableCalls = await this.deps.callUsage.countBillableCalls(
+    const billableSeconds = await this.deps.callUsage.sumBillableSeconds(
       input.tenantId,
       input.periodStart,
       input.periodEnd,
     );
-    const price = priceCallUsage({ planId, billableCalls });
+    const price = priceMinuteUsage({ planId, billableSeconds });
     const settlement = await this.deps.settlementRepo.ensurePending({
       id: randomUUID(),
       tenantId: input.tenantId,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd,
       planId,
-      billableCalls: price.billableCalls,
-      overageCalls: price.overageCalls,
+      billableSeconds,
+      billableMinutes: price.billableMinutes,
+      overageMinutes: price.overageMinutes,
       customerChargeCents: price.customerChargeCents,
     });
     const result = {
       planId,
-      billableCalls: settlement.billableCalls,
-      overageCalls: settlement.overageCalls,
+      billableMinutes: settlement.billableMinutes,
+      overageMinutes: settlement.overageMinutes,
       customerChargeCents: settlement.customerChargeCents,
     };
     if (settlement.status === "completed") {
@@ -184,14 +187,14 @@ export class CallUsageBillingService {
     );
     const customerId = customer.rows[0]?.stripe_customer_id;
     if (!customerId) {
-      throw new ValidationError("Tenant has no Stripe customer for call overage");
+      throw new ValidationError("Tenant has no Stripe customer for AI minute overage");
     }
     const body = new URLSearchParams();
     body.set("customer", customerId);
     if (input.stripeInvoiceId) body.set("invoice", input.stripeInvoiceId);
     body.set("amount", String(settlement.customerChargeCents));
     body.set("currency", "usd");
-    body.set("description", `Answered calls over plan: ${settlement.overageCalls}`);
+    body.set("description", `AI answering minutes over plan: ${settlement.overageMinutes} at $1.25/min`);
     const response = await (this.deps.fetchFn ?? fetch)("https://api.stripe.com/v1/invoiceitems", {
       method: "POST",
       headers: {
@@ -204,8 +207,8 @@ export class CallUsageBillingService {
     const created = response.ok ? ((await response.json()) as { id?: string }) : {};
     if (!created.id) {
       const message = response.ok
-        ? "Stripe call overage invoice item returned no id"
-        : `Stripe call overage invoice item failed (${response.status}): ${await response.text()}`;
+        ? "Stripe AI minute overage invoice item returned no id"
+        : `Stripe AI minute overage invoice item failed (${response.status}): ${await response.text()}`;
       await this.deps.settlementRepo.fail(input.tenantId, settlement.id, message);
       void Promise.resolve(
         this.deps.onAlert?.({ rule: "call_settlement_failed", tenantId: input.tenantId, message }),

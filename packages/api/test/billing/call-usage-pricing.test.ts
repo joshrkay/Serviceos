@@ -1,91 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { priceCallUsage } from "../../src/billing/call-usage-pricing";
+import { priceMinuteUsage } from "../../src/billing/call-usage-pricing";
 
-describe("per-call usage pricing", () => {
-  it("charges nothing while Starter stays within its 50-call bundle", () => {
-    expect(priceCallUsage({ planId: "starter", billableCalls: 50 })).toEqual({
-      includedCalls: 50,
-      billableCalls: 50,
-      overageCalls: 0,
+describe("AI answering minute pricing", () => {
+  it("charges nothing for Starter's 20 included minutes", () => {
+    expect(priceMinuteUsage({ planId: "starter", billableSeconds: 1_200 })).toEqual({
+      includedMinutes: 20,
+      billableMinutes: 20,
+      overageMinutes: 0,
       customerChargeCents: 0,
     });
   });
 
-  it("charges $1.50 for the first Starter call past the bundle", () => {
-    expect(priceCallUsage({ planId: "starter", billableCalls: 51 })).toEqual({
-      includedCalls: 50,
-      billableCalls: 51,
-      overageCalls: 1,
-      customerChargeCents: 150,
+  it("rounds the period up once: 1,201 seconds is 21 minutes, one over at $1.25", () => {
+    expect(priceMinuteUsage({ planId: "starter", billableSeconds: 1_201 })).toEqual({
+      includedMinutes: 20,
+      billableMinutes: 21,
+      overageMinutes: 1,
+      customerChargeCents: 125,
     });
   });
 
-  it("includes 150 calls on Growth and charges $1.25 for call 151", () => {
-    expect(priceCallUsage({ planId: "growth", billableCalls: 150 })).toEqual({
-      includedCalls: 150,
-      billableCalls: 150,
-      overageCalls: 0,
-      customerChargeCents: 0,
-    });
-    expect(priceCallUsage({ planId: "growth", billableCalls: 151 })).toEqual({
-      includedCalls: 150,
-      billableCalls: 151,
-      overageCalls: 1,
+  it("includes 60 minutes on Growth and charges $1.25 for minute 61", () => {
+    expect(priceMinuteUsage({ planId: "growth", billableSeconds: 3_600 }).customerChargeCents).toBe(0);
+    expect(priceMinuteUsage({ planId: "growth", billableSeconds: 3_660 })).toEqual({
+      includedMinutes: 60,
+      billableMinutes: 61,
+      overageMinutes: 1,
       customerChargeCents: 125,
     });
   });
 
   it("caps overage at the plan price by default", () => {
-    // 80 overage calls x $1.50 = $120, capped at the $79 Starter price.
-    expect(priceCallUsage({ planId: "starter", billableCalls: 130 })).toEqual({
-      includedCalls: 50,
-      billableCalls: 130,
-      overageCalls: 80,
+    // 200 minutes on Starter: 180 over x $1.25 = $225, capped at $79.
+    expect(priceMinuteUsage({ planId: "starter", billableSeconds: 12_000 })).toEqual({
+      includedMinutes: 20,
+      billableMinutes: 200,
+      overageMinutes: 180,
       customerChargeCents: 7_900,
     });
   });
 
-  it("honours an owner-raised overage cap", () => {
-    expect(
-      priceCallUsage({
-        planId: "starter",
-        billableCalls: 130,
-        overageCapCents: 20_000,
-      }).customerChargeCents,
-    ).toBe(12_000);
-    expect(
-      priceCallUsage({
-        planId: "starter",
-        billableCalls: 250,
-        overageCapCents: 20_000,
-      }).customerChargeCents,
-    ).toBe(20_000);
+  it("honours an owner-raised cap, or no cap at all", () => {
+    const starter200Min = { planId: "starter" as const, billableSeconds: 12_000 };
+    expect(priceMinuteUsage({ ...starter200Min, overageCapCents: 20_000 }).customerChargeCents).toBe(20_000);
+    expect(priceMinuteUsage({ ...starter200Min, overageCapCents: 30_000 }).customerChargeCents).toBe(22_500);
+    expect(priceMinuteUsage({ ...starter200Min, overageCapCents: null }).customerChargeCents).toBe(22_500);
   });
 
-  it("charges every overage call when the owner removes the cap", () => {
-    // 200 overage calls x $1.50 = $300.
-    expect(
-      priceCallUsage({
-        planId: "starter",
-        billableCalls: 250,
-        overageCapCents: null,
-      }).customerChargeCents,
-    ).toBe(30_000);
-  });
-
-  it("rejects call counts and caps that are not non-negative integers", () => {
+  it("rejects seconds and caps that are not non-negative integers", () => {
+    expect(() => priceMinuteUsage({ planId: "starter", billableSeconds: -1 })).toThrow(RangeError);
+    expect(() => priceMinuteUsage({ planId: "starter", billableSeconds: 1.5 })).toThrow(RangeError);
     expect(() =>
-      priceCallUsage({ planId: "starter", billableCalls: -1 }),
-    ).toThrow(RangeError);
-    expect(() =>
-      priceCallUsage({ planId: "starter", billableCalls: 1.5 }),
-    ).toThrow(RangeError);
-    expect(() =>
-      priceCallUsage({
-        planId: "starter",
-        billableCalls: 60,
-        overageCapCents: -100,
-      }),
+      priceMinuteUsage({ planId: "starter", billableSeconds: 60, overageCapCents: -100 }),
     ).toThrow(RangeError);
   });
 });

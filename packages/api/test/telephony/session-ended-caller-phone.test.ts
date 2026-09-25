@@ -1,6 +1,6 @@
 /**
- * Per-call billing needs the caller's number at call end: the test-call
- * exclusion and the 10-minute same-number merge both key on it.
+ * AI-minute billing needs the caller's number at call end: the test-call
+ * exclusion keys on it, and it is stored on each usage row.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';

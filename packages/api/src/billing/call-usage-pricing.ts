@@ -1,26 +1,15 @@
 /**
- * Customer-facing per-call usage policy.
- *
- * Each plan includes a bundle of billable answered calls per billing period;
- * calls beyond the bundle are charged a flat integer-cent amount each.
+ * Customer-facing AI answering policy: each plan includes a bundle of AI
+ * answering minutes per billing period; minutes beyond it are charged a flat
+ * integer-cent rate. Seconds are summed for the period and rounded up to a
+ * whole minute once.
  */
 export type CallPlanId = "starter" | "growth";
 
-export interface CallPlanUsagePolicy {
-  monthlyPriceCents: number;
-  includedCalls: number;
-  overageCentsPerCall: number;
-}
-
-export const CALL_PLAN_USAGE: Record<CallPlanId, CallPlanUsagePolicy> = {
-  starter: { monthlyPriceCents: 7_900, includedCalls: 50, overageCentsPerCall: 150 },
-  growth: { monthlyPriceCents: 19_900, includedCalls: 150, overageCentsPerCall: 125 },
-};
-
-export interface PriceCallUsageInput {
+export interface PriceMinuteUsageInput {
   planId: CallPlanId;
-  /** Billable calls for one tenant and billing period. */
-  billableCalls: number;
+  /** Billable AI answering seconds for one tenant and billing period. */
+  billableSeconds: number;
   /**
    * Tenant overage ceiling for the period. Omitted: one plan price.
    * null: no ceiling.
@@ -28,12 +17,24 @@ export interface PriceCallUsageInput {
   overageCapCents?: number | null;
 }
 
-export interface CallUsagePrice {
-  includedCalls: number;
-  billableCalls: number;
-  overageCalls: number;
+export interface MinuteUsagePrice {
+  includedMinutes: number;
+  billableMinutes: number;
+  overageMinutes: number;
   customerChargeCents: number;
 }
+
+export const OVERAGE_CENTS_PER_MINUTE = 125;
+
+export interface CallPlanUsagePolicy {
+  monthlyPriceCents: number;
+  includedMinutes: number;
+}
+
+export const CALL_PLAN_USAGE: Record<CallPlanId, CallPlanUsagePolicy> = {
+  starter: { monthlyPriceCents: 7_900, includedMinutes: 20 },
+  growth: { monthlyPriceCents: 19_900, includedMinutes: 60 },
+};
 
 function nonNegativeInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -42,12 +43,12 @@ function nonNegativeInteger(value: number, name: string): number {
   return value;
 }
 
-export function priceCallUsage(input: PriceCallUsageInput): CallUsagePrice {
-  const { monthlyPriceCents, includedCalls, overageCentsPerCall } =
-    CALL_PLAN_USAGE[input.planId];
-  const billableCalls = nonNegativeInteger(input.billableCalls, "billableCalls");
-  const overageCalls = Math.max(0, billableCalls - includedCalls);
-  const uncappedChargeCents = overageCalls * overageCentsPerCall;
+export function priceMinuteUsage(input: PriceMinuteUsageInput): MinuteUsagePrice {
+  const { includedMinutes, monthlyPriceCents } = CALL_PLAN_USAGE[input.planId];
+  const billableSeconds = nonNegativeInteger(input.billableSeconds, "billableSeconds");
+  const billableMinutes = Math.ceil(billableSeconds / 60);
+  const overageMinutes = Math.max(0, billableMinutes - includedMinutes);
+  const uncappedChargeCents = overageMinutes * OVERAGE_CENTS_PER_MINUTE;
   const capCents =
     input.overageCapCents === undefined
       ? monthlyPriceCents
@@ -55,9 +56,9 @@ export function priceCallUsage(input: PriceCallUsageInput): CallUsagePrice {
         ? null
         : nonNegativeInteger(input.overageCapCents, "overageCapCents");
   return {
-    includedCalls,
-    billableCalls,
-    overageCalls,
+    includedMinutes,
+    billableMinutes,
+    overageMinutes,
     customerChargeCents:
       capCents === null
         ? uncappedChargeCents

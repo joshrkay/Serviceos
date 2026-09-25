@@ -6984,7 +6984,7 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_ai_voice_usage_settlements ON ai_voice_usage_settlements
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
-  // Per-call usage ledger: one row per ended AI voice session, billable or
+  // AI answering usage ledger: one row per ended AI voice session, billable or
   // not, so the public billable-call rule is auditable call by call.
   '282_create_call_usage_events': `
     CREATE TABLE IF NOT EXISTS call_usage_events (
@@ -7008,7 +7008,7 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_call_usage_events ON call_usage_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
-  // One per-call overage settlement per (tenant, Stripe billing period).
+  // One AI-minute overage settlement per (tenant, Stripe billing period).
   '283_create_call_usage_settlements': `
     CREATE TABLE IF NOT EXISTS call_usage_settlements (
       id UUID PRIMARY KEY,
@@ -7016,8 +7016,9 @@ export const MIGRATIONS = {
       period_start TIMESTAMPTZ NOT NULL,
       period_end TIMESTAMPTZ NOT NULL,
       plan_id TEXT NOT NULL CHECK (plan_id IN ('starter', 'growth')),
-      billable_calls INTEGER NOT NULL CHECK (billable_calls >= 0),
-      overage_calls INTEGER NOT NULL CHECK (overage_calls >= 0),
+      billable_seconds INTEGER NOT NULL CHECK (billable_seconds >= 0),
+      billable_minutes INTEGER NOT NULL CHECK (billable_minutes >= 0),
+      overage_minutes INTEGER NOT NULL CHECK (overage_minutes >= 0),
       customer_charge_cents INTEGER NOT NULL CHECK (customer_charge_cents >= 0),
       status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
       stripe_invoice_item_id TEXT,

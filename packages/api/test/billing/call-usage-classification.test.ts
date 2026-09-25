@@ -6,20 +6,11 @@ const tenantPhones = {
   businessPhone: "+14805550199",
 };
 
-describe("billable call classification", () => {
-  it("does not bill a call shorter than 30 seconds", () => {
+describe("billable AI answering classification", () => {
+  it("bills every second of an AI-answered inbound call, even a 12-second one", () => {
     expect(
       classifyCall(
-        { channel: "voice_inbound", usageSeconds: 29, callerPhone: "+16025550123" },
-        tenantPhones,
-      ),
-    ).toEqual({ billable: false, reason: "under_30_seconds" });
-  });
-
-  it("bills an AI-answered call of exactly 30 seconds", () => {
-    expect(
-      classifyCall(
-        { channel: "voice_inbound", usageSeconds: 30, callerPhone: "+16025550123" },
+        { channel: "voice_inbound", usageSeconds: 12, callerPhone: "+16025550123" },
         tenantPhones,
       ),
     ).toEqual({ billable: true });

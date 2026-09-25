@@ -90,7 +90,7 @@ describe("Stripe invoice.created per-call settlement", () => {
 
   it("returns 500 so Stripe retries when settlement fails", async () => {
     const settlePeriod = vi.fn(async () => {
-      throw new Error("Stripe call overage invoice item failed (503)");
+      throw new Error("Stripe AI minute overage invoice item failed (503)");
     });
     const app = appWith(settlePeriod);
 

@@ -51,7 +51,7 @@ function fakeStripe() {
   };
 }
 
-describe("Postgres integration — per-call overage settlement", () => {
+describe("Postgres integration — AI minute overage settlement", () => {
   let pool: Pool;
   let ledger: PgCallUsageRepository;
   let tenant: TestTenant;
@@ -93,7 +93,7 @@ describe("Postgres integration — per-call overage settlement", () => {
   });
 
   /** Records `n` distinct 2-minute customer calls inside the period. */
-  async function recordBillableCalls(n: number) {
+  async function recordTwoMinuteCalls(n: number) {
     for (let i = 0; i < n; i += 1) {
       await ledger.recordCallEnded({
         tenantId: tenant.tenantId,
@@ -116,28 +116,28 @@ describe("Postgres integration — per-call overage settlement", () => {
     });
   }
 
-  it("invoices a Starter period with 60 calls as one $15.00 overage item", async () => {
-    await recordBillableCalls(60);
+  it("invoices a Starter period with 60 AI minutes as one $50.00 overage item", async () => {
+    await recordTwoMinuteCalls(30);
 
     const result = await settle();
 
-    expect(result).toMatchObject({ billableCalls: 60, overageCalls: 10, customerChargeCents: 1_500 });
+    expect(result).toMatchObject({ billableMinutes: 60, overageMinutes: 40, customerChargeCents: 5_000 });
     expect(stripe.items()).toEqual([
-      { id: "ii_1", amount: 1_500, customer: `cus_${tenant.tenantId.slice(0, 8)}` },
+      { id: "ii_1", amount: 5_000, customer: `cus_${tenant.tenantId.slice(0, 8)}` },
     ]);
   });
 
   it("completes a period inside the bundle without touching Stripe", async () => {
-    await recordBillableCalls(50);
+    await recordTwoMinuteCalls(10);
 
     const result = await settle();
 
-    expect(result).toMatchObject({ billableCalls: 50, overageCalls: 0, customerChargeCents: 0, invoiceItemId: null });
+    expect(result).toMatchObject({ billableMinutes: 20, overageMinutes: 0, customerChargeCents: 0, invoiceItemId: null });
     expect(stripe.items()).toEqual([]);
   });
 
   it("re-delivering a settled period's invoice webhook never calls Stripe again", async () => {
-    await recordBillableCalls(55);
+    await recordTwoMinuteCalls(11);
 
     const first = await settle();
     const again = await settle();
@@ -148,10 +148,10 @@ describe("Postgres integration — per-call overage settlement", () => {
   });
 
   it("retries a failed Stripe attempt and charges exactly once, at the original amount", async () => {
-    await recordBillableCalls(55);
+    await recordTwoMinuteCalls(11);
     stripe.failNextRequests(1);
 
-    await expect(settle()).rejects.toThrow(/Stripe call overage invoice item failed \(503\)/);
+    await expect(settle()).rejects.toThrow(/Stripe AI minute overage invoice item failed \(503\)/);
     // A late ledger write between attempts must not change what is charged.
     await ledger.recordCallEnded({
       tenantId: tenant.tenantId, callId: `late-${periodIndex}`, channel: "voice_inbound",
@@ -160,30 +160,30 @@ describe("Postgres integration — per-call overage settlement", () => {
     });
     const retried = await settle();
 
-    expect(retried).toMatchObject({ overageCalls: 5, customerChargeCents: 750 });
+    expect(retried).toMatchObject({ overageMinutes: 2, customerChargeCents: 250 });
     expect(stripe.items()).toEqual([
-      { id: "ii_1", amount: 750, customer: `cus_${tenant.tenantId.slice(0, 8)}` },
+      { id: "ii_1", amount: 250, customer: `cus_${tenant.tenantId.slice(0, 8)}` },
     ]);
   });
 
   it("prices the period on the plan the invoice carries (upgraded to Growth: no overage)", async () => {
-    await recordBillableCalls(60);
+    await recordTwoMinuteCalls(30);
 
     const result = await settle(GROWTH_PRICE);
 
-    expect(result).toMatchObject({ planId: "growth", overageCalls: 0, customerChargeCents: 0 });
+    expect(result).toMatchObject({ planId: "growth", overageMinutes: 0, customerChargeCents: 0 });
     expect(stripe.requests()).toBe(0);
   });
 
   it("refuses to settle against an unknown subscription price", async () => {
-    await recordBillableCalls(60);
+    await recordTwoMinuteCalls(30);
 
     await expect(settle("price_unknown")).rejects.toThrow(/Unknown subscription price/);
     expect(stripe.requests()).toBe(0);
   });
 
   it("RLS prevents another tenant from reading settlements", async () => {
-    await recordBillableCalls(60);
+    await recordTwoMinuteCalls(30);
     await settle();
     const other = await createTestTenant(pool);
     await pool.query(`DO $$ BEGIN

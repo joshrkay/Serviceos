@@ -3687,7 +3687,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             twilioAccountSid?: string;
             mediaStreamsUsed: boolean;
           }) => {
-            // Per-call billing ledger — every ended session gets a row
+            // AI answering usage ledger — every ended session gets a row
             // (billable or not); idempotent per (tenant, session).
             if (callUsageRepo) {
               await callUsageRepo

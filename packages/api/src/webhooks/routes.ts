@@ -152,7 +152,7 @@ export interface WebhookRouterDeps {
    * without Stripe configured still build the router.
    */
   billingService?: BillingService;
-  /** Per-call overage: settles the closed period on invoice.created. */
+  /** AI-minute overage: settles the closed period on invoice.created. */
   callUsageBillingService?: CallUsageBillingService;
   /**
    * Tier 4 (Payment methods — PR 1). When wired, the Stripe webhook
@@ -2110,7 +2110,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // snapshot. created/updated/deleted all share the same handler;
       // 'deleted' typically arrives with status='canceled' so the
       // mirror naturally reflects the lifecycle end.
-      // Per-call overage for the period that just closed. The invoice's
+      // AI-minute overage for the period that just closed. The invoice's
       // subscription line carries the plan in force now, which prices the
       // whole period (upgrades apply retroactively). A throw → 500 so
       // Stripe retries; settlement is idempotent per (tenant, period).
