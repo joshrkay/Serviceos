@@ -15,6 +15,7 @@
  * local row's id.
  */
 import { PendingInvitation, PendingInvitationRepository } from './pending-invitation';
+import { publicUrl } from '../shared/public-origins';
 import { UserRole } from './user';
 import { assertSeatAvailable, type SeatUsageReader } from './seat-limit';
 
