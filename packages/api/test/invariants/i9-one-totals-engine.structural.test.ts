@@ -218,7 +218,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: "`calculateEstimateTotal` is a SECOND totals engine: `sum + item.quantity * item.unitPrice` with NO per-line rounding, so a fractional quantity yields non-integer cents — CLAUDE.md's \"all money: integer cents\" broken outright, and exactly the P0-2 divergence `normalizeLineItemTotals` exists to close. It also has ZERO callers in src (only its own unit test), so the cheapest fix is deletion — which CLAUDE.md's hygiene rule already requires of an unused export.",
   },
   {
-    at: 'src/proposals/execution/handlers.ts:838',
+    at: 'src/proposals/execution/handlers.ts:839',
     as: 'violation',
     why: "`Math.round(quantity * unitPriceCents)` in the execution line-item normalizer duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap.",
   },

@@ -19,6 +19,7 @@
  * failure — NEVER a synthetic-id passthrough that reports success while
  * persisting nothing.
  */
+import type { SeatUsageReader } from '../../users/seat-limit';
 import type { Pool } from 'pg';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
@@ -462,6 +463,7 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
     private readonly invitationRepo: PendingInvitationRepository | undefined,
     private readonly auditRepo: AuditRepository,
     private readonly clerk: ClerkInvitationConfig = {},
+    private readonly seatUsage?: SeatUsageReader,
   ) {}
 
   isFullyWired(): boolean {
@@ -511,6 +513,7 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
         },
         this.invitationRepo,
         this.clerk,
+        this.seatUsage,
       );
       await this.auditRepo.create(
         createAuditEvent({

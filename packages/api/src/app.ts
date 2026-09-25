@@ -66,6 +66,7 @@ import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService, planIdForStripePrice } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
 import { PgCallUsageRepository } from './billing/call-usage-events';
+import { PgSeatUsageReader } from './users/seat-limit';
 import {
   CallUsageBillingService,
   PgCallUsageSettlementRepository,
@@ -1029,6 +1030,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
   const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
   const callUsageRepo = pool ? new PgCallUsageRepository(pool) : undefined;
+  // Per-plan user limit — shared by the invite route and the onboarding
+  // team-member proposal so neither path can exceed the plan.
+  const seatUsage = pool ? new PgSeatUsageReader(pool) : undefined;
   const callUsageBillingService =
     pool && process.env.STRIPE_SECRET_KEY && callUsageRepo
       ? new CallUsageBillingService({
@@ -1957,6 +1961,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       clerkSecretKey: process.env.CLERK_SECRET_KEY,
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     },
+    seatUsage,
     // B1.18 — update_brand_voice writes through the SAME versioned path
     // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
     // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
@@ -5123,6 +5128,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // Same instance the Clerk webhook reads on user.created — the
         // accept side reads what the invite side wrote.
         pendingInvitationRepo,
+        seatUsage,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
         appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
         // Account deletion purges the user's push tokens server-side.

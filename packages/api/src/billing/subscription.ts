@@ -54,12 +54,11 @@ export interface BillingPlanView {
 interface PlanSpec {
   envVar: string;
   displayName: string;
-  includedUsers: number;
 }
 
 const PLAN_SPECS: Record<BillingPlanId, PlanSpec> = {
-  starter: { envVar: 'STRIPE_STARTER_PRICE_ID', displayName: 'Starter', includedUsers: 2 },
-  growth: { envVar: 'STRIPE_GROWTH_PRICE_ID', displayName: 'Growth', includedUsers: 5 },
+  starter: { envVar: 'STRIPE_STARTER_PRICE_ID', displayName: 'Starter' },
+  growth: { envVar: 'STRIPE_GROWTH_PRICE_ID', displayName: 'Growth' },
 };
 
 /**
@@ -410,7 +409,7 @@ export class BillingService {
           amountCents: validated.amountCents,
           currency: 'usd',
           interval: 'month',
-          includedUsers: PLAN_SPECS[planId].includedUsers,
+          includedUsers: CALL_PLAN_USAGE[planId].includedUsers,
           includedAiMinutes: CALL_PLAN_USAGE[planId].includedMinutes,
           overageCentsPerAiMinute: OVERAGE_CENTS_PER_MINUTE,
         });
