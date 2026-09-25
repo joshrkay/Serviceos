@@ -11,8 +11,6 @@ interface BillingPlan {
   amountCents: number;
   currency: string;
   interval: string;
-  includedAiVoiceMinutes: number;
-  aiVoiceCostMarkupPercent: number;
 }
 
 /**
@@ -180,12 +178,6 @@ export function BillingStep() {
                   />
                   <span>
                     <span className="block text-base font-medium text-slate-900">{plan.name}</span>
-                    <span className="block text-xs text-slate-500">
-                      {plan.includedAiVoiceMinutes} AI voice minutes included
-                    </span>
-                    <span className="block text-xs text-slate-500">
-                      Then actual provider cost + {plan.aiVoiceCostMarkupPercent}%
-                    </span>
                   </span>
                 </span>
                 <span className="text-sm text-slate-600">

@@ -1,9 +1,5 @@
 import type { Pool } from 'pg';
 import { AppError, ValidationError, NotFoundError } from '../shared/errors';
-import {
-  AI_VOICE_INCLUDED_MINUTES,
-  AI_VOICE_MARKUP_BPS,
-} from './voice-usage-pricing';
 
 /**
  * Tier 4 (Subscription — Rivet billing). Service that mints Stripe
@@ -49,8 +45,6 @@ export interface BillingPlanView {
   amountCents: number;
   currency: string;
   interval: string;
-  includedAiVoiceMinutes: number;
-  aiVoiceCostMarkupPercent: number;
 }
 
 interface PlanSpec {
@@ -397,8 +391,6 @@ export class BillingService {
           amountCents: validated.amountCents,
           currency: 'usd',
           interval: 'month',
-          includedAiVoiceMinutes: AI_VOICE_INCLUDED_MINUTES,
-          aiVoiceCostMarkupPercent: AI_VOICE_MARKUP_BPS / 100,
         });
       } catch {
         continue;

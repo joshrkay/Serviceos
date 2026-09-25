@@ -302,7 +302,6 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ DELETE /connect
          └─ GET /connect
          └─ GET /subscription
-         └─ GET /voice-usage
          └─ POST /connect/onboarding
          └─ POST /end-trial-now
          └─ POST /portal-session

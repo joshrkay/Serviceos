@@ -6,7 +6,6 @@ import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse, NotFoundError } from '../shared/errors';
 import { BillingService } from '../billing/subscription';
-import type { VoiceUsageBillingService } from '../billing/voice-usage-billing';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
@@ -46,34 +45,11 @@ export interface BillingRouteDeps {
   auditRepo?: AuditRepository;
   /** Used to resolve owner email when the JWT has no email claim. */
   pool?: Pool;
-  voiceUsageBillingService?: VoiceUsageBillingService;
 }
 
 export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
   const { billingService, connectService, auditRepo, pool } = deps;
   const router = Router();
-
-  router.get(
-    '/voice-usage',
-    requireAuth,
-    requireTenant,
-    requirePermission('settings:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        if (!deps.voiceUsageBillingService) {
-          res.status(503).json({
-            error: 'BILLING_NOT_CONFIGURED',
-            message: 'Voice usage billing is not configured',
-          });
-          return;
-        }
-        res.json(await deps.voiceUsageBillingService.previewCurrentPeriod(req.auth!.tenantId));
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    },
-  );
 
   router.get(
     '/subscription',

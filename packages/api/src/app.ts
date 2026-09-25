@@ -67,10 +67,6 @@ import { BillingService } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
 import { PgCallUsageRepository } from './billing/call-usage-events';
 import {
-  PgVoiceUsageSettlementRepository,
-  VoiceUsageBillingService,
-} from './billing/voice-usage-billing';
-import {
   deepgramCostMicroCents,
   elevenLabsCostMicroCents,
   twilioPriceToMicroCents,
@@ -1029,24 +1025,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
   const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
   const callUsageRepo = pool ? new PgCallUsageRepository(pool) : undefined;
-  const voiceUsageSettlementRepo = pool
-    ? new PgVoiceUsageSettlementRepository(pool)
-    : undefined;
-  const voiceUsageBillingService =
-    pool && process.env.STRIPE_SECRET_KEY && voiceUsageCostRepo && voiceUsageSettlementRepo
-      ? new VoiceUsageBillingService({
-          pool,
-          usageRepo: voiceUsageCostRepo,
-          settlementRepo: voiceUsageSettlementRepo,
-          stripeApiKey: process.env.STRIPE_SECRET_KEY,
-          onAlert: (alert) => {
-            sentryClient.captureMessage(
-              `[VOICE_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
-              'error',
-            );
-          },
-        })
-      : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
@@ -1083,7 +1061,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // status the GET /api/billing/subscription endpoint reads.
     // Wired only when both pool and STRIPE_SECRET_KEY exist.
     billingService,
-    voiceUsageBillingService,
     connectService,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     queue,
@@ -5161,7 +5138,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the same instance.
   app.use('/api/billing', createBillingRouter({
     billingService,
-    voiceUsageBillingService,
     connectService,
     auditRepo,
     pool: pool ?? undefined,

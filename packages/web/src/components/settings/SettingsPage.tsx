@@ -198,12 +198,6 @@ export function SettingsPage() {
   // alert (the server's reason, e.g. "saved Stripe customer no longer
   // exists — contact support to re-link billing"), not a transient toast.
   const [billingPortalError, setBillingPortalError] = useState<BillingPortalFailure | null>(null);
-  const [voiceUsage, setVoiceUsage] = useState<{
-    usageSeconds: number;
-    includedMinutes: number;
-    projectedChargeCents: number;
-    complete: boolean;
-  } | null>(null);
   // Surface a failure to load the main /api/settings document instead of
   // silently swallowing it (which left the page showing stale defaults with
   // no signal that the user's real preferences never loaded).
@@ -357,21 +351,6 @@ export function SettingsPage() {
       cancelled = true;
     };
   }, [settingsReloadNonce]);
-
-  useEffect(() => {
-    let cancelled = false;
-    // Some embedders/tests provide a deliberately partial API adapter that
-    // returns undefined for unknown endpoints. Treat that the same as an
-    // unavailable optional usage panel instead of crashing Settings.
-    void Promise.resolve(apiFetch('/api/billing/voice-usage'))
-      .then(async (res) => {
-        if (!cancelled && res?.ok) setVoiceUsage(await res.json());
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [apiFetch]);
 
   async function refreshQuickBooksIntegration() {
     try {
@@ -955,9 +934,7 @@ export function SettingsPage() {
           kind: 'external',
           icon: CreditCard,
           label: 'Rivet subscription',
-          description: voiceUsage
-            ? `${Math.ceil(voiceUsage.usageSeconds / 60)} of ${voiceUsage.includedMinutes} AI voice minutes used · ${voiceUsage.complete ? `$${(voiceUsage.projectedChargeCents / 100).toFixed(2)} projected overage` : 'cost reconciliation pending'}`
-            : 'Manage card, plan, invoices in the Stripe billing portal',
+          description: 'Manage card, plan, invoices in the Stripe billing portal',
           action: () => setConfirmPortalOpen(true),
         },
       ],

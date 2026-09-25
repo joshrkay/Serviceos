@@ -112,8 +112,6 @@ describe('GET /api/onboarding/billing/plans', () => {
         amountCents: 5_000,
         currency: 'usd',
         interval: 'month',
-        includedAiVoiceMinutes: 30,
-        aiVoiceCostMarkupPercent: 30,
       },
       {
         id: 'enterprise',
@@ -121,8 +119,6 @@ describe('GET /api/onboarding/billing/plans', () => {
         amountCents: 15_000,
         currency: 'usd',
         interval: 'month',
-        includedAiVoiceMinutes: 30,
-        aiVoiceCostMarkupPercent: 30,
       },
     ]);
     expect(JSON.stringify(res.body)).not.toMatch(/price_(basic|enterprise)_live/);
