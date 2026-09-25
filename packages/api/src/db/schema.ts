@@ -6984,6 +6984,30 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_ai_voice_usage_settlements ON ai_voice_usage_settlements
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // Per-call usage ledger: one row per ended AI voice session, billable or
+  // not, so the public billable-call rule is auditable call by call.
+  '282_create_call_usage_events': `
+    CREATE TABLE IF NOT EXISTS call_usage_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      call_id TEXT NOT NULL,
+      caller_phone TEXT,
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ NOT NULL,
+      duration_seconds INTEGER NOT NULL CHECK (duration_seconds >= 0),
+      billable BOOLEAN NOT NULL,
+      not_billable_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, call_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_usage_events_period
+      ON call_usage_events (tenant_id, ended_at) WHERE billable;
+    ALTER TABLE call_usage_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_usage_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_usage_events ON call_usage_events;
+    CREATE POLICY tenant_isolation_call_usage_events ON call_usage_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
