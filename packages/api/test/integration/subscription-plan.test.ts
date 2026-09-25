@@ -14,6 +14,7 @@ import { createWebhookRouter } from '../../src/webhooks/routes';
 import { createWebhookSignature } from '../../src/webhooks/webhook-handler';
 import { BillingService } from '../../src/billing/subscription';
 import { PgWebhookRepository } from '../../src/webhooks/pg-webhook';
+import { readTenantPlanId } from '../../src/billing/plan-features';
 
 const SECRET = 'whsec_subscription_plan';
 
@@ -94,6 +95,7 @@ describe('Postgres integration — tenant plan mirrored from Stripe subscription
 
     expect((await subscriptionEvent('customer.subscription.updated', 'price_growth_plan_test')).status).toBe(200);
     expect((await billingService.getSubscription(tenantId)).planId).toBe('growth');
+    expect(await readTenantPlanId(pool, tenantId)).toBe('growth');
   });
 
   it('keeps the recorded plan when an event carries an unknown price', async () => {

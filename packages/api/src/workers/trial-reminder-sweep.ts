@@ -34,6 +34,8 @@ export interface TrialReminderSweepDeps {
   supportEmail: string;
   logger: Logger;
   now?: () => Date;
+  /** Billable AI minutes used in the trial (AI-minute ledger); shown in the email. */
+  trialMinutesUsed?: (tenantId: string) => Promise<number>;
 }
 
 export interface TrialReminderSweepResult {
@@ -119,6 +121,9 @@ export async function runTrialReminderSweep(
         appBaseUrl: deps.appBaseUrl,
         supportEmail: deps.supportEmail,
         daysLeft: window.daysLeft,
+        trialMinutesUsed: deps.trialMinutesUsed
+          ? await deps.trialMinutesUsed(row.tenant_id).catch(() => undefined)
+          : undefined,
       });
 
       const outcome = await sendLifecycleEmail(

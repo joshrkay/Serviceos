@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { recordFunnelEvent } from '../analytics/posthog';
 import { z } from 'zod';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
@@ -883,6 +884,11 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           successUrl,
           cancelUrl,
           planId: parsed.data.planId,
+        });
+        recordFunnelEvent({
+          distinctId: req.auth!.userId,
+          event: 'plan_selected',
+          properties: { tenant_id: tenantId, plan: parsed.data.planId },
         });
         res.json(result);
       } catch (err: unknown) {

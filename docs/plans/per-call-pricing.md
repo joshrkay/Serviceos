@@ -5,8 +5,9 @@ v2) · Branch `feat/per-call-pricing`
 
 Rivet is priced as the whole ServiceOS platform (CRM, jobs, estimates,
 invoices, payments, scheduling, dispatch, mobile) plus AI phone answering,
-metered by the minute. Plans differ by users and included minutes only —
-every feature is in both plans.
+metered by the minute. Plans differ by users and included minutes, plus
+one Growth-only feature: QuickBooks sync (decided 2026-09-25 to match the
+marketing site; enforced at connect, manual sync and the sync sweep).
 
 ## 1. Packaging
 

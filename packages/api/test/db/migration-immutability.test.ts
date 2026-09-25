@@ -550,6 +550,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['284_add_tenant_plan_id', 'b78c98f0685c48cfa7abd58739e022eb55476c84f4a4766aaecec4d63672bea3'],
   ['285_add_tenant_current_period', '73ffede053301c1c8fb32c4d167fe5e834b7946f3d5be7a07fd9d0cdf3395754'],
   ['286_add_ai_overage_cap', 'da903203a9652e9bffbe5b32e31f4db5b7b7bda2c5a5649d385fc29b4bf891d1'],
+  ['287_create_usage_alerts', '390e9355861d2344fe1cbd25650f8433fcd1cd8aaf08e546ff13cae6728ccf96'],
 ];
 
 function hashMigration(value: string): string {

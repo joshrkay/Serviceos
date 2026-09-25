@@ -38,7 +38,7 @@ export interface OnboardingFacts {
   };
   inboundCallCount: number;
   testCallSkippedAt: Date | null;
-  /** Timestamp of the one-time 30-minute upgrade prompt (when shown). null until trial usage crosses the threshold. */
+  /** Timestamp of the one-time 40-AI-minute trial upgrade prompt (when shown). null until trial usage crosses the threshold. */
   upgradePromptShownAt?: Date | null;
   voiceAgentLiveAt: Date | null;
   /** Timestamp of the first real inbound call (activation milestone). null

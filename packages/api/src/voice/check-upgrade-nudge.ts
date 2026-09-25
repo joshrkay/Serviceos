@@ -1,4 +1,7 @@
 import type { Pool } from 'pg';
+import { recordFunnelEvent } from '../analytics/posthog';
+import { PgCallUsageRepository } from '../billing/call-usage-events';
+import { TRIAL_MINUTE_LIMITS } from './trial-limits';
 import { loadConfig } from '../shared/config';
 
 /**
@@ -27,8 +30,8 @@ export interface CheckAndFireUpgradeNudgeDeps {
 }
 
 /**
- * §10 onboarding — checks whether a tenant has crossed the 30-minute
- * trial usage threshold and, if so, records the prompt timestamp +
+ * §10 onboarding — checks whether a trialing tenant has crossed 40 billable
+ * AI minutes (of the 60-minute trial) and, if so, records the prompt timestamp +
  * optionally sends a one-time email. Idempotent: a second call with the
  * prompt timestamp already set is a no-op.
  *
@@ -41,8 +44,12 @@ export async function checkAndFireUpgradeNudge(
 ): Promise<{ fired: boolean }> {
   const { pool } = deps;
 
-  const tenantRes = await pool.query<{ subscription_status: string | null; owner_email: string | null }>(
-    `SELECT subscription_status, owner_email FROM tenants WHERE id = $1`,
+  const tenantRes = await pool.query<{
+    subscription_status: string | null;
+    owner_email: string | null;
+    owner_id: string | null;
+  }>(
+    `SELECT subscription_status, owner_email, owner_id FROM tenants WHERE id = $1`,
     [tenantId],
   );
   const tenant = tenantRes.rows[0];
@@ -54,14 +61,14 @@ export async function checkAndFireUpgradeNudge(
   );
   if (settingsRes.rows[0]?.onboarding_upgrade_prompt_shown_at) return { fired: false };
 
-  const usageRes = await pool.query<{ mins: number }>(
-    `SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (ended_at - started_at)) / 60), 0)::int AS mins
-       FROM voice_sessions
-       WHERE tenant_id = $1 AND channel = 'voice_inbound' AND ended_at IS NOT NULL`,
-    [tenantId],
+  // Billable AI minutes across the trial — the owner's own test calls and
+  // in-app voice never count (see call-usage-events classifyCall).
+  const billableSeconds = await new PgCallUsageRepository(pool).sumBillableSeconds(
+    tenantId,
+    new Date(0),
+    new Date(8.64e15),
   );
-  const mins = usageRes.rows[0]?.mins ?? 0;
-  if (mins < UPGRADE_THRESHOLD_MINUTES) return { fired: false };
+  if (billableSeconds < TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS) return { fired: false };
 
   // Cross the threshold atomically — guard against a second concurrent
   // call also writing the timestamp. The WHERE on the existing column
@@ -74,6 +81,12 @@ export async function checkAndFireUpgradeNudge(
   );
   if ((updateRes.rowCount ?? 0) === 0) return { fired: false };
 
+  recordFunnelEvent({
+    distinctId: tenant.owner_id ?? tenantId,
+    event: 'trial_minutes_milestone',
+    properties: { tenant_id: tenantId, trial_minutes_used: Math.floor(billableSeconds / 60) },
+  });
+
   if (deps.sendEmail && tenant.owner_email) {
     try {
       const webUrl = deps.webUrl ?? loadConfig().publicOrigins.web;
@@ -81,7 +94,8 @@ export async function checkAndFireUpgradeNudge(
         to: tenant.owner_email,
         subject: "Your AI agent is earning — lock in your subscription",
         text:
-          `You've used ${UPGRADE_THRESHOLD_MINUTES} minutes of trial voice. ` +
+          `You've used ${TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS / 60} of your ` +
+          `${TRIAL_MINUTE_LIMITS.TRIAL_TOTAL_SECONDS / 60} trial AI minutes. ` +
           `Convert now to remove caps and bill today: ${webUrl}/onboarding?action=upgrade-now`,
       });
     } catch {

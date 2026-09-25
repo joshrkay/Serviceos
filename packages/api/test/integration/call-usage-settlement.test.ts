@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
 
 import {
@@ -13,6 +13,22 @@ import {
   PgCallUsageSettlementRepository,
 } from "../../src/billing/call-usage-billing";
 import { PgOverageCapStore } from "../../src/billing/overage-cap";
+import { __setClientForTests, __resetAnalyticsForTests } from "../../src/analytics/posthog";
+
+
+/** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
+function capturePostHog() {
+  const capture = vi.fn();
+  process.env.POSTHOG_API_KEY = 'phc_test';
+  __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
+  return {
+    events: () => capture.mock.calls.map((c) => c[0] as { event: string; properties: Record<string, unknown> }),
+    restore: () => {
+      __resetAnalyticsForTests();
+      delete process.env.POSTHOG_API_KEY;
+    },
+  };
+}
 
 const STARTER_PRICE = "price_starter_test";
 const GROWTH_PRICE = "price_growth_test";
@@ -229,5 +245,27 @@ describe("Postgres integration — AI minute overage settlement", () => {
     await recordTwoMinuteCalls(100);
     await caps.set(tenant.tenantId, null);
     expect(await settle()).toMatchObject({ overageMinutes: 180, customerChargeCents: 22_500 });
+  });
+
+  it("records minute_overage_invoiced once, only when an invoice item is created", async () => {
+    const posthog = capturePostHog();
+    try {
+      await recordTwoMinuteCalls(30); // 60 min: 40 over = $50.00
+      await settle();
+      await settle();
+
+      expect(posthog.events().filter((e) => e.event === "minute_overage_invoiced")).toEqual([
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            tenant_id: tenant.tenantId,
+            plan: "starter",
+            overage_minutes: 40,
+            charge_cents: 5_000,
+          }),
+        }),
+      ]);
+    } finally {
+      posthog.restore();
+    }
   });
 });

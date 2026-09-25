@@ -69,6 +69,7 @@ import { PgCallUsageRepository } from './billing/call-usage-events';
 import { PgSeatUsageReader } from './users/seat-limit';
 import { PgOverageCapStore } from './billing/overage-cap';
 import { AiUsageReader } from './billing/ai-usage';
+import { readTenantPlanId } from './billing/plan-features';
 import {
   CallUsageBillingService,
   PgCallUsageSettlementRepository,
@@ -126,6 +127,7 @@ import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
+import { checkUsageAlerts } from './billing/usage-alerts';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
@@ -3215,6 +3217,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     qboConfig,
     appBaseUrl: config.publicOrigins.web,
     auditRepo,
+    // QuickBooks connect/sync is Growth-only (billing/plan-features.ts).
+    ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
     logger: createLogger({
       service: 'accounting-integrations',
       environment: process.env.NODE_ENV ?? 'development',
@@ -3671,7 +3675,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // wired unconditionally so Gather hints work even in a keyless-gateway
     // deployment.
     sttHintsResolver: (tenantId: string) => transcriptionGlossaryProvider.termsForTenant(tenantId),
-    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // §10 onboarding — fire the 40-AI-minute trial upgrade nudge after every
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
       ? {
@@ -3774,7 +3778,31 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 }
               }
             }
-            await checkAndFireUpgradeNudge({ pool }, tenantId);
+            // Owner emails from call end: the trial upgrade nudge (40 AI
+            // minutes) and paid-plan AI-minute usage alerts (80% / 100% /
+            // cap reached). Both are once-only and failure-soft.
+            const ownerEmail = messageDelivery
+              ? (msg: { to: string; subject: string; text: string }) =>
+                  messageDelivery.sendEmail({ to: msg.to, subject: msg.subject, text: msg.text })
+              : undefined;
+            await checkAndFireUpgradeNudge(
+              { pool, ...(ownerEmail ? { sendEmail: ownerEmail } : {}) },
+              tenantId,
+            );
+            if (channel === 'voice_inbound') {
+              try {
+                await checkUsageAlerts(
+                  {
+                    pool,
+                    ...(ownerEmail ? { sendEmail: ownerEmail } : {}),
+                    appBaseUrl: process.env.WEB_URL ?? '',
+                  },
+                  tenantId,
+                );
+              } catch {
+                // swallow — usage alerts must not break call teardown
+              }
+            }
             await maybeAutoGoLiveOnInboundEnd(
               { pool, auditRepo },
               { tenantId, channel },
@@ -6485,6 +6513,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           qboConfig,
           logger: accountingSyncLogger,
+          ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
         });
       }).catch((err) => {
         accountingSyncLogger.error('Accounting sync sweep failed', {
@@ -6829,6 +6858,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           appBaseUrl: lifecycleEmailAppBaseUrl,
           supportEmail: lifecycleEmailSupportEmail,
           logger: lifecycleSweepLogger,
+          ...(callUsageRepo
+            ? {
+                trialMinutesUsed: async (tenantId: string) =>
+                  Math.ceil(
+                    (await callUsageRepo.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15))) / 60,
+                  ),
+              }
+            : {}),
         });
       }).catch((err) => {
         lifecycleSweepLogger.error('Trial-reminder sweep failed', {

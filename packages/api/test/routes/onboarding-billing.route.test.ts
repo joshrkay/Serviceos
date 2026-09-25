@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Pool } from 'pg';
 import { createOnboardingRouter } from '../../src/routes/onboarding';
+import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
 import { BillingService } from '../../src/billing/subscription';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
@@ -190,6 +191,17 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
     expect(body.get('subscription_data[metadata][plan_id]')).toBe('starter');
   });
 
+  it('records a plan_selected funnel event for the chosen plan', async () => {
+    const capture = vi.fn();
+    process.env.POSTHOG_API_KEY = 'phc_test';
+    __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
+        )
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_growth', url: 'https://checkout.stripe.com/c/pay/cs_growth' }));
   it('builds the Stripe success and cancel URLs from config.publicOrigins.web, not raw env', async () => {
     // The route used to read WEB_URL ?? APP_PUBLIC_URL straight from
     // process.env with a localhost fallback. The origin now comes from the
@@ -208,6 +220,19 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
 
       const res = await request(buildApp(svc))
         .post('/api/onboarding/billing/checkout-session')
+        .send({ planId: 'growth' });
+
+      expect(res.status).toBe(200);
+      expect(capture).toHaveBeenCalledWith(
+        expect.objectContaining({
+          distinctId: USER_ID,
+          event: 'plan_selected',
+          properties: expect.objectContaining({ tenant_id: TENANT_ID, plan: 'growth' }),
+        }),
+      );
+    } finally {
+      __resetAnalyticsForTests();
+      delete process.env.POSTHOG_API_KEY;
         .send({ planId: 'basic' });
       expect(res.status).toBe(200);
       const body = fetchFn.mock.calls[1][1].body as URLSearchParams;

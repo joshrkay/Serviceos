@@ -1,4 +1,6 @@
 import { Logger } from '../../logging/logger';
+import type { CallPlanId } from '../../billing/call-usage-pricing';
+import { planIncludesQuickBooks } from '../../billing/plan-features';
 import { Customer, CustomerRepository } from '../../customers/customer';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
 import { JobRepository } from '../../jobs/job';
@@ -29,6 +31,8 @@ export interface AccountingSyncServiceDeps {
   qboConfig: QuickBooksOAuthConfig;
   fetchFn?: QuickBooksFetch;
   logger: Logger;
+  /** The tenant's Rivet plan; the sweep only syncs plans that include QuickBooks (Growth). */
+  planForTenant?: (tenantId: string) => Promise<CallPlanId | null>;
   /**
    * Paid-invoice page size for the sync sweep. The sweep paginates through
    * EVERY paid invoice (already-synced ones are skipped cheaply via the sync
@@ -351,6 +355,9 @@ export async function runAccountingSyncSweep(
   for (const integration of integrations) {
     if (integration.provider !== 'quickbooks') continue;
     try {
+      if (deps.planForTenant && !planIncludesQuickBooks(await deps.planForTenant(integration.tenantId))) {
+        continue;
+      }
       const result = await service.syncIntegration(integration);
       pushed += result.pushedInvoices;
       skipped += result.skippedInvoices;
