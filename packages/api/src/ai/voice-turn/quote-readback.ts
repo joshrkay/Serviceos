@@ -30,6 +30,7 @@
  * their money.
  */
 import { formatCents } from '../skills/spoken-format';
+import { calculateLineItemTotal } from '../../shared/billing-engine';
 
 /**
  * The pre-WS5 fixed confirmation line, kept verbatim so NON-estimate
@@ -76,10 +77,22 @@ export interface QuoteReadbackInput {
  */
 export const PER_LINE_READBACK_MAX_LINES = 3;
 
-/** Integer-cents line total (unit price × quantity, quantity defaulting to 1). */
+/**
+ * Integer-cents line total. Derived from the billing engine's per-line rule
+ * (`calculateLineItemTotal`, which rounds) — the readback must never hold a
+ * second definition of what a line costs (I9′: one totals engine).
+ */
 function lineTotalCents(li: QuoteReadbackLine): number {
-  const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
-  return (li.unitPrice ?? 0) * qty;
+  return calculateLineItemTotal(lineQuantity(li), li.unitPrice ?? 0);
+}
+
+/**
+ * The spoken quote total, in integer cents: the sum of the engine-derived
+ * line totals. Exported so the turn pipeline's `pendingQuote.totalCents` is
+ * THIS number — the figure the caller hears — rather than a recomputation.
+ */
+export function quoteReadbackTotalCents(lines: readonly QuoteReadbackLine[]): number {
+  return lines.map(lineTotalCents).reduce((sum, cents) => sum + cents, 0);
 }
 
 /** Effective quantity for a line (≥ 1). */
@@ -153,7 +166,7 @@ export function buildQuoteReadback(input: QuoteReadbackInput): string {
     return `For the ${li.description}, that's typically ${formatCents(lineTotalCents(li))}. I'll send the full quote to confirm.`;
   }
 
-  const total = lines.reduce((sum, li) => sum + lineTotalCents(li), 0);
+  const total = quoteReadbackTotalCents(lines);
 
   // 2..N all-catalogued lines: recite each line, then the total last. The
   // confirmation suffix stays — it sets the expectation that a formal written
