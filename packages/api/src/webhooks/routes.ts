@@ -35,6 +35,7 @@ import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { BillingService } from '../billing/subscription';
+import type { CallUsageBillingService } from '../billing/call-usage-billing';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
@@ -151,6 +152,8 @@ export interface WebhookRouterDeps {
    * without Stripe configured still build the router.
    */
   billingService?: BillingService;
+  /** Per-call overage: settles the closed period on invoice.created. */
+  callUsageBillingService?: CallUsageBillingService;
   /**
    * Tier 4 (Payment methods — PR 1). When wired, the Stripe webhook
    * applies account.updated events onto tenants (cached
@@ -2107,6 +2110,47 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // snapshot. created/updated/deleted all share the same handler;
       // 'deleted' typically arrives with status='canceled' so the
       // mirror naturally reflects the lifecycle end.
+      // Per-call overage for the period that just closed. The invoice's
+      // subscription line carries the plan in force now, which prices the
+      // whole period (upgrades apply retroactively). A throw → 500 so
+      // Stripe retries; settlement is idempotent per (tenant, period).
+      if (deps.callUsageBillingService && deps.pool && event.type === 'invoice.created') {
+        const invoice = event.data.object as {
+          id?: string;
+          customer?: string;
+          period_start?: number;
+          period_end?: number;
+          billing_reason?: string;
+          lines?: { data?: Array<{ type?: string; price?: { id?: string } | null }> };
+        };
+        const subscriptionPriceId = invoice.lines?.data?.find(
+          (line) => line.type === 'subscription' && line.price?.id,
+        )?.price?.id;
+        if (
+          invoice.id &&
+          invoice.customer &&
+          subscriptionPriceId &&
+          typeof invoice.period_start === 'number' &&
+          typeof invoice.period_end === 'number' &&
+          invoice.billing_reason !== 'subscription_create'
+        ) {
+          const tenant = await deps.pool.query<{ id: string }>(
+            `SELECT id FROM tenants WHERE stripe_customer_id=$1 LIMIT 1`,
+            [invoice.customer],
+          );
+          const tenantId = tenant.rows[0]?.id;
+          if (tenantId) {
+            await deps.callUsageBillingService.settlePeriod({
+              tenantId,
+              periodStart: new Date(invoice.period_start * 1000),
+              periodEnd: new Date(invoice.period_end * 1000),
+              subscriptionPriceId,
+              stripeInvoiceId: invoice.id,
+            });
+          }
+        }
+      }
+
       if (
         deps.billingService &&
         (event.type === 'customer.subscription.created' ||

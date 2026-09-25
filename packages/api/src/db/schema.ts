@@ -7008,6 +7008,30 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_call_usage_events ON call_usage_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // One per-call overage settlement per (tenant, Stripe billing period).
+  '283_create_call_usage_settlements': `
+    CREATE TABLE IF NOT EXISTS call_usage_settlements (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      period_start TIMESTAMPTZ NOT NULL,
+      period_end TIMESTAMPTZ NOT NULL,
+      plan_id TEXT NOT NULL CHECK (plan_id IN ('starter', 'growth')),
+      billable_calls INTEGER NOT NULL CHECK (billable_calls >= 0),
+      overage_calls INTEGER NOT NULL CHECK (overage_calls >= 0),
+      customer_charge_cents INTEGER NOT NULL CHECK (customer_charge_cents >= 0),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+      stripe_invoice_item_id TEXT,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, period_start, period_end)
+    );
+    ALTER TABLE call_usage_settlements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_usage_settlements FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_usage_settlements ON call_usage_settlements;
+    CREATE POLICY tenant_isolation_call_usage_settlements ON call_usage_settlements
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -67,6 +67,10 @@ import { BillingService } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
 import { PgCallUsageRepository } from './billing/call-usage-events';
 import {
+  CallUsageBillingService,
+  PgCallUsageSettlementRepository,
+} from './billing/call-usage-billing';
+import {
   deepgramCostMicroCents,
   elevenLabsCostMicroCents,
   twilioPriceToMicroCents,
@@ -1025,6 +1029,27 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
   const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
   const callUsageRepo = pool ? new PgCallUsageRepository(pool) : undefined;
+  const callUsageBillingService =
+    pool && process.env.STRIPE_SECRET_KEY && callUsageRepo
+      ? new CallUsageBillingService({
+          pool,
+          settlementRepo: new PgCallUsageSettlementRepository(pool),
+          callUsage: callUsageRepo,
+          stripeApiKey: process.env.STRIPE_SECRET_KEY,
+          planForPriceId: (priceId) =>
+            priceId === process.env.STRIPE_STARTER_PRICE_ID
+              ? 'starter'
+              : priceId === process.env.STRIPE_GROWTH_PRICE_ID
+                ? 'growth'
+                : null,
+          onAlert: (alert) => {
+            sentryClient.captureMessage(
+              `[CALL_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
+              'error',
+            );
+          },
+        })
+      : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
@@ -1061,6 +1086,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // status the GET /api/billing/subscription endpoint reads.
     // Wired only when both pool and STRIPE_SECRET_KEY exist.
     billingService,
+    callUsageBillingService,
     connectService,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     queue,
