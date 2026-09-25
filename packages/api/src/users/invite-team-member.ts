@@ -16,6 +16,7 @@
  */
 import { PendingInvitation, PendingInvitationRepository } from './pending-invitation';
 import { UserRole } from './user';
+import { assertSeatAvailable, type SeatUsageReader } from './seat-limit';
 
 export interface ClerkInvitationConfig {
   clerkSecretKey?: string;
@@ -41,7 +42,12 @@ export async function inviteTeamMember(
   input: InviteTeamMemberInput,
   invitationRepo: PendingInvitationRepository,
   clerk: ClerkInvitationConfig = {},
+  /** Per-plan user limit; enforced whenever wired (always in production). */
+  seatUsage?: SeatUsageReader,
 ): Promise<InviteTeamMemberResult> {
+  if (seatUsage) {
+    assertSeatAvailable(await seatUsage.getSeatUsage(input.tenantId));
+  }
   const invitation = await invitationRepo.create({
     tenantId: input.tenantId,
     email: input.email,

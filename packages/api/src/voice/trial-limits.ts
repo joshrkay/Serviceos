@@ -1,6 +1,4 @@
 export const TRIAL_LIMITS = {
-  DAILY_MINUTES: 60,
-  TRIAL_TOTAL_MINUTES: 100,
   CONCURRENT_CALLS: 2,
 } as const;
 
@@ -16,42 +14,38 @@ export type GateReason =
   | 'no_billing'
   | 'not_live'
   | 'e1_script_unreviewed'
-  | 'trial_cap_daily'
   | 'trial_cap_total'
-  | 'trial_cap_concurrent';
+  | 'trial_cap_concurrent'
+  | 'overage_cap';
 
-interface TrialCapInput {
-  status: SubscriptionStatus;
-  dailyMinutes: number;
-  trialTotalMinutes: number;
+export const TRIAL_MINUTE_LIMITS = {
+  UPGRADE_NUDGE_SECONDS: 40 * 60,
+  TRIAL_TOTAL_SECONDS: 60 * 60,
+} as const;
+
+export interface TrialCallInput {
+  /** Billable AI answering seconds already used during this trial. */
+  billableSecondsUsed: number;
   concurrentCalls: number;
 }
 
-export interface TrialCapResult {
-  allowed: boolean;
-  reason?: GateReason;
-}
+export type TrialCallDecision =
+  | { action: 'answer'; upgradeNudgeDue: boolean }
+  | {
+      /** Over a trial cap: ring the owner rather than leave the caller unanswered. */
+      action: 'forward_to_owner';
+      reason: 'trial_cap_total' | 'trial_cap_concurrent';
+      upgradeNudgeDue: boolean;
+    };
 
-function envInt(name: string, fallback: number): number {
-  const v = process.env[name];
-  if (v === undefined) return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-export function evaluateTrialCap(input: TrialCapInput): TrialCapResult {
-  if (input.status !== 'trialing' && input.status !== 'active') {
-    return { allowed: false, reason: 'no_billing' };
+export function decideTrialCall(input: TrialCallInput): TrialCallDecision {
+  const upgradeNudgeDue =
+    input.billableSecondsUsed >= TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS;
+  if (input.billableSecondsUsed >= TRIAL_MINUTE_LIMITS.TRIAL_TOTAL_SECONDS) {
+    return { action: 'forward_to_owner', reason: 'trial_cap_total', upgradeNudgeDue };
   }
-  if (input.status === 'active') return { allowed: true };
-
-  const dailyCap = envInt('TRIAL_VOICE_MINUTES_DAILY_OVERRIDE', TRIAL_LIMITS.DAILY_MINUTES);
-  const totalCap = envInt('TRIAL_VOICE_MINUTES_TOTAL_OVERRIDE', TRIAL_LIMITS.TRIAL_TOTAL_MINUTES);
-
-  if (input.dailyMinutes >= dailyCap) return { allowed: false, reason: 'trial_cap_daily' };
-  if (input.trialTotalMinutes >= totalCap) return { allowed: false, reason: 'trial_cap_total' };
   if (input.concurrentCalls >= TRIAL_LIMITS.CONCURRENT_CALLS) {
-    return { allowed: false, reason: 'trial_cap_concurrent' };
+    return { action: 'forward_to_owner', reason: 'trial_cap_concurrent', upgradeNudgeDue };
   }
-  return { allowed: true };
+  return { action: 'answer', upgradeNudgeDue };
 }

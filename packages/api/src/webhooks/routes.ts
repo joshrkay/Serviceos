@@ -34,8 +34,8 @@ import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
 import { PendingInvitationRepository } from '../users/pending-invitation';
-import { BillingService } from '../billing/subscription';
-import type { VoiceUsageBillingService } from '../billing/voice-usage-billing';
+import { BillingService, planIdForStripePrice } from '../billing/subscription';
+import type { CallUsageBillingService } from '../billing/call-usage-billing';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
@@ -152,7 +152,8 @@ export interface WebhookRouterDeps {
    * without Stripe configured still build the router.
    */
   billingService?: BillingService;
-  voiceUsageBillingService?: VoiceUsageBillingService;
+  /** AI-minute overage: settles the closed period on invoice.created. */
+  callUsageBillingService?: CallUsageBillingService;
   /**
    * Tier 4 (Payment methods — PR 1). When wired, the Stripe webhook
    * applies account.updated events onto tenants (cached
@@ -2109,17 +2110,26 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // snapshot. created/updated/deleted all share the same handler;
       // 'deleted' typically arrives with status='canceled' so the
       // mirror naturally reflects the lifecycle end.
-      if (deps.voiceUsageBillingService && deps.pool && event.type === 'invoice.created') {
+      // AI-minute overage for the period that just closed. The invoice's
+      // subscription line carries the plan in force now, which prices the
+      // whole period (upgrades apply retroactively). A throw → 500 so
+      // Stripe retries; settlement is idempotent per (tenant, period).
+      if (deps.callUsageBillingService && deps.pool && event.type === 'invoice.created') {
         const invoice = event.data.object as {
           id?: string;
           customer?: string;
           period_start?: number;
           period_end?: number;
           billing_reason?: string;
+          lines?: { data?: Array<{ type?: string; price?: { id?: string } | null }> };
         };
+        const subscriptionPriceId = invoice.lines?.data?.find(
+          (line) => line.type === 'subscription' && line.price?.id,
+        )?.price?.id;
         if (
           invoice.id &&
           invoice.customer &&
+          subscriptionPriceId &&
           typeof invoice.period_start === 'number' &&
           typeof invoice.period_end === 'number' &&
           invoice.billing_reason !== 'subscription_create'
@@ -2130,10 +2140,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           );
           const tenantId = tenant.rows[0]?.id;
           if (tenantId) {
-            await deps.voiceUsageBillingService.settlePeriod({
+            await deps.callUsageBillingService.settlePeriod({
               tenantId,
               periodStart: new Date(invoice.period_start * 1000),
               periodEnd: new Date(invoice.period_end * 1000),
+              subscriptionPriceId,
               stripeInvoiceId: invoice.id,
             });
           }
@@ -2152,8 +2163,30 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           status?: string;
           trial_end?: number | null;
           metadata?: { tenant_id?: string };
+          current_period_start?: number;
+          current_period_end?: number;
+          items?: {
+            data?: Array<{
+              price?: { id?: string } | null;
+              current_period_start?: number;
+              current_period_end?: number;
+            }>;
+          };
         };
         if (sub.id && sub.customer && sub.status) {
+          // The subscription's price is the source of truth for the plan: a
+          // portal upgrade changes it without touching checkout metadata.
+          // Unknown prices leave the recorded plan untouched.
+          const planId = planIdForStripePrice(sub.items?.data?.[0]?.price?.id);
+          // Current Stripe API versions carry the period on the item; older
+          // ones on the subscription. Either way, epoch seconds → Date.
+          const periodStart =
+            sub.items?.data?.[0]?.current_period_start ?? sub.current_period_start;
+          const periodEnd = sub.items?.data?.[0]?.current_period_end ?? sub.current_period_end;
+          const currentPeriodStart =
+            typeof periodStart === 'number' ? new Date(periodStart * 1000) : null;
+          const currentPeriodEnd =
+            typeof periodEnd === 'number' ? new Date(periodEnd * 1000) : null;
           // Mirror the Stripe trial_end (epoch seconds) into trial_ends_at so
           // the trial-reminder sweep can compute the 3d/1d/day-of windows. When
           // the trial converts to active, Stripe drops trial_end → null, which
@@ -2254,9 +2287,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                       SET stripe_subscription_id = $1,
                           subscription_status = $2,
                           trial_ends_at = $3,
+                          plan_id = COALESCE($5, plan_id),
+                          current_period_start = COALESCE($6, current_period_start),
+                          current_period_end = COALESCE($7, current_period_end),
                           updated_at = NOW()
                     WHERE id = $4`,
-                  [sub.id, sub.status, trialEndsAt, row.id],
+                  [sub.id, sub.status, trialEndsAt, row.id, planId, currentPeriodStart, currentPeriodEnd],
                 );
               }
               await client.query('COMMIT');

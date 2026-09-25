@@ -192,7 +192,7 @@ export async function maybeFireFirstRealCallActivation(
 }
 
 /** E.164-ish digit comparison (ignores formatting / leading +). */
-function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+export function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
   if (!a || !b) return false;
   const da = a.replace(/\D/g, '');
   const db = b.replace(/\D/g, '');
