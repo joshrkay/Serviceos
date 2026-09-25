@@ -63,7 +63,7 @@ import {
 import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
-import { BillingService } from './billing/subscription';
+import { BillingService, planIdForStripePrice } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
 import { PgCallUsageRepository } from './billing/call-usage-events';
 import {
@@ -1036,12 +1036,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           settlementRepo: new PgCallUsageSettlementRepository(pool),
           callUsage: callUsageRepo,
           stripeApiKey: process.env.STRIPE_SECRET_KEY,
-          planForPriceId: (priceId) =>
-            priceId === process.env.STRIPE_STARTER_PRICE_ID
-              ? 'starter'
-              : priceId === process.env.STRIPE_GROWTH_PRICE_ID
-                ? 'growth'
-                : null,
+          planForPriceId: planIdForStripePrice,
           onAlert: (alert) => {
             sentryClient.captureMessage(
               `[CALL_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,

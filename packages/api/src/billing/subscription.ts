@@ -62,6 +62,18 @@ const PLAN_SPECS: Record<BillingPlanId, PlanSpec> = {
   growth: { envVar: 'STRIPE_GROWTH_PRICE_ID', displayName: 'Growth', includedUsers: 5 },
 };
 
+/**
+ * Maps a Stripe price id back to the Rivet plan it sells, via the same env
+ * vars checkout uses. Null for any other price (legacy, one-off, unknown).
+ */
+export function planIdForStripePrice(priceId: string | null | undefined): BillingPlanId | null {
+  if (!priceId) return null;
+  for (const planId of BILLING_PLAN_IDS) {
+    if (process.env[PLAN_SPECS[planId].envVar] === priceId) return planId;
+  }
+  return null;
+}
+
 /** Fails closed with a non-secret, actionable message — never the env value. */
 function resolvePlanPriceId(planId: BillingPlanId): string {
   const spec = PLAN_SPECS[planId];
@@ -83,6 +95,8 @@ export interface BillingSubscriptionView {
   subscriptionId: string | null;
   /** Mirror of Stripe subscription.status. Null until first sub. */
   status: string | null;
+  /** Rivet plan mirrored from the Stripe subscription price; null before checkout. */
+  planId: BillingPlanId | null;
 }
 
 export interface BillingServiceDeps {
@@ -194,7 +208,7 @@ export class BillingService {
    */
   async getSubscription(tenantId: string): Promise<BillingSubscriptionView> {
     const { rows } = await this.deps.pool.query(
-      `SELECT stripe_customer_id, stripe_subscription_id, subscription_status
+      `SELECT stripe_customer_id, stripe_subscription_id, subscription_status, plan_id
        FROM tenants WHERE id = $1`,
       [tenantId],
     );
@@ -206,6 +220,7 @@ export class BillingService {
       customerId: (row.stripe_customer_id as string | null) ?? null,
       subscriptionId: (row.stripe_subscription_id as string | null) ?? null,
       status: (row.subscription_status as string | null) ?? null,
+      planId: (row.plan_id as BillingPlanId | null) ?? null,
     };
   }
 

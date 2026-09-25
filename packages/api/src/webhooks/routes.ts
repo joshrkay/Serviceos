@@ -34,7 +34,7 @@ import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
 import { PendingInvitationRepository } from '../users/pending-invitation';
-import { BillingService } from '../billing/subscription';
+import { BillingService, planIdForStripePrice } from '../billing/subscription';
 import type { CallUsageBillingService } from '../billing/call-usage-billing';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
@@ -2163,8 +2163,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           status?: string;
           trial_end?: number | null;
           metadata?: { tenant_id?: string };
+          items?: { data?: Array<{ price?: { id?: string } | null }> };
         };
         if (sub.id && sub.customer && sub.status) {
+          // The subscription's price is the source of truth for the plan: a
+          // portal upgrade changes it without touching checkout metadata.
+          // Unknown prices leave the recorded plan untouched.
+          const planId = planIdForStripePrice(sub.items?.data?.[0]?.price?.id);
           // Mirror the Stripe trial_end (epoch seconds) into trial_ends_at so
           // the trial-reminder sweep can compute the 3d/1d/day-of windows. When
           // the trial converts to active, Stripe drops trial_end → null, which
@@ -2265,9 +2270,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                       SET stripe_subscription_id = $1,
                           subscription_status = $2,
                           trial_ends_at = $3,
+                          plan_id = COALESCE($5, plan_id),
                           updated_at = NOW()
                     WHERE id = $4`,
-                  [sub.id, sub.status, trialEndsAt, row.id],
+                  [sub.id, sub.status, trialEndsAt, row.id, planId],
                 );
               }
               await client.query('COMMIT');

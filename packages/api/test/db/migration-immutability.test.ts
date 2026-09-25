@@ -547,6 +547,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['281_create_ai_voice_billing_state', '5a069026dc4f46eeeb081915891c2e8e7859afc4883a1d960bc11e1f20634405'],
   ['282_create_call_usage_events', '1c4c54cb32c524799999dec9ec7160ee90f44c6636bdc124fa9f43c5fc5863ce'],
   ['283_create_call_usage_settlements', '91301ec03a92328c1e8d0fa157a91e5ba3108387c028824241e50a67715b6dbb'],
+  ['284_add_tenant_plan_id', 'b78c98f0685c48cfa7abd58739e022eb55476c84f4a4766aaecec4d63672bea3'],
 ];
 
 function hashMigration(value: string): string {

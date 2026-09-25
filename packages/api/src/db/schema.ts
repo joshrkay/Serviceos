@@ -7033,6 +7033,12 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_call_usage_settlements ON call_usage_settlements
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // The tenant's Rivet plan, mirrored from the Stripe subscription price on
+  // every customer.subscription.* webhook. Drives the per-plan user limit.
+  '284_add_tenant_plan_id': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_id TEXT
+      CHECK (plan_id IN ('starter', 'growth'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
