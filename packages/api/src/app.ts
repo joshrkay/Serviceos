@@ -6818,6 +6818,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           appBaseUrl: lifecycleEmailAppBaseUrl,
           supportEmail: lifecycleEmailSupportEmail,
           logger: lifecycleSweepLogger,
+          ...(callUsageRepo
+            ? {
+                trialMinutesUsed: async (tenantId: string) =>
+                  Math.ceil(
+                    (await callUsageRepo.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15))) / 60,
+                  ),
+              }
+            : {}),
         });
       }).catch((err) => {
         lifecycleSweepLogger.error('Trial-reminder sweep failed', {
