@@ -7039,6 +7039,14 @@ export const MIGRATIONS = {
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_id TEXT
       CHECK (plan_id IN ('starter', 'growth'));
   `,
+  // The Stripe subscription's current billing period, mirrored on every
+  // customer.subscription.* webhook — the window the AI-minute overage cap
+  // and the usage display measure against.
+  '285_add_tenant_current_period': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

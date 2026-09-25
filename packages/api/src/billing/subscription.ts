@@ -96,6 +96,8 @@ export interface BillingSubscriptionView {
   status: string | null;
   /** Rivet plan mirrored from the Stripe subscription price; null before checkout. */
   planId: BillingPlanId | null;
+  /** Stripe's current billing period; null until the first subscription webhook. */
+  currentPeriod: { start: Date; end: Date } | null;
 }
 
 export interface BillingServiceDeps {
@@ -207,7 +209,8 @@ export class BillingService {
    */
   async getSubscription(tenantId: string): Promise<BillingSubscriptionView> {
     const { rows } = await this.deps.pool.query(
-      `SELECT stripe_customer_id, stripe_subscription_id, subscription_status, plan_id
+      `SELECT stripe_customer_id, stripe_subscription_id, subscription_status, plan_id,
+              current_period_start, current_period_end
        FROM tenants WHERE id = $1`,
       [tenantId],
     );
@@ -220,6 +223,13 @@ export class BillingService {
       subscriptionId: (row.stripe_subscription_id as string | null) ?? null,
       status: (row.subscription_status as string | null) ?? null,
       planId: (row.plan_id as BillingPlanId | null) ?? null,
+      currentPeriod:
+        row.current_period_start && row.current_period_end
+          ? {
+              start: new Date(row.current_period_start as string),
+              end: new Date(row.current_period_end as string),
+            }
+          : null,
     };
   }
 

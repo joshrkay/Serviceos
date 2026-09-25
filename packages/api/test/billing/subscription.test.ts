@@ -99,7 +99,7 @@ describe('BillingService', () => {
     });
     const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
     const view = await svc.getSubscription(TENANT);
-    expect(view).toEqual({ customerId: null, subscriptionId: null, status: null, planId: null });
+    expect(view).toEqual({ customerId: null, subscriptionId: null, status: null, planId: null, currentPeriod: null });
   });
 
   it('getSubscription throws NotFoundError when tenant row missing', async () => {

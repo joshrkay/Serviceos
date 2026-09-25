@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+// Usage caps (trial minutes/concurrency, paid overage cap) read the AI-minute
+// ledger and are covered against real Postgres in
+// test/integration/voice-gate-usage.test.ts.
 import { createVoiceGate } from '../../src/voice/voice-gate';
 import type { Pool } from 'pg';
 import type { AuditRepository } from '../../src/audit/audit';
@@ -6,9 +9,6 @@ import type { AuditRepository } from '../../src/audit/audit';
 function mockPool(opts: {
   subscriptionStatus: string | null;
   voiceAgentLiveAt?: Date | null;
-  dailyMinutes?: number;
-  totalMinutes?: number;
-  concurrent?: number;
   e1ReviewedScript?: string | null;
 }): Pool {
   const liveAt = opts.voiceAgentLiveAt === undefined ? new Date() : opts.voiceAgentLiveAt;
@@ -28,17 +28,6 @@ function mockPool(opts: {
                 ? 'Reviewed safety script'
                 : opts.e1ReviewedScript,
           }],
-        };
-      }
-      if (sql.includes('FROM voice_sessions')) {
-        return {
-          rows: [
-            {
-              daily_minutes: opts.dailyMinutes ?? 0,
-              total_minutes: opts.totalMinutes ?? 0,
-              concurrent: opts.concurrent ?? 0,
-            },
-          ],
         };
       }
       return { rows: [] };
@@ -69,15 +58,6 @@ describe('createVoiceGate', () => {
     expect(auditRepo.create).not.toHaveBeenCalled();
   });
 
-  it('allows when trialing and under caps', async () => {
-    const gate = createVoiceGate({
-      pool: mockPool({ subscriptionStatus: 'trialing', dailyMinutes: 10, totalMinutes: 20 }),
-      auditRepo,
-    });
-    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
-    expect(result.allowed).toBe(true);
-  });
-
   it('blocks with no_billing when subscription is null', async () => {
     const gate = createVoiceGate({
       pool: mockPool({ subscriptionStatus: null }),
@@ -96,34 +76,6 @@ describe('createVoiceGate', () => {
     });
     const result = await gate({ tenantId: 't1', callSid: 'CA1' });
     expect(result.reason).toBe('no_billing');
-  });
-
-  it('blocks with trial_cap_total when trial total reached', async () => {
-    const gate = createVoiceGate({
-      pool: mockPool({ subscriptionStatus: 'trialing', totalMinutes: 100 }),
-      auditRepo,
-    });
-    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
-    expect(result.reason).toBe('trial_cap_total');
-    expect(auditRepo.create).toHaveBeenCalledOnce();
-  });
-
-  it('blocks with trial_cap_daily when daily cap reached', async () => {
-    const gate = createVoiceGate({
-      pool: mockPool({ subscriptionStatus: 'trialing', dailyMinutes: 60 }),
-      auditRepo,
-    });
-    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
-    expect(result.reason).toBe('trial_cap_daily');
-  });
-
-  it('blocks with trial_cap_concurrent at concurrency limit', async () => {
-    const gate = createVoiceGate({
-      pool: mockPool({ subscriptionStatus: 'trialing', concurrent: 2 }),
-      auditRepo,
-    });
-    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
-    expect(result.reason).toBe('trial_cap_concurrent');
   });
 
   it('blocks with not_live when trialing but voice_agent_live_at is null', async () => {

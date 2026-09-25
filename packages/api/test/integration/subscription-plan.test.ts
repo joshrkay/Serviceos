@@ -27,6 +27,7 @@ describe('Postgres integration — tenant plan mirrored from Stripe subscription
   function subscriptionEvent(
     type: 'customer.subscription.created' | 'customer.subscription.updated',
     priceId: string,
+    period: { onItem?: [number, number]; onSubscription?: [number, number] } = {},
   ) {
     const raw = JSON.stringify({
       id: `evt_${randomUUID()}`,
@@ -38,7 +39,19 @@ describe('Postgres integration — tenant plan mirrored from Stripe subscription
           status: 'active',
           trial_end: null,
           metadata: { tenant_id: tenantId },
-          items: { data: [{ price: { id: priceId } }] },
+          ...(period.onSubscription
+            ? { current_period_start: period.onSubscription[0], current_period_end: period.onSubscription[1] }
+            : {}),
+          items: {
+            data: [
+              {
+                price: { id: priceId },
+                ...(period.onItem
+                  ? { current_period_start: period.onItem[0], current_period_end: period.onItem[1] }
+                  : {}),
+              },
+            ],
+          },
         },
       },
     });
@@ -86,5 +99,22 @@ describe('Postgres integration — tenant plan mirrored from Stripe subscription
   it('keeps the recorded plan when an event carries an unknown price', async () => {
     expect((await subscriptionEvent('customer.subscription.updated', 'price_legacy_unknown')).status).toBe(200);
     expect((await billingService.getSubscription(tenantId)).planId).toBe('growth');
+  });
+
+  it('mirrors the current billing period from the subscription item (current API) or the subscription (legacy API)', async () => {
+    const oct = [Date.UTC(2026, 9, 1) / 1000, Date.UTC(2026, 10, 1) / 1000] as [number, number];
+    const nov = [Date.UTC(2026, 10, 1) / 1000, Date.UTC(2026, 11, 1) / 1000] as [number, number];
+
+    await subscriptionEvent('customer.subscription.updated', 'price_growth_plan_test', { onItem: oct });
+    expect((await billingService.getSubscription(tenantId)).currentPeriod).toEqual({
+      start: new Date(oct[0] * 1000),
+      end: new Date(oct[1] * 1000),
+    });
+
+    await subscriptionEvent('customer.subscription.updated', 'price_growth_plan_test', { onSubscription: nov });
+    expect((await billingService.getSubscription(tenantId)).currentPeriod).toEqual({
+      start: new Date(nov[0] * 1000),
+      end: new Date(nov[1] * 1000),
+    });
   });
 });

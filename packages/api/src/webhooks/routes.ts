@@ -2163,13 +2163,30 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           status?: string;
           trial_end?: number | null;
           metadata?: { tenant_id?: string };
-          items?: { data?: Array<{ price?: { id?: string } | null }> };
+          current_period_start?: number;
+          current_period_end?: number;
+          items?: {
+            data?: Array<{
+              price?: { id?: string } | null;
+              current_period_start?: number;
+              current_period_end?: number;
+            }>;
+          };
         };
         if (sub.id && sub.customer && sub.status) {
           // The subscription's price is the source of truth for the plan: a
           // portal upgrade changes it without touching checkout metadata.
           // Unknown prices leave the recorded plan untouched.
           const planId = planIdForStripePrice(sub.items?.data?.[0]?.price?.id);
+          // Current Stripe API versions carry the period on the item; older
+          // ones on the subscription. Either way, epoch seconds → Date.
+          const periodStart =
+            sub.items?.data?.[0]?.current_period_start ?? sub.current_period_start;
+          const periodEnd = sub.items?.data?.[0]?.current_period_end ?? sub.current_period_end;
+          const currentPeriodStart =
+            typeof periodStart === 'number' ? new Date(periodStart * 1000) : null;
+          const currentPeriodEnd =
+            typeof periodEnd === 'number' ? new Date(periodEnd * 1000) : null;
           // Mirror the Stripe trial_end (epoch seconds) into trial_ends_at so
           // the trial-reminder sweep can compute the 3d/1d/day-of windows. When
           // the trial converts to active, Stripe drops trial_end → null, which
@@ -2271,9 +2288,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                           subscription_status = $2,
                           trial_ends_at = $3,
                           plan_id = COALESCE($5, plan_id),
+                          current_period_start = COALESCE($6, current_period_start),
+                          current_period_end = COALESCE($7, current_period_end),
                           updated_at = NOW()
                     WHERE id = $4`,
-                  [sub.id, sub.status, trialEndsAt, row.id, planId],
+                  [sub.id, sub.status, trialEndsAt, row.id, planId, currentPeriodStart, currentPeriodEnd],
                 );
               }
               await client.query('COMMIT');
