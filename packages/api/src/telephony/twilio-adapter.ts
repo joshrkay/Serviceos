@@ -352,7 +352,7 @@ export interface TwilioAdapterDeps {
   voicePersonaResolver?: VoicePersonaResolver;
   /**
    * §10 onboarding — fired after voice_sessions.ended_at is stamped.
-   * Drives the 30-minute upgrade nudge (banner + optional email).
+   * Drives the 40-AI-minute trial upgrade nudge (banner + optional email).
    * Failures are swallowed so call termination is never blocked by
    * the nudge check.
    */

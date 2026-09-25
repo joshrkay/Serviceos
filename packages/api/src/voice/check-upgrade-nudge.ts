@@ -1,12 +1,6 @@
 import type { Pool } from 'pg';
-
-/**
- * Cumulative trial minutes at which we surface the early-upgrade nudge.
- * Hits at 30% of the trial AI-minute budget — high enough to mean the
- * agent has handled real calls, low enough to fire well before the
- * 100-minute trial cap.
- */
-const UPGRADE_THRESHOLD_MINUTES = 30;
+import { PgCallUsageRepository } from '../billing/call-usage-events';
+import { TRIAL_MINUTE_LIMITS } from './trial-limits';
 
 export type SendEmailFn = (input: {
   to: string;
@@ -26,8 +20,8 @@ export interface CheckAndFireUpgradeNudgeDeps {
 }
 
 /**
- * §10 onboarding — checks whether a tenant has crossed the 30-minute
- * trial usage threshold and, if so, records the prompt timestamp +
+ * §10 onboarding — checks whether a trialing tenant has crossed 40 billable
+ * AI minutes (of the 60-minute trial) and, if so, records the prompt timestamp +
  * optionally sends a one-time email. Idempotent: a second call with the
  * prompt timestamp already set is a no-op.
  *
@@ -53,14 +47,14 @@ export async function checkAndFireUpgradeNudge(
   );
   if (settingsRes.rows[0]?.onboarding_upgrade_prompt_shown_at) return { fired: false };
 
-  const usageRes = await pool.query<{ mins: number }>(
-    `SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (ended_at - started_at)) / 60), 0)::int AS mins
-       FROM voice_sessions
-       WHERE tenant_id = $1 AND channel = 'voice_inbound' AND ended_at IS NOT NULL`,
-    [tenantId],
+  // Billable AI minutes across the trial — the owner's own test calls and
+  // in-app voice never count (see call-usage-events classifyCall).
+  const billableSeconds = await new PgCallUsageRepository(pool).sumBillableSeconds(
+    tenantId,
+    new Date(0),
+    new Date(8.64e15),
   );
-  const mins = usageRes.rows[0]?.mins ?? 0;
-  if (mins < UPGRADE_THRESHOLD_MINUTES) return { fired: false };
+  if (billableSeconds < TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS) return { fired: false };
 
   // Cross the threshold atomically — guard against a second concurrent
   // call also writing the timestamp. The WHERE on the existing column
@@ -80,7 +74,8 @@ export async function checkAndFireUpgradeNudge(
         to: tenant.owner_email,
         subject: "Your AI agent is earning — lock in your subscription",
         text:
-          `You've used ${UPGRADE_THRESHOLD_MINUTES} minutes of trial voice. ` +
+          `You've used ${TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS / 60} of your ` +
+          `${TRIAL_MINUTE_LIMITS.TRIAL_TOTAL_SECONDS / 60} trial AI minutes. ` +
           `Convert now to remove caps and bill today: ${webUrl}/onboarding?action=upgrade-now`,
       });
     } catch {

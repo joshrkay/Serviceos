@@ -125,7 +125,7 @@ export const OnboardingStatusResponseSchema = z.object({
   tenantId: z.string(),
   /** Mirror of tenants.subscription_status. Drives the past-due payment banner. */
   subscriptionStatus: SubscriptionStatusSchema,
-  /** ISO-8601 timestamp of the 30-minute upgrade nudge fire-event. Drives the in-app banner. */
+  /** ISO-8601 timestamp of the 40-AI-minute trial upgrade nudge fire-event. Drives the in-app banner. */
   upgradePromptShownAt: z.string().datetime().optional(),
   /** ISO-8601 timestamp of the activation milestone (first real inbound call).
    * Drives the one-time celebration banner. Absent until activation fires. */

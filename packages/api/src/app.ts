@@ -3659,7 +3659,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // wired unconditionally so Gather hints work even in a keyless-gateway
     // deployment.
     sttHintsResolver: (tenantId: string) => transcriptionGlossaryProvider.termsForTenant(tenantId),
-    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // §10 onboarding — fire the 40-AI-minute trial upgrade nudge after every
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
       ? {
