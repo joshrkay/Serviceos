@@ -36,6 +36,10 @@ describe('BillingStep — explicit plan selection', () => {
       expect(opt).not.toBeChecked();
     }
     expect(group).toBeInTheDocument();
+    expect(screen.getByText('2 users · 20 AI answering minutes · then $1.25/min')).toBeInTheDocument();
+    expect(screen.getByText('5 users · 60 AI answering minutes · then $1.25/min')).toBeInTheDocument();
+    expect(screen.queryByText(/500 voice minutes|\$0\.30/)).not.toBeInTheDocument();
+    expect(screen.getByText('20 AI answering minutes a month on Starter (60 on Growth); $1.25/min after')).toBeInTheDocument();
   });
 
   it('renders real radio inputs with accessible labels meeting the 44px tap target', async () => {

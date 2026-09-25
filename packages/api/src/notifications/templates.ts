@@ -539,8 +539,8 @@ export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEm
   const intro =
     `Your 14-day Rivet trial ends ${when}. To keep your AI dispatcher answering ` +
     'calls and chasing invoices without interruption, no action is needed — your ' +
-    'selected plan starts automatically when the trial ends. Plans include 30 AI voice minutes; ' +
-    'additional usage is billed at actual provider cost plus 30%.';
+    'selected plan starts automatically when the trial ends. Plans include ' +
+    '20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute.';
   const reassure =
     'Not ready? You can cancel anytime before then and you won’t be charged. ' +
     'Either way, your data stays yours.';

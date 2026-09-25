@@ -321,6 +321,37 @@ describe('TeamMembersSheet — invite flow', () => {
     expect(row).toHaveTextContent('newhire@example.com');
   });
 
+  it('shows the plan user-limit message when an invite is over the limit', async () => {
+    apiFetchMock.mockImplementationOnce(async () => jsonResponse({ data: baseUsers }));
+    apiFetchMock.mockImplementationOnce(async () => jsonResponse({ data: [] }));
+    // The exact 403 body the API sends for SEAT_LIMIT_REACHED.
+    apiFetchMock.mockImplementationOnce(async () =>
+      jsonResponse(
+        {
+          error: 'SEAT_LIMIT_REACHED',
+          message: 'Starter includes 2 users. Upgrade to Growth for up to 5 users.',
+          details: { planId: 'starter', includedUsers: 2, seatsUsed: 2 },
+        },
+        { ok: false, status: 403 },
+      ),
+    );
+
+    render(<TeamMembersSheet onClose={() => {}} canEditRoles />);
+    await screen.findByTestId('team-members-list');
+    fireEvent.click(screen.getByTestId('team-members-invite-button'));
+    fireEvent.change(screen.getByTestId('invite-email-input'), {
+      target: { value: 'third@example.com' },
+    });
+    fireEvent.click(screen.getByTestId('invite-send-button'));
+
+    expect(
+      await screen.findByText('Starter includes 2 users. Upgrade to Growth for up to 5 users.'),
+    ).toBeInTheDocument();
+    expect(toastError).toHaveBeenCalledWith(
+      'Starter includes 2 users. Upgrade to Growth for up to 5 users.',
+    );
+  });
+
   it('surfaces invite-side server errors inline + via toast', async () => {
     apiFetchMock.mockImplementationOnce(async () => jsonResponse({ data: baseUsers }));
     apiFetchMock.mockImplementationOnce(async () => jsonResponse({ data: [] }));

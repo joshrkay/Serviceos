@@ -14,6 +14,7 @@ import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
 import { fetchIntegrations, type AccountingIntegrationSummary } from '../../api/integrations';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
+import { AiMinutesCard } from './AiMinutesCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -1420,6 +1421,12 @@ export function SettingsPage() {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* AI answering minutes — usage against the plan bundle, and the
+            owner's overage cap (the API enforces owner-only too). */}
+        <div className="mb-4">
+          <AiMinutesCard canManage={me?.role === 'owner'} />
         </div>
 
         {/* Settings sections */}

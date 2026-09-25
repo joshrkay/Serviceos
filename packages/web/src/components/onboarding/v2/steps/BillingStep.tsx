@@ -11,6 +11,9 @@ interface BillingPlan {
   amountCents: number;
   currency: string;
   interval: string;
+  includedUsers: number;
+  includedAiMinutes: number;
+  overageCentsPerAiMinute: number;
 }
 
 /**
@@ -125,7 +128,7 @@ export function BillingStep() {
           {[
             'Set up AI phone answering during onboarding',
             'AI drafts quotes from each call &amp; sends invoices when jobs close',
-            '500 voice minutes / month included; $0.30 each after',
+            '20 AI answering minutes a month on Starter (60 on Growth); $1.25/min after',
             'End-of-day digest by text — what got done, what got paid',
           ].map((line) => (
             <li key={line} className="flex items-start gap-2">
@@ -178,6 +181,9 @@ export function BillingStep() {
                   />
                   <span>
                     <span className="block text-base font-medium text-slate-900">{plan.name}</span>
+                    <span className="block text-xs text-slate-500">
+                      {`${plan.includedUsers} users · ${plan.includedAiMinutes} AI answering minutes · then ${formatAmount(plan.overageCentsPerAiMinute, plan.currency)}/min`}
+                    </span>
                   </span>
                 </span>
                 <span className="text-sm text-slate-600">

@@ -43,6 +43,30 @@ describe('SettingsPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('shows AI answering minutes for the current period', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/billing/ai-usage')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            kind: 'period', usedMinutes: 12, includedMinutes: 20, overageMinutes: 0,
+            overageCentsPerMinute: 125, projectedChargeCents: 0, capCents: 7900,
+          }),
+        } as Response);
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('12 of 20 AI minutes used')).toBeInTheDocument();
+  });
+
   it('surfaces an error with a retry when the main settings load fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
