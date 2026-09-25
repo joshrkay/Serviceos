@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **54** |
+| Owner-only routes in code | **56** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **6** |
-| `cadence: occasional` | **46** |
+| `cadence: occasional` | **48** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **6** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 55,
+  "ownerOnlyRoutes": 56,
   "daily": 2,
   "onboarding": 6,
-  "occasional": 47,
+  "occasional": 48,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 6
 }
@@ -134,6 +134,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/onboarding/billing/checkout-session` | onboarding | Step `billing`: mints the trial subscription checkout. `POST /api/voice/go-live` refuses with `BILLING_REQUIRED` until a subscription is active. | false | none | Reviewed: one-time activation, and the checkout itself is a hosted Stripe redirect that cannot happen over SMS. |
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
+| `PUT /api/billing/ai-overage-cap` | occasional | Sets or removes the monthly AI-minute overage cap (default: one plan price) after which calls ring the owner instead of the AI. A spending limit, changed rarely. | false | none | |
 | `DELETE /api/billing/connect` | occasional | Disconnects Stripe payouts — teardown, never part of a working day. | false | none | |
 | `DELETE /api/catalog/items/:id` | occasional | Price-book cleanup; the day's work adds items, it does not delete them. | false | none | |
 | `DELETE /api/dnc/:phone` | occasional | Removes a number from the do-not-call list — a correction, on request. | false | none | |
