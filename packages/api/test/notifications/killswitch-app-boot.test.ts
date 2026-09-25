@@ -55,6 +55,9 @@ beforeAll(async () => {
     STRIPE_WEBHOOK_SECRET: 'whsec_stripe_dummy',
     AI_PROVIDER_API_KEY: 'sk-dummy',
     CORS_ORIGIN: 'https://app.invalid',
+    // Public origins — required in prod (config.publicOrigins); see config.public-origins.test.ts.
+    WEB_URL: 'https://app.invalid',
+    PUBLIC_API_URL: 'https://api.invalid',
     RLS_RUNTIME_ROLE: 'true',
     TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     STRIPE_SECRET_KEY: 'sk_test_dummy',

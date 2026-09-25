@@ -8,6 +8,7 @@ import {
   checkInstallLocations,
   checkNodeVersion,
   checkNpmVersion,
+  checkPublicOrigins,
   parseEnvExampleKeys,
   parseIntegrationFlag,
   parseWarnOnlyFlag,
@@ -231,5 +232,40 @@ describe('checkEnvVars', () => {
 
   it('skips when .env.example is absent', () => {
     expect(checkEnvVars(makeRoot(), {}).status).toBe('skip');
+  });
+});
+
+describe('checkPublicOrigins', () => {
+  it('passes when both canonical origins are set and differ', () => {
+    const r = checkPublicOrigins({
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
+    });
+    expect(r.status).toBe('OK');
+  });
+
+  it('warns about the deprecated APP_PUBLIC_URL alias', () => {
+    const r = checkPublicOrigins({
+      APP_PUBLIC_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
+    });
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('APP_PUBLIC_URL is deprecated');
+  });
+
+  it('warns when the two origins collide (the 2026-09 prod shape)', () => {
+    const r = checkPublicOrigins({
+      WEB_URL: 'https://api.example.com/',
+      PUBLIC_API_URL: 'https://api.example.com',
+    });
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('same origin');
+  });
+
+  it('warns when either is unset', () => {
+    const r = checkPublicOrigins({});
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('WEB_URL unset');
+    expect(r.detail).toContain('PUBLIC_API_URL unset');
   });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { loadConfig, resetConfig } from '../../src/shared/config';
 import {
   OnboardingTeamMemberExecutionHandler,
   OnboardingScheduleExecutionHandler,
@@ -72,6 +73,10 @@ describe('OnboardingTeamMemberExecutionHandler', () => {
   const payload = { name: 'Carlos', role: 'technician', email: 'carlos@example.com' };
 
   it('sends the Clerk invitation, not just a local row', async () => {
+    // The redirect_url is built on config.publicOrigins.web (the SPA), not an
+    // injected base — see users/invite-team-member.ts.
+    resetConfig();
+    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.test' });
     const clerkFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ id: 'clerk_inv_9' }),
@@ -79,7 +84,7 @@ describe('OnboardingTeamMemberExecutionHandler', () => {
     const handler = new OnboardingTeamMemberExecutionHandler(
       invitationRepo as never,
       auditRepo as never,
-      { clerkSecretKey: 'sk_test', clerkFetch: clerkFetch as never, appBaseUrl: 'https://app.test' },
+      { clerkSecretKey: 'sk_test', clerkFetch: clerkFetch as never},
     );
 
     const result = await handler.execute(proposalOf('onboarding_team_member', payload), context);

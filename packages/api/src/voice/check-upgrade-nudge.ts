@@ -2,6 +2,15 @@ import type { Pool } from 'pg';
 import { recordFunnelEvent } from '../analytics/posthog';
 import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { TRIAL_MINUTE_LIMITS } from './trial-limits';
+import { loadConfig } from '../shared/config';
+
+/**
+ * Cumulative trial minutes at which we surface the early-upgrade nudge.
+ * Hits at 30% of the trial AI-minute budget — high enough to mean the
+ * agent has handled real calls, low enough to fire well before the
+ * 100-minute trial cap.
+ */
+const UPGRADE_THRESHOLD_MINUTES = 30;
 
 export type SendEmailFn = (input: {
   to: string;
@@ -80,7 +89,7 @@ export async function checkAndFireUpgradeNudge(
 
   if (deps.sendEmail && tenant.owner_email) {
     try {
-      const webUrl = deps.webUrl ?? process.env.WEB_URL ?? '';
+      const webUrl = deps.webUrl ?? loadConfig().publicOrigins.web;
       await deps.sendEmail({
         to: tenant.owner_email,
         subject: "Your AI agent is earning — lock in your subscription",

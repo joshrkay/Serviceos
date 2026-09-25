@@ -631,6 +631,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
 
+  // Non-fatal configuration findings (deprecated variables such as
+  // APP_PUBLIC_URL). Logged once at boot so an operator sees them in the
+  // deploy log; the fatal cases already threw inside loadConfig().
+  if (config.warnings.length > 0) {
+    const configBootLogger = createLogger({
+      service: 'api-boot',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    for (const warning of config.warnings) {
+      configBootLogger.warn('configuration warning', { warning });
+    }
+  }
+
   // FIX 10(i) (ANS-001) — boot-time readiness gate for the E1 life-safety
   // script. This is the ONE consumer of E1_SCRIPT_REVIEW_REQUIRED; without
   // it a placeholder life-safety script could ship silently forever. Purely
@@ -1429,7 +1442,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const feedbackDispatcher = messageDelivery
     ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
     : new NoopFeedbackDispatcher();
-  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const publicBaseUrl = config.publicOrigins.web;
   const sendService = messageDelivery
     ? new SendService({
         delivery: messageDelivery,
@@ -1625,7 +1638,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // ── Onboarding lifecycle emails. The frontend origin backs the CTA links
   // (/onboarding, /settings) and the support address backs the footer ask;
   // shared by the welcome worker (below) and the setup/trial sweeps.
-  const lifecycleEmailAppBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const lifecycleEmailAppBaseUrl = config.publicOrigins.web;
   const lifecycleEmailSupportEmail =
     process.env.SUPPORT_EMAIL ?? process.env.SENDGRID_REPLY_TO_EMAIL ?? 'support@rivet.ai';
   const lifecycleEmailWorker = createLifecycleEmailWorker({
@@ -1964,7 +1977,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     pendingInvitationRepo,
     clerkInvitationConfig: {
       clerkSecretKey: process.env.CLERK_SECRET_KEY,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     },
     seatUsage,
     // B1.18 — update_brand_voice writes through the SAME versioned path
@@ -2773,7 +2785,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
-    publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    publicBaseUrl: config.publicOrigins.web,
   });
   workerRegistry.set(
     feedbackSendWorker.type,
@@ -3153,9 +3165,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     syncService: calendarSyncService,
     // appBaseUrl is the FRONTEND URL we redirect the operator's
     // browser back to after OAuth completes. The API/callback URL is
-    // separate (googleApiUrl). 5173 is the Vite dev default; matches
-    // publicBaseUrl elsewhere in this file.
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    // separate (googleApiUrl). The origin is config.publicOrigins.web,
+    // resolved once by loadConfig() (see shared/config.ts).
+    appBaseUrl: config.publicOrigins.web,
     // D2-1d: emit calendar_integration.{connected,disconnected,
     // callback_consumed} for the per-user Google OAuth lifecycle. The
     // callback uses `system:google-oauth-callback` because there is no
@@ -3180,7 +3192,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     integrationRepo: googleBusinessIntegrationRepo,
     stateRepo: oauthStateRepo,
     googleConfig: googleBusinessOAuthConfig,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    appBaseUrl: config.publicOrigins.web,
     auditRepo,
     // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
     // credential (failed refresh) degrades visibly in Settings.
@@ -3203,7 +3215,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     customerRepo,
     jobRepo,
     qboConfig,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    appBaseUrl: config.publicOrigins.web,
     auditRepo,
     // QuickBooks connect/sync is Growth-only (billing/plan-features.ts).
     ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
@@ -4205,7 +4217,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // (outbound-call-service uses PUBLIC_API_URL ?? publicBaseUrl); otherwise
       // the signed URL and the reconstructed URL diverge when PUBLIC_API_URL is
       // unset and every callback 403s.
-      publicBaseUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+      publicBaseUrl: config.publicOrigins.api,
     }),
   );
 
@@ -5161,7 +5173,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         pendingInvitationRepo,
         seatUsage,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
-        appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
         // Account deletion purges the user's push tokens server-side.
         deviceTokenRepo,
       },
