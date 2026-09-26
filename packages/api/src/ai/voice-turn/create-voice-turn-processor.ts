@@ -114,6 +114,7 @@ import {
   LANGUAGE_SWITCH_CAP_LINE,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  CALLER_INCOMPLETE_REQUEST_COPY,
   type SessionLanguage,
 } from '../agents/customer-calling/tts-copy';
 import {
@@ -187,7 +188,7 @@ import type {
   ProposalStatus,
   ProposalType,
 } from '../../proposals/proposal';
-import { createProposal as buildProposal } from '../../proposals/proposal';
+import { createProposal as buildProposal, missingFieldsFor } from '../../proposals/proposal';
 import {
   isProposalTypeAllowedOnSurface,
   type ProposalSurface,
@@ -2320,6 +2321,13 @@ export function createVoiceTurnProcessor(
       });
       const stored = await deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
+      // #1272 — a draft persisted with unfilled missingFields (approve refuses
+      // it), or one degraded to a clarification because the details were
+      // incomplete, is NOT "taken care of". Without a more specific honest
+      // line below, speak the incomplete-request copy instead of the FSM's
+      // "You'll receive a confirmation shortly".
+      const incompleteRequest =
+        surfaceAllowed && (degradedFromContract || missingFieldsFor(stored).length > 0);
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
@@ -2331,7 +2339,9 @@ export function createVoiceTurnProcessor(
           ? { utterance: estimateQuote.utterance }
           : bookingUtterance
             ? { utterance: bookingUtterance }
-            : {}),
+            : incompleteRequest
+              ? { utterance: CALLER_INCOMPLETE_REQUEST_COPY }
+              : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
@@ -2364,6 +2374,17 @@ export function createVoiceTurnProcessor(
     }
     return path;
   }
+
+  /**
+   * #1230 — an emergency immediate Dial that found no reachable on-call phone
+   * has already walked the rotation and written escalation.requested. The
+   * FSM's emergency fast-path then emits notify_oncall for the same incident;
+   * it reuses this result instead of escalating (and auditing) a second time.
+   */
+  const unresolvedImmediateEscalation = new WeakMap<
+    VoiceSession,
+    Awaited<ReturnType<typeof escalateToHuman>>
+  >();
 
   async function handleNotifyOncall(
     session: VoiceSession,
@@ -2434,7 +2455,9 @@ export function createVoiceTurnProcessor(
       );
       const enrichedCaller = mergeCallerContextWithCrm(callerBundle, crm);
 
-      const result = await escalateToHuman({
+      const precomputed = unresolvedImmediateEscalation.get(session);
+      unresolvedImmediateEscalation.delete(session);
+      const result = precomputed ?? await escalateToHuman({
         tenantId,
         sessionId: session.id,
         reason: skillReason,
@@ -2475,7 +2498,7 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
         }
 
         if (
@@ -4857,6 +4880,9 @@ export function createVoiceTurnProcessor(
           // fast-path below, so the call still reaches `escalating` (and its
           // notify_oncall callback path) instead of staying in intent_capture
           // — which, on a capped call, had already spent its one cap end.
+          if (immediate.escalation && !immediate.escalation.transfer) {
+            unresolvedImmediateEscalation.set(session, immediate.escalation);
+          }
           if (immediate.dialed && immediate.escalation?.transfer) {
             if (immediate.escalation.transfer.fallbackTwiml !== undefined) {
               pendingTransferTwiml.set(

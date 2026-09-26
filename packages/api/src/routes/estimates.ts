@@ -46,7 +46,11 @@ import { PaymentRepository } from '../invoices/payment';
 import { convertEstimateToInvoice } from '../invoices/convert-estimate';
 import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { applyBps, resolveSelectedLineItems } from '../shared/billing-engine';
+import {
+  applyBps,
+  calculateSelectedDocumentTotals,
+  normalizeLineItemTotals,
+} from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { Customer, CustomerRepository } from '../customers/customer';
@@ -240,10 +244,14 @@ export function createEstimateRouter(
               // same subset createEstimate headlines. Summing every tier option
               // here would over-discount a tiered estimate (a discount computed
               // on the full menu but applied to only the default tier).
-              const subtotalCents = resolveSelectedLineItems(parsed.lineItems).reduce(
-                (sum, li) => sum + li.totalCents,
+              // #1064 — and take that subtotal FROM THE ENGINE, over the same
+              // normalized lines createEstimate persists, so the discount base
+              // is the document's own subtotal (not client-sent line totals).
+              const subtotalCents = calculateSelectedDocumentTotals(
+                normalizeLineItemTotals(parsed.lineItems),
                 0,
-              );
+                0,
+              ).subtotalCents;
               const cents = applyBps(subtotalCents, bps);
               if (cents > 0) {
                 discountCents += cents;

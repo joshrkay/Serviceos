@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createMockLLMGateway } from '../../../src/ai/gateway/factory';
 import { SuggestReplyTask } from '../../../src/ai/tasks/suggest-reply-task';
-import { buildUntrustedContentSection } from '../../../src/ai/untrusted-content';
+import { buildUntrustedContentSection, normalizeUntrustedFenceIds } from '../../../src/ai/untrusted-content';
 import { hasLiveFenceMarker } from '../../support/model-reads';
 
 describe('SuggestReplyTask', () => {
@@ -218,16 +218,20 @@ describe('SuggestReplyTask', () => {
       "Turn numbers [n] give the chronological order of the conversation across both sections above. Using that conversation, draft the shop's next reply.",
     ].join('\n\n');
 
-    expect(provider.getCalls()[0].messages).toEqual([
+    // #1240 — the fence carries a random per-request id; byte-identity is
+    // judged with it normalised (as the cassette hash does).
+    const norm = (ms: ReadonlyArray<{ role: string; content: string }>) =>
+      ms.map((m) => ({ ...m, content: normalizeUntrustedFenceIds(m.content) }));
+    expect(norm(provider.getCalls()[0].messages)).toEqual(norm([
       { role: 'system', content: expectedSystem },
       { role: 'user', content: expectedUser },
-    ]);
+    ]));
 
     // Explicit `undefined` and an empty chunk list are the same as absence.
     await task.suggest({ ...input, retrievedChunks: undefined });
     await task.suggest({ ...input, retrievedChunks: [] });
-    expect(provider.getCalls()[1].messages).toEqual(provider.getCalls()[0].messages);
-    expect(provider.getCalls()[2].messages).toEqual(provider.getCalls()[0].messages);
+    expect(norm(provider.getCalls()[1].messages)).toEqual(norm(provider.getCalls()[0].messages));
+    expect(norm(provider.getCalls()[2].messages)).toEqual(norm(provider.getCalls()[0].messages));
   });
 
   it('retrievedChunks ride the lowest-authority slot fenced as DATA — injection stays inside', async () => {
@@ -291,7 +295,8 @@ describe('SuggestReplyTask', () => {
 
     const user = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
     const lines = user.split('\n');
-    const lastEndIdx = lines.map((l) => l.trim()).lastIndexOf(END);
+    // #1240 — the real END line is "<fence id> === … (END) ===".
+    const lastEndIdx = lines.map((l) => l.trim()).findLastIndex((l) => /^[0-9a-f]{16} /.test(l) && l.endsWith(END));
     expect(lastEndIdx).toBeGreaterThan(-1);
     // Everything before the REAL closing line must contain no embedded END
     // marker that could have closed the fence early — the neutralizer

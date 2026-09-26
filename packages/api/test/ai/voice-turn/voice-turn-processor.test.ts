@@ -2011,6 +2011,54 @@ describe('createVoiceTurnProcessor — create_appointment missing-customer gap (
   });
 });
 
+// ─── #1272 — closing copy must not claim completion for an unapprovable draft ─
+
+describe('createVoiceTurnProcessor — closing copy for a missingFields-gated draft (#1272)', () => {
+  const GENERIC_CLOSING_LINE =
+    "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+
+  it('a caller estimate request with no line items does not promise a confirmation', async () => {
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'draft_estimate',
+        confidence: 0.95,
+        reasoning: 'caller wants a quote',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'can I get an estimate',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    const confirmEffects = await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    // Precondition: the persisted draft is unapprovable as-is.
+    expect(missingFieldsFor(proposals[0]!).length).toBeGreaterThan(0);
+
+    const spoken = confirmEffects
+      .filter((fx) => fx.type === 'tts_play')
+      .map((fx) => String(fx.payload.text));
+    expect(spoken.length).toBeGreaterThan(0);
+    const closing = spoken[spoken.length - 1]!;
+    expect(closing).not.toBe(GENERIC_CLOSING_LINE);
+    expect(closing).not.toMatch(/taken care of/i);
+    expect(closing).not.toMatch(/confirmation/i);
+    expect(closing).toMatch(/follow up/i);
+  });
+});
+
 // ─── I6 — fail-closed S1 predicate ───────────────────────────────────────────
 
 describe('I6 — untrusted-surface predicate is a trusted-channel allowlist', () => {

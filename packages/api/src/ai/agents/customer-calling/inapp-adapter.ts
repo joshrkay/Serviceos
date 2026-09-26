@@ -20,7 +20,7 @@ import type { Pool } from 'pg';
 import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
-import { createProposal as buildProposal } from '../../../proposals/proposal';
+import { createProposal as buildProposal, missingFieldsFor } from '../../../proposals/proposal';
 import type { ProposalType } from '../../../proposals/proposal';
 import type { ProposalSurface } from '../../../proposals/surface';
 // THE shared voice → proposal payload contract, also used by the real Twilio
@@ -111,6 +111,7 @@ import {
   LANGUAGE_SWITCH_CAP_LINE,
   LANGUAGE_UNSUPPORTED_LINE,
   VOICE_APPROVAL_REFUSAL,
+  INAPP_INCOMPLETE_DRAFT_COPY,
 } from './tts-copy';
 import type { SessionLanguage } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
@@ -2190,9 +2191,17 @@ export class InAppVoiceAdapter {
     // closing. Reached only via a GENUINE `confirmed` event from the caller —
     // never a synthesized one.
     if (session.machine.currentState === 'proposal_draft' && lastProposalId) {
+      // #1272 — a draft persisted with unfilled missingFields cannot be
+      // approved, so the FSM's default "taken care of … confirmation shortly"
+      // would be a lie. Speak the honest incomplete-draft line instead.
+      const queued = await this.deps.proposalRepo
+        .findById(session.tenantId, lastProposalId)
+        .catch(() => null);
+      const incomplete = queued ? missingFieldsFor(queued).length > 0 : false;
       const effects3 = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: lastProposalId,
+        ...(incomplete ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY } : {}),
       });
       allSideEffects.push(...effects3);
       await this.executeSideEffects(session, effects3);

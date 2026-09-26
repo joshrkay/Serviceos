@@ -116,6 +116,31 @@ describe('POST /api/estimates — member pricing', () => {
     expect(res.body.totals.discountCents).toBe(0);
   });
 
+  it('#1064 — bases the member discount on the ENGINE subtotal the estimate persists, not the client-sent line totals', async () => {
+    const customerId = 'cust-member-stale-total';
+    await seedMembership(customerId, 1_000); // 10%
+    const jobId = await seedJob(customerId);
+
+    // The client sends a line whose totalCents (19,990) disagrees with
+    // quantity × unitPriceCents (1 × 20,000). createEstimate normalizes the
+    // line to 20,000 (P0-2), so the persisted subtotal is 20,000 and the
+    // member discount must be 10% of THAT: 2,000 — not 10% of the stale
+    // 19,990 (1,999), which would leave the discount on a different base
+    // than the document it is applied to.
+    const stale = [
+      { id: 'li-1', description: 'AC tune-up', quantity: 1, unitPriceCents: 20_000, totalCents: 19_990, sortOrder: 0, taxable: true },
+    ];
+
+    const res = await request(h.app)
+      .post('/api/estimates')
+      .send({ jobId, lineItems: stale, taxRateBps: 0 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.totals.subtotalCents).toBe(20_000);
+    expect(res.body.totals.discountCents).toBe(2_000);
+    expect(res.body.totals.totalCents).toBe(18_000);
+  });
+
   it('bases the member discount on the default tier selection, not every option (EE-1)', async () => {
     const customerId = 'cust-member-tiered';
     await seedMembership(customerId, 1_000); // 10%

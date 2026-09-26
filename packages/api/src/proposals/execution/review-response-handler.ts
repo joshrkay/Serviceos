@@ -38,6 +38,7 @@ import {
   replyToReview as defaultReplyToReview,
 } from '../../reputation/google-business-client';
 import { ServiceCreditRepository } from '../../reputation/service-credit';
+import { CREDIT_CAP_CENTS_PER_12_MONTHS, exceedsCreditCap } from '../../reputation/credit-tier';
 
 import type {
   ReviewResponseProposalPayload,
@@ -341,14 +342,32 @@ export class ReviewResponseExecutionHandler implements ExecutionHandler {
       return { kind: 'credit', ok: true };
     }
     try {
-      const credit = await this.serviceCreditRepo.create({
-        tenantId: context.tenantId,
-        customerId: component.customerId,
-        amountCents: component.amountCents,
-        reviewId,
-        proposalId: proposal.id,
-      });
-      return { kind: 'credit', ok: true, id: credit.id };
+      // #1080 — re-check the rolling 12-month cap at EXECUTION against the
+      // live ledger, not just at draft: a delayed approval must not land a
+      // credit that another issuance has since pushed over the cap. Refuse
+      // and surface — never clamp (a clamped credit is the "$0 / partial
+      // credit" the draft-time omission exists to avoid).
+      const outcome = await this.serviceCreditRepo.createIfAllowed(
+        {
+          tenantId: context.tenantId,
+          customerId: component.customerId,
+          amountCents: component.amountCents,
+          reviewId,
+          proposalId: proposal.id,
+        },
+        (priorIssuedCents) => exceedsCreditCap(priorIssuedCents, component.amountCents),
+      );
+      if (!outcome.issued) {
+        return {
+          kind: 'credit',
+          ok: false,
+          error:
+            `refused — 12-month service-credit cap: customer already issued ` +
+            `${outcome.priorIssuedCents} cents, this credit is ${component.amountCents} cents, ` +
+            `cap is ${CREDIT_CAP_CENTS_PER_12_MONTHS} cents`,
+        };
+      }
+      return { kind: 'credit', ok: true, id: outcome.credit.id };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { kind: 'credit', ok: false, error: msg };

@@ -165,12 +165,22 @@ describe('public-intake route', () => {
       });
     });
 
-    it('falls back to the tenant name and empty service types when settings are absent', async () => {
+    // #1275 — `tenant.name` is an internal-only label (bootstrapTenant
+    // invents it from the owner's email in the same style Clerk uses for
+    // an unnamed org, e.g. "owner's Organization" — see auth/clerk.ts).
+    // Before this fix, a tenant with no settings row yet (or one that
+    // hadn't completed the identity step) leaked that placeholder straight
+    // to the public intake form. It must never appear here; the web
+    // client's own generic fallback (IntakeFormPage.tsx: 'Service
+    // Request' / 'Your service team') takes over when businessName is
+    // absent.
+    it('omits businessName (never the internal tenant name) when settings are absent (#1275)', async () => {
       const res = await request(app).get(`/public/intake/${tenantId}`);
 
       expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty('businessName');
+      expect(JSON.stringify(res.body)).not.toContain('Test Co');
       expect(res.body).toEqual({
-        businessName: 'Test Co',
         businessPhone: null,
         serviceTypes: [],
         businessHoursSummary: null,

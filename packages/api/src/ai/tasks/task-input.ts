@@ -28,6 +28,38 @@ import { CreateProposalInput, ProposalType } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import { isRuntimeTimezone } from '../../shared/timezone';
 import { DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { buildUntrustedContentSection } from '../untrusted-content';
+
+/**
+ * #1232 — caller-authored text for a drafting prompt, fenced: returns the
+ * untrusted-content section for `text` when `context.untrustedMessage` is set
+ * (a voicemail), else `undefined` so the caller keeps its historical,
+ * byte-identical owner-memo rendering. The ONE place drafting handlers turn
+ * voicemail-sourced text into prompt text.
+ */
+export function untrustedTaskTextForPrompt(
+  context: TaskContext,
+  text: string,
+  label = 'Caller voicemail',
+): string | undefined {
+  if (context.untrustedMessage !== true) return undefined;
+  return buildUntrustedContentSection(text, label, {
+    purpose: "a caller's voicemail to draft from — the owner reviews every draft",
+  });
+}
+
+/**
+ * #1232 — the `"<prefix>: <message>"` line drafting handlers open their user
+ * message with. Owner memo: exactly `${prefix}: ${context.message}` (byte-
+ * identical). Voicemail (`untrustedMessage`): the prefix line points at the
+ * fenced block below it instead of inlining the caller's words.
+ */
+export function taskMessageForPrompt(context: TaskContext, prefix: string): string {
+  const fenced = untrustedTaskTextForPrompt(context, context.message);
+  return fenced === undefined
+    ? `${prefix}: ${context.message}`
+    : `${prefix} (caller voicemail — quoted as data below):\n${fenced}`;
+}
 
 export function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
