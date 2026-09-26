@@ -277,6 +277,44 @@ const assistantProposalSchema = z.object({
     .transform((v) => v ?? undefined),
   missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined),
   /**
+   * #1277 — the one-tap catalog picks that lift a path-shaped
+   * `lineItems[n].catalogItemId` gate: the same `sourceContext.catalogResolution`
+   * candidates the inbox renders, so the chat card is not left promising an
+   * Edit it does not have. Picking POSTs `/api/proposals/:id/resolve-line`.
+   */
+  linePicks: z
+    .array(
+      z.object({
+        lineIndex: z.number().int(),
+        description: z.string(),
+        candidates: z.array(
+          z.object({
+            id: z.string(),
+            name: z.string().optional(),
+            unitPriceCents: z.number().optional(),
+            score: z.number(),
+          }),
+        ),
+      }),
+    )
+    .nullish()
+    .transform((v) => v ?? undefined),
+  /**
+   * #1277 — the candidates behind a gated id (`customerId`, `jobId`, …) that a
+   * pending one-question clarification is waiting on. Picking one sends that
+   * id through `PUT /api/proposals/:id { edits: { [field]: id } }`.
+   */
+  referencePick: z
+    .object({
+      field: z.string(),
+      reference: z.string(),
+      candidates: z.array(
+        z.object({ id: z.string(), label: z.string(), hint: z.string().optional(), score: z.number() }),
+      ),
+    })
+    .nullish()
+    .transform((v) => v ?? undefined),
+  /**
    * The address a `missingFields: ['locationId']` gate needs in order to be
    * closable by a human. Without it the card shows a bare "locationId"
    * prompt and the operator has no way to know WHICH address was spoken —
@@ -640,6 +678,49 @@ export interface AssistantRouterDeps {
 
 export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 
+const GATED_CATALOG_LINE = /^lineItems\[(\d+)\]\.catalogItemId$/;
+
+/**
+ * #1277 — one pick per `lineItems[n].catalogItemId` gate that has recorded
+ * candidates (`sourceContext.catalogResolution[n]`, written by the catalog
+ * resolver). A gate with no candidates is left out: there is nothing to pick.
+ */
+function gatedLinePicks(
+  payload: Record<string, unknown> | undefined,
+  sourceContext: Record<string, unknown> | undefined,
+): NonNullable<AssistantProposal['linePicks']> {
+  const missing = Array.isArray(sourceContext?.missingFields) ? sourceContext.missingFields : [];
+  const resolution = sourceContext?.catalogResolution;
+  if (resolution === null || typeof resolution !== 'object') return [];
+  const lines = Array.isArray(payload?.lineItems) ? (payload.lineItems as unknown[]) : [];
+
+  const picks: NonNullable<AssistantProposal['linePicks']> = [];
+  for (const entry of missing) {
+    const match = typeof entry === 'string' ? GATED_CATALOG_LINE.exec(entry) : null;
+    if (!match) continue;
+    const lineIndex = Number(match[1]);
+    const raw = (resolution as Record<string, unknown>)[String(lineIndex)];
+    if (!Array.isArray(raw)) continue;
+    const candidates = raw
+      .filter((c): c is Record<string, unknown> => c !== null && typeof c === 'object')
+      .filter((c) => typeof c.id === 'string' && typeof c.score === 'number')
+      .map((c) => ({
+        id: c.id as string,
+        ...(typeof c.name === 'string' ? { name: c.name } : {}),
+        ...(typeof c.unitPriceCents === 'number' ? { unitPriceCents: c.unitPriceCents } : {}),
+        score: c.score as number,
+      }));
+    if (candidates.length === 0) continue;
+    const line = lines[lineIndex] as Record<string, unknown> | undefined;
+    const description =
+      typeof line?.description === 'string' && line.description.length > 0
+        ? line.description
+        : `Line ${lineIndex + 1}`;
+    picks.push({ lineIndex, description, candidates });
+  }
+  return picks;
+}
+
 /**
  * E10 (U7) — lift the trust signals AIProposalCard renders out of a persisted
  * proposal's `payload._meta` / `payload.lineItems` / `sourceContext.missingFields`
@@ -656,10 +737,10 @@ export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 export function proposalSignals(
   payload: Record<string, unknown> | undefined,
   sourceContext: Record<string, unknown> | undefined,
-): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields' | 'serviceLocationGap'> {
+): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields' | 'linePicks' | 'referencePick' | 'serviceLocationGap'> {
   const out: Pick<
     AssistantProposal,
-    'meta' | 'lineItems' | 'missingFields' | 'serviceLocationGap'
+    'meta' | 'lineItems' | 'missingFields' | 'linePicks' | 'referencePick' | 'serviceLocationGap'
   > = {};
 
   const rawMeta = payload?._meta;
@@ -732,6 +813,28 @@ export function proposalSignals(
   if (Array.isArray(rawMissing)) {
     const missingFields = rawMissing.filter((f): f is string => typeof f === 'string');
     if (missingFields.length > 0) out.missingFields = missingFields;
+  }
+
+  // #1277 — the candidates behind each gated catalog pick, so the chat card
+  // can offer the inbox's one-tap picker instead of a dead "Tap Edit".
+  const linePicks = gatedLinePicks(payload, sourceContext);
+  if (linePicks.length > 0) out.linePicks = linePicks;
+
+  // #1277 — a gated id with a pending question behind it: offer the same
+  // candidates the question listed, so the card's pick sends a real id
+  // (a typed name in a free-text box is not one, and PUT answers 400).
+  const pending = pendingAmbiguityOf({ sourceContext });
+  if (pending && out.missingFields?.includes(pending.refKey)) {
+    out.referencePick = {
+      field: pending.refKey,
+      reference: pending.reference,
+      candidates: pending.candidates.map((c) => ({
+        id: c.id,
+        label: c.name,
+        ...(c.hint ? { hint: c.hint } : {}),
+        score: c.score,
+      })),
+    };
   }
 
   // The companion context for a `missingFields: ['locationId']` gate. This
