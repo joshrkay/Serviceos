@@ -392,6 +392,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    * real payment.
    */
   const resolveTenantConnectAccountId = async (tenantId: string): Promise<string | null> => {
+    // #1110 — a malformed tenant id names no tenant: refuse (fail-closed)
+    // before any resolver hands it to Postgres as a uuid and 500s.
+    if (!isValidTenantId(tenantId)) return null;
     try {
       if (deps.connectAccountResolver) {
         const view = await deps.connectAccountResolver.resolveTenantConnectAccount(tenantId);
