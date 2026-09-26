@@ -117,6 +117,91 @@ describe('CommsInboxPage', () => {
     expect(row.querySelector('.truncate')).not.toBeNull();
   });
 
+  it('#680 — ?customerId= opens (or creates) that customer\'s thread so an outbound message can be sent', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/conversations/customer/cust-new' && init?.method === 'POST') {
+        return jsonResponse({
+          conversation: {
+            id: 'conv-new',
+            entityType: 'customer',
+            entityId: 'cust-new',
+            status: 'open',
+            createdAt: '2026-06-17T10:00:00Z',
+            updatedAt: '2026-06-17T10:00:00Z',
+          },
+        });
+      }
+      if (url.includes('/api/conversations/conv-new/messages')) return jsonResponse([]);
+      if (url.includes('/api/conversations/conv-new/reply')) {
+        return jsonResponse({
+          message: {
+            id: 'm-out',
+            tenantId: 't1',
+            conversationId: 'conv-new',
+            messageType: 'text',
+            content: 'Hi! Following up on your quote.',
+            senderId: 'owner-1',
+            senderRole: 'owner',
+            createdAt: '2026-06-17T10:06:00Z',
+          },
+          dispatchId: 'd1',
+          channel: 'sms',
+          recipient: '+15555550000',
+        });
+      }
+      if (url.startsWith('/api/conversations') && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse({ threads: [] });
+      }
+      return jsonResponse({});
+    });
+
+    renderInbox('/comms-inbox?customerId=cust-new');
+
+    // The new thread's (empty) history loads, then the composer is live.
+    await waitFor(() =>
+      expect(
+        apiFetchMock.mock.calls.some(([url]) => url === '/api/conversations/conv-new/messages'),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(screen.getByTestId('message-send-button')).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId('message-input-field'), {
+      target: { value: 'Hi! Following up on your quote.' },
+    });
+    fireEvent.click(screen.getByTestId('message-send-button'));
+
+    await waitFor(() => {
+      expect(
+        apiFetchMock.mock.calls.some(
+          ([url, init]) =>
+            url === '/api/conversations/conv-new/reply' &&
+            (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByText('Hi! Following up on your quote.')).toBeInTheDocument();
+  });
+
+  it('#680 — the owner can pick the channel (Text / Email) for an outbound message', async () => {
+    renderInbox();
+    fireEvent.click(await screen.findByTestId('comms-thread-row'));
+    await waitFor(() => expect(screen.getByTestId('message-send-button')).toBeInTheDocument());
+
+    const email = screen.getByRole('radio', { name: 'Email' });
+    expect(email.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+    fireEvent.click(email);
+    fireEvent.change(screen.getByTestId('message-input-field'), { target: { value: 'on our way' } });
+    fireEvent.click(screen.getByTestId('message-send-button'));
+
+    await waitFor(() => {
+      const reply = apiFetchMock.mock.calls.find(([url]) => String(url).endsWith('/reply'));
+      expect(reply).toBeDefined();
+      expect(JSON.parse((reply![1] as RequestInit).body as string)).toEqual({
+        body: 'on our way',
+        channel: 'email',
+      });
+    });
+  });
+
   it('opens a thread and renders its messages', async () => {
     renderInbox();
     fireEvent.click(await screen.findByTestId('comms-thread-row'));

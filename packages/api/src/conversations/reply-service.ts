@@ -56,6 +56,7 @@ export type ConversationReplyErrorCode =
   | 'no_recipient'
   | 'channel_selection_required'
   | 'dnc_blocked'
+  | 'sms_consent_required'
   | 'delivery_failed';
 
 export class ConversationReplyError extends Error {
@@ -115,6 +116,14 @@ export interface SendConversationReplyResult {
 interface ResolvedTarget {
   channel: ReplyChannel;
   recipient: string;
+  /**
+   * #680 — true for an OWNER-INITIATED text to a customer: the thread has no
+   * inbound SMS to reply to (web/mobile "Message" opened a fresh thread) and
+   * the customer has no recorded SMS consent. The reply trust model below
+   * (owner pressing Send = consent) only holds for replies to a customer who
+   * texted in; a cold text needs the stored consent bit.
+   */
+  coldSmsWithoutConsent?: boolean;
 }
 
 /**
@@ -317,7 +326,7 @@ async function resolveTarget(
         : customer.preferredChannel === 'sms' || customer.preferredChannel === 'phone'
           ? 'sms'
           : undefined;
-    return pickReplyChannel({
+    const target = pickReplyChannel({
       explicit: input.channel,
       defaultChannel: threadChannel ?? preferenceChannel,
       defaultSource: threadChannel ? 'thread' : 'fallback',
@@ -325,6 +334,10 @@ async function resolveTarget(
       email,
       who: 'Customer',
     });
+    if (target.channel === 'sms' && threadChannel !== 'sms' && customer.smsConsent !== true) {
+      return { ...target, coldSmsWithoutConsent: true };
+    }
+    return target;
   }
 
   throw new ConversationReplyError(
@@ -430,6 +443,24 @@ export async function sendConversationReply(
     conversation.entityId,
     deps,
   );
+
+  // #680 — a cold text (no inbound SMS in this thread) needs recorded consent.
+  if (target.coldSmsWithoutConsent) {
+    await auditReplyRefusal(deps, {
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      actorId: input.actorId,
+      actorRole: input.actorRole,
+      eventType: 'conversation.reply.suppressed',
+      channel: target.channel,
+      recipient: target.recipient,
+      reason: 'sms_consent_required',
+    });
+    throw new ConversationReplyError(
+      'sms_consent_required',
+      "This customer hasn't agreed to receive texts. Send an email instead, or record their SMS consent on the customer first.",
+    );
+  }
 
   // DNC/STOP is the absolute block — never message an opted-out number, even
   // for a human-authored reply. No dispatch row is written for a blocked send.
