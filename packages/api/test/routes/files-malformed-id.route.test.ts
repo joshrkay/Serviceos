@@ -83,6 +83,7 @@ function buildApp(repo: InMemoryFileRepository, role: string | null = 'owner'): 
       storage: new FakeStorageProvider(),
       bucket: 'files-malformed-test',
       auditRepo: new InMemoryAuditRepository(),
+      jobRepo: { findById: async () => null },
     }),
   );
   return app;

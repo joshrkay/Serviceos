@@ -61,6 +61,8 @@ const alwaysFoundJobRepo: Pick<JobRepository, 'findById'> = {
 };
 
 const TENANT = 'tenant-job-photos-malformed';
+/** #1200 — the seeded file is presigned FOR this job; attach checks the linkage. */
+const SEEDED_JOB_ID = '5d0c6b1e-8a2f-4c3d-9e7b-2f1a4c6d8e09';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function castUuid(value: string): void {
@@ -162,6 +164,8 @@ async function seedFile(fileRepo: InMemoryFileRepository): Promise<string> {
         filename: 'before.jpg',
         contentType: 'image/jpeg',
         sizeBytes: 1024,
+        entityType: 'job',
+        entityId: SEEDED_JOB_ID,
       },
       'job-photos-malformed-test',
     ),
@@ -236,7 +240,7 @@ describe('job photos: malformed :id / :photoId never reach Postgres as a raw uui
   });
 
   it('DELETE with a malformed :id (a JS comparison, no SQL) keeps its existing 404', async () => {
-    const jobId = uuidv4();
+    const jobId = SEEDED_JOB_ID;
     const app = buildApp(photoRepo, fileRepo);
     const attach = await request(app).post(`/api/jobs/${jobId}/photos`).send({ fileId, category: 'before' });
     expect(attach.status).toBe(201);
@@ -247,7 +251,7 @@ describe('job photos: malformed :id / :photoId never reach Postgres as a raw uui
   });
 
   it('a valid id is unaffected — attach, list and delete still apply', async () => {
-    const jobId = uuidv4();
+    const jobId = SEEDED_JOB_ID;
     const app = buildApp(photoRepo, fileRepo);
 
     const attach = await request(app).post(`/api/jobs/${jobId}/photos`).send({ fileId, category: 'after' });
