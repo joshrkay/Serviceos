@@ -737,6 +737,32 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     expect(job.depositRequiredCents).toBe(25000);
   });
 
+  it('#1110 — a Stripe-rejected key or refusal is a clean mapped error, never a raw 500 with the Stripe body', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const serviceAnswering = (status: number) =>
+      new PublicEstimateService({
+        estimateRepo: h.estimate,
+        customerRepo: h.customer,
+        jobRepo: h.job,
+        settingsRepo: h.settings,
+        stripeConfig: { apiKey: 'sk_live_placeholder' },
+        stripeFetch: (async () =>
+          new Response('{"error":{"message":"Invalid API Key provided: sk_live_***"}}', { status })) as unknown as typeof fetch,
+      });
+
+    const badKey = await serviceAnswering(401).getOrCreateDepositCheckoutUrl(est.viewToken!).catch((e) => e);
+    expect(badKey).toMatchObject({ statusCode: 503, code: 'PAYMENTS_UNAVAILABLE' });
+    expect(String(badKey.message)).not.toMatch(/Invalid API Key|sk_live/);
+
+    const refused = await serviceAnswering(400).getOrCreateDepositCheckoutUrl(est.viewToken!).catch((e) => e);
+    expect(refused).toMatchObject({ statusCode: 502, code: 'PAYMENT_PROVIDER_ERROR' });
+  });
+
   it('returns the existing link on a second call (idempotent mint)', async () => {
     await h.settings.update(TENANT, {
       depositStrategy: 'fixed',
