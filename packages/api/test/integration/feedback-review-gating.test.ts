@@ -22,23 +22,12 @@
  *   3. proves T1: a second tenant's OWN review-URL settings decide its
  *      response, never the first tenant's.
  *
- * What this file does NOT prove: the story's "routed to me privately" half.
- * Grepping routes/public-feedback.ts and src/reputation (the only place a
- * private/owner-facing review flow exists, and that's for Google reviews,
- * not post-job feedback) turns up no push/SMS/email to the owner on a low
- * rating — "private routing" is implicit only: the response is persisted to
- * feedback_responses, which nothing but the owner's authenticated dashboard
- * (GET /api/feedback via requirePermission('settings:view')) can read, and
- * no public link is ever produced. There is no active "route to owner"
- * mechanism to pin. The it.fails below watches the real process-wide
- * OwnerNotificationService/notifyOwner() seam every other owner push uses
- * (notifications/owner-notifications-instance.ts) — not an invented audit
- * event — so it documents the gap rather than asserting something the code
- * doesn't do, and will correctly flip red the moment a real implementation
- * routes through that seam. Do not delete it without either building the
- * notify-owner path or striking the claim from the PRD row.
+ *   4. proves the story's "routed to me privately" half (#1071): a ≤3★
+ *      submission pushes the submitting tenant's owner through the shared
+ *      OwnerNotificationService/notifyOwner() seam every other owner push
+ *      uses; 4★+ does not; a neighbour tenant's devices never receive it.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { Pool } from 'pg';
 import express from 'express';
 import request from 'supertest';
@@ -193,46 +182,70 @@ describe('Postgres integration — 9.3 review-gating (rating >= 4 ⇒ review lin
   });
 
   /**
-   * Documents the unimplemented half of the story. No code path notifies
-   * the owner (push/SMS/email) when a low-rating response is submitted —
-   * see the file header. This assertion is EXPECTED to fail; it.fails
-   * flips vitest's pass/fail so a real "private routing" implementation
-   * (which should make this pass) is what turns this file red, not green.
-   *
-   * Watches the REAL mechanism, not an invented audit contract. An earlier
-   * version of this test asserted a `feedback_response.owner_notified` audit
-   * event — a type this codebase has no reason to ever emit. Every other
-   * owner-facing notification (payment received, lead captured, escalation,
-   * appointment reminders, …) fans out through the single process-wide
-   * `OwnerNotificationService` / `notifyOwner()` seam
-   * (notifications/owner-notifications-instance.ts), backed by
-   * `PushDeliveryProvider`; a real "route privately to the owner"
-   * implementation would almost certainly use that same seam (adding a new
-   * `NotificationType` to `@ai-service-os/shared`'s contract — none exists
-   * for feedback today), not a bespoke audit row. Caught in review on this PR
-   * (Codex): the old assertion would have stayed "passing" (as an expected
-   * failure) even after a real implementation shipped through this seam,
-   * because it was watching a signal nothing would ever produce.
+   * The story's "routed to me privately" half (#1071). A ≤3★ submission fans
+   * out through the process-wide OwnerNotificationService / notifyOwner()
+   * seam every other owner push uses (notifications/owner-notifications-
+   * instance.ts) as a `low_rating_feedback` push, scoped to the submitting
+   * tenant's devices. 4★+ is not pushed — those customers get the public
+   * review links instead.
    */
-  it.fails('story claim not met in code: a 3★ submission notifies the owner privately', async () => {
-    const tokenRepo = new InMemoryDeviceTokenRepository();
-    await tokenRepo.register({
-      tenantId: tenant.tenantId,
-      userId: 'owner-1',
-      expoPushToken: 'ExponentPushToken[feedback-gating-owner]',
-      platform: 'ios',
+  describe('low-rating owner push (#1071)', () => {
+    let pushProvider: InMemoryPushDeliveryProvider;
+    let otherTenant: TestTenant;
+
+    beforeAll(async () => {
+      otherTenant = await createTestTenant(pool);
     });
-    const pushProvider = new InMemoryPushDeliveryProvider();
-    setOwnerNotifications(new OwnerNotificationService({ deviceTokenRepo: tokenRepo, provider: pushProvider }));
-    try {
-      const token = await mintRequest();
-      const res = await request(app).post(`/public/feedback/${token}`).send({ rating: 2 });
-      expect(res.status).toBe(201);
-      // No code path in routes/public-feedback.ts calls notifyOwner(...)
-      // today — this is what a real implementation would need to do.
-      expect(pushProvider.sent.length).toBeGreaterThan(0);
-    } finally {
+
+    beforeEach(async () => {
+      const tokenRepo = new InMemoryDeviceTokenRepository();
+      await tokenRepo.register({
+        tenantId: tenant.tenantId,
+        userId: 'owner-1',
+        expoPushToken: 'ExponentPushToken[feedback-gating-owner]',
+        platform: 'ios',
+      });
+      await tokenRepo.register({
+        tenantId: otherTenant.tenantId,
+        userId: 'owner-2',
+        expoPushToken: 'ExponentPushToken[neighbour-owner]',
+        platform: 'ios',
+      });
+      pushProvider = new InMemoryPushDeliveryProvider();
+      setOwnerNotifications(new OwnerNotificationService({ deviceTokenRepo: tokenRepo, provider: pushProvider }));
+    });
+
+    afterEach(() => {
       setOwnerNotifications(undefined);
-    }
+    });
+
+    it("a 2★ submission pushes ONLY the submitting tenant's owner, deep-linked to the job", async () => {
+      const jobId = await createJob(pool, tenant);
+      const req = await requestRepo.create(createFeedbackRequest({ tenantId: tenant.tenantId, jobId }));
+
+      const res = await request(app).post(`/public/feedback/${req.token}`).send({ rating: 2 });
+      expect(res.status).toBe(201);
+
+      expect(pushProvider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[feedback-gating-owner]']);
+      expect(pushProvider.sent[0].data).toMatchObject({
+        type: 'low_rating_feedback',
+        screen: `/jobs/${jobId}`,
+        entityId: jobId,
+      });
+    });
+
+    it('a 3★ submission (boundary) pushes the owner', async () => {
+      const token = await mintRequest();
+      const res = await request(app).post(`/public/feedback/${token}`).send({ rating: 3 });
+      expect(res.status).toBe(201);
+      expect(pushProvider.sent).toHaveLength(1);
+    });
+
+    it('a 4★ submission does NOT push the owner', async () => {
+      const token = await mintRequest();
+      const res = await request(app).post(`/public/feedback/${token}`).send({ rating: 4 });
+      expect(res.status).toBe(201);
+      expect(pushProvider.sent).toHaveLength(0);
+    });
   });
 });
