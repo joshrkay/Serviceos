@@ -331,7 +331,7 @@ import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
-import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
@@ -4099,9 +4099,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 // onTranscribed hook gates the router enqueue on this
                 // phone matching the tenant's approver set. Absent
                 // caller-ID fails closed (notify-only).
-                voicemail: {
-                  ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
-                },
+                // #1223 — plus the STIR/SHAKEN verdict (A-attestation required).
+                voicemail: voicemailJobContextFromPersisted(event),
               },
               `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
             );

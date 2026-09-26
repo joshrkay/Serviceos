@@ -150,7 +150,7 @@ describe('Postgres integration — Gather transport: the caller transcript is fe
       publicBaseUrl: 'https://example.com',
     } as never);
     const callSid = `CA-894-${crypto.randomUUID().slice(0, 8)}`;
-    await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: tenant.tenantId });
+    await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: tenant.tenantId, stirVerstat: 'TN-Validation-Passed-A' });
     const session = store.findByCallSid(callSid)!;
     expect(session, 'handleInbound must establish a session').toBeDefined();
 
@@ -322,7 +322,7 @@ describe('Postgres integration — Gather transport: the caller transcript is fe
         publicBaseUrl: 'https://example.com',
       } as never);
       const callSid = `CA-894-obey-${crypto.randomUUID().slice(0, 8)}`;
-      await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: tenant.tenantId });
+      await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: tenant.tenantId, stirVerstat: 'TN-Validation-Passed-A' });
       const session = store.findByCallSid(callSid)!;
       if (session.machine.currentState === 'greeting') session.machine.dispatch({ type: 'greeted_ok' });
       if (session.machine.currentState === 'ask_caller') {

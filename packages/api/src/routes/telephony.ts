@@ -488,6 +488,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
                 recordingStatusCallback: callback,
                 callerPhone: from,
                 dialedNumber: to,
+                // #1223 — the STIR/SHAKEN verdict gates voicemail → action.
+                ...(body.StirVerstat ? { stirVerstat: body.StirVerstat } : {}),
               }),
             );
             return;
@@ -509,9 +511,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       const useStream =
         !!deps.mediaStreamsEnabled &&
         (await shouldUseRealtimeStream({ tenantId, callSid, deps }));
+      // #1223 — Twilio's STIR/SHAKEN verdict gates owner-line authority.
+      const stir = body.StirVerstat ? { stirVerstat: body.StirVerstat } : {};
       const twiml = useStream
-        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId, accountSid: body.AccountSid })
-        : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
+        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId, accountSid: body.AccountSid, ...stir })
+        : await deps.adapter.handleInbound({ callSid, from, to, tenantId, ...stir });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
       logger.error('telephony/voice: handleInbound failed', {
@@ -611,7 +615,13 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
     try {
-      const twiml = await deps.adapter.handleInbound({ callSid, from, to, tenantId });
+      const twiml = await deps.adapter.handleInbound({
+        callSid,
+        from,
+        to,
+        tenantId,
+        ...(body.StirVerstat ? { stirVerstat: body.StirVerstat } : {}),
+      });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
       logger.error('telephony/gather-fallback: handleInbound failed', {
@@ -954,6 +964,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           recordingStatusCallback: callback,
           ...(body.From ? { callerPhone: body.From } : {}),
           ...(body.To ? { dialedNumber: body.To } : {}),
+          // #1223 — the verdict captured at /voice for this call.
+          ...(session.stirVerstat ? { stirVerstat: session.stirVerstat } : {}),
         }),
       );
   });
