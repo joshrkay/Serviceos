@@ -1668,6 +1668,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 });
                 await killStaleInvoiceLink(tenantId, invoice);
               }
+            } else if (payErr.message.includes('not found')) {
+              // #1060 — the event names an invoice this tenant does not have
+              // (mis-addressed or forged metadata). Nothing is credited. It is
+              // a permanent condition, so ACK instead of 500ing Stripe into
+              // days of retries, and record the capture as unapplied on the
+              // tenant the event named so reconciliation still sees the money.
+              await auditUnappliedCapture({
+                tenantId, invoiceId, eventId: event.id,
+                providerReference: paymentIntentRef,
+                capturedCents: amountTotal,
+                creditedCents: 0,
+                invoiceStatus: 'not_found',
+                reason: 'invoice_not_found',
+              });
             } else {
               throw payErr;
             }

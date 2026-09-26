@@ -13,22 +13,9 @@ import {
   PgCallUsageSettlementRepository,
 } from "../../src/billing/call-usage-billing";
 import { PgOverageCapStore } from "../../src/billing/overage-cap";
-import { __setClientForTests, __resetAnalyticsForTests } from "../../src/analytics/posthog";
+import { capturePostHog } from "../helpers/posthog-capture";
 
 
-/** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
-function capturePostHog() {
-  const capture = vi.fn();
-  process.env.POSTHOG_API_KEY = 'phc_test';
-  __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
-  return {
-    events: () => capture.mock.calls.map((c) => c[0] as { event: string; properties: Record<string, unknown> }),
-    restore: () => {
-      __resetAnalyticsForTests();
-      delete process.env.POSTHOG_API_KEY;
-    },
-  };
-}
 
 const STARTER_PRICE = "price_starter_test";
 const GROWTH_PRICE = "price_growth_test";

@@ -139,4 +139,16 @@ describe('Postgres integration — voice gate usage caps', () => {
     await useSeconds(removed, 1_000 * 60);
     expect(await check(removed)).toEqual({ allowed: true });
   });
+
+  it('with a $0 cap, keeps answering inside the bundle and forwards once it is used up', async () => {
+    const caps = new PgOverageCapStore(pool);
+    const tenantId = await liveTenant({ status: 'active', planId: 'starter' });
+    await caps.set(tenantId, 0);
+
+    await useSeconds(tenantId, 19 * 60);
+    expect(await check(tenantId)).toEqual({ allowed: true });
+
+    await useSeconds(tenantId, 60);
+    expect(await check(tenantId)).toMatchObject({ allowed: false, reason: 'overage_cap' });
+  });
 });
