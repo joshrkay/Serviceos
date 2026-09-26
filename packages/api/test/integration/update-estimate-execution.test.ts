@@ -70,6 +70,7 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -90,7 +91,7 @@ interface SeededEstimate {
   subtotalBefore: number;
 }
 
-describe('Postgres integration — spoken update_estimate → resolve → draft → approve → execute', () => {
+describe(provesExecution('update_estimate') + 'Postgres integration — spoken update_estimate → resolve → draft → approve → execute', () => {
   let pool: Pool;
   let estimateRepo: PgEstimateRepository;
   let settingsRepo: PgSettingsRepository;

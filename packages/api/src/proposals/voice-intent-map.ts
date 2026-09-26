@@ -48,6 +48,7 @@
  */
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { ProposalType } from './proposal';
+import { CAPABILITIES, deriveIntentToProposalType } from '../capabilities/capabilities';
 
 /**
  * P11-001: lookup_* intents are READ-ONLY and never produce a proposal — the
@@ -124,107 +125,15 @@ import type { ProposalType } from './proposal';
  *     `createVoiceActionRouterWorker`, which is why the harness never
  *     double-emits against the memo-path branch above.
  */
-export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
-  create_invoice: 'draft_invoice',
-  draft_estimate: 'draft_estimate',
-  create_appointment: 'create_appointment',
-  update_invoice: 'update_invoice',
-  update_estimate: 'update_estimate',
-  issue_invoice: 'issue_invoice',
-  batch_invoice: 'batch_invoice',
-  create_customer: 'create_customer',
-  create_job: 'create_job',
-  update_job: 'update_job',
-  reschedule_appointment: 'reschedule_appointment',
-  cancel_appointment: 'cancel_appointment',
-  reassign_appointment: 'reassign_appointment',
-  add_crew_member: 'add_crew_member',
-  remove_crew_member: 'remove_crew_member',
-  add_note: 'add_note',
-  send_invoice: 'send_invoice',
-  send_estimate: 'send_estimate',
-  send_estimate_nudge: 'send_estimate_nudge',
-  send_payment_reminder: 'send_payment_reminder',
-  apply_late_fee: 'apply_late_fee',
-  record_payment: 'record_payment',
-  emergency_dispatch: 'emergency_dispatch',
-  update_customer: 'update_customer',
-  log_expense: 'log_expense',
-  convert_lead: 'convert_lead',
-  confirm_appointment: 'confirm_appointment',
-  mark_lead_lost: 'mark_lead_lost',
-  add_service_location: 'add_service_location',
-  log_time_entry: 'log_time_entry',
-  notify_delay: 'notify_delay',
-  request_feedback: 'request_feedback',
-  // Taxonomy 1.2.0 (agent wave, Track A) — the on-ramp trio. Each rides an
-  // existing (U2/U3) or new-in-this-train (UB-A2) proposal type + execution
-  // handler; the catalog contract test pins all three legs.
-  create_invoice_schedule: 'create_invoice_schedule',
-  respond_to_review: 'review_response_proposal',
-  create_standing_instruction: 'create_standing_instruction',
-  // B1.18 — brand voice captured by voice. `manual` action class (never
-  // auto-approves at any trust tier — proposals/proposal.ts). Lock stays
-  // tap-only: the payload has no field capable of expressing
-  // `brand_voice_locked` (see contracts/brand-voice.ts).
-  update_brand_voice: 'update_brand_voice',
-  // Tradesperson wave 1 — alias intents onto existing proposal types.
-  // Drafting + execution handlers are keyed by PROPOSAL type, so these
-  // inherit the create_appointment / add_note / create_job legs unchanged.
-  schedule_inspection: 'create_appointment',
-  log_permit: 'add_note',
-  log_warranty_claim: 'create_job',
-  // Tradesperson wave 1, Task 2 — WS20 type + handler pre-exist; this adds
-  // the voice on-ramp. NOT S1-allowed (operator-only): see
-  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
-  update_catalog_item: 'update_catalog_item',
-  // Tradesperson wave 1, Task 3 — record_refund is a NEW money-class
-  // proposal type (manual cash/check/external refunds only). NOT
-  // S1-allowed (operator-only): see proposals/surface.ts
-  // S1_ALLOWED_PROPOSAL_TYPES and its contract test.
-  record_refund: 'record_refund',
-  // Tradesperson wave 1, Task 4 — apply_credit is a NEW money-class
-  // proposal type: reduces what a customer owes on an issued invoice
-  // (goodwill, warranty labor, price match). NOT S1-allowed (operator-only):
-  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
-  apply_credit: 'apply_credit',
-  // Tradesperson wave 1, Task 5 — send_customer_message is a NEW comms-class
-  // proposal type: a free-form outbound customer message. NOT S1-allowed
-  // (operator-only): see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and
-  // its contract test.
-  send_customer_message: 'send_customer_message',
-  // Tradesperson wave 1, Task 6 — create_change_order is a NEW capture-class
-  // proposal type: mints a NEW estimate pinned to an EXISTING job, flagged
-  // isChangeOrder (migration 271). NOT S1-allowed (operator-only): see
-  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
-  create_change_order: 'create_change_order',
-  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement is a
-  // NEW capture-class proposal type: signs a customer up to a recurring
-  // maintenance plan/membership. NOT S1-allowed (operator-only): see
-  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
-  create_service_agreement: 'create_service_agreement',
-  // Task 9 (2026-08-07 tradesperson plan) — add_material is a NEW
-  // capture-class proposal type: adds a row to the voice-captured shopping
-  // list (material_items, migration 272, Task 8's substrate). NOT
-  // S1-allowed (operator-only): see proposals/surface.ts
-  // S1_ALLOWED_PROPOSAL_TYPES and its contract test. `lookup_materials` is
-  // deliberately OMITTED from this map — like every other lookup_*
-  // intent, it is read-only and never produces a proposal.
-  add_material: 'add_material',
-  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
-  // the EXISTING log_expense proposal type: no new ProposalType, no new
-  // execution handler, no migration. Drafting + execution are keyed by
-  // PROPOSAL type, so this inherits the log_expense leg unchanged; only
-  // LogExpenseTaskHandler's own drafting branches on the intent-specific
-  // `mileageMiles` extracted-entity field (ai/tasks/voice-extended-tasks.ts).
-  log_mileage: 'log_expense',
-  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
-  // capture-class proposal type: an owner adds a price-book entry by
-  // voice. NOT S1-allowed (operator-only), same as update_catalog_item:
-  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract
-  // test.
-  add_catalog_item: 'add_catalog_item',
-};
+export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> =
+  // #840 — DERIVED from the capability declarations, never hand-kept. Add a
+  // capability in `capabilities/capabilities.ts` (kind: 'proposal') and it
+  // lands here, on every surface that reads this map, with no other edit. The
+  // per-entry notes that annotated the old literal (alias rationale, the
+  // brand-voice lock) moved to the declarations; the S1 allowlist in
+  // proposals/surface.ts remains the security boundary — none of the
+  // operator-only types are S1-allowed, and editing this map cannot change that.
+  deriveIntentToProposalType(CAPABILITIES);
 
 /**
  * Function form for the two voice adapters, which hold a raw classifier

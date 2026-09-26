@@ -57,6 +57,7 @@ import { createAssistantRouter } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const NOW = new Date('2026-08-03T14:00:00.000Z'); // a Monday, well inside the appt windows below
 
@@ -74,7 +75,7 @@ async function insertTechnician(
   return userId;
 }
 
-describe('Integration — "on my way" by voice (real Postgres)', () => {
+describe(provesExecution('en_route') + 'Integration — "on my way" by voice (real Postgres)', () => {
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let assignmentRepo: PgAssignmentRepository;

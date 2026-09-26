@@ -57,11 +57,12 @@ import {
   ExecutionResult,
   createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const TZ = 'America/Chicago';
 const REFERENCE = 'tomorrow at 2';
 
-describe('Integration — U2 crew add/remove by voice (real Postgres + real resolver)', () => {
+describe(provesExecution('add_crew_member', 'remove_crew_member') + 'Integration — U2 crew add/remove by voice (real Postgres + real resolver)', () => {
   let pool: Pool;
   let resolver: PgEntityResolver;
   let appointmentRepo: PgAppointmentRepository;

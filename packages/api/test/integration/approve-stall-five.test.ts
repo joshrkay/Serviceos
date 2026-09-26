@@ -58,6 +58,7 @@ import {
 import type { TransactionalCommsService, ReminderDeliveryOutcome } from '../../src/notifications/transactional-comms-service';
 import { calculateDocumentTotals, buildLineItem } from '../../src/shared/billing-engine';
 import type { Invoice } from '../../src/invoices/invoice';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const TZ = 'America/Phoenix';
 const CUSTOMER_NAME = 'qa-matrix-A-customer';
@@ -82,7 +83,7 @@ function scriptedGateway(responses: string[]): LLMGateway {
   } as unknown as LLMGateway;
 }
 
-describe('Integration — fix/approve-stall-five (real Postgres + real resolver)', () => {
+describe(provesExecution('update_invoice', 'send_payment_reminder', 'apply_late_fee', 'notify_delay') + 'Integration — fix/approve-stall-five (real Postgres + real resolver)', () => {
   let pool: Pool;
   let resolver: PgEntityResolver;
   let appointmentRepo: PgAppointmentRepository;

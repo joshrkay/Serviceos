@@ -66,8 +66,9 @@ import { transitionJobStatus } from '../../src/jobs/job-lifecycle';
 import { createEstimate } from '../../src/estimates/estimate';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { lookupJobs } from '../../src/ai/skills/lookup-jobs';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — voice update_job → approve → execute → persist + audit', () => {
+describe(provesExecution('update_job') + 'Postgres integration — voice update_job → approve → execute → persist + audit', () => {
   let pool: Pool;
   let jobRepo: PgJobRepository;
   let timelineRepo: PgJobTimelineRepository;

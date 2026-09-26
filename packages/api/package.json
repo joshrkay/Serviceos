@@ -14,6 +14,8 @@
     "test:rls": "vitest run --config vitest.integration.config.mts test/integration/rls-tenant-isolation.test.ts",
     "test:voice-fixtures": "vitest run test/ai/orchestration/intent-classifier.launch-fixtures.test.ts test/voice/launch-slots.test.ts",
     "test:operator-ops-loop": "vitest run test/voice/operator-ops-loop.test.ts",
+    "catalog:generate": "ts-node scripts/generate-voice-action-catalog.ts",
+    "catalog:check": "ts-node scripts/generate-voice-action-catalog.ts --check",
     "test:coverage": "vitest run --coverage",
     "voice-quality": "ts-node scripts/prepare-voice-quality-run.ts && vitest run -c vitest.voice-quality.config.mts && ts-node scripts/merge-voice-quality-report.ts",
     "voice-quality:watch": "vitest -c vitest.voice-quality.config.mts",

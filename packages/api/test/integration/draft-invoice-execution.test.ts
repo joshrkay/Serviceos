@@ -39,8 +39,9 @@ import {
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
 import { CreateInvoiceExecutionHandler } from '../../src/proposals/execution/invoice-execution-handler';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — voice draft_invoice → approve → execute → persist + audit', () => {
+describe(provesExecution('draft_invoice') + 'Postgres integration — voice draft_invoice → approve → execute → persist + audit', () => {
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let settingsRepo: PgSettingsRepository;
@@ -583,7 +584,7 @@ describe('Postgres integration — B6: customer-only draft_invoice (no jobId) au
   });
 });
 
-describe('Postgres integration — Tradesperson wave 1, Task 4: apply_credit persists a negative line', () => {
+describe(provesExecution('apply_credit') + 'Postgres integration — Tradesperson wave 1, Task 4: apply_credit persists a negative line', () => {
   // Quality-review follow-up (commit 9617894e). Mocked-repo unit tests
   // (test/proposals/apply-credit-handler.test.ts) prove the handler's
   // logic, but a NEGATIVE `invoice_line_items.unit_price_cents` row is a
