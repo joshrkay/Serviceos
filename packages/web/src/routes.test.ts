@@ -133,7 +133,12 @@ describe('router', () => {
   it('registers invoices/new as its own route, before invoices/:id', () => {
     const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
     const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
-    const siblings = shellRoute!.children ?? [];
+    // #1280 — the invoice routes now sit under the pathless invoices:view
+    // guard; the ordering invariant applies among ITS children.
+    const guard = (shellRoute!.children ?? []).find(
+      (r) => (r.handle as { requires?: string } | undefined)?.requires === 'invoices:view',
+    );
+    const siblings = guard?.children ?? [];
     const newIdx = siblings.findIndex((r) => r.path === 'invoices/new');
     const detailIdx = siblings.findIndex((r) => r.path === 'invoices/:id');
     expect(newIdx, 'invoices/new must be registered').toBeGreaterThanOrEqual(0);
