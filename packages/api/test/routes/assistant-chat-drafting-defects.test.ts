@@ -21,6 +21,8 @@ import { approveProposal, editProposal } from '../../src/proposals/actions';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { EntityResolver } from '../../src/ai/resolution/entity-resolver';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
@@ -49,7 +51,12 @@ function classifierReply(intentType: string, entities: Record<string, unknown>):
   return JSON.stringify({ intentType, confidence: 0.95, reasoning: 'test', extractedEntities: entities });
 }
 
-function buildApp(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository, entityResolver?: EntityResolver) {
+function buildApp(
+  gateway: LLMGateway,
+  proposalRepo: InMemoryProposalRepository,
+  entityResolver?: EntityResolver,
+  extraDeps: Partial<Parameters<typeof createAssistantRouter>[0]> = {},
+) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -63,6 +70,7 @@ function buildApp(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository,
       proposalRepo,
       tenantTimezoneResolver: async () => 'America/Phoenix',
       ...(entityResolver ? { entityResolver } : {}),
+      ...extraDeps,
     }),
   );
   return app;
@@ -110,6 +118,53 @@ describe('#1271 — chat create_customer keeps the spoken address', () => {
   });
 });
 
+describe('#1276C — a numeric reply answers the customer question even when the client replays history without conversationId', () => {
+  const MORGAN = '11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const RILEY = '22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const ambiguousCustomers = {
+    resolve: vi.fn(async ({ kind }: { kind: string }) =>
+      kind === 'customer'
+        ? {
+            kind: 'ambiguous',
+            candidates: [
+              { id: MORGAN, kind: 'customer', label: 'Morgan Ashworth', score: 0.9 },
+              { id: RILEY, kind: 'customer', label: 'Riley Ashworth', score: 0.9 },
+            ],
+          }
+        : { kind: 'skipped' },
+    ),
+  } as unknown as EntityResolver;
+
+  it('"1" picks the first offered customer and lifts the gate', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      // One classifier entry: the answer turn must not be re-classified.
+      scriptedGateway([classifierReply('create_invoice', { customerName: 'Ashworth', amount: 40000 })]),
+      proposalRepo,
+      ambiguousCustomers,
+    );
+    const ask = 'Invoice Ashworth $400 for the repair';
+
+    const first = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: ask }] });
+    expect(first.body.message.content).toContain('1. Morgan Ashworth');
+
+    const second = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: ask },
+          { role: 'assistant', content: first.body.message.content },
+          { role: 'user', content: '1' },
+        ],
+      });
+
+    expect(second.body.taskType).toBe('assistant.entity_resolution');
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    expect(persisted.payload.customerId).toBe(MORGAN);
+    expect(missingFieldsFor(persisted)).not.toContain('customerId');
+  });
+});
+
 describe('#1276A — a bare first name asks for the last name instead of guessing', () => {
   async function draftTaylor() {
     const proposalRepo = new InMemoryProposalRepository();
@@ -149,5 +204,52 @@ describe('#1276A — a bare first name asks for the last name instead of guessin
     await expect(
       approveProposal(proposalRepo, TENANT, persisted.id, USER, 'owner'),
     ).resolves.toMatchObject({ status: 'approved' });
+  });
+});
+
+describe('#1276F — chat "invoice from the accepted estimate" bills the estimate', () => {
+  it('drafts the accepted estimate\'s $1,170 of lines, not the model\'s $10 placeholder', async () => {
+    const estimateRepo = new InMemoryEstimateRepository();
+    const lineItems = [
+      buildLineItem('li-1', 'Water heater install', 1, 100000, 0, true),
+      buildLineItem('li-2', 'Haul-away and permit', 1, 17000, 1, false),
+    ];
+    await estimateRepo.create({
+      id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+      tenantId: TENANT,
+      jobId: '9b2c4d6e-1f3a-4b5c-8d7e-0a1b2c3d4e5f',
+      estimateNumber: 'EST-0001',
+      status: 'accepted',
+      lineItems,
+      totals: calculateDocumentTotals(lineItems, 0, 0),
+      createdBy: USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway([
+        classifierReply('create_invoice', {}),
+        JSON.stringify({
+          lineItems: [{ description: 'Service as per accepted estimate', quantity: 1, unitPrice: 1000 }],
+          confidence_score: 0.9,
+        }),
+      ]),
+      proposalRepo,
+      undefined,
+      { estimateRepo },
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create an invoice from the accepted estimate' }] });
+
+    expect(res.status).toBe(200);
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    const lines = persisted.payload.lineItems as Array<{ description: string; unitPriceCents: number }>;
+    expect(lines.map((l) => [l.description, l.unitPriceCents])).toEqual([
+      ['Water heater install', 100000],
+      ['Haul-away and permit', 17000],
+    ]);
   });
 });

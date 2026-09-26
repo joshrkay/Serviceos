@@ -1662,6 +1662,61 @@ async function findReviewableInConversation(
   }
 }
 
+/** How far back an unpinned turn may look for the question it answers. */
+const PENDING_QUESTION_RECOVERY_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * #1276C — the conversation a history-replaying client is still in, when it
+ * did not send the id.
+ *
+ * The web UI pins `conversationId` from every reply envelope, so a typed "1"
+ * reaches `findPendingClarification`. An API client that replays `messages`
+ * but never echoes the id got a freshly minted conversation on every turn —
+ * the answer found no pending question and fell to general chat.
+ *
+ * Recovery is deliberately narrow: the request must carry a previous
+ * assistant turn, and that turn must contain the EXACT question text a
+ * still-reviewable proposal drafted by THIS user in THIS tenant, within the
+ * last half hour, is waiting on. Anything less is a new conversation, as
+ * before. Best-effort: a lookup failure mints a fresh id.
+ */
+async function recoverPendingConversationId(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  userId: string,
+  messages: ReadonlyArray<{ role: string; content: string }>,
+): Promise<string | undefined> {
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')?.content;
+  if (!lastAssistant) return undefined;
+
+  const since = new Date(Date.now() - PENDING_QUESTION_RECOVERY_WINDOW_MS);
+  let candidates: Proposal[];
+  try {
+    const statuses = ['ready_for_review', 'draft'] as const;
+    const byStatus = await Promise.all(
+      statuses.map((status) =>
+        deps.proposalRepo.findByStatusSince
+          ? deps.proposalRepo.findByStatusSince(tenantId, status, since, 50)
+          : deps.proposalRepo.findByStatus(tenantId, status),
+      ),
+    );
+    candidates = byStatus.flat();
+  } catch {
+    return undefined;
+  }
+
+  const newestFirst = candidates
+    .filter((p) => p.createdBy === userId && new Date(p.createdAt).getTime() >= since.getTime())
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  for (const proposal of newestFirst) {
+    const conversationId = (proposal.sourceContext as Record<string, unknown> | undefined)?.conversationId;
+    if (typeof conversationId !== 'string') continue;
+    const pending = pendingAmbiguityOf(proposal);
+    if (pending && lastAssistant.includes(buildDisambiguationQuestion(pending))) return conversationId;
+  }
+  return undefined;
+}
+
 /**
  * The proposal in this conversation that is waiting on a disambiguation
  * answer, if any.
@@ -3879,7 +3934,13 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
         // its own doc comment, conversations/conversation-service.ts) —
         // this fix is strictly about the one case that was never resolved
         // AT ALL before drafting: absent.
-        let conversationId = parsed.conversationId ?? uuidv4();
+        // #1276C — an API client that replays `messages` but never echoes the
+        // conversation id used to lose a pending question (see
+        // `recoverPendingConversationId`).
+        let conversationId =
+          parsed.conversationId ??
+          (await recoverPendingConversationId(deps, req.auth!.tenantId, req.auth!.userId, parsed.messages)) ??
+          uuidv4();
 
         const result = await generateAssistantReply(
           parsed.messages,
