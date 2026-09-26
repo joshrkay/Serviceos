@@ -2684,6 +2684,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // `detectServiceLocationGap` no-ops and an unbookable customer's booking
     // auto-approves at confidence 1 and fails in a log.
     locationRepo,
+    // #1045 — back-to-back travel warning on held slots.
+    feasibilityDeps,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -3638,6 +3640,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // here. agreementRepo lives a few hundred lines down.
     jobRepo,
     appointmentRepo,
+    // #1045 — live-call holds run the back-to-back drivability check.
+    feasibilityDeps,
     invoiceRepo,
     estimateRepo,
     customerRepo,
@@ -5741,6 +5745,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1045 — back-to-back travel warning on held slots.
+      feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was
       // uploaded through (POST /api/files/upload-url), so a photo turn's
       // fileIds resolve tenant-scoped into image parts on the estimate draft.

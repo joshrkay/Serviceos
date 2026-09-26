@@ -18,6 +18,7 @@
  * - No real-time / streaming work happens here. That's P8-012.
  */
 
+import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import type { Pool } from 'pg';
 import {
   classifyIntent,
@@ -254,6 +255,8 @@ export interface TwilioAdapterDeps {
    */
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
+  /** #1045 — see VoiceTurnProcessorDeps.feasibilityDeps. */
+  feasibilityDeps?: FeasibilityDependencies;
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
