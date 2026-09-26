@@ -402,6 +402,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    * real payment.
    */
   const resolveTenantConnectAccountId = async (tenantId: string): Promise<string | null> => {
+    // #1110 — a malformed tenant id names no tenant: refuse (fail-closed)
+    // before any resolver hands it to Postgres as a uuid and 500s.
+    if (!isValidTenantId(tenantId)) return null;
     try {
       if (deps.connectAccountResolver) {
         const view = await deps.connectAccountResolver.resolveTenantConnectAccount(tenantId);
@@ -926,7 +929,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }
           }
 
-          if (deps.auditRepo) {
+          // #1075 — gated on result.created: bootstrapTenant's findByOwner
+          // guard makes a genuinely re-delivered signup (distinct svix ids,
+          // same Clerk user) return `created: false` on the second delivery.
+          // Without this gate that redelivery wrote a SECOND
+          // `tenant.signup.bootstrap.completed` row for a tenant that was
+          // only ever bootstrapped once, over-counting anything that reads
+          // signups off `audit_events`.
+          if (deps.auditRepo && result.created) {
             await deps.auditRepo.create(createAuditEvent({
               tenantId: result.tenantId,
               actorId: userId,
@@ -1294,6 +1304,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // replay finds the row already stored and no-ops.
       if (event.type === 'setup_intent.succeeded') {
         const si = event.data.object as {
+          id?: string;
           customer?: string;
           payment_method?: string;
           metadata?: { tenant_id?: string; customer_id?: string };
@@ -1377,7 +1388,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               siTenantId,
               siCustomerId,
             );
-            await deps.customerPaymentMethodRepo.create({
+            const savedPaymentMethod = await deps.customerPaymentMethodRepo.create({
               id: randomUUID(),
               tenantId: siTenantId,
               customerId: siCustomerId,
@@ -1397,6 +1408,32 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             logger.info('Saved customer payment method from setup_intent.succeeded', {
               tenantId: siTenantId,
             });
+
+            // #1057 — every other money mutation emits an audit event; a
+            // stored card (which arms later off-session charging) must
+            // leave the same durable, tenant-scoped trail. Gated by the
+            // `!already` check above so a re-delivered event doesn't write
+            // a second row for the same card.
+            if (deps.auditRepo) {
+              await deps.auditRepo.create(createAuditEvent({
+                tenantId: siTenantId,
+                actorId: 'system:stripe_webhook',
+                actorRole: 'system',
+                eventType: 'payment_method.saved',
+                entityType: 'payment_method',
+                entityId: savedPaymentMethod.id,
+                correlationId: si.id,
+                metadata: {
+                  customerId: siCustomerId,
+                  brand,
+                  last4,
+                  expMonth,
+                  expYear,
+                  isDefault: savedPaymentMethod.isDefault,
+                  stripeAccountId: connectedAccountId ?? null,
+                },
+              }));
+            }
           }
         }
         await webhookRepo.updateStatus(webhookEvent.id, 'processed');
@@ -1678,6 +1715,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 });
                 await killStaleInvoiceLink(tenantId, invoice);
               }
+            } else if (payErr.message.includes('not found')) {
+              // #1060 — the event names an invoice this tenant does not have
+              // (mis-addressed or forged metadata). Nothing is credited. It is
+              // a permanent condition, so ACK instead of 500ing Stripe into
+              // days of retries, and record the capture as unapplied on the
+              // tenant the event named so reconciliation still sees the money.
+              await auditUnappliedCapture({
+                tenantId, invoiceId, eventId: event.id,
+                providerReference: paymentIntentRef,
+                capturedCents: amountTotal,
+                creditedCents: 0,
+                invoiceStatus: 'not_found',
+                reason: 'invoice_not_found',
+              });
             } else {
               throw payErr;
             }

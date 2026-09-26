@@ -88,22 +88,12 @@ function isVerticalType(v: unknown): v is VerticalType {
 //     conversation never captured a rate — never fabricated, because a
 //     wrong hourly rate is a money defect.
 //   - jobBufferMinutes: the conversation never asks for this at all, so
-//     there is no extracted value to thread through. We instead write the
-//     SAME default the form wizard pre-fills
-//     (packages/web/src/components/onboarding/v2/steps/IdentityStep.tsx:77,
-//     `useState<number>(30)`) so a form user who never touches the field
-//     and a conversation user who never mentions it land on the identical
-//     column value — genuine outcome parity, not a guess. This is
-//     deliberately NOT the same move as timezone: routes/onboarding.ts's
-//     PUT /identity refuses to ever default a timezone, because a wrong
-//     zone silently misbooks appointments (Phoenix mis-booking postmortem,
-//     migration 263) — there is no safe fallback value for "which zone is
-//     this business in". A job buffer has no equivalent correctness
-//     cliff: 30 minutes is a padding default the form itself ships to
-//     every silent user, not a fact about the tenant that can be "wrong"
-//     in a way that breaks bookings. Written unconditionally (every run of
-//     this handler represents a fresh conversational onboarding) rather
-//     than "only if unset", matching the wizard's own one-shot save.
+//     nothing is written (#1201). NULL means "not configured" (migration
+//     277) and every reader applies the 30-minute default in code
+//     (effectiveBufferMinutes), so scheduling behaves exactly as the old
+//     explicit 30 did — but the tenant is no longer recorded as having
+//     chosen a buffer it was never asked about. An owner who later sets one
+//     (Settings / PUT /identity) stores a real choice.
 //   - timezone: REQUIRED, and gated at draft time by
 //     tenant-settings-proposer.ts so it is always supplied by the time the
 //     card is approvable. This handler previously omitted the key entirely,
@@ -198,9 +188,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       await this.settingsRepo.upsertIdentityFields(context.tenantId, {
         businessName: payload.businessName,
         serviceAreaText,
-        // B1.20 parity default — see the class doc above for why this is
-        // safe to always write (unlike timezone).
-        jobBufferMinutes: 30,
+        // #1201 — no jobBufferMinutes: never asked, so never written (see above).
         ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
         timezone,
         bootstrapAiModel: resolveBootstrapAiModel(),
@@ -215,7 +203,6 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
           entityId: context.tenantId,
           metadata: {
             businessName: payload.businessName,
-            jobBufferMinutes: 30,
             ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
             timezone,
             source: 'onboarding_conversation',

@@ -42,6 +42,7 @@ import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
 import { Proposal, ProposalRepository } from './proposal';
+import { calculateLineItemTotal } from '../shared/billing-engine';
 
 interface CatalogCandidate {
   id: string;
@@ -234,7 +235,8 @@ export async function resolveProposalLine(
     // (which `Number(...) || 1` would do, mispricing a zero-qty line).
     const parsedQty = Number(line.quantity ?? 1);
     const qty = Number.isNaN(parsedQty) ? 1 : parsedQty;
-    line.totalCents = Math.round(chosen.unitPriceCents * qty);
+    // #1064 — the engine owns quantity × unit price (and its rounding).
+    line.totalCents = calculateLineItemTotal(qty, chosen.unitPriceCents);
   }
   lineItems[lineIndex] = line;
 

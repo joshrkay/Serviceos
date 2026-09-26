@@ -48,7 +48,19 @@ export type TwilioCredentialPath =
  * one.
  */
 export type TwilioCredentialDecision =
-  | { outcome: 'verify'; authToken: string; path: TwilioCredentialPath; tenantId?: string }
+  | {
+      outcome: 'verify';
+      authToken: string;
+      /**
+       * #1084 — the same tenant's secondary auth token, when one is stored.
+       * Tried only after the primary fails, so a zero-downtime token rotation
+       * (Twilio signs with whichever token is current) never 403s during the
+       * overlap. Mirrors `webhooks/routes.ts`'s primary-then-secondary check.
+       */
+      secondaryAuthToken?: string;
+      path: TwilioCredentialPath;
+      tenantId?: string;
+    }
   | { outcome: 'refuse'; reason: string; tenantId?: string }
   | { outcome: 'misconfigured'; reason: string; tenantId?: string };
 
@@ -270,6 +282,7 @@ export function requireTwilioSignature(
     );
 
     let authToken: string | undefined;
+    let secondaryAuthToken: string | undefined;
     let credentialPath: TwilioCredentialPath = 'deployment_fallback';
     let credentialTenantId: string | undefined;
     if (typeof resolved === 'object') {
@@ -293,6 +306,7 @@ export function requireTwilioSignature(
         return;
       }
       authToken = resolved.authToken;
+      secondaryAuthToken = resolved.secondaryAuthToken;
       credentialPath = resolved.path;
       credentialTenantId = resolved.tenantId;
     } else {
@@ -326,7 +340,15 @@ export function requireTwilioSignature(
       }
     }
 
-    if (!verifyTwilioSignature(signature, url, params, authToken)) {
+    // #1084 — primary first, then the secondary during a rotation overlap.
+    let credentialSlot: 'primary' | 'secondary' = 'primary';
+    let verified = verifyTwilioSignature(signature, url, params, authToken);
+    if (!verified && secondaryAuthToken) {
+      verified = verifyTwilioSignature(signature, url, params, secondaryAuthToken);
+      if (verified) credentialSlot = 'secondary';
+    }
+
+    if (!verified) {
       logger.warn('telephony.signature_invalid', {
         route: req.path,
         credentialPath,
@@ -350,6 +372,7 @@ export function requireTwilioSignature(
     logger.info('telephony.signature_verified', {
       route: req.path,
       credentialPath,
+      credentialSlot,
       ...(credentialTenantId ? { tenantId: credentialTenantId } : {}),
     });
 

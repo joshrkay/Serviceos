@@ -75,7 +75,7 @@ function buildCustomerCompat(api: JobDetailResponse['customer']): Customer | und
   };
 }
 import { StatusBadge } from '../shared/StatusBadge';
-import { Spinner, EmptyState, Input, Select } from '../ui';
+import { Spinner, EmptyState, Input, Select, ConfirmDialog } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { ActivityTimeline } from './ActivityTimeline';
 import { AddEntrySheet } from './AddEntrySheet';
@@ -940,20 +940,27 @@ export function JobDetailView({
   // U2 (E9 follow-up): delete a wrong photo/video behind a confirm. On success
   // drop the row from local state; on failure surface the error and keep the
   // photo (no phantom removal). The DELETE endpoint audits + gates server-side.
-  const handleDeletePhoto = useCallback(
-    async (photo: JobPhoto) => {
-      if (!id) return;
-      if (!window.confirm('Delete this photo? This cannot be undone.')) return;
-      setPhotoError(null);
-      try {
-        await deletePhoto(id, photo.id);
-        setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
-      } catch (err) {
-        setPhotoError(err instanceof Error ? err.message : 'Failed to delete photo');
-      }
-    },
-    [id, deletePhoto],
-  );
+  // #907 — window.confirm replaced with ConfirmDialog: `handleDeletePhoto`
+  // (the gallery's onDelete) now only stages the target; `confirmDeletePhoto`
+  // runs the actual delete once the dialog is confirmed.
+  const [pendingDeletePhoto, setPendingDeletePhoto] = useState<JobPhoto | null>(null);
+
+  const handleDeletePhoto = useCallback((photo: JobPhoto) => {
+    setPendingDeletePhoto(photo);
+  }, []);
+
+  const confirmDeletePhoto = useCallback(async () => {
+    const photo = pendingDeletePhoto;
+    setPendingDeletePhoto(null);
+    if (!id || !photo) return;
+    setPhotoError(null);
+    try {
+      await deletePhoto(id, photo.id);
+      setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+    } catch (err) {
+      setPhotoError(err instanceof Error ? err.message : 'Failed to delete photo');
+    }
+  }, [id, deletePhoto, pendingDeletePhoto]);
 
   async function saveTimeEntry() {
     if (!timeFormStart || !timeFormEnd) return;
@@ -1593,6 +1600,16 @@ export function JobDetailView({
           }}
         />
       )}
+      {/* #907 — window.confirm replaced with ConfirmDialog. */}
+      <ConfirmDialog
+        open={pendingDeletePhoto !== null}
+        title="Delete this photo?"
+        description="This cannot be undone."
+        confirmLabel="Delete"
+        tone="danger"
+        onConfirm={() => void confirmDeletePhoto()}
+        onCancel={() => setPendingDeletePhoto(null)}
+      />
     </>
   );
 }

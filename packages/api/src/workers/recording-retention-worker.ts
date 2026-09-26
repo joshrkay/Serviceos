@@ -48,6 +48,17 @@
  *     tenant's failure is logged and retried next sweep without stopping the
  *     rest.
  *
+ * #1208 — `voice_sessions.transcript`. The FSM hangup (`markEnded`) copies
+ * the whole call transcript onto the session row (migration 092). The sweep
+ * nulls it once the session's `started_at` is past the tenant's horizon,
+ * with or without a recording, and audits each session as
+ * `voice_session.transcript_purged` (reason `session_transcript_past_retention`).
+ * The row and its non-content columns (outcome, cost, call_sid, customer)
+ * are kept for analytics and the interactions list, whose readers already
+ * treat a NULL transcript as "no transcript recorded". Legal hold, tenant
+ * selection, bounded per-tenant batches and per-tenant failure isolation
+ * follow the #1202 unattached-turn phase exactly.
+ *
  * Pattern: cross-tenant batch drain like dropped-call-worker — per-row
  * failures are logged and left unpurged for the next sweep; the table query
  * is the queue. app.ts drives the cadence behind `runAsLeader`
@@ -67,6 +78,12 @@ export const UNATTACHED_TURN_SWEEP_TENANT_LIMIT = 100;
 
 /** #1202 — unattached transcript turns deleted per tenant per sweep. */
 export const UNATTACHED_TURN_SWEEP_BATCH = 1000;
+
+/** #1208 — tenants with expired voice_sessions transcripts served per sweep. */
+export const SESSION_TRANSCRIPT_SWEEP_TENANT_LIMIT = 100;
+
+/** #1208 — voice_sessions transcripts cleared per tenant per sweep. */
+export const SESSION_TRANSCRIPT_SWEEP_BATCH = 500;
 
 /** A purgeable recording (joined with its files row for the object key). */
 export interface PurgeableRecording {
@@ -91,6 +108,15 @@ export interface PurgedUnattachedCall {
   callSid: string | null;
   transcriptTurns: number;
   oldestTurnAt: Date;
+}
+
+/** #1208 — one voice_sessions row whose transcript `purgeSessionTranscripts` cleared. */
+export interface PurgedSessionTranscript {
+  sessionId: string;
+  callSid: string | null;
+  startedAt: Date;
+  /** Number of transcript lines the column held. */
+  transcriptLines: number;
 }
 
 export interface RecordingRetentionRepository {
@@ -125,6 +151,22 @@ export interface RecordingRetentionRepository {
     now: Date,
     limit: number,
   ): Promise<PurgedUnattachedCall[]>;
+  /**
+   * #1208 — cross-tenant: tenants holding a `voice_sessions.transcript` whose
+   * session started before the tenant's horizon and whose CallSid has no
+   * same-tenant recording on legal hold, oldest backlog first.
+   */
+  findTenantsWithDueSessionTranscripts(now: Date, limit: number): Promise<string[]>;
+  /**
+   * #1208 — null up to `limit` of the tenant's session transcripts past its
+   * horizon (oldest first) in one tenant-scoped transaction. Never touches a
+   * session whose CallSid has a same-tenant recording on legal hold.
+   */
+  purgeSessionTranscripts(
+    tenantId: string,
+    now: Date,
+    limit: number,
+  ): Promise<PurgedSessionTranscript[]>;
 }
 
 export class PgRecordingRetentionRepository
@@ -301,6 +343,89 @@ export class PgRecordingRetentionRepository
       );
     });
   }
+
+  async findTenantsWithDueSessionTranscripts(now: Date, limit: number): Promise<string[]> {
+    // Same shape as findTenantsWithDueUnattachedTurns: tenant_settings driven,
+    // LATERAL probe on voice_sessions_tenant_started (tenant_id, started_at).
+    return this.withCrossTenantSweep(async (client) => {
+      const { rows } = await client.query(
+        `SELECT ts.tenant_id
+           FROM tenant_settings ts
+           CROSS JOIN LATERAL (
+             SELECT vs.started_at
+               FROM voice_sessions vs
+              WHERE vs.tenant_id = ts.tenant_id
+                AND vs.transcript IS NOT NULL
+                AND vs.started_at <
+                    $1::timestamptz - make_interval(days => ts.recording_retention_days)
+                AND NOT EXISTS (
+                  SELECT 1 FROM voice_recordings vr
+                   WHERE vr.tenant_id = vs.tenant_id
+                     AND vr.call_sid = vs.call_sid
+                     AND vr.legal_hold
+                )
+              ORDER BY vs.started_at ASC
+              LIMIT 1
+           ) oldest
+          ORDER BY oldest.started_at ASC
+          LIMIT $2`,
+        [now, limit],
+      );
+      return rows.map((row) => String(row.tenant_id));
+    });
+  }
+
+  async purgeSessionTranscripts(
+    tenantId: string,
+    now: Date,
+    limit: number,
+  ): Promise<PurgedSessionTranscript[]> {
+    // Tenant-scoped; the horizon is re-read inside the UPDATE and the hold is
+    // re-checked on the locked row (same conventions as purgeUnattachedTurns).
+    // The pre-update line count is read from the `due` subquery snapshot.
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE voice_sessions s
+            SET transcript = NULL, updated_at = now()
+           FROM (
+             SELECT vs.id,
+                    CASE WHEN jsonb_typeof(vs.transcript) = 'array'
+                         THEN jsonb_array_length(vs.transcript) ELSE 1 END AS lines
+               FROM voice_sessions vs
+               JOIN tenant_settings ts ON ts.tenant_id = vs.tenant_id
+              WHERE vs.tenant_id = $1
+                AND vs.transcript IS NOT NULL
+                AND vs.started_at <
+                    $2::timestamptz - make_interval(days => ts.recording_retention_days)
+                AND NOT EXISTS (
+                  SELECT 1 FROM voice_recordings vr
+                   WHERE vr.tenant_id = vs.tenant_id
+                     AND vr.call_sid = vs.call_sid
+                     AND vr.legal_hold
+                )
+              ORDER BY vs.started_at ASC
+              LIMIT $3
+           ) due
+          WHERE s.id = due.id
+            AND s.tenant_id = $1
+            AND s.transcript IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM voice_recordings vr
+               WHERE vr.tenant_id = s.tenant_id
+                 AND vr.call_sid = s.call_sid
+                 AND vr.legal_hold
+            )
+          RETURNING s.id, s.call_sid, s.started_at, due.lines`,
+        [tenantId, now, limit],
+      );
+      return rows.map((row) => ({
+        sessionId: String(row.id),
+        callSid: (row.call_sid as string | null) ?? null,
+        startedAt: new Date(row.started_at as string),
+        transcriptLines: Number(row.lines),
+      }));
+    });
+  }
 }
 
 /** #1202 — fold deleted turn rows into one audit entry per call. */
@@ -348,7 +473,48 @@ export class InMemoryRecordingRetentionRepository
       createdAt: Date;
       retentionDays: number;
     }> = [],
+    /** #1208 — voice_sessions rows that carry a transcript. */
+    public sessionTranscripts: Array<{
+      id: string;
+      tenantId: string;
+      callSid: string | null;
+      startedAt: Date;
+      transcript: string[] | null;
+      retentionDays: number;
+    }> = [],
   ) {}
+
+  private dueSessionTranscripts(now: Date) {
+    return this.sessionTranscripts
+      .filter(
+        (s) =>
+          s.transcript !== null &&
+          s.startedAt.getTime() < now.getTime() - s.retentionDays * 24 * 3600 * 1000 &&
+          !this.rows.some(
+            (r) => r.tenantId === s.tenantId && r.callSid === s.callSid && r.legalHold,
+          ),
+      )
+      .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+  }
+
+  async findTenantsWithDueSessionTranscripts(now: Date, limit: number): Promise<string[]> {
+    return [...new Set(this.dueSessionTranscripts(now).map((s) => s.tenantId))].slice(0, limit);
+  }
+
+  async purgeSessionTranscripts(
+    tenantId: string,
+    now: Date,
+    limit: number,
+  ): Promise<PurgedSessionTranscript[]> {
+    const doomed = this.dueSessionTranscripts(now)
+      .filter((s) => s.tenantId === tenantId)
+      .slice(0, limit);
+    return doomed.map((s) => {
+      const transcriptLines = s.transcript?.length ?? 0;
+      s.transcript = null;
+      return { sessionId: s.id, callSid: s.callSid, startedAt: s.startedAt, transcriptLines };
+    });
+  }
 
   private dueUnattachedTurns(now: Date) {
     return this.unattachedTurns
@@ -424,6 +590,8 @@ export interface RecordingRetentionWorkerDeps {
   batchSize?: number;
   /** #1202 — unattached transcript turns deleted per tenant per sweep. */
   unattachedTurnBatchSize?: number;
+  /** #1208 — voice_sessions transcripts cleared per tenant per sweep. */
+  sessionTranscriptBatchSize?: number;
   now?: () => Date;
 }
 
@@ -435,6 +603,10 @@ export interface RecordingRetentionSweepResult {
   unattachedTurnsPurged: number;
   /** #1202 — tenants whose unattached-turn purge failed (retried next sweep). */
   unattachedTurnTenantsFailed: number;
+  /** #1208 — voice_sessions transcripts cleared past the horizon. */
+  sessionTranscriptsPurged: number;
+  /** #1208 — tenants whose session-transcript clear failed (retried next sweep). */
+  sessionTranscriptTenantsFailed: number;
 }
 
 /**
@@ -512,6 +684,76 @@ async function purgeUnattachedTranscriptTurns(
 }
 
 /**
+ * #1208 — the voice_sessions.transcript phase of the sweep. Same failure
+ * isolation as the unattached-turn phase. Never throws.
+ */
+async function purgeSessionTranscripts(
+  deps: RecordingRetentionWorkerDeps,
+  now: () => Date,
+): Promise<
+  Pick<RecordingRetentionSweepResult, 'sessionTranscriptsPurged' | 'sessionTranscriptTenantsFailed'>
+> {
+  const batchSize = deps.sessionTranscriptBatchSize ?? SESSION_TRANSCRIPT_SWEEP_BATCH;
+  let tenantIds: string[];
+  try {
+    tenantIds = await deps.repo.findTenantsWithDueSessionTranscripts(
+      now(),
+      SESSION_TRANSCRIPT_SWEEP_TENANT_LIMIT,
+    );
+  } catch (err) {
+    deps.logger.error('recording-retention sweep: session-transcript tenant selection failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { sessionTranscriptsPurged: 0, sessionTranscriptTenantsFailed: 0 };
+  }
+
+  let sessionTranscriptsPurged = 0;
+  let sessionTranscriptTenantsFailed = 0;
+  for (const tenantId of tenantIds) {
+    let cleared: PurgedSessionTranscript[];
+    try {
+      cleared = await deps.repo.purgeSessionTranscripts(tenantId, now(), batchSize);
+    } catch (err) {
+      sessionTranscriptTenantsFailed++;
+      deps.logger.warn('recording-retention sweep: session-transcript purge failed for tenant', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    sessionTranscriptsPurged += cleared.length;
+    if (!deps.auditRepo) continue;
+    for (const session of cleared) {
+      try {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: 'recording-retention-worker',
+            actorRole: 'system',
+            eventType: 'voice_session.transcript_purged',
+            entityType: 'voice_session',
+            entityId: session.sessionId,
+            metadata: {
+              callSid: session.callSid,
+              reason: 'session_transcript_past_retention',
+              startedAt: session.startedAt.toISOString(),
+              derivedPurged: { sessionTranscriptLines: session.transcriptLines },
+            },
+          }),
+        );
+      } catch (err) {
+        deps.logger.warn('recording-retention sweep: session-transcript audit write failed', {
+          tenantId,
+          sessionId: session.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+  return { sessionTranscriptsPurged, sessionTranscriptTenantsFailed };
+}
+
+/**
  * One drain sweep. Per-row failures (S3 delete, tombstone) are logged and
  * the row stays unpurged for the next sweep. Never throws.
  */
@@ -530,7 +772,8 @@ export async function runRecordingRetentionSweep(
     });
     // #1202 — a separate selection; a failed recording query doesn't skip it.
     const unattached = await purgeUnattachedTranscriptTurns(deps, now);
-    return { due: 0, purged: 0, failed: 0, ...unattached };
+    const sessions = await purgeSessionTranscripts(deps, now);
+    return { due: 0, purged: 0, failed: 0, ...unattached, ...sessions };
   }
 
   let purged = 0;
@@ -588,12 +831,15 @@ export async function runRecordingRetentionSweep(
   // #1202 — turns that never got a recording (never reached by the drain
   // above, which only deletes turns linked to a due recording).
   const unattached = await purgeUnattachedTranscriptTurns(deps, now);
+  // #1208 — the session-row copy of the transcript, with or without a recording.
+  const sessions = await purgeSessionTranscripts(deps, now);
 
   deps.logger.info('recording-retention sweep completed', {
     due: due.length,
     purged,
     failed,
     ...unattached,
+    ...sessions,
   });
-  return { due: due.length, purged, failed, ...unattached };
+  return { due: due.length, purged, failed, ...unattached, ...sessions };
 }

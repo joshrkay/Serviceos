@@ -5,12 +5,15 @@
  * `app.current_tenant_id` so the RLS policy on `service_credits`
  * enforces tenant isolation. The rolling 12-month sum is computed
  * via a single aggregate query so the cap check stays cheap.
+ * `createIfAllowed` (#1080) runs that aggregate and the insert under one
+ * per-customer transaction advisory lock — the execute-time cap check.
  */
 import { v4 as uuidv4 } from 'uuid';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   CreateServiceCreditInput,
+  GuardedCreateResult,
   ServiceCredit,
   ServiceCreditRepository,
 } from './service-credit';
@@ -57,44 +60,80 @@ export class PgServiceCreditRepository
     if (input.amountCents <= 0) {
       throw new Error('amountCents must be positive');
     }
+    return this.withTenant(input.tenantId, (client) => this.insert(client, input));
+  }
+
+  /**
+   * #1080 — the execute-time cap check. Inside ONE tenant transaction:
+   * take a per-(tenant, customer) transaction advisory lock, read the
+   * rolling 12-month sum, and insert only if `wouldExceed` says no. The lock
+   * serialises concurrent executions for the same customer (a plain
+   * check-then-insert under READ COMMITTED lets two both read the same
+   * prior total and both insert); it releases at COMMIT/ROLLBACK.
+   */
+  async createIfAllowed(
+    input: CreateServiceCreditInput,
+    wouldExceed: (priorIssuedCents: number) => boolean,
+  ): Promise<GuardedCreateResult> {
+    if (input.amountCents <= 0) {
+      throw new Error('amountCents must be positive');
+    }
+    return this.withTenant(input.tenantId, async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `service_credit_cap:${input.tenantId}:${input.customerId}`,
+      ]);
+      const priorIssuedCents = await this.sumInWindow(client, input.tenantId, input.customerId);
+      if (wouldExceed(priorIssuedCents)) {
+        return { issued: false, priorIssuedCents };
+      }
+      const credit = await this.insert(client, input);
+      return { issued: true, credit, priorIssuedCents };
+    });
+  }
+
+  private async insert(client: PoolClient, input: CreateServiceCreditInput): Promise<ServiceCredit> {
     const id = input.id ?? uuidv4();
     const issuedAt = input.issuedAt ?? new Date();
-    return this.withTenant(input.tenantId, async (client) => {
-      const result = await client.query<ServiceCreditRow>(
-        `INSERT INTO service_credits (
-           id, tenant_id, customer_id, amount_cents,
-           review_id, proposal_id, issued_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING *`,
-        [
-          id,
-          input.tenantId,
-          input.customerId,
-          input.amountCents,
-          input.reviewId,
-          input.proposalId,
-          issuedAt,
-        ],
-      );
-      return mapRow(result.rows[0]);
-    });
+    const result = await client.query<ServiceCreditRow>(
+      `INSERT INTO service_credits (
+         id, tenant_id, customer_id, amount_cents,
+         review_id, proposal_id, issued_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        id,
+        input.tenantId,
+        input.customerId,
+        input.amountCents,
+        input.reviewId,
+        input.proposalId,
+        issuedAt,
+      ],
+    );
+    return mapRow(result.rows[0]);
+  }
+
+  private async sumInWindow(
+    client: PoolClient,
+    tenantId: string,
+    customerId: string,
+  ): Promise<number> {
+    const result = await client.query<SumRow>(
+      `SELECT COALESCE(SUM(amount_cents), 0) AS sum_cents
+       FROM service_credits
+       WHERE tenant_id = $1
+         AND customer_id = $2
+         AND issued_at > NOW() - INTERVAL '12 months'`,
+      [tenantId, customerId],
+    );
+    const raw = result.rows[0]?.sum_cents ?? 0;
+    return typeof raw === 'string' ? Number(raw) : raw;
   }
 
   async sumIssuedInLast12Months(
     tenantId: string,
     customerId: string,
   ): Promise<number> {
-    return this.withTenant(tenantId, async (client) => {
-      const result = await client.query<SumRow>(
-        `SELECT COALESCE(SUM(amount_cents), 0) AS sum_cents
-         FROM service_credits
-         WHERE tenant_id = $1
-           AND customer_id = $2
-           AND issued_at > NOW() - INTERVAL '12 months'`,
-        [tenantId, customerId],
-      );
-      const raw = result.rows[0]?.sum_cents ?? 0;
-      return typeof raw === 'string' ? Number(raw) : raw;
-    });
+    return this.withTenant(tenantId, (client) => this.sumInWindow(client, tenantId, customerId));
   }
 }

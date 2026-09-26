@@ -138,6 +138,11 @@ export interface UpdateCustomerInput {
 
 export interface CustomerListOptions {
   includeArchived?: boolean;
+  /**
+   * #1281 — only archived customers (the directory's "Archived" view, where
+   * a record is found to be restored). Takes precedence over includeArchived.
+   */
+  archivedOnly?: boolean;
   search?: string;
   /**
    * U2 (4.8) — filter the list to customers carrying this exact tag.
@@ -614,7 +619,9 @@ export class InMemoryCustomerRepository implements CustomerRepository {
 
   async findByTenant(tenantId: string, options?: CustomerListOptions): Promise<Customer[]> {
     let results = Array.from(this.customers.values()).filter((c) => c.tenantId === tenantId);
-    if (!options?.includeArchived) {
+    if (options?.archivedOnly) {
+      results = results.filter((c) => c.isArchived);
+    } else if (!options?.includeArchived) {
       results = results.filter((c) => !c.isArchived);
     }
     if (options?.search) {

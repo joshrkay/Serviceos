@@ -61,6 +61,9 @@ describe('#909 planGatedReferenceLookups — gate ↔ free-text pairing', () => 
       ['appointmentId', { appointmentReference: "tomorrow's 3pm" }, 'appointment', "tomorrow's 3pm"],
       ['technicianId', { targetTechnicianName: 'Alex Rivera' }, 'technician', 'Alex Rivera'],
       ['toTechnicianId', { targetTechnicianName: 'Tom Baker' }, 'technician', 'Tom Baker'],
+      // #1067 — create_appointment's chained-booking job reference. Same job
+      // lifter as `jobId`: the operator names the job in the same free text.
+      ['linkedJobId', { jobReference: 'Miller furnace install' }, 'job', 'Miller furnace install'],
     ];
 
     for (const [idField, payload, kind, reference] of cases) {

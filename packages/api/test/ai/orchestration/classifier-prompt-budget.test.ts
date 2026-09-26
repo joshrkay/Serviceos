@@ -214,6 +214,8 @@ describe('classifier prompt budget — per-profile first turn', () => {
       // line. The line is NOT raised. The plan section has no cap in code
       // (formatCallerPlanForPrompt lists every active plan name), so ~170
       // more characters of plan names on this caller crosses it.
+      // #891/#893 (caller framing + draft_estimate grounding line) add
+      // ≈22 tok → ≈ 7,630; both were kept to one terse line for this reason.
       expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * BUDGET_MARGIN);
     },
   );

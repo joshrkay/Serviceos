@@ -211,6 +211,66 @@ describe('delay notification flow', () => {
     expect(sentMetrics).toHaveLength(1);
   });
 
+  it('#1201 — a failed sent-state write after delivery is logged, never recorded failed, never thrown', async () => {
+    const analyticsRepo = new InMemoryDispatchAnalyticsRepository();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+    await stateRepo.upsert({
+      idempotencyKey: 'appt-9:en_route',
+      tenantId,
+      appointmentId: 'appt-9',
+      delayVersion: 0,
+      status: 'queued',
+      channel: 'sms',
+      attempts: 0,
+      maxAttempts: 3,
+      updatedAt: new Date(),
+    });
+    const realUpsert = stateRepo.upsert.bind(stateRepo);
+    stateRepo.upsert = async (state) => {
+      if (state.status === 'sent') throw new Error('state db down');
+      return realUpsert(state);
+    };
+    const sendDelayNotice = vi.fn().mockResolvedValue({ providerMessageId: 'msg-9' });
+    const worker = createDelayNotificationWorker({ service: { sendDelayNotice }, stateRepo, analyticsRepo });
+    const error = vi.fn();
+    const logger = { ...createLogger({ service: 'test', environment: 'test' }), error };
+
+    await expect(
+      worker.handle(
+        {
+          id: 'q9',
+          type: DelayNotificationCoordinator.QUEUE_TYPE,
+          attempts: 1,
+          maxAttempts: 3,
+          idempotencyKey: 'appt-9:en_route',
+          createdAt: new Date().toISOString(),
+          payload: {
+            tenantId,
+            appointmentId: 'appt-9',
+            delayVersion: 0,
+            delayMinutes: 0,
+            targetCustomerId: 'cust-9',
+            customerName: 'Alex',
+            channel: 'sms' as const,
+            destination: '+15555550199',
+            message: 'on my way',
+            idempotencyKey: 'appt-9:en_route',
+            kind: 'en_route' as const,
+          },
+        },
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(sendDelayNotice).toHaveBeenCalledTimes(1);
+    expect((await stateRepo.findByKey('appt-9:en_route'))?.status).toBe('queued');
+    expect(error).toHaveBeenCalledWith(
+      'Delay notification sent, but persisting the sent state failed',
+      expect.objectContaining({ idempotencyKey: 'appt-9:en_route', error: 'state db down' }),
+    );
+    expect(await analyticsRepo.getMetricsByType(tenantId, 'en_route_notice_sent')).toHaveLength(1);
+  });
+
   it('chooses delay-specific template variants including ETA window text', () => {
     const variants = renderDelayTemplateVariants({
       customerName: 'Alex',
