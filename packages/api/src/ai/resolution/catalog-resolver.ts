@@ -45,6 +45,7 @@
 import type { CatalogItem } from '../../catalog/catalog-item';
 import type { ConfidenceLevel } from '../guardrails/confidence';
 import { catalogUnitSchema } from '@ai-service-os/shared';
+import { calculateLineItemTotal } from '../../shared/billing-engine';
 
 export type CatalogMatchTier = 'exact' | 'high' | 'ambiguous' | 'none';
 export type CatalogMatchType = 'exact' | 'prefix' | 'token_overlap' | 'fuzzy';
@@ -620,7 +621,8 @@ export function applyCatalogPricing(
         // the authoritative price (also prices lines the LLM left
         // price-less, which the handler would otherwise drop).
         const qty = Number(li.quantity ?? 1) || 1;
-        next.totalCents = Math.round(item.unitPriceCents * qty);
+        // #1064 — via the engine, the single home of line-total math.
+        next.totalCents = calculateLineItemTotal(qty, item.unitPriceCents);
       }
       out.push(next);
       anyCatalogPriced = true;

@@ -53,6 +53,14 @@
  * and need not equal the persisted one. Both surfaced in review round 4: the
  * sweep matched only `quantity * unitPrice`, and multiplication commutes.
  *
+ * #1064 (lane G) routed four of the recorded violations through the engine:
+ * `proposals/resolve-line.ts`, `ai/resolution/catalog-resolver.ts` and
+ * `ai/tasks/invoice-task.ts` now call `calculateLineItemTotal`, and
+ * `routes/estimates.ts`'s member-discount base is now
+ * `calculateSelectedDocumentTotals(normalizeLineItemTotals(lines)).subtotalCents`
+ * — the subtotal the estimate actually persists, not client-sent line totals
+ * (pinned in test/routes/estimates-member-pricing.route.test.ts).
+ *
  * The engine's math is NOT touched here (§5 lane rule: never touch
  * discount/tax math). The remaining violations are recorded and reported.
  *
@@ -279,9 +287,11 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
   });
 
   /**
-   * I9′ AS WRITTEN — the honest state. Three second implementations exist.
-   * When they are routed through the engine this starts PASSING, `it.fails`
-   * fails, and the row is forced back for re-grading.
+   * I9′ AS WRITTEN — the honest state. On this branch three recorded
+   * violations remain (estimate-editor, execution/handlers, routes/invoices —
+   * the ones PR #1349 routes through the engine). Once BOTH lanes land the
+   * inventory has no `violation` left, this starts PASSING, `it.fails`
+   * fails, and it must be flipped to a plain `it` (row re-graded).
    */
   it.fails(
     'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: #1064 fixed 3 of 7 sites; 4 remain)',
