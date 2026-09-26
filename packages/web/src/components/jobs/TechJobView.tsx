@@ -6,7 +6,7 @@ import {
   Sparkles, ChevronDown, ChevronUp, RotateCcw,
   MessageSquare, Check, Pencil,
 } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { Textarea } from '../ui';
 import { ActivityTimeline } from './ActivityTimeline';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
@@ -113,6 +113,16 @@ function apiStatusToTech(status: string): TechStatus {
   if (status === 'in_progress') return 'in_progress';
   if (status === 'scheduled') return 'en_route';
   return 'en_route';
+}
+
+/**
+ * #1122 — default the still-camera capture category off the job's own
+ * status instead of hardcoding 'before': not started (scheduled) yields
+ * 'before', in progress/done yields 'after'. Videos keep the pre-existing
+ * 'other' category (out of scope for this change).
+ */
+function defaultPhotoCategoryForJobStatus(status: string): JobPhotoCategory {
+  return status === 'scheduled' ? 'before' : 'after';
 }
 
 // ─── Parts catalog for voice parsing ──────────────────────────────────────────
@@ -485,6 +495,7 @@ function NotesSection({ notes, onAdd }: {
 
 // ─── Photos section ────────────────────────────────────────────────────────────
 function PhotosSection({
+  jobId,
   photos,
   category,
   onCategoryChange,
@@ -493,6 +504,7 @@ function PhotosSection({
   saving,
   error,
 }: {
+  jobId: string;
   photos: JobPhoto[];
   category: JobPhotoCategory | 'all';
   onCategoryChange: (next: JobPhotoCategory | 'all') => void;
@@ -538,6 +550,14 @@ function PhotosSection({
             onCategoryChange={onCategoryChange}
             onDelete={onDelete}
           />
+          {/* #1122 — the technician's photo surface: category select +
+              before/after pairing live on the full gallery page, not here. */}
+          <Link
+            to={`/jobs/${jobId}/photos`}
+            className="mt-3 flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-border text-sm text-primary hover:bg-secondary transition-colors"
+          >
+            Open full photo gallery <span aria-hidden="true">→</span>
+          </Link>
         </div>
       )}
     </div>
@@ -974,7 +994,9 @@ export function TechJobView({
     for (const m of media) {
       try {
         const file = await capturedMediaToFile(m);
-        const category: JobPhotoCategory = m.type === 'video' ? 'other' : 'before';
+        const category: JobPhotoCategory = m.type === 'video'
+          ? 'other'
+          : defaultPhotoCategoryForJobStatus(jobData?.status ?? '');
         await uploadPhoto(id, file, category, undefined, m.capturedAt);
         saved += 1;
       } catch (err) {
@@ -1207,6 +1229,7 @@ export function TechJobView({
             <div className="px-4 mt-4 flex flex-col gap-3 pb-4">
               <NotesSection notes={notes} onAdd={(text) => void addNote(text)} />
               <PhotosSection
+                jobId={id}
                 photos={photos}
                 category={photoCategory}
                 onCategoryChange={setPhotoCategory}

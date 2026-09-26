@@ -666,7 +666,18 @@ export function InboxPage() {
   const reviewSelectionFor = (row: InboxProposalRow): ReviewResponseSelection =>
     reviewSelections[row.proposal.id] ?? initialReviewResponseSelection(row.proposal.payload);
 
-  async function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<void> {
+  /**
+   * #1291 — per-row typed reject reason, keyed by proposal id. The reject
+   * endpoint's `reason` field (rejectProposalBodySchema) is REQUIRED and
+   * flows straight into the proposal's `rejectionReason`; previously this
+   * surface always sent the constant "Rejected from inbox" with no way for
+   * the operator to say why. An untouched/blank input still falls back to
+   * that same default, so this is additive — no existing reject behavior
+   * changes when nothing is typed.
+   */
+  const [rejectReasonDrafts, setRejectReasonDrafts] = useState<Record<string, string>>({});
+
+  async function actOnProposal(id: string, action: 'approve' | 'reject', rejectReason?: string): Promise<void> {
     const removed = rows.find((r) => r.proposal.id === id);
     setRows((prev) => prev.filter((r) => r.proposal.id !== id));
     try {
@@ -712,21 +723,30 @@ export function InboxPage() {
         }
       }
       // The reject endpoint validates `rejectProposalBodySchema` — `reason`
-      // is REQUIRED, so a body-less POST 400s for every proposal type. The
-      // inbox is a one-tap surface with no reason form (unlike mobile's
-      // useProposalReview, which collects one), so send the surface as the
-      // reason — same spirit as the route's 'ui' rejection-source stamp.
+      // is REQUIRED, so a body-less POST 400s for every proposal type.
+      // #1291 — the operator can type a reason (rejectReasonDrafts); an
+      // untouched/blank input keeps the prior constant default so this is
+      // additive, same spirit as the route's 'ui' rejection-source stamp.
+      const typedReason = rejectReason?.trim();
       const res = await apiFetch(
         `/api/proposals/${id}/${action}`,
         action === 'reject'
           ? {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ reason: 'Rejected from inbox' }),
+              body: JSON.stringify({ reason: typedReason || 'Rejected from inbox' }),
             }
           : { method: 'POST' },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (action === 'reject') {
+        setRejectReasonDrafts((prev) => {
+          if (!(id in prev)) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      }
       emitProposalsChanged();
       // D5 / Finding 2 — show the undo toast for approvals, anchored to the
       // server's real undo window (approvedAt / undoExpiresAt ride the approve
@@ -1069,9 +1089,24 @@ export function InboxPage() {
                     data-testid="row-actions"
                     className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center"
                   >
+                    {/* #1291 — optional typed reject reason, reaching the
+                        API's existing `rejectionReason` via the reject
+                        endpoint's `reason` field. Left blank, Reject keeps
+                        sending the prior constant default. */}
+                    <input
+                      type="text"
+                      id={`reject-reason-${row.proposal.id}`}
+                      aria-label={`Reason for reject — ${row.proposal.summary}`}
+                      placeholder="Reason for reject (optional)"
+                      value={rejectReasonDrafts[row.proposal.id] ?? ''}
+                      onChange={(e) =>
+                        setRejectReasonDrafts((prev) => ({ ...prev, [row.proposal.id]: e.target.value }))
+                      }
+                      className="min-h-11 w-full min-w-0 rounded-lg border border-border bg-card px-2 text-sm text-foreground sm:w-32"
+                    />
                     <button
                       type="button"
-                      onClick={() => actOnProposal(row.proposal.id, 'reject')}
+                      onClick={() => actOnProposal(row.proposal.id, 'reject', rejectReasonDrafts[row.proposal.id])}
                       className="min-h-11 rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
                     >
                       Reject
