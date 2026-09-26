@@ -45,6 +45,7 @@
  * same voice-event emissions.
  */
 
+import type { PinLockAlertRetryScheduler } from '../tasks/voice-approval-pin-lock-alert';
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import type { Pool } from 'pg';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
@@ -856,6 +857,8 @@ export interface VoiceTurnProcessorDeps {
   voiceApprovalOneTap?: OneTapFallbackDeps;
   /** #1233 review — claims the tenant PIN-lock owner alert before it is sent. */
   voiceApprovalPinLockAlertRepo?: VoiceApprovalPinLockAlertRepository;
+  /** #1238 — durable retry for a claimed PIN-lock alert that was not delivered. */
+  voiceApprovalPinLockAlertRetry?: PinLockAlertRetryScheduler;
 }
 
 export interface VoiceTurnProcessor {
@@ -3149,6 +3152,9 @@ export function createVoiceTurnProcessor(
       ...(deps.voiceApprovalOneTap ? { oneTapFallback: deps.voiceApprovalOneTap } : {}),
       ...(deps.voiceApprovalPinLockAlertRepo
         ? { pinLockAlertRepo: deps.voiceApprovalPinLockAlertRepo }
+        : {}),
+      ...(deps.voiceApprovalPinLockAlertRetry
+        ? { pinLockAlertRetry: deps.voiceApprovalPinLockAlertRetry }
         : {}),
       // RV-225 — the voice edit dialogue interprets deltas through the
       // SAME LLM seam as the SMS EDIT reply (proposals/edit-interpreter.ts).

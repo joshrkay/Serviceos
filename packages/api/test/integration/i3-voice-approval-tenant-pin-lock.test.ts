@@ -551,4 +551,22 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     expect(await alertClaims(a.tenantId)).toHaveLength(2);
     expect(await alertClaims(b.tenantId)).toHaveLength(1);
   });
+
+  it('#1238 — a claim starts UNSENT; markSent stamps sent_at once; tenant-isolated', async () => {
+    const a = await freshTenant();
+    const b = await freshTenant();
+    const repo = new PgVoiceApprovalPinLockAlertRepository(pool);
+    await repo.claim({ tenantId: a.tenantId, episodeKey: 'ep-sent', sessionId: 'i3t-sent', strikeCount: 5 });
+    expect(await repo.isSent(a.tenantId, 'ep-sent')).toBe(false);
+    // Another tenant cannot mark (or see) tenant A's claim.
+    await repo.markSent(b.tenantId, 'ep-sent');
+    expect(await repo.isSent(a.tenantId, 'ep-sent')).toBe(false);
+    await repo.markSent(a.tenantId, 'ep-sent');
+    expect(await repo.isSent(a.tenantId, 'ep-sent')).toBe(true);
+    const { rows } = await pool.query(
+      `SELECT sent_at FROM voice_approval_pin_lock_alerts WHERE tenant_id = $1 AND episode_key = 'ep-sent'`,
+      [a.tenantId],
+    );
+    expect(rows[0].sent_at).toBeInstanceOf(Date);
+  });
 });

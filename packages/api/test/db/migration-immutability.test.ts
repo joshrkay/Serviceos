@@ -555,6 +555,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['289_tenant_settings_default_tax_rate', '3e065ee911220c16d7f42a2da35cfc659b10aa8b00162e174c59565e5eb61694'],
   ['290_backfill_appointment_assignments_from_jobs', 'cd2d08fa8c0404df320d8a498f384e9822ba3a602355a2bae78f9b9c7e4c88bb'],
   ['291_tenant_settings_notify_technicians_by_sms', 'f5f7b81000e4bbff1e7941484798c722aea49e99e8d026cd02745bc1fe872daf'],
+  ['292_voice_approval_pin_lock_alerts_sent_at', 'b2682e45bffbc26193870e0da80e7f2a2bcde3b8bb52abe4a54ee1bfad8c617a'],
 ];
 
 function hashMigration(value: string): string {
