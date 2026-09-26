@@ -99,6 +99,36 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
 ];
 
 /**
+ * #1241 item 4 — English gas reports that need grammar, not a fixed phrase:
+ * gas coming out of something, a hissing tank/line, and a broken/struck line.
+ * Like {@link E1_HAZARD_PHRASES} these are never suppressed by price wording
+ * ("the gas line is broken, how much to fix it?" is a leak). Guards:
+ * - "no gas coming out of the burner" (a no-gas complaint) is excluded by a
+ *   negation lookbehind; "gas is not coming out" never matches the grammar.
+ * - "gas line install/quote" has no break verb; "cut-off valve" is a part, so a
+ *   break verb must not be followed by a hyphen.
+ */
+const EN_GAS = '(?:natural )?(?:gas|propane)';
+const EN_GAS_PART = '(?:line|lines|pipe|pipes|piping|hose|tank|meter|valve|regulator|connection|fitting)';
+const EN_GAS_BREAK = '(?:broken|broke|busted|burst|cracked|ruptured|severed|snapped|cut|damaged|punctured|hit|struck|nicked)';
+const EN_OWNER = '(?:(?:the|a|my|our|their|his|her|that|this) )?';
+export const E1_HAZARD_PATTERNS_EN: ReadonlyArray<{ keyword: string; pattern: string }> = [
+  {
+    keyword: 'gas coming out',
+    pattern: `(?<!\\b(?:no|not|any|zero) )${EN_GAS} (?:is |was |keeps )?(?:coming|pouring|escaping|blowing|spewing|seeping|rushing|hissing|leaking)(?: out)? (?:of|from)\\b`,
+  },
+  { keyword: 'gas escaping', pattern: `(?<!\\b(?:no|not|any|zero) )${EN_GAS} (?:is |was )?(?:escaping|spewing|pouring out)` },
+  {
+    keyword: 'gas hissing',
+    pattern: `${EN_GAS}(?: [a-z]+){0,2} (?:is |are |keeps |was |started |starts )?(?:hissing|whistling)|hiss(?:ing|es)?(?: (?:sound|sounds|noise|noises))? (?:from|at|near|by|in|coming from) ${EN_OWNER}${EN_GAS} ${EN_GAS_PART}`,
+  },
+  {
+    keyword: 'gas line broken',
+    pattern: `${EN_GAS} ${EN_GAS_PART} (?:is |are |was |were |got |has been |just |(?:is|was|got) (?:just )?)?${EN_GAS_BREAK}(?![\\w-])|${EN_GAS_BREAK} (?:into )?${EN_OWNER}${EN_GAS} ${EN_GAS_PART}\\b`,
+  },
+];
+
+/**
  * #1056 — Spanish acute hazards, category for category with
  * {@link E1_HAZARD_PHRASES}. Before this table a Spanish gas leak only hit the
  * `detectEmergency` backstop, which is E2: the caller got the dispatcher line,
@@ -1016,7 +1046,10 @@ function benignSmokeShape(
   return null;
 }
 
-const HAZARD_REGEXES = compile(E1_HAZARD_PHRASES);
+const HAZARD_REGEXES = [
+  ...compile(E1_HAZARD_PHRASES),
+  ...E1_HAZARD_PATTERNS_EN.map(({ keyword, pattern }) => ({ keyword, regex: new RegExp(`\\b(?:${pattern})`, 'i') })),
+];
 const HAZARD_REGEXES_ES = compileSpanish(E1_HAZARD_PATTERNS_ES).map((entry) => ({
   ...entry,
   regexAll: new RegExp(entry.regex.source, 'giu'),
