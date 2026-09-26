@@ -10,9 +10,9 @@
  * `POST /api/terminal/payment-intents`):
  *
  *   (a) THE 409 HALF — a tenant with NO Connect account taps to pay and gets
- *       a clean, coded 409 (`CONNECT_REQUIRED`). Nothing is written: no
- *       payments row, no Stripe call at all, and — pinned as CURRENT
- *       BEHAVIOUR, not as a thing the story asked for — no audit row either.
+ *       a clean, coded 409 (`CONNECT_REQUIRED`). No payments row, no Stripe
+ *       call at all — but (#1098) exactly one `terminal.connect_required`
+ *       audit row on the refused tenant's timeline, actor = the technician.
  *   (b) T1 — tenant B's ACTIVE Connect account (a real `tenants` row) does not
  *       satisfy tenant A's gate, and A's refused attempt leaves B untouched.
  *   (c) THE CHARGE HALF — the connected tenant's Terminal session persists a
@@ -413,7 +413,7 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
 
   // ───────────────────────── (a) THE 409 HALF ─────────────────────────
 
-  it('no Connect account: tap-to-pay is refused with a clean coded 409 and writes nothing', async () => {
+  it('no Connect account: tap-to-pay is refused with a clean coded 409, moves no money, and leaves one refusal audit row', async () => {
     actingTenant = noConnect;
     const invoiceId = await seedOpenInvoice(noConnect);
     const auditBefore = await allAuditEventTypes(noConnect.tenantId);
@@ -446,18 +446,33 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     expect(invoice?.amountDueCents).toBe(AMOUNT_CENTS);
     expect(invoice?.amountPaidCents).toBe(0);
 
-    // FINDING (pinned, not invented): the refusal writes NO audit row. The
-    // route's only audit write is `terminal.payment_intent_created`, after
-    // the gate (routes/terminal.ts:183). A refused doorstep charge leaves no
-    // trace on the tenant's timeline. This asserts today's behaviour so a
-    // change to it is visible; it is reported as a gap, not as a pass.
-    expect(await allAuditEventTypes(noConnect.tenantId)).toEqual(auditBefore);
-    expect(
-      await auditRepo.findByEntity(noConnect.tenantId, 'invoice', invoiceId),
-    ).toEqual([]);
+    // #1098 — the refusal leaves exactly ONE audit row on the refused
+    // tenant's own timeline (`terminal.connect_required`, actor = the
+    // technician who tapped), so the owner can later see field collection
+    // was attempted and blocked. Still no money row, no invoice change.
+    const after = await allAuditEventTypes(noConnect.tenantId);
+    expect(after).toEqual([...auditBefore, 'terminal.connect_required']);
+    const refusal = await pool.query<{
+      actor_id: string;
+      entity_type: string;
+      entity_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_id, entity_type, entity_id, metadata FROM audit_events
+        WHERE tenant_id = $1 AND event_type = 'terminal.connect_required'
+        ORDER BY created_at DESC LIMIT 1`,
+      [noConnect.tenantId],
+    );
+    expect(refusal.rows[0].actor_id).toBe(noConnect.userId);
+    expect(refusal.rows[0].entity_type).toBe('tenant');
+    expect(refusal.rows[0].entity_id).toBe(noConnect.tenantId);
+    expect(refusal.rows[0].metadata).toMatchObject({
+      surface: 'payment_intent',
+      requestedInvoiceId: invoiceId,
+    });
   });
 
-  it('no Connect account: minting a connection token is refused the same way, writing nothing', async () => {
+  it('no Connect account: minting a connection token is refused the same way, with one refusal audit row', async () => {
     actingTenant = noConnect;
     const auditBefore = await allAuditEventTypes(noConnect.tenantId);
 
@@ -466,7 +481,11 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('CONNECT_REQUIRED');
     expect(stripeCalls).toEqual([]);
-    expect(await allAuditEventTypes(noConnect.tenantId)).toEqual(auditBefore);
+    // #1098 — one refusal row, surface = connection_token.
+    expect(await allAuditEventTypes(noConnect.tenantId)).toEqual([
+      ...auditBefore,
+      'terminal.connect_required',
+    ]);
 
     // Nothing was persisted onto the tenant row either.
     const view = await connectService.getAccount(noConnect.tenantId);
