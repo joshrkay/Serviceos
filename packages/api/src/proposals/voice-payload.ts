@@ -37,7 +37,11 @@
  * so no `ai/` type has to be named here.
  */
 import type { ProposalType } from './proposal';
-import { validateProposalPayload, type ProposalConfidenceMeta } from './contracts';
+import {
+  isSystemSuppliedIdField,
+  validateProposalPayload,
+  type ProposalConfidenceMeta,
+} from './contracts';
 import { parseJobEditFields } from './job-edit-phrases';
 
 /**
@@ -498,6 +502,15 @@ export async function buildVoiceProposalPayload(
   const validation = validateProposalPayload(proposalType, payload);
   if (!validation.valid) {
     const errors = validation.errors ?? ['payload failed contract validation'];
+    // #1067 — a failure on a SYSTEM-SUPPLIED id (contracts.ts
+    // SYSTEM_SUPPLIED_ID_FIELDS) is a drafting defect no operator can clear.
+    // Gating it — or gating the draft on its OTHER fields while the id is
+    // still missing — mints a card that can never be approved, so the draft
+    // is not gateable at all: an empty `missingFieldPaths` with `ok: false`
+    // makes both live voice legs degrade to a clarification.
+    if (fieldPathsFrom(errors).some((field) => isSystemSuppliedIdField(proposalType, field))) {
+      return { ...common, ok: false, errors, missingFieldPaths: [] };
+    }
     // D01 — merge in the whole-object-refine gap `fieldPathsFrom` cannot
     // name (see contractGapFields above); deduped, since a payload can also
     // independently fail a field-specific check (e.g. scheduledStart).

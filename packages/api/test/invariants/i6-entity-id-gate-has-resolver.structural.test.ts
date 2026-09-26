@@ -56,13 +56,30 @@
  * The literal `missingFields: ['…']` emitters in `src` are swept as a second
  * source so a hand-written gate cannot slip past the derivation.
  *
+ * ## Closed by #1067 (2026-09-26): I6 now holds
+ *
+ * The four recorded gaps are gone. `linkedJobId` got a lifter (it names a job,
+ * so it lifts from the same free text `jobId` does). `reviewId`, `entityId`
+ * and `groundedProposalId` are SYSTEM-SUPPLIED — the drafting code picks the
+ * row — so the owner's decision was to make them unreachable as gates rather
+ * than invent a lifter for a field no operator can name:
+ * `SYSTEM_SUPPLIED_ID_FIELDS` (proposals/contracts.ts) declares them per
+ * proposal type, and the voice payload builder refuses to gate a draft that
+ * fails on one (pinned by test/proposals/voice-payload-system-supplied-ids
+ * .test.ts). The derivation below skips exactly those (type, key) pairs —
+ * per TYPE, so the same key on any other contract is still checked.
+ *
  * Evidence class: STRUCTURAL (negative controls plant an unliftable gate on
  * both sources).
  */
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import path from 'path';
-import { PROPOSAL_TYPE_SCHEMAS } from '../../src/proposals/contracts';
+import {
+  PROPOSAL_TYPE_SCHEMAS,
+  SYSTEM_SUPPLIED_ID_FIELDS,
+  isSystemSuppliedIdField,
+} from '../../src/proposals/contracts';
 import { GATED_REFERENCE_SOURCES } from '../../src/ai/resolution/gated-reference-resolution';
 import { listSourceFiles, plantTree, removeTree } from '../support/structural-scan';
 
@@ -87,6 +104,10 @@ export function gateKeysEmittableByContracts(
 
   const record = (head: string, proposalType: string): void => {
     if (head.length === 0) return;
+    // #1067 — production never emits a system-supplied id as a gate: the
+    // voice builder refuses to gate such a draft (voice-payload.ts). Skipped
+    // per (type, key), never per key.
+    if (isSystemSuppliedIdField(proposalType, head)) return;
     const seen = byKey.get(head) ?? [];
     if (!seen.includes(proposalType)) seen.push(proposalType);
     byKey.set(head, seen);
@@ -387,57 +408,6 @@ export function unliftableEntityIdGates(
   return out;
 }
 
-/**
- * The genuine I6 gaps found on `origin/main` at 2026-09-12: entity-id gates a
- * contract can emit with nothing on record to lift them.
- *
- * All three are SYSTEM-SUPPLIED ids — the row is chosen by the code, not named
- * by the operator — which makes them a milder shape than #909's `convert_lead`
- * (where the operator DID name a lead and had no way to be understood). They
- * are still recorded rather than excused, because I6 is a universal and
- * because the consequence when one is emitted is identical: a card the
- * operator is shown and cannot clear.
- *
- * Reported on #1021 for Fable and the product owner; not fixed here.
- */
-const KNOWN_UNLIFTABLE: ReadonlyArray<{
-  key: string;
-  /** Where the gate is DEFINED — the citation for the report. */
-  where: string;
-  /**
-   * The exact `where` string `unliftableEntityIdGates` produces for this gap
-   * today — the set of emitting sites, frozen. A new contract emitting the
-   * same key changes this string and fails the guard.
-   */
-  emittedAt: string;
-  note: string;
-}> = [
-  {
-    key: 'reviewId',
-    where: 'packages/shared/src/contracts/review-response-proposal.ts:73 (review_response_proposal)',
-    emittedAt: 'contract(s): review_response_proposal',
-    note: 'The review being answered is picked from the reputation queue by the drafting task (ai/tasks/review-response-task.ts:182), never named by the operator. Emitted as a gate on the voice leg by proposals/voice-payload.ts:504 if it is ever absent, and no resolver or card affordance can supply it.',
-  },
-  {
-    key: 'linkedJobId',
-    where: 'packages/api/src/proposals/contracts.ts:276 (create_appointment)',
-    emittedAt: 'contract(s): create_appointment',
-    note: "`linkedJobId: z.string().uuid().optional()` — the chained-booking job reference. A malformed value emits `linkedJobId` as a gate via `fieldPathsFrom`, and GATED_REFERENCE_SOURCES has `jobId` but not `linkedJobId`, so the resolver cannot lift it. Found in review round 5 by probing declared fields with an INVALID value: an optional field parses `{}` cleanly, so the empty-payload probe never saw it. Likely the cheapest of the four to close — `linkedJobId` pairs with the same `jobReference` free text `jobId` already resolves from.",
-  },
-  {
-    key: 'entityId',
-    where: 'packages/api/src/proposals/contracts/adopt-entity-alias.ts:11 (adopt_entity_alias)',
-    emittedAt: 'contract(s): adopt_entity_alias',
-    note: 'The entity the alias is being adopted for — already resolved by the time the alias proposal is drafted. Owner-only to approve (proposals/actions.ts:227).',
-  },
-  {
-    key: 'groundedProposalId',
-    where: 'packages/api/src/proposals/contracts/adopt-entity-alias.ts:13 (adopt_entity_alias)',
-    emittedAt: 'contract(s): adopt_entity_alias',
-    note: 'The proposal whose resolution grounded the alias — a system id by construction.',
-  },
-];
-
 // ─── The guard ──────────────────────────────────────────────────────────────
 
 describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can emit has a lifter', () => {
@@ -466,20 +436,15 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
     expect(emitted).toContain('locationId');
   });
 
-  it('no NEW entity-id gate appears without a lifter (the three recorded gaps are frozen)', () => {
+  /**
+   * I6 AS WRITTEN. Until #1067 this was an `it.fails` over four recorded gaps
+   * (reviewId, entityId, groundedProposalId, linkedJobId); with those closed it
+   * is a plain assertion, and any new entity-id gate with no lifter fails it.
+   */
+  it('I6 as written — every entity-id gate a contract or literal can emit has a lifter', () => {
     const unliftable = unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC]);
-    // Compared on the full EMITTING SITE, not just the key. Reviewed on
-    // PR #1063: filtering on `key` alone meant a NEW contract that emits an
-    // already-recorded key — a second `reviewId` gate on another proposal
-    // type — was waved through as "recorded" while it expanded the set of
-    // unreachable capabilities. The `where` string carries the emitting
-    // contract types (or the file:line for a hand-written literal), so
-    // freezing it makes a new emitter fail.
-    const unrecorded = unliftable.filter(
-      (u) => !KNOWN_UNLIFTABLE.some((k) => k.key === u.key && k.emittedAt === u.where),
-    );
     expect(
-      unrecorded.map((u) => `${u.key}  (${u.where})`),
+      unliftable.map((u) => `${u.key}  (${u.where})`),
       [
         'A proposal can be gated on an entity id that nothing lifts.',
         '',
@@ -489,25 +454,49 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
         '',
         'Fix: add the id field to GATED_REFERENCE_SOURCES with the free text it',
         'pairs with, or add it to LIFTED_BY_OTHER_MECHANISM naming what the',
-        'operator actually does to clear it.',
+        'operator actually does to clear it. Only if the drafting CODE picks the',
+        'row (no operator can name it) does it belong in SYSTEM_SUPPLIED_ID_FIELDS.',
       ].join('\n'),
     ).toEqual([]);
   });
 
-  it('the recorded gaps are still exactly where the report says they are — key AND emitting site', () => {
-    const found = unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC]);
-    for (const known of KNOWN_UNLIFTABLE) {
-      const match = found.find((u) => u.key === known.key);
-      expect(match, `${known.key} — ${known.note}`).toBeDefined();
-      // The emitting site is frozen too: a SECOND contract emitting this same
-      // key would widen `where` and fail here rather than pass as "recorded".
-      expect(match!.where, `${known.key} emitting site drifted`).toBe(known.emittedAt);
+  it('#1067 — linkedJobId is closed by a real lifter, not by an exemption', () => {
+    expect(Object.hasOwn(GATED_REFERENCE_SOURCES, 'linkedJobId')).toBe(true);
+    expect(GATED_REFERENCE_SOURCES.linkedJobId.kind).toBe('job');
+    expect(isSystemSuppliedIdField('create_appointment', 'linkedJobId')).toBe(false);
+  });
+
+  it('every SYSTEM_SUPPLIED_ID_FIELDS entry is a uuid-typed key of its OWN contract (no dumping ground)', () => {
+    const entries = Object.entries(SYSTEM_SUPPLIED_ID_FIELDS);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const [proposalType, fields] of entries) {
+      const schema = PROPOSAL_TYPE_SCHEMAS[proposalType as keyof typeof PROPOSAL_TYPE_SCHEMAS];
+      expect(schema, proposalType).toBeDefined();
+      for (const field of fields ?? []) {
+        expect(/^[A-Za-z][A-Za-z0-9]*Id$/.test(field), `${proposalType}.${field}`).toBe(true);
+        expect(
+          isUuidTypedByAnyContract({ [proposalType]: schema }, field),
+          `${proposalType}.${field} must be a uuid-typed row reference on its own contract`,
+        ).toBe(true);
+      }
     }
   });
 
-  it('NEGATIVE CONTROL — a SECOND contract emitting an already-recorded key still fails the guard', () => {
-    // The false negative reviewed on PR #1063: `reviewId` is recorded, so a
-    // new proposal type gating on it must not be filtered out as known.
+  it('NEGATIVE CONTROL — without the system-supplied declaration the three ids ARE unliftable gates', () => {
+    // Proves the skip is what closes them (not a probe that stopped seeing
+    // them): the same schemas re-keyed under a type with no declaration
+    // surface every one of the three.
+    const rekeyed = {
+      plant_review_copy: PROPOSAL_TYPE_SCHEMAS.review_response_proposal,
+      plant_alias_copy: PROPOSAL_TYPE_SCHEMAS.adopt_entity_alias,
+    };
+    const keys = unliftableEntityIdGates(rekeyed, []).map((u) => u.key).sort();
+    expect(keys).toEqual(['entityId', 'groundedProposalId', 'reviewId']);
+  });
+
+  it('NEGATIVE CONTROL — a SECOND contract gating on a system-supplied key still fails the guard', () => {
+    // The declaration is per (type, key): a new proposal type gating on
+    // `reviewId` is a new, unliftable gate and must not be waved through.
     const planted = {
       ...PROPOSAL_TYPE_SCHEMAS,
       plant_review_escalation: z.object({ reviewId: z.string().uuid() }),
@@ -515,27 +504,8 @@ describe('§5 I6 (STRUCTURAL) — every entity-id gate a proposal contract can e
     const unliftable = unliftableEntityIdGates(planted, [API_SRC]);
     const reviewIdRow = unliftable.find((u) => u.key === 'reviewId');
     expect(reviewIdRow).toBeDefined();
-    expect(reviewIdRow!.where).toContain('plant_review_escalation');
-    // …and the freeze rejects it, because the emitting-site string changed.
-    const unrecorded = unliftable.filter(
-      (u) => !KNOWN_UNLIFTABLE.some((k) => k.key === u.key && k.emittedAt === u.where),
-    );
-    expect(unrecorded.map((u) => u.key)).toContain('reviewId');
+    expect(reviewIdRow!.where).toBe('contract(s): plant_review_escalation');
   });
-
-  /**
-   * I6 AS WRITTEN — the honest state of the invariant. It does not hold for
-   * three system-supplied ids. Recorded rather than defined away: when they
-   * are given a lifter (or shown unreachable and removed from the gate path),
-   * this case starts PASSING, `it.fails` itself fails, and the row is forced
-   * back for re-grading.
-   */
-  it.fails(
-    'I6 as written — every entity-id gate has a lifter (KNOWN GAP: reviewId, entityId, groundedProposalId, linkedJobId)',
-    () => {
-      expect(unliftableEntityIdGates(PROPOSAL_TYPE_SCHEMAS, [API_SRC])).toEqual([]);
-    },
-  );
 
   it('every documented exception NAMES its lifting mechanism (an exception without one is the gap)', () => {
     for (const entry of LIFTED_BY_OTHER_MECHANISM) {
