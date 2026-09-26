@@ -82,7 +82,7 @@ describe('#1274 — a refused line-item edit does not render as saved', () => {
   // noise the customer sees; removing the line is how to drop it. The editor
   // says so before anything is sent.
   it('refuses a zero-quantity line before saving, with a reason', async () => {
-    const mutate = vi.fn(async () => savedEstimate());
+    const mutate = vi.fn(async (_body: unknown) => savedEstimate());
     vi.mocked(useMutation).mockReturnValue({ mutate, isLoading: false, error: null });
     render(
       <MemoryRouter>
