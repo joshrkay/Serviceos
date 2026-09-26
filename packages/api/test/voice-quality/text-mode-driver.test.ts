@@ -499,7 +499,11 @@ describe('VQ-007 — TextModeDriver', () => {
 
     const { agentResponse } = await driver.speak(
       sessionId,
-      '¡Hay una fuga de gas en mi casa, se siente el olor a gas muy fuerte!',
+      // #1222 — an E2 (urgent dispatch) hazard. A gas leak is E1 life safety
+      // now that the driver runs the production tier classifier: that call
+      // closes on the evacuation script and never escalates (see the #1222
+      // test above and the 11-spanish E1 corpus scripts).
+      '¡Se rompió una tubería y hay agua por todas partes!',
     );
 
     // Localized Spanish 911 safety line, not the English source.
@@ -507,6 +511,86 @@ describe('VQ-007 — TextModeDriver', () => {
     expect(h.bus.filterByType('escalation_triggered').length).toBeGreaterThan(0);
     // No classifier ran — the emergency interrupt consumed the turn.
     expect(h.bus.filterByType('intent_classified')).toHaveLength(0);
+  });
+
+  it('#897/#890 — the driver classifies with the prompt production sends (vertical, plan, protection, language)', async () => {
+    const { gateway, provider } = createMockLLMGateway();
+    provider.setDefaultResponse(JSON.stringify({ intentType: 'lookup_appointments', confidence: 0.95 }));
+    const complete = vi.spyOn(gateway, 'complete');
+    const tenantId = 't-897';
+    const customer = makeCustomer(tenantId, '00000000-0000-4000-8000-000000000897', 'Ana Torres', '+15555550897');
+    await h.customerRepo.create(customer);
+    const driver = new TextModeDriver({
+      voiceSessionStore: h.store,
+      bus: h.bus,
+      gateway,
+      proposalRepo: h.proposalRepo,
+      customerRepo: h.customerRepo,
+      // The tenant's greeting language is Spanish (tenant_settings.default_language).
+      settingsRepo: {
+        findByTenant: async () => ({ tenantId, defaultLanguage: 'es', supportedLanguages: ['en', 'es'] }),
+      } as never,
+      verticalPromptResolver: async () => 'Equipment: furnace, heat pump',
+      callerPlanResolver: async () => 'Active plan: Gold maintenance',
+      systemActorId: 'system:vq-test',
+    });
+
+    const { sessionId } = await driver.startSession({
+      tenantId,
+      callerId: '+15555550897',
+      callerIdBlocked: false,
+    });
+    await driver.speak(sessionId, '¿A qué hora viene el técnico mañana?');
+
+    const classify = complete.mock.calls
+      .map(([req]) => req)
+      .find((req) => req.taskType === 'classify_intent');
+    expect(classify, 'the driver never classified').toBeDefined();
+    const system = classify!.messages
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .join('\n');
+    expect(system).toContain('Equipment: furnace, heat pump');
+    expect(system).toContain('Active plan: Gold maintenance');
+    expect(system).toContain('Customer protection intents');
+    expect(system).toContain('The caller is speaking Spanish');
+  });
+
+  it('#1222 — an E1 life-safety turn speaks the evacuation script, closes the call and never bridges to the dispatcher', async () => {
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([['t-e1', [{ id: 'oncall_1', userId: 'dispatcher_1', orderIndex: 0 }]]]),
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const driver = new TextModeDriver({
+      voiceSessionStore: h.store,
+      bus: h.bus,
+      gateway: createMockLLMGateway().gateway,
+      proposalRepo: h.proposalRepo,
+      customerRepo: h.customerRepo,
+      auditRepo,
+      onCallRepo,
+      systemActorId: 'system:vq-test',
+    });
+    const { sessionId } = await driver.startSession({
+      tenantId: 't-e1',
+      callerId: '+15555551222',
+      callerIdBlocked: false,
+    });
+
+    const { agentResponse } = await driver.speak(sessionId, 'I smell gas in my kitchen, it is really strong.');
+
+    // The evacuation script (gas / CO → leave the building, then call 911).
+    expect(agentResponse).toContain('leave the building');
+    expect(agentResponse).toContain('911');
+    // E1 never bridges the caller to the contractor's dispatcher.
+    expect(h.bus.filterByType('escalation_triggered')).toHaveLength(0);
+    // The call is closed by the life-safety path.
+    expect(h.bus.filterByType('session_terminated')).toHaveLength(1);
+    // Durable "logged as E1" record.
+    const e1Audit = (await auditRepo.findByCorrelation('t-e1', sessionId)).filter(
+      (a) => (a.metadata as Record<string, unknown>)?.tier === 'E1',
+    );
+    expect(e1Audit).toHaveLength(1);
   });
 
   it('WS1 — an owner-session emits a verify_owner_identity lookup at establishment', async () => {

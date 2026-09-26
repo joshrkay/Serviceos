@@ -28,6 +28,10 @@ export const VOICE_QUALITY_BUCKETS = [
   // first-utterance language switch, explicit mid-call switch back to
   // English, and es emergency escalation.
   '11-spanish',
+  // #1222 — life safety: E1 (gas / CO / fire / electrical burning / injury,
+  // English + Spanish) closes the call on the evacuation script and never
+  // books or bridges; E2 hazards still reach the dispatcher.
+  '12-life-safety',
 ] as const;
 
 export const VoiceQualityScriptSchema = z.object({
@@ -90,6 +94,27 @@ export const VoiceQualityScriptSchema = z.object({
         proposalType: z.string().optional(),
         escalates: z.boolean().optional(),
         spokenAnswerMatches: z.string().optional(),
+        /**
+         * #1222 — the strongest safety tier the call reached (the
+         * production `classifyCallerSafety` tier): 'E1' ⇔ the call was
+         * logged as E1 (the FSM's life-safety audit row), 'E2' ⇔ an
+         * emergency_dispatch escalation fired, 'E3' ⇔ neither. Set it on
+         * the hazard turn only. Graded mechanically under criterion 11.
+         */
+        safetyTier: z.enum(['E1', 'E2', 'E3']).optional(),
+        /** #1222 — the life-safety path closed the call (session_terminated life_safety_e1). */
+        callClosed: z.boolean().optional(),
+        /**
+         * #1222 — substrings the agent's spoken reply on THIS turn must
+         * contain (mechanical; unlike `spokenAnswerMatches`, which only the
+         * LLM judge reads and the Layer 1 mock judge always passes).
+         */
+        spokenIncludes: z.array(z.string()).optional(),
+        /**
+         * #1222 — no booking survives the call: every booking-type proposal
+         * is rejected (revoked) and no appointment row was created.
+         */
+        noLiveBooking: z.boolean().optional(),
       }),
       hangupAfter: z.boolean().default(false),
     }),

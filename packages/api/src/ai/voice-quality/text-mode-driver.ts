@@ -116,10 +116,11 @@ import {
   type VoiceSession,
 } from '../agents/customer-calling/voice-session-store';
 import { AgentEventBus } from './event-bus';
+import { EMERGENCY_SAFETY_LINE } from '../agents/customer-calling/emergency-detector';
 import {
-  detectEmergency,
-  EMERGENCY_SAFETY_LINE,
-} from '../agents/customer-calling/emergency-detector';
+  classifyCallerSafety,
+  type SafetyClassification,
+} from '../agents/customer-calling/emergency-tier';
 import { detectLanguage, renderTtsText } from '../agents/customer-calling/tts-copy';
 import type { CallingAgentEvent, SideEffect } from '../agents/customer-calling/types';
 import { enforceCompliance } from '../skills/enforce-compliance';
@@ -251,6 +252,15 @@ export interface TextModeDriverDeps {
    * the deterministic parts (datetime phrases, already-UUID ids).
    */
   entityResolver?: EntityResolver;
+  /**
+   * #897 — the SAME resolvers production hands the voice-turn processor
+   * (app.ts builds them), so the corpus classify prompt carries the tenant's
+   * vertical section and the caller's plan section exactly as a live call
+   * does. Optional: omitted, the section is absent — as on an unwired
+   * deployment.
+   */
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  callerPlanResolver?: (tenantId: string, customerId: string) => Promise<string | undefined>;
   /** Used as `userId` on synthesized voice-action-router messages. */
   systemActorId?: string;
   /**
@@ -457,6 +467,9 @@ export class TextModeDriver implements AgentDriver {
       // same resolver the driver already hands the voice-action-router, so a
       // corpus script exercises real resolution rather than a free-text echo.
       ...(deps.entityResolver ? { entityResolver: deps.entityResolver } : {}),
+      // #897 — the prompt-section resolvers behind buildPhoneClassifyContext.
+      ...(deps.verticalPromptResolver ? { verticalPromptResolver: deps.verticalPromptResolver } : {}),
+      ...(deps.callerPlanResolver ? { callerPlanResolver: deps.callerPlanResolver } : {}),
     });
   }
 
@@ -477,7 +490,14 @@ export class TextModeDriver implements AgentDriver {
     const session = this.deps.voiceSessionStore.create(opts.tenantId, 'telephony', {
       callSid: synthetic,
       ...(ownerSession ? { ownerSession: true } : {}),
+      // #897 — telephony always opts every caller into the customer-protection
+      // intents (twilio-adapter establishment); the harness did not, so
+      // complaint / negotiation classification was never exercised.
+      customerProtectionIntents: true,
     });
+    // #890 — pin the call language the way the Gather establishment does
+    // (resolveTenantLanguage): the tenant's default_language, else English.
+    await this.pinTenantLanguage(session);
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
     }
@@ -529,6 +549,24 @@ export class TextModeDriver implements AgentDriver {
     }
 
     return { sessionId: session.id };
+  }
+
+  /**
+   * #890 — mirror TwilioGatherAdapter.resolveTenantLanguage: the tenant's
+   * explicit default_language is the call language; the supported stack is
+   * threaded for the language-switch gate. Fail-soft to English.
+   */
+  private async pinTenantLanguage(session: VoiceSession): Promise<void> {
+    if (!this.deps.settingsRepo) return;
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(session.tenantId);
+      const language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      session.language = language;
+      const stack = settings?.supportedLanguages ?? ['en'];
+      session.supportedLanguages = stack.includes(language) ? stack : [...stack, language];
+    } catch {
+      // English, as production falls back.
+    }
   }
 
   /**
@@ -671,9 +709,22 @@ export class TextModeDriver implements AgentDriver {
     // call escalates to the on-call dispatcher (reason=emergency_dispatch). The
     // Layer-1 driver never wired this, so a Spanish "fuga de gas" fell through
     // to the classifier and never escalated.
-    const emergency = detectEmergency(callerTranscript);
-    if (emergency.matched) {
-      const emergencyResponse = await this.handleEmergency(session, callerTranscript, emergency.language);
+    //
+    // #1222 — the SAME tier classification the Gather and Media Streams
+    // transports run before any model call (twilio-adapter.runEmergencyScan):
+    // E1 (life safety: gas / CO / fire / electrical burning / injury) closes
+    // the call on the evacuation script and never bridges to the dispatcher;
+    // E2 keeps the dispatcher escalation. The driver used to treat every
+    // emergency as E2, so the corpus could not see an E1 regression.
+    const safety = classifyCallerSafety(callerTranscript, {});
+    if (safety.tier === 'E1') {
+      const lifeSafetyResponse = await this.handleLifeSafetyE1(session, callerTranscript, safety);
+      const latencyMsE1 = performance.now() - startedAt;
+      this.appendAgentAndEmit(session, sessionId, lifeSafetyResponse);
+      return { agentResponse: lifeSafetyResponse, latencyMs: latencyMsE1 };
+    }
+    if (safety.tier === 'E2') {
+      const emergencyResponse = await this.handleEmergency(session, callerTranscript, safety.language);
       const latencyMsEmergency = performance.now() - startedAt;
       this.appendAgentAndEmit(session, sessionId, emergencyResponse);
       return { agentResponse: emergencyResponse, latencyMs: latencyMsEmergency };
@@ -698,20 +749,27 @@ export class TextModeDriver implements AgentDriver {
     }
 
     try {
+      // #897 — the SAME context assembly the Gather adapter and speechTurn
+      // call, so the corpus sees the production prompt (vertical + plan
+      // sections, surface profile, owner / protection flags, call language).
+      //
+      // ONE deliberate divergence remains: the surface PROFILE. Production
+      // classifies a customer's line on the S1 'caller' taxonomy (#886/#887);
+      // 21 corpus scripts still ask operator-only actions (log an expense,
+      // record a refund, update a customer…) from a customer's line, which
+      // the caller profile correctly refuses. Re-personaing them is a corpus
+      // decision tracked as the D-028 follow-up, so the harness keeps the
+      // full ('operator') taxonomy — the profile is dropped here, and ONLY
+      // the profile.
+      const { classifierProfile: _profileDeferredD028, ...classifyContext } =
+        await this.voiceProcessor.buildPhoneClassifyContext(session, session.tenantId);
       const classification = await classifyIntent(
         callerTranscript,
         {
-          tenantId: session.tenantId,
-          // U10 — trace-session grouping (metadata only; prompt unchanged).
-          sessionId: session.id,
-          ...(session.callSid ? { callSid: session.callSid } : {}),
+          ...classifyContext,
+          // Harness-only (not prompt-bearing): suppresses the deterministic
+          // sign-up override for a caller-ID-resolved customer.
           callerIsExistingCustomer: state?.identityState === 'resolved',
-          // WS21b — the owner-approval prompt section is appended to the
-          // classifier prompt ONLY on a recognized owner line, so every
-          // non-owner call's prompt (and its cassette) stays byte-identical.
-          ...(session.machine.currentContext.ownerSession === true
-            ? { ownerSession: true }
-            : {}),
         },
         this.deps.gateway,
       );
@@ -1140,6 +1198,51 @@ export class TextModeDriver implements AgentDriver {
     const safetyLine = renderTtsText(EMERGENCY_SAFETY_LINE, {}, lang);
     await this.escalate(session, 'emergency_dispatch');
     return safetyLine;
+  }
+
+  /**
+   * #1222 — E1 life safety, exactly as twilio-adapter.runEmergencyScan: the
+   * tenant's reviewed script wins over the embedded placeholder, the FSM's
+   * `emergency_detected{tier:'E1'}` guard produces the effects (audit "logged
+   * as E1", the Spanish 911 line for a Spanish caller, the evacuation script,
+   * revoke any booking drafted this call, alert the tenant, end the session),
+   * and the shared voice-turn processor executes them — the same executor the
+   * live transports use. No dispatcher bridge, no escalation.
+   */
+  private async handleLifeSafetyE1(
+    session: VoiceSession,
+    callerTranscript: string,
+    safety: SafetyClassification,
+  ): Promise<string> {
+    let responseScript = safety.responseScript;
+    if (this.deps.settingsRepo) {
+      try {
+        const settings = await this.deps.settingsRepo.findByTenant(session.tenantId);
+        if (settings?.e1ReviewedScript) responseScript = settings.e1ReviewedScript;
+      } catch {
+        // Placeholder script, as production falls back.
+      }
+    }
+    const effects = session.machine.dispatch({
+      type: 'emergency_detected',
+      keyword: safety.keyword,
+      utterance: callerTranscript,
+      tier: 'E1',
+      ...(responseScript ? { responseScript } : {}),
+      ...(safety.language ? { language: safety.language } : {}),
+      ...(session.language === 'es' || session.language === 'en'
+        ? { sessionLanguage: session.language }
+        : {}),
+    });
+    await this.voiceProcessor.executeSideEffects(session, effects, session.tenantId);
+    if (session.machine.currentState === 'terminated') {
+      session.events.emit('voice-event', sessionTerminatedEvent('life_safety_e1'));
+      session.ended = true;
+    }
+    const spoken = effects
+      .filter((fx) => fx.type === 'tts_play' && typeof fx.payload.text === 'string')
+      .map((fx) => fx.payload.text as string);
+    return spoken.length > 0 ? spoken.join(' ') : renderTtsText(EMERGENCY_SAFETY_LINE, {}, 'en');
   }
 
   /**

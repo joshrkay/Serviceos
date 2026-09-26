@@ -29,6 +29,14 @@ import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
+import { InMemoryPackActivationRepository, activatePack } from '../../src/settings/pack-activation';
+import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
+import { seedCanonicalVerticalPacks } from '../../src/shared/canonical-vertical-packs';
+import { buildVerticalPromptResolver } from '../../src/verticals/resolve-active-pack';
+import {
+  buildCallerPlanContext,
+  formatCallerPlanForPrompt,
+} from '../../src/ai/orchestration/caller-plan-context';
 import {
   hashVoiceApprovalPin,
   isEnrollablePin,
@@ -461,6 +469,37 @@ export function buildCassetteGatewayForScript(
   });
 }
 
+/**
+ * #897 — the corpus tenant's vertical prompt resolver, built exactly as app.ts
+ * builds production's (`buildVerticalPromptResolver` over the pack-activation
+ * repo + the seeded canonical registry). The tenant activates the pack its
+ * fixture names (`fixtures.tenant.verticalPack`), defaulting to `hvac-v1` —
+ * every corpus tenant is an HVAC shop. `null` opts a script out (no pack).
+ */
+function corpusVerticalPromptResolver(
+  script: VoiceQualityScript,
+  tenantId: string,
+): ((tenantId: string) => Promise<string | undefined>) | undefined {
+  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
+  const packId = tenant.verticalPack === undefined ? 'hvac-v1' : tenant.verticalPack;
+  if (typeof packId !== 'string') return undefined;
+  const canonicalPackRegistry = new InMemoryVerticalPackRegistry();
+  const packActivationRepo = new InMemoryPackActivationRepository();
+  const resolver = buildVerticalPromptResolver({
+    packActivationRepo,
+    canonicalPackRegistry,
+    cacheTtlMs: 0,
+  });
+  const ready = (async () => {
+    await seedCanonicalVerticalPacks(canonicalPackRegistry);
+    await activatePack({ tenantId, packId }, packActivationRepo);
+  })();
+  return async (t: string) => {
+    await ready;
+    return resolver(t);
+  };
+}
+
 export function makeVoiceQualityDriverFactory(
   script: VoiceQualityScript,
   cassetteMode?: CassetteMode,
@@ -531,6 +570,15 @@ export function makeVoiceQualityDriverFactory(
             businessHoursSchedule: businessHours?.schedule ?? [],
             ...(ownerPhone ? { ownerPhone } : {}),
             ...(escalationSettings ? { escalationSettings } : {}),
+            // #890 — the tenant's greeting language + supported stack
+            // (tenant_settings.default_language / supported_languages), so a
+            // Spanish tenant's call is classified as Spanish.
+            ...(tenant.default_language === 'es' || tenant.default_language === 'en'
+              ? { defaultLanguage: tenant.default_language }
+              : {}),
+            ...(Array.isArray(tenant.supported_languages)
+              ? { supportedLanguages: tenant.supported_languages }
+              : {}),
           } as unknown as TenantSettings)
         : null;
     // Tooling fix (2026-08-09) — `SettingsRepository` grew
@@ -589,6 +637,11 @@ export function makeVoiceQualityDriverFactory(
       }
     }
 
+    // #897 — one agreement repo for the lookup bundle AND the caller-plan
+    // resolver (app.ts shares one too), so a plan a lookup can see is the
+    // plan the classifier is told about.
+    const agreementRepo = new InMemoryAgreementRepository();
+
     const driver = new TextModeDriver({
       voiceSessionStore: store,
       bus: fctx.bus,
@@ -612,7 +665,7 @@ export function makeVoiceQualityDriverFactory(
           invoiceRepo: fctx.repos.invoiceRepo,
           estimateRepo: fctx.repos.estimateRepo,
           leadRepo: fctx.repos.leadRepo,
-          agreementRepo: new InMemoryAgreementRepository(),
+          agreementRepo,
           moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
           catalogRepo,
           settingsRepo,
@@ -636,6 +689,14 @@ export function makeVoiceQualityDriverFactory(
         tenantTimezoneResolver: async (t: string) =>
           (await settingsRepo.findByTenant(t))?.timezone,
         ...(now ? { now } : {}),
+      },
+      // #897 — the prompt-section resolvers production wires (app.ts).
+      verticalPromptResolver: corpusVerticalPromptResolver(script, fctx.tenantId),
+      callerPlanResolver: async (tenantId: string, customerId: string) => {
+        const section = formatCallerPlanForPrompt(
+          await buildCallerPlanContext(tenantId, customerId, agreementRepo),
+        );
+        return section.length > 0 ? section : undefined;
       },
       onCallRepo,
       dncRepo,
