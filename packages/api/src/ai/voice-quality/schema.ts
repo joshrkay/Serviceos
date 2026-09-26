@@ -115,6 +115,12 @@ export const VoiceQualityScriptSchema = z.object({
          * is rejected (revoked) and no appointment row was created.
          */
         noLiveBooking: z.boolean().optional(),
+        /**
+         * #898 — the session cost cap ended the call: exactly the production
+         * `session_terminated{cap_exceeded}` fired, and no classify call was
+         * made after it. Graded session-wide under criterion 11.
+         */
+        capEndsCall: z.boolean().optional(),
       }),
       hangupAfter: z.boolean().default(false),
     }),

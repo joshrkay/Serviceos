@@ -549,3 +549,54 @@ describe('#1222 — gradeDispositionStructured life-safety expectations', () => 
     expect(result.reasons[11]).toMatch(/E1/);
   });
 });
+
+/**
+ * #898 — `capEndsCall`: the session cost cap ended the call (one
+ * session_terminated{cap_exceeded}) and the agent made no model call after
+ * it. The old cost-cap-drain script could only express this in a free-text
+ * `spokenAnswerMatches` the Layer 1 mock judge always passes.
+ */
+describe('#898 — gradeDispositionStructured capEndsCall', () => {
+  const turn = {
+    caller: 'Anyway, what is your favourite colour?',
+    expected: { capEndsCall: true },
+    hangupAfter: false,
+  };
+
+  it('passes when the cap ended the call and nothing was classified afterwards', () => {
+    const result = gradeDispositionStructured(
+      makeObservation({
+        events: [
+          intentEvent('unknown', 1_000),
+          { type: 'session_terminated', cause: 'cap_exceeded', ts: 1_001 },
+        ],
+      }),
+      makeScript({ turns: [turn] }),
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  it('fails criterion 11 when the cap never ended the call', () => {
+    const result = gradeDispositionStructured(
+      makeObservation({ events: [intentEvent('unknown', 1_000)] }),
+      makeScript({ turns: [turn] }),
+    );
+    expect(result.failedCriteria).toContain(11);
+  });
+
+  it('fails criterion 11 when the model was still called after the cap ended the call', () => {
+    const result = gradeDispositionStructured(
+      makeObservation({
+        events: [
+          { type: 'session_terminated', cause: 'cap_exceeded', ts: 1_000 },
+          // The crossing turn's reply, then a LATER turn classifies again.
+          { type: 'speech_outbound', transcript: 'Let me connect you.', turnIndex: 0, ts: 1_001 },
+          intentEvent('unknown', 1_002),
+        ],
+      }),
+      makeScript({ turns: [turn] }),
+    );
+    expect(result.failedCriteria).toContain(11);
+    expect(result.reasons[11]).toMatch(/after the cost cap/);
+  });
+});

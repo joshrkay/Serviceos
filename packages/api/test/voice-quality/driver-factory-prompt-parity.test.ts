@@ -13,7 +13,8 @@ import { LLMGateway, type LLMRequest, type LLMResponse } from '../../src/ai/gate
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
 import { makeRepoBundle } from '../../src/ai/voice-quality/runner';
 import { VoiceQualityScriptSchema } from '../../src/ai/voice-quality/schema';
-import { makeVoiceQualityDriverFactory } from './voice-quality-driver-factory';
+import { createMockLLMGateway } from '../../src/ai/gateway/factory';
+import { makeVoiceQualityDriverFactory, ScriptAwareMockGateway } from './voice-quality-driver-factory';
 
 const TENANT = 't_897_parity';
 
@@ -75,5 +76,61 @@ describe('#897 — corpus driver factory prompt parity', () => {
     expect(system).toContain('Tenant vertical context');
     expect(system).toMatch(/furnace|HVAC/i);
     expect(system).toContain('Customer protection intents');
+    // #888/#897 — a customer's line is classified on the production S1
+    // 'caller' taxonomy, not the full operator prompt (~4x the tokens).
+    expect(system).toContain('from an inbound customer caller');
+  });
+
+  it('#888 — the corpus mock reports classify usage sized to the real prompt, not a fixed 10 tokens', async () => {
+    const bus = new AgentEventBus();
+    const { gateway: inner } = createMockLLMGateway();
+    const driver = makeVoiceQualityDriverFactory(script)({
+      repos: makeRepoBundle('memory'),
+      bus,
+      gateway: new ScriptAwareMockGateway(script, inner),
+      scriptId: script.id,
+      tenantId: TENANT,
+    });
+    const { sessionId } = await driver.startSession({
+      tenantId: TENANT,
+      callerId: script.callerId,
+      callerIdBlocked: false,
+    });
+    await driver.speak(sessionId, script.turns[0].caller);
+    const classified = bus.filterByType('intent_classified');
+    await driver.endSession(sessionId);
+
+    // The caller-profile prompt + vertical + protection sections are ~16k
+    // characters (~4k tokens at the gateway's 4-chars-per-token estimate).
+    expect(classified).toHaveLength(1);
+    expect(classified[0].tokenUsage.inputTokens).toBeGreaterThan(3_000);
+    expect(classified[0].tokenUsage.inputTokens).toBeLessThan(9_000);
+    expect(classified[0].tokenUsage.outputTokens).toBeGreaterThan(0);
+  });
+
+  it('a script that declares the operator taxonomy (D-028 follow-up) keeps the operator prompt', async () => {
+    const gateway = new RecordingGateway();
+    const operatorScript = VoiceQualityScriptSchema.parse({
+      ...script,
+      fixtures: { ...script.fixtures, tenant: { ...script.fixtures.tenant, harnessOperatorTaxonomy: true } },
+    });
+    const driver = makeVoiceQualityDriverFactory(operatorScript)({
+      repos: makeRepoBundle('memory'),
+      bus: new AgentEventBus(),
+      gateway,
+      scriptId: operatorScript.id,
+      tenantId: TENANT,
+    });
+    const { sessionId } = await driver.startSession({
+      tenantId: TENANT,
+      callerId: operatorScript.callerId,
+      callerIdBlocked: false,
+    });
+    await driver.speak(sessionId, operatorScript.turns[0].caller);
+    await driver.endSession(sessionId);
+
+    const classify = gateway.requests.find((r) => r.taskType === 'classify_intent');
+    const system = classify!.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    expect(system).toContain('from a field service operator');
   });
 });

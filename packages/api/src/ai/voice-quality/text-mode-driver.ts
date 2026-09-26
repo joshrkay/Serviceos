@@ -109,7 +109,6 @@ import {
   lookupExecutedEvent,
   sessionTerminatedEvent,
   speechOutboundEvent,
-  costIncurredEvent,
 } from './events';
 import {
   VoiceSessionStore,
@@ -126,7 +125,6 @@ import type { CallingAgentEvent, SideEffect } from '../agents/customer-calling/t
 import { enforceCompliance } from '../skills/enforce-compliance';
 import { escalateToHuman } from '../skills/escalate-to-human';
 import { toEscalationReason } from '../agents/customer-calling/inapp-adapter';
-import { estimateCostCents } from '../skills/session-cost-tracker';
 import { createAuditEvent } from '../../audit/audit';
 import { normalizePhone, type DncRepository } from '../../compliance/dnc';
 import type { SettingsRepository } from '../../settings/settings';
@@ -260,6 +258,18 @@ export interface TextModeDriverDeps {
    * deployment.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * #888/#897 — the classifier surface PROFILE is production's by default
+   * (`classifierProfileForSession`: a customer's line gets the S1 'caller'
+   * taxonomy, ~4x fewer tokens than the operator prompt). A corpus script
+   * that asks operator-only actions from a customer's line (log an expense,
+   * record a refund, update a customer…) — which the caller profile rightly
+   * refuses — declares `fixtures.tenant.harnessOperatorTaxonomy`, and the
+   * factory sets this to classify on the full operator taxonomy instead.
+   * A visible, per-script divergence; re-personaing those scripts is the
+   * D-028 follow-up.
+   */
+  operatorTaxonomyOverride?: boolean;
   callerPlanResolver?: (tenantId: string, customerId: string) => Promise<string | undefined>;
   /** Used as `userId` on synthesized voice-action-router messages. */
   systemActorId?: string;
@@ -311,6 +321,9 @@ interface TurnState {
 
 /** Adversarial payload patterns (SQL / markup injection) in caller text. */
 const ADVERSARIAL_INPUT_RE = /drop\s+table|union\s+select|;\s*--|'\)\s*;|<\s*script|--\s*$/i;
+
+/** #898 — spoken on a scripted turn that arrives after the call already ended. */
+const CALL_ENDED_LINE = 'This call has ended.';
 
 /** Repeated identical mutation intents beyond this count escalate as abuse. */
 const SPAM_INTENT_THRESHOLD = 5;
@@ -701,6 +714,15 @@ export class TextModeDriver implements AgentDriver {
 
     let agentResponse: string;
 
+    // #898 — a call the session cost cap ended is over: production never
+    // classifies again (the FSM is escalating / the call is torn down), so a
+    // scripted turn arriving after it makes no model call and moves nothing.
+    if (session.machine.currentContext.escalationReason === 'cost_cap_exceeded') {
+      agentResponse = CALL_ENDED_LINE;
+      this.appendAgentAndEmit(session, sessionId, agentResponse);
+      return { agentResponse, latencyMs: performance.now() - startedAt };
+    }
+
     // RV-140/RV-142 — deterministic emergency-keyword interrupt, mirroring the
     // telephony transports (twilio-adapter.runEmergencyScan /
     // mediastream scanInterimForEmergency): a life-safety phrase in the caller
@@ -752,21 +774,16 @@ export class TextModeDriver implements AgentDriver {
       // #897 — the SAME context assembly the Gather adapter and speechTurn
       // call, so the corpus sees the production prompt (vertical + plan
       // sections, surface profile, owner / protection flags, call language).
-      //
-      // ONE deliberate divergence remains: the surface PROFILE. Production
-      // classifies a customer's line on the S1 'caller' taxonomy (#886/#887);
-      // 21 corpus scripts still ask operator-only actions (log an expense,
-      // record a refund, update a customer…) from a customer's line, which
-      // the caller profile correctly refuses. Re-personaing them is a corpus
-      // decision tracked as the D-028 follow-up, so the harness keeps the
-      // full ('operator') taxonomy — the profile is dropped here, and ONLY
-      // the profile.
-      const { classifierProfile: _profileDeferredD028, ...classifyContext } =
-        await this.voiceProcessor.buildPhoneClassifyContext(session, session.tenantId);
+      const classifyContext = await this.voiceProcessor.buildPhoneClassifyContext(
+        session,
+        session.tenantId,
+      );
       const classification = await classifyIntent(
         callerTranscript,
         {
           ...classifyContext,
+          // The one declared divergence (see `operatorTaxonomyOverride`).
+          ...(this.deps.operatorTaxonomyOverride ? { classifierProfile: 'operator' as const } : {}),
           // Harness-only (not prompt-bearing): suppresses the deterministic
           // sign-up override for a caller-ID-resolved customer.
           callerIsExistingCustomer: state?.identityState === 'resolved',
@@ -774,28 +791,13 @@ export class TextModeDriver implements AgentDriver {
         this.deps.gateway,
       );
 
-      // Cost accounting: feed the classifier's usage into the real
-      // session cost tracker (same path inapp-adapter uses) and emit
-      // cost_incurred for the harness tally.
-      let capExceeded = false;
-      if (classification.tokenUsage) {
-        const cents = estimateCostCents(
-          classification.tokenUsage.input,
-          classification.tokenUsage.output,
-        );
-        const capEvents = session.costTracker.recordUsage({
-          inputTokens: classification.tokenUsage.input,
-          outputTokens: classification.tokenUsage.output,
-          costCents: cents,
-        });
-        session.events.emit(
-          'voice-event',
-          costIncurredEvent(cents, session.costTracker.totals.costCents),
-        );
-        capExceeded =
-          session.costTracker.isExceeded ||
-          capEvents.some((e) => e.type === 'cost_cap_exceeded');
-      }
+      // #898 — cost accounting through the SAME seam the phone transports
+      // use (`processor.recordCost`): records the usage, emits
+      // cost_incurred, and on the turn the session cap is crossed emits the
+      // one `session_terminated{cap_exceeded}` and returns true. The FSM's
+      // cost_cap_exceeded escalation below then hands the caller off, and the
+      // call is over (see the ended-session guard at the top of speak()).
+      const capExceeded = this.voiceProcessor.recordCost(session, classification.tokenUsage);
 
       const intent = classification.intentType;
       if (state) {

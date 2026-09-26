@@ -310,6 +310,26 @@ function lifeSafetyFailure(
       return `turn ${turnIndex}: spoken reply is missing ${missing.map((m) => `"${m}"`).join(', ')}`;
     }
   }
+  if (expected.capEndsCall !== undefined) {
+    const capEndIndex = obs.events.findIndex(
+      (e) => e.type === 'session_terminated' && e.cause === 'cap_exceeded',
+    );
+    const capEnded = capEndIndex >= 0;
+    if (capEnded !== expected.capEndsCall) {
+      return `turn ${turnIndex}: expected capEndsCall=${expected.capEndsCall}, got ${capEnded}`;
+    }
+    // The turn that crossed the cap still reports its own classification
+    // (the driver emits intent_classified at the end of the turn); anything
+    // classified after that turn's reply was spoken is a model call made on
+    // a call that was already over.
+    const crossingTurnEnd = obs.events.findIndex(
+      (e, i) => i > capEndIndex && e.type === 'speech_outbound',
+    );
+    const after = crossingTurnEnd >= 0 ? obs.events.slice(crossingTurnEnd + 1) : [];
+    if (capEnded && after.some((e) => e.type === 'intent_classified')) {
+      return `turn ${turnIndex}: the model was called after the cost cap ended the call`;
+    }
+  }
   if (expected.noLiveBooking === true) {
     const live = obs.proposals.filter(
       (p) => BOOKING_PROPOSAL_TYPES.has(p.proposalType) && p.status !== 'rejected',

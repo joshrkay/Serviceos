@@ -91,17 +91,17 @@
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 15195,
+          "output": 47,
+          "total": 15242
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 15195,
+        "outputTokens": 47,
         "costCents": 0
       },
-      "recordedAt": "2026-09-26T23:08:44.783Z"
+      "recordedAt": "2026-09-26T23:33:34.777Z"
     },
     {
       "requestHash": "sha256:3048c868c84dcdeb966ee36c169f5524f738196baa7a7375fa5f920aba7036e2",
@@ -116,17 +116,17 @@
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 16053,
+          "output": 47,
+          "total": 16100
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 16053,
+        "outputTokens": 47,
         "costCents": 0
       },
-      "recordedAt": "2026-09-26T23:08:44.769Z"
+      "recordedAt": "2026-09-26T23:33:34.770Z"
     }
   ]
 }

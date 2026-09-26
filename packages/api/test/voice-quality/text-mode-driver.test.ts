@@ -593,6 +593,46 @@ describe('VQ-007 — TextModeDriver', () => {
     expect(e1Audit).toHaveLength(1);
   });
 
+  it('#898 — crossing the session cost cap ends the call once (cap_exceeded) and no later turn calls the model', async () => {
+    const { gateway } = createMockLLMGateway();
+    // One classify turn that alone exceeds the telephony input cap (72,000).
+    const complete = vi.spyOn(gateway, 'complete').mockResolvedValue({
+      content: JSON.stringify({ intentType: 'lookup_appointments', confidence: 0.95 }),
+      model: 'mock',
+      provider: 'mock',
+      latencyMs: 1,
+      tokenUsage: { input: 80_000, output: 50, total: 80_050 },
+    });
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([['t-898', [{ id: 'oncall_1', userId: 'dispatcher_1', orderIndex: 0 }]]]),
+    );
+    const driver = new TextModeDriver({
+      voiceSessionStore: h.store,
+      bus: h.bus,
+      gateway,
+      proposalRepo: h.proposalRepo,
+      customerRepo: h.customerRepo,
+      onCallRepo,
+      systemActorId: 'system:vq-test',
+    });
+    const { sessionId } = await driver.startSession({
+      tenantId: 't-898',
+      callerId: '+15555550898',
+      callerIdBlocked: false,
+    });
+
+    await driver.speak(sessionId, 'So what is the weather like where you are?');
+    await driver.speak(sessionId, 'And did you catch the game last night?');
+
+    const ended = h.bus.filterByType('session_terminated');
+    expect(ended.map((e) => e.cause)).toEqual(['cap_exceeded']);
+    expect(h.bus.filterByType('escalation_triggered').map((e) => e.reason)).toEqual([
+      'cost_cap_exceeded',
+    ]);
+    // The second turn arrives after the call ended: no model call is made.
+    expect(complete.mock.calls.filter(([r]) => r.taskType === 'classify_intent')).toHaveLength(1);
+  });
+
   it('WS1 — an owner-session emits a verify_owner_identity lookup at establishment', async () => {
     const { sessionId } = await h.driver.startSession({
       tenantId: 't-owner',
