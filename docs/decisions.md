@@ -1084,3 +1084,53 @@ entity resolver shipping with nonexistent column names because its `Pool` was mo
   perfectly RLS-scoped and still unproven across tenants.
 - *Grade every row now from the existing scan.* Rejected: the scan is a keyword heuristic. It is
   sound as an aggregate and not sound per row, and a wrong grade is worse than an absent one.
+
+---
+
+## D-033 — A capability is declared once; every surface's map derives from the declaration
+
+**Date:** 2026-09-26
+**Status:** Accepted
+**Resolves:** #840 (map #833, build epic #852). Parts 2 and 3 below resolve #841 and #842.
+
+**Context.** Adding one intent touched 13 production files across two packages, held together by
+~3,300 lines of list-agreement tests, and it still shipped incomplete twice. The failure shape was
+always the same: a hand-kept per-surface list (the intent → proposal-type map, then its three
+drifted copies; the chat dispatch map, which silently lacked 18 intents until Task 15) that nobody
+remembered to extend.
+
+**Decision (part 1 — the declaration, #840).**
+
+1. **The unit is the intent.** `packages/api/src/capabilities/capabilities.ts#CAPABILITIES` holds
+   one declaration per classifiable intent, typed `Record<Exclude<IntentType,'unknown'>, …>` —
+   adding an intent to `SUPPORTED_INTENTS` does not compile until it is declared. Per proposal type
+   was rejected: four intents alias an existing type, and lookups, the direct act and the dialogue
+   intents would have no home. Per a broader "capability spanning both" was rejected as a second
+   vocabulary for the same thing.
+2. **A capability declares** its `kind` (proposal · lookup · direct_act · approval · dialogue), its
+   `proposalType` (proposal kind — naming the type IS the drafting/execution handler binding, since
+   both registries are keyed by it), a spoken `example`, and `unavailableOn` opt-outs. It does
+   **not** declare what already has exactly one owner: the action class (derived from the type), the
+   payload contract, the spoken summary, or its proof (part 2).
+3. **Parity is the default; a surface opts out by declaration, with a reason.** Surfaces are
+   `phone` (every transport — transport divergence is the coverage table's job), `memo`, `chat`.
+4. **Derived, not hand-kept:** `INTENT_TO_PROPOSAL_TYPE` (phone, memo, in-app voice),
+   `CHAT_INTENT_TO_REGISTRY_KEY` and `CHAT_DISPATCH_EXCLUDED_INTENTS`. **Stays hand-maintained, on
+   purpose:** the S1 caller allowlist (the security boundary — a declaration can never widen what an
+   unauthenticated caller reaches), the per-profile accept sets, the coverage table (turn-level
+   behaviours per transport, including holes nobody chose), and `SUPPORTED_INTENTS` (its order feeds
+   the classifier prompt and every cassette hash).
+
+**Consequences.** A new `kind: 'proposal'` declaration is dispatched on phone, memo, in-app and chat
+with no other edit — pinned by negative controls that plant a declaration and watch it reach both
+maps (`test/capabilities/capability-declarations.test.ts`). The existing list-agreement suites
+(`drafting-surface-parity`, `assistant-dropped-intents`, the single-map contract) keep passing
+unchanged against the derived maps; they now guard the derivation rather than two hand copies.
+
+**Alternatives rejected:**
+- *Declarations that also carry handlers (a registry of objects).* Rejected for now: the drafting
+  and execution registries are already keyed by proposal type and constructed with runtime deps in
+  `app.ts`; moving construction here collides with D-024's deferred `app.ts` decomposition.
+- *Derive `SUPPORTED_INTENTS` from the declarations.* Rejected: it would reorder the classifier
+  prompt and invalidate the whole cassette corpus for no behavioural gain; the `Record` type already
+  makes the two sets provably equal.

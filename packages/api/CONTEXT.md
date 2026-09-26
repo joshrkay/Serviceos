@@ -35,6 +35,11 @@ terms float.
 - **Capability** — one thing a tradesperson can do by speaking: an intent plus
   whatever answers or executes it. The catalog lists them; the map (#833) is
   about making their surface coverage structural.
+- **Capability declaration** — the one entry per intent in
+  `capabilities/capabilities.ts#CAPABILITIES` (D-033): kind, proposal type,
+  spoken example, and per-surface opt-outs (`unavailableOn`, each with a
+  reason). Every surface's intent map is derived from it, so a new
+  declaration is served everywhere unless it opts out.
 - **Parity** — the same capability behaves the same on every surface it
   targets. Structural parity means a new capability cannot land on one surface
   and silently miss another. Until parity is structural, the coverage table

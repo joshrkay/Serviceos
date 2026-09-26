@@ -380,6 +380,8 @@ export { assistantChatRequestSchema };
  */
 import { CONFIRM_NOTHING_PENDING_LINE } from '../ai/agents/customer-calling/transitions';
 export { CONFIRM_NOTHING_PENDING_LINE };
+import { CAPABILITIES, deriveChatDispatch } from '../capabilities/capabilities';
+import { CHAT_DEDICATED_BRANCH_INTENTS } from '../ai/voice-turn/coverage-table';
 
 /**
  * The "nothing happened" sentence is no longer assembled here.
@@ -2187,63 +2189,17 @@ function downgradeIfCallerLacksDirectPermission(
  * either drafts or is skipped), so it special-cases `create_customer`
  * separately, alongside this map, rather than folding it in here.
  */
-export const CHAT_INTENT_TO_REGISTRY_KEY: Readonly<Record<string, ProposalType>> = {
-  draft_estimate: 'draft_estimate',
-  update_estimate: 'update_estimate',
-  create_invoice: 'draft_invoice',
-  send_invoice: 'send_invoice',
-  issue_invoice: 'issue_invoice',
-  update_invoice: 'update_invoice',
-  reschedule_appointment: 'reschedule_appointment',
-  cancel_appointment: 'cancel_appointment',
-  reassign_appointment: 'reassign_appointment',
-  confirm_appointment: 'confirm_appointment',
-  create_job: 'create_job',
-  update_job: 'update_job',
-  send_payment_reminder: 'send_payment_reminder',
-  apply_late_fee: 'apply_late_fee',
-  send_estimate_nudge: 'send_estimate_nudge',
-  batch_invoice: 'batch_invoice',
-  create_invoice_schedule: 'create_invoice_schedule',
-  record_payment: 'record_payment',
-  notify_delay: 'notify_delay',
-  add_note: 'add_note',
-  log_time_entry: 'log_time_entry',
-  log_expense: 'log_expense',
-  create_appointment: 'create_appointment',
-  send_estimate: 'send_estimate',
-  update_customer: 'update_customer',
-  // Task 15 — the 18 intents a mechanical derivation (every
-  // INTENT_TO_PROPOSAL_TYPE key checked against this map) found with a real
-  // drafting handler in `sharedHandlers` and no chat dispatch entry.
-  add_crew_member: 'add_crew_member',
-  remove_crew_member: 'remove_crew_member',
-  convert_lead: 'convert_lead',
-  mark_lead_lost: 'mark_lead_lost',
-  add_service_location: 'add_service_location',
-  request_feedback: 'request_feedback',
-  record_refund: 'record_refund',
-  apply_credit: 'apply_credit',
-  send_customer_message: 'send_customer_message',
-  create_change_order: 'create_change_order',
-  create_service_agreement: 'create_service_agreement',
-  add_material: 'add_material',
-  update_catalog_item: 'update_catalog_item',
-  add_catalog_item: 'add_catalog_item',
-  // Alias intents — dispatch keyed by the classifier's INTENT (this map's
-  // key), drafting keyed by PROPOSAL type (the value), so each rides its
-  // target's handler unchanged, exactly like `create_invoice` → `draft_invoice`
-  // above.
-  schedule_inspection: 'create_appointment',
-  log_permit: 'add_note',
-  log_warranty_claim: 'create_job',
-  // log_mileage ALSO aliases log_expense's handler, but — unlike the three
-  // aliases above — needs `context.intent` threaded through (see the
-  // `intent:` field on both `.handle()` calls below) so LogExpenseTaskHandler
-  // can tell it apart from a plain log_expense turn (Task 11,
-  // TaskContext.intent's doc comment).
-  log_mileage: 'log_expense',
-};
+// #840 — the chat dispatch map and its exclusions are DERIVED from the
+// capability declarations (capabilities/capabilities.ts). A new proposal
+// capability is dispatched here with no edit to this file; the only way to
+// keep one off chat is an `unavailableOn: { chat: '<reason>' }` opt-out on
+// its declaration, which lands it in CHAT_DISPATCH_EXCLUDED_INTENTS below.
+// Alias intents (schedule_inspection → create_appointment, log_mileage →
+// log_expense, …) dispatch keyed by the classifier's INTENT and draft keyed by
+// the PROPOSAL type; log_mileage additionally needs `context.intent` threaded
+// through (the `intent:` field on both `.handle()` calls below).
+const CHAT_DISPATCH = deriveChatDispatch(CAPABILITIES, CHAT_DEDICATED_BRANCH_INTENTS);
+export const CHAT_INTENT_TO_REGISTRY_KEY: Readonly<Record<string, ProposalType>> = CHAT_DISPATCH.dispatch;
 
 /**
  * Task 15 quality-review fix (C1/C2) — intents that read `context.customerId`
@@ -2346,8 +2302,10 @@ export const CHAT_CONTEXT_CUSTOMER_ID_INTENTS: ReadonlySet<string> = new Set([
 
 /**
  * Task 15 quality-review fix (I1) — intents this route deliberately never
- * dispatches, for two structurally different reasons. Single source of
- * truth so the rationale lives in exactly one place instead of five
+ * dispatches, for two structurally different reasons. #840: derived from the
+ * `unavailableOn.chat` opt-outs on the capability declarations, where each
+ * reason now lives; the history below explains the four members. Originally
+ * a single source of truth so the rationale lived in exactly one place instead of five
  * (assistant.ts's two dispatch-map comments plus three test files, all
  * previously hand-copied and — for `emergency_dispatch` / `update_brand_
  * voice` — citing the wrong authority):
@@ -2380,12 +2338,7 @@ export const CHAT_CONTEXT_CUSTOMER_ID_INTENTS: ReadonlySet<string> = new Set([
  *     same generic `INTENT_TO_PROPOSAL_TYPE` dispatch every other mapped
  *     intent uses. Recorded here rather than silently left as a gap.
  */
-export const CHAT_DISPATCH_EXCLUDED_INTENTS: ReadonlySet<string> = new Set([
-  'respond_to_review',
-  'create_standing_instruction',
-  'update_brand_voice',
-  'emergency_dispatch',
-]);
+export const CHAT_DISPATCH_EXCLUDED_INTENTS: ReadonlySet<string> = CHAT_DISPATCH.excluded;
 
 async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
