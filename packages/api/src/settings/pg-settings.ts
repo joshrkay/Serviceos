@@ -56,6 +56,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     nextEstimateNumber: row.next_estimate_number as number,
     nextInvoiceNumber: row.next_invoice_number as number,
     defaultPaymentTermDays: row.default_payment_term_days as number,
+    // #1288 — migration 289. Absent on narrow SELECTs that don't project it.
+    ...(row.default_tax_rate_bps !== undefined && row.default_tax_rate_bps !== null
+      ? { defaultTaxRateBps: Number(row.default_tax_rate_bps) }
+      : {}),
     terminologyPreferences,
     activeVerticalPacks,
     // Phase 12 — columns added in migration 063 (P12-001).
@@ -71,6 +75,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    // #1033 — migration 289 (NOT NULL DEFAULT true).
+    notifyTechniciansBySms: row.notify_technicians_by_sms as boolean | undefined,
     appointmentReminderOffsetsHours: normalizeReminderOffsets(
       parseJsonbArray(row.appointment_reminder_offsets_hours),
     ),
@@ -379,12 +385,16 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         nextEstimateNumber: 'next_estimate_number',
         nextInvoiceNumber: 'next_invoice_number',
         defaultPaymentTermDays: 'default_payment_term_days',
+        // #1288 — migration 289.
+        defaultTaxRateBps: 'default_tax_rate_bps',
         // Phase 12 — migration 063.
         backupSupervisorUserId: 'backup_supervisor_user_id',
         unsupervisedProposalRouting: 'unsupervised_proposal_routing',
         // Tier 4 — migration 075.
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
+        // #1033 — migration 289.
+        notifyTechniciansBySms: 'notify_technicians_by_sms',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
         // Migration 194.
         sendThankYouSms: 'send_thank_you_sms',

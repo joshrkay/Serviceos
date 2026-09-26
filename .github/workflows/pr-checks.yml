@@ -204,6 +204,35 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: packages/api/voice-quality-report.json
 
+  # #839 — voice-eval baseline regression gate.
+  #
+  # Runs the voice-eval harness's OFFLINE intent + slot evals (deterministic,
+  # no network, no secrets — so it is fork-safe on this public repo) and fails
+  # when any metric drops below the committed baseline in
+  # packages/voice-eval/baselines/*-offline.json, or when the golden set
+  # changed without the baseline being re-recorded in the same PR. A corpus
+  # or taxonomy change therefore always ships with a reviewed baseline diff:
+  #   npx tsx packages/voice-eval/run-intent-eval.ts --record-baseline packages/voice-eval/baselines/intent-offline.json
+  #   npx tsx packages/voice-eval/run-slot-eval.ts --record-baseline packages/voice-eval/baselines/slot-offline.json
+  # The LIVE (production-model) comparison needs the API key, so it runs in
+  # voice-eval-live.yml against baselines/*-live.json instead. No `needs:` —
+  # it runs alongside `test` and adds no PR latency.
+  voice-eval-gate:
+    name: Voice eval baseline gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      - name: Intent eval vs committed baseline
+        run: npx tsx packages/voice-eval/run-intent-eval.ts --gate --baseline packages/voice-eval/baselines/intent-offline.json
+      - name: Slot eval vs committed baseline
+        run: npx tsx packages/voice-eval/run-slot-eval.ts --gate --baseline packages/voice-eval/baselines/slot-offline.json
+
   # WS7 — Mobile typecheck gate.
   #
   # packages/mobile is an isolated Expo project (intentionally NOT a root npm

@@ -108,6 +108,8 @@ export enum PaymentMethod {
   CASH = 'cash',
   CHECK = 'check',
   CREDIT_CARD = 'credit_card',
+  // #1099 — an in-person (Stripe Terminal) card tap, separable from an online card.
+  CARD_PRESENT = 'card_present',
   BANK_TRANSFER = 'bank_transfer',
   STRIPE = 'stripe',
   OTHER = 'other',

@@ -1,11 +1,18 @@
 # Voice action catalog — what a tradesperson can do by speaking
 
-**Audience:** product + engineering. **Source of truth:** the code, not this
-file. The machine-readable block at the bottom is pinned to the code by
-`packages/api/test/ai/voice-action-catalog.contract.test.ts` — if an intent,
-proposal type, action class, or execution handler changes and this file is not
-updated, that test fails. (This is deliberate: `docs/remaining-features.md`
-rotted because it was prose with no test behind it.)
+**Audience:** product + engineering. **Source of truth:** the capability
+declarations in `packages/api/src/capabilities/capabilities.ts` (D-034). Every
+block between `BEGIN generated` / `END generated` markers — and the
+machine-readable block at the bottom — is **generated** from them by
+`npm run catalog:generate` (in `packages/api`), and
+`packages/api/test/ai/voice-action-catalog.contract.test.ts` fails CI when the
+committed file differs from a regenerate. Do not edit inside the markers.
+
+Prose outside the markers explains; it must not restate the generated facts
+(counts, proof, which surface serves what). A fact in prose is a claim nothing
+checks — that is how this catalog lied twice (#842): a lookup "covered
+automatically" when dispatch was three switches, and a persistence column that
+listed 8 proofs when the tests held 29.
 
 A spoken instruction travels:
 
@@ -54,74 +61,92 @@ already has its own executable pin.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 48 actions can be spoken, drafted as a proposal, approved, and executed.
-"Persistence proof" = a Docker-gated integration test that proves the row +
-audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
-catch schema drift or a missing dependency).
+Each row can be spoken, drafted as a proposal, approved, and executed.
+"Execution proof" means a Docker-gated integration test that proves the row +
+audit event land in Postgres (vs. mocked-DB-only coverage, which cannot catch
+schema drift or a missing dependency). It is derived from `provesExecution(...)`
+tags in the tests (D-034 part 2); a capability with none is either in the
+shrink-only grandfather register or fails CI.
 
-> **⚠️ The Persistence-proof column below is hand-maintained and is known to be
-> stale.** A 2026-08-19 audit read the integration tests directly and found
-> **29** actions with real-database proof; this column lists 8. It understates
-> real coverage by more than 3×.
->
-> It is deliberately NOT being hand-corrected here. A 48-row column updated by
-> hand is what produced the drift in the first place, and re-typing it would
-> restart the same clock. Whether this catalog becomes generated from code,
-> reduced to prose that cannot make checkable claims, or deleted is the
-> decision at #842; the proof bar it should be measured against is #841.
->
-> Until then, treat the column as a lower bound and read the tests.
+<!-- BEGIN generated: speakable -->
+<!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
+48 actions — 40 with real-database execution proof, 8 without. "Surfaces" is phone / memo / chat; an opt-out is declared with its reason in the declaration. "Execution proof" lists the integration tests that carry a `provesExecution(...)` tag for the proposal type and open a real pool (#841) — derived from the tests, never typed here.
 
-| Spoken example | Intent | Proposal type | Class | Persistence proof |
-|---|---|---|---|---|
-| "Invoice the Johnson job, $450 capacitor + labor" | `create_invoice` | `draft_invoice` | capture | integration (`integration/draft-invoice-execution.test.ts`) |
-| "Quote the Khan install, 3-ton condenser" | `draft_estimate` | `draft_estimate` | capture | partial |
-| "Book Carlos at the Garcia place Tue 2pm" | `create_appointment` | `create_appointment` | capture | integration (`integration/appointments.test.ts`) |
-| "Add a $90 contactor to the Smith invoice" | `update_invoice` | `update_invoice` | capture | unit |
-| "Change the Khan quote to a 3-ton" | `update_estimate` | `update_estimate` | capture | unit |
-| "Issue the Garcia invoice" | `issue_invoice` | `issue_invoice` | money | unit |
-| "Invoice all my completed jobs" | `batch_invoice` | `batch_invoice` | capture | handler-level |
-| "New customer Maria Alvarez, 480-555-0102" | `create_customer` | `create_customer` | capture | integration (`integration/voice-create-customer.test.ts`) |
-| "Open a job for Alvarez, no AC" | `create_job` | `create_job` | capture | integration (`integration/create-job-execution.test.ts`) |
-| "Mark the Henderson job in progress" | `update_job` | `update_job` | capture | integration (`integration/update-job-execution.test.ts`) |
-| "Move the Garcia job to Thursday 10" | `reschedule_appointment` | `reschedule_appointment` | capture | unit |
-| "Cancel Tuesday's Garcia appointment" | `cancel_appointment` | `cancel_appointment` | irreversible | unit |
-| "Put Carlos on the Garcia job instead of me" | `reassign_appointment` | `reassign_appointment` | capture | unit |
-| "Add Carlos to the Garcia appointment" | `add_crew_member` | `add_crew_member` | capture | handler-level |
-| "Take Carlos off Tuesday's job" | `remove_crew_member` | `remove_crew_member` | capture | handler-level |
-| "Note on the Patel job: wants morning visits" | `add_note` | `add_note` | capture | unit |
-| "Send the Johnson invoice" | `send_invoice` | `send_invoice` | comms | unit |
-| "Send the Khan estimate" | `send_estimate` | `send_estimate` | comms | unit |
-| "Nudge the Khan estimate again" | `send_estimate_nudge` | `send_estimate_nudge` | comms | handler-level |
-| "Chase the unpaid Smith invoice" | `send_payment_reminder` | `send_payment_reminder` | comms | handler-level |
-| "Add a $25 late fee to the Smith invoice" | `apply_late_fee` | `apply_late_fee` | money | handler-level |
-| "Mark the Smith invoice paid, $200 cash" | `record_payment` | `record_payment` | money | unit |
-| "Emergency, no heat at the Hayes place — page me" | `emergency_dispatch` | `emergency_dispatch` | irreversible | unit |
-| "Update Alvarez's phone number" | `update_customer` | `update_customer` | capture | unit |
-| "Log a $60 parts expense on the Patel job" | `log_expense` | `log_expense` | capture | unit |
-| "Convert the Greenfield lead to a customer" | `convert_lead` | `convert_lead` | capture | unit |
-| "Confirm the Garcia appointment" | `confirm_appointment` | `confirm_appointment` | capture | unit |
-| "Mark the Wagner lead lost — went with a competitor" | `mark_lead_lost` | `mark_lead_lost` | capture | unit |
-| "Add a service location for Greenfield, 12 Lakeshore" | `add_service_location` | `add_service_location` | capture | unit |
-| "Clock 2 hours on the Patel job" | `log_time_entry` | `log_time_entry` | capture | unit |
-| "Text the Garcia customer I'm 20 min late" | `notify_delay` | `notify_delay` | comms | unit |
-| "Ask the Smith customer for a review" | `request_feedback` | `request_feedback` | comms | unit |
-| "Set up 50% deposit, 50% on completion for the Hendersons" | `create_invoice_schedule` | `create_invoice_schedule` | capture | unit + handler-level (schedule execution: `proposals/invoice-schedule-handler.test.ts`) |
-| "Respond to that 1-star review" | `respond_to_review` | `review_response_proposal` | comms | unit |
-| "From now on always add a $79 diagnostic fee to AC calls" | `create_standing_instruction` | `create_standing_instruction` | capture | unit (table: integration via UB-A1 `integration/standing-instructions.test.ts`) |
-| "Set my brand voice: friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'" | `update_brand_voice` | `update_brand_voice` | manual | integration (`integration/update-brand-voice-voice-execution.test.ts`) |
-| "Schedule the rough-in inspection for Thursday" | `schedule_inspection` | `create_appointment` | capture | unit |
-| "Log permit 2024-1187 on the Patel job" | `log_permit` | `add_note` | capture | unit |
-| "Log a warranty callback for the Hendersons' water heater" | `log_warranty_claim` | `create_job` | capture | unit |
-| "Raise the diagnostic fee to 89 dollars" | `update_catalog_item` | `update_catalog_item` | capture | unit |
-| "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | unit |
-| "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
-| "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
-| "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
-| "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit + sweep round-trip (`proposals/create-service-agreement-handler.test.ts`: handler-created agreement → `runDueAgreements` → asserts a `generated`, not `failed`, run) |
-| "Add three boxes of half-inch PEX to the shopping list" | `add_material` | `add_material` | capture | unit (`proposals/add-material-handler.test.ts`) |
-| "Log 32 miles to the Patel job" | `log_mileage` | `log_expense` | capture | unit |
-| "Add a catalog item: smart thermostat install, 385" | `add_catalog_item` | `add_catalog_item` | capture | unit (`proposals/add-catalog-item-handler.test.ts`) |
+| Spoken example | Intent | Proposal type | Class | Surfaces | Execution proof |
+|---|---|---|---|---|---|
+| "Invoice the Johnson job, $450 capacitor + labor" | `create_invoice` | `draft_invoice` | capture | all | integration (`integration/draft-invoice-execution.test.ts`) |
+| "Quote the Khan install, 3-ton condenser" | `draft_estimate` | `draft_estimate` | capture | all | integration (`integration/draft-estimate-execution.test.ts`) |
+| "Book Carlos at the Garcia place Tue 2pm" | `create_appointment` | `create_appointment` | capture | all | integration (`integration/voice-inbound-appointment.test.ts`) |
+| "Add a $90 contactor to the Smith invoice" | `update_invoice` | `update_invoice` | capture | all | integration (`integration/approve-stall-five.test.ts`) |
+| "Change the Khan quote to a 3-ton" | `update_estimate` | `update_estimate` | capture | all | integration (`integration/update-estimate-execution.test.ts`) |
+| "Issue the Garcia invoice" | `issue_invoice` | `issue_invoice` | money | all | integration (`integration/issue-invoice-conversation-resolution.test.ts`) |
+| "Invoice all my completed jobs" | `batch_invoice` | `batch_invoice` | capture | all | **none** — grandfathered gap (#841) |
+| "New customer Maria Alvarez, 480-555-0102" | `create_customer` | `create_customer` | capture | all | integration (`integration/create-customer-execution.test.ts`) |
+| "Open a job for Alvarez, no AC" | `create_job` | `create_job` | capture | all | integration (`integration/create-job-execution.test.ts`) |
+| "Mark the Henderson job in progress" | `update_job` | `update_job` | capture | all | integration (`integration/update-job-execution.test.ts`) |
+| "Move the Garcia job to Thursday 10" | `reschedule_appointment` | `reschedule_appointment` | capture | all | integration (`integration/reschedule-appointment-voice.test.ts`) |
+| "Cancel Tuesday's Garcia appointment" | `cancel_appointment` | `cancel_appointment` | irreversible | all | integration (`integration/cancel-appointment-voice.test.ts`) |
+| "Put Carlos on the Garcia job instead of me" | `reassign_appointment` | `reassign_appointment` | capture | all | integration (`integration/reassign-appointment-voice.test.ts`) |
+| "Add Carlos to the Garcia appointment" | `add_crew_member` | `add_crew_member` | capture | all | integration (`integration/crew-voice-execution.test.ts`) |
+| "Take Carlos off Tuesday's job" | `remove_crew_member` | `remove_crew_member` | capture | all | integration (`integration/crew-voice-execution.test.ts`) |
+| "Note on the Patel job: wants morning visits" | `add_note` | `add_note` | capture | all | integration (`integration/add-note-voice-execution.test.ts`) |
+| "Send the Johnson invoice" | `send_invoice` | `send_invoice` | comms | all | integration (`integration/voice-collections-execution.test.ts`) |
+| "Send the Khan estimate" | `send_estimate` | `send_estimate` | comms | all | integration (`integration/autonomous-close-chain.test.ts`) |
+| "Nudge the Khan estimate again" | `send_estimate_nudge` | `send_estimate_nudge` | comms | all | integration (`integration/estimate-nudge.test.ts`) |
+| "Chase the unpaid Smith invoice" | `send_payment_reminder` | `send_payment_reminder` | comms | all | integration (`integration/approve-stall-five.test.ts`) |
+| "Add a $25 late fee to the Smith invoice" | `apply_late_fee` | `apply_late_fee` | money | all | integration (`integration/approve-stall-five.test.ts`) |
+| "Mark the Smith invoice paid, $200 cash" | `record_payment` | `record_payment` | money | all | integration (`integration/record-payment-refund-proposal-flow.test.ts`) |
+| "Emergency, no heat at the Hayes place — page me" | `emergency_dispatch` | `emergency_dispatch` | irreversible | phone, memo (not chat) | integration (`integration/emergency-dispatch-hold.test.ts`) |
+| "Update Alvarez's phone number" | `update_customer` | `update_customer` | capture | all | integration (`integration/ws3-consent-audit-atomicity.test.ts`) |
+| "Log a $60 parts expense on the Patel job" | `log_expense` | `log_expense` | capture | all | integration (`integration/log-expense-job-link.test.ts`) |
+| "Convert the Greenfield lead to a customer" | `convert_lead` | `convert_lead` | capture | all | **none** — grandfathered gap (#841) |
+| "Confirm the Garcia appointment" | `confirm_appointment` | `confirm_appointment` | capture | all | integration (`integration/ws3-consent-audit-atomicity.test.ts`) |
+| "Mark the Wagner lead lost — went with a competitor" | `mark_lead_lost` | `mark_lead_lost` | capture | all | **none** — grandfathered gap (#841) |
+| "Add a service location for Greenfield, 12 Lakeshore" | `add_service_location` | `add_service_location` | capture | all | **none** — grandfathered gap (#841) |
+| "Clock 2 hours on the Patel job" | `log_time_entry` | `log_time_entry` | capture | all | integration (`integration/log-time-entry-execution.test.ts`) |
+| "Text the Garcia customer I'm 20 min late" | `notify_delay` | `notify_delay` | comms | all | integration (`integration/approve-stall-five.test.ts`) |
+| "Ask the Smith customer for a review" | `request_feedback` | `request_feedback` | comms | all | integration (`integration/ws3-consent-audit-atomicity.test.ts`) |
+| "Schedule the rough-in inspection for Thursday" | `schedule_inspection` | `create_appointment` | capture | all | integration (`integration/voice-inbound-appointment.test.ts`) |
+| "Log permit 2024-1187 on the Patel job" | `log_permit` | `add_note` | capture | all | integration (`integration/add-note-voice-execution.test.ts`) |
+| "Log a warranty callback for the Hendersons' water heater" | `log_warranty_claim` | `create_job` | capture | all | integration (`integration/create-job-execution.test.ts`) |
+| "Raise the diagnostic fee to 89 dollars" | `update_catalog_item` | `update_catalog_item` | capture | all | integration (`integration/correction-repetition-meta-proposal.test.ts`) |
+| "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | all | integration (`integration/record-payment-refund-proposal-flow.test.ts`) |
+| "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | all | integration (`integration/draft-invoice-execution.test.ts`) |
+| "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | all | **none** — grandfathered gap (#841) |
+| "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | all | integration (`integration/draft-estimate-execution.test.ts`) |
+| "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | all | **none** — grandfathered gap (#841) |
+| "Add three boxes of half-inch PEX to the shopping list" | `add_material` | `add_material` | capture | all | integration (`integration/material-items.test.ts`) |
+| "Log 32 miles to the Patel job" | `log_mileage` | `log_expense` | capture | all | integration (`integration/log-expense-job-link.test.ts`) |
+| "Add a catalog item: smart thermostat install, 385" | `add_catalog_item` | `add_catalog_item` | capture | all | **none** — grandfathered gap (#841) |
+| "Set up 50% deposit, 50% on completion for the Hendersons" | `create_invoice_schedule` | `create_invoice_schedule` | capture | all | integration (`integration/milestone-billing.test.ts`) |
+| "Respond to that 1-star review" | `respond_to_review` | `review_response_proposal` | comms | phone, memo (not chat) | integration (`integration/service-credit-cap-9-5.test.ts`) |
+| "From now on always add a $79 diagnostic fee to AC calls" | `create_standing_instruction` | `create_standing_instruction` | capture | phone, memo (not chat) | **none** — grandfathered gap (#841) |
+| "Set my brand voice: friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'" | `update_brand_voice` | `update_brand_voice` | manual | phone, memo (not chat) | integration (`integration/update-brand-voice-voice-execution.test.ts`) |
+<!-- END generated: speakable -->
+
+### Surface opt-outs
+
+Parity is the default: a capability is served on every voice surface unless
+its declaration opts out, with a reason.
+
+<!-- BEGIN generated: surface-opt-outs -->
+<!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
+| Intent | Not served on | Why |
+|---|---|---|
+| `emergency_dispatch` | chat | the 2026-08-07 tradesperson plan keeps emergency dispatch surface-specific by design; chat answers with the generic unmapped-capability refusal (routes/assistant.ts buildUnmappedCapabilityReply) |
+| `respond_to_review` | chat | no drafting handler in the shared registry (ai/orchestration/handler-registry.ts) — only the memo router registers one, so chat has nothing to dispatch to |
+| `create_standing_instruction` | chat | no drafting handler in the shared registry (ai/orchestration/handler-registry.ts) — only the memo router registers one, so chat has nothing to dispatch to |
+| `update_brand_voice` | chat | no drafting handler in the shared registry (ai/orchestration/handler-registry.ts) — only the memo router registers one, so chat has nothing to dispatch to |
+| `language_switch` | memo | a recorded memo has no live call whose language can be switched (Task 13, 2026-08-07 plan) |
+| `operator_request` | memo | a recorded memo has no live operator to transfer to (Task 13, 2026-08-07 plan) |
+| `confirm` | memo | a recorded memo has no live pending question to confirm (Task 13, 2026-08-07 plan) |
+| `approve_proposal` | memo | a stored transcript must never approve or edit a mutation (RV-071 belt-and-braces guard in workers/voice-action-router.ts) |
+| `approve_proposal` | chat | D-025 scopes voice approval to a transport-identified owner LINE; in-app answers "Tap the card to approve — I don't take approvals by voice here yet." |
+| `reject_proposal` | memo | a stored transcript must never approve or edit a mutation (RV-071 belt-and-braces guard in workers/voice-action-router.ts) |
+| `reject_proposal` | chat | D-025 scopes voice approval to a transport-identified owner LINE; in-app answers "Tap the card to approve — I don't take approvals by voice here yet." |
+| `edit_proposal` | memo | a stored transcript must never approve or edit a mutation (RV-071 belt-and-braces guard in workers/voice-action-router.ts) |
+| `edit_proposal` | chat | D-025 scopes voice approval to a transport-identified owner LINE; in-app answers "Tap the card to approve — I don't take approvals by voice here yet." |
+<!-- END generated: surface-opt-outs -->
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -1279,12 +1304,26 @@ classifier intent + an `INTENT_TO_PROPOSAL_TYPE` entry so a transcript can reach
 them. Building the on-ramp is front-half-only (no new handler, schema, or
 migration).
 
-| Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
-|---|---|---|---|
-| "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
-| _(none — minted after entity resolution, not spoken)_ | `adopt_entity_alias` | manual | U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable |
-| _(none — conversational onboarding, not the voice intent classifier)_ | `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` | capture | B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment). |
-| _(none — minted internally as a companion/fallback, never a top-level classifier intent)_ | `callback` | capture | Task 14 (2026-08-07 tradesperson plan): `CallbackExecutionHandler` (`proposals/execution/callback-handler.ts`) — deliberately dep-free, registered unconditionally, always `isFullyWired()`. Fixes the pre-existing bug where an approved `callback` proposal had NO execution handler at all and threw `HANDLER_NOT_FOUND`, retrying into terminal `execution_failed`. A no-op-plus-audit is the correct semantic, not a gap: `callback` mutates nothing (surface.ts), its payload is already durably captured on the proposal row at DRAFT time — 4 production files / 5 `createProposal`/`buildProposal` call sites / 7 total content branches resolving to `proposalType: 'callback'` (see `proposals/execution/callback-handler.ts`'s class doc for the counting rule): negotiation-task.ts (2 direct calls, ALLOW branch + the enriched/default branch), complaint-task.ts (1 direct call, companion owner-followup), create-voice-turn-processor.ts (1 call, live-call negotiation FSM path, 2 of 3 evaluation-outcome branches), and sms/negotiation/inbound-negotiation-handler.ts (1 call, inbound-SMS negotiation guardrail, 2 of 3 branches — the only site stamping `callerPhone`); text-mode-driver.ts's after-hours branch also mints one but is the VQ-007 voice-quality harness, excluded from every count above (production after-hours is routes/telephony.ts's `afterHours` branch, which sends the caller to voicemail TwiML and drafts no `callback` proposal) — and the separate `call_me_back_tasks` operational-task system (voice/call-me-back/call-me-back.ts) is created directly by its own independent call sites (warm-transfer failure, E1 safety follow-up, patched-through voicemail) — none of which is gated on a `callback` proposal's approval. `callback` IS S1-reachable (the after-hours caller path, surface.ts's allowlist) even though it has no `INTENT_TO_PROPOSAL_TYPE` on-ramp. |
+<!-- BEGIN generated: handler-no-onramp -->
+<!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
+| Proposal type | Class |
+|---|---|
+| `adopt_entity_alias` | manual |
+| `callback` | capture |
+| `create_booking` | capture |
+| `onboarding_estimate_template` | capture |
+| `onboarding_schedule` | capture |
+| `onboarding_service_category` | capture |
+| `onboarding_team_member` | capture |
+| `onboarding_tenant_settings` | capture |
+<!-- END generated: handler-no-onramp -->
+
+Notes per type (prose — the list above is the generated fact):
+
+- `create_booking` — deferred (customer-call FSM path). Expected phrasing: "Book this caller for Thursday".
+- `adopt_entity_alias` — U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable.
+- `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` — B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment).
+- `callback` — Task 14 (2026-08-07 tradesperson plan): `CallbackExecutionHandler` (`proposals/execution/callback-handler.ts`) — deliberately dep-free, registered unconditionally, always `isFullyWired()`. Fixes the pre-existing bug where an approved `callback` proposal had NO execution handler at all and threw `HANDLER_NOT_FOUND`, retrying into terminal `execution_failed`. A no-op-plus-audit is the correct semantic, not a gap: `callback` mutates nothing (surface.ts), its payload is already durably captured on the proposal row at DRAFT time — 4 production files / 5 `createProposal`/`buildProposal` call sites / 7 total content branches resolving to `proposalType: 'callback'` (see `proposals/execution/callback-handler.ts`'s class doc for the counting rule): negotiation-task.ts (2 direct calls, ALLOW branch + the enriched/default branch), complaint-task.ts (1 direct call, companion owner-followup), create-voice-turn-processor.ts (1 call, live-call negotiation FSM path, 2 of 3 evaluation-outcome branches), and sms/negotiation/inbound-negotiation-handler.ts (1 call, inbound-SMS negotiation guardrail, 2 of 3 branches — the only site stamping `callerPhone`); text-mode-driver.ts's after-hours branch also mints one but is the VQ-007 voice-quality harness, excluded from every count above (production after-hours is routes/telephony.ts's `afterHours` branch, which sends the caller to voicemail TwiML and drafts no `callback` proposal) — and the separate `call_me_back_tasks` operational-task system (voice/call-me-back/call-me-back.ts) is created directly by its own independent call sites (warm-transfer failure, E1 safety follow-up, patched-through voicemail) — none of which is gated on a `callback` proposal's approval. `callback` IS S1-reachable (the after-hours caller path, surface.ts's allowlist) even though it has no `INTENT_TO_PROPOSAL_TYPE` on-ramp.
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
 section A in taxonomy 1.2.0 — U2/U3 of the agent build wave. `update_catalog_item`
@@ -1303,22 +1342,24 @@ contract-compatibility caveats.)
 
 ## D) Classified but intentionally gated (locked decision, not a gap)
 
-`approve_proposal`, `reject_proposal`, and `edit_proposal` are recognised by the
-classifier but **hard-refused on the recorder channel** (RV-071 / RV-225); they
+<!-- BEGIN generated: gated -->
+<!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
+`approve_proposal`, `reject_proposal`, `edit_proposal`
+<!-- END generated: gated -->
+
+These are recognised by the classifier but **hard-refused on the recorder channel** (RV-071 / RV-225); they
 are actionable only on a live, verified owner telephony session. In-app voice
 approval is post-launch per `docs/launch/voice-interaction-scope.md` (launch
 approves by screen/SMS tap).
 
 ## E) Read-only voice queries (work today; not "actions")
 
-`lookup_appointments`, `lookup_invoices`, `lookup_balance`, `lookup_jobs`,
-`lookup_agreements`, `lookup_account_summary`, `lookup_customer`,
-`lookup_estimates`, `lookup_availability`, `lookup_leads`, `lookup_revenue`,
-`lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`,
-`lookup_materials`, `lookup_crew_schedule`, `lookup_timesheets`, `lookup_my_day`,
-`lookup_job_profit`
-— 20 `lookup_*` intents total — routed to read-only skills, never to a
-proposal (correct by design).
+<!-- BEGIN generated: lookups -->
+<!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
+20 `lookup_*` intents: `lookup_account_summary`, `lookup_agreements`, `lookup_appointments`, `lookup_availability`, `lookup_balance`, `lookup_catalog`, `lookup_crew_schedule`, `lookup_customer`, `lookup_day_overview`, `lookup_digest`, `lookup_estimates`, `lookup_invoices`, `lookup_job_profit`, `lookup_jobs`, `lookup_leads`, `lookup_materials`, `lookup_my_day`, `lookup_pending_items`, `lookup_revenue`, `lookup_timesheets`.
+<!-- END generated: lookups -->
+
+Each is routed to a read-only skill, never to a proposal (correct by design).
 
 > **Dispatch is ONE switch behind THREE surface adapters (#866), with FOUR
 > callers (#869).** Classification
@@ -1471,11 +1512,18 @@ audit event, tech actor, + the existing branded ETA SMS via
 `DelayNotificationCoordinator.enqueueEnRouteNotice`) — never a drafted
 proposal a human has to tap.
 
-| Spoken/texted example | Intent / trigger | What fires | Persistence proof |
-|---|---|---|---|
-| "On my way to the Garcia job" | `en_route` (voice) | `triggerEnRoute` (same act as the app button) | integration (`integration/en-route-voice.test.ts`) |
-| "Heading to my next one now" | `en_route` (voice, bare — resolves to the tech's next upcoming appointment today) | `triggerEnRoute` | integration (`integration/en-route-voice.test.ts`) |
-| "OMW" / "on my way" texted from a registered tech phone | SMS keyword (joins `TECH_STATUS_KEYWORDS`) | `triggerEnRoute` | handler-suite |
+<!-- BEGIN generated: direct-acts -->
+<!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
+| Spoken example | Intent | Execution proof |
+|---|---|---|
+| "On my way to the Garcia job" | `en_route` | integration (`integration/en-route-voice.test.ts`) |
+<!-- END generated: direct-acts -->
+
+A bare "Heading to my next one now" resolves to the technician's next upcoming
+appointment today (same test file). The SMS leg — "OMW" / "on my way" texted
+from a registered tech phone (joins `TECH_STATUS_KEYWORDS`) — fires the same
+`triggerEnRoute` act; it is a keyword, not a voice capability, so it has no
+declaration and is not generated here.
 
 Because misclassification risk is real on the voice leg (unlike a tap), a
 low-confidence `en_route` classification gates to clarification instead of
@@ -1543,10 +1591,6 @@ either `speakable` or `lookups`.
     { "intent": "log_time_entry", "proposalType": "log_time_entry", "actionClass": "capture" },
     { "intent": "notify_delay", "proposalType": "notify_delay", "actionClass": "comms" },
     { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" },
-    { "intent": "create_invoice_schedule", "proposalType": "create_invoice_schedule", "actionClass": "capture" },
-    { "intent": "respond_to_review", "proposalType": "review_response_proposal", "actionClass": "comms" },
-    { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
-    { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" },
     { "intent": "schedule_inspection", "proposalType": "create_appointment", "actionClass": "capture" },
     { "intent": "log_permit", "proposalType": "add_note", "actionClass": "capture" },
     { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" },
@@ -1558,41 +1602,15 @@ either `speakable` or `lookups`.
     { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" },
     { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" },
     { "intent": "log_mileage", "proposalType": "log_expense", "actionClass": "capture" },
-    { "intent": "add_catalog_item", "proposalType": "add_catalog_item", "actionClass": "capture" }
+    { "intent": "add_catalog_item", "proposalType": "add_catalog_item", "actionClass": "capture" },
+    { "intent": "create_invoice_schedule", "proposalType": "create_invoice_schedule", "actionClass": "capture" },
+    { "intent": "respond_to_review", "proposalType": "review_response_proposal", "actionClass": "comms" },
+    { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
+    { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
   ],
-  "lookups": [
-    "lookup_account_summary",
-    "lookup_agreements",
-    "lookup_appointments",
-    "lookup_availability",
-    "lookup_balance",
-    "lookup_catalog",
-    "lookup_crew_schedule",
-    "lookup_customer",
-    "lookup_day_overview",
-    "lookup_digest",
-    "lookup_estimates",
-    "lookup_invoices",
-    "lookup_job_profit",
-    "lookup_jobs",
-    "lookup_leads",
-    "lookup_materials",
-    "lookup_my_day",
-    "lookup_pending_items",
-    "lookup_revenue",
-    "lookup_timesheets"
-  ],
-  "handlerNoOnramp": [
-    "create_booking",
-    "adopt_entity_alias",
-    "onboarding_tenant_settings",
-    "onboarding_service_category",
-    "onboarding_estimate_template",
-    "onboarding_team_member",
-    "onboarding_schedule",
-    "callback"
-  ],
-  "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
+  "lookups": ["lookup_account_summary","lookup_agreements","lookup_appointments","lookup_availability","lookup_balance","lookup_catalog","lookup_crew_schedule","lookup_customer","lookup_day_overview","lookup_digest","lookup_estimates","lookup_invoices","lookup_job_profit","lookup_jobs","lookup_leads","lookup_materials","lookup_my_day","lookup_pending_items","lookup_revenue","lookup_timesheets"],
+  "handlerNoOnramp": ["adopt_entity_alias","callback","create_booking","onboarding_estimate_template","onboarding_schedule","onboarding_service_category","onboarding_team_member","onboarding_tenant_settings"],
+  "gated": ["approve_proposal","reject_proposal","edit_proposal"]
 }
 ```
 <!-- END machine-readable: voice-action-catalog -->

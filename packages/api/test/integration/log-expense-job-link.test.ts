@@ -55,10 +55,11 @@ import {
   ExecutionResult,
   createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const SPOKEN_AMOUNT_CENTS = 4000; // "$40 in parts" — integer cents end-to-end
 
-describe('Integration — U3 spoken expense keeps its job link (real Postgres + real resolver)', () => {
+describe(provesExecution('log_expense') + 'Integration — U3 spoken expense keeps its job link (real Postgres + real resolver)', () => {
   let pool: Pool;
   let resolver: PgEntityResolver;
   let jobRepo: PgJobRepository;

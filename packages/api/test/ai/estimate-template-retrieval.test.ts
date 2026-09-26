@@ -1,29 +1,43 @@
 import {
   InMemoryEstimateTemplateRepository,
-  createTemplate,
+  CreateTemplateInput,
   findTemplate,
 } from '../../src/ai/tasks/estimate-template';
+
+/**
+ * Seeds the pack-template store directly. #1066: the AI module no longer
+ * writes templates (it drafts an `onboarding_estimate_template` proposal), so
+ * fixtures are written straight to the repository — which is what they are.
+ */
+async function seed(input: CreateTemplateInput, repo: InMemoryEstimateTemplateRepository) {
+  return repo.create({
+    ...input,
+    id: `${input.packId}:${input.serviceCategory}`,
+    sortOrder: input.sortOrder ?? 0,
+    createdAt: new Date(),
+  });
+}
 
 describe('P4-004B — Template retrieval by vertical and category', () => {
   let repo: InMemoryEstimateTemplateRepository;
 
   beforeEach(async () => {
     repo = new InMemoryEstimateTemplateRepository();
-    await createTemplate({
+    await seed({
       packId: 'hvac-v1',
       verticalType: 'hvac',
       serviceCategory: 'diagnostic',
       name: 'HVAC Diagnostic',
       defaultLineItems: [{ description: 'Diagnostic fee', category: 'labor', quantity: 1, unitPriceCents: 8900, taxable: true, sortOrder: 1 }],
     }, repo);
-    await createTemplate({
+    await seed({
       packId: 'hvac-v1',
       verticalType: 'hvac',
       serviceCategory: 'repair',
       name: 'HVAC Repair',
       defaultLineItems: [{ description: 'Repair labor', category: 'labor', quantity: 1, unitPriceCents: 15000, taxable: true, sortOrder: 1 }],
     }, repo);
-    await createTemplate({
+    await seed({
       packId: 'plumbing-v1',
       verticalType: 'plumbing',
       serviceCategory: 'drain',

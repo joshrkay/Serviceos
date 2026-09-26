@@ -25,8 +25,9 @@ import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import type { CatalogItem } from '../../src/catalog/catalog-item';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — WS20 correction-repetition meta-proposal', () => {
+describe(provesExecution('update_catalog_item') + 'Postgres integration — WS20 correction-repetition meta-proposal', () => {
   let pool: Pool;
   let tenant: { tenantId: string; userId: string };
   let catalogRepo: PgCatalogItemRepository;

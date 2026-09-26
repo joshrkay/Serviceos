@@ -13,6 +13,8 @@ import {
 } from '../files/file-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppError } from '../shared/errors';
+import type { JobRepository } from '../jobs/job';
+import { z } from 'zod';
 import { verifyDevStorageToken } from '../files/storage-provider';
 
 interface UploadUrlBody {
@@ -28,10 +30,18 @@ export interface FilesRouterDeps {
   storage: StorageProvider;
   bucket: string;
   auditRepo: AuditRepository;
+  /**
+   * #1200 — a job-scoped generic upload (`entityType: 'job'`) must name a
+   * real job in the caller's tenant, same as the job-files / job-photo
+   * routes (#1187). files.entity_id is TEXT (no FK), so without this an
+   * unknown job id wrote an orphan row and still answered 201. Only
+   * `findById` is used, tenant-scoped.
+   */
+  jobRepo: Pick<JobRepository, 'findById'>;
 }
 
 export function createFilesRouter(deps: FilesRouterDeps): Router {
-  const { fileRepo, storage, bucket, auditRepo } = deps;
+  const { fileRepo, storage, bucket, auditRepo, jobRepo } = deps;
   const router = Router();
 
   const uploadHandler = asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
@@ -50,6 +60,19 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     if (errors.length > 0) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
       return;
+    }
+
+    // #1200 — tenant-scoped parent lookup before any write. A malformed id
+    // is "not found" too (the Pg lookup would otherwise raise on the uuid cast).
+    if (uploadRequest.entityType === 'job' && uploadRequest.entityId !== undefined) {
+      const jobId = uploadRequest.entityId;
+      const job = z.string().uuid().safeParse(jobId).success
+        ? await jobRepo.findById(uploadRequest.tenantId, jobId)
+        : null;
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
     }
 
     const record = createFileRecord(uploadRequest, bucket);

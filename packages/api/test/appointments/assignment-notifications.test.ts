@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   TechnicianAssignmentNotifier,
   formatAssignmentWhenLabel,
@@ -379,6 +379,135 @@ describe('TechnicianAssignmentNotifier', () => {
     await expect(
       svc.notifyChange({ tenantId: TENANT, appointmentId: APPT_ID, technicianId: TECH_ID, kind: 'assigned' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+// #1033 — per-tenant `notifyTechniciansBySms` (default ON) + a churn window so
+// rapid assign/unassign/reassign texts only the final state.
+describe('technician assignment SMS — tenant toggle and churn window (#1033)', () => {
+  const OTHER_TECH = 'tech-uuid-2';
+  const OTHER_MOBILE = '+15555550999';
+
+  function build(opts: {
+    settings?: { notifyTechniciansBySms?: boolean } | null;
+    windowMs?: number;
+  }) {
+    const push = capturingNotifier();
+    const sms = capturingSms();
+    let settings = opts.settings;
+    const svc = new TechnicianAssignmentNotifier({
+      appointmentRepo: { findById: async () => makeAppointment() },
+      jobRepo: { findById: async () => makeJob() },
+      customerRepo: { findById: async () => makeCustomer() },
+      userRepo: {
+        findById: async (_t: string, id: string) =>
+          id === OTHER_TECH
+            ? makeUser({ id: OTHER_TECH, clerkUserId: 'clerk-tech-2', mobileNumber: OTHER_MOBILE })
+            : makeUser(),
+      },
+      locationRepo: { findById: async () => makeLocation() },
+      notifier: push.notifier,
+      smsSender: sms.smsSender,
+      settingsRepo: { findByTenant: async () => (settings ?? null) as never },
+      ...(opts.windowMs !== undefined ? { smsChurnWindowMs: opts.windowMs } : {}),
+    });
+    return {
+      svc,
+      push: push.calls,
+      sent: sms.sent,
+      setSettings: (s: { notifyTechniciansBySms?: boolean }) => {
+        settings = s;
+      },
+    };
+  }
+
+  const change = (kind: 'assigned' | 'unassigned', technicianId = TECH_ID) => ({
+    tenantId: TENANT,
+    appointmentId: APPT_ID,
+    technicianId,
+    kind,
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('tenant toggle OFF → no SMS, push still fires', async () => {
+    const t = build({ settings: { notifyTechniciansBySms: false } });
+    await t.svc.notifyChange(change('assigned'));
+    expect(t.push).toHaveLength(1);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('toggle unset (legacy row / no settings) → SMS sends (default ON, no behaviour change)', async () => {
+    const t = build({ settings: null });
+    await t.svc.notifyChange(change('assigned'));
+    expect(t.sent).toHaveLength(1);
+  });
+
+  it('with a window, the SMS waits for the window to close', async () => {
+    vi.useFakeTimers();
+    const t = build({ settings: { notifyTechniciansBySms: true }, windowMs: 60_000 });
+    await t.svc.notifyChange(change('assigned'));
+    expect(t.push).toHaveLength(1); // push is immediate
+    expect(t.sent).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(t.sent).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(t.sent).toHaveLength(1);
+    expect(t.sent[0].body).toContain('New job');
+  });
+
+  it('assign → unassign inside the window sends nothing (net no change)', async () => {
+    vi.useFakeTimers();
+    const t = build({ settings: { notifyTechniciansBySms: true }, windowMs: 60_000 });
+    await t.svc.notifyChange(change('assigned'));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await t.svc.notifyChange(change('unassigned'));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('assign → unassign → assign inside the window sends exactly one "assigned" SMS', async () => {
+    vi.useFakeTimers();
+    const t = build({ settings: { notifyTechniciansBySms: true }, windowMs: 60_000 });
+    await t.svc.notifyChange(change('assigned'));
+    await t.svc.notifyChange(change('unassigned'));
+    await t.svc.notifyChange(change('assigned'));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.sent).toHaveLength(1);
+    expect(t.sent[0].to).toBe(TECH_MOBILE);
+    expect(t.sent[0].body).toContain('New job');
+  });
+
+  it('reassign A → B → A inside the window texts neither technician', async () => {
+    vi.useFakeTimers();
+    const t = build({ settings: { notifyTechniciansBySms: true }, windowMs: 60_000 });
+    // A was already assigned (and texted) before this burst.
+    await t.svc.notifyChange(change('unassigned', TECH_ID));
+    await t.svc.notifyChange(change('assigned', OTHER_TECH));
+    await t.svc.notifyChange(change('unassigned', OTHER_TECH));
+    await t.svc.notifyChange(change('assigned', TECH_ID));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.sent).toEqual([]);
+  });
+
+  it('reassign A → B sends the final state to each technician once', async () => {
+    vi.useFakeTimers();
+    const t = build({ settings: { notifyTechniciansBySms: true }, windowMs: 60_000 });
+    await t.svc.notifyChange(change('unassigned', TECH_ID));
+    await t.svc.notifyChange(change('assigned', OTHER_TECH));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.sent.map((s) => s.to).sort()).toEqual([OTHER_MOBILE, TECH_MOBILE].sort());
+  });
+
+  it('turning the toggle OFF during the window suppresses the pending SMS', async () => {
+    vi.useFakeTimers();
+    const t = build({ settings: { notifyTechniciansBySms: true }, windowMs: 60_000 });
+    await t.svc.notifyChange(change('assigned'));
+    t.setSettings({ notifyTechniciansBySms: false });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.sent).toHaveLength(0);
   });
 });
 

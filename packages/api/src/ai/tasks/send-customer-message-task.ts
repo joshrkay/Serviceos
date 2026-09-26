@@ -61,7 +61,7 @@ import { createProposal } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { LLMGateway } from '../gateway/gateway';
 import { SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH } from '../../proposals/contracts/send-customer-message';
-import { entitiesFrom, inputFor } from './task-input';
+import { entitiesFrom, inputFor, untrustedTaskTextForPrompt } from './task-input';
 
 const REWRITE_SYSTEM_PROMPT =
   "Rewrite the operator's spoken message as a short, polite customer message. Do not add promises, prices, or times the operator did not say.";
@@ -93,7 +93,7 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
     const spoken =
       typeof ee.customerMessageBody === 'string' ? ee.customerMessageBody.trim() : '';
     if (spoken.length > 0) {
-      payload.body = await this.resolveBody(spoken, context.tenantId);
+      payload.body = await this.resolveBody(spoken, context);
     } else {
       missing.push('body');
     }
@@ -110,8 +110,8 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
    * above). Never fabricates, never blocks, never drafts a body the
    * contract will reject on length.
    */
-  private async resolveBody(spoken: string, tenantId?: string): Promise<string> {
-    const rewritten = await this.rewrite(spoken, tenantId);
+  private async resolveBody(spoken: string, context: TaskContext): Promise<string> {
+    const rewritten = await this.rewrite(spoken, context);
     // Rule 1 — an over-cap rewrite is discarded in favor of the spoken
     // text rather than kept (even truncated): the operator never reviewed
     // the rewrite's tail, only spoke the original.
@@ -133,15 +133,21 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
    * cleanup — `resolveBody` above is the only caller and treats
    * `undefined` as "fall back to the spoken text."
    */
-  private async rewrite(spoken: string, tenantId?: string): Promise<string | undefined> {
+  private async rewrite(spoken: string, context: TaskContext): Promise<string | undefined> {
     if (!this.gateway) return undefined;
+    const tenantId = context.tenantId;
     try {
       const response = await this.gateway.complete({
         taskType: this.taskType,
         ...(tenantId ? { tenantId } : {}),
         messages: [
           { role: 'system', content: REWRITE_SYSTEM_PROMPT },
-          { role: 'user', content: spoken },
+          // #1232 — a voicemail-sourced body is the CALLER's words: fenced
+          // (the owner-spoken body stays the raw, byte-identical user turn).
+          {
+            role: 'user',
+            content: untrustedTaskTextForPrompt(context, spoken, 'Spoken message body') ?? spoken,
+          },
         ],
         temperature: 0.3,
         responseFormat: 'text',

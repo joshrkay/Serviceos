@@ -145,6 +145,33 @@ describe('CustomersPage', () => {
     expect(screen.getByText('Bob Jones')).toBeInTheDocument();
   });
 
+  it('#1281 — an Archived toggle (44px) switches the list to archived customers and back', () => {
+    const setFilters = vi.fn();
+    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, setFilters });
+    renderPage();
+    const toggle = screen.getByRole('button', { name: /Archived/ });
+    expect(toggle.className).toMatch(/min-h-11/);
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(toggle);
+    expect(setFilters).toHaveBeenLastCalledWith({ archived: 'only' });
+    expect(screen.getByRole('button', { name: /Archived/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/2 archived/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived/ }));
+    expect(setFilters).toHaveBeenLastCalledWith({});
+  });
+
+  it('#1281 — an archived row carries an Archived pill', () => {
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [{ ...mockCustomers[1], isArchived: true }],
+      total: 1,
+    });
+    renderPage();
+    expect(screen.getByTestId('customer-row-archived-pill')).toHaveTextContent('Archived');
+  });
+
   it('hides the tag filter bar when no customer has tags', () => {
     vi.mocked(useListQuery).mockReturnValue({
       ...defaultListResult,

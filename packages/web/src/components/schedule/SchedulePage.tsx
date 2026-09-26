@@ -67,6 +67,18 @@ function toTimeLabel(iso: string, timezone: string) {
   return formatTimeInTenantTz(iso, timezone);
 }
 
+// #1289 — confirmed-vs-pending colour. `confirmed` is written by the
+// confirm_appointment handler (packages/api/src/appointments/appointment.ts);
+// every other status (scheduled, in_progress, completed, canceled, no_show)
+// renders as "pending" amber so a supervisor can scan the day for what still
+// needs a confirmation call. Week/month grid + SMS-confirmation preview are
+// deferred — see PR description.
+function statusPillClass(status: string): string {
+  return status === 'confirmed'
+    ? 'bg-green-100 text-green-700 border-green-200'
+    : 'bg-amber-100 text-amber-700 border-amber-200';
+}
+
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
   const aStart = new Date(a.scheduledStart).getTime();
   const aEnd   = new Date(a.scheduledEnd).getTime();
@@ -158,9 +170,15 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   // number or summary) — owners no longer paste a raw job UUID.
   const [job,      setJob]      = useState<JobOption | null>(null);
   const [techId,   setTechId]   = useState('');
+  // Default to the first technician ONCE when the roster arrives. Re-running
+  // on every empty techId made "Unassigned" impossible to pick — the effect
+  // snapped the select straight back to the first technician.
+  const techDefaultedRef = useRef(false);
   useEffect(() => {
-    if (!techId && technicians[0]?.id) setTechId(technicians[0].id);
-  }, [technicians, techId]);
+    if (techDefaultedRef.current || !technicians[0]?.id) return;
+    techDefaultedRef.current = true;
+    setTechId((cur) => cur || technicians[0].id);
+  }, [technicians]);
   const [startTime, setStartTime] = useState('10:00');
   const [endTime,   setEndTime]   = useState('12:00');
   const [saving, setSaving]     = useState(false);
@@ -180,7 +198,10 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       const end   = tenantWallClockToUtc(selectedDate, endTime, tz);
       if (end <= start) { setError('End time must be after start time'); setSaving(false); return; }
 
-      // Create the appointment
+      // #1279 — create the appointment AND its primary technician in one
+      // request. The API writes appointment_assignments (the canonical
+      // relation the dispatch board and double-booking guard read), refuses
+      // an overlapping booking with 409, and derives the job's technician.
       const apptRes = await apiFetch('/api/appointments', {
         method: 'POST',
         body: JSON.stringify({
@@ -188,19 +209,12 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
           scheduledStart: start.toISOString(),
           scheduledEnd: end.toISOString(),
           timezone: tz,
+          ...(techId ? { technicianId: techId } : {}),
         }),
       });
       if (!apptRes.ok) {
         const j = await apptRes.json().catch(() => ({}));
         throw new Error(j?.message ?? `HTTP ${apptRes.status}`);
-      }
-
-      // Also update the job's assigned technician and scheduled start
-      if (techId) {
-        await apiFetch(`/api/jobs/${jobId}`, {
-          method: 'PUT',
-          body: JSON.stringify({ assignedTechnicianId: techId, scheduledStart: start.toISOString(), status: 'scheduled' }),
-        }).catch(() => null);
       }
 
       onCreated();
@@ -216,7 +230,13 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
     <div className="rounded-xl border border-slate-200 bg-white p-4 mb-4">
       <div className="flex items-center justify-between mb-3">
         <p className="text-sm text-slate-800">New appointment</p>
-        <button onClick={onClose}><X size={14} className="text-slate-400" /></button>
+        <button
+          onClick={onClose}
+          aria-label="Close new appointment"
+          className="min-h-11 min-w-11 inline-flex items-center justify-center"
+        >
+          <X size={14} className="text-slate-400" />
+        </button>
       </div>
       {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
       <div className="grid md:grid-cols-2 gap-3">
@@ -239,7 +259,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
         <label className="text-xs text-slate-500 md:col-span-2">
           Assign technician
           <select value={techId} onChange={e => setTechId(e.target.value)}
-            className="w-full mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm">
+            className="w-full min-h-11 mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm">
             <option value="">Unassigned</option>
             {technicians.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
@@ -248,7 +268,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       <button
         onClick={save}
         disabled={saving || !job}
-        className="mt-3 w-full rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
+        className="mt-3 w-full min-h-11 rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
       >
         {saving ? 'Saving…' : 'Create appointment'}
       </button>
@@ -600,7 +620,7 @@ export function SchedulePage() {
                             <User size={11} /> Unassigned
                           </span>
                         )}
-                        <span className="text-xs text-slate-400">{appt.status}</span>
+                        <span className={`text-xs rounded-full border px-2 py-0.5 ${statusPillClass(appt.status)}`}>{appt.status}</span>
                       </div>
 
                       {/* Actions */}

@@ -1,6 +1,6 @@
 import { messagesContainImage, type LLMProvider, type LLMRequest, type LLMResponse } from '../gateway/gateway';
 import { matchUpdateJobPriorityPhrase } from '../orchestration/intent-classifier';
-import { UNTRUSTED_CONTENT_BLOCK_BEGIN, UNTRUSTED_CONTENT_BLOCK_END } from '../untrusted-content';
+import { untrustedFenceBeginLine, untrustedFenceEndLine, untrustedFenceIdOf } from '../untrusted-content';
 
 /**
  * Deterministic mock provider for unit tests and hermetic local/dev.
@@ -93,20 +93,20 @@ function lastUserText(request: LLMRequest): string {
  * Text with no fence (every owner surface) is returned unchanged.
  *
  * Anchored: only a message that IS a fence — starts with the BEGIN marker
- * line and ends with the END marker line — is unwrapped, so owner text that
- * merely quotes a marker string somewhere is never sliced.
+ * line and ends with the END marker line carrying the SAME fence id (#1240)
+ * — is unwrapped, so owner text that merely quotes a marker string somewhere
+ * is never sliced.
  */
 function fencedUtteranceOrText(text: string): string {
   const trimmed = text.trim();
-  if (
-    !trimmed.startsWith(`${UNTRUSTED_CONTENT_BLOCK_BEGIN}\n`) ||
-    !trimmed.endsWith(`\n${UNTRUSTED_CONTENT_BLOCK_END}`)
-  ) {
-    return text;
-  }
+  const fenceId = untrustedFenceIdOf(trimmed);
+  if (fenceId === null) return text;
+  const begin = untrustedFenceBeginLine(fenceId);
+  const end = untrustedFenceEndLine(fenceId);
+  if (!trimmed.endsWith(`\n${end}`)) return text;
   // [label line, ...words, hardening line]
   const lines = trimmed
-    .slice(UNTRUSTED_CONTENT_BLOCK_BEGIN.length + 1, trimmed.length - UNTRUSTED_CONTENT_BLOCK_END.length - 1)
+    .slice(begin.length + 1, trimmed.length - end.length - 1)
     .split('\n');
   if (lines.length < 3) return text;
   return lines.slice(1, -1).join('\n');
@@ -206,6 +206,97 @@ function extractAddress(text: string): string | undefined {
   return match[1].replace(/[\s,.]+$/, '').trim();
 }
 
+/** The fixed first line of confirmIntent's yes/no prompt. */
+const CONFIRM_PROMPT_HEAD = "Classify the caller's response as YES or NO.";
+
+function isConfirmIntentRequest(request: LLMRequest, text: string): boolean {
+  return request.metadata?.skill === 'confirm_intent' || text.startsWith(CONFIRM_PROMPT_HEAD);
+}
+
+/**
+ * Affirmative phrases a hermetic confirm accepts. CLOSED on purpose: the
+ * caller's whole reply must be made of these (plus politeness fillers) to
+ * count as a yes. Anything else — a "no", a correction, a "yes but…", a
+ * hedge — is answered "no", which is exactly the rule the confirm prompt
+ * gives the real model ("Ambiguous responses → NO").
+ */
+const CONFIRM_AFFIRMATIVES: readonly string[] = [
+  'yes',
+  'yeah',
+  'yep',
+  'yup',
+  'correct',
+  "that's correct",
+  'that is correct',
+  "that's right",
+  'that is right',
+  'right',
+  'exactly',
+  'sure',
+  'sounds good',
+  'go ahead',
+  'ok',
+  'okay',
+  'perfect',
+  'that works',
+  'affirmative',
+  'sí',
+  'si',
+  'correcto',
+  'claro',
+];
+const CONFIRM_FILLERS: readonly string[] = ['please', 'thanks', 'thank you'];
+
+/** Longest first, so "that is right" is consumed before "right". */
+const CONFIRM_PHRASES = [...CONFIRM_AFFIRMATIVES, ...CONFIRM_FILLERS].sort(
+  (a, b) => b.length - a.length,
+);
+
+function callerSaidInConfirmPrompt(text: string): string {
+  // #1240 — confirmIntent quotes the caller's reply inside a per-request
+  // untrusted-content fence; read the body between its BEGIN and END lines.
+  const beginAt = text.indexOf(untrustedFenceBeginLine('').trimEnd());
+  if (beginAt >= 0) {
+    const fenced = text.slice(beginAt);
+    const id = untrustedFenceIdOf(fenced);
+    if (id !== null) {
+      const bodyStart = untrustedFenceBeginLine(id).length + 1;
+      const bodyEnd = fenced.indexOf(`\n${untrustedFenceEndLine(id)}`, bodyStart);
+      if (bodyEnd >= 0) {
+        // The block is: a label line ("…quoted verbatim as DATA:"), the
+        // caller's words, then the hardening line. Keep only the words.
+        const lines = fenced.slice(bodyStart, bodyEnd).split('\n');
+        if (lines[0]?.trimEnd().endsWith('DATA:')) lines.shift();
+        const hardeningAt = lines.findIndex((l) => l.startsWith('The lines between the markers above'));
+        if (hardeningAt >= 0) lines.length = hardeningAt;
+        return lines.join('\n').trim();
+      }
+    }
+  }
+  const match = text.match(/^The caller said: "([\s\S]*)"$/m);
+  return match?.[1] ?? '';
+}
+
+/** Deterministic yes/no for confirmIntent's prompt (#1119). */
+function scriptConfirmAnswer(text: string): { answer: 'yes' | 'no'; reasoning: string } {
+  let rest = callerSaidInConfirmPrompt(text)
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[^\p{L}\p{N}'\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let sawAffirmative = false;
+  while (rest.length > 0) {
+    const phrase = CONFIRM_PHRASES.find((p) => rest === p || rest.startsWith(`${p} `));
+    if (!phrase) break;
+    if (CONFIRM_AFFIRMATIVES.includes(phrase)) sawAffirmative = true;
+    rest = rest.slice(phrase.length).trim();
+  }
+  return rest.length === 0 && sawAffirmative
+    ? { answer: 'yes', reasoning: 'hermetic: reply is a clear affirmative' }
+    : { answer: 'no', reasoning: 'hermetic: negative, correction or ambiguous reply' };
+}
+
 /**
  * Scripted hermetic completions used when AI_PROVIDER_API_KEY is unset.
  * Intentionally conservative: only operator CRM/money drafting intents that
@@ -282,6 +373,15 @@ export function scriptHermeticResponse(request: LLMRequest): string {
       `sorry for the schedule change and will follow up shortly with next steps.` +
       (signoff ? ` ${signoff}` : '');
     return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
+  if (taskType === 'classify_intent' && isConfirmIntentRequest(request, text)) {
+    // #1119 — confirmIntent (ai/skills/confirm-intent.ts) rides the
+    // `classify_intent` task type. Before this branch the confirm prompt fell
+    // into the intent script below, which answers `{intentType,...}` with no
+    // `answer` field — so `parseYesNo` returned null and EVERY hermetic
+    // confirm turn, "Yes, that is right" included, became a correction.
+    return JSON.stringify(scriptConfirmAnswer(text));
   }
 
   if (taskType === 'classify_intent' || taskType.startsWith('classify')) {

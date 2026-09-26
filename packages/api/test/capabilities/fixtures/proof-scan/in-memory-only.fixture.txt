@@ -1,0 +1,7 @@
+// Fixture for test/capabilities/proven-bar.test.ts — a tagged file that never
+// opens a database. Directory location is not evidence (D-031): the scanner
+// must refuse to credit add_note and report this file.
+import { InMemoryNoteRepository } from '../../src/notes/note';
+describe(provesExecution('add_note') + 'add_note executes (in memory)', () => {
+  const repo = new InMemoryNoteRepository();
+});

@@ -36,6 +36,7 @@ import {
 import { buildTaskHandlers } from '../../src/ai/orchestration/handler-registry';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 function noopGateway(): LLMGateway {
   return {
@@ -50,7 +51,7 @@ function noopGateway(): LLMGateway {
   } as unknown as LLMGateway;
 }
 
-describe('Postgres integration — voice create_customer → approve → execute → persist + audit', () => {
+describe(provesExecution('create_customer') + 'Postgres integration — voice create_customer → approve → execute → persist + audit', () => {
   let pool: Pool;
   let customerRepo: PgCustomerRepository;
   let auditRepo: PgAuditRepository;

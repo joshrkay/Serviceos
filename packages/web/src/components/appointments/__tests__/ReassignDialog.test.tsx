@@ -26,7 +26,7 @@ describe('P11-007 ReassignDialog', () => {
       }),
     } as unknown as Response);
 
-    render(<ReassignDialog appointmentId="a-1" jobId="j-1" />);
+    render(<ReassignDialog appointmentId="a-1" />);
 
     await waitFor(() => {
       expect(screen.getByText('Tech One')).toBeInTheDocument();
@@ -36,7 +36,7 @@ describe('P11-007 ReassignDialog', () => {
     expect(vi.mocked(apiFetch).mock.calls[0][0]).toBe('/api/users?role=technician');
   });
 
-  it('PUTs assignedTechnicianId to the job on save', async () => {
+  it('writes through the appointment assignment endpoint on save (#1279), never the job field', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce({
         ok: true,
@@ -50,7 +50,7 @@ describe('P11-007 ReassignDialog', () => {
       } as unknown as Response);
 
     const onSaved = vi.fn();
-    render(<ReassignDialog appointmentId="a-1" jobId="j-1" onSaved={onSaved} />);
+    render(<ReassignDialog appointmentId="a-1" onSaved={onSaved} />);
 
     await waitFor(() => {
       expect(screen.getByText('Tech One')).toBeInTheDocument();
@@ -61,13 +61,38 @@ describe('P11-007 ReassignDialog', () => {
 
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
 
-    const putCall = vi.mocked(apiFetch).mock.calls[1];
-    // Assignment persists on the job, not the appointment (which has no
-    // assignment field).
-    expect(putCall[0]).toBe('/api/jobs/j-1');
-    expect(putCall[1]?.method).toBe('PUT');
-    const body = JSON.parse(putCall[1]?.body as string);
-    expect(body.assignedTechnicianId).toBe('u-1');
+    const call = vi.mocked(apiFetch).mock.calls[1];
+    // appointment_assignments is canonical (D-007); the job's
+    // assignedTechnicianId is derived server-side.
+    expect(call[0]).toBe('/api/appointments/a-1/assignments');
+    expect(call[1]?.method).toBe('POST');
+    expect(JSON.parse(call[1]?.body as string)).toEqual({ technicianId: 'u-1' });
+    const urls = vi.mocked(apiFetch).mock.calls.map(([url]) => String(url));
+    expect(urls.filter((u) => u.startsWith('/api/jobs/'))).toEqual([]);
+  });
+
+  it('surfaces a 409 double-booking message and does not report success', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'u-1', name: 'Tech One' }] }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({ message: 'Technician is already booked at this time' }),
+      } as unknown as Response);
+
+    const onSaved = vi.fn();
+    render(<ReassignDialog appointmentId="a-1" onSaved={onSaved} />);
+    await waitFor(() => expect(screen.getByText('Tech One')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('assignedUserId'), { target: { value: 'u-1' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/already booked/i);
+    expect(onSaved).not.toHaveBeenCalled();
   });
 
   it('falls back to manual ID input when users endpoint fails', async () => {
@@ -77,7 +102,7 @@ describe('P11-007 ReassignDialog', () => {
       json: async () => ({}),
     } as unknown as Response);
 
-    render(<ReassignDialog appointmentId="a-1" jobId="j-1" />);
+    render(<ReassignDialog appointmentId="a-1" />);
 
     await waitFor(() => {
       const input = screen.getByLabelText('assignedUserId') as HTMLInputElement;
@@ -92,7 +117,7 @@ describe('P11-007 ReassignDialog', () => {
       json: async () => ({ data: [{ id: 'u-1', name: 'Tech One' }] }),
     } as unknown as Response);
 
-    render(<ReassignDialog appointmentId="a-1" jobId="j-1" />);
+    render(<ReassignDialog appointmentId="a-1" />);
 
     await waitFor(() => {
       expect(screen.getByText('Tech One')).toBeInTheDocument();

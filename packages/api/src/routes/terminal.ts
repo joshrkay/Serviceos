@@ -67,6 +67,47 @@ async function requireConnectAccount(
   return { accountId: connect.accountId };
 }
 
+/**
+ * #1098 — run the Connect gate, and when it refuses, leave one
+ * `terminal.connect_required` row on the refused tenant's own timeline
+ * (actor = the technician who tapped) before the 409 propagates. Without it a
+ * blocked doorstep charge left no trace, and the owner never learned field
+ * collection was being attempted without Connect finished. The audit write is
+ * best-effort: it must never turn the clean 409 into a 500.
+ */
+async function requireConnectAccountOrAudit(
+  deps: TerminalRouterDeps,
+  req: AuthenticatedRequest,
+  surface: 'connection_token' | 'payment_intent',
+  requestedInvoiceId?: string,
+): Promise<{ accountId: string }> {
+  const tenantId = req.auth!.tenantId;
+  try {
+    return await requireConnectAccount(deps.connectAccountResolver, tenantId);
+  } catch (err) {
+    if (deps.auditRepo && err instanceof AppError && err.code === 'CONNECT_REQUIRED') {
+      await deps.auditRepo
+        .create(
+          createAuditEvent({
+            tenantId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role ?? 'technician',
+            eventType: 'terminal.connect_required',
+            entityType: 'tenant',
+            entityId: tenantId,
+            metadata: {
+              surface,
+              reason: err.message,
+              ...(requestedInvoiceId ? { requestedInvoiceId } : {}),
+            },
+          }),
+        )
+        .catch(() => undefined);
+    }
+    throw err;
+  }
+}
+
 export function createTerminalRouter(deps: TerminalRouterDeps): Router {
   const router = Router();
 
@@ -84,7 +125,7 @@ export function createTerminalRouter(deps: TerminalRouterDeps): Router {
         return;
       }
       const tenantId = req.auth!.tenantId;
-      const { accountId } = await requireConnectAccount(deps.connectAccountResolver, tenantId);
+      const { accountId } = await requireConnectAccountOrAudit(deps, req, 'connection_token');
 
       const existingLocationId = deps.terminalLocation
         ? await deps.terminalLocation.getExistingLocationId(tenantId)
@@ -157,7 +198,12 @@ export function createTerminalRouter(deps: TerminalRouterDeps): Router {
       }
       const body = paymentIntentBodySchema.parse(req.body);
       const tenantId = req.auth!.tenantId;
-      const { accountId } = await requireConnectAccount(deps.connectAccountResolver, tenantId);
+      const { accountId } = await requireConnectAccountOrAudit(
+        deps,
+        req,
+        'payment_intent',
+        body.invoiceId,
+      );
 
       const invoice = await deps.invoiceRepo.findById(tenantId, body.invoiceId);
       if (!invoice) throw new NotFoundError('Invoice', body.invoiceId);

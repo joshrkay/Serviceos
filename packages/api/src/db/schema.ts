@@ -7072,6 +7072,95 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_usage_alerts ON usage_alerts
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // #1099 — a doorstep (Stripe Terminal) tap is recorded as 'card_present',
+  // separable from an online 'credit_card' in the ledger. Widens the CHECK
+  // that 133 last set (same DROP + ADD shape 133 used on its predecessor; the
+  // runner re-runs 133 every boot, then this re-widens it). NOT VALID so a
+  // boot never re-scans the table (see 070). The Stripe-reference dedup index
+  // (232) only covers credit_card/bank_transfer, and must not be dropped here
+  // (232 re-creates it every boot), so card_present gets its own partial
+  // unique index with the same scope — a redelivered terminal intent can
+  // never double-credit. No card_present row predates this migration, so it
+  // needs no 232-style quarantine preflight.
+  '288_payments_card_present_method': `
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'card_present', 'bank_transfer', 'other')) NOT VALID;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_card_present_reference_unique
+      ON payments (tenant_id, reference_number)
+      WHERE reference_number IS NOT NULL
+        AND payment_method = 'card_present'
+        AND status IN ('completed', 'processing');
+  `,
+  // #1288 — the tenant's default tax rate (basis points), applied when an
+  // estimate or invoice is created without an explicit rate. 0 = no tax, the
+  // pre-migration behaviour, so existing tenants are unchanged. Column-level
+  // CHECK mirrors the per-document taxRateBps bound (0–10000).
+  '289_tenant_settings_default_tax_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_tax_rate_bps INTEGER NOT NULL DEFAULT 0
+        CHECK (default_tax_rate_bps >= 0 AND default_tax_rate_bps <= 10000);
+  `,
+  '290_backfill_appointment_assignments_from_jobs': `
+    DO $$
+    DECLARE
+      r RECORD;
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'appointment_assignments'
+           AND column_name = 'backfill_source'
+      ) THEN
+        RETURN;
+      END IF;
+
+      ALTER TABLE appointment_assignments ADD COLUMN backfill_source TEXT;
+
+      FOR r IN
+        SELECT a.id AS appointment_id, a.tenant_id, j.assigned_technician_id AS technician_id,
+               a.scheduled_start, a.scheduled_end
+          FROM appointments a
+          JOIN jobs j ON j.id = a.job_id AND j.tenant_id = a.tenant_id
+          JOIN users u ON u.id = j.assigned_technician_id
+                      AND u.tenant_id = j.tenant_id
+                      AND u.role = 'technician'
+         WHERE j.assigned_technician_id IS NOT NULL
+           AND a.status IN ('scheduled', 'confirmed', 'in_progress')
+           AND NOT EXISTS (
+             SELECT 1 FROM appointment_assignments aa
+              WHERE aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id
+           )
+         ORDER BY a.scheduled_start, a.id
+      LOOP
+        IF EXISTS (
+          SELECT 1 FROM appointment_assignments aa
+           WHERE aa.tenant_id = r.tenant_id
+             AND aa.technician_id = r.technician_id
+             AND aa.appointment_status NOT IN ('canceled', 'no_show')
+             AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+                 && tstzrange(r.scheduled_start, r.scheduled_end)
+        ) THEN
+          RAISE NOTICE 'backfill 288: skipped appointment % (technician already booked)', r.appointment_id;
+          CONTINUE;
+        END IF;
+        BEGIN
+          INSERT INTO appointment_assignments
+            (tenant_id, appointment_id, technician_id, is_primary, assigned_by, backfill_source)
+          VALUES
+            (r.tenant_id, r.appointment_id, r.technician_id, true, 'system', 'job_assigned_technician');
+        EXCEPTION WHEN exclusion_violation OR unique_violation THEN
+          RAISE NOTICE 'backfill 288: skipped appointment % (constraint)', r.appointment_id;
+        END;
+      END LOOP;
+    END $$;
+  `,
+  // #1033 — per-tenant switch for technician assignment SMS (in-app push is
+  // unaffected). Default ON so no tenant's behaviour changes on deploy.
+  '291_tenant_settings_notify_technicians_by_sms': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS notify_technicians_by_sms BOOLEAN NOT NULL DEFAULT true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

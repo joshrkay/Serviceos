@@ -36,6 +36,7 @@ import { SendEstimateNudgeTaskHandler } from '../../src/ai/tasks/voice-extended-
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
 import { resolveVoiceEntityReferences } from '../../src/ai/agents/customer-calling/entity-resolution';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 describe('dispatchEstimateNudge (integration) — claim-before-send against real Postgres', () => {
   let pool: Pool;
@@ -338,7 +339,7 @@ const CUSTOMER_DISPLAY_NAME = 'Khan Household';
  */
 const SPOKEN_CUSTOMER_NAME = 'Khan';
 
-describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan estimate") → approve → execute → dispatch + audit; 48h cooldown holds under voice', () => {
+describe(provesExecution('send_estimate_nudge') + 'Postgres integration — voice send_estimate_nudge ("Nudge the Khan estimate") → approve → execute → dispatch + audit; 48h cooldown holds under voice', () => {
   let pool: Pool;
   let estimateRepo: PgEstimateRepository;
   let auditRepo: PgAuditRepository;

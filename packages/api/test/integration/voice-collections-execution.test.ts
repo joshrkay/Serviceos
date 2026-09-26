@@ -58,11 +58,12 @@ import {
   createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const BASE_INVOICE_CENTS = 10000;
 const SPOKEN_FEE_CENTS = 2500; // "twenty-five dollars" — integer cents end-to-end
 
-describe('Integration — U1 voice collections resolution → execution (real Postgres)', () => {
+describe(provesExecution('send_invoice') + 'Integration — U1 voice collections resolution → execution (real Postgres)', () => {
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let jobRepo: PgJobRepository;

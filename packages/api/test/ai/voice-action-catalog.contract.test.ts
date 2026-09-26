@@ -1,7 +1,7 @@
 /**
  * U1 — Voice action catalog ↔ code contract.
  *
- * `docs/reference/voice-action-catalog.md` is the human-readable answer to
+ * `docs/reference/voice-action-catalog.md` (GENERATED — #842) is the human-readable answer to
  * "what can a tradesperson do by speaking?". This test pins the catalog's
  * machine-readable block to the actual code so the doc cannot silently rot
  * the way `docs/remaining-features.md` did. If an intent, proposal type,
@@ -26,6 +26,7 @@ import {
 import { INTENT_TO_PROPOSAL_TYPE } from '../../src/workers/voice-action-router';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { ProposalType, actionClassForProposalType } from '../../src/proposals/proposal';
+import { regenerateVoiceActionCatalog } from '../../scripts/generate-voice-action-catalog';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const CATALOG_PATH = path.resolve(REPO_ROOT, 'docs/reference/voice-action-catalog.md');
@@ -72,6 +73,15 @@ function allHandlerTypes(): Set<ProposalType> {
 }
 
 describe('U1: voice action catalog ↔ code contract', () => {
+  // #842 — the catalog is GENERATED from the capability declarations. This is
+  // the drift gate: it fails CI whenever the committed file differs from a
+  // regenerate — a hand edit inside a generated block, or a declaration /
+  // execution handler / proof tag that changed without regenerating.
+  it('the committed catalog is exactly what the generator produces (run `npm run catalog:generate`)', async () => {
+    const committed = await fs.readFile(CATALOG_PATH, 'utf8');
+    expect(regenerateVoiceActionCatalog(committed) === committed, 'catalog drifted — run `npm run catalog:generate` in packages/api').toBe(true);
+  });
+
   it('speakable list exactly matches INTENT_TO_PROPOSAL_TYPE (intent + proposal type + action class)', async () => {
     const catalog = await loadCatalog();
     const codeMap = INTENT_TO_PROPOSAL_TYPE as Record<string, ProposalType>;

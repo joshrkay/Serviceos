@@ -23,14 +23,26 @@
  *     checked against this cap; the run aborts (exit 3) before spending a cent
  *     if the projection exceeds it.
  *
+ * Baseline regression gate (#839, both modes — see baseline.ts):
+ *   --baseline <file>          fail (exit 1) if accuracy / macro-F1 dropped past
+ *                              the baseline's tolerance or the golden set changed;
+ *                              exit 4 if the baseline is an unrecorded placeholder.
+ *   --record-baseline <file>   write this run's metrics as the new baseline.
+ *
  * Held-out split: deterministic 20% by stable hash of the utterance, so the test
  * set is stable across runs and independent of row order.
  */
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { classificationReport, stableHash } from './metrics';
+import { classificationReport, type ClassReport } from './metrics';
 import { classifyBaseline } from './baseline-classifier';
+import { intentGoldenKey, loadIntentTestSplit as loadTestSplit, type IntentGoldRow } from './corpus';
+import {
+  LIVE_BASELINE_TOLERANCE,
+  OFFLINE_BASELINE_TOLERANCE,
+  applyBaselineGate,
+  fingerprintGoldenSet,
+  parseBaselineArgs,
+  type EvalMode,
+} from './baseline';
 import {
   ActualCostCapExceededError,
   assertActualCostWithinCap,
@@ -45,26 +57,33 @@ import {
   sampleDeterministic,
 } from './live-support';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const UTTERANCES = resolve(__dirname, '../../data/corpus/utterances.jsonl');
-
-const TEST_FRACTION = 0.20;
 const OFFLINE_FLOOR = 0.50; // regression guard for the rule baseline on this data
 
-interface Row { utterance: string; intent: string }
+const RECORD_COMMANDS: Record<EvalMode, string> = {
+  offline: 'npx tsx packages/voice-eval/run-intent-eval.ts --record-baseline packages/voice-eval/baselines/intent-offline.json',
+  live: 'ANTHROPIC_API_KEY=... VOICE_EVAL_COST_CAP_CENTS=1500 npx tsx packages/voice-eval/run-intent-eval.ts --live --max-utterances 200 --record-baseline packages/voice-eval/baselines/intent-live.json',
+};
 
-// The corpus jsonl carries the utterance under `text` (current schema) or
-// `utterance` (older rows) — normalize to a canonical `{ utterance, intent }`.
-interface RawRow { text?: string; utterance?: string; intent?: string }
-
-function loadTestSplit(): Row[] {
-  const rows = readFileSync(UTTERANCES, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as RawRow)
-    .map((r): Row => ({ utterance: r.text ?? r.utterance ?? '', intent: r.intent ?? '' }))
-    .filter((r) => r.utterance !== '' && r.intent !== '');
-  return rows.filter((r) => stableHash(r.utterance) < TEST_FRACTION);
+/**
+ * Compare/record against a baseline when asked. Returns the exit code the
+ * baseline step demands (0 when not requested) after printing its verdict.
+ */
+function baselineStep(mode: EvalMode, rows: IntentGoldRow[], report: ClassReport): number {
+  const r = applyBaselineGate(
+    {
+      eval: 'intent',
+      mode,
+      goldenSet: { rows: rows.length, fingerprint: fingerprintGoldenSet(rows.map(intentGoldenKey)) },
+      metrics: { accuracy: report.accuracy, macroF1: report.macroF1 },
+    },
+    parseBaselineArgs(process.argv),
+    {
+      tolerance: mode === 'live' ? LIVE_BASELINE_TOLERANCE : OFFLINE_BASELINE_TOLERANCE,
+      recordCommand: RECORD_COMMANDS[mode],
+    },
+  );
+  if (r.message) (r.exitCode === 0 ? console.log : console.error)(`\n${r.exitCode === 0 ? '📏' : '❌'} ${r.message}`);
+  return r.exitCode;
 }
 
 // --live is now WIRED and credential-gated: it needs a real LLM key. This is the
@@ -124,8 +143,10 @@ async function runLive(gate: boolean): Promise<void> {
   console.log('   worst confusions (gold ⇒ pred):');
   for (const c of report.topConfusions.slice(0, 8)) console.log(`     - ${c.gold} ⇒ ${c.pred}: ${c.count}`);
 
+  const baselineExit = baselineStep('live', sample, report);
   const g = evaluateGate(report.accuracy, LIVE_INTENT_TARGET, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%`);
+  if (baselineExit !== 0) process.exit(baselineExit);
   if (!g.pass) {
     console.error(`\n❌ FAIL: accuracy ${(report.accuracy * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
     process.exit(1);
@@ -148,9 +169,11 @@ function runOffline(gate: boolean): void {
   console.log('   worst confusions (gold ⇒ pred):');
   for (const c of report.topConfusions.slice(0, 8)) console.log(`     - ${c.gold} ⇒ ${c.pred}: ${c.count}`);
 
+  const baselineExit = baselineStep('offline', test, report);
   const g = evaluateGate(report.accuracy, OFFLINE_FLOOR, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%  ` +
     `(LIVE target ${LIVE_INTENT_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
+  if (baselineExit !== 0) process.exit(baselineExit);
   if (!g.pass) {
     console.error(`\n❌ FAIL: accuracy ${(report.accuracy * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
     process.exit(1);

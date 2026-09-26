@@ -177,7 +177,10 @@ import type {
   VoiceSession,
   VoiceSessionStore,
 } from '../agents/customer-calling/voice-session-store';
-import { deriveCallOutcome } from '../agents/customer-calling/outcome-mapper';
+import {
+  deriveCallOutcome,
+  deriveCallOutcomeFromSession,
+} from '../agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../../voice/voice-session';
 import type {
   Proposal,
@@ -254,6 +257,8 @@ import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
+import { xmlEscape } from '../../telephony/shared/xml-escape';
+import { queueCallbackProposal as queueCallbackProposalShared } from '../../telephony/shared/queue-callback-proposal';
 
 const logger = createLogger({
   service: 'ai.voice-turn.processor',
@@ -319,15 +324,6 @@ export const SMS_CONSENT_DECLINE_FALLBACK =
  */
 export const CLOSE_FALLBACK_LINE =
   "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.";
-
-function xmlEscape(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 // `intentToProposalType` + `voiceProposalSummary` are imported from
 // `proposals/voice-intent-map.ts` — this file used to carry a private
@@ -2502,7 +2498,7 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
         }
 
         if (
@@ -2556,11 +2552,13 @@ export function createVoiceTurnProcessor(
           hasSummary: Boolean(summary),
         });
       } else if (!result.escalated && deps.callControl) {
-        await queueCallbackProposalInternal(
+        await queueCallbackProposalShared(
+          deps,
           session,
           tenantId,
           rawReason,
           'rotation_empty',
+          resolveThresholdOverride,
         );
         const safeName = xmlEscape(deps.businessName);
         pendingTransferTwiml.set(
@@ -2575,86 +2573,6 @@ export function createVoiceTurnProcessor(
       }
     } catch (err) {
       logger.warn('escalateToHuman failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-    }
-  }
-
-  /**
-   * Internal duplicate of the adapter's `queueCallbackProposal` used by
-   * `handleNotifyOncall` when the rotation cascade is empty. The adapter
-   * retains its public `queueCallbackProposal` for the route layer; both
-   * paths build the same proposal shape.
-   */
-  async function queueCallbackProposalInternal(
-    session: VoiceSession,
-    tenantId: string,
-    reason: string,
-    outcome: 'rotation_empty' | 'rotation_exhausted',
-  ): Promise<void> {
-    if (!deps.proposalRepo) {
-      logger.warn('queueCallbackProposal: proposalRepo not wired', {
-        sessionId: session.id,
-        outcome,
-      });
-      return;
-    }
-    try {
-      const tenantThresholdOverride = await resolveThresholdOverride(tenantId);
-      const proposal = buildProposal({
-        tenantId,
-        proposalType: 'voice_clarification',
-        payload: {
-          intent: 'customer_callback_required',
-          reason,
-          outcome,
-          sessionId: session.id,
-          callSid: session.callSid,
-        },
-        summary: `Customer callback required (${outcome})`,
-        sourceContext: {
-          source: 'calling-agent',
-          channel: 'telephony',
-          sessionId: session.id,
-          escalationReason: reason,
-        },
-        // This callback proposal is generated internally (rotation empty/
-        // exhausted) with no associated ai_runs row, so ai_run_id stays null —
-        // never fabricate a uuid (FK to ai_runs(id) would reject it).
-        createdBy: deps.systemActorId ?? 'calling-agent',
-        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-      });
-      const stored = await deps.proposalRepo.create(proposal);
-      session.proposalIds.push(stored.id);
-      if (deps.auditRepo) {
-        try {
-          const auditEvent = createAuditEvent({
-            tenantId,
-            actorId: deps.systemActorId ?? 'calling-agent',
-            actorRole: 'system',
-            eventType: 'customer_callback_required',
-            entityType: 'voice_session',
-            entityId: session.id,
-            correlationId: session.id,
-            metadata: {
-              proposalId: stored.id,
-              reason,
-              outcome,
-              callSid: session.callSid,
-            },
-          });
-          await deps.auditRepo.create(auditEvent);
-        } catch (err) {
-          logger.warn('queueCallbackProposal: audit persist failed', {
-            error: err instanceof Error ? err.message : String(err),
-            sessionId: session.id,
-          });
-        }
-      }
-      deps.callControl?.clearCursor(session.id);
-    } catch (err) {
-      logger.warn('queueCallbackProposal failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
@@ -3205,7 +3123,7 @@ export function createVoiceTurnProcessor(
         await deps.voiceRepo.stampOutcomeByCallSid(
           session.tenantId,
           callSid,
-          deriveOutcomeFromSession(session),
+          deriveCallOutcomeFromSession(session),
         );
       } catch (err) {
         logger.warn('stampOutcomeByCallSid failed', {
@@ -3214,31 +3132,6 @@ export function createVoiceTurnProcessor(
         });
       }
     }
-  }
-
-  /**
-   * Local duplicate of the adapter's `deriveCallOutcome` for use inside
-   * `runSummary`. The adapter retains its own (used by
-   * `stampCallOutcomeByCallSid`); both branches return the same value
-   * for the same session.
-   */
-  function deriveOutcomeFromSession(session: VoiceSession): CallOutcome {
-    const ctx = session.machine.currentContext;
-    if (ctx.escalationReason) {
-      if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
-      if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
-      if (ctx.escalationReason.startsWith('callback_required'))
-        return 'callback_required';
-      if (ctx.escalationReason.startsWith('abuse_detected')) return 'failed';
-      return 'escalated_to_human';
-    }
-    if (session.proposalIds.length > 0) return 'completed';
-    if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
-    const hadCallerSpeech = session.transcript.some((line) =>
-      line.startsWith('caller:'),
-    );
-    if (!hadCallerSpeech) return 'dropped';
-    return 'no_intent';
   }
 
   // ─── RV-071 — owner voice-approval dialogue ─────────────────────────
