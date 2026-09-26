@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import {
   Search, Plus, ChevronRight, MapPin, X, Check,
   AlertTriangle, FileText, Briefcase, ArrowLeft,
-  User, Phone, Mail,
+  User, Phone, Mail, Archive,
 } from 'lucide-react';
 import type { ServiceType } from '../../types/job-ui';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
@@ -504,8 +504,17 @@ export function CustomersPage() {
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
   const [searchTerm,   setSearchTerm]   = useState('');
+  // #1281 — the Archived view: the only place an archived customer is listed
+  // (and so the way to reach its Restore control).
+  const [showArchived, setShowArchived] = useState(false);
 
-  const { data, total, isLoading, error, setSearch, refetch } = useListQuery<CustomerListItem>('/api/customers');
+  const { data, total, isLoading, error, setSearch, setFilters, refetch } = useListQuery<CustomerListItem>('/api/customers');
+
+  const toggleArchived = () => {
+    const next = !showArchived;
+    setShowArchived(next);
+    setFilters(next ? { archived: 'only' } : {});
+  };
 
   // customer_search_run (U6) — a debounced "search executed" signal, once the
   // term settles (and again after the fetch updates `total`). PII GUARDRAIL:
@@ -543,7 +552,9 @@ export function CustomersPage() {
           <div>
             <h1 className="text-foreground">Customers</h1>
             <p className="text-xs text-muted-foreground mt-0.5">
-              {total} customers · {totalLocations} locations
+              {showArchived
+                ? `${total} archived`
+                : `${total} customers · ${totalLocations} locations`}
             </p>
           </div>
           <button
@@ -576,6 +587,17 @@ export function CustomersPage() {
               {f}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={toggleArchived}
+            aria-pressed={showArchived}
+            className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+              showArchived
+                ? 'bg-primary border-primary text-primary-foreground'
+                : 'border-border text-muted-foreground hover:border-border'
+            }`}>
+            <Archive size={12} /> Archived
+          </button>
         </div>
 
         {/* 4.8 — tag filter chips (only shown when the loaded set has tags) */}
@@ -640,6 +662,13 @@ export function CustomersPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm text-foreground">{name}</p>
+                      {c.isArchived && (
+                        <span
+                          data-testid="customer-row-archived-pill"
+                          className="text-xs bg-secondary text-muted-foreground border border-border rounded-full px-2 py-0.5">
+                          Archived
+                        </span>
+                      )}
                       {c.tags?.includes('VIP') && (
                         <span className="text-xs bg-warning/15 text-warning rounded-full px-2 py-0.5">VIP</span>
                       )}
