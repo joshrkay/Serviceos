@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { formatCurrency } from '../../utils/currency';
 import { Link } from 'react-router';
 import { Phone } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
@@ -14,10 +15,6 @@ interface PeriodUsage {
   capCents: number | null;
   /** Server's isOverageCapReached — the one rule; never recomputed here. */
   capReached: boolean;
-}
-
-function dollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 /**
@@ -48,11 +45,11 @@ export function UsageBanner() {
 
   const { capReached } = usage;
   const message = capReached
-    ? `Your ${dollars(usage.capCents ?? 0)} overage cap is reached — calls ring you instead of the AI.`
+    ? `Your ${formatCurrency(usage.capCents ?? 0)} overage cap is reached — calls ring you instead of the AI.`
     : usage.usedMinutes >= usage.includedMinutes
-      ? `All ${usage.includedMinutes} included AI minutes used — extra minutes are ${dollars(
+      ? `All ${usage.includedMinutes} included AI minutes used — extra minutes are ${formatCurrency(
           usage.overageCentsPerMinute,
-        )} each (${dollars(usage.projectedChargeCents)} so far).`
+        )} each (${formatCurrency(usage.projectedChargeCents)} so far).`
       : `You've used ${usage.usedMinutes} of your ${usage.includedMinutes} AI answering minutes.`;
 
   return (

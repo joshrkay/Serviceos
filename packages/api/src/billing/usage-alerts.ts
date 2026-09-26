@@ -7,6 +7,7 @@
  * only the highest is emailed and the lower ones are marked sent.
  * Trials are covered by the upgrade nudge instead.
  */
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import { recordFunnelEvent } from '../analytics/posthog';
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
@@ -48,10 +49,6 @@ class PgUsageAlertLedger extends PgBaseRepository {
   }
 }
 
-function dollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): Promise<void> {
   const tenant = await readTenantBillingState(deps.pool, tenantId);
   if (tenant?.status !== 'active') return;
@@ -83,7 +80,7 @@ export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): 
   if (!highest || !to || !deps.sendEmail) return;
 
   const settingsUrl = `${deps.appBaseUrl}/settings`;
-  const rate = dollars(usage.overageCentsPerMinute);
+  const rate = formatUsdCentsFixed(usage.overageCentsPerMinute);
   const used = `You've used ${usage.usedMinutes} of the ${usage.includedMinutes} AI answering minutes included this billing period.`;
   const email =
     highest === 'included_80'
@@ -95,12 +92,12 @@ export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): 
         ? {
             subject: "You've used all your included AI answering minutes",
             text: `${used} Extra minutes are ${rate} each, up to your overage cap of ${
-              usage.capCents === null ? 'no limit' : dollars(usage.capCents)
+              usage.capCents === null ? 'no limit' : formatUsdCentsFixed(usage.capCents)
             } this period. Adjust it here: ${settingsUrl}`,
           }
         : {
             subject: 'Your AI overage cap is reached — calls now ring you',
-            text: `This period's extra AI minutes have reached your ${dollars(
+            text: `This period's extra AI minutes have reached your ${formatUsdCentsFixed(
               usage.capCents ?? 0,
             )} overage cap, so new calls ring your phone instead of the AI answering. Raise or remove the cap to turn the AI back on: ${settingsUrl}`,
           };
