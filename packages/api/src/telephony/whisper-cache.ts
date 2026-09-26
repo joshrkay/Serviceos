@@ -10,8 +10,13 @@
  * Redis-backed implementation that conforms to the same interface.
  */
 
-interface CacheEntry {
+/** A cached whisper and the tenant whose escalation produced it (#1084). */
+export interface WhisperEntry {
   text: string;
+  tenantId: string;
+}
+
+interface CacheEntry extends WhisperEntry {
   expiresAt: number;
 }
 
@@ -37,23 +42,23 @@ export class WhisperCache {
     this.maxEntries = opts.maxEntries ?? 1000;
   }
 
-  set(escalationId: string, text: string): void {
+  set(escalationId: string, text: string, tenantId: string): void {
     if (this.entries.size >= this.maxEntries && !this.entries.has(escalationId)) {
       // Map iteration is insertion-ordered; the first key is the oldest.
       const oldestKey = this.entries.keys().next().value;
       if (oldestKey !== undefined) this.entries.delete(oldestKey);
     }
-    this.entries.set(escalationId, { text, expiresAt: Date.now() + this.ttlMs });
+    this.entries.set(escalationId, { text, tenantId, expiresAt: Date.now() + this.ttlMs });
   }
 
-  get(escalationId: string): string | undefined {
+  get(escalationId: string): WhisperEntry | undefined {
     const entry = this.entries.get(escalationId);
     if (!entry) return undefined;
     if (entry.expiresAt < Date.now()) {
       this.entries.delete(escalationId);
       return undefined;
     }
-    return entry.text;
+    return { text: entry.text, tenantId: entry.tenantId };
   }
 
   size(): number {
