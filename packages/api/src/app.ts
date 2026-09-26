@@ -5111,6 +5111,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       userRepo,
       settingsRepo,
       auditRepo,
+      // #1079 / PRD 4.7 — board lateness from truck-location pings.
+      locationPingRepo: technicianLocationPingRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
