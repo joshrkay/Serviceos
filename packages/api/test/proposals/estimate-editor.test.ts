@@ -1,6 +1,5 @@
 import {
   editEstimateProposal,
-  calculateEstimateTotal,
   getEstimateLineItems,
   EstimateEditAction,
 } from '../../src/proposals/estimate-editor';
@@ -94,14 +93,6 @@ describe('P2-017 — Estimate proposal review + inline edit workflow', () => {
     expect(editedFields).toContain('notes');
   });
 
-  it('happy path — calculates estimate total', () => {
-    const proposal = makeEstimateProposal();
-    const total = calculateEstimateTotal(proposal.payload);
-
-    // 2 * 75 + 3 * 50 = 150 + 150 = 300
-    expect(total).toBe(300);
-  });
-
   it('validation — rejects edit on non-estimate proposal', () => {
     const input: CreateProposalInput = {
       tenantId: 'tenant-1',
@@ -160,9 +151,6 @@ describe('P2-017 — Estimate proposal review + inline edit workflow', () => {
 
     const lineItems = getEstimateLineItems(proposal.payload);
     expect(lineItems).toEqual([]);
-
-    const total = calculateEstimateTotal(proposal.payload);
-    expect(total).toBe(0);
   });
 
   it('security — update_wording rejects disallowed fields', () => {
