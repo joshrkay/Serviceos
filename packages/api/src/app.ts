@@ -390,7 +390,10 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
-import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
+import {
+  createTwilioWebhookCredentialResolver,
+  createSubaccountCredentialView,
+} from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
@@ -3938,19 +3941,20 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
    *     a tenant dials a number another tenant happens to own.
    * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
    * when we hold one, deployment token otherwise.
+   *
+   * #1084 — `subaccountCredentialView` is the decision-shaped form of the same
+   * view (the whisper mount uses it directly, so the middleware logs the path
+   * that really answered and records the verifying tenant); the plain-token
+   * form below is derived from it rather than re-implementing the fallback.
    */
+  const subaccountCredentialView = createSubaccountCredentialView(
+    resolveTwilioWebhookCredential,
+  );
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    const decision = await resolveTwilioWebhookCredential(
-      accountSid ? { accountSid } : {},
-    );
-    if (typeof decision === 'object') {
-      return decision.outcome === 'verify'
-        ? decision.authToken
-        : process.env.TWILIO_AUTH_TOKEN;
-    }
-    return decision ?? process.env.TWILIO_AUTH_TOKEN;
+    const decision = await subaccountCredentialView(accountSid ? { accountSid } : {});
+    return decision.outcome === 'verify' ? decision.authToken : undefined;
   };
 
   // D2-3 / #1061 — the ONE phone-number → tenant lookup for inbound
@@ -3986,10 +3990,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // way past.
   app.use(
     '/api/telephony/whisper',
-    requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
+    requireTwilioSignature(subaccountCredentialView, {
+      publicBaseUrl: () => process.env.PUBLIC_API_URL,
+    }),
   );
   app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
 

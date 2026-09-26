@@ -33,6 +33,7 @@ import { TwilioGatherAdapter, xmlEscape } from '../telephony/twilio-adapter';
 import {
   requireTwilioSignature,
   sessionBelongsToAnotherTenant,
+  actingTenantMismatchesCredential,
   type TwilioAuthTokenGetter,
 } from '../telephony/twilio-signature';
 import {
@@ -1377,9 +1378,27 @@ async function resolveInboundTenantId(opts: {
     return undefined;
   }
 
+  // #1084 — the dev seam must not accept a call whose verifying credential
+  // belongs to a specific, DIFFERENT tenant. After #1082 an unowned (or
+  // absent) dialled number verifies on the AccountSid path, so without this
+  // tenant A's own credential could run a call as the env default tenant. The
+  // deployment-wide token implies no tenant and still reaches the seam.
+  const refuseForeignCredential = (candidate: string, source: string): boolean => {
+    if (!actingTenantMismatchesCredential(opts.req, candidate)) return false;
+    logger.warn('telephony.tenant_lookup_dev_fallback_refused', {
+      to: normalizedTo,
+      callSid,
+      source,
+      reason: 'verifying_credential_belongs_to_another_tenant',
+      env: nodeEnv,
+    });
+    return true;
+  };
+
   // Dev path — try the legacy resolver, then the env var.
   try {
     const legacy = await Promise.resolve(deps.resolveTenantId({ to: normalizedTo, from }));
+    if (legacy && refuseForeignCredential(legacy, 'resolveTenantId')) return undefined;
     if (legacy) {
       logger.warn('telephony.tenant_lookup_dev_fallback', {
         to: normalizedTo,
@@ -1398,6 +1417,9 @@ async function resolveInboundTenantId(opts: {
   }
 
   const envFallback = process.env.TWILIO_DEFAULT_TENANT_ID;
+  if (envFallback && refuseForeignCredential(envFallback, 'TWILIO_DEFAULT_TENANT_ID')) {
+    return undefined;
+  }
   if (envFallback) {
     logger.warn('telephony.tenant_lookup_dev_fallback', {
       to: normalizedTo,

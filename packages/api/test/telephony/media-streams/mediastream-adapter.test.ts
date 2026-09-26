@@ -1446,7 +1446,9 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         channelPreferences: { sms: true, in_app: true, whisper: true },
       });
 
-      expect(whisperCache.get('esc_xyz')).toBe('Test whisper');
+      // #1084 — tagged with the live session's tenant ('t'), which outranks the
+      // payload's own tenantId field.
+      expect(whisperCache.get('esc_xyz')).toEqual({ text: 'Test whisper', tenantId: 't' });
       expect(sendSms).toHaveBeenCalledWith(
         expect.objectContaining({ to: '+15125550999', body: 'Test SMS esc_xyz' }),
       );
@@ -1504,7 +1506,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       });
 
       expect(sendSms).not.toHaveBeenCalled();
-      expect(whisperCache.get('esc_no_sms')).toBe('w');
+      expect(whisperCache.get('esc_no_sms')?.text).toBe('w');
       expect(
         inAppEvents.some((e) => (e as { type?: string }).type === 'escalation_started'),
       ).toBe(true);
