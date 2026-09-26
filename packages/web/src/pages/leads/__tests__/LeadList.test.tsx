@@ -39,6 +39,18 @@ describe('Leads — LeadList kanban (P9-001)', () => {
     vi.mocked(apiFetch).mockReset();
   });
 
+  it('#1283 — source filter chips meet the 44px tap target (min-h-11)', async () => {
+    mockListOnce();
+    render(<LeadList />);
+    await screen.findByText('Alice Wong');
+    const all = screen.getByRole('button', { name: 'All' });
+    const chips = Array.from(all.parentElement!.querySelectorAll('button'));
+    expect(chips.length).toBeGreaterThan(1);
+    for (const chip of chips) {
+      expect(chip.className, chip.textContent ?? '').toMatch(/(^|\s)min-h-11(\s|$)/);
+    }
+  });
+
   it('renders kanban columns and lead cards from the API', async () => {
     mockListOnce();
     render(<LeadList />);

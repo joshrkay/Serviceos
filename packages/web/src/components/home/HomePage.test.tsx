@@ -287,6 +287,15 @@ describe('HomePage', () => {
     expect(screen.getByText('TODAY')).toBeInTheDocument();
   });
 
+  it('#1283 — every "View all" link meets the 44px tap target (min-h-11)', () => {
+    renderPage();
+    const viewAll = screen.getAllByRole('button', { name: /view all/i });
+    expect(viewAll.length).toBeGreaterThan(0);
+    for (const btn of viewAll) {
+      expect(btn.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+    }
+  });
+
   it('shows empty jobs state when no jobs', () => {
     vi.mocked(useListQuery).mockImplementation((path: string) => {
       if (path === '/api/jobs')      return makeListResult([]) as ReturnType<typeof useListQuery>;

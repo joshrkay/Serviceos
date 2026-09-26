@@ -83,6 +83,21 @@ describe('SettingsPage Quick toggles persistence', () => {
     );
   });
 
+  it('#1283 — the business-profile "Edit" button meets the 44px tap target', async () => {
+    apiFetchMock.mockResolvedValue(jsonResponse({}));
+    fetchLanguageMock.mockResolvedValue({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+    renderPage();
+    const edit = await screen.findByRole('button', { name: 'Edit' });
+    expect(edit.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+    expect(edit.className).toMatch(/(^|\s)min-w-11(\s|$)/);
+  });
+
   it('hydrates spanishMode from /api/settings/language on mount', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
