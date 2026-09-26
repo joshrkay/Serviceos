@@ -36,7 +36,13 @@ export async function connectQuickBooks(redirectAfter?: string): Promise<string>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(redirectAfter ? { redirectAfter } : {}),
   });
-  if (!res.ok) throw new Error(`connectQuickBooks failed: ${res.status}`);
+  if (!res.ok) {
+    // e.g. PLAN_UPGRADE_REQUIRED — QuickBooks is Growth-only; show why.
+    const body = (await res.json().catch(() => null)) as { message?: unknown } | null;
+    throw new Error(
+      typeof body?.message === 'string' ? body.message : `connectQuickBooks failed: ${res.status}`,
+    );
+  }
   const json = (await res.json()) as { url: string };
   return json.url;
 }

@@ -20,7 +20,7 @@ import {
   MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { SettingsRepository } from '../settings/settings';
+import { resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
 import { SendService } from '../notifications/send-service';
@@ -28,7 +28,7 @@ import { Job, JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
-import { applyBps } from '../shared/billing-engine';
+import { applyBps, calculateDocumentTotals } from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
@@ -196,7 +196,11 @@ export function createInvoiceRouter(
             ? await getCustomerMemberDiscountBps(req.auth!.tenantId, memberJob.customerId, agreementRepo)
             : 0;
           if (bps > 0) {
-            const subtotalCents = parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0);
+            // #1064 — derive the member-discount base from the engine's own
+            // subtotal (I9′) instead of a hand-rolled reduce, so this can
+            // never silently diverge from what the engine calls "every
+            // line's total" if that definition changes.
+            const subtotalCents = calculateDocumentTotals(parsed.lineItems, 0, 0).subtotalCents;
             const cents = applyBps(subtotalCents, bps);
             if (cents > 0) {
               discountCents += cents;
@@ -205,10 +209,15 @@ export function createInvoiceRouter(
           }
         }
 
+        // #1288 — no explicit rate ⇒ the tenant's default (0 when unset).
+        const taxRateBps =
+          parsed.taxRateBps ?? (await resolveDefaultTaxRateBps(req.auth!.tenantId, settingsRepo));
+
         const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
             discountCents,
+            taxRateBps,
             originatingLeadId: job?.originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,

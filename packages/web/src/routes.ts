@@ -33,15 +33,8 @@ export const router = createBrowserRouter([
   // /download, /privacy, /terms) moved to the standalone marketing site.
   // The API forwards those paths there (see marketing-redirects.ts), and a
   // signed-out visit to "/" is redirected too (see ProtectedRoute).
-
   // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
-  // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
-  {
-    path: '/onboarding',
-    lazy: async () => ({ Component: (await import('./components/onboarding/v2/OnboardingShell')).OnboardingShell }),
-    ErrorBoundary: RouteErrorElement,
-    hydrateFallbackElement: routeFallback,
-  },
+  // §10 onboarding now lives under ProtectedRoute below (auth-gated, no Shell).
   { path: '/e/:id',      lazy: async () => ({ Component: (await import('./components/customer/EstimateApprovalPage')).EstimateApprovalPage }), ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
   { path: '/pay/:id',    lazy: async () => ({ Component: (await import('./components/customer/InvoicePaymentPage')).InvoicePaymentPage }),   ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
   { path: '/intake',     lazy: async () => ({ Component: (await import('./components/customer/IntakeFormPage')).IntakeFormPage }),           ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
@@ -57,7 +50,20 @@ export const router = createBrowserRouter([
     path: '/',
     Component: ProtectedRoute,
     ErrorBoundary: RouteErrorElement,
-    children: [{
+    children: [
+      // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
+      // Auth-gated but rendered WITHOUT the Shell chrome. It is the landing
+      // page after Clerk sign-up and the Stripe checkout return target, so a
+      // signed-out visit must bounce to /login with the return path (the
+      // guard's existing behaviour) instead of rendering the shell, whose
+      // status fetch then fails with "We couldn't load your setup" and no
+      // way forward. OnboardingGuard already passes /onboarding through.
+      {
+        path: 'onboarding',
+        lazy: async () => ({ Component: (await import('./components/onboarding/v2/OnboardingShell')).OnboardingShell }),
+        hydrateFallbackElement: routeFallback,
+      },
+      {
       path: '/',
       Component: Shell,
       // Covers cold deep-links to any lazy app page below (chain:

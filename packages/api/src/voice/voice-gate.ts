@@ -3,8 +3,11 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import { voiceBlocksTotal } from '../monitoring/metrics';
 import { loadVoiceAgentLiveAt } from './go-live';
-import { loadTrialUsage } from './load-trial-usage';
-import { evaluateTrialCap, type GateReason, type SubscriptionStatus } from './trial-limits';
+import { decideTrialCall, type GateReason, type SubscriptionStatus } from './trial-limits';
+import { PgCallUsageRepository } from '../billing/call-usage-events';
+import { PgOverageCapStore } from '../billing/overage-cap';
+import { isOverageCapReached } from '../billing/call-usage-pricing';
+import { readTenantBillingState } from '../billing/tenant-billing-state';
 
 export interface VoiceGateInput {
   tenantId: string;
@@ -14,6 +17,12 @@ export interface VoiceGateInput {
 export interface VoiceGateResult {
   allowed: boolean;
   reason?: GateReason;
+  /**
+   * Usage caps (trial minutes, trial concurrency, paid overage cap) ring the
+   * owner instead of dropping the caller: their phone, or null when none is
+   * on file (the route then falls back to voicemail). Absent for other blocks.
+   */
+  forwardTo?: string | null;
 }
 
 export type VoiceGate = (input: VoiceGateInput) => Promise<VoiceGateResult>;
@@ -24,16 +33,16 @@ export interface VoiceGateDeps {
 }
 
 /**
- * Composes Gate A (subscription), go-live gate, and Gate B (trial caps) for
- * the telephony /voice webhook. Blocks return voicemail TwiML upstream.
+ * Composes Gate A (subscription), go-live gate, and Gate B (usage caps) for
+ * the telephony /voice webhook. Setup blocks return voicemail TwiML upstream;
+ * usage caps forward to the owner (see VoiceGateResult.forwardTo).
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
+  const ledger = new PgCallUsageRepository(deps.pool);
+  const overageCaps = new PgOverageCapStore(deps.pool);
   return async ({ tenantId, callSid }) => {
-    const subRes = await deps.pool.query<{ subscription_status: string | null }>(
-      `SELECT subscription_status FROM tenants WHERE id = $1`,
-      [tenantId],
-    );
-    const rawStatus = subRes.rows[0]?.subscription_status ?? null;
+    const tenant = await readTenantBillingState(deps.pool, tenantId);
+    const rawStatus = tenant?.status ?? null;
     const status = normalizeStatus(rawStatus);
 
     if (status !== 'trialing' && status !== 'active') {
@@ -57,8 +66,11 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
       });
     }
 
-    const safetyRes = await deps.pool.query<{ e1_reviewed_script: string | null }>(
-      `SELECT e1_reviewed_script FROM tenant_settings WHERE tenant_id = $1`,
+    const safetyRes = await deps.pool.query<{
+      e1_reviewed_script: string | null;
+      owner_phone: string | null;
+    }>(
+      `SELECT e1_reviewed_script, owner_phone FROM tenant_settings WHERE tenant_id = $1`,
       [tenantId],
     );
     const reviewedScript = safetyRes.rows[0]?.e1_reviewed_script?.trim();
@@ -72,18 +84,51 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
       });
     }
 
-    const usage = await loadTrialUsage(deps.pool, tenantId);
-    const evalResult = evaluateTrialCap({
-      status,
-      dailyMinutes: usage.dailyMinutes,
-      trialTotalMinutes: usage.trialTotalMinutes,
-      concurrentCalls: usage.concurrentCalls,
-    });
+    const forwardTo = safetyRes.rows[0]?.owner_phone?.trim() || null;
 
-    if (evalResult.allowed) return { allowed: true };
+    if (status === 'trialing') {
+      const concurrentRes = await deps.pool.query<{ concurrent: number }>(
+        `SELECT COUNT(*)::int AS concurrent FROM voice_sessions
+          WHERE tenant_id = $1 AND channel = 'voice_inbound' AND ended_at IS NULL`,
+        [tenantId],
+      );
+      // The whole trial: every billable second recorded so far.
+      const billableSecondsUsed = await ledger.sumTrialBillableSeconds(tenantId);
+      const decision = decideTrialCall({
+        billableSecondsUsed,
+        concurrentCalls: concurrentRes.rows[0]?.concurrent ?? 0,
+      });
+      if (decision.action === 'answer') return { allowed: true };
+      return block(deps, {
+        tenantId,
+        callSid,
+        reason: decision.reason,
+        rawStatus,
+        usage: { billableSecondsUsed },
+        forwardTo,
+      });
+    }
 
-    const reason = evalResult.reason ?? 'no_billing';
-    return block(deps, { tenantId, callSid, reason, rawStatus, usage });
+    // Paid: forward once this period's overage has reached the owner's cap
+    // (one plan price by default; none if they removed it). Without a
+    // mirrored period, nothing to measure.
+    const period = tenant?.period ?? null;
+    const cap = period ? await overageCaps.get(tenantId) : null;
+    if (cap !== null && period) {
+      const planId = tenant?.planId ?? 'starter';
+      const billableSeconds = await ledger.sumBillableSeconds(tenantId, period.start, period.end);
+      if (isOverageCapReached({ planId, billableSeconds, overageCapCents: cap })) {
+        return block(deps, {
+          tenantId,
+          callSid,
+          reason: 'overage_cap',
+          rawStatus,
+          usage: { billableSeconds },
+          forwardTo,
+        });
+      }
+    }
+    return { allowed: true };
   };
 }
 
@@ -94,7 +139,8 @@ async function block(
     callSid: string;
     reason: GateReason;
     rawStatus: string | null;
-    usage: Awaited<ReturnType<typeof loadTrialUsage>> | null;
+    usage: Record<string, number> | null;
+    forwardTo?: string | null;
   },
 ): Promise<VoiceGateResult> {
   voiceBlocksTotal.inc({ reason: input.reason });
@@ -106,7 +152,9 @@ async function block(
         ? 'voice_blocked_not_live'
         : input.reason === 'e1_script_unreviewed'
           ? 'voice_blocked_e1_script_unreviewed'
-        : 'voice_blocked_trial_cap';
+        : input.reason === 'overage_cap'
+          ? 'voice_forwarded_overage_cap'
+          : 'voice_forwarded_trial_cap';
 
   try {
     await deps.auditRepo.create(
@@ -128,7 +176,9 @@ async function block(
     // Audit failures must not block the response.
   }
 
-  return { allowed: false, reason: input.reason };
+  return input.forwardTo === undefined
+    ? { allowed: false, reason: input.reason }
+    : { allowed: false, reason: input.reason, forwardTo: input.forwardTo };
 }
 
 const VALID_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);

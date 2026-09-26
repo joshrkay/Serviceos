@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { loadConfig, resetConfig } from '../../src/shared/config';
 import {
   OnboardingTeamMemberExecutionHandler,
   OnboardingScheduleExecutionHandler,
@@ -72,6 +73,10 @@ describe('OnboardingTeamMemberExecutionHandler', () => {
   const payload = { name: 'Carlos', role: 'technician', email: 'carlos@example.com' };
 
   it('sends the Clerk invitation, not just a local row', async () => {
+    // The redirect_url is built on config.publicOrigins.web (the SPA), not an
+    // injected base — see users/invite-team-member.ts.
+    resetConfig();
+    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.test' });
     const clerkFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ id: 'clerk_inv_9' }),
@@ -79,7 +84,7 @@ describe('OnboardingTeamMemberExecutionHandler', () => {
     const handler = new OnboardingTeamMemberExecutionHandler(
       invitationRepo as never,
       auditRepo as never,
-      { clerkSecretKey: 'sk_test', clerkFetch: clerkFetch as never, appBaseUrl: 'https://app.test' },
+      { clerkSecretKey: 'sk_test', clerkFetch: clerkFetch as never},
     );
 
     const result = await handler.execute(proposalOf('onboarding_team_member', payload), context);
@@ -261,9 +266,6 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
       expect.objectContaining({
         businessName: 'Acme Plumbing',
         serviceAreaText: 'Austin, TX',
-        // The same default IdentityStep pre-fills, so a silent form user and a
-        // silent conversation user land on the identical column value.
-        jobBufferMinutes: 30,
         // The operator-supplied zone reaches the SAME column PUT /identity
         // writes. Without it the tenant derives identity-done but every spoken
         // booking gates as a timezone clarification.
@@ -271,6 +273,10 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
       }),
     );
     expect(activatePackWithSeed).toHaveBeenCalledTimes(2);
+    // #1201 — the conversation never asks for a job buffer, so none is
+    // written (NULL = default, applied by readers).
+    const identityFields = vi.mocked(settingsRepo.upsertIdentityFields).mock.calls[0][1];
+    expect(identityFields).not.toHaveProperty('jobBufferMinutes');
   });
 
   // Still "never writes a timezone it was not told" — the refusal is just

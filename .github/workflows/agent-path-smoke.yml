@@ -34,8 +34,8 @@ jobs:
       AGENT_PATH_SMOKE_PASS_RATIO: '0.8'
       AGENT_PATH_SMOKE_OUT: agent-path-smoke-report.json
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -58,7 +58,7 @@ jobs:
             | tee agent-path-smoke-console.txt
       - name: Upload path-smoke report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agent-path-smoke-report
           path: |

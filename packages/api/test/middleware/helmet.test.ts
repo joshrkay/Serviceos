@@ -63,6 +63,25 @@ describe('D1-3 — helmet hardening headers', () => {
       expect(connectDirective).toContain('https://us-assets.i.posthog.com');
     });
 
+    it('allows the production Clerk Frontend API host + Turnstile origins (else /login and /signup render blank)', async () => {
+      // The pk_live_ publishable key encodes the Frontend API host
+      // clerk.therivetapp.com — a custom domain, so neither *.clerk.com nor
+      // *.clerk.accounts.dev matches it. clerk-js itself is loaded from that
+      // host (/npm/@clerk/clerk-js@…), so a script-src miss blanks every auth
+      // page. Sign-up bot protection is Cloudflare Turnstile (script + iframe).
+      const res = await request(app).get('/health');
+      const csp = res.headers['content-security-policy'] ?? '';
+      const directive = (name: string) =>
+        csp.split(';').find((d) => d.trim().startsWith(name)) ?? '';
+      expect(directive('script-src')).toContain('https://clerk.therivetapp.com');
+      expect(directive('connect-src')).toContain('https://clerk.therivetapp.com');
+      expect(directive('script-src')).toContain('https://challenges.cloudflare.com');
+      expect(directive('frame-src')).toContain('https://challenges.cloudflare.com');
+      expect(directive('script-src')).toContain('https://*.protect.clerk.com');
+      expect(directive('connect-src')).toContain('https://*.protect.clerk.com:*');
+      expect(directive('frame-src')).toContain('https://*.protect.clerk.com');
+    });
+
     it('allows the Deepgram STT WebSocket in connect-src (else in-app voice dictation is CSP-blocked)', async () => {
       // The browser streams mic audio straight to wss://api.deepgram.com/v1/
       // listen (useDeepgramDictation). connect-src governs WebSocket targets,

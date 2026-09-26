@@ -1,3 +1,4 @@
+import { effectiveBufferMinutes } from '../../../src/scheduling/booking-availability';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OnboardingConversationOrchestrator } from '../../../src/ai/orchestration/onboarding-conversation';
 import { InMemoryOnboardingSessionRepository } from '../../../src/db/onboarding-session-repository';
@@ -302,7 +303,8 @@ describe('OnboardingConversationOrchestrator — a captured price that is not an
     const status = deriveOnboardingStatus(factsFrom({
       businessName: written?.businessName ?? null,
       businessHours: { monday: { start: '08:00', end: '17:00' } },
-      jobBufferMinutes: written?.jobBufferMinutes ?? null,
+      // #1201 — the handler no longer writes a buffer; load-facts applies the default.
+      jobBufferMinutes: effectiveBufferMinutes(written?.jobBufferMinutes ?? null),
       hourlyRateCents: written?.hourlyRateCents ?? null,
       timezone: written?.timezone ?? null,
     }));
@@ -342,7 +344,8 @@ describe('OnboardingConversationOrchestrator — a captured price that is not an
     const status = deriveOnboardingStatus(factsFrom({
       businessName: written?.businessName ?? null,
       businessHours: { monday: { start: '08:00', end: '17:00' } },
-      jobBufferMinutes: written?.jobBufferMinutes ?? null,
+      // #1201 — the handler no longer writes a buffer; load-facts applies the default.
+      jobBufferMinutes: effectiveBufferMinutes(written?.jobBufferMinutes ?? null),
       hourlyRateCents: written?.hourlyRateCents ?? null,
       timezone: written?.timezone ?? null,
     }));

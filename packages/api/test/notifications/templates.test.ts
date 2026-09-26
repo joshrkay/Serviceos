@@ -98,6 +98,19 @@ describe('onboarding lifecycle emails', () => {
     expect(today.subject).toMatch(/today/i);
     expect(today.text).toContain('https://app.rivet.ai/settings');
   });
+
+  it('tells the owner how many of the 60 trial AI minutes they have used', () => {
+    const { text, html } = renderTrialEndingEmail({ ...base, daysLeft: 1, trialMinutesUsed: 23 });
+    expect(text).toContain("You've used 23 of 60 trial AI minutes.");
+    expect(html).toContain("You&#39;ve used 23 of 60 trial AI minutes.");
+    expect(renderTrialEndingEmail({ ...base, daysLeft: 1 }).text).not.toContain('trial AI minutes.');
+  });
+
+  it('describes current AI-minute pricing, not the retired per-minute cost-plus model', () => {
+    const { text } = renderTrialEndingEmail({ ...base, daysLeft: 3 });
+    expect(text).toContain('20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute');
+    expect(text).not.toMatch(/provider cost|30 AI voice minutes/);
+  });
 });
 
 describe('invoice templates', () => {

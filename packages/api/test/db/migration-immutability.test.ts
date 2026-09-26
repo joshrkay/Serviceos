@@ -545,6 +545,14 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['279_create_voice_approval_pin_lock_alerts', '35edd5ee8f1f8c0cf011fa8ae30f947e2e1deaca760b5b4ccef69584ce18dce8'],
   ['280_create_ai_voice_usage_costs', 'd57ecc8c5482de5212ea914b8472b7ec3d4e92259a62d1388d4ebdaab64c53e8'],
   ['281_create_ai_voice_billing_state', '5a069026dc4f46eeeb081915891c2e8e7859afc4883a1d960bc11e1f20634405'],
+  ['282_create_call_usage_events', '1c4c54cb32c524799999dec9ec7160ee90f44c6636bdc124fa9f43c5fc5863ce'],
+  ['283_create_call_usage_settlements', '91301ec03a92328c1e8d0fa157a91e5ba3108387c028824241e50a67715b6dbb'],
+  ['284_add_tenant_plan_id', 'b78c98f0685c48cfa7abd58739e022eb55476c84f4a4766aaecec4d63672bea3'],
+  ['285_add_tenant_current_period', '73ffede053301c1c8fb32c4d167fe5e834b7946f3d5be7a07fd9d0cdf3395754'],
+  ['286_add_ai_overage_cap', 'da903203a9652e9bffbe5b32e31f4db5b7b7bda2c5a5649d385fc29b4bf891d1'],
+  ['287_create_usage_alerts', '390e9355861d2344fe1cbd25650f8433fcd1cd8aaf08e546ff13cae6728ccf96'],
+  ['288_payments_card_present_method', '882db504e3c8aa429311e7db8efa7a2168601fdb1f0e2bb6b0531ff0c0ab6676'],
+  ['289_tenant_settings_default_tax_rate', '3e065ee911220c16d7f42a2da35cfc659b10aa8b00162e174c59565e5eb61694'],
 ];
 
 function hashMigration(value: string): string {

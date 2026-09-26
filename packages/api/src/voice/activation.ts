@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { loadConfig } from '../shared/config';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import { recordFunnelEvent } from '../analytics/posthog';
@@ -168,7 +169,7 @@ export async function maybeFireFirstRealCallActivation(
   // a retry that re-enters this function will no-op on the check-and-set.
   if (deps.sendEmail && tenant.owner_email) {
     try {
-      const webUrl = deps.webUrl ?? process.env.WEB_URL ?? '';
+      const webUrl = deps.webUrl ?? loadConfig().publicOrigins.web;
       await deps.sendEmail({
         to: tenant.owner_email,
         subject: 'Your AI agent just handled its first real call 🎉',
@@ -192,7 +193,7 @@ export async function maybeFireFirstRealCallActivation(
 }
 
 /** E.164-ish digit comparison (ignores formatting / leading +). */
-function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+export function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
   if (!a || !b) return false;
   const da = a.replace(/\D/g, '');
   const db = b.replace(/\D/g, '');
@@ -282,7 +283,7 @@ export async function maybeFireActivationForInboundCall(
   );
   if (deps.sendEmail && tenant.owner_email) {
     try {
-      const webUrl = deps.webUrl ?? process.env.WEB_URL ?? '';
+      const webUrl = deps.webUrl ?? loadConfig().publicOrigins.web;
       await deps.sendEmail({
         to: tenant.owner_email,
         subject: 'Your AI agent just handled its first real call 🎉',

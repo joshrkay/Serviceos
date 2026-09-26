@@ -379,7 +379,14 @@ export type EnRouteUnavailableReason =
   | 'no_timezone';
 
 export type EnRouteVoiceOutcome =
-  | { kind: 'answered'; answer: VoiceLookupAnswer }
+  // `notified` mirrors `TriggerEnRouteResult.notified` (dispatch/routes.ts)
+  // when the act actually fired (`answer.result === 'found'`) — undefined
+  // for the 'none' (nothing upcoming) case, where no act was attempted.
+  // #885 — the SMS-keyword leg needs this machine-readable signal (its
+  // `HandlerResult.reason` distinguishes 'triggered' from
+  // 'triggered_no_recipient'); the other three surfaces only branch on
+  // `answer.result`/`.summary` and can ignore it.
+  | { kind: 'answered'; answer: VoiceLookupAnswer; notified?: boolean }
   | { kind: 'ambiguous'; reference: string; candidates: EntityCandidate[] }
   // No recording/identity/deps to act on — the caller should treat this
   // exactly like an intent with no answer surface on this path (skip, or
@@ -521,6 +528,7 @@ export async function handleEnRouteForTechnician(
 
   return {
     kind: 'answered',
+    notified: trigger.notified,
     answer: {
       version: 1,
       intent: 'en_route',

@@ -60,7 +60,17 @@ const configSchema = z.object({
   CORS_ORIGIN: z.string().optional(),
   STRIPE_API_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
-  WEB_URL: z.string().url().optional().default('http://localhost:5173'),
+  // Public origins — resolved into `config.publicOrigins` below; read those,
+  // never these raw values. WEB_URL = where humans open the SPA;
+  // PUBLIC_API_URL = where machines (Twilio, Stripe, OAuth) call back;
+  // MARKETING_SITE_URL = the standalone marketing site.
+  WEB_URL: z.string().url().optional(),
+  PUBLIC_API_URL: z.string().url().optional(),
+  MARKETING_SITE_URL: z.string().url().optional(),
+  // DEPRECATED alias for WEB_URL. It never fills the API role: half the old
+  // call sites read it as the API host, which is how prod ended up emitting
+  // invitation links to the API domain. Setting it adds a boot warning.
+  APP_PUBLIC_URL: z.string().url().optional(),
   // DEPRECATED — legacy single-plan trial price, superseded by the
   // explicit basic/enterprise plan selection below. Kept only for
   // scripts/provision-tenant.ts and createTrialCheckoutSession's legacy
@@ -70,8 +80,8 @@ const configSchema = z.object({
   // BILLING_PLAN_IDS). Each id maps to its own Stripe recurring monthly USD
   // price, validated live against Stripe before every checkout — never
   // trusted at face value from env alone.
-  STRIPE_BASIC_PRICE_ID: z.string().optional(),
-  STRIPE_ENTERPRISE_PRICE_ID: z.string().optional(),
+  STRIPE_STARTER_PRICE_ID: z.string().optional(),
+  STRIPE_GROWTH_PRICE_ID: z.string().optional(),
   // TCPA/DNC express-consent enforcement for the outbound calling path.
   // 'off' (default) preserves prior behavior exactly (DNC opt-out check only);
   // 'warn' runs the per-customer consent gate and audits+logs a would-be block
@@ -199,7 +209,64 @@ const configSchema = z.object({
   PRESIDIO_ANONYMIZER_URL: z.string().url().optional(),
 });
 
-export type AppConfig = z.infer<typeof configSchema>;
+export interface PublicOrigins {
+  /** Where humans open the SPA: emailed / texted links, OAuth + Stripe returns. */
+  web: string;
+  /** Where machines call this API back: Twilio webhooks, media-stream socket, OAuth redirect_uri. */
+  api: string;
+  /** The standalone marketing site. */
+  marketing: string;
+}
+
+export type AppConfig = z.infer<typeof configSchema> & {
+  publicOrigins: PublicOrigins;
+  /** Non-fatal configuration findings for the boot log (deprecated variables, …). */
+  warnings: string[];
+};
+
+/**
+ * A public origin is scheme + host[:port] and nothing else. A trailing slash
+ * is tolerated (and dropped) because every call site appends `/path`; a real
+ * path, query or fragment is refused because it would make every join
+ * ambiguous and nothing deploys under a prefix.
+ */
+function normalizeOrigin(name: string, value: string): string {
+  const url = new URL(value);
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
+    throw new Error(
+      `Configuration validation failed:\n  ${name}: must be a bare origin (scheme + host[:port]) with no path, query or fragment; got ${value}`,
+    );
+  }
+  return url.origin;
+}
+
+function resolvePublicOrigins(
+  parsed: z.infer<typeof configSchema>,
+): { publicOrigins: PublicOrigins; warnings: string[] } {
+  const warnings: string[] = [];
+  let web = parsed.WEB_URL === undefined ? undefined : normalizeOrigin('WEB_URL', parsed.WEB_URL);
+  if (web === undefined && parsed.APP_PUBLIC_URL !== undefined) {
+    web = normalizeOrigin('APP_PUBLIC_URL', parsed.APP_PUBLIC_URL);
+    warnings.push(
+      'APP_PUBLIC_URL is deprecated and was used as the web origin; set WEB_URL instead ' +
+        '(and PUBLIC_API_URL for the API origin — the alias never fills that role).',
+    );
+  }
+  return {
+    publicOrigins: {
+      web: web ?? 'http://localhost:5173',
+      api:
+        parsed.PUBLIC_API_URL === undefined
+          ? 'http://localhost:3000'
+          : normalizeOrigin('PUBLIC_API_URL', parsed.PUBLIC_API_URL),
+      marketing:
+        parsed.MARKETING_SITE_URL === undefined
+          ? 'https://therivetapp.com'
+          : normalizeOrigin('MARKETING_SITE_URL', parsed.MARKETING_SITE_URL),
+    },
+    warnings,
+  };
+}
 
 let cachedConfig: AppConfig | null = null;
 
@@ -224,7 +291,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error(`Configuration validation failed:\n${issues.join('\n')}`);
   }
 
-  cachedConfig = result.data;
+  cachedConfig = { ...result.data, ...resolvePublicOrigins(result.data) };
 
   // WS1 — prod/staging default the consent gate to enforcement. The zod default
   // is 'off' (safe for dev/test), but in production a send must fail closed
@@ -284,6 +351,13 @@ function validateProductionConfig(config: AppConfig): void {
   // CORS — must be an explicit origin, not the wildcard fallback
   if (!config.CORS_ORIGIN) missing.push('CORS_ORIGIN');
 
+  // Public origins — every emailed / texted link and every Twilio, Stripe and
+  // OAuth callback is built from these. The dev defaults are localhost, which
+  // in prod means links to nowhere, so both must be explicit. (APP_PUBLIC_URL
+  // still satisfies the web origin for now, with a boot warning.)
+  if (!config.WEB_URL && !config.APP_PUBLIC_URL) missing.push('WEB_URL');
+  if (!config.PUBLIC_API_URL) missing.push('PUBLIC_API_URL');
+
   // NOTE (P5-017): Stripe payment-link key (STRIPE_SECRET_KEY / STRIPE_API_KEY)
   // is enforced at boot by `createPaymentLinkProvider` in
   // `payments/payment-link-provider.ts` rather than here, because the
@@ -294,6 +368,26 @@ function validateProductionConfig(config: AppConfig): void {
     throw new Error(
       `Production configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
         'Set these environment variables before starting in production.'
+    );
+  }
+
+  for (const [name, origin] of [
+    ['WEB_URL', config.publicOrigins.web],
+    ['PUBLIC_API_URL', config.publicOrigins.api],
+  ] as const) {
+    if (!origin.startsWith('https://')) {
+      throw new Error(
+        `Production configuration error: ${name} must be an https origin in production; got ${origin}`
+      );
+    }
+  }
+
+  // The two roles must be different hosts: when they collide, every link a
+  // human opens is built on the API host (the 2026-09 prod outage shape).
+  if (config.publicOrigins.web === config.publicOrigins.api) {
+    throw new Error(
+      `Production configuration error: WEB_URL resolves to the same origin as PUBLIC_API_URL (${config.publicOrigins.web}). ` +
+        'WEB_URL is where humans open the app; PUBLIC_API_URL is where Twilio/Stripe/OAuth call back. They must differ.'
     );
   }
 }

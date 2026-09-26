@@ -10,9 +10,9 @@ import {
   createWebhookSignature,
   InMemoryWebhookRepository,
 } from "../../src/webhooks/webhook-handler";
-import type { VoiceUsageBillingService } from "../../src/billing/voice-usage-billing";
+import type { CallUsageBillingService } from "../../src/billing/call-usage-billing";
 
-const SECRET = "whsec_voice_usage_test";
+const SECRET = "whsec_call_usage_test";
 const TENANT = "11111111-1111-4111-8111-111111111111";
 
 function buildApp(deps: WebhookRouterDeps) {
@@ -25,6 +25,7 @@ function buildApp(deps: WebhookRouterDeps) {
 async function postInvoiceCreated(
   app: express.Express,
   eventId = "evt_invoice_created",
+  billingReason = "subscription_cycle",
 ) {
   const raw = JSON.stringify({
     id: eventId,
@@ -33,9 +34,15 @@ async function postInvoiceCreated(
       object: {
         id: "in_123",
         customer: "cus_123",
-        billing_reason: "subscription_cycle",
+        billing_reason: billingReason,
         period_start: 1_788_220_800,
         period_end: 1_790_899_200,
+        lines: {
+          data: [
+            { type: "invoiceitem", price: { id: "price_setup_fee" } },
+            { type: "subscription", price: { id: "price_growth" } },
+          ],
+        },
       },
     },
   });
@@ -46,17 +53,19 @@ async function postInvoiceCreated(
     .send(raw);
 }
 
-describe("Stripe invoice.created voice usage settlement", () => {
-  it("settles the closed billing period once and attaches the item to the draft invoice", async () => {
+function appWith(settlePeriod: ReturnType<typeof vi.fn>) {
+  return buildApp({
+    webhookRepo: new InMemoryWebhookRepository(),
+    stripeWebhookSecret: SECRET,
+    pool: { query: vi.fn(async () => ({ rows: [{ id: TENANT }] })) } as never,
+    callUsageBillingService: { settlePeriod } as unknown as CallUsageBillingService,
+  });
+}
+
+describe("Stripe invoice.created per-call settlement", () => {
+  it("settles the closed period once, on the invoice's subscription price", async () => {
     const settlePeriod = vi.fn(async () => ({ invoiceItemId: "ii_123" }));
-    const app = buildApp({
-      webhookRepo: new InMemoryWebhookRepository(),
-      stripeWebhookSecret: SECRET,
-      pool: { query: vi.fn(async () => ({ rows: [{ id: TENANT }] })) } as never,
-      voiceUsageBillingService: {
-        settlePeriod,
-      } as unknown as VoiceUsageBillingService,
-    });
+    const app = appWith(settlePeriod);
 
     expect((await postInvoiceCreated(app)).status).toBe(200);
     expect((await postInvoiceCreated(app)).status).toBe(200);
@@ -66,26 +75,26 @@ describe("Stripe invoice.created voice usage settlement", () => {
       tenantId: TENANT,
       periodStart: new Date(1_788_220_800_000),
       periodEnd: new Date(1_790_899_200_000),
+      subscriptionPriceId: "price_growth",
       stripeInvoiceId: "in_123",
     });
   });
 
-  it("returns 500 so Stripe retries when provider cost reconciliation is incomplete", async () => {
+  it("does not settle the first invoice of a new subscription", async () => {
+    const settlePeriod = vi.fn();
+    const app = appWith(settlePeriod);
+
+    expect((await postInvoiceCreated(app, "evt_create", "subscription_create")).status).toBe(200);
+    expect(settlePeriod).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 so Stripe retries when settlement fails", async () => {
     const settlePeriod = vi.fn(async () => {
-      throw new Error("AI voice provider cost data is incomplete");
+      throw new Error("Stripe AI minute overage invoice item failed (503)");
     });
-    const app = buildApp({
-      webhookRepo: new InMemoryWebhookRepository(),
-      stripeWebhookSecret: SECRET,
-      pool: { query: vi.fn(async () => ({ rows: [{ id: TENANT }] })) } as never,
-      voiceUsageBillingService: {
-        settlePeriod,
-      } as unknown as VoiceUsageBillingService,
-    });
+    const app = appWith(settlePeriod);
 
-    const response = await postInvoiceCreated(app, "evt_incomplete");
-
-    expect(response.status).toBe(500);
+    expect((await postInvoiceCreated(app, "evt_fail")).status).toBe(500);
     expect(settlePeriod).toHaveBeenCalledTimes(1);
   });
 });

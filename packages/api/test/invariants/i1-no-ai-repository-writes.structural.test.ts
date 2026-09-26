@@ -28,21 +28,30 @@
  * That is what makes it structural: the next path cannot be added silently,
  * whichever side of the line it lands on.
  *
- * ## Finding: the universal does NOT hold today
+ * ## Status: I1′ holds AS AMENDED BY D-033 (2026-09-26, #1066)
  *
- * SIX production AI call sites write an operational entity (listed in
- * `KNOWN_VIOLATIONS` with file:line; the sixth,
- * `ai/tasks/estimate-template.ts:97`, surfaced in review when the receiver
- * pattern stopped requiring an entity prefix). They are NOT waved through: the guard
- * keeps them as an explicit, honest `it.fails` assertion of I1′ as written, so
- * the gap is recorded rather than defined away. Closing them is product work
- * and is reported, not attempted here (#1021 is test-only).
+ * The first edition of this guard (#1021) found SIX production AI call sites
+ * writing an operational entity and recorded them as an `it.fails`. The owner
+ * then decided each one (D-033, `docs/decisions.md`):
+ *
+ *   - FIVE are sanctioned exceptions — the caller's own customer / lead record,
+ *     two call-back tasks, and the E1 release of a tentative hold. Each is
+ *     listed in `SANCTIONED_EXCEPTIONS` with D-033's reason and matched by file
+ *     + receiver + method with an EXACT per-file count, so a sixth write (even a
+ *     second `appointmentRepo.update` in the same file) still fails the build.
+ *   - The sixth, `ai/tasks/estimate-template.ts` (`repository.create` of a
+ *     priced template), is NOT sanctioned: it now drafts an
+ *     `onboarding_estimate_template` proposal instead of writing.
+ *
+ * So the guard asserts I1′ as amended — zero operational writes under `src/ai`
+ * outside D-033 — as a plain, passing test.
  *
  * Evidence class: STRUCTURAL (negative control below plants a violation into a
  * temp tree and shows the guard reporting it).
  */
 import { describe, it, expect } from 'vitest';
 import path from 'path';
+import { readFileSync } from 'fs';
 import {
   listSourceFiles,
   plantTree,
@@ -301,11 +310,6 @@ const GENERIC_RECEIVER_SITES: ReadonlyArray<{
     as: 'ai-plane',
     why: 'recordTurn persists a mid-call voice TRANSCRIPT turn (call_transcript_turns) for durability (U8) — the voice AI\'s own conversational record, keyed by CallSid + session id, never an operational business entity.',
   },
-  {
-    file: 'ai/tasks/estimate-template.ts',
-    as: 'violation',
-    why: 'repository.create(template) mints a tenant ESTIMATE TEMPLATE — priced, catalog-adjacent, operational — straight from an AI task module with no proposal. Found by the review that relaxed the receiver pattern; it was invisible to the first edition of this guard.',
-  },
 ];
 
 /**
@@ -326,39 +330,53 @@ const EXEMPT_FILE_PREFIXES: ReadonlyArray<{ prefix: string; why: string }> = [
 ];
 
 /**
- * The genuine I1′ violations found on `origin/main` at 2026-09-12. Production
- * AI modules that write an operational entity directly.
- *
- * These are RECORDED, not excused: the `it.fails` case below asserts I1′ as
- * written and fails on exactly this list. Keeping them enumerated means a
- * SIXTH one still breaks the build.
+ * D-033 (`docs/decisions.md`, 2026-09-26) — the ONLY operational writes an AI
+ * module may make. Matched by file + `receiver.method`, line-agnostic, with an
+ * exact count per (file, receiver, method): adding a second identical write in
+ * the same file changes the count and fails the build. Adding an entry here
+ * requires amending D-033.
  */
-const KNOWN_VIOLATIONS: ReadonlyArray<{ at: string; why: string }> = [
+const SANCTIONED_EXCEPTIONS: ReadonlyArray<{
+  file: string;
+  call: string;
+  count: number;
+  why: string;
+}> = [
   {
-    at: 'ai/skills/find-or-create-customer.ts:116',
-    why: 'customerRepo.create — mints a customer row mid-call under actor `system:inbound-call`, with no proposal and no human approval.',
+    file: 'ai/skills/find-or-create-customer.ts',
+    call: 'customerRepo.create',
+    count: 1,
+    why: 'D-033 — mints the CALLER\'s own customer record mid-call (actor system:inbound-call, audited customer.created) so the call\'s proposals have a customer to attach to. Records who is on the line; commits the business to nothing.',
   },
   {
-    at: 'ai/skills/find-or-create-lead.ts:122',
-    why: 'leadRepo.create — same shape for the lead entity.',
+    file: 'ai/skills/find-or-create-lead.ts',
+    call: 'leadRepo.create',
+    count: 1,
+    why: 'D-033 — same shape for an unknown inbound contact: captures them as a lead (audited lead.created). No money, no schedule, no customer-facing message.',
   },
   {
-    at: 'ai/skills/patch-owner-through.ts:238',
-    why: 'callMeBackRepo.create — creates an owner call-back task row directly from the AI skill.',
-  },
-  {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2698',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2713',
     why: 'callMeBackRepo.create — same entity from the voice-turn processor.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2863',
+    at: 'ai/voice-turn/create-voice-turn-processor.ts:2878',
     why: 'appointmentRepo.update — the E1 revoke path CANCELS a held appointment (`status: canceled`) without a proposal. The strongest of the six: a state-changing write to a scheduled entity.',
   },
   {
-    at: 'ai/tasks/estimate-template.ts:97',
-    why: 'repository.create(template) — mints a tenant estimate template (priced, catalog-adjacent) from an AI task module with no proposal. Found in review (PR #1063): the bare `repository` receiver was invisible until the entity prefix was made optional.',
+    file: 'ai/voice-turn/create-voice-turn-processor.ts',
+    call: 'appointmentRepo.update',
+    count: 1,
+    why: 'D-033 — the E1 revoke releases a TENTATIVE hold (holdPendingApproval: true) this call created, setting status canceled. Only ever an unapproved hold; it withdraws rather than commits.',
   },
 ];
+
+function callOf(w: RepoWrite): string {
+  return `${w.receiver}.${w.method}`;
+}
+
+function isSanctioned(w: RepoWrite): boolean {
+  return SANCTIONED_EXCEPTIONS.some((e) => e.file === w.file && e.call === callOf(w));
+}
 
 // ─── Classification ─────────────────────────────────────────────────────────
 
@@ -388,47 +406,74 @@ export function operationalWrites(roots: readonly string[]): RepoWrite[] {
 // ─── The guard ──────────────────────────────────────────────────────────────
 
 describe('§5 I1′ (STRUCTURAL) — no AI module may call an operational repository write', () => {
-  it('every repository write under src/ai is classified: AI-plane, exempt harness, or a recorded violation', () => {
-    const unclassified = operationalWrites([AI_ROOT]).filter(
-      (w) => !KNOWN_VIOLATIONS.some((k) => k.at === w.at),
-    );
+  /**
+   * I1′ AS AMENDED BY D-033. Until #1066 this was an `it.fails` over six
+   * recorded violations; five are now sanctioned by decision and the sixth
+   * (estimate-template) drafts a proposal, so this is a plain assertion.
+   */
+  it('I1′ (D-033) — no AI module writes an operational entity outside the sanctioned exceptions', () => {
+    const unsanctioned = operationalWrites([AI_ROOT]).filter((w) => !isSanctioned(w));
 
     expect(
-      formatViolations(unclassified),
+      formatViolations(unsanctioned),
       [
-        'A new repository write appeared under src/ai that is neither AI-plane',
-        'nor on the recorded I1′ violation list.',
+        'A repository write appeared under src/ai that is neither AI-plane nor',
+        'one of the D-033 sanctioned exceptions.',
         '',
         'If it writes an operational entity, it is an I1′ violation: route it',
         'through a typed proposal (D-004) instead. If its target is genuinely',
-        'AI-plane, add the receiver to AI_PLANE_REPOS with the reason.',
+        'AI-plane, add the receiver to AI_PLANE_REPOS with the reason. A new',
+        'sanctioned exception requires amending D-033 first.',
       ].join('\n'),
     ).toEqual([]);
   });
 
-  it('the recorded violations are still exactly where the report says they are', () => {
-    const found = operationalWrites([AI_ROOT]).map((w) => w.at);
-    for (const known of KNOWN_VIOLATIONS) {
-      expect(found, `${known.at} — ${known.why}`).toContain(known.at);
+  it('each sanctioned exception is present with EXACTLY its recorded count (a second identical write fails)', () => {
+    const writes = operationalWrites([AI_ROOT]);
+    for (const e of SANCTIONED_EXCEPTIONS) {
+      const n = writes.filter((w) => w.file === e.file && callOf(w) === e.call).length;
+      expect(n, `${e.file} ${e.call} — ${e.why}`).toBe(e.count);
     }
   });
 
-  /**
-   * I1′ AS WRITTEN. This is the honest state of the invariant: it does not
-   * hold. `it.fails` records that without weakening the guard above and
-   * without pretending the tree is clean — when the five call sites are moved
-   * behind proposals, this case starts PASSING, which makes `it.fails` itself
-   * fail and forces the row to be re-graded.
-   *
-   * Product gap, reported on #1021 for Fable's sign-off — not fixed here
-   * (this lane is test-only).
-   */
-  it.fails(
-    'I1′ as written — zero AI modules write an operational entity (KNOWN GAP: 6 call sites)',
-    () => {
-      expect(formatViolations(operationalWrites([AI_ROOT]))).toEqual([]);
-    },
-  );
+  it('#1066 — the estimate-template AI module writes nothing (it drafts a proposal)', () => {
+    const inFile = findRepositoryWrites([AI_ROOT]).filter(
+      (w) => w.file === 'ai/tasks/estimate-template.ts',
+    );
+    expect(formatViolations(inFile)).toEqual([]);
+  });
+
+  it('D-033 exists in docs/decisions.md and names every sanctioned site', () => {
+    const decisions = readFileSync(path.resolve(__dirname, '../../../../docs/decisions.md'), 'utf8');
+    const start = decisions.indexOf('## D-033');
+    expect(start, 'D-033 heading').toBeGreaterThanOrEqual(0);
+    const next = decisions.indexOf('\n## D-', start + 1);
+    const body = decisions.slice(start, next === -1 ? undefined : next);
+    for (const e of SANCTIONED_EXCEPTIONS) {
+      expect(body, e.file).toContain(e.file.replace(/^ai\//, ''));
+      expect(body, e.call).toContain(e.call);
+    }
+  });
+
+  it('NEGATIVE CONTROL — a second write of a sanctioned call in the SAME file is not absorbed', () => {
+    const dir = plantTree('i1-sanctioned-dup', {
+      'planted-dup.ts': [
+        'export async function twice(appointmentRepo: { update: Function }) {',
+        "  await appointmentRepo.update('t', 'a', { status: 'canceled' });",
+        "  await appointmentRepo.update('t', 'b', { status: 'canceled' });",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const found = operationalWrites([dir]).filter((w) => callOf(w) === 'appointmentRepo.update');
+      expect(found).toHaveLength(2);
+      // …and a planted file is never sanctioned, even for a sanctioned call.
+      expect(found.some(isSanctioned)).toBe(false);
+    } finally {
+      removeTree(dir);
+    }
+  });
 
   // ─── Negative control ─────────────────────────────────────────────────────
 
@@ -507,9 +552,10 @@ describe('§5 I1′ (STRUCTURAL) — no AI module may call an operational reposi
     for (const entry of EXEMPT_FILE_PREFIXES) {
       expect(entry.why.length, entry.prefix).toBeGreaterThan(30);
     }
-    for (const entry of KNOWN_VIOLATIONS) {
-      expect(entry.at, entry.at).toMatch(/^ai\/.+\.ts:\d+$/);
-      expect(entry.why.length, entry.at).toBeGreaterThan(30);
+    for (const entry of SANCTIONED_EXCEPTIONS) {
+      expect(entry.file, entry.file).toMatch(/^ai\/.+\.ts$/);
+      expect(entry.why, entry.file).toMatch(/^D-033 — /);
+      expect(entry.why.length, entry.file).toBeGreaterThan(40);
     }
     for (const entry of GENERIC_RECEIVER_SITES) {
       expect(entry.why.length, entry.file).toBeGreaterThan(40);

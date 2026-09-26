@@ -1,9 +1,6 @@
 import type { Pool } from 'pg';
 import { AppError, ValidationError, NotFoundError } from '../shared/errors';
-import {
-  AI_VOICE_INCLUDED_MINUTES,
-  AI_VOICE_MARKUP_BPS,
-} from './voice-usage-pricing';
+import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from './call-usage-pricing';
 
 /**
  * Tier 4 (Subscription — Rivet billing). Service that mints Stripe
@@ -39,7 +36,7 @@ export interface BillingConfig {
  * amount, which `validatePlanPrice` checks against live Stripe data
  * before every checkout.
  */
-export const BILLING_PLAN_IDS = ['basic', 'enterprise'] as const;
+export const BILLING_PLAN_IDS = ['starter', 'growth'] as const;
 export type BillingPlanId = (typeof BILLING_PLAN_IDS)[number];
 
 export interface BillingPlanView {
@@ -49,20 +46,32 @@ export interface BillingPlanView {
   amountCents: number;
   currency: string;
   interval: string;
-  includedAiVoiceMinutes: number;
-  aiVoiceCostMarkupPercent: number;
+  includedUsers: number;
+  includedAiMinutes: number;
+  overageCentsPerAiMinute: number;
 }
 
 interface PlanSpec {
   envVar: string;
-  expectedAmountCents: number;
   displayName: string;
 }
 
 const PLAN_SPECS: Record<BillingPlanId, PlanSpec> = {
-  basic: { envVar: 'STRIPE_BASIC_PRICE_ID', expectedAmountCents: 5_000, displayName: 'Basic' },
-  enterprise: { envVar: 'STRIPE_ENTERPRISE_PRICE_ID', expectedAmountCents: 15_000, displayName: 'Enterprise' },
+  starter: { envVar: 'STRIPE_STARTER_PRICE_ID', displayName: 'Starter' },
+  growth: { envVar: 'STRIPE_GROWTH_PRICE_ID', displayName: 'Growth' },
 };
+
+/**
+ * Maps a Stripe price id back to the Rivet plan it sells, via the same env
+ * vars checkout uses. Null for any other price (legacy, one-off, unknown).
+ */
+export function planIdForStripePrice(priceId: string | null | undefined): BillingPlanId | null {
+  if (!priceId) return null;
+  for (const planId of BILLING_PLAN_IDS) {
+    if (process.env[PLAN_SPECS[planId].envVar] === priceId) return planId;
+  }
+  return null;
+}
 
 /** Fails closed with a non-secret, actionable message — never the env value. */
 function resolvePlanPriceId(planId: BillingPlanId): string {
@@ -85,6 +94,10 @@ export interface BillingSubscriptionView {
   subscriptionId: string | null;
   /** Mirror of Stripe subscription.status. Null until first sub. */
   status: string | null;
+  /** Rivet plan mirrored from the Stripe subscription price; null before checkout. */
+  planId: BillingPlanId | null;
+  /** Stripe's current billing period; null until the first subscription webhook. */
+  currentPeriod: { start: Date; end: Date } | null;
 }
 
 export interface BillingServiceDeps {
@@ -196,7 +209,8 @@ export class BillingService {
    */
   async getSubscription(tenantId: string): Promise<BillingSubscriptionView> {
     const { rows } = await this.deps.pool.query(
-      `SELECT stripe_customer_id, stripe_subscription_id, subscription_status
+      `SELECT stripe_customer_id, stripe_subscription_id, subscription_status, plan_id,
+              current_period_start, current_period_end
        FROM tenants WHERE id = $1`,
       [tenantId],
     );
@@ -208,6 +222,14 @@ export class BillingService {
       customerId: (row.stripe_customer_id as string | null) ?? null,
       subscriptionId: (row.stripe_subscription_id as string | null) ?? null,
       status: (row.subscription_status as string | null) ?? null,
+      planId: (row.plan_id as BillingPlanId | null) ?? null,
+      currentPeriod:
+        row.current_period_start && row.current_period_end
+          ? {
+              start: new Date(row.current_period_start as string),
+              end: new Date(row.current_period_end as string),
+            }
+          : null,
     };
   }
 
@@ -336,7 +358,7 @@ export class BillingService {
       price.recurring?.interval === 'month' &&
       price.recurring?.interval_count === 1 &&
       price.recurring?.usage_type === 'licensed' &&
-      price.unit_amount === spec.expectedAmountCents &&
+      price.unit_amount === CALL_PLAN_USAGE[planId].monthlyPriceCents &&
       product?.active === true &&
       Boolean(productId);
     if (!valid) {
@@ -357,7 +379,7 @@ export class BillingService {
       });
       throw new ValidationError(
         `Billing plan "${planId}" is misconfigured (expected an active, USD, monthly ` +
-          `(not quarterly/annual), licensed (not metered) $${(spec.expectedAmountCents / 100).toFixed(2)} ` +
+          `(not quarterly/annual), licensed (not metered) $${(CALL_PLAN_USAGE[planId].monthlyPriceCents / 100).toFixed(2)} ` +
           `price on an active product). Contact support.`,
       );
     }
@@ -365,12 +387,12 @@ export class BillingService {
       priceId,
       productId: productId!,
       name: product?.name?.trim() || spec.displayName,
-      amountCents: spec.expectedAmountCents,
+      amountCents: CALL_PLAN_USAGE[planId].monthlyPriceCents,
     };
   }
 
   /**
-   * Validated, display-safe view of the sellable plans (basic/enterprise)
+   * Validated, display-safe view of the sellable plans (starter/growth)
    * for the onboarding billing step. Only ids whose env var is set AND
    * whose Stripe price passes `validatePlanPrice` are included — a
    * misconfigured plan is omitted (and logged) rather than shown broken
@@ -397,8 +419,9 @@ export class BillingService {
           amountCents: validated.amountCents,
           currency: 'usd',
           interval: 'month',
-          includedAiVoiceMinutes: AI_VOICE_INCLUDED_MINUTES,
-          aiVoiceCostMarkupPercent: AI_VOICE_MARKUP_BPS / 100,
+          includedUsers: CALL_PLAN_USAGE[planId].includedUsers,
+          includedAiMinutes: CALL_PLAN_USAGE[planId].includedMinutes,
+          overageCentsPerAiMinute: OVERAGE_CENTS_PER_MINUTE,
         });
       } catch {
         continue;
@@ -413,7 +436,7 @@ export class BillingService {
    * enter card details. Trial starts immediately; billing begins after
    * 14 days.
    *
-   * `planId` (basic|enterprise) is the ONLY caller-controlled plan
+   * `planId` (starter|growth) is the ONLY caller-controlled plan
    * selection: the price id is resolved server-side from the matching
    * STRIPE_<PLAN>_PRICE_ID env var and validated live against Stripe
    * (see `validatePlanPrice`) — a caller can never point checkout at an

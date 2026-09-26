@@ -12,6 +12,7 @@ import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
 import type { Express, NextFunction, Request, Response } from 'express';
 import { createCustomerRouter } from '../../src/routes/customers';
 import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
+import { InMemoryContactRepository } from '../../src/customers/contact';
 import { InMemoryCustomerMergeRepository } from '../../src/customers/merge';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -285,6 +286,58 @@ describe('POST /api/customers/:id/archive', () => {
   });
 });
 
+describe('POST /api/customers/:id/restore (#1281)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('restores an archived customer: isArchived false, archivedAt cleared, back in the directory', async () => {
+    const created = await createCustomer(app);
+    await request(app).post(`/api/customers/${created.body.id}/archive`).send({});
+    const listedWhileArchived = await request(app).get('/api/customers');
+    expect(listedWhileArchived.body.map((c: { id: string }) => c.id)).not.toContain(created.body.id);
+
+    const res = await request(app).post(`/api/customers/${created.body.id}/restore`).send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.isArchived).toBe(false);
+    expect(res.body.archivedAt ?? null).toBeNull();
+    const listed = await request(app).get('/api/customers');
+    expect(listed.body.map((c: { id: string }) => c.id)).toContain(created.body.id);
+  });
+
+  it('returns 404 when restoring an unknown customer', async () => {
+    const res = await request(app)
+      .post('/api/customers/11111111-1111-1111-1111-111111111111/restore')
+      .send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('GET /api/customers?archived=only lists only archived customers (paginated + bare shapes)', async () => {
+    const active = await createCustomer(app, { firstName: 'Active', lastName: 'One' });
+    const gone = await createCustomer(app, { firstName: 'Gone', lastName: 'One' });
+    await request(app).post(`/api/customers/${gone.body.id}/archive`).send({});
+
+    const bare = await request(app).get('/api/customers?archived=only');
+    expect(bare.status).toBe(200);
+    expect(bare.body.map((c: { id: string }) => c.id)).toEqual([gone.body.id]);
+
+    const paged = await request(app).get('/api/customers?archived=only&paginated=true');
+    expect(paged.body.total).toBe(1);
+    expect(paged.body.data.map((c: { id: string }) => c.id)).toEqual([gone.body.id]);
+    expect(paged.body.data.map((c: { id: string }) => c.id)).not.toContain(active.body.id);
+  });
+
+  it('returns 404 NOT_FOUND, not 500, for a malformed id', async () => {
+    const res = await request(app).post('/api/customers/new/restore').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
 describe('POST /api/customers/:id/merge (Story 4.6)', () => {
   let app: Express;
 
@@ -407,6 +460,55 @@ function buildPgLikeApp(): Express {
   );
   return app;
 }
+
+// #908 — a malformed :id on the nested CRM sub-resource routes (contacts,
+// tags, custom-fields) used to reach `loadCustomerOr404` -> `getCustomer` ->
+// `customerRepo.findById`, which is exactly the same Postgres uuid-column
+// comparison the direct /:id routes above hit — but no existing test wired
+// a sub-resource repo into this harness to prove it. Consolidating onto the
+// shared `notFoundOnMalformedId` middleware (see routes/customers.ts) closes
+// that gap for all nine nested routes at once; this pins one of them.
+function buildPgLikeAppWithContacts(): Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER_ID,
+      sessionId: 'session-test-1',
+      tenantId: TEST_TENANT_ID,
+      role: 'owner',
+    };
+    next();
+  });
+  const customerRepo = new PgLikeCustomerRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  app.use(
+    '/api/customers',
+    createCustomerRouter(
+      customerRepo,
+      auditRepo,
+      undefined,
+      new InMemoryContactRepository(),
+    ),
+  );
+  return app;
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison (nested CRM sub-resources, #908)', () => {
+  it('GET /api/customers/new/contacts returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(buildPgLikeAppWithContacts()).get('/api/customers/new/contacts');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Customer not found' });
+  });
+
+  it('POST /api/customers/new/contacts returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(buildPgLikeAppWithContacts())
+      .post('/api/customers/new/contacts')
+      .send({ firstName: 'X' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Customer not found' });
+  });
+});
 
 describe('malformed :id never reaches Postgres as a raw uuid comparison', () => {
   let app: Express;

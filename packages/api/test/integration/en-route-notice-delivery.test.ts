@@ -287,4 +287,50 @@ describe('Postgres integration — en-route notice delivery settles sent + recor
     expect(metricsA.map((m) => m.eventType)).toEqual(['en_route_notice_sent']);
     expect(metricsA.every((m) => m.tenantId === a.tenantId)).toBe(true);
   });
+
+  it('#1201 item 3 — a delivered notice whose `sent` state write fails is NOT recorded failed, and a second tap does not re-text the customer', async () => {
+    const c = await seedTenantFixture('a', '+15125550133');
+    // A real Postgres failure on the post-send state write only (status
+    // 'sent'), scoped to this tenant: the SMS goes out, then persisting
+    // `sent` raises.
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION test_1201_fail_sent_state() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        RAISE EXCEPTION 'test_1201: simulated sent-state write failure';
+      END
+      $fn$`);
+    await pool.query(`
+      CREATE TRIGGER test_1201_fail_sent_state
+        BEFORE INSERT OR UPDATE ON delay_notice_state
+        FOR EACH ROW WHEN (NEW.tenant_id = '${c.tenantId}'::uuid AND NEW.status = 'sent')
+        EXECUTE FUNCTION test_1201_fail_sent_state()`);
+    try {
+      await coordinator.enqueueEnRouteNotice({
+        tenantId: c.tenantId,
+        appointmentId: c.appointmentId,
+        technicianName: 'Terry',
+      });
+      await drainDelayNoticeQueue();
+      expect(textsTo(c.phone)).toBe(1);
+
+      const state = await pool.query(
+        `SELECT status FROM delay_notice_state WHERE tenant_id = $1 AND appointment_id = $2`,
+        [c.tenantId, c.appointmentId],
+      );
+      expect(state.rows.map((r) => r.status)).not.toContain('failed');
+
+      // Second "on my way" tap for the same visit.
+      await coordinator.enqueueEnRouteNotice({
+        tenantId: c.tenantId,
+        appointmentId: c.appointmentId,
+        technicianName: 'Terry',
+      });
+      await drainDelayNoticeQueue();
+      expect(textsTo(c.phone), 'the customer must not be texted twice').toBe(1);
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS test_1201_fail_sent_state ON delay_notice_state`);
+      await pool.query(`DROP FUNCTION IF EXISTS test_1201_fail_sent_state()`);
+    }
+  });
 });

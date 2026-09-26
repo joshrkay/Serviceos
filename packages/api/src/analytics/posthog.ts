@@ -37,7 +37,14 @@ export type FunnelEvent =
   // Activation milestone — the first real inbound call a tenant's voice
   // agent handles after go-live. Emitted server-side from voice/activation.ts
   // (idempotent once per tenant). See FUNNEL.md for the activation rule.
-  | 'first_real_call_received';
+  | 'first_real_call_received'
+  // Pricing funnel (docs/plans/per-call-pricing.md §5): the plan picked at
+  // the onboarding checkout, the 40-AI-minute trial nudge, paid-period usage
+  // alerts (80% / 100% / cap reached) and settled AI-minute overage.
+  | 'plan_selected'
+  | 'trial_minutes_milestone'
+  | 'overage_threshold'
+  | 'minute_overage_invoiced';
 
 /** Props allowed on any server-side event — IDs/enums/flags only, never PII. */
 type EventProps = Record<string, string | number | boolean | null | undefined>;

@@ -12,6 +12,7 @@
  * P11-002 — copy is localized via the notifications catalog (`tn`). Each
  * context carries an optional `language`; omitted → 'en' (back-compat).
  */
+import { TRIAL_MINUTE_LIMITS } from '../voice/trial-limits';
 import { tn } from './i18n';
 import type { Language } from '../ai/i18n/i18n';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
@@ -523,6 +524,8 @@ export interface TrialEndingEmailContext {
   supportEmail: string;
   /** Whole days remaining in the trial: 3, 1, or 0 (day-of). Drives the copy. */
   daysLeft: 0 | 1 | 3;
+  /** Billable AI minutes used so far in the trial; omitted when unknown. */
+  trialMinutesUsed?: number;
 }
 
 export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEmail {
@@ -539,15 +542,21 @@ export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEm
   const intro =
     `Your 14-day Rivet trial ends ${when}. To keep your AI dispatcher answering ` +
     'calls and chasing invoices without interruption, no action is needed — your ' +
-    'selected plan starts automatically when the trial ends. Plans include 30 AI voice minutes; ' +
-    'additional usage is billed at actual provider cost plus 30%.';
+    'selected plan starts automatically when the trial ends. Plans include ' +
+    '20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute.';
   const reassure =
     'Not ready? You can cancel anytime before then and you won’t be charged. ' +
     'Either way, your data stays yours.';
 
+  const usage =
+    ctx.trialMinutesUsed === undefined
+      ? null
+      : `You've used ${ctx.trialMinutesUsed} of ${TRIAL_MINUTE_LIMITS.TRIAL_TOTAL_SECONDS / 60} trial AI minutes.`;
+
   const text = [
     intro,
     '',
+    ...(usage ? [usage, ''] : []),
     reassure,
     '',
     cta.text,
@@ -557,6 +566,7 @@ export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEm
 
   const bodyHtml = [
     `<p style="margin: 0 0 16px 0;">${escapeHtml(intro)}</p>`,
+    ...(usage ? [`<p style="margin: 0 0 16px 0;">${escapeHtml(usage)}</p>`] : []),
     `<p style="margin: 0 0 20px 0; color: #374151;">${escapeHtml(reassure)}</p>`,
     cta.html,
     `<p style="margin: 0; color: #6b7280; font-size: 13px;">Questions about billing? Email ${escapeHtml(

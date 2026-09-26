@@ -68,7 +68,14 @@ describe('P9-003 recurring-agreements-worker', () => {
       },
       logger: createLogger({ service: 'test', environment: 'test' }),
     });
-    expect(result).toEqual({ tenants: 0, renewed: 0, generated: 0, skipped: 0, failed: 0 });
+    expect(result).toEqual({
+      tenants: 0,
+      renewed: 0,
+      generated: 0,
+      skipped: 0,
+      failed: 0,
+      failedTenants: 0,
+    });
   });
 
   it('renews lapsed auto-renew memberships during the sweep', async () => {
@@ -105,5 +112,88 @@ describe('P9-003 recurring-agreements-worker', () => {
     // ends_on rolled forward past "now" (the sweep uses the real clock).
     expect(new Date(`${updated?.endsOn}T00:00:00Z`).getTime()).toBeGreaterThan(Date.now());
     expect(updated?.renewalCount).toBeGreaterThanOrEqual(1);
+  });
+  // #1059 — a tenant-level failure must be COUNTED, not just logged. `failed`
+  // counts failed agreement RUNS; `failedTenants` counts tenants whose sweep
+  // threw (the same observability the overdue-invoice and money-reconciliation
+  // sweeps give their callers).
+  describe('#1059 failedTenants counter', () => {
+    const logger = createLogger({ service: 'test', environment: 'test' });
+    const tA = 'aaaaaaaa-0000-0000-0000-000000000001';
+    const tB = 'aaaaaaaa-0000-0000-0000-000000000002';
+    const tC = 'aaaaaaaa-0000-0000-0000-000000000003';
+    const noopPorts = {
+      runRepo: {} as never,
+      jobsService: { async createJob() { return { id: 'x' }; } },
+      invoicesService: { async createDraftInvoice() { return { id: 'x' }; } },
+    };
+
+    it('counts a tenant whose billing phase throws, and keeps sweeping', async () => {
+      const billed: string[] = [];
+      const result = await runRecurringAgreementsSweep({
+        agreementRepo: {
+          findRenewable: async () => [],
+          findDue: async (tenantId: string) => {
+            billed.push(tenantId);
+            if (tenantId === tB) throw new Error('synthetic billing failure');
+            return [];
+          },
+        } as never,
+        ...noopPorts,
+        listTenantIds: async () => [tA, tB, tC],
+        logger,
+      });
+      expect(billed).toEqual([tA, tB, tC]);
+      expect(result.failedTenants).toBe(1);
+      // No agreement RUN failed — the tenant as a whole did.
+      expect(result.failed).toBe(0);
+      expect(result.tenants).toBe(3);
+    });
+
+    it('counts a tenant whose renewal phase throws', async () => {
+      const result = await runRecurringAgreementsSweep({
+        agreementRepo: {
+          findRenewable: async (tenantId: string) => {
+            if (tenantId === tA) throw new Error('synthetic renewal failure');
+            return [];
+          },
+          findDue: async () => [],
+        } as never,
+        ...noopPorts,
+        listTenantIds: async () => [tA, tB],
+        logger,
+      });
+      expect(result.failedTenants).toBe(1);
+    });
+
+    it('counts a tenant ONCE when both of its phases throw', async () => {
+      const result = await runRecurringAgreementsSweep({
+        agreementRepo: {
+          findRenewable: async (tenantId: string) => {
+            if (tenantId !== tC) throw new Error('synthetic renewal failure');
+            return [];
+          },
+          findDue: async (tenantId: string) => {
+            if (tenantId !== tC) throw new Error('synthetic billing failure');
+            return [];
+          },
+        } as never,
+        ...noopPorts,
+        listTenantIds: async () => [tA, tB, tC],
+        logger,
+      });
+      // tA and tB each failed twice; tC was clean.
+      expect(result.failedTenants).toBe(2);
+    });
+
+    it('reports zero failed tenants on a clean sweep', async () => {
+      const result = await runRecurringAgreementsSweep({
+        agreementRepo: { findRenewable: async () => [], findDue: async () => [] } as never,
+        ...noopPorts,
+        listTenantIds: async () => [tA, tB],
+        logger,
+      });
+      expect(result.failedTenants).toBe(0);
+    });
   });
 });

@@ -22,6 +22,7 @@
  *       --business-name "QA HVAC Co" --pack hvac --region CA
  */
 import { createPool } from '../src/db/pool';
+import { publicUrl } from '../src/shared/public-origins';
 import { createLogger } from '../src/logging/logger';
 import { PgTenantRepository } from '../src/auth/pg-tenant';
 import { PgSettingsRepository } from '../src/settings/pg-settings';
@@ -30,6 +31,7 @@ import { bootstrapTenant } from '../src/auth/clerk';
 import { activatePack } from '../src/settings/pack-activation';
 import { loadOnboardingFacts } from '../src/onboarding/load-facts';
 import { deriveOnboardingStatus } from '../src/onboarding/derive-status';
+import { seedProvisionIdentity } from './provision-tenant-identity';
 import { BillingService } from '../src/billing/subscription';
 import {
   createProvisionTwilioWorker,
@@ -101,34 +103,7 @@ async function main(): Promise<void> {
     out(`1/6 tenant ${boot.created ? 'created' : 'exists'}: ${tenantId}`);
 
     // 2 — business identity (mirrors PUT /api/onboarding/identity)
-    await pool.query(
-      `INSERT INTO tenant_settings (
-         id, tenant_id, business_name, business_hours, job_buffer_minutes, hourly_rate_cents,
-         timezone, estimate_prefix, invoice_prefix, next_estimate_number,
-         next_invoice_number, default_payment_term_days
-       )
-       VALUES (gen_random_uuid(), $1, $2, $3::jsonb, $4, $5,
-               'America/New_York', 'EST-', 'INV-', 1001, 1001, 30)
-       ON CONFLICT (tenant_id) DO UPDATE SET
-         business_name      = EXCLUDED.business_name,
-         business_hours     = EXCLUDED.business_hours,
-         job_buffer_minutes = EXCLUDED.job_buffer_minutes,
-         hourly_rate_cents  = EXCLUDED.hourly_rate_cents,
-         updated_at         = now()`,
-      [
-        tenantId,
-        args.businessName,
-        JSON.stringify({
-          mon: { open: '08:00', close: '17:00' },
-          tue: { open: '08:00', close: '17:00' },
-          wed: { open: '08:00', close: '17:00' },
-          thu: { open: '08:00', close: '17:00' },
-          fri: { open: '08:00', close: '17:00' },
-        }),
-        30,
-        12500,
-      ],
-    );
+    await seedProvisionIdentity(pool, tenantId, args.businessName!);
     out('2/6 identity set');
 
     // 3 — vertical pack
@@ -164,12 +139,12 @@ async function main(): Promise<void> {
     const stripeKey = process.env.STRIPE_SECRET_KEY;
     if (stripeKey && process.env.STRIPE_PRICE_ID) {
       const billing = new BillingService({ pool, config: { apiKey: stripeKey } });
-      const webUrl = process.env.WEB_URL ?? 'http://localhost:5173';
+      // Where the owner lands after Stripe: the SPA (config.publicOrigins.web).
       const { url } = await billing.createTrialCheckoutSession({
         tenantId,
         ownerEmail: args.ownerEmail!,
-        successUrl: `${webUrl}/onboarding?billing=ok`,
-        cancelUrl: `${webUrl}/onboarding?billing=cancel`,
+        successUrl: publicUrl('web', '/onboarding', { billing: 'ok' }),
+        cancelUrl: publicUrl('web', '/onboarding', { billing: 'cancel' }),
       });
       out(`5/6 Stripe trial checkout — open this to enter a card:\n     ${url}`);
     } else {

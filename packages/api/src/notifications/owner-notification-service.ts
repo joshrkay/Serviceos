@@ -45,6 +45,7 @@ export interface NotificationContextMap {
   payment_received: { invoiceId: string; customerName: string; amountLabel: string };
   invoice_overdue: { invoiceId: string; customerName: string; amountLabel: string };
   lead_captured: { leadId: string; leadLabel: string };
+  low_rating_feedback: { jobId: string; rating: number; comment?: string | null };
   escalation: { reason: string; proposalId?: string; customerId?: string };
   emergency: { reason: string; proposalId?: string; customerId?: string };
 }
@@ -62,6 +63,13 @@ type Descriptor<K extends NotificationType> = {
 };
 
 type DescriptorMap = { [K in NotificationType]: Descriptor<K> };
+
+/** Max chars of a customer's feedback comment shown in a push body. */
+const LOW_RATING_PREVIEW_MAX = 120;
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
+}
 
 /**
  * Copy is short, blame-free, and action-first (matches the app's existing
@@ -216,6 +224,24 @@ export const NOTIFICATION_DESCRIPTORS: DescriptorMap = {
         entityId: ctx.leadId,
       },
     }),
+  },
+  low_rating_feedback: {
+    // Same permission that gates the owner's feedback page (GET /api/feedback).
+    permission: 'settings:view',
+    build: (ctx) => {
+      const comment = ctx.comment?.trim();
+      return {
+        title: `Unhappy customer — ${ctx.rating}★`,
+        body: comment
+          ? `"${truncate(comment, LOW_RATING_PREVIEW_MAX)}"`
+          : `A customer rated a recent job ${ctx.rating}★. Reach out before it becomes a public review.`,
+        data: {
+          type: 'low_rating_feedback',
+          screen: `/jobs/${ctx.jobId}`,
+          entityId: ctx.jobId,
+        },
+      };
+    },
   },
   escalation: {
     permission: 'proposals:approve',

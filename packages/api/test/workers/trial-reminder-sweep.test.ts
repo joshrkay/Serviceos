@@ -101,6 +101,18 @@ describe('runTrialReminderSweep', () => {
     expect(delivery.sentEmails[0].subject).toMatch(/in 3 days/i);
   });
 
+  it("includes the tenant's trial AI minutes used in the reminder", async () => {
+    const { deps, delivery } = makeDeps([
+      { tenant_id: TENANT, owner_email: 'owner@shop.com', trial_ends_at: new Date(NOW.getTime() + 60 * HOUR) },
+    ]);
+    const trialMinutesUsed = vi.fn(async () => 23);
+
+    await runTrialReminderSweep({ ...deps, trialMinutesUsed });
+
+    expect(trialMinutesUsed).toHaveBeenCalledWith(TENANT);
+    expect(delivery.sentEmails[0].text).toContain("You've used 23 of 60 trial AI minutes.");
+  });
+
   it('skips a trial in the between-window gap (~36h)', async () => {
     const { deps, delivery } = makeDeps([
       { tenant_id: TENANT, owner_email: 'owner@shop.com', trial_ends_at: new Date(NOW.getTime() + 36 * HOUR) },

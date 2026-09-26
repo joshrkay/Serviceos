@@ -52,7 +52,6 @@ import {
   buildAccountContextPromptSection,
 } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
-import { summarizeSession } from '../ai/skills/summarize-session';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
 import {
   detectLanguageSwitchIntent,
@@ -67,15 +66,8 @@ import type {
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
 import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
-// Aliased to avoid name collision with the private `deriveCallOutcome` method
-// on this class — see line 1828. The imported function takes the typed
-// options object (DeriveOutcomeInput); the instance method takes a
-// VoiceSession. They are NOT interchangeable. Pre-existing fix from cf76752
-// that got reverted in a subsequent merge to main.
-import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository } from '../proposals/proposal';
-import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
@@ -86,9 +78,13 @@ import {
   type DispatcherPhoneResolver,
 } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
+import { xmlEscape } from './shared/xml-escape';
+import {
+  queueCallbackProposal as queueCallbackProposalShared,
+} from './shared/queue-callback-proposal';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
-import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
+import type { VoiceRepository } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 import { resolveEscalationSettings } from '../settings/settings';
 import { resolvePhoneActor } from './phone-actor';
@@ -358,7 +354,7 @@ export interface TwilioAdapterDeps {
   voicePersonaResolver?: VoicePersonaResolver;
   /**
    * §10 onboarding — fired after voice_sessions.ended_at is stamped.
-   * Drives the 30-minute upgrade nudge (banner + optional email).
+   * Drives the 40-AI-minute trial upgrade nudge (banner + optional email).
    * Failures are swallowed so call termination is never blocked by
    * the nudge check.
    */
@@ -366,6 +362,8 @@ export interface TwilioAdapterDeps {
     sessionId: string;
     tenantId: string;
     callSid?: string;
+    /** Caller-ID (E.164) from the inbound webhook; absent when blocked. */
+    callerPhone?: string;
     channel: 'voice_inbound' | 'inapp_voice';
     endedAt: Date;
     usageSeconds: number;
@@ -595,15 +593,14 @@ export async function notifyOwnerOfIncomingCall(opts: {
   });
 }
 
-/** Escape a string for safe inclusion in TwiML. */
-export function xmlEscape(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
+// #350 — canonical home is telephony/shared/xml-escape.ts (imported above;
+// also imported directly by ai/voice-turn/create-voice-turn-processor.ts,
+// which cannot import THIS file — see that module's header comment on the
+// circular-import constraint this file's `processor` field creates).
+// Re-exported here so the existing consumers of `twilio-adapter`'s
+// `xmlEscape` (whisper-route.ts, twilio-call-control.ts, routes/telephony.ts,
+// and their tests) keep working unchanged.
+export { xmlEscape } from './shared/xml-escape';
 
 // ─── Side-effect → TwiML mapping ─────────────────────────────────────────────
 
@@ -832,6 +829,8 @@ export class TwilioGatherAdapter {
    * "missing" (never recorded) from "explicitly blocked".
    */
   private readonly callerIdBySession = new Map<string, string>();
+  /** Sessions whose `onSessionEnded` hook already fired (weak: no leak). */
+  private readonly sessionEndedEmitted = new WeakSet<VoiceSession>();
 
   /**
    * RV-130 / C5 — pending implicit recording-consent ledger writes, keyed by
@@ -941,6 +940,7 @@ export class TwilioGatherAdapter {
         // speechTurn path bypasses the adapter wrapper), so stamp the
         // durable recovery context here.
         this.scheduleDurableRecoveryContext(session);
+        void this.emitSessionEnded(session);
         void this.processor.runSummary(session).catch(() => {
           /* swallow — summary is best-effort */
         });
@@ -3284,86 +3284,17 @@ export class TwilioGatherAdapter {
     reason: string,
     outcome: 'rotation_empty' | 'rotation_exhausted',
   ): Promise<void> {
-    if (!this.deps.proposalRepo) {
-      logger.warn('queueCallbackProposal: proposalRepo not wired', {
-        sessionId: session.id,
-        outcome,
-      });
-      return;
-    }
-    try {
-      const tenantThresholdOverride = await this.processor.resolveThresholdOverride(tenantId);
-      const proposal = buildProposal({
-        tenantId,
-        // No dedicated `customer_callback_required` ProposalType
-        // exists; voice_clarification is the closest existing bucket
-        // (it's the "needs human follow-up" capture-class proposal).
-        // The semantic intent rides in payload.intent so the review
-        // UI / future executor can branch on it.
-        proposalType: 'voice_clarification',
-        payload: {
-          intent: 'customer_callback_required',
-          reason,
-          outcome,
-          sessionId: session.id,
-          callSid: session.callSid,
-        },
-        summary: `Customer callback required (${outcome})`,
-        sourceContext: {
-          source: 'calling-agent',
-          channel: 'telephony',
-          sessionId: session.id,
-          escalationReason: reason,
-        },
-        // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id has
-        // an FK to ai_runs(id); a random uuid violates it and the swallowed
-        // insert error silently dropped EVERY inbound-voice proposal on
-        // Postgres-backed envs (in-memory repos don't enforce the FK, which
-        // is why tests passed). This callback proposal is generated internally
-        // with no associated ai_runs row, so ai_run_id stays null.
-        createdBy: this.deps.systemActorId ?? 'calling-agent',
-        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-      });
-      const stored = await this.deps.proposalRepo.create(proposal);
-      session.proposalIds.push(stored.id);
-
-      // Audit for parity with normal escalation paths: operators
-      // searching for "callback queued" want a single audit row to
-      // jump from.
-      if (this.deps.auditRepo) {
-        try {
-          const auditEvent = createAuditEvent({
-            tenantId,
-            actorId: this.deps.systemActorId ?? 'calling-agent',
-            actorRole: 'system',
-            eventType: 'customer_callback_required',
-            entityType: 'voice_session',
-            entityId: session.id,
-            correlationId: session.id,
-            metadata: {
-              proposalId: stored.id,
-              reason,
-              outcome,
-              callSid: session.callSid,
-            },
-          });
-          await this.deps.auditRepo.create(auditEvent);
-        } catch (err) {
-          logger.warn('queueCallbackProposal: audit persist failed', {
-            error: err instanceof Error ? err.message : String(err),
-            sessionId: session.id,
-          });
-        }
-      }
-
-      // Drop the rotation cursor — the call is done with the dial flow.
-      this.deps.callControl?.clearCursor(session.id);
-    } catch (err) {
-      logger.warn('queueCallbackProposal failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-    }
+    // #350 — delegates to telephony/shared/queue-callback-proposal.ts, the
+    // canonical home shared with the processor's former
+    // `queueCallbackProposalInternal` duplicate.
+    await queueCallbackProposalShared(
+      this.deps,
+      session,
+      tenantId,
+      reason,
+      outcome,
+      (t) => this.processor.resolveThresholdOverride(t),
+    );
   }
 
   /**
@@ -3439,22 +3370,7 @@ export class TwilioGatherAdapter {
     // dedupes on (tenant, voice_session_id)) and swallow-on-error inside the
     // scheduler, so this never disturbs the terminal path.
     this.scheduleDurableRecoveryContext(session);
-    if (session.terminalOutcome) return;
-    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
-    const reason =
-      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
-        ? endSessionEffect.payload.reason
-        : undefined) ?? fallbackReason;
-    const outcome = deriveCallOutcomeFromState({
-      finalState: session.machine.currentState,
-      endedReason: reason,
-      context: session.machine.currentContext,
-      transcript: session.transcript,
-      proposalIds: session.proposalIds,
-    });
-    session.terminalOutcome = outcome;
-    session.terminalReason = reason;
-    void this.persistSessionEnded(session, reason, outcome);
+    void this.emitSessionEnded(session);
   }
 
   /**
@@ -3491,43 +3407,25 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
-   * fire-and-forget; errors are swallowed (outcome stamping is
-   * best-effort, never breaks a call flow).
+   * Fires the host's `onSessionEnded` hook (usage ledger, provider costs,
+   * upgrade nudge, activation) exactly once per session. Both end paths call
+   * it: the adapter-driven `finalizeTerminatedSession` wrapper and the
+   * processor's internal speechTurn path via `onSessionTerminated`. The
+   * processor owns `markEnded`, so this is the only adapter-side end work.
    */
-  private async persistSessionEnded(
-    session: VoiceSession,
-    endedReason: string,
-    outcome: CallOutcome,
-  ): Promise<void> {
-    if (!this.deps.voiceSessionRepo) return;
+  private async emitSessionEnded(session: VoiceSession): Promise<void> {
+    if (!this.deps.onSessionEnded || this.sessionEndedEmitted.has(session)) return;
+    this.sessionEndedEmitted.add(session);
+    // Empty string = blocked caller-id (see callerIdBySession).
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
     try {
-      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
-        endedAt: new Date(),
-        endedReason,
-        outcome,
-        state: session.machine.currentState,
-        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
-        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
-        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
-        // can surface the full conversation without relying on the
-        // process-scoped VoiceSessionStore.
-        transcript: session.transcript.length > 0 ? [...session.transcript] : undefined,
-        // Stamp the customer FK so the interactions list can join to
-        // the customers table and surface the linked customer.
-        ...(session.customerId !== undefined ? { customerId: session.customerId } : {}),
-      });
-    } catch {
-      /* swallow — outcome stamping is best-effort */
-    }
-    if (this.deps.onSessionEnded) {
-      try {
         const endedAt = new Date();
         await this.deps.onSessionEnded({
           sessionId: session.id,
           tenantId: session.tenantId,
           channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
           ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+          ...(callerPhone ? { callerPhone } : {}),
           endedAt,
           usageSeconds: Math.max(0, Math.ceil((endedAt.getTime() - session.createdAt.getTime()) / 1000)),
           llmCostMicroCents: session.costTracker.costMicroCents,
@@ -3538,136 +3436,20 @@ export class TwilioGatherAdapter {
             : {}),
           mediaStreamsUsed: session.mediaStreamsUsed,
         });
-      } catch {
-        /* swallow — nudge check must never block call end */
-      }
+    } catch {
+      /* swallow — end-of-call hooks must never block call end */
     }
   }
 
-  private async runSummary(session: VoiceSession): Promise<void> {
-    const durationMs = Date.now() - session.createdAt.getTime();
-
-    // Skip when the caller hung up before speaking — there's nothing to
-    // summarize and the LLM call wastes tokens generating filler. The
-    // outcome stamp below still runs.
-    if (session.transcript.length === 0) {
-      logger.info('runSummary: skipping (empty transcript)', {
-        sessionId: session.id,
-      });
-    } else {
-      const intentDetected = session.machine.currentContext.currentIntent;
-      const SUMMARY_RETRY_DELAYS_MS = [200, 800];
-      let lastErr: unknown = null;
-      for (let attempt = 0; attempt <= SUMMARY_RETRY_DELAYS_MS.length; attempt++) {
-        try {
-          await summarizeSession({
-            tenantId: session.tenantId,
-            sessionId: session.id,
-            transcript: session.transcript,
-            proposalIds: session.proposalIds,
-            durationMs,
-            gateway: this.deps.gateway,
-            ...(intentDetected ? { intentDetected } : {}),
-            ...(this.deps.pool ? { pool: this.deps.pool } : {}),
-            // RIVET I13 — inbound telephony: the caller is an unauthenticated
-            // homeowner (S1); their turns are fenced as untrusted.
-            inboundCallerSession: true,
-          });
-          lastErr = null;
-          break;
-        } catch (err) {
-          lastErr = err;
-          if (attempt < SUMMARY_RETRY_DELAYS_MS.length) {
-            await new Promise((r) => {
-              const t = setTimeout(r, SUMMARY_RETRY_DELAYS_MS[attempt]);
-              if (typeof t.unref === 'function') t.unref();
-            });
-          }
-        }
-      }
-      if (lastErr) {
-        // After bounded retries, don't bubble — the call has ended and the
-        // outcome stamp + audit log carry the operationally important data.
-        // Logged at warn so on-call sees a visible signal in metrics.
-        logger.warn('summarizeSession failed after retries', {
-          error: lastErr instanceof Error ? lastErr.message : String(lastErr),
-          sessionId: session.id,
-          attempts: SUMMARY_RETRY_DELAYS_MS.length + 1,
-        });
-      }
-    }
-
-    const callSid = session.machine.currentContext.callSid;
-    if (this.deps.voiceRepo?.stampOutcomeByCallSid && callSid) {
-      try {
-        await this.deps.voiceRepo.stampOutcomeByCallSid(
-          session.tenantId,
-          callSid,
-          this.deriveCallOutcome(session),
-        );
-      } catch (err) {
-        logger.warn('stampOutcomeByCallSid failed', {
-          error: err instanceof Error ? err.message : String(err),
-          callSid,
-        });
-      }
-    }
-  }
-
-  /**
-   * Stamp the call outcome on the voice_recordings row. Called from
-   * runSummary() (best-effort — usually no-ops because Twilio's recording
-   * webhook hasn't fired yet) and again from the recording webhook's
-   * onPersisted hook (the reliable path — the row exists by then).
-   * Idempotent: stampOutcomeByCallSid is a single UPDATE, so duplicate
-   * calls just rewrite the same value.
-   */
-  async stampCallOutcomeByCallSid(opts: {
-    tenantId: string;
-    callSid: string;
-  }): Promise<void> {
-    if (!this.deps.voiceRepo?.stampOutcomeByCallSid) return;
-    // Use the ended-inclusive lookup: by the time the recording webhook
-    // fires onPersisted, the FSM is typically already terminated and
-    // session.ended === true, so findByCallSid would return undefined.
-    const session = this.deps.store.findByCallSidIncludingEnded(opts.callSid);
-    // When the session is genuinely gone (multi-instance deploy, restart, or
-    // idle reap), we cannot derive the outcome — leave the column NULL rather
-    // than defaulting to 'completed', which would silently overwrite or mask
-    // real failed/escalated outcomes in analytics.
-    if (!session) return;
-    try {
-      await this.deps.voiceRepo.stampOutcomeByCallSid(
-        opts.tenantId,
-        opts.callSid,
-        this.deriveCallOutcome(session),
-      );
-    } catch (err) {
-      logger.warn('stampCallOutcomeByCallSid failed', {
-        error: err instanceof Error ? err.message : String(err),
-        callSid: opts.callSid,
-      });
-    }
-  }
-
-  private deriveCallOutcome(session: VoiceSession): CallOutcome {
-    const ctx = session.machine.currentContext;
-    if (ctx.escalationReason) {
-      if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
-      if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
-      if (ctx.escalationReason.startsWith('callback_required')) return 'callback_required';
-      // abuse_detected terminates the call immediately with no human handoff
-      if (ctx.escalationReason.startsWith('abuse_detected')) return 'failed';
-      return 'escalated_to_human';
-    }
-    if (session.proposalIds.length > 0) return 'completed';
-    if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
-    // No escalation, no proposal, no classified intent. Distinguish "caller
-    // hung up before saying anything" (dropped) from "caller spoke but we
-    // couldn't classify" (no_intent) by whether any caller turns landed in
-    // the transcript.
-    const hadCallerSpeech = session.transcript.some((line) => line.startsWith('caller:'));
-    if (!hadCallerSpeech) return 'dropped';
-    return 'no_intent';
-  }
+  // #350/#351 — this class used to carry its own private `runSummary`,
+  // public `stampCallOutcomeByCallSid`, and private `deriveCallOutcome`
+  // (a third, independently-drifting copy of the outcome-derivation logic
+  // now unified in `ai/agents/customer-calling/outcome-mapper.ts` as
+  // `deriveCallOutcomeFromSession`). All three were dead: every live
+  // termination path goes through `this.processor.runSummary` (wired as
+  // the `onSessionTerminated` callback in the constructor above), and
+  // `stampCallOutcomeByCallSid` had zero callers anywhere in the codebase
+  // — a grep confirms no route, webhook, or test ever called it. Removed
+  // per CLAUDE.md's dead-code mandate rather than left as an unreachable
+  // fourth copy of outcome derivation to keep in sync.
 }

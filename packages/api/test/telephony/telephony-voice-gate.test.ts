@@ -1,7 +1,7 @@
 /**
  * §10 onboarding — Gate A (subscription) + Gate B (trial caps) at the
  * inbound POST /api/telephony/voice webhook. Complements unit tests on
- * evaluateTrialCap / createVoiceGate by asserting the TwiML branch.
+ * createVoiceGate by asserting the TwiML branch.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -152,31 +152,48 @@ describe('POST /api/telephony/voice — §10 voiceGate', () => {
     expect(store.size()).toBe(0);
   });
 
-  it('returns voicemail TwiML when Gate B blocks (trial_cap_daily)', async () => {
-    const voiceGate: VoiceGate = vi.fn(async () => ({
-      allowed: false,
-      reason: 'trial_cap_daily' as const,
-    }));
-    const { app } = buildHarness(voiceGate);
-
-    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-daily' });
-
-    expect(res.status).toBe(200);
-    expect(res.text).toContain('being set up');
-    expect(res.text).toContain('<Record');
-    expect(res.text).not.toContain('<Gather');
-  });
-
-  it('returns voicemail TwiML when Gate B blocks (trial_cap_total)', async () => {
+  it('rings the owner when a usage cap forwards, with voicemail if they do not pick up', async () => {
     const voiceGate: VoiceGate = vi.fn(async () => ({
       allowed: false,
       reason: 'trial_cap_total' as const,
+      forwardTo: '+14805550100',
     }));
     const { app } = buildHarness(voiceGate);
 
-    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-total' });
+    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-forward' });
 
     expect(res.status).toBe(200);
+    expect(res.text).toMatch(/<Dial[^>]*>\+14805550100<\/Dial>/);
+    // Twilio runs the next verb when the Dial ends unanswered.
+    expect(res.text.indexOf('<Dial')).toBeLessThan(res.text.indexOf('<Record'));
+    expect(res.text).not.toContain('<Gather');
+  });
+
+  it('forwards on the paid overage cap the same way', async () => {
+    const voiceGate: VoiceGate = vi.fn(async () => ({
+      allowed: false,
+      reason: 'overage_cap' as const,
+      forwardTo: '+14805550100',
+    }));
+    const { app } = buildHarness(voiceGate);
+
+    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-overage' });
+
+    expect(res.text).toMatch(/<Dial[^>]*>\+14805550100<\/Dial>/);
+  });
+
+  it('falls back to voicemail when a usage cap has no owner phone to ring', async () => {
+    const voiceGate: VoiceGate = vi.fn(async () => ({
+      allowed: false,
+      reason: 'trial_cap_total' as const,
+      forwardTo: null,
+    }));
+    const { app } = buildHarness(voiceGate);
+
+    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-no-owner' });
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
     expect(res.text).toContain('<Record');
     expect(res.text).not.toContain('<Gather');
   });

@@ -114,6 +114,7 @@ import {
   LANGUAGE_SWITCH_CAP_LINE,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  CALLER_INCOMPLETE_REQUEST_COPY,
   type SessionLanguage,
 } from '../agents/customer-calling/tts-copy';
 import {
@@ -176,7 +177,10 @@ import type {
   VoiceSession,
   VoiceSessionStore,
 } from '../agents/customer-calling/voice-session-store';
-import { deriveCallOutcome } from '../agents/customer-calling/outcome-mapper';
+import {
+  deriveCallOutcome,
+  deriveCallOutcomeFromSession,
+} from '../agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../../voice/voice-session';
 import type {
   Proposal,
@@ -184,7 +188,7 @@ import type {
   ProposalStatus,
   ProposalType,
 } from '../../proposals/proposal';
-import { createProposal as buildProposal } from '../../proposals/proposal';
+import { createProposal as buildProposal, missingFieldsFor } from '../../proposals/proposal';
 import {
   isProposalTypeAllowedOnSurface,
   type ProposalSurface,
@@ -194,24 +198,19 @@ import {
   buildAndPersistComplaintProposal,
 } from '../../proposals/guardrails/voice-protection-proposal';
 import type { CurrentQuoteResolver } from '../../conversations/negotiation/current-quote-resolver';
-import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { TwilioCallControl } from '../../telephony/twilio-call-control';
 import { maskPhone } from '../../telephony/twilio-call-control';
 import type { DispatcherPhoneResolver } from '../skills/escalate-to-human';
-import type { TenantCredentialResolver } from '../../integrations/credentials';
 import type { JobRepository } from '../../jobs/job';
 import type { AppointmentRepository } from '../../appointments/appointment';
-import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
 import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
 import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
-import type { EstimateRepository } from '../../estimates/estimate';
-import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import {
   groundLineItemPricing,
@@ -239,14 +238,13 @@ import {
   type SchedulingEntityResolution,
 } from '../agents/customer-calling/entity-resolution';
 import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
-import { buildQuoteReadback, type QuoteReadbackLine } from './quote-readback';
+import { buildQuoteReadback, quoteReadbackTotalCents, type QuoteReadbackLine } from './quote-readback';
 import { parseLeadingQuantity } from './quantity-parse';
 import type { LLMGateway } from '../gateway/gateway';
 import type {
   VoiceRepository,
   CallOutcome,
 } from '../../voice/voice-service';
-import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import { isRuntimeTimezone } from '../../shared/timezone';
@@ -259,6 +257,8 @@ import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
+import { xmlEscape } from '../../telephony/shared/xml-escape';
+import { queueCallbackProposal as queueCallbackProposalShared } from '../../telephony/shared/queue-callback-proposal';
 
 const logger = createLogger({
   service: 'ai.voice-turn.processor',
@@ -324,15 +324,6 @@ export const SMS_CONSENT_DECLINE_FALLBACK =
  */
 export const CLOSE_FALLBACK_LINE =
   "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.";
-
-function xmlEscape(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 // `intentToProposalType` + `voiceProposalSummary` are imported from
 // `proposals/voice-intent-map.ts` — this file used to carry a private
@@ -437,12 +428,10 @@ function finalizeGroundedQuote(
     ...(typeof li.description === 'string' ? { description: li.description } : {}),
   }));
   const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
-  // WS18 — the spoken total (integer cents; formatCents divides by 100). Sum of
-  // each line's unit price × quantity, exactly what buildQuoteReadback recites.
-  const totalCents = readbackLines.reduce((sum, li) => {
-    const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
-    return sum + (typeof li.unitPrice === 'number' ? li.unitPrice * qty : 0);
-  }, 0);
+  // WS18 — the spoken total (integer cents): the SAME number buildQuoteReadback
+  // recites, derived from the billing engine's per-line rule inside the
+  // readback module. Never recomputed here (I9′: one totals engine).
+  const totalCents = quoteReadbackTotalCents(readbackLines);
 
   return {
     lineItems,
@@ -667,7 +656,6 @@ export interface VoiceTurnProcessorDeps {
    * warning (never a silent clarification card).
    */
   enRoute?: PhoneEnRouteDeps;
-  leadRepo?: LeadRepository;
   /**
    * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
    * enriched with the caller's LTV/recency (resolved via the session customerId).
@@ -726,10 +714,8 @@ export interface VoiceTurnProcessorDeps {
   callControl?: TwilioCallControl;
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
   businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
-  recordingCallbackPath?: string;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
-  invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
   /** Customer tags for escalation CRM hydration (handoff context pack). */
@@ -742,7 +728,6 @@ export interface VoiceTurnProcessorDeps {
    * fall back to the retry/escalate path.
    */
   conversationRepo?: ConversationRepository;
-  estimateRepo?: EstimateRepository;
   /**
    * WS5 — tenant catalog repo for in-call grounded quoting. When wired, a
    * drafted estimate's spoken line items are resolved against the tenant's
@@ -781,8 +766,6 @@ export interface VoiceTurnProcessorDeps {
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
   };
-  lookupEvents?: LookupEventService;
-  credentialResolver?: TenantCredentialResolver;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   callerPlanResolver?: (
     tenantId: string,
@@ -795,7 +778,6 @@ export interface VoiceTurnProcessorDeps {
   >;
   voiceSessionRepo?: VoiceSessionRepository;
   voiceRepo?: VoiceRepository;
-  voicePersonaResolver?: VoicePersonaResolver;
   /**
    * Optional shared map. When the host (TwilioGatherAdapter) provides
    * its own Map instance, the processor reads/writes the same instance
@@ -2339,6 +2321,13 @@ export function createVoiceTurnProcessor(
       });
       const stored = await deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
+      // #1272 — a draft persisted with unfilled missingFields (approve refuses
+      // it), or one degraded to a clarification because the details were
+      // incomplete, is NOT "taken care of". Without a more specific honest
+      // line below, speak the incomplete-request copy instead of the FSM's
+      // "You'll receive a confirmation shortly".
+      const incompleteRequest =
+        surfaceAllowed && (degradedFromContract || missingFieldsFor(stored).length > 0);
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
@@ -2350,7 +2339,9 @@ export function createVoiceTurnProcessor(
           ? { utterance: estimateQuote.utterance }
           : bookingUtterance
             ? { utterance: bookingUtterance }
-            : {}),
+            : incompleteRequest
+              ? { utterance: CALLER_INCOMPLETE_REQUEST_COPY }
+              : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
@@ -2383,6 +2374,17 @@ export function createVoiceTurnProcessor(
     }
     return path;
   }
+
+  /**
+   * #1230 — an emergency immediate Dial that found no reachable on-call phone
+   * has already walked the rotation and written escalation.requested. The
+   * FSM's emergency fast-path then emits notify_oncall for the same incident;
+   * it reuses this result instead of escalating (and auditing) a second time.
+   */
+  const unresolvedImmediateEscalation = new WeakMap<
+    VoiceSession,
+    Awaited<ReturnType<typeof escalateToHuman>>
+  >();
 
   async function handleNotifyOncall(
     session: VoiceSession,
@@ -2453,7 +2455,9 @@ export function createVoiceTurnProcessor(
       );
       const enrichedCaller = mergeCallerContextWithCrm(callerBundle, crm);
 
-      const result = await escalateToHuman({
+      const precomputed = unresolvedImmediateEscalation.get(session);
+      unresolvedImmediateEscalation.delete(session);
+      const result = precomputed ?? await escalateToHuman({
         tenantId,
         sessionId: session.id,
         reason: skillReason,
@@ -2494,7 +2498,7 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
         }
 
         if (
@@ -2548,11 +2552,13 @@ export function createVoiceTurnProcessor(
           hasSummary: Boolean(summary),
         });
       } else if (!result.escalated && deps.callControl) {
-        await queueCallbackProposalInternal(
+        await queueCallbackProposalShared(
+          deps,
           session,
           tenantId,
           rawReason,
           'rotation_empty',
+          resolveThresholdOverride,
         );
         const safeName = xmlEscape(deps.businessName);
         pendingTransferTwiml.set(
@@ -2567,86 +2573,6 @@ export function createVoiceTurnProcessor(
       }
     } catch (err) {
       logger.warn('escalateToHuman failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-    }
-  }
-
-  /**
-   * Internal duplicate of the adapter's `queueCallbackProposal` used by
-   * `handleNotifyOncall` when the rotation cascade is empty. The adapter
-   * retains its public `queueCallbackProposal` for the route layer; both
-   * paths build the same proposal shape.
-   */
-  async function queueCallbackProposalInternal(
-    session: VoiceSession,
-    tenantId: string,
-    reason: string,
-    outcome: 'rotation_empty' | 'rotation_exhausted',
-  ): Promise<void> {
-    if (!deps.proposalRepo) {
-      logger.warn('queueCallbackProposal: proposalRepo not wired', {
-        sessionId: session.id,
-        outcome,
-      });
-      return;
-    }
-    try {
-      const tenantThresholdOverride = await resolveThresholdOverride(tenantId);
-      const proposal = buildProposal({
-        tenantId,
-        proposalType: 'voice_clarification',
-        payload: {
-          intent: 'customer_callback_required',
-          reason,
-          outcome,
-          sessionId: session.id,
-          callSid: session.callSid,
-        },
-        summary: `Customer callback required (${outcome})`,
-        sourceContext: {
-          source: 'calling-agent',
-          channel: 'telephony',
-          sessionId: session.id,
-          escalationReason: reason,
-        },
-        // This callback proposal is generated internally (rotation empty/
-        // exhausted) with no associated ai_runs row, so ai_run_id stays null —
-        // never fabricate a uuid (FK to ai_runs(id) would reject it).
-        createdBy: deps.systemActorId ?? 'calling-agent',
-        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-      });
-      const stored = await deps.proposalRepo.create(proposal);
-      session.proposalIds.push(stored.id);
-      if (deps.auditRepo) {
-        try {
-          const auditEvent = createAuditEvent({
-            tenantId,
-            actorId: deps.systemActorId ?? 'calling-agent',
-            actorRole: 'system',
-            eventType: 'customer_callback_required',
-            entityType: 'voice_session',
-            entityId: session.id,
-            correlationId: session.id,
-            metadata: {
-              proposalId: stored.id,
-              reason,
-              outcome,
-              callSid: session.callSid,
-            },
-          });
-          await deps.auditRepo.create(auditEvent);
-        } catch (err) {
-          logger.warn('queueCallbackProposal: audit persist failed', {
-            error: err instanceof Error ? err.message : String(err),
-            sessionId: session.id,
-          });
-        }
-      }
-      deps.callControl?.clearCursor(session.id);
-    } catch (err) {
-      logger.warn('queueCallbackProposal failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
@@ -3197,7 +3123,7 @@ export function createVoiceTurnProcessor(
         await deps.voiceRepo.stampOutcomeByCallSid(
           session.tenantId,
           callSid,
-          deriveOutcomeFromSession(session),
+          deriveCallOutcomeFromSession(session),
         );
       } catch (err) {
         logger.warn('stampOutcomeByCallSid failed', {
@@ -3206,31 +3132,6 @@ export function createVoiceTurnProcessor(
         });
       }
     }
-  }
-
-  /**
-   * Local duplicate of the adapter's `deriveCallOutcome` for use inside
-   * `runSummary`. The adapter retains its own (used by
-   * `stampCallOutcomeByCallSid`); both branches return the same value
-   * for the same session.
-   */
-  function deriveOutcomeFromSession(session: VoiceSession): CallOutcome {
-    const ctx = session.machine.currentContext;
-    if (ctx.escalationReason) {
-      if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
-      if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
-      if (ctx.escalationReason.startsWith('callback_required'))
-        return 'callback_required';
-      if (ctx.escalationReason.startsWith('abuse_detected')) return 'failed';
-      return 'escalated_to_human';
-    }
-    if (session.proposalIds.length > 0) return 'completed';
-    if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
-    const hadCallerSpeech = session.transcript.some((line) =>
-      line.startsWith('caller:'),
-    );
-    if (!hadCallerSpeech) return 'dropped';
-    return 'no_intent';
   }
 
   // ─── RV-071 — owner voice-approval dialogue ─────────────────────────
@@ -4979,6 +4880,9 @@ export function createVoiceTurnProcessor(
           // fast-path below, so the call still reaches `escalating` (and its
           // notify_oncall callback path) instead of staying in intent_capture
           // — which, on a capped call, had already spent its one cap end.
+          if (immediate.escalation && !immediate.escalation.transfer) {
+            unresolvedImmediateEscalation.set(session, immediate.escalation);
+          }
           if (immediate.dialed && immediate.escalation?.transfer) {
             if (immediate.escalation.transfer.fallbackTwiml !== undefined) {
               pendingTransferTwiml.set(

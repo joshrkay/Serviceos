@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Zap, Check, Mic } from 'lucide-react';
 import type { OnboardingStatusResponse, OnboardingStepId, OnboardingStepStatus } from '../../../types/onboarding';
+import { ConfirmDialog } from '../../ui';
 
 interface SidebarProps {
   status: OnboardingStatusResponse;
@@ -53,6 +55,9 @@ export function Sidebar({
   onToggleVoice,
 }: SidebarProps) {
   const navigate = useNavigate();
+  // #907 — window.confirm replaced with ConfirmDialog for the downstream-
+  // invalidation warning on re-editing a completed identity/pack step.
+  const [pendingStepId, setPendingStepId] = useState<OnboardingStepId | null>(null);
   const completedCount = status.steps.filter(
     (s) => s.status === 'done' || s.status === 'skipped',
   ).length;
@@ -111,14 +116,8 @@ export function Sidebar({
           const requiresInvalidationWarning =
             isDone && !isActive && (step.id === 'identity' || step.id === 'pack');
           const handleClick = () => {
-            if (
-              requiresInvalidationWarning &&
-              !window.confirm(
-                step.id === 'identity'
-                  ? 'Re-editing business identity will overwrite saved values when you save. Downstream setup (phone, billing, AI check) is not reset. Continue?'
-                  : 'Re-picking your trade may add another pack to your tenant but will not reset the job types and templates the previous pack seeded. Continue?',
-              )
-            ) {
+            if (requiresInvalidationWarning) {
+              setPendingStepId(step.id);
               return;
             }
             onSelect(step.id);
@@ -185,6 +184,23 @@ export function Sidebar({
           })}
         </ul>
       </div>
+
+      {/* #907 — window.confirm replaced with ConfirmDialog. */}
+      <ConfirmDialog
+        open={pendingStepId !== null}
+        title="Continue?"
+        description={
+          pendingStepId === 'identity'
+            ? 'Re-editing business identity will overwrite saved values when you save. Downstream setup (phone, billing, AI check) is not reset.'
+            : 'Re-picking your trade may add another pack to your tenant but will not reset the job types and templates the previous pack seeded.'
+        }
+        confirmLabel="Continue"
+        onConfirm={() => {
+          if (pendingStepId) onSelect(pendingStepId);
+          setPendingStepId(null);
+        }}
+        onCancel={() => setPendingStepId(null)}
+      />
     </nav>
   );
 }

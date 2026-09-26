@@ -14,6 +14,7 @@ import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
 import { fetchIntegrations, type AccountingIntegrationSummary } from '../../api/integrations';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
+import { AiMinutesCard } from './AiMinutesCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -28,6 +29,7 @@ import { BrandVoiceSheet } from './BrandVoiceSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
+import { TaxRateSheet } from './TaxRateSheet';
 import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
@@ -198,12 +200,6 @@ export function SettingsPage() {
   // alert (the server's reason, e.g. "saved Stripe customer no longer
   // exists — contact support to re-link billing"), not a transient toast.
   const [billingPortalError, setBillingPortalError] = useState<BillingPortalFailure | null>(null);
-  const [voiceUsage, setVoiceUsage] = useState<{
-    usageSeconds: number;
-    includedMinutes: number;
-    projectedChargeCents: number;
-    complete: boolean;
-  } | null>(null);
   // Surface a failure to load the main /api/settings document instead of
   // silently swallowing it (which left the page showing stale defaults with
   // no signal that the user's real preferences never loaded).
@@ -357,21 +353,6 @@ export function SettingsPage() {
       cancelled = true;
     };
   }, [settingsReloadNonce]);
-
-  useEffect(() => {
-    let cancelled = false;
-    // Some embedders/tests provide a deliberately partial API adapter that
-    // returns undefined for unknown endpoints. Treat that the same as an
-    // unavailable optional usage panel instead of crashing Settings.
-    void Promise.resolve(apiFetch('/api/billing/voice-usage'))
-      .then(async (res) => {
-        if (!cancelled && res?.ok) setVoiceUsage(await res.json());
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [apiFetch]);
 
   async function refreshQuickBooksIntegration() {
     try {
@@ -582,6 +563,7 @@ export function SettingsPage() {
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
+  const [taxRateOpen, setTaxRateOpen] = useState(false);
   const [lateFeesOpen, setLateFeesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
@@ -913,6 +895,7 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
+        { icon: FileText,   label: 'Tax rate',               description: 'Default tax rate for new estimates and invoices', action: () => setTaxRateOpen(true) },
         // #1143 (row 8.10) — the only surface that sets the tenant's late-fee
         // policy; the overdue sweep drafts each fee for owner approval.
         { icon: FileText,   label: 'Late fees',              description: 'Fee on invoices still unpaid after a grace period', action: () => setLateFeesOpen(true) },
@@ -955,9 +938,7 @@ export function SettingsPage() {
           kind: 'external',
           icon: CreditCard,
           label: 'Rivet subscription',
-          description: voiceUsage
-            ? `${Math.ceil(voiceUsage.usageSeconds / 60)} of ${voiceUsage.includedMinutes} AI voice minutes used · ${voiceUsage.complete ? `$${(voiceUsage.projectedChargeCents / 100).toFixed(2)} projected overage` : 'cost reconciliation pending'}`
-            : 'Manage card, plan, invoices in the Stripe billing portal',
+          description: 'Manage card, plan, invoices in the Stripe billing portal',
           action: () => setConfirmPortalOpen(true),
         },
       ],
@@ -1445,6 +1426,12 @@ export function SettingsPage() {
           </div>
         </div>
 
+        {/* AI answering minutes — usage against the plan bundle, and the
+            owner's overage cap (the API enforces owner-only too). */}
+        <div className="mb-4">
+          <AiMinutesCard canManage={me?.role === 'owner'} />
+        </div>
+
         {/* Settings sections */}
         {SECTIONS.map(section => (
           <div key={section.title} className="mb-4">
@@ -1638,6 +1625,9 @@ export function SettingsPage() {
       {discountPolicyOpen && (
         <DiscountPolicySheet onClose={() => setDiscountPolicyOpen(false)} />
       )}
+
+      {/* #1288 — tenant default tax rate for new estimates/invoices. */}
+      {taxRateOpen && <TaxRateSheet onClose={() => setTaxRateOpen(false)} />}
 
       {/* Late fees sheet — dunning late-fee policy (type, amount, grace, cap). */}
       {lateFeesOpen && (

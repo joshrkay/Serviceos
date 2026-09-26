@@ -15,14 +15,14 @@
  * local row's id.
  */
 import { PendingInvitation, PendingInvitationRepository } from './pending-invitation';
+import { publicUrl } from '../shared/public-origins';
 import { UserRole } from './user';
+import { assertSeatAvailable, type SeatUsageReader } from './seat-limit';
 
 export interface ClerkInvitationConfig {
   clerkSecretKey?: string;
   /** Defaults to global fetch. Tests inject a stub. */
   clerkFetch?: typeof fetch;
-  /** Public web URL used as the redirect target after accept. */
-  appBaseUrl?: string;
 }
 
 export interface InviteTeamMemberInput {
@@ -41,7 +41,12 @@ export async function inviteTeamMember(
   input: InviteTeamMemberInput,
   invitationRepo: PendingInvitationRepository,
   clerk: ClerkInvitationConfig = {},
+  /** Per-plan user limit; enforced whenever wired (always in production). */
+  seatUsage?: SeatUsageReader,
 ): Promise<InviteTeamMemberResult> {
+  if (seatUsage) {
+    assertSeatAvailable(await seatUsage.getSeatUsage(input.tenantId));
+  }
   const invitation = await invitationRepo.create({
     tenantId: input.tenantId,
     email: input.email,
@@ -53,7 +58,9 @@ export async function inviteTeamMember(
   if (clerk.clerkSecretKey) {
     try {
       const fetchFn = clerk.clerkFetch ?? fetch;
-      const redirectUrl = `${clerk.appBaseUrl ?? ''}/accept-invitation?invitation_id=${encodeURIComponent(invitation.id)}`;
+      // Where the invitee lands after Clerk sign-up: the SPA (web origin),
+      // never the API host. Resolved once by loadConfig().
+      const redirectUrl = publicUrl('web', '/accept-invitation', { invitation_id: invitation.id });
       const clerkRes = await fetchFn('https://api.clerk.com/v1/invitations', {
         method: 'POST',
         headers: {

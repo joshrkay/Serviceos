@@ -21,6 +21,7 @@ import {
   missingFieldsFor,
 } from '../../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
+import type { VoiceRepository } from '../../../src/voice/voice-service';
 import { InMemoryCallMeBackRepository } from '../../../src/voice/call-me-back/call-me-back';
 import { InMemoryDeviceTokenRepository } from '../../../src/push/device-token-service';
 import type { PushMessage, PushSendResult } from '../../../src/notifications/push-delivery-provider';
@@ -288,7 +289,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
       }),
       JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
     ]);
-    const { processor, session, proposalRepo } = makeCtx({
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
       gateway,
       withRepos: true,
     });
@@ -1464,6 +1465,59 @@ describe('createVoiceTurnProcessor.runSummary', () => {
     await processor.runSummary(session);
     expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
+
+  // #351 — `runSummary` used to derive `voice_recordings.outcome` from a
+  // local `deriveOutcomeFromSession` duplicate that read only
+  // `session.machine.currentContext.escalationReason`, never the FSM's
+  // `endedReason` string `finalizeTerminatedSession` (and the canonical
+  // `deriveCallOutcome`) key off. For an abuse-terminated call that
+  // duplicate returned 'failed' while `finalizeTerminatedSession` had
+  // already stamped `session.terminalOutcome = 'escalated_to_human'` on the
+  // SAME session moments earlier — so `voice_sessions.outcome` and
+  // `voice_recordings.outcome` disagreed for every abuse-terminated call.
+  // Pre-fix this test fails (`stampOutcomeByCallSid` called with 'failed'
+  // instead of 'escalated_to_human'); it is the chosen-behavior red/green
+  // pin for the fix, not just a characterization of the old code.
+  it('stamps voice_recordings.outcome consistent with the already-persisted voice_sessions.outcome for an abuse-terminated call (#351)', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const stampOutcomeByCallSid = vi.fn().mockResolvedValue(null);
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      voiceRepo: { stampOutcomeByCallSid } as unknown as VoiceRepository,
+    });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-abuse' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-abuse',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    const abuseEffects = session.machine.dispatch({
+      type: 'abuse_detected',
+      category: 'profanity',
+    });
+    expect(session.machine.currentState).toBe('terminated');
+    expect(session.machine.currentContext.escalationReason).toBe('abuse_detected:profanity');
+
+    // Mirrors speechTurn's terminal branch: finalizeTerminatedSession always
+    // runs (and stashes terminalOutcome/terminalReason) before runSummary.
+    processor.finalizeTerminatedSession(session, abuseEffects, 'caller_hangup');
+    expect(session.terminalOutcome).toBe('escalated_to_human');
+    expect(session.terminalReason).toBe('abuse_detected:profanity');
+
+    await processor.runSummary(session);
+
+    expect(stampOutcomeByCallSid).toHaveBeenCalledWith(
+      'tenant-abc',
+      'CA-abuse',
+      'escalated_to_human',
+    );
+  });
 });
 
 // ─── Codex P1 round 5 — onSessionTerminated awaitable + persist fields ──────
@@ -1954,6 +2008,54 @@ describe('createVoiceTurnProcessor — create_appointment missing-customer gap (
     expect(proposals).toHaveLength(1);
     expect(proposals[0]!.proposalType).toBe('create_appointment');
     expect(missingFieldsFor(proposals[0]!)).toEqual([]);
+  });
+});
+
+// ─── #1272 — closing copy must not claim completion for an unapprovable draft ─
+
+describe('createVoiceTurnProcessor — closing copy for a missingFields-gated draft (#1272)', () => {
+  const GENERIC_CLOSING_LINE =
+    "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+
+  it('a caller estimate request with no line items does not promise a confirmation', async () => {
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'draft_estimate',
+        confidence: 0.95,
+        reasoning: 'caller wants a quote',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'can I get an estimate',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    const confirmEffects = await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    // Precondition: the persisted draft is unapprovable as-is.
+    expect(missingFieldsFor(proposals[0]!).length).toBeGreaterThan(0);
+
+    const spoken = confirmEffects
+      .filter((fx) => fx.type === 'tts_play')
+      .map((fx) => String(fx.payload.text));
+    expect(spoken.length).toBeGreaterThan(0);
+    const closing = spoken[spoken.length - 1]!;
+    expect(closing).not.toBe(GENERIC_CLOSING_LINE);
+    expect(closing).not.toMatch(/taken care of/i);
+    expect(closing).not.toMatch(/confirmation/i);
+    expect(closing).toMatch(/follow up/i);
   });
 });
 

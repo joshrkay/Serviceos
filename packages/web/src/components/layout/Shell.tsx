@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, UNSAFE_DataRouterStateContex
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
-  Wrench, Mail, Newspaper,
+  Wrench, Mail, Newspaper, MoreHorizontal, X as CloseIcon, WifiOff,
 } from 'lucide-react';
 import { useUser, useClerk } from '@clerk/clerk-react';
 import { Toaster, toast } from 'sonner';
@@ -26,6 +26,7 @@ import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrat
 import { WelcomeWalkthrough } from '../walkthrough/WelcomeWalkthrough';
 import { WhatsNewModal } from '../walkthrough/WhatsNewModal';
 import { PastDueBanner } from '../billing/PastDueBanner';
+import { UsageBanner } from '../billing/UsageBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -143,6 +144,46 @@ function getBottomNav(mode: Mode): NavItem[] {
         { to: '/invoices',   label: 'Invoices',  icon: Receipt, requires: 'invoices:view' },
       ];
   }
+}
+
+/**
+ * #1292 — the supervisor mobile bottom bar (Figma 6) omits Schedule,
+ * Messages, Estimates, Interactions and Digest, which otherwise exist only
+ * as sidebar entries or deep links. Rather than crowd a 7th/8th/9th/10th/11th
+ * tab into the bar, a single "More" tab opens a sheet listing them. Scoped
+ * to supervisor mode only — 'tech' already surfaces Messages directly, and
+ * 'both' has its own trimmed bottom bar; neither was named in the decision.
+ */
+const MOBILE_MORE_ITEMS: NavItem[] = [
+  { to: '/schedule',      label: 'Schedule',     icon: Calendar },
+  { to: '/comms-inbox',   label: 'Messages',     icon: Mail },
+  { to: '/estimates',     label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
+  { to: '/interactions',  label: 'Interactions', icon: Layers },
+  { to: '/digest',        label: 'Digest',       icon: Newspaper },
+];
+
+/**
+ * #1292 — small online/offline banner. `navigator.onLine` is a best-effort
+ * signal (it reports the network interface's state, not true reachability
+ * of the API), but it's the same signal every other offline-aware web app
+ * uses and is enough to warn a technician in a basement or a dead zone that
+ * changes may not save.
+ */
+function useOnlineStatus(): boolean {
+  const [online, setOnline] = useState(
+    () => typeof navigator === 'undefined' || navigator.onLine,
+  );
+  useEffect(() => {
+    const goOnline = () => setOnline(true);
+    const goOffline = () => setOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
+  return online;
 }
 
 function getInitials(fullName: string | null, email: string | null | undefined): string {
@@ -263,6 +304,8 @@ function ShellInner() {
   const dataRouterState = useContext(UNSAFE_DataRouterStateContext);
   const isNavigating = dataRouterState?.navigation?.state === 'loading';
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const isOnline = useOnlineStatus();
   const voiceBarRef = useRef<VoiceBarHandle>(null);
   const isExact = (to: string) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
@@ -373,6 +416,8 @@ function ShellInner() {
     items.filter((item) => !item.requires || grantedPermissions.has(item.requires));
   const nav = visibleItems(getNav(currentMode));
   const bottomNav = visibleItems(getBottomNav(currentMode));
+  // #1292 — "More" tab, supervisor bottom bar only (see MOBILE_MORE_ITEMS).
+  const moreNavItems = currentMode === 'supervisor' ? visibleItems(MOBILE_MORE_ITEMS) : [];
 
   // The mode toggle calls this; if the destination crosses out of
   // supervisor coverage, we surface the confirmation modal instead of
@@ -403,9 +448,24 @@ function ShellInner() {
     <ErrorBoundary>
     <div className="flex flex-col h-screen bg-background overflow-hidden">
 
+      {/* #1292 — small, non-blocking online/offline banner. Fires off
+          `navigator.onLine` via the window online/offline events; a
+          technician in a basement or dead zone gets a signal that changes
+          may not save, instead of a silent failure later. */}
+      {!isOnline && (
+        <div
+          role="status"
+          data-testid="offline-banner"
+          className="flex items-center justify-center gap-1.5 bg-warning/15 text-warning text-xs px-3 py-1.5 shrink-0"
+        >
+          <WifiOff size={12} /> You&apos;re offline — changes may not save until you reconnect
+        </div>
+      )}
+
       {/* Payment problem — renders only when the Stripe subscription is
           past_due. Blocking, not dismissible. */}
       <PastDueBanner />
+      <UsageBanner />
 
       {/* Activation celebration — one-time "first real call" banner, fires
           when tenant_settings.activated_at is set (< 7 days, not dismissed). */}
@@ -637,10 +697,64 @@ function ShellInner() {
                 </NavLink>
               );
             })}
+            {/* #1292 — "More" tab: the only tap path to Schedule, Messages,
+                Estimates, Interactions and Digest from the supervisor
+                bottom bar (previously deep-link only). */}
+            {moreNavItems.length > 0 && (
+              <button
+                type="button"
+                data-testid="mobile-more-tab"
+                onClick={() => setMoreOpen(true)}
+                className="relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 min-h-11 text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <MoreHorizontal size={18} />
+                <span style={{ fontSize: 9 }}>More</span>
+              </button>
+            )}
           </div>
         </div>
 
       </main>
+
+      {/* #1292 — "More" sheet: bottom-sheet menu for the deep-link-only
+          sections. Closes on backdrop click, the X, or tapping a link. */}
+      {moreOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-end md:hidden"
+          data-testid="mobile-more-sheet"
+          onClick={() => setMoreOpen(false)}
+        >
+          <div
+            className="w-full rounded-t-2xl bg-card p-4 pb-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm text-foreground">More</p>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setMoreOpen(false)}
+                className="flex size-11 items-center justify-center text-muted-foreground hover:text-foreground"
+              >
+                <CloseIcon size={16} />
+              </button>
+            </div>
+            <nav className="flex flex-col gap-1">
+              {moreNavItems.map(({ to, label, icon: Icon }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onClick={() => setMoreOpen(false)}
+                  className="flex items-center gap-3 rounded-lg px-3 min-h-11 text-sm text-foreground hover:bg-secondary"
+                >
+                  <Icon size={16} className="text-muted-foreground" />
+                  {label}
+                </NavLink>
+              ))}
+            </nav>
+          </div>
+        </div>
+      )}
 
       {/* Camera overlay */}
       {cameraOpen && (

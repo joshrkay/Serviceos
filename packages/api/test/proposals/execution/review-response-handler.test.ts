@@ -529,4 +529,95 @@ describe('P7-026 ReviewResponseExecutionHandler', () => {
       expect(result.error).toContain('publicResponse');
     });
   });
+  // #1080 — the $100 / 12-month cap is re-checked at EXECUTION, not only at
+  // draft. Worked examples (independent of the code): cap = 10000 cents.
+  //   prior 9000 + requested 5000 = 14000 > 10000 → refused, ledger stays 9000
+  //   prior 5000 + requested 5000 = 10000 = cap   → allowed (edge), ledger 10000
+  //   prior 5001 + requested 5000 = 10001 > 10000 → refused by 1 cent
+  describe('#1080 execute-time credit cap', () => {
+    const OTHER_PROPOSAL = '66666666-6666-6666-6666-666666666666';
+    const creditPayload = (amountCents: number) =>
+      makePayload({
+        serviceCredit: { customerId: CUSTOMER, amountCents, approved: true },
+      });
+
+    async function seedPrior(repo: InMemoryServiceCreditRepository, cents: number) {
+      await repo.create({
+        tenantId: TENANT,
+        customerId: CUSTOMER,
+        amountCents: cents,
+        reviewId: null,
+        proposalId: OTHER_PROPOSAL,
+      });
+    }
+
+    it('refuses a credit that would push the rolling 12-month total over the cap, with a reason', async () => {
+      const repo = new InMemoryServiceCreditRepository();
+      await seedPrior(repo, 9000);
+      const handler = new ReviewResponseExecutionHandler(repo);
+      const result = await handler.execute(makeProposal(creditPayload(5000)), {
+        tenantId: TENANT,
+        executedBy: 'user',
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^credit: /);
+      expect(result.error).toMatch(/cap/i);
+      // The reason names the numbers the owner needs: already issued, asked, cap.
+      expect(result.error).toContain('9000');
+      expect(result.error).toContain('5000');
+      expect(result.error).toContain('10000');
+      // Nothing was inserted: the ledger still holds only the prior 9000.
+      expect(repo.size()).toBe(1);
+      expect(await repo.sumIssuedInLast12Months(TENANT, CUSTOMER)).toBe(9000);
+    });
+
+    it('allows a credit that lands EXACTLY on the cap', async () => {
+      const repo = new InMemoryServiceCreditRepository();
+      await seedPrior(repo, 5000);
+      const handler = new ReviewResponseExecutionHandler(repo);
+      const result = await handler.execute(makeProposal(creditPayload(5000)), {
+        tenantId: TENANT,
+        executedBy: 'user',
+      });
+      expect(result.success).toBe(true);
+      expect(await repo.sumIssuedInLast12Months(TENANT, CUSTOMER)).toBe(10000);
+    });
+
+    it('refuses a credit that overflows the cap by a single cent', async () => {
+      const repo = new InMemoryServiceCreditRepository();
+      await seedPrior(repo, 5001);
+      const handler = new ReviewResponseExecutionHandler(repo);
+      const result = await handler.execute(makeProposal(creditPayload(5000)), {
+        tenantId: TENANT,
+        executedBy: 'user',
+      });
+      expect(result.success).toBe(false);
+      expect(await repo.sumIssuedInLast12Months(TENANT, CUSTOMER)).toBe(5001);
+    });
+
+    it('a refused credit does not block the other approved sub-actions', async () => {
+      const repo = new InMemoryServiceCreditRepository();
+      await seedPrior(repo, 9000);
+      const replyFn = vi.fn(async () => ({ comment: 'x', updateTime: '2026-05-17T11:00:00Z' }));
+      const handler = new ReviewResponseExecutionHandler(
+        repo,
+        makeResolver(),
+        undefined,
+        undefined,
+        replyFn,
+      );
+      const result = await handler.execute(
+        makeProposal(
+          makePayload({
+            publicResponse: { text: 'x', approved: true },
+            serviceCredit: { customerId: CUSTOMER, amountCents: 5000, approved: true },
+          }),
+        ),
+        { tenantId: TENANT, executedBy: 'user' },
+      );
+      expect(replyFn).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(false);
+      expect(result.error).not.toMatch(/public/);
+    });
+  });
 });

@@ -29,6 +29,19 @@ export const PREAMBLE_HEAD = `You are an intent classifier for a field service o
 Given a voice transcript from a field service operator, decide which action they intend to take.
 `;
 
+/**
+ * #891 — 'caller' profile replacement for PREAMBLE_HEAD. On an inbound S1
+ * call the speaker is a CUSTOMER (or prospective customer), not a field
+ * service operator; the operator framing contradicted the caller-plan block,
+ * the customer-protection section and the lookup blocks that all address a
+ * customer in the same request. The first line is unchanged. Kept terse:
+ * the caller first turn sits within ~1% of its token budget
+ * (classifier-prompt-budget.test.ts).
+ */
+export const CALLER_PREAMBLE_HEAD = `You are an intent classifier for a field service operating system.
+Given a voice transcript from an inbound customer caller, decide which action they intend to take.
+`;
+
 /** Opens the intent list. Follows PREAMBLE_HEAD (and any profile preamble additions). */
 export const INTENT_LIST_HEADER = `
 Supported intents (return exactly ONE):
@@ -54,6 +67,7 @@ export const INTENT_BLOCKS = {
                                       lineItemDescriptions ["completed furnace repair"]
 `,
   draft_estimate: `- "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
+                           Never invent prices; set amount only if explicitly stated.
                            Example: "Draft an estimate for the Johnson water heater"
 `,
   create_appointment: `- "create_appointment"  — user wants to schedule a new appointment or follow-up.

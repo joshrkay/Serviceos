@@ -6984,6 +6984,123 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_ai_voice_usage_settlements ON ai_voice_usage_settlements
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // AI answering usage ledger: one row per ended AI voice session, billable or
+  // not, so the public billable-call rule is auditable call by call.
+  '282_create_call_usage_events': `
+    CREATE TABLE IF NOT EXISTS call_usage_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      call_id TEXT NOT NULL,
+      caller_phone TEXT,
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ NOT NULL,
+      duration_seconds INTEGER NOT NULL CHECK (duration_seconds >= 0),
+      billable BOOLEAN NOT NULL,
+      not_billable_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, call_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_usage_events_period
+      ON call_usage_events (tenant_id, ended_at) WHERE billable;
+    ALTER TABLE call_usage_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_usage_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_usage_events ON call_usage_events;
+    CREATE POLICY tenant_isolation_call_usage_events ON call_usage_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // One AI-minute overage settlement per (tenant, Stripe billing period).
+  '283_create_call_usage_settlements': `
+    CREATE TABLE IF NOT EXISTS call_usage_settlements (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      period_start TIMESTAMPTZ NOT NULL,
+      period_end TIMESTAMPTZ NOT NULL,
+      plan_id TEXT NOT NULL CHECK (plan_id IN ('starter', 'growth')),
+      billable_seconds INTEGER NOT NULL CHECK (billable_seconds >= 0),
+      billable_minutes INTEGER NOT NULL CHECK (billable_minutes >= 0),
+      overage_minutes INTEGER NOT NULL CHECK (overage_minutes >= 0),
+      customer_charge_cents INTEGER NOT NULL CHECK (customer_charge_cents >= 0),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+      stripe_invoice_item_id TEXT,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, period_start, period_end)
+    );
+    ALTER TABLE call_usage_settlements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_usage_settlements FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_usage_settlements ON call_usage_settlements;
+    CREATE POLICY tenant_isolation_call_usage_settlements ON call_usage_settlements
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // The tenant's Rivet plan, mirrored from the Stripe subscription price on
+  // every customer.subscription.* webhook. Drives the per-plan user limit.
+  '284_add_tenant_plan_id': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_id TEXT
+      CHECK (plan_id IN ('starter', 'growth'));
+  `,
+  // The Stripe subscription's current billing period, mirrored on every
+  // customer.subscription.* webhook — the window the AI-minute overage cap
+  // and the usage display measure against.
+  '285_add_tenant_current_period': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
+  `,
+  // The owner's AI-minute overage cap. NULL cents = the plan-price default;
+  // ai_overage_uncapped = the owner removed the cap.
+  '286_add_ai_overage_cap': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_overage_cap_cents INTEGER
+        CHECK (ai_overage_cap_cents IS NULL OR ai_overage_cap_cents >= 0),
+      ADD COLUMN IF NOT EXISTS ai_overage_uncapped BOOLEAN NOT NULL DEFAULT false;
+  `,
+  // At-most-once ledger for AI-minute usage alerts (80% / 100% of the
+  // included minutes, overage cap reached) per tenant and billing period.
+  '287_create_usage_alerts': `
+    CREATE TABLE IF NOT EXISTS usage_alerts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      period_start TIMESTAMPTZ NOT NULL,
+      threshold TEXT NOT NULL CHECK (threshold IN ('included_80', 'included_100', 'cap_reached')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, period_start, threshold)
+    );
+    ALTER TABLE usage_alerts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE usage_alerts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_usage_alerts ON usage_alerts;
+    CREATE POLICY tenant_isolation_usage_alerts ON usage_alerts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // #1099 — a doorstep (Stripe Terminal) tap is recorded as 'card_present',
+  // separable from an online 'credit_card' in the ledger. Widens the CHECK
+  // that 133 last set (same DROP + ADD shape 133 used on its predecessor; the
+  // runner re-runs 133 every boot, then this re-widens it). NOT VALID so a
+  // boot never re-scans the table (see 070). The Stripe-reference dedup index
+  // (232) only covers credit_card/bank_transfer, and must not be dropped here
+  // (232 re-creates it every boot), so card_present gets its own partial
+  // unique index with the same scope — a redelivered terminal intent can
+  // never double-credit. No card_present row predates this migration, so it
+  // needs no 232-style quarantine preflight.
+  '288_payments_card_present_method': `
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'card_present', 'bank_transfer', 'other')) NOT VALID;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_card_present_reference_unique
+      ON payments (tenant_id, reference_number)
+      WHERE reference_number IS NOT NULL
+        AND payment_method = 'card_present'
+        AND status IN ('completed', 'processing');
+  `,
+  // #1288 — the tenant's default tax rate (basis points), applied when an
+  // estimate or invoice is created without an explicit rate. 0 = no tax, the
+  // pre-migration behaviour, so existing tenants are unchanged. Column-level
+  // CHECK mirrors the per-document taxRateBps bound (0–10000).
+  '289_tenant_settings_default_tax_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_tax_rate_bps INTEGER NOT NULL DEFAULT 0
+        CHECK (default_tax_rate_bps >= 0 AND default_tax_rate_bps <= 10000);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

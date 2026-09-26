@@ -2586,8 +2586,14 @@ export class TwilioMediaStreamAdapter {
     const { escalationId, summary, dispatcher, callSid, channelPreferences } = payload;
 
     // 1) Store whisper text in cache for Twilio's webhook fetch (no-op if disabled).
+    // #1084 — tagged with the call's tenant (the verified session's, else the
+    // payload's) so the whisper route can refuse another tenant's credential.
     if (channelPreferences.whisper && this.deps.whisperCache) {
-      this.deps.whisperCache.set(escalationId, summary.whisper);
+      this.deps.whisperCache.set(
+        escalationId,
+        summary.whisper,
+        this.state.tenantId ?? payload.tenantId,
+      );
     }
 
     // 2) Send dispatcher SMS in parallel (no-op if disabled).

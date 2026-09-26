@@ -12,13 +12,14 @@
  *     that quantity; a size ("2 inch pipe fitting") stays quantity 1;
  *   - WS17 I3: draft_invoice is grounded too, on the unitPriceCents contract
  *     (185000 cents speaks $1850.00), while a non-extended proposal type
- *     (record_payment) keeps the fixed generic confirmation line.
+ *     (record_payment) never speaks a quote read-back.
  */
 import { describe, it, expect, vi } from 'vitest';
 
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
-import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../../src/proposals/proposal';
+import { CALLER_INCOMPLETE_REQUEST_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import type { CatalogItem, CatalogItemRepository } from '../../../src/catalog/catalog-item';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
@@ -273,7 +274,7 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     expect(lastTts(sideEffects)).not.toMatch(/\$/);
   });
 
-  it('estimate with no line items → generic confirmation, no lineItems in payload', async () => {
+  it('estimate with no line items → honest incomplete-request line (#1272), no lineItems in payload', async () => {
     const ctx = makeEstimateCtx({
       gateway: estimateFlowGateway([]),
       catalogRepo: stubCatalogRepo(),
@@ -281,9 +282,9 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     const sideEffects = await runConfirmFlow(ctx);
     const p = (await ctx.proposalRepo.findByTenant('tenant-abc'))[0]!;
     expect(p.payload.lineItems).toBeUndefined();
-    expect(lastTts(sideEffects)).toBe(
-      "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
-    );
+    // The draft is gated on lineItems, so no confirmation is promised.
+    expect(missingFieldsFor(p)).toContain('lineItems');
+    expect(lastTts(sideEffects)).toBe(CALLER_INCOMPLETE_REQUEST_COPY);
   });
 
   it('WS17 I3 — draft_invoice grounds too: cents contract, speaks $1850.00 not $185,000', async () => {
@@ -367,8 +368,10 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     const p = (await proposalRepo.findByTenant('tenant-abc'))[0]!;
     expect(p.proposalType).toBe('record_payment');
     expect(p.payload.lineItems).toBeUndefined();
-    expect(lastTts(sideEffects)).toBe(
-      "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
-    );
+    // No quote read-back for a non-grounded type. This spoken payment names
+    // no amount, so the draft is missingFields-gated and gets the honest
+    // incomplete-request line rather than a promised confirmation (#1272).
+    expect(missingFieldsFor(p).length).toBeGreaterThan(0);
+    expect(lastTts(sideEffects)).toBe(CALLER_INCOMPLETE_REQUEST_COPY);
   });
 });

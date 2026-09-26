@@ -8,7 +8,6 @@ import {
   type TestTenant,
 } from "./shared";
 import { PgVoiceUsageCostRepository } from "../../src/billing/voice-usage-cost";
-import { PgVoiceUsageSettlementRepository } from "../../src/billing/voice-usage-billing";
 
 const APP_ROLE = "voice_billing_rls_runtime";
 
@@ -17,14 +16,12 @@ describe("Postgres integration — AI voice usage billing", () => {
   let tenantA: TestTenant;
   let tenantB: TestTenant;
   let usageRepo: PgVoiceUsageCostRepository;
-  let settlementRepo: PgVoiceUsageSettlementRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
     usageRepo = new PgVoiceUsageCostRepository(pool);
-    settlementRepo = new PgVoiceUsageSettlementRepository(pool);
     await pool.query(`DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
         CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
@@ -106,31 +103,6 @@ describe("Postgres integration — AI voice usage billing", () => {
         ...input,
         id: crypto.randomUUID(),
       }),
-    ).toBe(firstId);
-  });
-
-  it("uses one durable settlement record for retries of the same billing period", async () => {
-    const periodStart = new Date("2026-09-01T00:00:00.000Z");
-    const periodEnd = new Date("2026-10-01T00:00:00.000Z");
-    const firstId = crypto.randomUUID();
-    const input = {
-      id: firstId,
-      tenantId: tenantA.tenantId,
-      periodStart,
-      periodEnd,
-      usageSeconds: 2400,
-      providerCostMicroCents: 100_000,
-      customerChargeCents: 130,
-    };
-
-    expect((await settlementRepo.ensurePending(input)).id).toBe(firstId);
-    expect(
-      (
-        await settlementRepo.ensurePending({
-          ...input,
-          id: crypto.randomUUID(),
-        })
-      ).id,
     ).toBe(firstId);
   });
 

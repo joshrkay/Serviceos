@@ -260,7 +260,7 @@ describe('Postgres integration — lookup_balance speaks each tenant\'s OWN numb
       {
         tenantId: t.tenantId,
         jobId: job.id,
-        invoiceNumber: `INV-${crypto.randomUUID().slice(0, 8)}`,
+        invoiceNumber: `INV-0${crypto.randomUUID().slice(0, 7)}`,
         lineItems: [buildLineItem('li-1', 'Labor', 1, amountDueCents, 0, false, 'labor')],
         createdBy: t.userId,
       },

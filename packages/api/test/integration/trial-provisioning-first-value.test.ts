@@ -84,7 +84,7 @@ import {
   createProvisionTwilioWorker,
   type ProvisionTwilioPayload,
 } from '../../src/workers/provision-twilio';
-import { evaluateTrialCap, TRIAL_LIMITS } from '../../src/voice/trial-limits';
+import { decideTrialCall, TRIAL_MINUTE_LIMITS } from '../../src/voice/trial-limits';
 import { createLogger } from '../../src/logging/logger';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -469,22 +469,15 @@ describe('Postgres integration — trial/provisioning proof pack (signup → wor
     const billingStep = status.body.steps.find((s: { id: string }) => s.id === 'billing');
     expect(billingStep?.status).toBe('done');
 
-    // Trial entitlement, pure function — the same evaluator the telephony
-    // voice gate (voice-gate.ts) calls with a real usage snapshot.
-    const capBrandNew = evaluateTrialCap({
-      status: 'trialing',
-      dailyMinutes: 0,
-      trialTotalMinutes: 0,
-      concurrentCalls: 0,
+    // Trial entitlement, pure function — the same decision the telephony
+    // voice gate (voice-gate.ts) makes from the AI-minute ledger.
+    expect(decideTrialCall({ billableSecondsUsed: 0, concurrentCalls: 0 })).toEqual({
+      action: 'answer',
+      upgradeNudgeDue: false,
     });
-    expect(capBrandNew).toEqual({ allowed: true });
-    const capAtDailyCeiling = evaluateTrialCap({
-      status: 'trialing',
-      dailyMinutes: TRIAL_LIMITS.DAILY_MINUTES,
-      trialTotalMinutes: 0,
-      concurrentCalls: 0,
-    });
-    expect(capAtDailyCeiling).toEqual({ allowed: false, reason: 'trial_cap_daily' });
+    expect(
+      decideTrialCall({ billableSecondsUsed: TRIAL_MINUTE_LIMITS.TRIAL_TOTAL_SECONDS, concurrentCalls: 0 }),
+    ).toMatchObject({ action: 'forward_to_owner', reason: 'trial_cap_total' });
   });
 
   it('step d — provision-twilio dev stub reaches full_readiness; onboarding phone step done; test-call skip works', async () => {

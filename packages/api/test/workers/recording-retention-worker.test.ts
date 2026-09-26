@@ -17,7 +17,8 @@ const noopLogger = {
 } as never;
 
 /** #1202 — sweeps with no unattached transcript turns report zero for that phase. */
-const NO_UNATTACHED = { unattachedTurnsPurged: 0, unattachedTurnTenantsFailed: 0 };
+const NO_SESSIONS = { sessionTranscriptsPurged: 0, sessionTranscriptTenantsFailed: 0 };
+const NO_UNATTACHED = { unattachedTurnsPurged: 0, unattachedTurnTenantsFailed: 0, ...NO_SESSIONS };
 
 function ageDays(days: number): Date {
   return new Date(NOW.getTime() - days * 24 * 3600 * 1000);
@@ -267,6 +268,7 @@ describe('#1202 unattached transcript-turn purge', () => {
       failed: 0,
       unattachedTurnsPurged: 2,
       unattachedTurnTenantsFailed: 0,
+      ...NO_SESSIONS,
     });
     expect(repo.unattachedTurns.map((t) => t.callSid)).toEqual(['CA-fresh', 'CA-b']);
     const events = auditRepo.getAll();
@@ -330,6 +332,7 @@ describe('#1202 unattached transcript-turn purge', () => {
       failed: 0,
       unattachedTurnsPurged: 1,
       unattachedTurnTenantsFailed: 0,
+      ...NO_SESSIONS,
     });
   });
 
@@ -388,6 +391,119 @@ describe('#1202 unattached transcript-turn purge', () => {
     expect(warn).toHaveBeenCalledWith(
       'recording-retention sweep: unattached-turn audit write failed',
       { tenantId: 'tA', callSid: 'CA-1', transcriptTurns: 2, error: 'audit down' },
+    );
+  });
+});
+
+describe('#1208 — voice_sessions.transcript phase', () => {
+  function session(id: string, tenantId: string, callSid: string | null, days: number, lines = ['caller: hi']) {
+    return { id, tenantId, callSid, startedAt: ageDays(days), transcript: [...lines], retentionDays: 30 };
+  }
+
+  it('clears past-horizon session transcripts, skips held CallSids, and audits per session', async () => {
+    const repo = new InMemoryRecordingRetentionRepository(
+      [
+        {
+          id: 'rec-held',
+          tenantId: 'tA',
+          callSid: 'CA-held',
+          storageBucket: null,
+          storageKey: null,
+          createdAt: ageDays(1),
+          legalHold: true,
+          retentionDays: 30,
+        },
+      ],
+      [],
+      [
+        session('s-old', 'tA', 'CA-old', 40, ['caller: a', 'agent: b']),
+        session('s-held', 'tA', 'CA-held', 40),
+        session('s-fresh', 'tA', 'CA-fresh', 2),
+        session('s-inapp', 'tB', null, 31),
+      ],
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      auditRepo,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+    expect(result.sessionTranscriptsPurged).toBe(2);
+    expect(result.sessionTranscriptTenantsFailed).toBe(0);
+    expect(repo.sessionTranscripts.filter((s) => s.transcript !== null).map((s) => s.id)).toEqual([
+      's-held',
+      's-fresh',
+    ]);
+    const events = auditRepo.getAll().filter((e) => e.entityId === 's-old');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toEqual({
+      callSid: 'CA-old',
+      reason: 'session_transcript_past_retention',
+      startedAt: ageDays(40).toISOString(),
+      derivedPurged: { sessionTranscriptLines: 2 },
+    });
+  });
+
+  it('a tenant whose clear throws is counted and logged; the next tenant is still cleared', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [], [
+      session('s-1', 't-doomed', 'CA-1', 60),
+      session('s-2', 't-ok', 'CA-2', 40),
+    ]);
+    const real = repo.purgeSessionTranscripts.bind(repo);
+    repo.purgeSessionTranscripts = async (tenantId, now, limit) => {
+      if (tenantId === 't-doomed') throw new Error('update failed');
+      return real(tenantId, now, limit);
+    };
+    const warn = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      logger: { ...(noopLogger as object), warn } as never,
+      now: () => NOW,
+    });
+    expect(result.sessionTranscriptTenantsFailed).toBe(1);
+    expect(result.sessionTranscriptsPurged).toBe(1);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: session-transcript purge failed for tenant',
+      { tenantId: 't-doomed', error: 'update failed' },
+    );
+  });
+
+  it('a failed tenant selection is logged and returns zero (never throws)', async () => {
+    const repo = new InMemoryRecordingRetentionRepository();
+    repo.findTenantsWithDueSessionTranscripts = vi.fn(async () => {
+      throw new Error('pg down');
+    });
+    const error = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      logger: { ...(noopLogger as object), error } as never,
+      now: () => NOW,
+    });
+    expect(result).toMatchObject(NO_SESSIONS);
+    expect(error).toHaveBeenCalledWith(
+      'recording-retention sweep: session-transcript tenant selection failed',
+      { error: 'pg down' },
+    );
+  });
+
+  it('a failed audit write after the clear is logged with tenant and session id', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [], [session('s-1', 'tA', 'CA-1', 45)]);
+    const warn = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn() } as unknown as StorageProvider,
+      auditRepo: { create: vi.fn().mockRejectedValue(new Error('audit down')) } as never,
+      logger: { ...(noopLogger as object), warn } as never,
+      now: () => NOW,
+    });
+    expect(result.sessionTranscriptsPurged).toBe(1);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: session-transcript audit write failed',
+      { tenantId: 'tA', sessionId: 's-1', error: 'audit down' },
     );
   });
 });

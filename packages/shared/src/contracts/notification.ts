@@ -26,6 +26,9 @@ export const NOTIFICATION_TYPES = [
   'payment_received',
   'invoice_overdue',
   'lead_captured',
+  // #1071 — a customer left a ≤3★ post-job rating; routed to the owner
+  // privately (4★+ customers are shown the public review links instead).
+  'low_rating_feedback',
   'escalation',
   'emergency',
 ] as const;

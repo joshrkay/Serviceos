@@ -15,7 +15,7 @@ import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
-import { createTelephonyRouter } from './routes/telephony';
+import { createTelephonyRouter, createDidTenantResolver } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import {
@@ -63,12 +63,17 @@ import {
 import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
-import { BillingService } from './billing/subscription';
+import { BillingService, planIdForStripePrice } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
+import { PgCallUsageRepository } from './billing/call-usage-events';
+import { PgSeatUsageReader } from './users/seat-limit';
+import { PgOverageCapStore } from './billing/overage-cap';
+import { AiUsageReader } from './billing/ai-usage';
+import { readTenantPlanId } from './billing/plan-features';
 import {
-  PgVoiceUsageSettlementRepository,
-  VoiceUsageBillingService,
-} from './billing/voice-usage-billing';
+  CallUsageBillingService,
+  PgCallUsageSettlementRepository,
+} from './billing/call-usage-billing';
 import {
   deepgramCostMicroCents,
   elevenLabsCostMicroCents,
@@ -122,6 +127,7 @@ import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
+import { checkUsageAlerts } from './billing/usage-alerts';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
@@ -384,7 +390,10 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
-import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
+import {
+  createTwilioWebhookCredentialResolver,
+  createSubaccountCredentialView,
+} from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
@@ -624,6 +633,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
+
+  // Non-fatal configuration findings (deprecated variables such as
+  // APP_PUBLIC_URL). Logged once at boot so an operator sees them in the
+  // deploy log; the fatal cases already threw inside loadConfig().
+  if (config.warnings.length > 0) {
+    const configBootLogger = createLogger({
+      service: 'api-boot',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    for (const warning of config.warnings) {
+      configBootLogger.warn('configuration warning', { warning });
+    }
+  }
 
   // FIX 10(i) (ANS-001) — boot-time readiness gate for the E1 life-safety
   // script. This is the ONE consumer of E1_SCRIPT_REVIEW_REQUIRED; without
@@ -1027,19 +1049,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // in-memory map. createWebhookRouter throws if this is missing in prod.
   const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
   const voiceUsageCostRepo = pool ? new PgVoiceUsageCostRepository(pool) : undefined;
-  const voiceUsageSettlementRepo = pool
-    ? new PgVoiceUsageSettlementRepository(pool)
-    : undefined;
-  const voiceUsageBillingService =
-    pool && process.env.STRIPE_SECRET_KEY && voiceUsageCostRepo && voiceUsageSettlementRepo
-      ? new VoiceUsageBillingService({
+  const callUsageRepo = pool ? new PgCallUsageRepository(pool) : undefined;
+  // Per-plan user limit — shared by the invite route and the onboarding
+  // team-member proposal so neither path can exceed the plan.
+  const seatUsage = pool ? new PgSeatUsageReader(pool) : undefined;
+  const callUsageBillingService =
+    pool && process.env.STRIPE_SECRET_KEY && callUsageRepo
+      ? new CallUsageBillingService({
           pool,
-          usageRepo: voiceUsageCostRepo,
-          settlementRepo: voiceUsageSettlementRepo,
+          settlementRepo: new PgCallUsageSettlementRepository(pool),
+          callUsage: callUsageRepo,
+          overageCaps: new PgOverageCapStore(pool),
           stripeApiKey: process.env.STRIPE_SECRET_KEY,
+          planForPriceId: planIdForStripePrice,
           onAlert: (alert) => {
             sentryClient.captureMessage(
-              `[VOICE_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
+              `[CALL_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
               'error',
             );
           },
@@ -1081,7 +1106,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // status the GET /api/billing/subscription endpoint reads.
     // Wired only when both pool and STRIPE_SECRET_KEY exist.
     billingService,
-    voiceUsageBillingService,
+    callUsageBillingService,
     connectService,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     queue,
@@ -1112,12 +1137,39 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // removed rather than duplicated — smaller surface, no divergent behavior.
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
-  // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
-  // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
-  // succeed in local development. In prod/staging, createStorageProvider
-  // refuses to return a DevStorageProvider, so this route is dormant.
-  if (config.NODE_ENV !== 'prod' && config.NODE_ENV !== 'staging') {
-    app.use('/storage-dev', createDevStorageRouter());
+  // Built here (rather than down where storageProvider/storageBucket are
+  // consumed) so the /storage-dev mount below can gate on `storageMode` —
+  // moved up from its old spot further down in createApp(); pure function
+  // of process.env, no ordering dependency on anything between here and
+  // there.
+  const {
+    provider: storageProvider,
+    bucket: storageBucket,
+    mode: storageMode,
+    devStorageSecret,
+  } = createStorageProvider(process.env as NodeJS.ProcessEnv);
+
+  // Dev-only storage PUT/GET receiver for DevStorageProvider upload URLs.
+  // Mounted before /api Clerk auth so a plain unauthenticated-looking PUT
+  // succeeds, same as it would against a real S3 presigned URL — but every
+  // request must carry the per-boot HMAC token DevStorageProvider embeds
+  // in the URLs it hands out (verified in createDevStorageRouter), so
+  // hitting this path directly without a completed presign call 401s
+  // (#1273 — previously there was no check at all).
+  //
+  // Gated on BOTH: storageMode === 'dev' (DevStorageProvider must actually
+  // be the active backend — a "dev" host with real S3 credentials
+  // configured has no reason to also expose this receiver) AND
+  // NODE_ENV !== prod/staging (belt-and-suspenders: createStorageProvider
+  // only returns 'dev' mode in a prod-like env when STORAGE_ENABLED=false,
+  // and this route must stay dark there too).
+  if (
+    storageMode === 'dev' &&
+    devStorageSecret &&
+    config.NODE_ENV !== 'prod' &&
+    config.NODE_ENV !== 'staging'
+  ) {
+    app.use('/storage-dev', createDevStorageRouter(devStorageSecret));
   }
 
   const financingProvider = createFinancingProvider();
@@ -1275,10 +1327,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const portalSessionRepo: PortalSessionRepository = pool
     ? new PgPortalSessionRepository(pool)
     : new InMemoryPortalSessionRepository();
-
-  const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
-    process.env as NodeJS.ProcessEnv
-  );
+  // storageProvider/storageBucket: see createStorageProvider() call moved up
+  // near the /storage-dev mount (#1273).
 
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
@@ -1420,7 +1470,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const feedbackDispatcher = messageDelivery
     ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
     : new NoopFeedbackDispatcher();
-  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const publicBaseUrl = config.publicOrigins.web;
   const sendService = messageDelivery
     ? new SendService({
         delivery: messageDelivery,
@@ -1616,7 +1666,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // ── Onboarding lifecycle emails. The frontend origin backs the CTA links
   // (/onboarding, /settings) and the support address backs the footer ask;
   // shared by the welcome worker (below) and the setup/trial sweeps.
-  const lifecycleEmailAppBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const lifecycleEmailAppBaseUrl = config.publicOrigins.web;
   const lifecycleEmailSupportEmail =
     process.env.SUPPORT_EMAIL ?? process.env.SENDGRID_REPLY_TO_EMAIL ?? 'support@rivet.ai';
   const lifecycleEmailWorker = createLifecycleEmailWorker({
@@ -1955,8 +2005,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     pendingInvitationRepo,
     clerkInvitationConfig: {
       clerkSecretKey: process.env.CLERK_SECRET_KEY,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     },
+    seatUsage,
     // B1.18 — update_brand_voice writes through the SAME versioned path
     // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
     // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
@@ -2763,7 +2813,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
-    publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    publicBaseUrl: config.publicOrigins.web,
   });
   workerRegistry.set(
     feedbackSendWorker.type,
@@ -3143,9 +3193,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     syncService: calendarSyncService,
     // appBaseUrl is the FRONTEND URL we redirect the operator's
     // browser back to after OAuth completes. The API/callback URL is
-    // separate (googleApiUrl). 5173 is the Vite dev default; matches
-    // publicBaseUrl elsewhere in this file.
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    // separate (googleApiUrl). The origin is config.publicOrigins.web,
+    // resolved once by loadConfig() (see shared/config.ts).
+    appBaseUrl: config.publicOrigins.web,
     // D2-1d: emit calendar_integration.{connected,disconnected,
     // callback_consumed} for the per-user Google OAuth lifecycle. The
     // callback uses `system:google-oauth-callback` because there is no
@@ -3170,7 +3220,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     integrationRepo: googleBusinessIntegrationRepo,
     stateRepo: oauthStateRepo,
     googleConfig: googleBusinessOAuthConfig,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    appBaseUrl: config.publicOrigins.web,
     auditRepo,
     // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
     // credential (failed refresh) degrades visibly in Settings.
@@ -3193,8 +3243,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     customerRepo,
     jobRepo,
     qboConfig,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    appBaseUrl: config.publicOrigins.web,
     auditRepo,
+    // QuickBooks connect/sync is Growth-only (billing/plan-features.ts).
+    ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
     logger: createLogger({
       service: 'accounting-integrations',
       environment: process.env.NODE_ENV ?? 'development',
@@ -3651,7 +3703,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // wired unconditionally so Gather hints work even in a keyless-gateway
     // deployment.
     sttHintsResolver: (tenantId: string) => transcriptionGlossaryProvider.termsForTenant(tenantId),
-    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // §10 onboarding — fire the 40-AI-minute trial upgrade nudge after every
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
       ? {
@@ -3665,6 +3717,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sttAudioSeconds,
             ttsCharacters,
             callSid,
+            callerPhone,
             twilioAccountSid,
             mediaStreamsUsed,
           }: {
@@ -3677,9 +3730,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sttAudioSeconds: number;
             ttsCharacters: number;
             callSid?: string;
+            callerPhone?: string;
             twilioAccountSid?: string;
             mediaStreamsUsed: boolean;
           }) => {
+            // AI answering usage ledger — every ended session gets a row
+            // (billable or not); idempotent per (tenant, session).
+            if (callUsageRepo) {
+              await callUsageRepo
+                .recordCallEnded({
+                  tenantId, callId: sessionId, channel, endedAt, usageSeconds,
+                  ...(callerPhone ? { callerPhone } : {}),
+                })
+                .catch((err: unknown) => {
+                  requestLogger.warn('call usage ledger write failed', {
+                    sessionId,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                });
+            }
             if (channel === 'voice_inbound' && voiceUsageCostRepo) {
               const records: Array<Parameters<typeof voiceUsageCostRepo.record>[0]> = [
                 {
@@ -3737,7 +3806,37 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 }
               }
             }
-            await checkAndFireUpgradeNudge({ pool }, tenantId);
+            // Owner emails from call end — the trial upgrade nudge (40 AI
+            // minutes), paid-plan AI-minute usage alerts (80% / 100% / cap
+            // reached) and first-call activation all send through this one
+            // mapping onto messageDelivery. Each is once-only and failure-soft.
+            const ownerEmail = messageDelivery
+              ? (msg: { to: string; subject: string; text: string; html?: string }) =>
+                  messageDelivery.sendEmail({
+                    to: msg.to,
+                    subject: msg.subject,
+                    text: msg.text,
+                    ...(msg.html ? { html: msg.html } : {}),
+                  })
+              : undefined;
+            await checkAndFireUpgradeNudge(
+              { pool, ...(ownerEmail ? { sendEmail: ownerEmail } : {}) },
+              tenantId,
+            );
+            if (channel === 'voice_inbound') {
+              try {
+                await checkUsageAlerts(
+                  {
+                    pool,
+                    ...(ownerEmail ? { sendEmail: ownerEmail } : {}),
+                    appBaseUrl: process.env.WEB_URL ?? '',
+                  },
+                  tenantId,
+                );
+              } catch {
+                // swallow — usage alerts must not break call teardown
+              }
+            }
             await maybeAutoGoLiveOnInboundEnd(
               { pool, auditRepo },
               { tenantId, channel },
@@ -3751,17 +3850,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 {
                   pool,
                   auditRepo,
-                  ...(messageDelivery
-                    ? {
-                        sendEmail: (msg) =>
-                          messageDelivery.sendEmail({
-                            to: msg.to,
-                            subject: msg.subject,
-                            text: msg.text,
-                            ...(msg.html ? { html: msg.html } : {}),
-                          }),
-                      }
-                    : {}),
+                  ...(ownerEmail ? { sendEmail: ownerEmail } : {}),
                 },
                 { tenantId, channel },
               );
@@ -3873,56 +3962,29 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
    *     a tenant dials a number another tenant happens to own.
    * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
    * when we hold one, deployment token otherwise.
+   *
+   * #1084 — `subaccountCredentialView` is the decision-shaped form of the same
+   * view (the whisper mount uses it directly, so the middleware logs the path
+   * that really answered and records the verifying tenant); the plain-token
+   * form below is derived from it rather than re-implementing the fallback.
    */
+  const subaccountCredentialView = createSubaccountCredentialView(
+    resolveTwilioWebhookCredential,
+  );
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    const decision = await resolveTwilioWebhookCredential(
-      accountSid ? { accountSid } : {},
-    );
-    if (typeof decision === 'object') {
-      return decision.outcome === 'verify'
-        ? decision.authToken
-        : process.env.TWILIO_AUTH_TOKEN;
-    }
-    return decision ?? process.env.TWILIO_AUTH_TOKEN;
+    const decision = await subaccountCredentialView(accountSid ? { accountSid } : {});
+    return decision.outcome === 'verify' ? decision.authToken : undefined;
   };
 
-  const resolveTenantIdByPhoneNumber = async (
-    to: string,
-  ): Promise<string | undefined> => {
-    if (!to || !pool) return process.env.TWILIO_DEFAULT_TENANT_ID;
-    try {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ tenant_id: string }>(
-          `SELECT tenant_id FROM tenant_integrations
-           WHERE provider = 'twilio'
-             AND provider_data->>'phoneE164' = $1
-           LIMIT 1`,
-          [to],
-        );
-        await client.query('COMMIT');
-        return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
-      } catch (err) {
-        // Same dirty-connection guard as the credential resolver's lookups.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_DEFAULT_TENANT_ID;
-    }
-  };
-
-  // D2-3 — real phone-number → tenant lookup for inbound /voice. The
-  // legacy `resolveTenantId` callback is still wired for `/gather` and
-  // `/dial-result`, which already run inside an established call; the
-  // /voice handler consults this repo first and only falls through to
-  // the env-var seam in dev (with a loud WARN).
+  // D2-3 / #1061 — the ONE phone-number → tenant lookup for inbound
+  // telephony. /voice, /voice/gather-fallback, /gather, /dial-result and
+  // /callback-message all resolve through it (resolveInboundTenantId); the
+  // payload-alias `resolveTenantId` callback below — the /recording and
+  // /voicemail-status no-session fallbacks — goes through the same repository
+  // via createDidTenantResolver. There is no second copy of the DID SQL, and
+  // TWILIO_DEFAULT_TENANT_ID is only ever a dev seam (with a WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
   // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
@@ -3949,10 +4011,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // way past.
   app.use(
     '/api/telephony/whisper',
-    requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
+    requireTwilioSignature(subaccountCredentialView, {
+      publicBaseUrl: () => process.env.PUBLIC_API_URL,
+    }),
   );
   app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
 
@@ -3963,7 +4024,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
-      resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
+      resolveTenantId: createDidTenantResolver(phoneNumberRepo ? { phoneNumberRepo } : {}),
       // WS8 — a worker-role process never attaches the media-streams WS
       // handler (see the role gate on attachMediaStreamServer below), so its
       // /voice must never emit <Connect><Stream/> pointing at a socket this
@@ -4152,7 +4213,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // (outbound-call-service uses PUBLIC_API_URL ?? publicBaseUrl); otherwise
       // the signed URL and the reconstructed URL diverge when PUBLIC_API_URL is
       // unset and every callback 403s.
-      publicBaseUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+      publicBaseUrl: config.publicOrigins.api,
     }),
   );
 
@@ -5106,8 +5167,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // Same instance the Clerk webhook reads on user.created — the
         // accept side reads what the invite side wrote.
         pendingInvitationRepo,
+        seatUsage,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
-        appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
         // Account deletion purges the user's push tokens server-side.
         deviceTokenRepo,
       },
@@ -5142,10 +5203,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the same instance.
   app.use('/api/billing', createBillingRouter({
     billingService,
-    voiceUsageBillingService,
     connectService,
     auditRepo,
     pool: pool ?? undefined,
+    aiUsage: pool ? new AiUsageReader(pool) : undefined,
+    overageCaps: pool ? new PgOverageCapStore(pool) : undefined,
   }));
 
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
@@ -5645,7 +5707,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
   app.use(
     '/api/files',
-    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
+    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo, jobRepo })
   );
   app.use(
     '/api/assistant',
@@ -6447,6 +6509,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           qboConfig,
           logger: accountingSyncLogger,
+          ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
         });
       }).catch((err) => {
         accountingSyncLogger.error('Accounting sync sweep failed', {
@@ -6791,6 +6854,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           appBaseUrl: lifecycleEmailAppBaseUrl,
           supportEmail: lifecycleEmailSupportEmail,
           logger: lifecycleSweepLogger,
+          ...(callUsageRepo
+            ? {
+                trialMinutesUsed: async (tenantId: string) =>
+                  Math.ceil(
+                    (await callUsageRepo.sumTrialBillableSeconds(tenantId)) / 60,
+                  ),
+              }
+            : {}),
         });
       }).catch((err) => {
         lifecycleSweepLogger.error('Trial-reminder sweep failed', {

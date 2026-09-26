@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Pool } from 'pg';
 import { createOnboardingRouter } from '../../src/routes/onboarding';
+import { capturePostHog } from '../helpers/posthog-capture';
 import { BillingService } from '../../src/billing/subscription';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
@@ -12,7 +13,7 @@ import { AuthenticatedRequest } from '../../src/auth/clerk';
 /**
  * Route-level coverage for GET /api/onboarding/billing/plans and
  * POST /api/onboarding/billing/checkout-session — the explicit
- * basic/enterprise plan selection surface. BillingService's Stripe calls
+ * starter/growth plan selection surface. BillingService's Stripe calls
  * are stubbed via its injectable `fetchFn`; the tenant Pool is stubbed
  * directly (BillingService's own unit tests exercise the SQL shapes).
  */
@@ -32,9 +33,9 @@ function validPrice(overrides: Record<string, unknown> = {}) {
     active: true,
     currency: 'usd',
     type: 'recurring',
-    unit_amount: 5_000,
+    unit_amount: 7_900,
     recurring: { interval: 'month', interval_count: 1, usage_type: 'licensed' },
-    product: { id: 'prod_basic', active: true, name: 'Basic Plan' },
+    product: { id: 'prod_starter', active: true, name: 'Rivet Starter' },
     ...overrides,
   });
 }
@@ -83,8 +84,8 @@ function buildApp(billingService?: BillingService, role: string = 'owner') {
 
 describe('GET /api/onboarding/billing/plans', () => {
   beforeEach(() => {
-    vi.stubEnv('STRIPE_BASIC_PRICE_ID', 'price_basic_live');
-    vi.stubEnv('STRIPE_ENTERPRISE_PRICE_ID', 'price_enterprise_live');
+    vi.stubEnv('STRIPE_STARTER_PRICE_ID', 'price_starter_live');
+    vi.stubEnv('STRIPE_GROWTH_PRICE_ID', 'price_growth_live');
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -97,9 +98,9 @@ describe('GET /api/onboarding/billing/plans', () => {
   it('returns validated plans with no price ids in the response', async () => {
     const fetchFn = vi
       .fn()
-      .mockResolvedValueOnce(validPrice({ unit_amount: 5_000, product: { id: 'prod_basic', active: true, name: 'Basic Plan' } }))
+      .mockResolvedValueOnce(validPrice({ unit_amount: 7_900, product: { id: 'prod_starter', active: true, name: 'Rivet Starter' } }))
       .mockResolvedValueOnce(
-        validPrice({ unit_amount: 15_000, product: { id: 'prod_enterprise', active: true, name: 'Enterprise Plan' } }),
+        validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
       );
     const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
 
@@ -107,25 +108,15 @@ describe('GET /api/onboarding/billing/plans', () => {
     expect(res.status).toBe(200);
     expect(res.body.plans).toEqual([
       {
-        id: 'basic',
-        name: 'Basic Plan',
-        amountCents: 5_000,
-        currency: 'usd',
-        interval: 'month',
-        includedAiVoiceMinutes: 30,
-        aiVoiceCostMarkupPercent: 30,
+        id: 'starter', name: 'Rivet Starter', amountCents: 7_900, currency: 'usd', interval: 'month',
+        includedUsers: 2, includedAiMinutes: 20, overageCentsPerAiMinute: 125,
       },
       {
-        id: 'enterprise',
-        name: 'Enterprise Plan',
-        amountCents: 15_000,
-        currency: 'usd',
-        interval: 'month',
-        includedAiVoiceMinutes: 30,
-        aiVoiceCostMarkupPercent: 30,
+        id: 'growth', name: 'Rivet Growth', amountCents: 19_900, currency: 'usd', interval: 'month',
+        includedUsers: 5, includedAiMinutes: 60, overageCentsPerAiMinute: 125,
       },
     ]);
-    expect(JSON.stringify(res.body)).not.toMatch(/price_(basic|enterprise)_live/);
+    expect(JSON.stringify(res.body)).not.toMatch(/price_(starter|growth)_live/);
   });
 
   it('fails closed with a 503 + actionable message when nothing validates', async () => {
@@ -143,8 +134,8 @@ describe('GET /api/onboarding/billing/plans', () => {
 
 describe('POST /api/onboarding/billing/checkout-session', () => {
   beforeEach(() => {
-    vi.stubEnv('STRIPE_BASIC_PRICE_ID', 'price_basic_live');
-    vi.stubEnv('STRIPE_ENTERPRISE_PRICE_ID', 'price_enterprise_live');
+    vi.stubEnv('STRIPE_STARTER_PRICE_ID', 'price_starter_live');
+    vi.stubEnv('STRIPE_GROWTH_PRICE_ID', 'price_growth_live');
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -154,6 +145,20 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
     const res = await request(buildApp(svc)).post('/api/onboarding/billing/checkout-session').send({});
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('400s for the retired basic/enterprise plan ids, even with their old price env set', async () => {
+    vi.stubEnv('STRIPE_BASIC_PRICE_ID', 'price_basic_live');
+    vi.stubEnv('STRIPE_ENTERPRISE_PRICE_ID', 'price_enterprise_live');
+    const fetchFn = vi.fn();
+    const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
+    for (const planId of ['basic', 'enterprise']) {
+      const res = await request(buildApp(svc))
+        .post('/api/onboarding/billing/checkout-session')
+        .send({ planId });
+      expect(res.status).toBe(400);
+    }
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
@@ -170,20 +175,77 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
   it('mints a checkout session for an explicit, validated plan and stamps plan_id metadata', async () => {
     const fetchFn = vi
       .fn()
-      .mockResolvedValueOnce(validPrice({ unit_amount: 5_000 }))
+      .mockResolvedValueOnce(validPrice({ unit_amount: 7_900 }))
       .mockResolvedValueOnce(jsonOk({ id: 'cs_1', url: 'https://checkout.stripe.com/c/pay/cs_1' }));
     const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
 
     const res = await request(buildApp(svc))
       .post('/api/onboarding/billing/checkout-session')
-      .send({ planId: 'basic' });
+      .send({ planId: 'starter' });
     expect(res.status).toBe(200);
     expect(res.body.url).toBe('https://checkout.stripe.com/c/pay/cs_1');
     expect(fetchFn.mock.calls[0][0]).toBe(
-      'https://api.stripe.com/v1/prices/price_basic_live?expand[]=product',
+      'https://api.stripe.com/v1/prices/price_starter_live?expand[]=product',
     );
     const body = fetchFn.mock.calls[1][1].body as URLSearchParams;
-    expect(body.get('subscription_data[metadata][plan_id]')).toBe('basic');
+    expect(body.get('subscription_data[metadata][plan_id]')).toBe('starter');
+  });
+
+  it('records a plan_selected funnel event for the chosen plan', async () => {
+    const posthog = capturePostHog();
+    const { capture } = posthog;
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
+        )
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_growth', url: 'https://checkout.stripe.com/c/pay/cs_growth' }));
+      const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
+
+      const res = await request(buildApp(svc))
+        .post('/api/onboarding/billing/checkout-session')
+        .send({ planId: 'growth' });
+
+      expect(res.status).toBe(200);
+      expect(capture).toHaveBeenCalledWith(
+        expect.objectContaining({
+          distinctId: USER_ID,
+          event: 'plan_selected',
+          properties: expect.objectContaining({ tenant_id: TENANT_ID, plan: 'growth' }),
+        }),
+      );
+    } finally {
+      posthog.restore();
+    }
+  });
+
+  it('builds the Stripe success and cancel URLs from config.publicOrigins.web, not raw env', async () => {
+    // The route used to read WEB_URL ?? APP_PUBLIC_URL straight from
+    // process.env with a localhost fallback. The origin now comes from the
+    // config seam, so a deployment whose config resolves the web origin
+    // returns the customer to the app domain regardless of what process.env
+    // happens to hold.
+    const { loadConfig, resetConfig } = await import('../../src/shared/config');
+    resetConfig();
+    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.example.com' });
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(validPrice({ unit_amount: 7_900 }))
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2' }));
+      const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
+
+      const res = await request(buildApp(svc))
+        .post('/api/onboarding/billing/checkout-session')
+        .send({ planId: 'starter' });
+      expect(res.status).toBe(200);
+      const body = fetchFn.mock.calls[1][1].body as URLSearchParams;
+      expect(body.get('success_url')).toBe('https://app.example.com/onboarding?billing=ok');
+      expect(body.get('cancel_url')).toBe('https://app.example.com/onboarding?billing=cancel');
+    } finally {
+      resetConfig();
+    }
   });
 
   it('surfaces a misconfigured plan as an actionable 400/500 without charging', async () => {
@@ -193,7 +255,7 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
 
     const res = await request(buildApp(svc))
       .post('/api/onboarding/billing/checkout-session')
-      .send({ planId: 'basic' });
+      .send({ planId: 'starter' });
     expect(res.status).toBeLessThan(500);
     expect(res.body.message).toMatch(/misconfigured/i);
     expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -205,7 +267,7 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
     const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
     const res = await request(buildApp(svc, 'technician'))
       .post('/api/onboarding/billing/checkout-session')
-      .send({ planId: 'basic' });
+      .send({ planId: 'starter' });
     expect(res.status).toBe(403);
     expect(fetchFn).not.toHaveBeenCalled();
   });
