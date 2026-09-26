@@ -5,6 +5,16 @@ import type { IntentType } from '../orchestration/intent-classifier';
 export interface TaskContext {
   tenantId: string;
   message: string;
+  /**
+   * #1232 — `message` (and every entity the classifier extracted from it) is
+   * S1 caller-authored text: set by voice-action-router for
+   * `sourceChannel: 'voicemail'` jobs, whose owner-line caller-ID match is
+   * spoofable. Drafting handlers must render such text into a prompt only
+   * through `taskMessageForPrompt` / `untrustedTaskTextForPrompt`
+   * (task-input.ts), which fence it. Absent on owner surfaces, whose prompts
+   * stay byte-identical.
+   */
+  untrustedMessage?: boolean;
   conversationId?: string;
   existingEntities?: Record<string, unknown>;
   userId: string;

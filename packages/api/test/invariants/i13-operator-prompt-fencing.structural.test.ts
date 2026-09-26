@@ -242,10 +242,12 @@ type Classification =
  * path. voice-action-router.ts hands `TaskContext.message: segmentText` to the
  * drafting handlers for `sourceChannel: 'voicemail'` jobs too — a caller's
  * voicemail, enqueued only because its (spoofable) caller-ID matched the
- * owner line. The classifier and decomposer fence that text; the drafting
- * handlers below still receive it raw. The effect is bounded by U9
- * (holdIfUntrustedSource: every voicemail proposal is held for human review),
- * but the "owner-authored" label is only true for non-voicemail memos.
+ * owner line. The classifier and decomposer fence that text, and since #1232
+ * the drafting handlers do too: the router sets `TaskContext.untrustedMessage`
+ * for voicemail jobs and every drafting prompt renders the message through
+ * `taskMessageForPrompt` / `untrustedTaskTextForPrompt` (pinned by the
+ * "#1219 / #1232" test below). U9 still holds every voicemail proposal for
+ * review. The "owner-authored" label describes the non-voicemail memo path.
  */
 const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string }> = [
   {
@@ -483,6 +485,15 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
       { file: 'src/ai/agents/customer-calling/sentiment-classifier.ts', via: 'buildUntrustedContentSection' },
       { file: 'src/ai/agents/customer-calling/vulnerability-grader.ts', via: 'buildCallerTurnClassifierPrompt' },
       { file: 'src/workers/transcription.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/tasks/mms-estimate-task.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/tasks/task-input.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/tasks/invoice-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/send-customer-message-task.ts', via: 'untrustedTaskTextForPrompt' },
+      { file: 'src/ai/tasks/estimate-task.ts', via: 'untrustedTaskTextForPrompt' },
+      { file: 'src/ai/tasks/estimate-edit-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/invoice-edit-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/job-edit-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/create-appointment-task.ts', via: 'taskMessageForPrompt' },
     ];
     const files = new Map(listSourceFiles([SRC]).map((f) => [f.rel, f]));
     const unfenced = FENCED_BY_REVIEW.filter(({ file, via }) => {

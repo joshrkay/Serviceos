@@ -16,7 +16,7 @@ import {
   buildStandingInstructionsSection,
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
-import { contractErrorsFrom, contractGapFields } from './task-input';
+import { contractErrorsFrom, contractGapFields, taskMessageForPrompt } from './task-input';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
@@ -467,7 +467,8 @@ export class InvoiceTaskHandler implements TaskHandler {
 
   private buildUserMessage(context: TaskContext, catalogItems: CatalogItem[] = []): string {
     const parts: string[] = [];
-    parts.push(`Request: ${context.message}`);
+    // #1232 — fenced when the message is a caller's voicemail.
+    parts.push(taskMessageForPrompt(context, 'Request'));
     if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
       parts.push(`Context entities: ${JSON.stringify(context.existingEntities)}`);
     }
