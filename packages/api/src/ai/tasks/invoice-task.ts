@@ -17,6 +17,7 @@ import {
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
 import { contractErrorsFrom, contractGapFields } from './task-input';
+import { calculateLineItemTotal } from '../../shared/billing-engine';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
@@ -302,7 +303,7 @@ export class InvoiceTaskHandler implements TaskHandler {
           })(),
           quantity: qty,
           ...(unitPriceCents !== undefined
-            ? { unitPriceCents, totalCents: Math.round(unitPriceCents * qty) }
+            ? { unitPriceCents, totalCents: calculateLineItemTotal(qty, unitPriceCents) }
             : {}),
           ...(typeof li.unit === 'string' ? { unit: li.unit } : {}),
           sortOrder: idx,

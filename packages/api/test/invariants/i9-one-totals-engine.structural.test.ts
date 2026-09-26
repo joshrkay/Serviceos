@@ -48,6 +48,14 @@
  * and need not equal the persisted one. Both surfaced in review round 4: the
  * sweep matched only `quantity * unitPrice`, and multiplication commutes.
  *
+ * #1064 (lane G) routed four of the recorded violations through the engine:
+ * `proposals/resolve-line.ts`, `ai/resolution/catalog-resolver.ts` and
+ * `ai/tasks/invoice-task.ts` now call `calculateLineItemTotal`, and
+ * `routes/estimates.ts`'s member-discount base is now
+ * `calculateSelectedDocumentTotals(normalizeLineItemTotals(lines)).subtotalCents`
+ * — the subtotal the estimate actually persists, not client-sent line totals
+ * (pinned in test/routes/estimates-member-pricing.route.test.ts).
+ *
  * The engine's math is NOT touched here (§5 lane rule: never touch
  * discount/tax math). The violations are recorded and reported.
  *
@@ -223,26 +231,6 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: "`Math.round(quantity * unitPriceCents)` in the execution line-item normalizer duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap.",
   },
   {
-    at: 'src/proposals/resolve-line.ts:237',
-    as: 'violation',
-    why: '`Math.round(chosen.unitPriceCents * qty)` duplicates `calculateLineItemTotal`. Rounded, so numerically right today — a second definition tomorrow.',
-  },
-  {
-    at: 'src/ai/resolution/catalog-resolver.ts:623',
-    as: 'violation',
-    why: '`Math.round(item.unitPriceCents * qty)` duplicates `calculateLineItemTotal`, inside the catalog resolver that CLAUDE.md makes the grounding authority for AI-drafted prices.',
-  },
-  {
-    at: 'src/ai/tasks/invoice-task.ts:305',
-    as: 'violation',
-    why: '`Math.round(unitPriceCents * qty)` duplicates `calculateLineItemTotal` on the invoice drafting path.',
-  },
-  {
-    at: 'src/routes/estimates.ts:243',
-    as: 'violation',
-    why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
-  },
-  {
     at: 'src/routes/invoices.ts:199',
     as: 'violation',
     why: "Recomputes an invoice subtotal by hand (`parsed.lineItems.reduce(... + li.totalCents)`) to feed the member-discount `applyBps`. It reaches for the engine's `applyBps` and then defines `subtotal` itself — so if the engine's subtotal ever stops meaning \"every line\" (optional and tier lines are already selectable), the member discount silently uses a different base than the invoice does.",
@@ -290,12 +278,14 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
   });
 
   /**
-   * I9′ AS WRITTEN — the honest state. Three second implementations exist.
-   * When they are routed through the engine this starts PASSING, `it.fails`
-   * fails, and the row is forced back for re-grading.
+   * I9′ AS WRITTEN — the honest state. On this branch three recorded
+   * violations remain (estimate-editor, execution/handlers, routes/invoices —
+   * the ones PR #1349 routes through the engine). Once BOTH lanes land the
+   * inventory has no `violation` left, this starts PASSING, `it.fails`
+   * fails, and it must be flipped to a plain `it` (row re-graded).
    */
   it.fails(
-    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 9 sites)',
+    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 3 sites left after #1064 lane G)',
     () => {
       const violations = totalsMathOutsideEngine([SRC]).filter(
         (h) => classificationOf(h.at) === 'violation',
