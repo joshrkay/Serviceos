@@ -93,11 +93,7 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
         [tenantId],
       );
       // The whole trial: every billable second recorded so far.
-      const billableSecondsUsed = await ledger.sumBillableSeconds(
-        tenantId,
-        new Date(0),
-        new Date(8.64e15),
-      );
+      const billableSecondsUsed = await ledger.sumTrialBillableSeconds(tenantId);
       const decision = decideTrialCall({
         billableSecondsUsed,
         concurrentCalls: concurrentRes.rows[0]?.concurrent ?? 0,

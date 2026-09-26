@@ -56,11 +56,7 @@ export async function checkAndFireUpgradeNudge(
 
   // Billable AI minutes across the trial — the owner's own test calls and
   // in-app voice never count (see call-usage-events classifyCall).
-  const billableSeconds = await new PgCallUsageRepository(pool).sumBillableSeconds(
-    tenantId,
-    new Date(0),
-    new Date(8.64e15),
-  );
+  const billableSeconds = await new PgCallUsageRepository(pool).sumTrialBillableSeconds(tenantId);
   if (billableSeconds < TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS) return { fired: false };
 
   // Cross the threshold atomically — guard against a second concurrent

@@ -6862,7 +6862,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             ? {
                 trialMinutesUsed: async (tenantId: string) =>
                   Math.ceil(
-                    (await callUsageRepo.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15))) / 60,
+                    (await callUsageRepo.sumTrialBillableSeconds(tenantId)) / 60,
                   ),
               }
             : {}),

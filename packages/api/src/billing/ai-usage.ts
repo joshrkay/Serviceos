@@ -56,7 +56,7 @@ export class AiUsageReader {
     const planId = tenant?.planId ?? 'starter';
 
     if (tenant?.status === 'trialing') {
-      const seconds = await this.ledger.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15));
+      const seconds = await this.ledger.sumTrialBillableSeconds(tenantId);
       return {
         kind: 'trial',
         planId,
