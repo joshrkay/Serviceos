@@ -233,6 +233,62 @@ describe('#1173 — a chat photo reaches the draft estimate as an image part (re
     expect(drafted.status).not.toBe('approved');
   });
 
+  it('#1201 item 2 — a multi-step ("X, then Y") turn carrying a photo drafts its estimate step FROM the photo (image part, photoFileIds, audit)', async () => {
+    const { app, provider } = buildApp(tenantA);
+    const before = await proposalsFor(tenantA.tenantId);
+
+    const res = await supertest(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          {
+            role: 'user',
+            content: 'Draft an estimate for Dana Photo: fix what is in the photo, then schedule it Tuesday at 9am',
+          },
+        ],
+        attachments: [{ fileId: tenantA.fileId }],
+      });
+    expect(res.status).toBe(200);
+
+    expect(draftImageParts(provider.getCalls())).toEqual([
+      expect.objectContaining({ type: 'image', url: tenantA.photoUrl }),
+    ]);
+    const beforeIds = new Set(before.map((r) => r.id));
+    const drafted = (await proposalsFor(tenantA.tenantId)).filter(
+      (r) => !beforeIds.has(r.id) && r.proposal_type === 'draft_estimate',
+    );
+    expect(drafted).toHaveLength(1);
+    expect(drafted[0]!.source_context?.photoFileIds).toEqual([tenantA.fileId]);
+    const audit = await pool.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM audit_events
+        WHERE tenant_id = $1 AND event_type = 'assistant.photo_estimate_drafted' AND entity_id = $2`,
+      [tenantA.tenantId, drafted[0]!.id],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]!.metadata.fileIds).toEqual([tenantA.fileId]);
+  });
+
+  it('#1201 item 2 — an API turn with BLANK text and a photo drafts from the photo instead of skipping the photo path', async () => {
+    const { app, provider } = buildApp(tenantA);
+    const before = await proposalsFor(tenantA.tenantId);
+
+    const res = await supertest(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [{ role: 'user', content: '   ' }],
+        attachments: [{ fileId: tenantA.fileId }],
+      });
+    expect(res.status).toBe(200);
+
+    expect(draftImageParts(provider.getCalls())).toEqual([
+      expect.objectContaining({ type: 'image', url: tenantA.photoUrl }),
+    ]);
+    const beforeIds = new Set(before.map((r) => r.id));
+    const drafted = (await proposalsFor(tenantA.tenantId)).filter((r) => !beforeIds.has(r.id));
+    expect(drafted.map((r) => r.proposal_type)).toEqual(['draft_estimate']);
+    expect(drafted[0]!.source_context?.photoFileIds).toEqual([tenantA.fileId]);
+  });
+
   it("T1: tenant A's chat naming TENANT B's fileId is refused — no image part, no draft — and tenant B's file and proposals are untouched", async () => {
     const { app, provider } = buildApp(tenantA);
     const aBefore = (await proposalsFor(tenantA.tenantId)).length;
