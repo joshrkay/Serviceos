@@ -2379,6 +2379,17 @@ export function createVoiceTurnProcessor(
     return path;
   }
 
+  /**
+   * #1230 — an emergency immediate Dial that found no reachable on-call phone
+   * has already walked the rotation and written escalation.requested. The
+   * FSM's emergency fast-path then emits notify_oncall for the same incident;
+   * it reuses this result instead of escalating (and auditing) a second time.
+   */
+  const unresolvedImmediateEscalation = new WeakMap<
+    VoiceSession,
+    Awaited<ReturnType<typeof escalateToHuman>>
+  >();
+
   async function handleNotifyOncall(
     session: VoiceSession,
     fx: SideEffect,
@@ -2448,7 +2459,9 @@ export function createVoiceTurnProcessor(
       );
       const enrichedCaller = mergeCallerContextWithCrm(callerBundle, crm);
 
-      const result = await escalateToHuman({
+      const precomputed = unresolvedImmediateEscalation.get(session);
+      unresolvedImmediateEscalation.delete(session);
+      const result = precomputed ?? await escalateToHuman({
         tenantId,
         sessionId: session.id,
         reason: skillReason,
@@ -4974,6 +4987,9 @@ export function createVoiceTurnProcessor(
           // fast-path below, so the call still reaches `escalating` (and its
           // notify_oncall callback path) instead of staying in intent_capture
           // — which, on a capped call, had already spent its one cap end.
+          if (immediate.escalation && !immediate.escalation.transfer) {
+            unresolvedImmediateEscalation.set(session, immediate.escalation);
+          }
           if (immediate.dialed && immediate.escalation?.transfer) {
             if (immediate.escalation.transfer.fallbackTwiml !== undefined) {
               pendingTransferTwiml.set(
