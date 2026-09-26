@@ -12,6 +12,8 @@ interface PeriodUsage {
   overageCentsPerMinute: number;
   projectedChargeCents: number;
   capCents: number | null;
+  /** Server's isOverageCapReached — the one rule; never recomputed here. */
+  capReached: boolean;
 }
 
 function dollars(cents: number): string {
@@ -44,8 +46,7 @@ export function UsageBanner() {
 
   if (!usage || usage.usedMinutes * 100 < usage.includedMinutes * 80) return null;
 
-  const capReached =
-    usage.capCents !== null && usage.overageMinutes * usage.overageCentsPerMinute >= usage.capCents;
+  const { capReached } = usage;
   const message = capReached
     ? `Your ${dollars(usage.capCents ?? 0)} overage cap is reached — calls ring you instead of the AI.`
     : usage.usedMinutes >= usage.includedMinutes

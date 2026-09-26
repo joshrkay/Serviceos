@@ -8,6 +8,7 @@ import { PgCallUsageRepository } from './call-usage-events';
 import { PgOverageCapStore } from './overage-cap';
 import {
   CALL_PLAN_USAGE,
+  isOverageCapReached,
   OVERAGE_CENTS_PER_MINUTE,
   priceMinuteUsage,
   type CallPlanId,
@@ -34,6 +35,8 @@ export type AiUsage =
       projectedChargeCents: number;
       /** The effective cap in cents; null when the owner removed it. */
       capCents: number | null;
+      /** Overage has reached the cap: calls now ring the owner (isOverageCapReached). */
+      capReached: boolean;
     }
   /** No billing period mirrored yet (before the first subscription webhook). */
   | { kind: 'none' };
@@ -75,11 +78,8 @@ export class AiUsageReader {
     const periodStart = new Date(tenant.current_period_start);
     const periodEnd = new Date(tenant.current_period_end);
     const cap = await this.caps.get(tenantId);
-    const price = priceMinuteUsage({
-      planId,
-      billableSeconds: await this.ledger.sumBillableSeconds(tenantId, periodStart, periodEnd),
-      overageCapCents: cap,
-    });
+    const billableSeconds = await this.ledger.sumBillableSeconds(tenantId, periodStart, periodEnd);
+    const price = priceMinuteUsage({ planId, billableSeconds, overageCapCents: cap });
     return {
       kind: 'period',
       planId,
@@ -91,6 +91,7 @@ export class AiUsageReader {
       overageCentsPerMinute: OVERAGE_CENTS_PER_MINUTE,
       projectedChargeCents: price.customerChargeCents,
       capCents: cap === undefined ? CALL_PLAN_USAGE[planId].monthlyPriceCents : cap,
+      capReached: isOverageCapReached({ planId, billableSeconds, overageCapCents: cap }),
     };
   }
 }

@@ -6,7 +6,7 @@ import { loadVoiceAgentLiveAt } from './go-live';
 import { decideTrialCall, type GateReason, type SubscriptionStatus } from './trial-limits';
 import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { PgOverageCapStore } from '../billing/overage-cap';
-import { CALL_PLAN_USAGE, priceMinuteUsage, type CallPlanId } from '../billing/call-usage-pricing';
+import { isOverageCapReached, type CallPlanId } from '../billing/call-usage-pricing';
 
 export interface VoiceGateInput {
   tenantId: string;
@@ -136,8 +136,7 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
         new Date(tenant.current_period_start),
         new Date(tenant.current_period_end),
       );
-      const uncapped = priceMinuteUsage({ planId, billableSeconds, overageCapCents: null });
-      if (uncapped.customerChargeCents >= (cap ?? CALL_PLAN_USAGE[planId].monthlyPriceCents)) {
+      if (isOverageCapReached({ planId, billableSeconds, overageCapCents: cap })) {
         return block(deps, {
           tenantId,
           callSid,

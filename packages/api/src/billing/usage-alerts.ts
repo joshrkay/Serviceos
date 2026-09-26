@@ -68,9 +68,7 @@ export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): 
   const reached: UsageAlertThreshold[] = [];
   if (usage.usedMinutes * 100 >= usage.includedMinutes * 80) reached.push('included_80');
   if (usage.usedMinutes >= usage.includedMinutes) reached.push('included_100');
-  if (usage.capCents !== null && usage.overageMinutes * usage.overageCentsPerMinute >= usage.capCents) {
-    reached.push('cap_reached');
-  }
+  if (usage.capReached) reached.push('cap_reached');
   if (reached.length === 0) return;
 
   const claimed = await new PgUsageAlertLedger(deps.pool).claim(tenantId, usage.periodStart, reached);

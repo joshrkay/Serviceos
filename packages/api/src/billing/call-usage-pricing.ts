@@ -67,3 +67,24 @@ export function priceMinuteUsage(input: PriceMinuteUsageInput): MinuteUsagePrice
         : Math.min(uncappedChargeCents, capCents),
   };
 }
+
+/**
+ * The one rule for "this period's AI-minute overage has reached the owner's
+ * cap" — shared by the voice gate (calls start ringing the owner), usage
+ * alerts and the usage summary. Reached when the included minutes are used
+ * up and the uncapped overage charge is at or past the cap; a null cap is
+ * never reached, and a $0 cap is reached exactly when the bundle runs out.
+ */
+export function isOverageCapReached(input: PriceMinuteUsageInput): boolean {
+  if (input.overageCapCents === null) return false;
+  const { billableMinutes, includedMinutes, customerChargeCents } = priceMinuteUsage({
+    planId: input.planId,
+    billableSeconds: input.billableSeconds,
+    overageCapCents: null,
+  });
+  const capCents =
+    input.overageCapCents === undefined
+      ? CALL_PLAN_USAGE[input.planId].monthlyPriceCents
+      : nonNegativeInteger(input.overageCapCents, "overageCapCents");
+  return billableMinutes >= includedMinutes && customerChargeCents >= capCents;
+}

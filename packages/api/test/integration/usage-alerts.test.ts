@@ -11,6 +11,7 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
 import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
 import { checkUsageAlerts } from '../../src/billing/usage-alerts';
+import { PgOverageCapStore } from '../../src/billing/overage-cap';
 
 
 /** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
@@ -122,6 +123,17 @@ describe('Postgres integration — AI minute usage alerts', () => {
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     expect(sendEmail).toHaveBeenCalledTimes(2);
+  });
+
+  it('with a $0 cap, does not claim the cap is reached while bundle minutes remain', async () => {
+    const tenantId = await paidTenant(OCT);
+    await new PgOverageCapStore(pool).set(tenantId, 0);
+    const sendEmail = vi.fn(async () => undefined);
+
+    await use(tenantId, 17); // 85% of 20
+    await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
+
+    expect(subjects(sendEmail)).toEqual(["You've used 80% of your AI answering minutes"]);
   });
 
   it('never alerts trialing tenants (the trial nudge covers them)', async () => {
