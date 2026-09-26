@@ -541,6 +541,7 @@ export function createDelayNotificationWorker(deps: {
         }
       };
 
+      let providerMessageId: string | undefined;
       try {
         const response = await deps.service.sendDelayNotice({
           tenantId: payload.tenantId,
@@ -555,14 +556,7 @@ export function createDelayNotificationWorker(deps: {
             appointmentId: payload.appointmentId,
           },
         });
-
-        await deps.stateRepo.upsert({
-          ...statusBase,
-          status: 'sent',
-          attempts: message.attempts,
-          providerMessageId: response.providerMessageId,
-          updatedAt: new Date(),
-        });
+        providerMessageId = response.providerMessageId;
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         const isTransient = error instanceof DelayNotificationTransientError;
@@ -600,6 +594,28 @@ export function createDelayNotificationWorker(deps: {
           error: err.message,
         });
         throw err;
+      }
+
+      // #1201 — the message is DELIVERED at this point. Persisting `sent` is
+      // bookkeeping about that delivery, so a failure here must not flip the
+      // notice to `failed` (which re-enqueue does not skip — a second "on my
+      // way" tap re-texted the customer) nor throw (the queue would redeliver
+      // and re-send). The row keeps its pre-send `queued`/`retrying` status,
+      // which enqueue treats as in flight, so no duplicate is ever sent.
+      try {
+        await deps.stateRepo.upsert({
+          ...statusBase,
+          status: 'sent',
+          attempts: message.attempts,
+          providerMessageId,
+          updatedAt: new Date(),
+        });
+      } catch (stateError) {
+        logger.error('Delay notification sent, but persisting the sent state failed', {
+          appointmentId: payload.appointmentId,
+          idempotencyKey: payload.idempotencyKey,
+          error: stateError instanceof Error ? stateError.message : String(stateError),
+        });
       }
 
       await recordAnalytics(isEnRoute ? 'en_route_notice_sent' : 'delay_notice_sent', {
