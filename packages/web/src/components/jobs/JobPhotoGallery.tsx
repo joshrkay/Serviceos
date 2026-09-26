@@ -6,7 +6,7 @@
  * the optional onDelete callback pluggable so tests can assert it
  * fires without coupling the gallery to a specific delete client.
  */
-import React from 'react';
+import React, { useState } from 'react';
 import { JobPhoto, JobPhotoCategory, JOB_PHOTO_CATEGORIES } from '../../api/job-photos';
 
 export interface JobPhotoGalleryProps {
@@ -14,7 +14,21 @@ export interface JobPhotoGalleryProps {
   activeCategory?: JobPhotoCategory | 'all';
   onCategoryChange?: (next: JobPhotoCategory | 'all') => void;
   onDelete?: (photo: JobPhoto) => void;
+  /**
+   * #1122 — before/after pairing (RV-005's `pair_group_id`/`pair_role` was
+   * previously reachable by API only). Offered only on 'before'/'after'
+   * photos when an opposite-category candidate exists; the caller resolves
+   * the underlying attachment ids and calls the pair endpoint.
+   */
+  onPair?: (photo: JobPhoto, otherPhoto: JobPhoto) => void;
   loading?: boolean;
+}
+
+/** The category a 'before'/'after' photo can pair against; null otherwise. */
+function oppositePairCategory(category: JobPhotoCategory): JobPhotoCategory | null {
+  if (category === 'before') return 'after';
+  if (category === 'after') return 'before';
+  return null;
 }
 
 const CATEGORY_LABELS: Record<JobPhotoCategory | 'all', string> = {
@@ -31,12 +45,16 @@ export function JobPhotoGallery({
   activeCategory = 'all',
   onCategoryChange,
   onDelete,
+  onPair,
   loading = false,
 }: JobPhotoGalleryProps) {
   const filtered =
     activeCategory === 'all'
       ? photos
       : photos.filter((p) => p.category === activeCategory);
+
+  // #1122 — per-card "pair with…" selection, keyed by photo id.
+  const [pairSelections, setPairSelections] = useState<Record<string, string>>({});
 
   return (
     <div data-testid="job-photo-gallery">
@@ -124,6 +142,49 @@ export function JobPhotoGallery({
                     Delete
                   </button>
                 ) : null}
+                {(() => {
+                  if (!onPair) return null;
+                  const opposite = oppositePairCategory(photo.category);
+                  if (!opposite) return null;
+                  const candidates = photos.filter(
+                    (p) => p.category === opposite && p.id !== photo.id,
+                  );
+                  if (candidates.length === 0) return null;
+                  const selectedId = pairSelections[photo.id] ?? '';
+                  return (
+                    <div className="mt-1.5 flex items-center gap-1">
+                      <select
+                        data-testid={`job-photo-pair-select-${photo.id}`}
+                        aria-label={`Pair ${CATEGORY_LABELS[photo.category]} photo with`}
+                        value={selectedId}
+                        onChange={(e) =>
+                          setPairSelections((prev) => ({ ...prev, [photo.id]: e.target.value }))
+                        }
+                        className="min-h-11 flex-1 min-w-0 rounded border px-1 text-xs"
+                      >
+                        <option value="">Pair with…</option>
+                        {candidates.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {CATEGORY_LABELS[c.category]}
+                            {c.notes ? ` · ${c.notes}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        data-testid={`job-photo-pair-button-${photo.id}`}
+                        disabled={!selectedId}
+                        onClick={() => {
+                          const other = candidates.find((c) => c.id === selectedId);
+                          if (other) onPair(photo, other);
+                        }}
+                        className="min-h-11 shrink-0 rounded border px-2 text-xs text-primary disabled:opacity-40"
+                      >
+                        Pair
+                      </button>
+                    </div>
+                  );
+                })()}
               </figcaption>
             </figure>
           ))}

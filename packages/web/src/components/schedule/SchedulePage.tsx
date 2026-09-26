@@ -67,6 +67,18 @@ function toTimeLabel(iso: string, timezone: string) {
   return formatTimeInTenantTz(iso, timezone);
 }
 
+// #1289 — confirmed-vs-pending colour. `confirmed` is written by the
+// confirm_appointment handler (packages/api/src/appointments/appointment.ts);
+// every other status (scheduled, in_progress, completed, canceled, no_show)
+// renders as "pending" amber so a supervisor can scan the day for what still
+// needs a confirmation call. Week/month grid + SMS-confirmation preview are
+// deferred — see PR description.
+function statusPillClass(status: string): string {
+  return status === 'confirmed'
+    ? 'bg-green-100 text-green-700 border-green-200'
+    : 'bg-amber-100 text-amber-700 border-amber-200';
+}
+
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
   const aStart = new Date(a.scheduledStart).getTime();
   const aEnd   = new Date(a.scheduledEnd).getTime();
@@ -600,7 +612,7 @@ export function SchedulePage() {
                             <User size={11} /> Unassigned
                           </span>
                         )}
-                        <span className="text-xs text-slate-400">{appt.status}</span>
+                        <span className={`text-xs rounded-full border px-2 py-0.5 ${statusPillClass(appt.status)}`}>{appt.status}</span>
                       </div>
 
                       {/* Actions */}

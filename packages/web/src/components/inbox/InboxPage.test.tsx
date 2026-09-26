@@ -663,6 +663,88 @@ describe('InboxPage', () => {
     );
   });
 
+  // ── #1291 — reject-reason UI: the operator can type a reason that
+  // reaches the API's existing `rejectionReason` (via the `reason` field
+  // rejectProposalBodySchema validates). BUILD scope: this input only.
+  // DEFERRED: Spanish chat replies, cross-entity timeline, audit-log UI.
+  // DROPPED: customer catalog price lookup (owner-only stays). See PR.
+  describe('#1291 — reject-reason UI', () => {
+    it('sends a typed reason to the reject endpoint instead of the hardcoded default', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            { proposal: { id: 'p-3', proposalType: 'add_note', summary: 'Add another note', status: 'ready_for_review', createdAt: new Date().toISOString() }, urgency: 'low', reason: 'Standard priority' },
+          ],
+          summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 1, truncated: false },
+        }),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ data: { id: 'p-3', status: 'rejected' } }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Add another note'));
+
+      fireEvent.change(screen.getByLabelText(/reason for reject/i), {
+        target: { value: 'Duplicate of an existing note' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith(
+          '/api/proposals/p-3/reject',
+          expect.objectContaining({
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ reason: 'Duplicate of an existing note' }),
+          }),
+        );
+      });
+    });
+
+    it('trims whitespace and falls back to the default reason when the input is blank', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            { proposal: { id: 'p-4', proposalType: 'add_note', summary: 'Add another note', status: 'ready_for_review', createdAt: new Date().toISOString() }, urgency: 'low', reason: 'Standard priority' },
+          ],
+          summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 1, truncated: false },
+        }),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ data: { id: 'p-4', status: 'rejected' } }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Add another note'));
+
+      fireEvent.change(screen.getByLabelText(/reason for reject/i), {
+        target: { value: '   ' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith(
+          '/api/proposals/p-4/reject',
+          expect.objectContaining({
+            body: JSON.stringify({ reason: 'Rejected from inbox' }),
+          }),
+        );
+      });
+    });
+
+    it('the reason input meets the >=44px glove tap target (min-h-11)', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            { proposal: { id: 'p-5', proposalType: 'add_note', summary: 'Add another note', status: 'ready_for_review', createdAt: new Date().toISOString() }, urgency: 'low', reason: 'Standard priority' },
+          ],
+          summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 1, truncated: false },
+        }),
+      );
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Add another note'));
+      const input = screen.getByLabelText(/reason for reject/i);
+      expect(input.className).toContain('min-h-11');
+    });
+  });
+
   // ── U6: "approve all eligible" (capture-class + high-confidence only) ──
   describe('approve all eligible (U6)', () => {
     interface RowOpts {
