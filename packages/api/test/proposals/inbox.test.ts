@@ -68,6 +68,61 @@ describe('buildInboxPayload', () => {
     expect(inbox.summary.truncated).toBe(true);
   });
 
+  // #1278 — the inbox was hard-capped at 100 with no way to see the rest.
+  // `offset` is a new optional third argument (default 0) so every existing
+  // 2-arg call site (routes/proposals.ts pre-fix, lookup-day-overview.ts,
+  // and the tests above) keeps its exact prior behavior.
+  describe('offset pagination (#1278)', () => {
+    const proposals = Array.from({ length: 250 }, (_, i) =>
+      // Fixed createdAt spacing so prioritizeProposals' ordering (and thus
+      // page boundaries) is deterministic across runs.
+      makeProposal({ id: `p${String(i).padStart(3, '0')}`, createdAt: new Date(Date.now() - i * 1000) }),
+    );
+
+    it('returns the second page starting where the first left off', () => {
+      const page1 = buildInboxPayload(proposals, 100, 0);
+      const page2 = buildInboxPayload(proposals, 100, 100);
+      expect(page1.data).toHaveLength(100);
+      expect(page2.data).toHaveLength(100);
+      const page1Ids = new Set(page1.data.map((p) => p.proposal.id));
+      const page2Ids = new Set(page2.data.map((p) => p.proposal.id));
+      expect([...page1Ids].some((id) => page2Ids.has(id))).toBe(false);
+    });
+
+    it('reports pagination metadata: hasMore + nextOffset while more remain', () => {
+      const page1 = buildInboxPayload(proposals, 100, 0);
+      expect(page1.pagination).toEqual({ offset: 0, limit: 100, hasMore: true, nextOffset: 100 });
+      expect(page1.summary.truncated).toBe(true);
+    });
+
+    it('the last page reports hasMore=false and nextOffset=null', () => {
+      const lastPage = buildInboxPayload(proposals, 100, 200);
+      expect(lastPage.data).toHaveLength(50);
+      expect(lastPage.pagination).toEqual({ offset: 200, limit: 100, hasMore: false, nextOffset: null });
+      expect(lastPage.summary.truncated).toBe(false);
+    });
+
+    it('an offset past the end returns an empty page, not an error', () => {
+      const page = buildInboxPayload(proposals, 100, 1000);
+      expect(page.data).toEqual([]);
+      expect(page.pagination).toEqual({ offset: 1000, limit: 100, hasMore: false, nextOffset: null });
+    });
+
+    it('summary counts stay totals over the WHOLE set on every page, not just the page', () => {
+      const page2 = buildInboxPayload(proposals, 100, 100);
+      expect(page2.summary.totalCount).toBe(250);
+    });
+
+    it('defaults offset to 0 when omitted (backward compatible)', () => {
+      const withDefault = buildInboxPayload(proposals, 100);
+      const withExplicitZero = buildInboxPayload(proposals, 100, 0);
+      expect(withDefault.data.map((p) => p.proposal.id)).toEqual(
+        withExplicitZero.data.map((p) => p.proposal.id),
+      );
+      expect(withDefault.pagination).toEqual({ offset: 0, limit: 100, hasMore: true, nextOffset: 100 });
+    });
+  });
+
   it('returns an empty payload with zero counts for an empty input', () => {
     const inbox = buildInboxPayload([], 100);
     expect(inbox.data).toEqual([]);

@@ -29,6 +29,7 @@ import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 import {
   proposalFilterSchema,
+  proposalInboxQuerySchema,
   rejectProposalBodySchema,
   editProposalBodySchema,
 } from '../proposals/proposal-contracts';
@@ -213,6 +214,13 @@ export function createProposalsRouter(
     requirePermission('proposals:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        // #1278 — offset/limit pagination (VOX-11: the inbox was hard-capped
+        // at 100 with truncated:true and no way to page past it). Defaults
+        // (limit=100, offset=0) reproduce the exact prior response for any
+        // caller that doesn't send these params yet.
+        const { limit, offset } = validate(proposalInboxQuerySchema, req.query) as z.infer<
+          typeof proposalInboxQuerySchema
+        >;
         // Inbox fetches the open proposals awaiting operator action and
         // runs `prioritizeProposals` over them. Both 'draft' and
         // 'ready_for_review' are surfaced: voice proposals are created in
@@ -263,7 +271,7 @@ export function createProposalsRouter(
                   .slice(0, EXPIRED_INBOX_LIMIT),
               ),
         ]);
-        const inbox = buildInboxPayload([...ready, ...drafts], 100);
+        const inbox = buildInboxPayload([...ready, ...drafts], limit, offset);
         const expired = expiredRows.map((p) => ({
           id: p.id,
           proposalType: p.proposalType,
