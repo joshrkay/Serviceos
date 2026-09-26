@@ -1,6 +1,7 @@
 // Shared billing engine for estimates and invoices
 // All money values are integer cents. Tax rate in basis points (bps).
 import type { CatalogUnitValue } from '@ai-service-os/shared';
+import { AppError } from './errors';
 
 export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
 
@@ -117,6 +118,34 @@ export function applyBps(amountCents: number, bps: number): number {
   return Math.round((amountCents * bps) / 10000);
 }
 
+/**
+ * #1288 / PRD §12.3 Q12 — FAIL CLOSED. This engine subtracts the WHOLE
+ * discount from the taxable base, which is only right when every billed line
+ * shares one taxability. On a document that mixes taxable and non-taxable
+ * lines, carries a discount AND a non-zero tax rate, that under-taxes (the
+ * §12.3 worked example: $5 short on a $200 invoice). Until proportional
+ * allocation lands, such a document is refused with this typed 422 rather
+ * than totalled with a wrong tax base. A 0% rate cannot produce wrong tax, so
+ * it is not refused; neither is a single-taxability document.
+ */
+export class DiscountTaxAllocationError extends AppError {
+  constructor(details: {
+    taxableSubtotalCents: number;
+    nonTaxableSubtotalCents: number;
+    discountCents: number;
+    taxRateBps: number;
+  }) {
+    super(
+      'DISCOUNT_TAX_ALLOCATION_UNSUPPORTED',
+      'A discount on a document that mixes taxable and non-taxable line items cannot be taxed correctly yet. ' +
+        'Remove the discount, set the tax rate to 0, or make every line the same taxability.',
+      422,
+      details,
+    );
+    this.name = 'DiscountTaxAllocationError';
+  }
+}
+
 export function calculateDocumentTotals(
   lineItems: LineItem[],
   discountCents: number,
@@ -127,6 +156,17 @@ export function calculateDocumentTotals(
   const taxableSubtotalCents = lineItems
     .filter((item) => item.taxable)
     .reduce((sum, item) => sum + item.totalCents, 0);
+
+  const hasTaxableLine = lineItems.some((item) => item.taxable && item.totalCents !== 0);
+  const hasNonTaxableLine = lineItems.some((item) => !item.taxable && item.totalCents !== 0);
+  if (discountCents > 0 && taxRateBps > 0 && hasTaxableLine && hasNonTaxableLine) {
+    throw new DiscountTaxAllocationError({
+      taxableSubtotalCents,
+      nonTaxableSubtotalCents: subtotalCents - taxableSubtotalCents,
+      discountCents,
+      taxRateBps,
+    });
+  }
 
   // Apply discount to taxable amount before computing tax
   const effectiveTaxableAmount = Math.max(0, taxableSubtotalCents - discountCents);

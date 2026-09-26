@@ -240,7 +240,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: '`Math.round(unitPriceCents * qty)` duplicates `calculateLineItemTotal` on the invoice drafting path.',
   },
   {
-    at: 'src/routes/estimates.ts:243',
+    at: 'src/routes/estimates.ts:246',
     as: 'violation',
     why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
   },
