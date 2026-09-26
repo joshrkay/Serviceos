@@ -3,8 +3,8 @@
 Terms the backend uses with a specific meaning. This is one context of a
 multi-context repo — the root `CONTEXT-MAP.md` says which package owns which
 vocabulary. System-wide decisions live in `docs/decisions.md` (D-NNN); the
-speakable capability inventory in `docs/reference/voice-action-catalog.md`.
-Coined during the voice-first effort (#833); add to it rather than letting
+speakable capability inventory in `docs/reference/voice-action-catalog.md`
+(generated from the capability declarations — D-033). Coined during the voice-first effort (#833); add to it rather than letting
 terms float.
 
 - **Surface** — a way a person reaches the product: the live phone, a recorded

@@ -1160,3 +1160,17 @@ unchanged against the derived maps; they now guard the derivation rather than tw
    are proven (29 at the #833 audit).
 5. **The audit's A/B/C tiering is replaced by the gate**, not maintained: a tier someone assigns is
    the prediction D-031 forbids. The generated catalog (part 3) prints each capability's proof files.
+
+**Decision (part 3 — the catalog is generated, #842).** Of the three options — generate, reduce to
+prose that cannot make checkable claims, delete — **both of the first two**: every part of
+`docs/reference/voice-action-catalog.md` that makes a checkable claim is generated from the
+declarations between `BEGIN generated` markers (the speakable table with class, surfaces and
+execution proof; surface opt-outs with their reasons; handler-without-on-ramp; gated intents;
+lookups; direct acts; the machine-readable block, whose JSON shape the web and API contract tests
+parse is unchanged). What remains hand-written is explanatory prose, and the header now forbids it
+from restating generated facts. `npm run catalog:generate` rewrites it; the contract test fails CI
+when the committed file differs from a regenerate, so a hand edit inside a block, or a declaration,
+handler or proof tag that changed without regenerating, cannot merge. Deletion was rejected: the
+catalog is the one place product reads "what can I say, and is it proven", and `packages/web`'s
+voice-example pin depends on its machine-readable block. The stale "Persistence proof" column and
+its warning are gone — the generated column is derived from part 2's tags.

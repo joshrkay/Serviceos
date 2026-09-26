@@ -30,12 +30,16 @@ budgets**, and adding an intent changes that prompt.
 3. **`EST_SYSTEM_PROMPT_TOKENS`** (`packages/voice-eval/live-support.ts`) is a cost-cap
    overestimate asserted with a 1.15 safety margin. A longer prompt overruns it. Raise the
    constant — never weaken the margin or the assertion; the constant is the thing that should move.
-4. **The intent-map contract tests + the catalog doc.** `docs/reference/voice-action-catalog.md`
-   is pinned against `INTENT_TO_PROPOSAL_TYPE`, the execution-handler registry,
-   `actionClassForProposalType`, and `SUPPORTED_INTENTS`. A new intent must be classified there —
-   including a **deliberately non-proposal** intent, which belongs in the documented non-proposal
-   set the same way `lookup_*` is, so the drift test reads its absence from the map as intentional
-   rather than as a gap.
+4. **The capability declaration + the generated catalog (D-033, since 2026-09-26).** A new
+   intent does not compile until it has an entry in
+   `packages/api/src/capabilities/capabilities.ts#CAPABILITIES` — including a **deliberately
+   non-proposal** intent (`kind: 'lookup' | 'dialogue' | …`). A `kind: 'proposal'` declaration is
+   dispatched on phone, memo, in-app and chat with no other edit (the maps are derived); keep it off
+   a surface only with an `unavailableOn` opt-out and a reason. Then `npm run catalog:generate` —
+   `docs/reference/voice-action-catalog.md` is generated and a drift test fails otherwise. And a
+   writing capability must be **proven**: tag a real-database integration test with
+   `provesExecution('<proposal type>')`, or `test/capabilities/proven-bar.test.ts` fails (the
+   grandfather register is pinned and shrink-only — do not add to it to get green).
 
 ## Fix (do all of it in the same commit)
 
@@ -46,7 +50,7 @@ git add src/ai/voice-quality/corpus/cassettes
 ```
 
 Then bump `INTENT_TAXONOMY_VERSION` + its pin, raise `EST_SYSTEM_PROMPT_TOKENS` if the token test
-fails, and update the catalog doc. Verify with:
+fails, declare the capability, and regenerate the catalog (`npm run catalog:generate`). Verify with:
 
 ```bash
 npx tsc --project tsconfig.build.json --noEmit
