@@ -1,4 +1,4 @@
-import { createHash, createHmac } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
 
 export interface S3StorageConfig {
@@ -14,6 +14,15 @@ export interface S3StorageConfig {
 export interface DevStorageConfig {
   bucket: string;
   publicUrlBase: string;
+  /**
+   * HMAC secret binding presigned dev-storage URLs (#1273). Without this,
+   * `/storage-dev/*` accepts any PUT/GET unauthenticated — the presigned
+   * URL's own token is the only thing standing in for a real S3 signature.
+   * Optional here so direct test construction of a `DevStorageProvider` as
+   * a plain `StorageProvider` stub keeps working; createStorageProvider()
+   * always supplies a fresh per-boot secret for the real dev path.
+   */
+  secret?: string;
 }
 
 export interface StorageProviderEnv {
@@ -28,6 +37,38 @@ export interface StorageProviderEnv {
   API_PORT?: string;
   PORT?: string;
   NODE_ENV?: string;
+  /**
+   * Where machines/browsers reach this API from outside the process
+   * (shared/config.ts's canonical "public API base" var — see its
+   * PUBLIC_API_URL doc comment). #1273: a browser on a deployed dev host
+   * cannot reach `http://localhost:PORT` (that's the browser's own
+   * machine), so the dev presign must prefer this over the localhost
+   * fallback when it's set.
+   */
+  PUBLIC_API_URL?: string;
+}
+
+// #1273 — signs a dev-storage URL so hitting `/storage-dev/*` directly
+// (without having gone through a real presign call first) is rejected.
+// Not a security boundary in the SigV4 sense (single static per-boot
+// secret, no expiry) — it exists only to close the "mounted
+// unauthenticated" gap while keeping the plain `fetch()` PUT/GET the web
+// client already does (no Bearer header, same as a real S3 presigned URL).
+export function signDevStorageToken(secret: string, method: 'GET' | 'PUT', key: string): string {
+  return createHmac('sha256', secret).update(`${method}:${key}`).digest('hex');
+}
+
+export function verifyDevStorageToken(
+  secret: string,
+  method: 'GET' | 'PUT',
+  key: string,
+  token: string | undefined
+): boolean {
+  if (!token) return false;
+  const expected = Buffer.from(signDevStorageToken(secret, method, key), 'hex');
+  const actual = Buffer.from(token, 'hex');
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
 }
 
 const DEFAULT_UPLOAD_EXPIRES_SECONDS = 300;
@@ -251,14 +292,24 @@ export class S3StorageProvider implements StorageProvider {
 // provider does not fetch audio bytes anyway. In prod the factory
 // refuses to return this provider.
 export class DevStorageProvider implements StorageProvider {
-  constructor(private readonly config: DevStorageConfig) {}
+  private readonly secret: string;
+
+  constructor(private readonly config: DevStorageConfig) {
+    // Generated once per instance (in practice once per process boot, via
+    // createStorageProvider) when the caller doesn't supply one — plain
+    // `new DevStorageProvider(...)` test stubs never exercise the actual
+    // /storage-dev route, so an ungoverned random secret there is harmless.
+    this.secret = config.secret ?? randomBytes(32).toString('hex');
+  }
 
   async generateUploadUrl(_bucket: string, key: string, _contentType: string): Promise<string> {
-    return `${this.config.publicUrlBase.replace(/\/$/, '')}/${encodeKeyPath(key)}`;
+    const token = signDevStorageToken(this.secret, 'PUT', key);
+    return `${this.config.publicUrlBase.replace(/\/$/, '')}/${encodeKeyPath(key)}?token=${token}`;
   }
 
   async generateDownloadUrl(_bucket: string, key: string): Promise<string> {
-    return `${this.config.publicUrlBase.replace(/\/$/, '')}/${encodeKeyPath(key)}`;
+    const token = signDevStorageToken(this.secret, 'GET', key);
+    return `${this.config.publicUrlBase.replace(/\/$/, '')}/${encodeKeyPath(key)}?token=${token}`;
   }
 
   async getObjectMetadata(): Promise<ObjectMetadata | null> {
@@ -289,6 +340,12 @@ function isProductionLikeEnv(nodeEnv: string | undefined): boolean {
 }
 
 function defaultDevPublicUrl(env: StorageProviderEnv): string {
+  // #1273 — PUBLIC_API_URL is where machines/browsers reach this API from
+  // outside the process; localhost:PORT only resolves for a caller on the
+  // same machine as the API, which a browser on a deployed dev host is not.
+  if (env.PUBLIC_API_URL) {
+    return `${env.PUBLIC_API_URL.replace(/\/+$/, '')}/storage-dev`;
+  }
   const port = env.API_PORT || env.PORT || '3000';
   return `http://localhost:${port}/storage-dev`;
 }
@@ -297,6 +354,12 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
   provider: StorageProvider;
   bucket: string;
   mode: 's3' | 'dev';
+  /**
+   * Set only when `mode === 'dev'` — app.ts's signal both that
+   * DevStorageProvider is the active backend (mount the receiver at all)
+   * and the secret to verify its tokens with (#1273).
+   */
+  devStorageSecret?: string;
 } {
   const {
     STORAGE_BUCKET,
@@ -342,9 +405,14 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
 
   const bucket = STORAGE_BUCKET || 'serviceos-dev';
   const publicUrlBase = STORAGE_PUBLIC_URL || defaultDevPublicUrl(env);
+  // Fresh per-boot secret — never persisted, never logged, only ever held
+  // by this DevStorageProvider instance and the /storage-dev router app.ts
+  // wires up alongside it (#1273).
+  const devStorageSecret = randomBytes(32).toString('hex');
   return {
-    provider: new DevStorageProvider({ bucket, publicUrlBase }),
+    provider: new DevStorageProvider({ bucket, publicUrlBase, secret: devStorageSecret }),
     bucket,
     mode: 'dev',
+    devStorageSecret,
   };
 }

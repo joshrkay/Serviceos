@@ -7,6 +7,7 @@
 import type { Pool } from 'pg';
 import { AppError } from '../shared/errors';
 import type { CallPlanId } from './call-usage-pricing';
+import { readTenantBillingState } from './tenant-billing-state';
 
 export function planIncludesQuickBooks(planId: CallPlanId | null): boolean {
   return planId === 'growth';
@@ -14,11 +15,7 @@ export function planIncludesQuickBooks(planId: CallPlanId | null): boolean {
 
 /** The tenant's mirrored Rivet plan (tenants.plan_id), or null before checkout. */
 export async function readTenantPlanId(pool: Pool, tenantId: string): Promise<CallPlanId | null> {
-  const res = await pool.query<{ plan_id: CallPlanId | null }>(
-    `SELECT plan_id FROM tenants WHERE id = $1`,
-    [tenantId],
-  );
-  return res.rows[0]?.plan_id ?? null;
+  return (await readTenantBillingState(pool, tenantId))?.planId ?? null;
 }
 
 export function quickBooksUpgradeRequired(): AppError {

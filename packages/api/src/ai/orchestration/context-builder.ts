@@ -5,6 +5,7 @@ import type { RetrieveContextResult } from '../skills/retrieve-context';
 import { createLogger } from '../../logging/logger';
 import { classifyMessageProvenance } from '../content-provenance';
 import { buildUntrustedContentSection } from '../untrusted-content';
+import { sliceWithoutSplittingSurrogate } from '../untrusted-text-matching';
 
 const logger = createLogger({
   service: 'ai.orchestration.context-builder',
@@ -282,7 +283,8 @@ export function buildRetrievedChunksPromptSection(
     lines.push(`[${c.sourceType}] ${content}`);
   }
   if (lines.length === 0) return undefined;
-  const body = lines.join('\n').slice(0, MAX_RETRIEVED_SECTION_CHARS);
+  // #1240 item 4 — never cut between the halves of a surrogate pair.
+  const body = sliceWithoutSplittingSurrogate(lines.join('\n'), MAX_RETRIEVED_SECTION_CHARS);
   return buildUntrustedContentSection(body, 'Retrieved reference notes');
 }
 

@@ -44,8 +44,8 @@ jobs:
       VOICE_QUALITY_REPO: memory
       VOICE_QUALITY_COST_CAP_CENTS: '1000'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           # WS7 — pinned to 20 to match every other workflow, all Dockerfiles
           # (node:20-alpine), and the Railway runtime. This job was the lone
@@ -59,7 +59,7 @@ jobs:
         run: npm run voice-quality:layer2:weekly --workspace=packages/api
       - name: Upload weekly report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: voice-quality-layer2-weekly-${{ github.run_id }}
           path: packages/api/voice-quality-layer2-report.json
@@ -72,7 +72,7 @@ jobs:
           TREND_OUTPUT_PATH: packages/api/voice-quality-trend-report.json
       - name: Upload trend artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: voice-quality-trend-report-${{ github.run_id }}
           path: packages/api/voice-quality-trend-report.json

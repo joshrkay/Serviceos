@@ -9,23 +9,11 @@ import { randomUUID } from 'crypto';
 
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
-import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
+import { capturePostHog } from '../helpers/posthog-capture';
 import { checkUsageAlerts } from '../../src/billing/usage-alerts';
+import { PgOverageCapStore } from '../../src/billing/overage-cap';
 
 
-/** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
-function capturePostHog() {
-  const capture = vi.fn();
-  process.env.POSTHOG_API_KEY = 'phc_test';
-  __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
-  return {
-    events: () => capture.mock.calls.map((c) => c[0] as { event: string; properties: Record<string, unknown> }),
-    restore: () => {
-      __resetAnalyticsForTests();
-      delete process.env.POSTHOG_API_KEY;
-    },
-  };
-}
 
 const OCT = [new Date(Date.UTC(2026, 9, 1)), new Date(Date.UTC(2026, 10, 1))] as const;
 const NOV = [new Date(Date.UTC(2026, 10, 1)), new Date(Date.UTC(2026, 11, 1))] as const;
@@ -71,7 +59,7 @@ describe('Postgres integration — AI minute usage alerts', () => {
 
   it('emails once at 80%, once at 100%, then once when overage reaches the $79 cap', async () => {
     const tenantId = await paidTenant(OCT);
-    const sendEmail = vi.fn(async () => undefined);
+    const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
     const check = () => checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     await use(tenantId, 15);
@@ -100,7 +88,7 @@ describe('Postgres integration — AI minute usage alerts', () => {
 
   it('sends only the highest newly crossed alert when one call jumps several thresholds', async () => {
     const tenantId = await paidTenant(OCT);
-    const sendEmail = vi.fn(async () => undefined);
+    const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
 
     await use(tenantId, 25);
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
@@ -110,7 +98,7 @@ describe('Postgres integration — AI minute usage alerts', () => {
 
   it('alerts again in the next billing period', async () => {
     const tenantId = await paidTenant(OCT);
-    const sendEmail = vi.fn(async () => undefined);
+    const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
     await use(tenantId, 16);
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
@@ -124,10 +112,21 @@ describe('Postgres integration — AI minute usage alerts', () => {
     expect(sendEmail).toHaveBeenCalledTimes(2);
   });
 
+  it('with a $0 cap, does not claim the cap is reached while bundle minutes remain', async () => {
+    const tenantId = await paidTenant(OCT);
+    await new PgOverageCapStore(pool).set(tenantId, 0);
+    const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
+
+    await use(tenantId, 17); // 85% of 20
+    await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
+
+    expect(subjects(sendEmail)).toEqual(["You've used 80% of your AI answering minutes"]);
+  });
+
   it('never alerts trialing tenants (the trial nudge covers them)', async () => {
     const tenantId = await paidTenant(OCT);
     await pool.query(`UPDATE tenants SET subscription_status = 'trialing' WHERE id = $1`, [tenantId]);
-    const sendEmail = vi.fn(async () => undefined);
+    const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
     await use(tenantId, 30);
 
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);

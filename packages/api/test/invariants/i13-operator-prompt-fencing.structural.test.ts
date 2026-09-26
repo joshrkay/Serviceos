@@ -242,10 +242,12 @@ type Classification =
  * path. voice-action-router.ts hands `TaskContext.message: segmentText` to the
  * drafting handlers for `sourceChannel: 'voicemail'` jobs too — a caller's
  * voicemail, enqueued only because its (spoofable) caller-ID matched the
- * owner line. The classifier and decomposer fence that text; the drafting
- * handlers below still receive it raw. The effect is bounded by U9
- * (holdIfUntrustedSource: every voicemail proposal is held for human review),
- * but the "owner-authored" label is only true for non-voicemail memos.
+ * owner line. The classifier and decomposer fence that text, and since #1232
+ * the drafting handlers do too: the router sets `TaskContext.untrustedMessage`
+ * for voicemail jobs and every drafting prompt renders the message through
+ * `taskMessageForPrompt` / `untrustedTaskTextForPrompt` (pinned by the
+ * "#1219 / #1232" test below). U9 still holds every voicemail proposal for
+ * review. The "owner-authored" label describes the non-voicemail memo path.
  */
 const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string }> = [
   {
@@ -260,8 +262,8 @@ const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string 
   },
   {
     file: 'src/workers/transcription.ts',
-    as: 'violation',
-    why: 'transcription.ts:241 interpolates the RAW caller transcript into a user message ("Raw transcript: ${raw}") with no fence and no hardening line. The corrected output is written back as the stored transcript, so a planted instruction survives into every operator surface that later reads it.',
+    as: 'fenced',
+    why: 'Was the one recorded violation (#1065): the correction pass inlined "Raw transcript: ${raw}" unfenced. It now wraps the raw transcript in buildUntrustedContentSection with the data rule in the system prompt, and refuses to store a correction that echoes fence text.',
   },
   {
     file: 'src/ai/agents/onboarding/transitions.ts',
@@ -443,31 +445,63 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
     expect(PINNED_GATEWAY_SENDER_COUNT).toBe(senders.length);
   });
 
-  it('B — the recorded violation is still exactly where the report says it is', () => {
-    const found = promptBuildersNamingCallerText([SRC]);
-    for (const entry of CLASSIFIED.filter((c) => c.as === 'violation')) {
-      expect(found, `${entry.file} — ${entry.why}`).toContain(entry.file);
-    }
-    // And it still inlines the transcript with no fence.
+  it('B — the formerly recorded violation (#1065, transcription.ts) is fenced', () => {
     const file = listSourceFiles([SRC]).find((f) => f.rel === 'src/workers/transcription.ts')!;
-    expect(file.code).toMatch(/Raw transcript: \$\{raw\}/);
-    expect(usesSanctionedRenderer(file)).toBe(false);
+    expect(file.code).not.toMatch(/Raw transcript: \$\{raw\}/);
+    expect(usesSanctionedRenderer(file)).toBe(true);
+    // Every module classified `fenced` really calls a sanctioned renderer.
+    const files = new Map(listSourceFiles([SRC]).map((f) => [f.rel, f]));
+    for (const entry of CLASSIFIED.filter((c) => c.as === 'fenced')) {
+      expect(usesSanctionedRenderer(files.get(entry.file)!), entry.file).toBe(true);
+    }
   });
 
   /**
-   * I13′ AS WRITTEN. One operator-reachable prompt still inlines caller text
-   * unfenced. When it is routed through the helper this starts PASSING,
-   * `it.fails` fails, and the row is forced back for re-grading.
+   * I13′ AS WRITTEN. Was `it.fails` while transcription.ts:241 inlined the raw
+   * caller transcript (#1065); flipped when #1219 routed it through the fence.
    */
-  it.fails(
-    'I13′ as written — no unfenced caller text in any model context (KNOWN GAP: workers/transcription.ts:241)',
-    () => {
-      const violations = promptBuildersNamingCallerText([SRC]).filter(
-        (rel) => classificationOf(rel) === 'violation',
-      );
-      expect(violations).toEqual([]);
-    },
-  );
+  it('I13′ as written — no unfenced caller text in any model context', () => {
+    const violations = promptBuildersNamingCallerText([SRC]).filter(
+      (rel) => classificationOf(rel) === 'violation',
+    );
+    expect(violations).toEqual([]);
+  });
+
+  /**
+   * #1219 / #1232 — caller-text prompt sites clause B cannot see.
+   *
+   * Clause B keys on `PROMPT_ASSEMBLY` + `CALLER_TEXT` identifiers, and these
+   * modules escape it: the sentiment / vulnerability classifiers build ONE
+   * `prompt` string that app.ts wraps into a message (the #1065 lane's
+   * data-flow note), confirm-intent names its text `callerResponse`, the
+   * drafting handlers read `context.message` / an extracted entity, and the
+   * MMS task reads `input.message`. Each was found by review, so each is
+   * pinned here by name: it must CALL the fence helper (or the drafting
+   * helper built on it). Removing the call fails the build.
+   */
+  it('#1219 / #1232 — every reviewed caller-text prompt site calls the fence helper', () => {
+    const FENCED_BY_REVIEW: ReadonlyArray<{ file: string; via: string }> = [
+      { file: 'src/ai/skills/confirm-intent.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/agents/customer-calling/sentiment-classifier.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/agents/customer-calling/vulnerability-grader.ts', via: 'buildCallerTurnClassifierPrompt' },
+      { file: 'src/workers/transcription.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/tasks/mms-estimate-task.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/tasks/task-input.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/tasks/invoice-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/send-customer-message-task.ts', via: 'untrustedTaskTextForPrompt' },
+      { file: 'src/ai/tasks/estimate-task.ts', via: 'untrustedTaskTextForPrompt' },
+      { file: 'src/ai/tasks/estimate-edit-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/invoice-edit-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/job-edit-task.ts', via: 'taskMessageForPrompt' },
+      { file: 'src/ai/tasks/create-appointment-task.ts', via: 'taskMessageForPrompt' },
+    ];
+    const files = new Map(listSourceFiles([SRC]).map((f) => [f.rel, f]));
+    const unfenced = FENCED_BY_REVIEW.filter(({ file, via }) => {
+      const f = files.get(file);
+      return !f || !callsRenderer(f, via);
+    }).map(({ file, via }) => `${file} (expected a call to ${via})`);
+    expect(unfenced).toEqual([]);
+  });
 
   // ─── Negative controls ────────────────────────────────────────────────────
 

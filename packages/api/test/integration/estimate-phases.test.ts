@@ -99,7 +99,7 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
     const totals = calculateDocumentTotals(lineItems, 0, 0);
     const est = await estimateRepo.create({
       id: crypto.randomUUID(), tenantId: ctx.tenantId, jobId,
-      estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+      estimateNumber: `EST-0${crypto.randomUUID().slice(0, 7)}`,
       status: 'draft', lineItems, totals, version: 1,
       createdBy: ctx.userId, createdAt: new Date(), updatedAt: new Date(),
     });

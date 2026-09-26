@@ -90,6 +90,15 @@ export class PgCallUsageRepository extends PgBaseRepository {
     });
   }
 
+  /**
+   * Every billable second the tenant has recorded — the trial allowance
+   * measure (a trial has no billing period of its own; the meter resets at
+   * conversion because paid usage is measured per period instead).
+   */
+  async sumTrialBillableSeconds(tenantId: string): Promise<number> {
+    return this.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15));
+  }
+
   async sumBillableSeconds(
     tenantId: string,
     periodStart: Date,

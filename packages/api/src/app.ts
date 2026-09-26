@@ -1137,12 +1137,39 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // removed rather than duplicated — smaller surface, no divergent behavior.
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
-  // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
-  // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
-  // succeed in local development. In prod/staging, createStorageProvider
-  // refuses to return a DevStorageProvider, so this route is dormant.
-  if (config.NODE_ENV !== 'prod' && config.NODE_ENV !== 'staging') {
-    app.use('/storage-dev', createDevStorageRouter());
+  // Built here (rather than down where storageProvider/storageBucket are
+  // consumed) so the /storage-dev mount below can gate on `storageMode` —
+  // moved up from its old spot further down in createApp(); pure function
+  // of process.env, no ordering dependency on anything between here and
+  // there.
+  const {
+    provider: storageProvider,
+    bucket: storageBucket,
+    mode: storageMode,
+    devStorageSecret,
+  } = createStorageProvider(process.env as NodeJS.ProcessEnv);
+
+  // Dev-only storage PUT/GET receiver for DevStorageProvider upload URLs.
+  // Mounted before /api Clerk auth so a plain unauthenticated-looking PUT
+  // succeeds, same as it would against a real S3 presigned URL — but every
+  // request must carry the per-boot HMAC token DevStorageProvider embeds
+  // in the URLs it hands out (verified in createDevStorageRouter), so
+  // hitting this path directly without a completed presign call 401s
+  // (#1273 — previously there was no check at all).
+  //
+  // Gated on BOTH: storageMode === 'dev' (DevStorageProvider must actually
+  // be the active backend — a "dev" host with real S3 credentials
+  // configured has no reason to also expose this receiver) AND
+  // NODE_ENV !== prod/staging (belt-and-suspenders: createStorageProvider
+  // only returns 'dev' mode in a prod-like env when STORAGE_ENABLED=false,
+  // and this route must stay dark there too).
+  if (
+    storageMode === 'dev' &&
+    devStorageSecret &&
+    config.NODE_ENV !== 'prod' &&
+    config.NODE_ENV !== 'staging'
+  ) {
+    app.use('/storage-dev', createDevStorageRouter(devStorageSecret));
   }
 
   const financingProvider = createFinancingProvider();
@@ -1300,10 +1327,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const portalSessionRepo: PortalSessionRepository = pool
     ? new PgPortalSessionRepository(pool)
     : new InMemoryPortalSessionRepository();
-
-  const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
-    process.env as NodeJS.ProcessEnv
-  );
+  // storageProvider/storageBucket: see createStorageProvider() call moved up
+  // near the /storage-dev mount (#1273).
 
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
@@ -3781,12 +3806,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 }
               }
             }
-            // Owner emails from call end: the trial upgrade nudge (40 AI
-            // minutes) and paid-plan AI-minute usage alerts (80% / 100% /
-            // cap reached). Both are once-only and failure-soft.
+            // Owner emails from call end — the trial upgrade nudge (40 AI
+            // minutes), paid-plan AI-minute usage alerts (80% / 100% / cap
+            // reached) and first-call activation all send through this one
+            // mapping onto messageDelivery. Each is once-only and failure-soft.
             const ownerEmail = messageDelivery
-              ? (msg: { to: string; subject: string; text: string }) =>
-                  messageDelivery.sendEmail({ to: msg.to, subject: msg.subject, text: msg.text })
+              ? (msg: { to: string; subject: string; text: string; html?: string }) =>
+                  messageDelivery.sendEmail({
+                    to: msg.to,
+                    subject: msg.subject,
+                    text: msg.text,
+                    ...(msg.html ? { html: msg.html } : {}),
+                  })
               : undefined;
             await checkAndFireUpgradeNudge(
               { pool, ...(ownerEmail ? { sendEmail: ownerEmail } : {}) },
@@ -3819,17 +3850,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 {
                   pool,
                   auditRepo,
-                  ...(messageDelivery
-                    ? {
-                        sendEmail: (msg) =>
-                          messageDelivery.sendEmail({
-                            to: msg.to,
-                            subject: msg.subject,
-                            text: msg.text,
-                            ...(msg.html ? { html: msg.html } : {}),
-                          }),
-                      }
-                    : {}),
+                  ...(ownerEmail ? { sendEmail: ownerEmail } : {}),
                 },
                 { tenantId, channel },
               );
@@ -6837,7 +6858,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             ? {
                 trialMinutesUsed: async (tenantId: string) =>
                   Math.ceil(
-                    (await callUsageRepo.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15))) / 60,
+                    (await callUsageRepo.sumTrialBillableSeconds(tenantId)) / 60,
                   ),
               }
             : {}),
