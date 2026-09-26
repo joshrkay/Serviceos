@@ -201,13 +201,18 @@ describe('Postgres integration — Clerk owner membership bootstrap', () => {
       await pool.query(`SELECT id FROM tenants WHERE owner_id = $1`, [clerkUserId])
     ).rows[0].id as string;
 
-    // Audit leg — the signup-bootstrap audit event is readable back
-    // through the real repository, not just a raw SELECT.
+    // Audit leg — the signup-bootstrap audit event is readable back through
+    // the real repository, not just a raw SELECT. #1075 — a genuinely
+    // re-delivered signup (findByOwner's guard makes the second delivery's
+    // bootstrapTenant return `created: false`) must NOT write a second
+    // `tenant.signup.bootstrap.completed` row: the tenant was bootstrapped
+    // ONCE, so the audit trail says so exactly once, even though the
+    // webhook itself was delivered twice.
     const auditEvents = await auditRepo.findByEntity(tenantAId, 'tenant', tenantAId);
     const bootstrapEvents = auditEvents.filter(
       (e) => e.eventType === 'tenant.signup.bootstrap.completed',
     );
-    expect(bootstrapEvents.length).toBeGreaterThanOrEqual(1);
+    expect(bootstrapEvents.length).toBe(1);
 
     // Neighbour (tenant B) membership is untouched by tenant A's re-delivery
     // — compare the FULL row, not just count+role, so a regression that

@@ -448,6 +448,21 @@ export async function buildVoiceProposalPayload(
     if (reference) flat.invoiceReference = reference;
   }
 
+  // cancel_appointment (#1272): the classifier emits `cancellationReason`,
+  // `cancelAppointmentPayloadSchema` wants `reason` + a `cancellationType`
+  // enum a spoken cancel almost never names. Same defaults, same precedence,
+  // as `CancelAppointmentTaskHandler` (ai/tasks/voice-extended-tasks.ts) on
+  // the memo/chat leg (`cancellationType ?? 'other'`, `cancellationReason ??
+  // the spoken request`). Without them every live voice cancel minted an
+  // approve-to-fail card gated on `cancellationType` (QA row SCH-03).
+  if (proposalType === 'cancel_appointment') {
+    if (flat.cancellationType === undefined) flat.cancellationType = 'other';
+    if (flat.reason === undefined) {
+      const reason = nonEmptyString(entities.cancellationReason) ?? nonEmptyString(input.utterance);
+      if (reason) flat.reason = reason;
+    }
+  }
+
   // Whole-object contract refines carry `path: []`, so `fieldPathsFrom` below
   // can name nothing and `missingFieldPaths` comes back EMPTY even when the
   // check fails — leaving the caller with an invalid payload it cannot gate

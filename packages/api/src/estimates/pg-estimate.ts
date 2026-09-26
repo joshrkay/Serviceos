@@ -25,8 +25,16 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           id, tenant_id, job_id, estimate_number, status,
           discount_cents, tax_rate_bps, subtotal_cents, taxable_subtotal_cents,
           tax_cents, total_cents, valid_until, customer_message, internal_notes,
-          is_change_order, created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+          is_change_order, created_by, created_at, updated_at,
+          view_token, view_token_expires_at, sent_at, last_dispatch_id,
+          first_viewed_at, view_count, accepted_at, accepted_by_name,
+          accepted_by_ip, accepted_user_agent, accepted_signature_data,
+          rejected_at, rejected_reason, version, last_revised_at,
+          reminder_count, last_reminder_at, accepted_selection, deleted_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+          $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+        )`,
         [
           estimate.id,
           estimate.tenantId,
@@ -49,6 +57,33 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           estimate.createdBy,
           estimate.createdAt,
           estimate.updatedAt,
+          // #1030 — lifecycle columns. The rest of this object's callers
+          // (send, view, accept/reject, revise, remind, soft-delete) all go
+          // through update(), which already persists every one of these; a
+          // caller that builds a full Estimate up front (e.g. VQ fixture
+          // replay in ai/voice-quality/runner.ts) must not have it silently
+          // discarded on create().
+          estimate.viewToken ?? null,
+          estimate.viewTokenExpiresAt ?? null,
+          estimate.sentAt ?? null,
+          estimate.lastDispatchId ?? null,
+          estimate.firstViewedAt ?? null,
+          estimate.viewCount ?? 0,
+          estimate.acceptedAt ?? null,
+          estimate.acceptedByName ?? null,
+          estimate.acceptedByIp ?? null,
+          estimate.acceptedUserAgent ?? null,
+          estimate.acceptedSignatureData ?? null,
+          estimate.rejectedAt ?? null,
+          estimate.rejectedReason ?? null,
+          estimate.version,
+          estimate.lastRevisedAt ?? null,
+          estimate.reminderCount ?? 0,
+          estimate.lastReminderAt ?? null,
+          // RV-042: write SQL NULL for "no selection", never the JSON string
+          // "null" — mirrors update()'s handling of this same column.
+          estimate.acceptedSelection ? JSON.stringify(estimate.acceptedSelection) : null,
+          estimate.deletedAt ?? null,
         ],
       );
 
