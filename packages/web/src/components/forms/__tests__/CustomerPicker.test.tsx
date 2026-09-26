@@ -88,4 +88,41 @@ describe('CustomerPicker (P11-006)', () => {
     render(<Harness />);
     expect(screen.getByLabelText('customer-search').className).toContain('min-h-11');
   });
+
+  // #908 — CustomerPicker and JobPicker now share the EntityPicker base;
+  // this closes a gap review found (JobPicker had an explicit empty state
+  // and min-h-11 option buttons, CustomerPicker had neither).
+  it('shows an explicit "No matching customers" empty state for a zero-result search', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [] }),
+    } as unknown as Response);
+
+    render(<Harness />);
+    fireEvent.change(screen.getByLabelText('customer-search'), {
+      target: { value: 'zzz-nothing' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('customer-picker-empty')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('customer-picker-empty').textContent).toBe('No matching customers');
+  });
+
+  it('meets the 44px tap-target contract on result options (CLAUDE.md)', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: 'c-1', firstName: 'Alice' }] }),
+    } as unknown as Response);
+
+    render(<Harness />);
+    fireEvent.change(screen.getByLabelText('customer-search'), { target: { value: 'al' } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('customer-option-c-1')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('customer-option-c-1').className).toContain('min-h-11');
+  });
 });

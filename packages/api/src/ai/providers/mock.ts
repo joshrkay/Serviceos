@@ -1,6 +1,6 @@
 import { messagesContainImage, type LLMProvider, type LLMRequest, type LLMResponse } from '../gateway/gateway';
 import { matchUpdateJobPriorityPhrase } from '../orchestration/intent-classifier';
-import { UNTRUSTED_CONTENT_BLOCK_BEGIN, UNTRUSTED_CONTENT_BLOCK_END } from '../untrusted-content';
+import { untrustedFenceBeginLine, untrustedFenceEndLine, untrustedFenceIdOf } from '../untrusted-content';
 
 /**
  * Deterministic mock provider for unit tests and hermetic local/dev.
@@ -93,20 +93,20 @@ function lastUserText(request: LLMRequest): string {
  * Text with no fence (every owner surface) is returned unchanged.
  *
  * Anchored: only a message that IS a fence — starts with the BEGIN marker
- * line and ends with the END marker line — is unwrapped, so owner text that
- * merely quotes a marker string somewhere is never sliced.
+ * line and ends with the END marker line carrying the SAME fence id (#1240)
+ * — is unwrapped, so owner text that merely quotes a marker string somewhere
+ * is never sliced.
  */
 function fencedUtteranceOrText(text: string): string {
   const trimmed = text.trim();
-  if (
-    !trimmed.startsWith(`${UNTRUSTED_CONTENT_BLOCK_BEGIN}\n`) ||
-    !trimmed.endsWith(`\n${UNTRUSTED_CONTENT_BLOCK_END}`)
-  ) {
-    return text;
-  }
+  const fenceId = untrustedFenceIdOf(trimmed);
+  if (fenceId === null) return text;
+  const begin = untrustedFenceBeginLine(fenceId);
+  const end = untrustedFenceEndLine(fenceId);
+  if (!trimmed.endsWith(`\n${end}`)) return text;
   // [label line, ...words, hardening line]
   const lines = trimmed
-    .slice(UNTRUSTED_CONTENT_BLOCK_BEGIN.length + 1, trimmed.length - UNTRUSTED_CONTENT_BLOCK_END.length - 1)
+    .slice(begin.length + 1, trimmed.length - end.length - 1)
     .split('\n');
   if (lines.length < 3) return text;
   return lines.slice(1, -1).join('\n');

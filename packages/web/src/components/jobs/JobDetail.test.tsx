@@ -245,8 +245,11 @@ describe('JobDetailView', () => {
       expect(uploadPhoto).not.toHaveBeenCalled();
     });
 
-    it('deletes a photo behind a confirm: calls deleteJobPhoto and removes it from the gallery', async () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    // #907 — window.confirm replaced with ConfirmDialog: the delete button
+    // now stages the photo and opens the dialog; the actual delete only
+    // fires from the dialog's confirm button (data-testid
+    // "confirm-dialog-confirm" / "confirm-dialog-cancel").
+    it('deletes a photo behind a ConfirmDialog: calls deleteJobPhoto and removes it from the gallery', async () => {
       const uploadPhoto = vi.fn();
       const deletePhoto = vi.fn().mockResolvedValue(undefined);
       const fetchPhotos = vi.fn().mockResolvedValue([makePhoto('p-del')]);
@@ -258,16 +261,16 @@ describe('JobDetailView', () => {
       );
 
       fireEvent.click(screen.getAllByTestId('job-photo-delete-p-del')[0]);
+      expect(await screen.findByText('Delete this photo?')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
 
       await waitFor(() => expect(deletePhoto).toHaveBeenCalledWith('j1', 'p-del'));
       await waitFor(() =>
         expect(screen.queryByTestId('job-photo-card-p-del')).not.toBeInTheDocument(),
       );
-      confirmSpy.mockRestore();
     });
 
-    it('does not delete when the confirm is dismissed', async () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    it('does not delete when the ConfirmDialog is cancelled', async () => {
       const uploadPhoto = vi.fn();
       const deletePhoto = vi.fn().mockResolvedValue(undefined);
       const fetchPhotos = vi.fn().mockResolvedValue([makePhoto('p-keep')]);
@@ -279,14 +282,13 @@ describe('JobDetailView', () => {
       );
 
       fireEvent.click(screen.getAllByTestId('job-photo-delete-p-keep')[0]);
+      fireEvent.click(await screen.findByTestId('confirm-dialog-cancel'));
 
       expect(deletePhoto).not.toHaveBeenCalled();
       expect(screen.getAllByTestId('job-photo-card-p-keep').length).toBeGreaterThan(0);
-      confirmSpy.mockRestore();
     });
 
     it('surfaces a delete error and keeps the photo (no phantom removal)', async () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
       const uploadPhoto = vi.fn();
       const deletePhoto = vi.fn().mockRejectedValue(new Error('Delete failed: 403'));
       const fetchPhotos = vi.fn().mockResolvedValue([makePhoto('p-err')]);
@@ -298,13 +300,13 @@ describe('JobDetailView', () => {
       );
 
       fireEvent.click(screen.getAllByTestId('job-photo-delete-p-err')[0]);
+      fireEvent.click(await screen.findByTestId('confirm-dialog-confirm'));
 
       await waitFor(() =>
         expect(screen.getAllByTestId('job-photo-error')[0]).toHaveTextContent('Delete failed: 403'),
       );
       // The photo is still present — the failed delete did not remove it.
       expect(screen.getAllByTestId('job-photo-card-p-err').length).toBeGreaterThan(0);
-      confirmSpy.mockRestore();
     });
   });
 

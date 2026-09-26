@@ -1035,6 +1035,49 @@ describe('#1253 round 3 — falling objects on people, gas smell words, leak pat
   });
 });
 
+// ─── #1241 item 4 — English gas coming out / hissing / broken line ──────────
+
+describe('#1241 item 4 — English gas escaping, hissing and broken-line reports are E1', () => {
+  const EN_GAS_TABLE: ReadonlyArray<[bucket: 'E1' | 'not-E1', utterance: string, why: string]> = [
+    // The three misses named in #1241 (E3 on main).
+    ['E1', 'gas coming out of the stove', '#1241: gas coming out of a source'],
+    ['E1', 'the gas tank is hissing', '#1241: hissing tank'],
+    ['E1', 'the gas line is broken', '#1241: broken gas line'],
+    // Variants of the same grammar.
+    ['E1', 'there is gas coming out of the meter', 'gas coming out, meter'],
+    ['E1', "there's propane escaping from the tank", 'propane escaping'],
+    ['E1', 'gas is pouring out of the pipe', 'pouring out'],
+    ['E1', 'the propane tank is hissing', 'propane hissing'],
+    ['E1', 'my gas meter keeps hissing', '"keeps hissing"'],
+    ['E1', 'I hear a hissing sound from the gas line', 'hissing sound from a gas line'],
+    ['E1', 'the gas pipe is cracked', 'cracked pipe'],
+    ['E1', 'the landscaper hit the gas line', 'struck line'],
+    ['E1', 'we broke a gas line digging', 'broke a line'],
+    ['E1', 'the gas hose got cut', 'cut hose'],
+    ['E1', 'the gas line is broken how much to fix it', 'leak + price question stays E1'],
+    // Benign: installs, quotes, no-gas complaints, shutoff valves.
+    ['not-E1', 'I want a price for a gas line install', 'install quote'],
+    ['not-E1', 'how much to run a new gas line to my stove', 'install quote'],
+    ['not-E1', 'can you quote a gas line for my dryer', 'install quote'],
+    ['not-E1', 'no gas coming out of the stove burner', 'no gas: routine'],
+    ['not-E1', "there's no gas coming out of my stove", 'no gas: routine'],
+    ['not-E1', 'the gas is not coming out of the burner', 'no gas: routine'],
+    ['not-E1', 'the gas line is not broken, I just need a new stove hooked up', 'negated'],
+    ['not-E1', 'I need the gas line cut-off valve replaced', '"cut-off valve" is a part'],
+    ['not-E1', 'is my gas tank big enough for a tankless heater', 'sizing question'],
+  ];
+
+  it.each(EN_GAS_TABLE)('%s: %j (%s)', (bucket, utterance) => {
+    const r = classifyCallerSafety(utterance, {});
+    if (bucket === 'E1') {
+      expect(r.tier).toBe('E1');
+      expect(r.requiresEvacuation).toBe(true);
+    } else {
+      expect(r.tier).not.toBe('E1');
+    }
+  });
+});
+
 // ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
 
 describe('e1ScriptReadiness (boot gate)', () => {

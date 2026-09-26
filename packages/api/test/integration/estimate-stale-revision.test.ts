@@ -82,7 +82,7 @@ describe('Postgres integration — estimate stale-revision guard (7.7)', () => {
     const totals = calculateDocumentTotals(lineItems, 0, 0);
     const inserted = await estimateRepo.create({
       id: crypto.randomUUID(), tenantId: tenant.tenantId, jobId,
-      estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+      estimateNumber: `EST-0${crypto.randomUUID().slice(0, 7)}`,
       status: 'sent', lineItems, totals, version: 1,
       createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
     });

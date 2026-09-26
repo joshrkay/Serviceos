@@ -15,7 +15,7 @@ import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
-import { createTelephonyRouter } from './routes/telephony';
+import { createTelephonyRouter, createDidTenantResolver } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import {
@@ -390,7 +390,10 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
-import { createTwilioWebhookCredentialResolver } from './telephony/twilio-webhook-credential';
+import {
+  createTwilioWebhookCredentialResolver,
+  createSubaccountCredentialView,
+} from './telephony/twilio-webhook-credential';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
@@ -1134,12 +1137,39 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // removed rather than duplicated — smaller surface, no divergent behavior.
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
-  // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
-  // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
-  // succeed in local development. In prod/staging, createStorageProvider
-  // refuses to return a DevStorageProvider, so this route is dormant.
-  if (config.NODE_ENV !== 'prod' && config.NODE_ENV !== 'staging') {
-    app.use('/storage-dev', createDevStorageRouter());
+  // Built here (rather than down where storageProvider/storageBucket are
+  // consumed) so the /storage-dev mount below can gate on `storageMode` —
+  // moved up from its old spot further down in createApp(); pure function
+  // of process.env, no ordering dependency on anything between here and
+  // there.
+  const {
+    provider: storageProvider,
+    bucket: storageBucket,
+    mode: storageMode,
+    devStorageSecret,
+  } = createStorageProvider(process.env as NodeJS.ProcessEnv);
+
+  // Dev-only storage PUT/GET receiver for DevStorageProvider upload URLs.
+  // Mounted before /api Clerk auth so a plain unauthenticated-looking PUT
+  // succeeds, same as it would against a real S3 presigned URL — but every
+  // request must carry the per-boot HMAC token DevStorageProvider embeds
+  // in the URLs it hands out (verified in createDevStorageRouter), so
+  // hitting this path directly without a completed presign call 401s
+  // (#1273 — previously there was no check at all).
+  //
+  // Gated on BOTH: storageMode === 'dev' (DevStorageProvider must actually
+  // be the active backend — a "dev" host with real S3 credentials
+  // configured has no reason to also expose this receiver) AND
+  // NODE_ENV !== prod/staging (belt-and-suspenders: createStorageProvider
+  // only returns 'dev' mode in a prod-like env when STORAGE_ENABLED=false,
+  // and this route must stay dark there too).
+  if (
+    storageMode === 'dev' &&
+    devStorageSecret &&
+    config.NODE_ENV !== 'prod' &&
+    config.NODE_ENV !== 'staging'
+  ) {
+    app.use('/storage-dev', createDevStorageRouter(devStorageSecret));
   }
 
   const financingProvider = createFinancingProvider();
@@ -1297,10 +1327,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const portalSessionRepo: PortalSessionRepository = pool
     ? new PgPortalSessionRepository(pool)
     : new InMemoryPortalSessionRepository();
-
-  const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
-    process.env as NodeJS.ProcessEnv
-  );
+  // storageProvider/storageBucket: see createStorageProvider() call moved up
+  // near the /storage-dev mount (#1273).
 
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
@@ -3934,56 +3962,29 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
    *     a tenant dials a number another tenant happens to own.
    * Keeps the pre-#1072 behaviour for those paths exactly: subaccount token
    * when we hold one, deployment token otherwise.
+   *
+   * #1084 — `subaccountCredentialView` is the decision-shaped form of the same
+   * view (the whisper mount uses it directly, so the middleware logs the path
+   * that really answered and records the verifying tenant); the plain-token
+   * form below is derived from it rather than re-implementing the fallback.
    */
+  const subaccountCredentialView = createSubaccountCredentialView(
+    resolveTwilioWebhookCredential,
+  );
   const resolveTwilioAuthTokenForSubaccount = async (
     accountSid: string | undefined,
   ): Promise<string | undefined> => {
-    const decision = await resolveTwilioWebhookCredential(
-      accountSid ? { accountSid } : {},
-    );
-    if (typeof decision === 'object') {
-      return decision.outcome === 'verify'
-        ? decision.authToken
-        : process.env.TWILIO_AUTH_TOKEN;
-    }
-    return decision ?? process.env.TWILIO_AUTH_TOKEN;
+    const decision = await subaccountCredentialView(accountSid ? { accountSid } : {});
+    return decision.outcome === 'verify' ? decision.authToken : undefined;
   };
 
-  const resolveTenantIdByPhoneNumber = async (
-    to: string,
-  ): Promise<string | undefined> => {
-    if (!to || !pool) return process.env.TWILIO_DEFAULT_TENANT_ID;
-    try {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ tenant_id: string }>(
-          `SELECT tenant_id FROM tenant_integrations
-           WHERE provider = 'twilio'
-             AND provider_data->>'phoneE164' = $1
-           LIMIT 1`,
-          [to],
-        );
-        await client.query('COMMIT');
-        return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
-      } catch (err) {
-        // Same dirty-connection guard as the credential resolver's lookups.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_DEFAULT_TENANT_ID;
-    }
-  };
-
-  // D2-3 — real phone-number → tenant lookup for inbound /voice. The
-  // legacy `resolveTenantId` callback is still wired for `/gather` and
-  // `/dial-result`, which already run inside an established call; the
-  // /voice handler consults this repo first and only falls through to
-  // the env-var seam in dev (with a loud WARN).
+  // D2-3 / #1061 — the ONE phone-number → tenant lookup for inbound
+  // telephony. /voice, /voice/gather-fallback, /gather, /dial-result and
+  // /callback-message all resolve through it (resolveInboundTenantId); the
+  // payload-alias `resolveTenantId` callback below — the /recording and
+  // /voicemail-status no-session fallbacks — goes through the same repository
+  // via createDidTenantResolver. There is no second copy of the DID SQL, and
+  // TWILIO_DEFAULT_TENANT_ID is only ever a dev seam (with a WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
   // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
@@ -4010,10 +4011,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // way past.
   app.use(
     '/api/telephony/whisper',
-    requireTwilioSignature(
-      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
-    ),
+    requireTwilioSignature(subaccountCredentialView, {
+      publicBaseUrl: () => process.env.PUBLIC_API_URL,
+    }),
   );
   app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
 
@@ -4024,7 +4024,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
-      resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
+      resolveTenantId: createDidTenantResolver(phoneNumberRepo ? { phoneNumberRepo } : {}),
       // WS8 — a worker-role process never attaches the media-streams WS
       // handler (see the role gate on attachMediaStreamServer below), so its
       // /voice must never emit <Connect><Stream/> pointing at a socket this

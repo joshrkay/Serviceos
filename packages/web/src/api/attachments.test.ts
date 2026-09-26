@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   attachFileToEntity,
   listAttachments,
+  pairAttachments,
   presignAttachmentUpload,
   uploadAttachment,
 } from './attachments';
@@ -91,5 +92,31 @@ describe('attachments api client', () => {
       headers: { 'Content-Type': 'image/jpeg' },
     }));
     expect(fetch).toHaveBeenNthCalledWith(3, '/api/attachments', expect.any(Object));
+  });
+
+  // #1122 — the technician's photo surface needs to reach the existing
+  // before/after pairing endpoint (RV-005, POST /api/attachments/:id/pair).
+  describe('pairAttachments', () => {
+    it('posts { otherId, role } to /api/attachments/:id/pair', async () => {
+      vi.mocked(fetch).mockResolvedValueOnce(
+        jsonResponse({ pairGroupId: 'g1', attachment: { id: 'a1' }, other: { id: 'a2' } }),
+      );
+
+      const result = await pairAttachments('a1', 'a2', 'before');
+
+      expect(fetch).toHaveBeenCalledWith(
+        '/api/attachments/a1/pair',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ otherId: 'a2', role: 'before' }),
+        }),
+      );
+      expect(result.pairGroupId).toBe('g1');
+    });
+
+    it('throws when the pair request fails', async () => {
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 404 }));
+      await expect(pairAttachments('a1', 'a2', 'after')).rejects.toThrow('404');
+    });
   });
 });
