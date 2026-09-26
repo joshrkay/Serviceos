@@ -9,13 +9,14 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { EmergencyDispatchExecutionHandler } from '../../src/proposals/execution/emergency-dispatch-handler';
 import type { Proposal } from '../../src/proposals/proposal';
 import type { SettingsRepository } from '../../src/settings/settings';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 /**
  * RV-141 hold — proves the emergency_dispatch handler persists a real held
  * appointment row through Postgres (real findBookableSlots + real
  * hold_pending_approval / hold_expiry_at columns), not just against mocks.
  */
-describe('Postgres integration — emergency_dispatch appointment hold (RV-141)', () => {
+describe(provesExecution('emergency_dispatch') + 'Postgres integration — emergency_dispatch appointment hold (RV-141)', () => {
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let jobRepo: PgJobRepository;

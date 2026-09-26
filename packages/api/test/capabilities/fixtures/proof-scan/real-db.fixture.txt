@@ -1,0 +1,6 @@
+// Fixture for test/capabilities/proven-bar.test.ts — a tagged file that opens
+// a real pool. The scanner must credit record_payment.
+import { getSharedTestDb } from './shared';
+describe(provesExecution('record_payment') + 'Postgres integration — record_payment', () => {
+  const pool = getSharedTestDb();
+});

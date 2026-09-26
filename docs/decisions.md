@@ -1134,3 +1134,29 @@ unchanged against the derived maps; they now guard the derivation rather than tw
 - *Derive `SUPPORTED_INTENTS` from the declarations.* Rejected: it would reorder the classifier
   prompt and invalidate the whole cassette corpus for no behavioural gain; the `Record` type already
   makes the two sets provably equal.
+
+**Decision (part 2 — the proven bar is a gate, #841).**
+
+1. **Mechanism: a coverage assertion over the declaration set, in the unit suite.** Every writing
+   capability (every `proposal` — proven by its proposal type's execution, so an alias rides its
+   target's proof — and every `direct_act`) must be proven. `test/capabilities/proven-bar.test.ts`
+   fails CI otherwise; it needs no Docker because it reads evidence, not a database.
+2. **Proof is derived from evidence, never asserted** (D-031). A real-database test claims it with a
+   `provesExecution('<key>')` prefix in its title (`src/capabilities/proven-bar.ts`); the scanner
+   credits the claim only if that file opens a real pool (the PRD §11.0e regex), and a tag in a file
+   that never opens one is itself a failure. The claim sits beside the test it describes and dies
+   with it — the failure mode of the catalog's hand-kept column (stale in both directions) cannot
+   recur. The scan is lexical and says so; the tag makes it an explicit per-file claim a reviewer
+   reads rather than a keyword the scanner guesses at.
+3. **The 8 existing gaps are grandfathered in an explicit register** (`KNOWN_PROOF_GAPS`), not
+   blocked on backfill: `batch_invoice`, `convert_lead`, `mark_lead_lost`, `add_service_location`,
+   `create_standing_instruction`, `send_customer_message`, `create_service_agreement`,
+   `add_catalog_item`. The register only shrinks — a member that gains a proof fails the gate until
+   it is removed, and its exact contents are pinned, so growing it is a reviewable edit.
+4. **The risk ranking was re-checked, and no longer holds as stated.** `record_payment`,
+   `record_refund`, `add_material` (and `apply_credit`) now have real-database execution tests
+   (`record-payment-refund-proposal-flow`, `material-items`, `draft-invoice-execution`); the gate
+   pins that they stay proven. As of this decision **40 of 48** proposal capabilities plus `en_route`
+   are proven (29 at the #833 audit).
+5. **The audit's A/B/C tiering is replaced by the gate**, not maintained: a tier someone assigns is
+   the prediction D-031 forbids. The generated catalog (part 3) prints each capability's proof files.

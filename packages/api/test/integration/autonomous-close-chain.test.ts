@@ -42,11 +42,12 @@ import { isInUndoWindow } from '../../src/proposals/lifecycle';
 import { placeAppointmentHold } from '../../src/ai/scheduling/place-hold';
 import { createProposal, type Proposal } from '../../src/proposals/proposal';
 import type { ExecutionContext } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const CALLER_PHONE = '+15125550100';
 const OWNER = 'owner-user';
 
-describe('Integration — D-019 owner-approval close chain (real Postgres)', () => {
+describe(provesExecution('send_estimate') + 'Integration — D-019 owner-approval close chain (real Postgres)', () => {
   let pool: Pool;
   let proposalRepo: PgProposalRepository;
   let appointmentRepo: PgAppointmentRepository;

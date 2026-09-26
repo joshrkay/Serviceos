@@ -46,7 +46,10 @@ terms float.
   declares where today's behavior diverges; the turn pipeline is where it
   stops being able to.
 - **Proven** — a capability has a real-database integration test on the
-  surface in question (`test/integration/`), not only an in-memory one.
+  surface in question (`test/integration/`), not only an in-memory one. For
+  execution, claimed by a `provesExecution('<key>')` title tag in a file that
+  opens a real pool, and gated over every writing capability (D-033 part 2,
+  `test/capabilities/proven-bar.test.ts`).
 - **Proposal-first** (D-004) — the AI never writes to operational entities;
   it drafts a typed proposal a human approves. Lookups are read-only and are
   never proposals.
