@@ -285,6 +285,58 @@ describe('POST /api/customers/:id/archive', () => {
   });
 });
 
+describe('POST /api/customers/:id/restore (#1281)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('restores an archived customer: isArchived false, archivedAt cleared, back in the directory', async () => {
+    const created = await createCustomer(app);
+    await request(app).post(`/api/customers/${created.body.id}/archive`).send({});
+    const listedWhileArchived = await request(app).get('/api/customers');
+    expect(listedWhileArchived.body.map((c: { id: string }) => c.id)).not.toContain(created.body.id);
+
+    const res = await request(app).post(`/api/customers/${created.body.id}/restore`).send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.isArchived).toBe(false);
+    expect(res.body.archivedAt ?? null).toBeNull();
+    const listed = await request(app).get('/api/customers');
+    expect(listed.body.map((c: { id: string }) => c.id)).toContain(created.body.id);
+  });
+
+  it('returns 404 when restoring an unknown customer', async () => {
+    const res = await request(app)
+      .post('/api/customers/11111111-1111-1111-1111-111111111111/restore')
+      .send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('GET /api/customers?archived=only lists only archived customers (paginated + bare shapes)', async () => {
+    const active = await createCustomer(app, { firstName: 'Active', lastName: 'One' });
+    const gone = await createCustomer(app, { firstName: 'Gone', lastName: 'One' });
+    await request(app).post(`/api/customers/${gone.body.id}/archive`).send({});
+
+    const bare = await request(app).get('/api/customers?archived=only');
+    expect(bare.status).toBe(200);
+    expect(bare.body.map((c: { id: string }) => c.id)).toEqual([gone.body.id]);
+
+    const paged = await request(app).get('/api/customers?archived=only&paginated=true');
+    expect(paged.body.total).toBe(1);
+    expect(paged.body.data.map((c: { id: string }) => c.id)).toEqual([gone.body.id]);
+    expect(paged.body.data.map((c: { id: string }) => c.id)).not.toContain(active.body.id);
+  });
+
+  it('returns 404 NOT_FOUND, not 500, for a malformed id', async () => {
+    const res = await request(app).post('/api/customers/new/restore').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
 describe('POST /api/customers/:id/merge (Story 4.6)', () => {
   let app: Express;
 

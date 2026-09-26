@@ -4,6 +4,8 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgContactRepository } from '../../src/customers/pg-contact';
 import { createContact } from '../../src/customers/contact';
+import { archiveCustomer, restoreCustomer } from '../../src/customers/customer';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 describe('Postgres integration — customers', () => {
   let pool: Pool;
@@ -289,6 +291,80 @@ describe('Postgres integration — customers', () => {
       });
       const fromB = await repo.findByPhoneNormalized(tenantB.tenantId, '5554443333');
       expect(fromB).toHaveLength(0);
+    });
+  });
+
+  describe('#1281 — archive then restore', () => {
+    it('restore clears is_archived + archived_at, returns the row to the directory, audits it, and cannot cross tenants', async () => {
+      const audit = new PgAuditRepository(pool);
+      const customer = await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        firstName: 'Restore',
+        lastName: 'Me',
+        displayName: 'Restore Me',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await archiveCustomer(tenant.tenantId, customer.id, repo, tenant.userId, audit);
+      const listedArchived = await repo.findByTenant(tenant.tenantId);
+      expect(listedArchived.map((c) => c.id)).not.toContain(customer.id);
+
+      // Neighbour tenant cannot restore it.
+      const other = await createTestTenant(pool);
+      expect(await restoreCustomer(other.tenantId, customer.id, repo, other.userId, audit)).toBeNull();
+      const { rows: still } = await pool.query(
+        `SELECT is_archived FROM customers WHERE id = $1`,
+        [customer.id],
+      );
+      expect(still[0].is_archived).toBe(true);
+
+      const restored = await restoreCustomer(tenant.tenantId, customer.id, repo, tenant.userId, audit);
+      expect(restored).toMatchObject({ id: customer.id, isArchived: false });
+      const { rows } = await pool.query(
+        `SELECT is_archived, archived_at FROM customers WHERE id = $1`,
+        [customer.id],
+      );
+      expect(rows).toEqual([{ is_archived: false, archived_at: null }]);
+      const listed = await repo.findByTenant(tenant.tenantId);
+      expect(listed.map((c) => c.id)).toContain(customer.id);
+      const events = await audit.findByEntity(tenant.tenantId, 'customer', customer.id);
+      expect(events.map((e) => e.eventType)).toEqual(
+        expect.arrayContaining(['customer.archived', 'customer.restored']),
+      );
+    });
+
+    it('archivedOnly lists only the tenant\'s archived customers, in data and count', async () => {
+      const t = await createTestTenant(pool);
+      const other = await createTestTenant(pool);
+      const mk = async (tenantId: string, userId: string, name: string, archived: boolean) =>
+        repo.create({
+          id: crypto.randomUUID(),
+          tenantId,
+          firstName: name,
+          lastName: 'X',
+          displayName: `${name} X`,
+          preferredChannel: 'phone',
+          smsConsent: false,
+          isArchived: archived,
+          ...(archived ? { archivedAt: new Date() } : {}),
+          createdBy: userId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      await mk(t.tenantId, t.userId, 'Live', false);
+      const gone = await mk(t.tenantId, t.userId, 'Gone', true);
+      await mk(other.tenantId, other.userId, 'Neighbour', true);
+
+      const list = await repo.findByTenant(t.tenantId, { archivedOnly: true });
+      expect(list.map((c) => c.id)).toEqual([gone.id]);
+      const withMeta = await repo.listWithMeta(t.tenantId, { archivedOnly: true, limit: 10, offset: 0 });
+      expect(withMeta.total).toBe(1);
+      expect(withMeta.data.map((c) => c.id)).toEqual([gone.id]);
     });
   });
 });
