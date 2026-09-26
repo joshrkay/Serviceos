@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "eval": "intent",
+  "mode": "offline",
+  "status": "recorded",
+  "recordedAt": "2026-09-26T16:33:09.271Z",
+  "goldenSet": {
+    "rows": 635,
+    "fingerprint": "7147f9e8f80a5bb1"
+  },
+  "metrics": {
+    "accuracy": 0.7433070866141732,
+    "macroF1": 0.7761126869307621
+  },
+  "tolerance": 0,
+  "recordCommand": "npx tsx packages/voice-eval/run-intent-eval.ts --record-baseline packages/voice-eval/baselines/intent-offline.json"
+}

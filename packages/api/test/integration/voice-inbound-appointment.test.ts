@@ -77,6 +77,7 @@ import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-ro
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const TENANT_DID = '+15125550100';
 const REASON = 'Leaking water heater';
@@ -158,7 +159,7 @@ async function insertTwilioIntegration(pool: Pool, tenantId: string, phoneE164: 
   }
 }
 
-describe('Integration — inbound voice appointment-setting (real Postgres)', () => {
+describe(provesExecution('create_appointment') + 'Integration — inbound voice appointment-setting (real Postgres)', () => {
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let phoneRepo: PgPhoneNumberRepository;

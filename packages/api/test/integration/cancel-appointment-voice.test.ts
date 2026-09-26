@@ -69,6 +69,7 @@ import {
   ExecutionContext,
   createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 const TENANT_TIMEZONE = 'America/Chicago';
 // "Tuesday's Garcia appointment" — the seeded appointment's actual scheduled
@@ -79,7 +80,7 @@ const APPOINTMENT_START = new Date('2026-08-04T14:00:00.000Z'); // Tue 9am Chica
 const APPOINTMENT_END = new Date('2026-08-04T16:00:00.000Z');
 const CANCEL_REASON = "Customer can't make it Tuesday";
 
-describe('Integration — voice cancel_appointment (real Postgres)', () => {
+describe(provesExecution('cancel_appointment') + 'Integration — voice cancel_appointment (real Postgres)', () => {
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let jobRepo: PgJobRepository;

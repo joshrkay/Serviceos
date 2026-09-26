@@ -30,8 +30,9 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — voice create_job → approve → execute → persist + audit', () => {
+describe(provesExecution('create_job') + 'Postgres integration — voice create_job → approve → execute → persist + audit', () => {
   let pool: Pool;
   let jobRepo: PgJobRepository;
   let auditRepo: PgAuditRepository;

@@ -71,6 +71,9 @@ const estimateTokens = (text: string): number => Math.ceil(text.length / CHARS_P
 /** Margin convention: stay under 85% of budget (inverse of the 1.15× pin). */
 const BUDGET_MARGIN = 0.85;
 
+/** The worst-first-turn line only: 86% after #1240's fence id (see the case below). */
+const PER_TURN_FIRST_TURN_MARGIN = 0.86;
+
 /** A deliberately long, entity-rich first utterance. */
 const SAMPLE_UTTERANCE =
   "Hi, this is Maria Delgado-Whitfield calling about the house over on 412 East Oakhurst " +
@@ -216,7 +219,13 @@ describe('classifier prompt budget — per-profile first turn', () => {
       // more characters of plan names on this caller crosses it.
       // #891/#893 (caller framing + draft_estimate grounding line) add
       // ≈22 tok → ≈ 7,630; both were kept to one terse line for this reason.
-      expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * BUDGET_MARGIN);
+      // #1240 (per-request 64-bit fence id on the BEGIN/END lines + the
+      // "only the END line carrying <id> closes this block" rule) adds ≈40
+      // tok → ≈ 7,670 on the plan+account caller. That is a security cost,
+      // so this ONE per-turn line moves 85% → 86% (7,740); the hard ceiling
+      // (9,000, session-cost-tracker) is unchanged and still ≈15% away. Any
+      // further growth must be paid for by trimming, not by raising this.
+      expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * PER_TURN_FIRST_TURN_MARGIN);
     },
   );
 

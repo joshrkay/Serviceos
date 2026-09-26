@@ -45,7 +45,13 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
   sub-sample so runs are comparable. `VOICE_EVAL_COST_CAP_CENTS` (default 500 =
   $5, per script) caps spend: each run projects cost conservatively (no cache
   discount) and **aborts (exit 3) before spending** if the projection exceeds
-  the cap. Exit codes: `1` gate fail, `2` no key, `3` over cost cap.
+  the cap. Exit codes: `1` gate fail, `2` no key, `3` over cost cap, `4` no
+  baseline recorded (see below).
+  The projection prices Haiku at the harness's pinned $3/$15 per MTok (about
+  3x the current $1/$5 list rate), so a cap must be sized to its sample: the
+  scheduled workflow sets it per step (intent N=200 → 1500c, slot N=100 →
+  800c), and `ci-workflow-voice-eval-live.test.ts` fails if a configured sample
+  ever projects over its cap (#839 — the old shared 500c cap sat below both).
 
 ## Run
 
@@ -60,10 +66,37 @@ npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100
 The scheduled CI surface is `.github/workflows/voice-eval-live.yml`
 (weekly cron + `workflow_dispatch`, cost-capped, not PR-blocking).
 
-## Current offline baseline (this pass)
+## Baseline regression gate (#839)
 
-- Intent: ~62% accuracy / ~57% macro-F1 on the held-out rows (rule baseline).
-- Slot: ~87.5% micro-F1 across 305 transcripts (heuristic baseline).
+Both runners take `--baseline <file>` (compare) and `--record-baseline <file>`
+(write). A baseline (`baselines/*.json`, see `baseline.ts`) stores the metrics,
+the golden set they were scored on (row count + order-independent fingerprint
+of every row *and its label*), a `tolerance` (max absolute drop per metric) and
+the one command that re-records it. Compare fails with:
+
+- exit `1` — a metric dropped past `tolerance`, or the golden set changed
+  since the baseline was recorded (re-record it in the same PR, so every
+  corpus/taxonomy change ships with a reviewed baseline diff);
+- exit `4` — the baseline is still an unrecorded `placeholder` (fails closed).
+
+| File | Mode | Metrics | Tolerance | Enforced by |
+|---|---|---|---|---|
+| `intent-offline.json` | offline | accuracy, macroF1 | 0 (deterministic) | PR Checks `voice-eval-gate` + Deploy `voice-quality-gate` |
+| `slot-offline.json` | offline | microF1 + per-slot F1 | 0 (deterministic) | same |
+| `intent-live.json` | live, N=200 | accuracy, macroF1 | 0.05 | `voice-eval-live.yml` (weekly) |
+| `slot-live.json` | live, N=100 | microF1 + per-slot F1 | 0.05 | same |
+
+The offline baselines are recorded (free, deterministic). **The live baselines
+are placeholders** — recording them needs a paid run against the production
+model (~$3 + ~$1 real spend). Either run the `recordCommand` in each file
+locally with a key and commit the result, or dispatch `voice-eval-live.yml`
+with `record_baseline: true` and commit the `voice-eval-live-baselines`
+artifact. Until then the weekly live run exits 4.
+
+## Current offline numbers (2026-09-26)
+
+- Intent: 74.3% accuracy / 77.6% macro-F1 on 635 held-out rows (rule baseline).
+- Slot: 88.5% micro-F1 across 305 transcripts (heuristic baseline).
 
 These are honest baseline numbers from non-ML rules/heuristics. The production
 LLM model is expected to clear 92% / 0.88 in `--live` mode; those numbers are

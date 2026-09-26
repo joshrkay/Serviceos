@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "eval": "slot",
+  "mode": "live",
+  "status": "placeholder",
+  "recordedAt": null,
+  "goldenSet": null,
+  "metrics": {},
+  "tolerance": 0.05,
+  "recordCommand": "ANTHROPIC_API_KEY=... VOICE_EVAL_COST_CAP_CENTS=800 npx tsx packages/voice-eval/run-slot-eval.ts --live --max-utterances 100 --record-baseline packages/voice-eval/baselines/slot-live.json"
+}

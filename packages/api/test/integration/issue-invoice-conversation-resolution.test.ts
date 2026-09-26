@@ -44,8 +44,9 @@ import {
 } from '../../src/proposals/execution/handlers';
 import { IssueInvoiceTaskHandler } from '../../src/ai/orchestration/task-router';
 import { approveProposal } from '../../src/proposals/actions';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — B4: issue_invoice resolves "the one we just drafted" from conversation history', () => {
+describe(provesExecution('issue_invoice') + 'Postgres integration — B4: issue_invoice resolves "the one we just drafted" from conversation history', () => {
   let pool: Pool;
   let proposalRepo: PgProposalRepository;
   let invoiceRepo: PgInvoiceRepository;

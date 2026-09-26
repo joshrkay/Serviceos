@@ -46,6 +46,7 @@ import { InvoiceMilestone } from '../../src/invoices/invoice-schedule';
 import { Invoice } from '../../src/invoices/invoice';
 import { Job } from '../../src/jobs/job';
 import { Proposal } from '../../src/proposals/proposal';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 /** 100.00 split 1/3 – 1/3 – remainder: 3333 + 3333 + 3334 = 10000. */
 const SCHEDULE_TOTAL_CENTS = 10_000;
@@ -62,7 +63,7 @@ interface SeededJob {
   job: Job;
 }
 
-describe('Postgres integration — milestone billing persisted (§8.11)', () => {
+describe(provesExecution('create_invoice_schedule') + 'Postgres integration — milestone billing persisted (§8.11)', () => {
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let scheduleRepo: PgInvoiceScheduleRepository;

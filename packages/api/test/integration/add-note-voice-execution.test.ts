@@ -32,8 +32,9 @@ import {
 } from '../../src/proposals/execution/handlers';
 import { AddNoteTaskHandler } from '../../src/ai/tasks/voice-extended-tasks';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — voice add_note ("Note on the Patel job") → approve → execute → persist + audit', () => {
+describe(provesExecution('add_note') + 'Postgres integration — voice add_note ("Note on the Patel job") → approve → execute → persist + audit', () => {
   let pool: Pool;
   let auditRepo: PgAuditRepository;
   let noteRepo: PgNoteRepository;

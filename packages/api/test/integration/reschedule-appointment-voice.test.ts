@@ -85,6 +85,7 @@ import {
   ExecutionContext,
   createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 // Monday 2026-08-03 noon in America/Chicago (fixed, deterministic anchor for
 // resolveDateTime's forwardDate weekday resolution).
@@ -97,7 +98,7 @@ const ORIGINAL_DURATION_MIN = 120;
 const EXPECTED_START_UTC = '2026-08-06T15:00:00.000Z';
 const EXPECTED_END_UTC = '2026-08-06T17:00:00.000Z';
 
-describe('Integration — voice reschedule_appointment (real Postgres)', () => {
+describe(provesExecution('reschedule_appointment') + 'Integration — voice reschedule_appointment (real Postgres)', () => {
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let jobRepo: PgJobRepository;

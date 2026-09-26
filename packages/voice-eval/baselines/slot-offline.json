@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "eval": "slot",
+  "mode": "offline",
+  "status": "recorded",
+  "recordedAt": "2026-09-26T16:33:17.520Z",
+  "goldenSet": {
+    "rows": 305,
+    "fingerprint": "61ebc082202cd6d1"
+  },
+  "metrics": {
+    "microF1": 0.8849706129303107,
+    "f1.name": 0.8555347091932458,
+    "f1.address": 1,
+    "f1.service_type": 0.9747899159663865,
+    "f1.time_window": 0.625,
+    "f1.problem_description": 0.9078947368421053
+  },
+  "tolerance": 0,
+  "recordCommand": "npx tsx packages/voice-eval/run-slot-eval.ts --record-baseline packages/voice-eval/baselines/slot-offline.json"
+}

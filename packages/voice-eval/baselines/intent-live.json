@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "eval": "intent",
+  "mode": "live",
+  "status": "placeholder",
+  "recordedAt": null,
+  "goldenSet": null,
+  "metrics": {},
+  "tolerance": 0.05,
+  "recordCommand": "ANTHROPIC_API_KEY=... VOICE_EVAL_COST_CAP_CENTS=1500 npx tsx packages/voice-eval/run-intent-eval.ts --live --max-utterances 200 --record-baseline packages/voice-eval/baselines/intent-live.json"
+}

@@ -285,6 +285,11 @@ export interface TenantSettings {
    */
   autoSendAppointmentReminders?: boolean;
   /**
+   * #1033 — text a technician when they are assigned to / moved off an
+   * appointment (in-app push is unaffected). Default true (migration 289).
+   */
+  notifyTechniciansBySms?: boolean;
+  /**
    * Story 10.2 — tenant-configurable reminder cadence. Hours-before-start
    * at which an appointment reminder fires; e.g. [24, 2] sends a reminder a
    * day ahead and again two hours out. Normalized (deduped, 1..720h, ≤5
@@ -654,6 +659,8 @@ export interface UpdateSettingsInput {
   autoApplyInternalUpdates?: boolean;
   /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
   autoSendAppointmentReminders?: boolean;
+  /** #1033 — text technicians on assignment changes. */
+  notifyTechniciansBySms?: boolean;
   /** Story 10.2 — reminder cadence (hours-before-start); e.g. [24, 2]. */
   appointmentReminderOffsetsHours?: number[];
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
