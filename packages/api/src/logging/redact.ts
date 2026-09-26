@@ -124,7 +124,12 @@ export function redactUrlValue(rawUrl: string): string {
   return `${scrubbedPath}?${scrubTokenQueryParams(query)}`;
 }
 
-function walk<T>(input: T, seen: WeakSet<object>, tier: RedactionTier): T {
+function walk<T>(
+  input: T,
+  seen: WeakSet<object>,
+  tier: RedactionTier,
+  piiExempt?: ReadonlySet<string>,
+): T {
   if (input === null || input === undefined) return input;
   if (typeof input !== 'object') return input;
 
@@ -134,7 +139,7 @@ function walk<T>(input: T, seen: WeakSet<object>, tier: RedactionTier): T {
   seen.add(input as object);
 
   if (Array.isArray(input)) {
-    return input.map((v) => walk(v, seen, tier)) as unknown as T;
+    return input.map((v) => walk(v, seen, tier, piiExempt)) as unknown as T;
   }
 
   const out: Record<string, unknown> = {};
@@ -149,11 +154,11 @@ function walk<T>(input: T, seen: WeakSet<object>, tier: RedactionTier): T {
       out[key] = redactUrlValue(value);
       continue;
     }
-    if (tier === 'strict' && isPiiKey(key) && shouldRedactValue(value)) {
+    if (tier === 'strict' && !piiExempt?.has(key) && isPiiKey(key) && shouldRedactValue(value)) {
       out[key] = maskValue(value);
       continue;
     }
-    out[key] = walk(value, seen, tier);
+    out[key] = walk(value, seen, tier, piiExempt);
   }
   return out as unknown as T;
 }
@@ -164,6 +169,33 @@ export function redactSecrets<T>(input: T): T {
 
 export function redactByTier<T>(input: T, tier: RedactionTier): T {
   return walk(input, new WeakSet<object>(), tier);
+}
+
+/**
+ * #1205 — Sentry-event keys that match a PII pattern by NAME but never carry
+ * PII: a stack frame's `filename` / `abs_path` is a source path (`/name/i`
+ * masked every one of them).
+ */
+const SENTRY_STRUCTURAL_KEYS: ReadonlySet<string> = new Set(['filename', 'abs_path']);
+
+/**
+ * #1205 — `beforeSend` redaction for a Sentry event. Strict tier everywhere
+ * EXCEPT:
+ *   - `tags`: only ever set from already-redacted sources
+ *     (monitoring/capture-server-error.ts — route pattern, request id, tenant
+ *     id). Walking them masked the tenant_id tag (`/tenant/i`) so events could
+ *     not be filtered by tenant. Secret-shaped values are still scrubbed.
+ *   - stack-frame filenames (see SENTRY_STRUCTURAL_KEYS).
+ */
+export function redactSentryEvent<T>(event: T): T {
+  if (!event || typeof event !== 'object') return event;
+  const { tags, ...rest } = event as Record<string, unknown>;
+  const out = walk(rest, new WeakSet<object>(), 'strict', SENTRY_STRUCTURAL_KEYS) as Record<
+    string,
+    unknown
+  >;
+  if (tags !== undefined) out.tags = redactByTier(tags, 'standard');
+  return out as T;
 }
 
 export function redactSentryUser(user: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
