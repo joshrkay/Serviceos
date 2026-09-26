@@ -261,7 +261,7 @@ describe('Postgres integration — canonical technician assignment path (#1279)'
   });
 
   it('migration 288 backfills assignment rows from job-level values where missing, skips clashes, and is one-shot', async () => {
-    const migration = (MIGRATIONS as Record<string, string>)['288_backfill_appointment_assignments_from_jobs'];
+    const migration = (MIGRATIONS as Record<string, string>)['290_backfill_appointment_assignments_from_jobs'];
     expect(migration, 'migration 288 must exist').toBeTruthy();
 
     const techId = await makeTechnician();
