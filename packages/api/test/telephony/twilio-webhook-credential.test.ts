@@ -12,7 +12,10 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Pool } from 'pg';
-import { createTwilioWebhookCredentialResolver } from '../../src/telephony/twilio-webhook-credential';
+import {
+  createTwilioWebhookCredentialResolver,
+  createSubaccountCredentialView,
+} from '../../src/telephony/twilio-webhook-credential';
 import { encrypt } from '../../src/integrations/crypto';
 
 const ENC_KEY = 'b'.repeat(64);
@@ -31,6 +34,7 @@ interface Row {
   tenant_id: string;
   subaccount_sid: string | null;
   auth_token_primary_enc: string | null;
+  auth_token_secondary_enc?: string | null;
 }
 
 /**
@@ -279,6 +283,127 @@ describe('createTwilioWebhookCredentialResolver (#1072)', () => {
     expect(await resolve({ to: A_DID })).toMatchObject({
       outcome: 'misconfigured',
       reason: 'no_twilio_auth_token_configured',
+    });
+  });
+});
+
+/**
+ * #1084 (2) — zero-downtime token rotation. `webhooks/routes.ts` verifies
+ * against `auth_token_primary` then `auth_token_secondary`; the telephony
+ * resolver read only the primary, so during a rotation's overlap every
+ * `/api/telephony/*` webhook signed with the other token 403'd. The resolver
+ * now hands the secondary to the middleware as a second verification attempt,
+ * on both paths that answer with a tenant's own credential.
+ */
+describe('createTwilioWebhookCredentialResolver — secondary auth token (#1084)', () => {
+  const A_SECONDARY = 'tenant-a-rotated-token';
+  const withSecondary = (secondary: string | null): Row => ({
+    ...tenantRow(A_TENANT, A_SUBACCOUNT, A_TOKEN),
+    auth_token_secondary_enc: secondary,
+  });
+
+  it('tenant_integration path: carries the dialled-number owner\'s secondary token', async () => {
+    const { pool } = stubPool([withSecondary(encrypt(A_SECONDARY, ENC_KEY))]);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+
+    expect(await resolve({ accountSid: A_SUBACCOUNT, to: A_DID })).toEqual({
+      outcome: 'verify',
+      authToken: A_TOKEN,
+      secondaryAuthToken: A_SECONDARY,
+      path: 'tenant_integration',
+      tenantId: A_TENANT,
+    });
+  });
+
+  it('subaccount_lookup path: carries the subaccount tenant\'s secondary token', async () => {
+    const { pool } = stubPool([withSecondary(encrypt(A_SECONDARY, ENC_KEY))]);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+
+    expect(await resolve({ accountSid: A_SUBACCOUNT })).toEqual({
+      outcome: 'verify',
+      authToken: A_TOKEN,
+      secondaryAuthToken: A_SECONDARY,
+      path: 'subaccount_lookup',
+      tenantId: A_TENANT,
+    });
+  });
+
+  it('asks for the secondary column on every tenant lookup', async () => {
+    const { pool, statements } = stubPool([withSecondary(null)]);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+
+    await resolve({ to: A_DID });
+    await resolve({ accountSid: A_SUBACCOUNT });
+    await resolve({ tenantId: A_TENANT });
+
+    const selects = statements.filter((sql) => /FROM tenant_integrations/.test(sql));
+    expect(selects).toHaveLength(3);
+    for (const sql of selects) expect(sql).toContain('auth_token_secondary_enc');
+  });
+
+  it('an undecryptable secondary is dropped (logged), never fails a request the primary can verify', async () => {
+    const { pool } = stubPool([withSecondary('not-a-valid-ciphertext')]);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+
+    expect(await resolve({ to: A_DID })).toEqual({
+      outcome: 'verify',
+      authToken: A_TOKEN,
+      path: 'tenant_integration',
+      tenantId: A_TENANT,
+    });
+  });
+});
+
+/**
+ * #1084 (4) — the whisper mount's AccountSid-only view. It used to be the
+ * plain-string getter, so `requireTwilioSignature` logged every whisper GET as
+ * `deployment_fallback` even when tenant A's subaccount token verified it —
+ * and, because a bare string carries no tenant, the whisper route had no
+ * verified tenant to check its cache entry against (#1084 (3)).
+ */
+describe('createSubaccountCredentialView (#1084)', () => {
+  it('answers with the subaccount decision itself — path and tenant intact', async () => {
+    const { pool } = stubPool(ROWS);
+    const view = createSubaccountCredentialView(
+      createTwilioWebhookCredentialResolver({ pool, env: baseEnv }),
+      baseEnv,
+    );
+
+    // A `To` in the payload (the dispatcher's number) is deliberately ignored.
+    expect(await view({ accountSid: A_SUBACCOUNT, to: B_DID })).toEqual({
+      outcome: 'verify',
+      authToken: A_TOKEN,
+      path: 'subaccount_lookup',
+      tenantId: A_TENANT,
+    });
+  });
+
+  it('an unknown subaccount answers the deployment token, labelled as such', async () => {
+    const { pool } = stubPool(ROWS);
+    const view = createSubaccountCredentialView(
+      createTwilioWebhookCredentialResolver({ pool, env: baseEnv }),
+      baseEnv,
+    );
+
+    expect(await view({ accountSid: 'ACunknown' })).toEqual({
+      outcome: 'verify',
+      authToken: DEPLOYMENT_TOKEN,
+      path: 'deployment_fallback',
+    });
+  });
+
+  it('keeps the pre-#1072 whisper behaviour on a non-verify decision: the deployment token, never a 500', async () => {
+    const { pool } = stubPool(ROWS);
+    const env = () => ({ ...baseEnv(), TENANT_ENCRYPTION_KEY: undefined }) as NodeJS.ProcessEnv;
+    const view = createSubaccountCredentialView(
+      createTwilioWebhookCredentialResolver({ pool, env }),
+      env,
+    );
+
+    expect(await view({ accountSid: A_SUBACCOUNT })).toEqual({
+      outcome: 'verify',
+      authToken: DEPLOYMENT_TOKEN,
+      path: 'deployment_fallback',
     });
   });
 });

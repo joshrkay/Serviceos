@@ -6,7 +6,9 @@ import {
   verifyTwilioSignature,
   requireTwilioSignature,
   reconstructWebhookUrl,
+  getVerifiedTwilioTenantId,
   type TwilioAuthTokenGetter,
+  type TwilioCredentialDecision,
 } from '../../src/telephony/twilio-signature';
 
 const AUTH_TOKEN = 'test-auth-token-abc123';
@@ -280,6 +282,66 @@ describe('requireTwilioSignature — credential decisions (#1072)', () => {
       { to: '+15125550888' },
       { to: '+15125550777' },
     ]);
+  });
+});
+
+describe('requireTwilioSignature — secondary auth token (#1084)', () => {
+  const PRIMARY = 'primary-token';
+  const SECONDARY = 'secondary-token';
+  const params = { CallSid: 'CA1084', From: '+15125550100', To: '+15125550999' };
+  const sigWith = (token: string) =>
+    twilio.getExpectedTwilioSignature(token, 'https://example.com/voice', params);
+
+  function build(decision: TwilioCredentialDecision) {
+    const handler = vi.fn((_req: express.Request, res: express.Response) => {
+      res.status(200).json({ verifiedTenant: getVerifiedTwilioTenantId(_req) ?? null });
+    });
+    const app = express();
+    app.use(express.urlencoded({ extended: false }));
+    app.use(requireTwilioSignature(() => decision, { publicBaseUrl: 'https://example.com' }));
+    app.post('/voice', handler);
+    return { app, handler };
+  }
+
+  const rotating: TwilioCredentialDecision = {
+    outcome: 'verify',
+    authToken: PRIMARY,
+    secondaryAuthToken: SECONDARY,
+    path: 'tenant_integration',
+    tenantId: 'tenant-rotating',
+  };
+
+  it('accepts a request signed with the secondary token during a rotation overlap', async () => {
+    const { app } = build(rotating);
+    const res = await request(app)
+      .post('/voice')
+      .set('X-Twilio-Signature', sigWith(SECONDARY))
+      .type('form')
+      .send(params);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ verifiedTenant: 'tenant-rotating' });
+  });
+
+  it('still accepts the primary', async () => {
+    const { app } = build(rotating);
+    const res = await request(app)
+      .post('/voice')
+      .set('X-Twilio-Signature', sigWith(PRIMARY))
+      .type('form')
+      .send(params);
+    expect(res.status).toBe(200);
+  });
+
+  it('refuses a signature neither token produced', async () => {
+    const { app, handler } = build(rotating);
+    const res = await request(app)
+      .post('/voice')
+      .set('X-Twilio-Signature', sigWith('some-other-token'))
+      .type('form')
+      .send(params);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 

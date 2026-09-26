@@ -193,7 +193,7 @@ export async function runHandoffContextVerify(opts?: {
 
   const sms = sent[0];
   const escMatch = sms?.body.match(/\/c\/(esc_[A-Za-z0-9-]+)/);
-  const whisperText = escMatch ? whisperCache.get(escMatch[1]) : undefined;
+  const whisperText = escMatch ? whisperCache.get(escMatch[1])?.text : undefined;
   const dialTwiml = pendingTransferTwiml.get(session.id);
 
   // Rebuild summary expectations from SMS/whisper alone when panel isn't

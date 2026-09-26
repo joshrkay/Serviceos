@@ -2502,7 +2502,7 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
         }
 
         if (
