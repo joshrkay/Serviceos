@@ -86,6 +86,7 @@ import {
 } from '../../audit/audit';
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import { pinLockAlertBody, type PinLockAlertRetryScheduler } from './voice-approval-pin-lock-alert';
+import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import {
@@ -655,8 +656,8 @@ async function tenantPinLockWithholdsLinks(
  * write → `failed`: the caller refuses and never compares the code.
  *
  * Correctness relies on the reservation being COMMITTED before the count that
- * follows it; voice approval runs on the Twilio webhook path, outside any
- * request-scoped transaction, so each audit write commits on its own.
+ * follows it, so the write always runs outside any request-scoped transaction
+ * (#1238 item 3 — enforced, not assumed).
  */
 async function reservePinAttempt(
   deps: VoiceApprovalDeps,
@@ -668,8 +669,13 @@ async function reservePinAttempt(
     logger.error('voice approval PIN attempt cannot be reserved (no audit repository) — refusing without comparing', context);
     return { status: 'failed' };
   }
+  const auditRepo = deps.auditRepo;
   try {
-    const saved = await deps.auditRepo.create(
+    // #1238 item 3 — ALWAYS its own committed transaction. Inside an /api
+    // request transaction the write would otherwise join it and stay invisible
+    // to parallel attempts' re-count until the response commits (the in-app
+    // voice path runs there), reopening the race #1233 closed.
+    const saved = await runOutsideRequestTransaction(() => auditRepo.create(
       createAuditEvent({
         tenantId: ref.tenantId,
         actorId: VOICE_APPROVAL_ACTOR_ID,
@@ -680,7 +686,7 @@ async function reservePinAttempt(
         correlationId: ref.sessionId,
         metadata: { channel: 'voice', sessionId: ref.sessionId },
       }),
-    );
+    ));
     return { status: 'reserved', attemptId: saved.id };
   } catch (err) {
     logger.error('voice approval PIN attempt reservation failed — refusing without comparing (fail closed)', {
