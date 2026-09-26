@@ -33,6 +33,7 @@ import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgFeedbackRequestRepository } from '../../src/feedback/pg-feedback-request';
 import { Proposal, ProposalType, createProposal } from '../../src/proposals/proposal';
 import { transitionProposal } from '../../src/proposals/lifecycle';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 /**
  * QUALITY-2026-07-12 WS3 — real-Postgres atomicity proof for the four
@@ -235,7 +236,7 @@ async function makeApproved(
   return proposalRepo.create(p);
 }
 
-describe('WS3 — voice mutation handler audit/consent atomicity (real Postgres)', () => {
+describe(provesExecution('update_customer', 'confirm_appointment', 'request_feedback') + 'WS3 — voice mutation handler audit/consent atomicity (real Postgres)', () => {
   let pool: Pool;
   let proposalRepo: PgProposalRepository;
   let executionRepo: PgProposalExecutionRepository;

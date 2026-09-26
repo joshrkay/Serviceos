@@ -46,6 +46,7 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -59,7 +60,7 @@ function mockGateway(jsonContent: string): LLMGateway {
   } as unknown as LLMGateway;
 }
 
-describe('Postgres integration — voice draft_estimate → approve → execute → persist + audit', () => {
+describe(provesExecution('draft_estimate') + 'Postgres integration — voice draft_estimate → approve → execute → persist + audit', () => {
   let pool: Pool;
   let estimateRepo: PgEstimateRepository;
   let settingsRepo: PgSettingsRepository;
@@ -275,7 +276,7 @@ describe('Postgres integration — voice draft_estimate → approve → execute 
   // NOT executed locally (no Docker in this environment) — typechecked
   // against tsconfig.build.json and reviewed by inspection; run in PR CI
   // against real Postgres, same as every other test in this file.
-  it('create_change_order: persists an estimate row flagged is_change_order and linked to the EXISTING job', async () => {
+  it(provesExecution('create_change_order') + 'create_change_order: persists an estimate row flagged is_change_order and linked to the EXISTING job', async () => {
     const handler = new CreateChangeOrderTaskHandler(catalogRepo);
     const result = await handler.handle({
       tenantId: tenant.tenantId,

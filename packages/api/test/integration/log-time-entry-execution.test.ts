@@ -49,8 +49,9 @@ import {
 } from '../../src/proposals/execution/handlers';
 import { LogTimeEntryTaskHandler } from '../../src/ai/tasks/voice-extended-tasks';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — voice log_time_entry ("Clock 2 hours on the Patel job") → approve → execute → persist + audit', () => {
+describe(provesExecution('log_time_entry') + 'Postgres integration — voice log_time_entry ("Clock 2 hours on the Patel job") → approve → execute → persist + audit', () => {
   let pool: Pool;
   let jobRepo: PgJobRepository;
   let auditRepo: PgAuditRepository;

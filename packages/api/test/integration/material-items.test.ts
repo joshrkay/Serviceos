@@ -38,6 +38,7 @@ import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-ro
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 /**
  * Insert the customer -> location -> job FK chain under tenant RLS context.
@@ -600,7 +601,7 @@ describe('Postgres integration — material items', () => {
     };
   }
 
-  describe('add_material end-to-end: task -> approve -> execute -> material_items + audit (#1019 6.9)', () => {
+  describe(provesExecution('add_material') + 'add_material end-to-end: task -> approve -> execute -> material_items + audit (#1019 6.9)', () => {
     it('persists quantity and the spoken unit, and emits a readable material.requested audit event', async () => {
       const t = await createTestTenant(pool);
       const auditRepo = new PgAuditRepository(pool);

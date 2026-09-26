@@ -56,8 +56,9 @@ import {
   ExecutionContext,
   createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Integration — voice reassign_appointment (real Postgres)', () => {
+describe(provesExecution('reassign_appointment') + 'Integration — voice reassign_appointment (real Postgres)', () => {
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let assignmentRepo: PgAssignmentRepository;

@@ -42,6 +42,7 @@ import { runExecutionSweep } from '../../src/workers/execution-worker';
 import { createLogger } from '../../src/logging/logger';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -56,7 +57,7 @@ function mockGateway(jsonContent: string): LLMGateway {
   } as unknown as LLMGateway;
 }
 
-describe('Postgres integration — voice update_brand_voice → approve → execute → persist + audit', () => {
+describe(provesExecution('update_brand_voice') + 'Postgres integration — voice update_brand_voice → approve → execute → persist + audit', () => {
   let pool: Pool;
   let auditRepo: PgAuditRepository;
   let brandVoiceRepo: PgBrandVoiceRepository;

@@ -62,6 +62,7 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 import { ReviewResponseExecutionHandler } from '../../src/proposals/execution/review-response-handler';
 
 const DOLLARS_80 = 8000;
@@ -75,7 +76,7 @@ interface SeededTenant {
   anchorProposalId: string;
 }
 
-describe('Postgres integration — §8.9 row 9.5 service credits without over-giving', () => {
+describe(provesExecution('review_response_proposal') + 'Postgres integration — §8.9 row 9.5 service credits without over-giving', () => {
   let pool: Pool;
   let customerRepo: PgCustomerRepository;
   let proposalRepo: PgProposalRepository;

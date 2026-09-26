@@ -38,8 +38,9 @@ import { RecordPaymentExecutionHandler } from '../../src/proposals/execution/voi
 import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../src/proposals/proposal';
+import { provesExecution } from '../../src/capabilities/proven-bar';
 
-describe('Postgres integration — record_payment / record_refund proposal flow (A22/A37)', () => {
+describe(provesExecution('record_payment', 'record_refund') + 'Postgres integration — record_payment / record_refund proposal flow (A22/A37)', () => {
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let paymentRepo: PgPaymentRepository;
