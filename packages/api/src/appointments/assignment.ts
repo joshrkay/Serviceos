@@ -156,6 +156,59 @@ export function validateAssignmentInput(input: CreateAssignmentInput): string[] 
   return errors;
 }
 
+/**
+ * Double-booking pre-flight: throws ConflictError (409) when the technician
+ * already holds an active appointment overlapping `window`. Standalone so a
+ * caller can refuse the booking BEFORE writing the appointment row (#1279 —
+ * "create appointment with technician" must not leave an orphan behind); the
+ * race-safe backstop remains the `no_double_booking` EXCLUDE constraint.
+ */
+export async function assertNoDoubleBooking(
+  tenantId: string,
+  technicianId: string,
+  window: { start: Date; end: Date; excludeAppointmentId?: string },
+  repository: AssignmentRepository,
+  appointmentRepo: Pick<AppointmentRepository, 'findById'>,
+): Promise<void> {
+  const techAssignments = await repository.findByTechnician(tenantId, technicianId);
+  const otherApptIds = Array.from(
+    new Set(
+      techAssignments
+        .map((a) => a.appointmentId)
+        .filter((apptId) => apptId !== window.excludeAppointmentId),
+    ),
+  );
+  const others: Array<{
+    id: string;
+    technicianId: string;
+    scheduledStart: Date;
+    scheduledEnd: Date;
+    status: AppointmentStatus;
+  }> = [];
+  for (const apptId of otherApptIds) {
+    const appt = await appointmentRepo.findById(tenantId, apptId);
+    if (appt) {
+      others.push({
+        id: appt.id,
+        technicianId,
+        scheduledStart: appt.scheduledStart,
+        scheduledEnd: appt.scheduledEnd,
+        status: appt.status,
+      });
+    }
+  }
+  const conflicts = detectOverlappingAppointments(
+    technicianId,
+    window.start,
+    window.end,
+    others,
+    window.excludeAppointmentId,
+  );
+  if (conflicts.length > 0) {
+    throw new ConflictError(`Technician is already booked at this time: ${conflicts[0].message}`);
+  }
+}
+
 export async function assignTechnician(
   input: CreateAssignmentInput,
   repository: AssignmentRepository,
@@ -176,45 +229,13 @@ export async function assignTechnician(
   if (deps.appointmentRepo) {
     const target = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
     if (target) {
-      const techAssignments = await repository.findByTechnician(input.tenantId, input.technicianId);
-      const otherApptIds = Array.from(
-        new Set(
-          techAssignments
-            .map((a) => a.appointmentId)
-            .filter((apptId) => apptId !== input.appointmentId),
-        ),
-      );
-      const others: Array<{
-        id: string;
-        technicianId: string;
-        scheduledStart: Date;
-        scheduledEnd: Date;
-        status: AppointmentStatus;
-      }> = [];
-      for (const apptId of otherApptIds) {
-        const appt = await deps.appointmentRepo.findById(input.tenantId, apptId);
-        if (appt) {
-          others.push({
-            id: appt.id,
-            technicianId: input.technicianId,
-            scheduledStart: appt.scheduledStart,
-            scheduledEnd: appt.scheduledEnd,
-            status: appt.status,
-          });
-        }
-      }
-      const conflicts = detectOverlappingAppointments(
+      await assertNoDoubleBooking(
+        input.tenantId,
         input.technicianId,
-        target.scheduledStart,
-        target.scheduledEnd,
-        others,
-        input.appointmentId,
+        { start: target.scheduledStart, end: target.scheduledEnd, excludeAppointmentId: input.appointmentId },
+        repository,
+        deps.appointmentRepo,
       );
-      if (conflicts.length > 0) {
-        throw new ConflictError(
-          `Technician is already booked at this time: ${conflicts[0].message}`,
-        );
-      }
 
       // Availability preconditions (contract #12/#13) — see the deps doc.
       await assertTechnicianAvailability(

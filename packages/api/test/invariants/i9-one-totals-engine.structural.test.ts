@@ -224,26 +224,6 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     as: 'cross-document-aggregate',
     why: 'Pipeline value for the daily digest — sums `e.totals.totalCents` across sent estimates.',
   },
-  {
-    at: 'src/proposals/resolve-line.ts:237',
-    as: 'violation',
-    why: '`Math.round(chosen.unitPriceCents * qty)` duplicates `calculateLineItemTotal`. Rounded, so numerically right today — a second definition tomorrow.',
-  },
-  {
-    at: 'src/ai/resolution/catalog-resolver.ts:623',
-    as: 'violation',
-    why: '`Math.round(item.unitPriceCents * qty)` duplicates `calculateLineItemTotal`, inside the catalog resolver that CLAUDE.md makes the grounding authority for AI-drafted prices.',
-  },
-  {
-    at: 'src/ai/tasks/invoice-task.ts:305',
-    as: 'violation',
-    why: '`Math.round(unitPriceCents * qty)` duplicates `calculateLineItemTotal` on the invoice drafting path.',
-  },
-  {
-    at: 'src/routes/estimates.ts:246',
-    as: 'violation',
-    why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
-  },
 ];
 
 function classificationOf(at: string): Classification | null {
@@ -287,14 +267,12 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
   });
 
   /**
-   * I9′ AS WRITTEN — the honest state. On this branch three recorded
-   * violations remain (estimate-editor, execution/handlers, routes/invoices —
-   * the ones PR #1349 routes through the engine). Once BOTH lanes land the
-   * inventory has no `violation` left, this starts PASSING, `it.fails`
-   * fails, and it must be flipped to a plain `it` (row re-graded).
+   * I9′ AS WRITTEN — holds. PR #1349 and PR #1356 (#1064 lanes B and G)
+   * together routed all seven recorded violations through the engine, so
+   * the inventory has no `violation` left.
    */
-  it.fails(
-    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: #1064 fixed 3 of 7 sites; 4 remain)',
+  it(
+    'I9′ as written — no module outside the engine computes document totals',
     () => {
       const violations = totalsMathOutsideEngine([SRC]).filter(
         (h) => classificationOf(h.at) === 'violation',

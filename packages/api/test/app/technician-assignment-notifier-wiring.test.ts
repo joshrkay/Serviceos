@@ -62,4 +62,14 @@ describe('createApp wires the technician-assignment notifier (4.11)', () => {
     expect(registered.length).toBeGreaterThan(0);
     expect(registered[0]).toBeDefined();
   });
+
+  it('#1033 — wires the tenant SMS toggle and the 60s churn window', async () => {
+    const { TECH_ASSIGNMENT_SMS_CHURN_WINDOW_MS } = await import(
+      '../../src/appointments/assignment-notifications'
+    );
+    const deps = (registered[0] as { deps: Record<string, unknown> }).deps;
+    expect(TECH_ASSIGNMENT_SMS_CHURN_WINDOW_MS).toBe(60_000);
+    expect(deps.smsChurnWindowMs).toBe(TECH_ASSIGNMENT_SMS_CHURN_WINDOW_MS);
+    expect(typeof (deps.settingsRepo as { findByTenant?: unknown })?.findByTenant).toBe('function');
+  });
 });

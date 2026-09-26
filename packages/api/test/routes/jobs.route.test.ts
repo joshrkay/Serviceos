@@ -692,3 +692,40 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     expect(res.body.message).toBe('Estimate not found');
   });
 });
+
+describe('PUT /api/jobs/:id — assignedTechnicianId is derived, never written directly (#1279)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('refuses assignedTechnicianId with 400 and leaves the job untouched', async () => {
+    const created = await request(app).post('/api/jobs').send({
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      summary: 'Derived tech field',
+    });
+    const res = await request(app)
+      .put(`/api/jobs/${created.body.id}`)
+      .send({ assignedTechnicianId: '11111111-1111-4111-8111-111111111111', summary: 'Changed' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.message).toMatch(/assignment/i);
+
+    const after = await request(app).get(`/api/jobs/${created.body.id}`);
+    expect(after.body.assignedTechnicianId).toBeUndefined();
+    expect(after.body.summary).toBe('Derived tech field');
+  });
+
+  it('still accepts ordinary field edits', async () => {
+    const created = await request(app).post('/api/jobs').send({
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      summary: 'Before',
+    });
+    const res = await request(app).put(`/api/jobs/${created.body.id}`).send({ summary: 'After' });
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toBe('After');
+  });
+});

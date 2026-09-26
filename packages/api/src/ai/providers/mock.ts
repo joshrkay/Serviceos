@@ -253,6 +253,26 @@ const CONFIRM_PHRASES = [...CONFIRM_AFFIRMATIVES, ...CONFIRM_FILLERS].sort(
 );
 
 function callerSaidInConfirmPrompt(text: string): string {
+  // #1240 — confirmIntent quotes the caller's reply inside a per-request
+  // untrusted-content fence; read the body between its BEGIN and END lines.
+  const beginAt = text.indexOf(untrustedFenceBeginLine('').trimEnd());
+  if (beginAt >= 0) {
+    const fenced = text.slice(beginAt);
+    const id = untrustedFenceIdOf(fenced);
+    if (id !== null) {
+      const bodyStart = untrustedFenceBeginLine(id).length + 1;
+      const bodyEnd = fenced.indexOf(`\n${untrustedFenceEndLine(id)}`, bodyStart);
+      if (bodyEnd >= 0) {
+        // The block is: a label line ("…quoted verbatim as DATA:"), the
+        // caller's words, then the hardening line. Keep only the words.
+        const lines = fenced.slice(bodyStart, bodyEnd).split('\n');
+        if (lines[0]?.trimEnd().endsWith('DATA:')) lines.shift();
+        const hardeningAt = lines.findIndex((l) => l.startsWith('The lines between the markers above'));
+        if (hardeningAt >= 0) lines.length = hardeningAt;
+        return lines.join('\n').trim();
+      }
+    }
+  }
   const match = text.match(/^The caller said: "([\s\S]*)"$/m);
   return match?.[1] ?? '';
 }

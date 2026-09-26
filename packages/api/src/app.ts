@@ -97,6 +97,7 @@ import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import {
   TechnicianAssignmentNotifier,
+  TECH_ASSIGNMENT_SMS_CHURN_WINDOW_MS,
   setTechnicianAssignmentNotifier,
 } from './appointments/assignment-notifications';
 import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
@@ -5080,6 +5081,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
       delayNotificationCoordinator,
+      // #1279 — canonical appointment-level assignment writes.
+      assignment: { assignmentRepo, userRepo, workingHoursRepo, unavailableBlockRepo },
     }, auditRepo)
   );
   // UC-3 — presence store goes cluster-wide when REDIS_URL is set (in-memory
@@ -5529,6 +5532,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               }),
           }
         : {}),
+      // #1033 — per-tenant toggle (default ON) + churn window so rapid
+      // assign/unassign/reassign texts only the final state.
+      settingsRepo,
+      smsChurnWindowMs: TECH_ASSIGNMENT_SMS_CHURN_WINDOW_MS,
       logger: requestLogger,
     }),
   );
