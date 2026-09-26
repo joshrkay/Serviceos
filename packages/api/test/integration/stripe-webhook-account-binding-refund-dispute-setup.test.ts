@@ -698,8 +698,21 @@ describe('Postgres integration — #1109 refund, dispute and saved-card Stripe e
         { tenant_id: tenantA.tenantId, customer_id: customerId },
       ]);
       expect((await webhookRow(eventId))?.status).toBe('processed');
-      // No refusal was audited for the legit delivery.
-      expect(await auditRows(tenantA.tenantId)).toHaveLength(auditBefore);
+      // No refusal was audited for the legit delivery — but #1057 the save
+      // itself now leaves exactly one durable, tenant-scoped audit row (a
+      // stored card arms later off-session charging).
+      const { rows: pmRows } = await pool.query<{ id: string }>(
+        `SELECT id FROM customer_payment_methods WHERE stripe_payment_method_id = $1`,
+        [paymentMethodId],
+      );
+      const rows = await auditRows(tenantA.tenantId);
+      expect(rows).toHaveLength(auditBefore + 1);
+      const savedEvent = rows[rows.length - 1];
+      expect(savedEvent.event_type).toBe('payment_method.saved');
+      expect(savedEvent.entity_id).toBe(pmRows[0].id);
+      expect(savedEvent.metadata.customerId).toBe(customerId);
+      expect(savedEvent.metadata.brand).toBe('visa');
+      expect(savedEvent.metadata.isDefault).toBe(true);
     });
   });
 

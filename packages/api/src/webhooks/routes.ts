@@ -916,7 +916,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }
           }
 
-          if (deps.auditRepo) {
+          // #1075 — gated on result.created: bootstrapTenant's findByOwner
+          // guard makes a genuinely re-delivered signup (distinct svix ids,
+          // same Clerk user) return `created: false` on the second delivery.
+          // Without this gate that redelivery wrote a SECOND
+          // `tenant.signup.bootstrap.completed` row for a tenant that was
+          // only ever bootstrapped once, over-counting anything that reads
+          // signups off `audit_events`.
+          if (deps.auditRepo && result.created) {
             await deps.auditRepo.create(createAuditEvent({
               tenantId: result.tenantId,
               actorId: userId,
@@ -1284,6 +1291,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // replay finds the row already stored and no-ops.
       if (event.type === 'setup_intent.succeeded') {
         const si = event.data.object as {
+          id?: string;
           customer?: string;
           payment_method?: string;
           metadata?: { tenant_id?: string; customer_id?: string };
@@ -1367,7 +1375,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               siTenantId,
               siCustomerId,
             );
-            await deps.customerPaymentMethodRepo.create({
+            const savedPaymentMethod = await deps.customerPaymentMethodRepo.create({
               id: randomUUID(),
               tenantId: siTenantId,
               customerId: siCustomerId,
@@ -1387,6 +1395,32 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             logger.info('Saved customer payment method from setup_intent.succeeded', {
               tenantId: siTenantId,
             });
+
+            // #1057 — every other money mutation emits an audit event; a
+            // stored card (which arms later off-session charging) must
+            // leave the same durable, tenant-scoped trail. Gated by the
+            // `!already` check above so a re-delivered event doesn't write
+            // a second row for the same card.
+            if (deps.auditRepo) {
+              await deps.auditRepo.create(createAuditEvent({
+                tenantId: siTenantId,
+                actorId: 'system:stripe_webhook',
+                actorRole: 'system',
+                eventType: 'payment_method.saved',
+                entityType: 'payment_method',
+                entityId: savedPaymentMethod.id,
+                correlationId: si.id,
+                metadata: {
+                  customerId: siCustomerId,
+                  brand,
+                  last4,
+                  expMonth,
+                  expYear,
+                  isDefault: savedPaymentMethod.isDefault,
+                  stripeAccountId: connectedAccountId ?? null,
+                },
+              }));
+            }
           }
         }
         await webhookRepo.updateStatus(webhookEvent.id, 'processed');
