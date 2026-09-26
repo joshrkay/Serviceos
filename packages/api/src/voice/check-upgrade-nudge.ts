@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { recordFunnelEvent } from '../analytics/posthog';
 import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { TRIAL_MINUTE_LIMITS } from './trial-limits';
+import { readTenantBillingState } from '../billing/tenant-billing-state';
 import { loadConfig } from '../shared/config';
 
 /**
@@ -44,16 +45,8 @@ export async function checkAndFireUpgradeNudge(
 ): Promise<{ fired: boolean }> {
   const { pool } = deps;
 
-  const tenantRes = await pool.query<{
-    subscription_status: string | null;
-    owner_email: string | null;
-    owner_id: string | null;
-  }>(
-    `SELECT subscription_status, owner_email, owner_id FROM tenants WHERE id = $1`,
-    [tenantId],
-  );
-  const tenant = tenantRes.rows[0];
-  if (!tenant || tenant.subscription_status !== 'trialing') return { fired: false };
+  const tenant = await readTenantBillingState(pool, tenantId);
+  if (!tenant || tenant.status !== 'trialing') return { fired: false };
 
   const settingsRes = await pool.query<{ onboarding_upgrade_prompt_shown_at: Date | null }>(
     `SELECT onboarding_upgrade_prompt_shown_at FROM tenant_settings WHERE tenant_id = $1`,
@@ -82,16 +75,16 @@ export async function checkAndFireUpgradeNudge(
   if ((updateRes.rowCount ?? 0) === 0) return { fired: false };
 
   recordFunnelEvent({
-    distinctId: tenant.owner_id ?? tenantId,
+    distinctId: tenant.ownerId ?? tenantId,
     event: 'trial_minutes_milestone',
     properties: { tenant_id: tenantId, trial_minutes_used: Math.floor(billableSeconds / 60) },
   });
 
-  if (deps.sendEmail && tenant.owner_email) {
+  if (deps.sendEmail && tenant.ownerEmail) {
     try {
       const webUrl = deps.webUrl ?? loadConfig().publicOrigins.web;
       await deps.sendEmail({
-        to: tenant.owner_email,
+        to: tenant.ownerEmail,
         subject: "Your AI agent is earning — lock in your subscription",
         text:
           `You've used ${TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS / 60} of your ` +

@@ -11,6 +11,7 @@ import { recordFunnelEvent } from '../analytics/posthog';
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { AiUsageReader } from './ai-usage';
+import { readTenantBillingState } from './tenant-billing-state';
 
 export type UsageAlertThreshold = 'included_80' | 'included_100' | 'cap_reached';
 
@@ -52,15 +53,8 @@ function dollars(cents: number): string {
 }
 
 export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): Promise<void> {
-  const tenant = await deps.pool.query<{
-    subscription_status: string | null;
-    owner_email: string | null;
-    owner_id: string | null;
-  }>(
-    `SELECT subscription_status, owner_email, owner_id FROM tenants WHERE id = $1`,
-    [tenantId],
-  );
-  if (tenant.rows[0]?.subscription_status !== 'active') return;
+  const tenant = await readTenantBillingState(deps.pool, tenantId);
+  if (tenant?.status !== 'active') return;
 
   const usage = await new AiUsageReader(deps.pool).getUsage(tenantId);
   if (usage.kind !== 'period') return;
@@ -74,7 +68,7 @@ export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): 
   const claimed = await new PgUsageAlertLedger(deps.pool).claim(tenantId, usage.periodStart, reached);
   for (const threshold of claimed) {
     recordFunnelEvent({
-      distinctId: tenant.rows[0]?.owner_id ?? tenantId,
+      distinctId: tenant.ownerId ?? tenantId,
       event: 'overage_threshold',
       properties: {
         tenant_id: tenantId,
@@ -85,7 +79,7 @@ export async function checkUsageAlerts(deps: UsageAlertDeps, tenantId: string): 
     });
   }
   const highest = claimed[claimed.length - 1];
-  const to = tenant.rows[0]?.owner_email;
+  const to = tenant.ownerEmail;
   if (!highest || !to || !deps.sendEmail) return;
 
   const settingsUrl = `${deps.appBaseUrl}/settings`;
