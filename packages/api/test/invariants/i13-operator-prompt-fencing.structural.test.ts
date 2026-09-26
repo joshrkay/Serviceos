@@ -260,8 +260,8 @@ const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string 
   },
   {
     file: 'src/workers/transcription.ts',
-    as: 'violation',
-    why: 'transcription.ts:241 interpolates the RAW caller transcript into a user message ("Raw transcript: ${raw}") with no fence and no hardening line. The corrected output is written back as the stored transcript, so a planted instruction survives into every operator surface that later reads it.',
+    as: 'fenced',
+    why: 'Was the one recorded violation (#1065): the correction pass inlined "Raw transcript: ${raw}" unfenced. It now wraps the raw transcript in buildUntrustedContentSection with the data rule in the system prompt, and refuses to store a correction that echoes fence text.',
   },
   {
     file: 'src/ai/agents/onboarding/transitions.ts',
@@ -443,31 +443,54 @@ describe('§5 I13′ (STRUCTURAL) — caller text reaches a model context only t
     expect(PINNED_GATEWAY_SENDER_COUNT).toBe(senders.length);
   });
 
-  it('B — the recorded violation is still exactly where the report says it is', () => {
-    const found = promptBuildersNamingCallerText([SRC]);
-    for (const entry of CLASSIFIED.filter((c) => c.as === 'violation')) {
-      expect(found, `${entry.file} — ${entry.why}`).toContain(entry.file);
-    }
-    // And it still inlines the transcript with no fence.
+  it('B — the formerly recorded violation (#1065, transcription.ts) is fenced', () => {
     const file = listSourceFiles([SRC]).find((f) => f.rel === 'src/workers/transcription.ts')!;
-    expect(file.code).toMatch(/Raw transcript: \$\{raw\}/);
-    expect(usesSanctionedRenderer(file)).toBe(false);
+    expect(file.code).not.toMatch(/Raw transcript: \$\{raw\}/);
+    expect(usesSanctionedRenderer(file)).toBe(true);
+    // Every module classified `fenced` really calls a sanctioned renderer.
+    const files = new Map(listSourceFiles([SRC]).map((f) => [f.rel, f]));
+    for (const entry of CLASSIFIED.filter((c) => c.as === 'fenced')) {
+      expect(usesSanctionedRenderer(files.get(entry.file)!), entry.file).toBe(true);
+    }
   });
 
   /**
-   * I13′ AS WRITTEN. One operator-reachable prompt still inlines caller text
-   * unfenced. When it is routed through the helper this starts PASSING,
-   * `it.fails` fails, and the row is forced back for re-grading.
+   * I13′ AS WRITTEN. Was `it.fails` while transcription.ts:241 inlined the raw
+   * caller transcript (#1065); flipped when #1219 routed it through the fence.
    */
-  it.fails(
-    'I13′ as written — no unfenced caller text in any model context (KNOWN GAP: workers/transcription.ts:241)',
-    () => {
-      const violations = promptBuildersNamingCallerText([SRC]).filter(
-        (rel) => classificationOf(rel) === 'violation',
-      );
-      expect(violations).toEqual([]);
-    },
-  );
+  it('I13′ as written — no unfenced caller text in any model context', () => {
+    const violations = promptBuildersNamingCallerText([SRC]).filter(
+      (rel) => classificationOf(rel) === 'violation',
+    );
+    expect(violations).toEqual([]);
+  });
+
+  /**
+   * #1219 / #1232 — caller-text prompt sites clause B cannot see.
+   *
+   * Clause B keys on `PROMPT_ASSEMBLY` + `CALLER_TEXT` identifiers, and these
+   * modules escape it: the sentiment / vulnerability classifiers build ONE
+   * `prompt` string that app.ts wraps into a message (the #1065 lane's
+   * data-flow note), confirm-intent names its text `callerResponse`, the
+   * drafting handlers read `context.message` / an extracted entity, and the
+   * MMS task reads `input.message`. Each was found by review, so each is
+   * pinned here by name: it must CALL the fence helper (or the drafting
+   * helper built on it). Removing the call fails the build.
+   */
+  it('#1219 / #1232 — every reviewed caller-text prompt site calls the fence helper', () => {
+    const FENCED_BY_REVIEW: ReadonlyArray<{ file: string; via: string }> = [
+      { file: 'src/ai/skills/confirm-intent.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/agents/customer-calling/sentiment-classifier.ts', via: 'buildUntrustedContentSection' },
+      { file: 'src/ai/agents/customer-calling/vulnerability-grader.ts', via: 'buildCallerTurnClassifierPrompt' },
+      { file: 'src/workers/transcription.ts', via: 'buildUntrustedContentSection' },
+    ];
+    const files = new Map(listSourceFiles([SRC]).map((f) => [f.rel, f]));
+    const unfenced = FENCED_BY_REVIEW.filter(({ file, via }) => {
+      const f = files.get(file);
+      return !f || !callsRenderer(f, via);
+    }).map(({ file, via }) => `${file} (expected a call to ${via})`);
+    expect(unfenced).toEqual([]);
+  });
 
   // ─── Negative controls ────────────────────────────────────────────────────
 
