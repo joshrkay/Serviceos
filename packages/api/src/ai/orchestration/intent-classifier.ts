@@ -1958,6 +1958,62 @@ export function matchNewBookingPhrase(transcript: string): boolean {
 }
 
 /**
+ * #1119 — deterministic short-circuits for the OPENING turn of a move or a
+ * cancel: "I need to reschedule my appointment", "can you cancel my visit?".
+ *
+ * WHY THIS EXISTS: `matchNewBookingPhrase` above made BOOK's opening turn
+ * model-free, but MOVE and CANCEL had no deterministic classify path at all,
+ * so without a real model (the hermetic no-key gateway, or a flaky model on
+ * this entity-free shape) they stopped one turn earlier than BOOK.
+ *
+ * Same rules as `matchNewBookingPhrase`: ANCHORED and ENTITY-FREE by
+ * construction — the object is a bare possessive/article + appointment noun,
+ * so the instant the utterance names a customer, a job or a time ("move my
+ * appointment to Thursday", "cancel the Miller appointment") it stops
+ * matching and falls through to the LLM with its entity extraction intact.
+ *
+ * Safe for WRITE intents for the same reason: D-004 — the result is a
+ * proposal that needs human approval, gated on the appointment it cannot yet
+ * name. The CALLER of `classifyIntentRaw` additionally gates each match on
+ * the classifier profile (`isIntentAcceptedOnProfile`) — `cancel_appointment`
+ * is not offered on the S1 caller / field_tech profiles, and a deterministic
+ * matcher must never mint an intent the surface does not offer.
+ */
+const APPOINTMENT_CHANGE_LEAD =
+  String.raw`(?:i(?:'d|\s+would)\s+like\s+to\s+|i\s+(?:want|need)\s+to\s+|we\s+need\s+to\s+|(?:can|could)\s+(?:i|you|we)\s+|let'?s\s+|please\s+)?`;
+const APPOINTMENT_NOUN_OBJECT = String.raw`(?:my|our|the|an?)\s+(?:appointment|visit|booking|service\s+call)`;
+const APPOINTMENT_CHANGE_TAIL = String.raw`\s*[?.!]?\s*$`;
+
+const RESCHEDULE_OPENING_PHRASES: ReadonlyArray<RegExp> = [
+  new RegExp(
+    String.raw`^\s*${APPOINTMENT_CHANGE_LEAD}(?:reschedule|move|change)\s+${APPOINTMENT_NOUN_OBJECT}${APPOINTMENT_CHANGE_TAIL}`,
+    'i',
+  ),
+  // The bare verb: "I need to reschedule", "can I reschedule?"
+  new RegExp(String.raw`^\s*${APPOINTMENT_CHANGE_LEAD}reschedule${APPOINTMENT_CHANGE_TAIL}`, 'i'),
+];
+
+const CANCEL_OPENING_PHRASES: ReadonlyArray<RegExp> = [
+  new RegExp(
+    String.raw`^\s*${APPOINTMENT_CHANGE_LEAD}cancel\s+${APPOINTMENT_NOUN_OBJECT}${APPOINTMENT_CHANGE_TAIL}`,
+    'i',
+  ),
+];
+
+/**
+ * Which appointment-change intent an anchored, entity-free opening names —
+ * or null when the utterance is anything richer.
+ */
+export function matchAppointmentChangeOpening(
+  transcript: string,
+): 'reschedule_appointment' | 'cancel_appointment' | null {
+  if (!transcript) return null;
+  if (RESCHEDULE_OPENING_PHRASES.some((rx) => rx.test(transcript))) return 'reschedule_appointment';
+  if (CANCEL_OPENING_PHRASES.some((rx) => rx.test(transcript))) return 'cancel_appointment';
+  return null;
+}
+
+/**
  * A06 (2026-08-30 live sweep, sweep-10) — deterministic short-circuit for the
  * canonical dictated `issue_invoice` phrasing: "Issue invoice INV-0010" /
  * "Issue the invoice INV-0010". Anchored, doc-number-shaped capture, same
@@ -2729,6 +2785,22 @@ async function classifyIntentRaw(
       intentType: 'create_appointment',
       confidence: 0.95,
       reasoning: 'matched deterministic new-booking phrasing',
+    };
+  }
+
+  // #1119 — the anchored, entity-free move/cancel opening. Gated on the
+  // profile (unlike the booking opening above, `cancel_appointment` is NOT on
+  // every PROFILE_INTENTS set); an off-profile match falls through to the LLM
+  // path, whose post-parse guard owns off-surface interception + its audit.
+  const appointmentChange = matchAppointmentChangeOpening(transcript);
+  if (
+    appointmentChange &&
+    isIntentAcceptedOnProfile(context.classifierProfile ?? 'operator', appointmentChange)
+  ) {
+    return {
+      intentType: appointmentChange,
+      confidence: 0.95,
+      reasoning: `matched deterministic ${appointmentChange} opening phrasing`,
     };
   }
 
