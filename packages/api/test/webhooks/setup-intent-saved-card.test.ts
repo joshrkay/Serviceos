@@ -13,6 +13,7 @@ import { createWebhookSignature } from '../../src/webhooks/webhook-handler';
 import { InMemoryCustomerPaymentMethodRepository } from '../../src/payments/customer-payment-method';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { StripeFetch } from '../../src/payments/stripe-payment-intent';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const STRIPE_SECRET = 'whsec_test_setup_intent';
 const TENANT = '11111111-1111-1111-1111-111111111111';
@@ -229,5 +230,63 @@ describe('webhook: setup_intent.succeeded', () => {
     );
     expect(res.status).toBe(403);
     expect(res.body).toEqual({ error: 'Forbidden', reason: 'stripe_customer_tenant_mismatch' });
+  });
+
+  it('#1057 — emits a payment_method.saved audit event, correlated to the setup intent', async () => {
+    const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const stripeFetch: StripeFetch = async () =>
+      jsonRes(true, 200, {
+        id: 'pm_audit',
+        card: { brand: 'visa', last4: '4242', exp_month: 9, exp_year: 2030 },
+      });
+    const app = await buildApp({
+      stripeWebhookSecret: STRIPE_SECRET,
+      customerPaymentMethodRepo: cpmRepo,
+      stripeConfig: { apiKey: 'sk_test' },
+      stripeFetch,
+      auditRepo,
+    });
+
+    const event = setupIntentSucceeded({ paymentMethod: 'pm_audit' });
+    const res = await postSigned(app, event);
+    expect(res.status).toBe(200);
+
+    const saved = await cpmRepo.findByCustomer(TENANT, CUSTOMER);
+    expect(saved).toHaveLength(1);
+
+    const events = await auditRepo.findByEntity(TENANT, 'payment_method', saved[0].id);
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('payment_method.saved');
+    expect(events[0].actorRole).toBe('system');
+    expect(events[0].correlationId).toBe(
+      ((event.data as { object: { id: string } }).object).id,
+    );
+    expect(events[0].metadata).toMatchObject({
+      customerId: CUSTOMER,
+      brand: 'visa',
+      last4: '4242',
+      isDefault: true,
+    });
+  });
+
+  it('#1057 — does not double-write the audit row across distinct redeliveries for the same card', async () => {
+    const cpmRepo = new InMemoryCustomerPaymentMethodRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const stripeFetch: StripeFetch = async () =>
+      jsonRes(true, 200, { id: 'pm_audit_dup', card: { brand: 'visa', last4: '4242' } });
+    const app = await buildApp({
+      stripeWebhookSecret: STRIPE_SECRET,
+      customerPaymentMethodRepo: cpmRepo,
+      stripeConfig: { apiKey: 'sk' },
+      stripeFetch,
+      auditRepo,
+    });
+    await postSigned(app, setupIntentSucceeded({ paymentMethod: 'pm_audit_dup' }));
+    await postSigned(app, setupIntentSucceeded({ paymentMethod: 'pm_audit_dup' }));
+
+    const saved = await cpmRepo.findByCustomer(TENANT, CUSTOMER);
+    const pm = saved.find((p) => p.stripePaymentMethodId === 'pm_audit_dup')!;
+    expect(await auditRepo.findByEntity(TENANT, 'payment_method', pm.id)).toHaveLength(1);
   });
 });

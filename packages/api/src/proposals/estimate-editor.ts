@@ -28,11 +28,6 @@ export function getEstimateLineItems(payload: Record<string, unknown>): Estimate
   return payload.lineItems as EstimateLineItem[];
 }
 
-export function calculateEstimateTotal(payload: Record<string, unknown>): number {
-  const lineItems = getEstimateLineItems(payload);
-  return lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
-}
-
 export function editEstimateProposal(
   proposal: Proposal,
   actions: EstimateEditAction[]

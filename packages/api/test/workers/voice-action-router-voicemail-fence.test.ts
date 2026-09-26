@@ -47,6 +47,7 @@ import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/g
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
 import { hasLiveBracketMarker, hasLiveFenceMarker, hasLiveRoleTag } from '../support/model-reads';
+import { onlyInsideFence } from '../support/fence-reads';
 
 const TENANT = 't-vm-fence';
 const RECORDING_ID = 'rec-vm-fence-1';
@@ -215,6 +216,35 @@ describe('#894 review — voice-action-router: a voicemail transcript is fenced 
     );
     expect(rule, 'a system message states the fence rule').toHaveLength(1);
     for (const s of systems) expect(s).not.toContain(INJECTION);
+  });
+
+  it('#1232 — voicemail: the DRAFTING handler (create_appointment) gets the transcript fenced too', async () => {
+    const { gateway, requests } = recordingGateway(BOOKING);
+    await worker(gateway).handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: VOICEMAIL,
+        recordingId: RECORDING_ID,
+        sourceChannel: 'voicemail' as const,
+      }),
+      silentLogger(),
+    );
+    const draft = only(requests, 'create_appointment');
+    const user = userContent(draft);
+    expect(onlyInsideFence(user, UNDERLYING), user).toBe(true);
+    expect(user).not.toContain(`Transcript: ${UNDERLYING}`);
+  });
+
+  it('#1232 CONTROL — in-app operator memo: the drafting handler still gets the raw "Transcript:" line', async () => {
+    const { gateway, requests } = recordingGateway(BOOKING);
+    await worker(gateway).handle(
+      msg({ tenantId: TENANT, userId: 'owner-1', transcript: UNDERLYING, recordingId: RECORDING_ID }),
+      silentLogger(),
+    );
+    const user = userContent(only(requests, 'create_appointment'));
+    expect(user.startsWith(`Transcript: ${UNDERLYING}`)).toBe(true);
+    expect(user).not.toContain(UNTRUSTED_CONTENT_BLOCK_BEGIN);
   });
 
   it('CONTROL — in-app operator memo (no sourceChannel): classify and decompose requests stay raw, no rule', async () => {

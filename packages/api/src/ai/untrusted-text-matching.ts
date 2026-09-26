@@ -103,6 +103,17 @@ export function capUntrustedText(text: string): string {
   return `${text.slice(0, headEnd)}\n[… ${omitted} characters of caller content omitted …]\n${text.slice(tailStart)}`;
 }
 
+/**
+ * `text.slice(0, max)` that never leaves a lone high surrogate at the cut
+ * (#1240 item 4): when the last kept code unit opens a pair, the pair is
+ * dropped whole.
+ */
+export function sliceWithoutSplittingSurrogate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const end = max > 0 && isHighSurrogate(text.charCodeAt(max - 1)) ? max - 1 : max;
+  return text.slice(0, end);
+}
+
 // ─── The matching copy ──────────────────────────────────────────────────────
 
 /**
@@ -385,6 +396,16 @@ export type ForgedSpanKind = 'fence-marker' | 'role-tag' | 'bracket-delimiter';
 interface ForgedSpan {
   start: number;
   end: number;
+  kind: ForgedSpanKind;
+}
+
+/** Sentence punctuation: a keyword on the far side of one is prose, not part of a marker (#1240 item 3). */
+const SENTENCE_PUNCTUATION = new Set(['.', ',', ';', '!', '?']);
+
+/** Does the copy strictly between indices a < b hold sentence punctuation? */
+function crossesSentence(copy: CopyUnit[], a: number, b: number): boolean {
+  for (let i = a + 1; i < b; i++) if (SENTENCE_PUNCTUATION.has(copy[i].ch)) return true;
+  return false;
 }
 
 /** Marker words tolerate the look-alike ASCII I/L/1 and O/0 without folding ordinary words. */
@@ -428,12 +449,15 @@ function findFenceMarkers(copy: CopyUnit[], text: string, out: ForgedSpan[]): vo
     let first = m.index;
     let last = m.index + m[0].length - 1;
     let keyword = false;
+    // #1240 item 3 — a keyword belongs to the marker only when no sentence
+    // punctuation separates it from the core phrase: "I don't want caller
+    // content. End of story." is prose, not "CALLER CONTENT END".
     if (leadLen > 0) {
-      if (breakBefore(first)) keyword = true;
+      if (breakBefore(first) && !crossesSentence(copy, alnumIdx[first], alnumIdx[first + leadLen])) keyword = true;
       else first += leadLen; // "WEEKEND UNTRUSTED …": that END belongs to WEEKEND
     }
     if (trailLen > 0) {
-      if (breakAfter(last)) keyword = true;
+      if (breakAfter(last) && !crossesSentence(copy, alnumIdx[last - trailLen], alnumIdx[last - trailLen + 1])) keyword = true;
       else last -= trailLen; // "… CONTENT ENDORSEMENT"
     }
     if (!breakBefore(first) || !breakAfter(last)) {
@@ -477,7 +501,7 @@ function findFenceMarkers(copy: CopyUnit[], text: string, out: ForgedSpan[]): vo
     }
     while (s < alnumIdx[first] && copy[s].ch === ' ') s++;
     while (e > alnumIdx[last] && copy[e].ch === ' ') e--;
-    out.push({ start: copy[s].start, end: copy[e].end });
+    out.push({ start: copy[s].start, end: copy[e].end, kind: 'fence-marker' });
     FENCE_PHRASE_RE.lastIndex = last + 1;
   }
 }
@@ -500,7 +524,7 @@ function findRoleTags(copy: CopyUnit[], text: string, out: ForgedSpan[]): void {
     const person = firstWord(copy, p + 1, gt, '<', personBreak);
     const token = firstWord(copy, p + 1, gt, '<', (i, j) => tokenBreak(copy, text, i, j));
     if (!ROLE_WORD_RE.test(person) && !ROLE_WORD_RE.test(token)) continue;
-    out.push({ start: copy[p].start, end: copy[gt].end });
+    out.push({ start: copy[p].start, end: copy[gt].end, kind: 'role-tag' });
     p = gt;
   }
 }
@@ -523,7 +547,7 @@ function findBracketDelimiters(copy: CopyUnit[], text: string, out: ForgedSpan[]
     const person = firstWord(copy, p + 1, close, '[', personBreak);
     const token = firstWord(copy, p + 1, close, '[', (i, j) => tokenBreak(copy, text, i, j));
     if (!BRACKET_KEYWORD_RE.test(person) && !BRACKET_KEYWORD_RE.test(token)) continue;
-    out.push({ start: copy[p].start, end: copy[close].end });
+    out.push({ start: copy[p].start, end: copy[close].end, kind: 'bracket-delimiter' });
     p = close;
   }
 }
@@ -540,13 +564,28 @@ function findForgedSpans(text: string, kinds: ReadonlyArray<ForgedSpanKind>): Fo
   return spans.sort((a, b) => a.start - b.start || b.end - a.end);
 }
 
-/** Replace each span (overlaps merged) with `token`; every character outside a span is kept. */
-function replaceSpans(text: string, spans: ReadonlyArray<ForgedSpan>, token: string): string {
+/**
+ * The replacement for forged spans: one string for every kind, or one per kind
+ * (#1240 item 2 — a single fixpoint over several kinds, each still replaced
+ * with its own token).
+ */
+export type ForgedSpanTokens = string | Readonly<Partial<Record<ForgedSpanKind, string>>>;
+
+function tokenFor(tokens: ForgedSpanTokens, kind: ForgedSpanKind): string {
+  if (typeof tokens === 'string') return tokens;
+  const token = tokens[kind];
+  if (token === undefined) throw new Error(`neutralizeForgedText: no replacement token for ${kind}`);
+  return token;
+}
+
+/** Replace each span (overlaps merged; the first span's token wins) with its token; every character outside a span is kept. */
+function replaceSpans(text: string, spans: ReadonlyArray<ForgedSpan>, tokens: ForgedSpanTokens): string {
   let out = '';
   let cursor = 0;
   let i = 0;
   while (i < spans.length) {
     const start = spans[i].start;
+    const token = tokenFor(tokens, spans[i].kind);
     let end = spans[i].end;
     i++;
     while (i < spans.length && spans[i].start < end) {
@@ -569,10 +608,15 @@ const MAX_NEUTRALIZE_PASSES = 16;
 
 /**
  * Replace every span of `text` that reads as a forged boundary of one of
- * `kinds` with `token`, repeating until none is left. `token` must contain no
+ * `kinds` with its token, repeating until none is left. Tokens must contain no
  * delimiter characters. Callers cap `text` first (`capUntrustedText`).
+ *
+ * Pass every kind a prompt needs in ONE call (#1240 item 2): separate passes
+ * per kind let one pass's replacement build a live span of another kind — a
+ * fence marker split across a line break inside a forged `[END …` became
+ * `[END … (fence-marker) ]`, a closed delimiter the earlier pass never saw.
  */
-export function neutralizeForgedText(text: string, kinds: ReadonlyArray<ForgedSpanKind>, token: string): string {
+export function neutralizeForgedText(text: string, kinds: ReadonlyArray<ForgedSpanKind>, token: ForgedSpanTokens): string {
   let current = text;
   for (let pass = 0; pass < MAX_NEUTRALIZE_PASSES; pass++) {
     if (current.length === 0) return current;
@@ -583,5 +627,5 @@ export function neutralizeForgedText(text: string, kinds: ReadonlyArray<ForgedSp
   const rest = findForgedSpans(current, kinds);
   if (rest.length === 0) return current;
   const end = Math.max(...rest.map((s) => s.end));
-  return replaceSpans(current, [{ start: rest[0].start, end }], token);
+  return replaceSpans(current, [{ start: rest[0].start, end, kind: rest[0].kind }], token);
 }

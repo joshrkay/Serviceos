@@ -28,6 +28,7 @@ import type { IntentType } from './intent-classifier';
 import {
   CALIBRATION,
   CALLER_MONEY_PREAMBLE,
+  CALLER_PREAMBLE_HEAD,
   DISTINCTIONS_HEADER,
   DISTINCTION_RULES,
   ENTITY_FIELDS,
@@ -282,7 +283,8 @@ export function buildClassifierSystemPrompt(profile: ClassifierProfile): string 
   if (memoized !== undefined) return memoized;
 
   const allowed = PROFILE_INTENTS[profile];
-  const parts: string[] = [PREAMBLE_HEAD];
+  // #891 — an inbound caller is a customer, not an operator.
+  const parts: string[] = [profile === 'caller' ? CALLER_PREAMBLE_HEAD : PREAMBLE_HEAD];
   // The caller surface advertises no money/document intents; one preamble
   // paragraph tells the model where those asks land (operator_request).
   if (profile === 'caller') parts.push(CALLER_MONEY_PREAMBLE);
