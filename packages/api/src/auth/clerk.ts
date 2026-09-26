@@ -623,9 +623,17 @@ export async function bootstrapTenant(
 
   if (deps.settingsRepository) {
     const { ensureTenantSettings } = await import('../settings/settings');
-    await ensureTenantSettings(tenant.id, deps.settingsRepository, {
-      businessName: tenant.name,
-    });
+    // #1275 — tenant.name above is an internal-only label (mirrors Clerk's
+    // own "<local-part>'s Organization" default for an unnamed org); it is
+    // NOT something a customer should ever see. Customer-facing pages
+    // (public intake, estimate approval, invoice pay) read
+    // tenant_settings.business_name, so seeding it from tenant.name leaked
+    // that placeholder straight through until the owner completed the
+    // identity step (PUT /api/onboarding/identity). Omitting the override
+    // here lets ensureTenantSettings apply its own generic 'My Business'
+    // placeholder instead — same one every other bootstrap path already
+    // gets.
+    await ensureTenantSettings(tenant.id, deps.settingsRepository);
   }
 
   return { tenantId: tenant.id, ownerId: userId, created: true };
