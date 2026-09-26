@@ -96,6 +96,16 @@ describe('PendingInvitationRepository — Tier 4 Team members (PR 3)', () => {
     expect(missing).toBeNull();
   });
 
+  it('#1032 — findPendingByEmail ignores an expired invitation', async () => {
+    const inv = await repo.create({
+      tenantId: TENANT, email: 'jane@example.com',
+      role: 'technician', invitedBy: 'user-owner',
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    expect(await repo.findPendingByEmail('jane@example.com')).toBeNull();
+    expect(await repo.findById!(inv.id)).toBeNull();
+  });
+
   it('validateInvitationInput catches malformed inputs', () => {
     expect(validateInvitationInput({
       tenantId: '', email: 'bad', role: 'technician', invitedBy: 'u',

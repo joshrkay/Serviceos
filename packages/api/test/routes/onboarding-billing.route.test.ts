@@ -3,7 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Pool } from 'pg';
 import { createOnboardingRouter } from '../../src/routes/onboarding';
-import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
+import { capturePostHog } from '../helpers/posthog-capture';
 import { BillingService } from '../../src/billing/subscription';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
@@ -192,9 +192,8 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
   });
 
   it('records a plan_selected funnel event for the chosen plan', async () => {
-    const capture = vi.fn();
-    process.env.POSTHOG_API_KEY = 'phc_test';
-    __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
+    const posthog = capturePostHog();
+    const { capture } = posthog;
     try {
       const fetchFn = vi
         .fn()
@@ -217,8 +216,7 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
         }),
       );
     } finally {
-      __resetAnalyticsForTests();
-      delete process.env.POSTHOG_API_KEY;
+      posthog.restore();
     }
   });
 
