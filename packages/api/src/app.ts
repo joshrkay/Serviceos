@@ -3778,12 +3778,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 }
               }
             }
-            // Owner emails from call end: the trial upgrade nudge (40 AI
-            // minutes) and paid-plan AI-minute usage alerts (80% / 100% /
-            // cap reached). Both are once-only and failure-soft.
+            // Owner emails from call end — the trial upgrade nudge (40 AI
+            // minutes), paid-plan AI-minute usage alerts (80% / 100% / cap
+            // reached) and first-call activation all send through this one
+            // mapping onto messageDelivery. Each is once-only and failure-soft.
             const ownerEmail = messageDelivery
-              ? (msg: { to: string; subject: string; text: string }) =>
-                  messageDelivery.sendEmail({ to: msg.to, subject: msg.subject, text: msg.text })
+              ? (msg: { to: string; subject: string; text: string; html?: string }) =>
+                  messageDelivery.sendEmail({
+                    to: msg.to,
+                    subject: msg.subject,
+                    text: msg.text,
+                    ...(msg.html ? { html: msg.html } : {}),
+                  })
               : undefined;
             await checkAndFireUpgradeNudge(
               { pool, ...(ownerEmail ? { sendEmail: ownerEmail } : {}) },
@@ -3816,17 +3822,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 {
                   pool,
                   auditRepo,
-                  ...(messageDelivery
-                    ? {
-                        sendEmail: (msg) =>
-                          messageDelivery.sendEmail({
-                            to: msg.to,
-                            subject: msg.subject,
-                            text: msg.text,
-                            ...(msg.html ? { html: msg.html } : {}),
-                          }),
-                      }
-                    : {}),
+                  ...(ownerEmail ? { sendEmail: ownerEmail } : {}),
                 },
                 { tenantId, channel },
               );
@@ -6862,7 +6858,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             ? {
                 trialMinutesUsed: async (tenantId: string) =>
                   Math.ceil(
-                    (await callUsageRepo.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15))) / 60,
+                    (await callUsageRepo.sumTrialBillableSeconds(tenantId)) / 60,
                   ),
               }
             : {}),
