@@ -16,6 +16,7 @@ import { Logger } from '../logging/logger';
 import { withRequestSavepoint } from '../middleware/tenant-context';
 import { InvoiceScheduleRepository } from './invoice-schedule';
 import {
+  estimateLinkHeldByDeadConversionReason,
   estimateLinkHeldByMilestoneReason,
   invoiceStillBills,
   wholeInvoiceBlockedByPlan,
@@ -83,7 +84,14 @@ export async function convertEstimateToInvoice(
   const alreadyConverted = existing.find(
     (inv) => inv.estimateId === estimate.id && inv.scheduleId === undefined,
   );
-  if (alreadyConverted) return alreadyConverted;
+  if (alreadyConverted) {
+    // #1215 — only a conversion that still bills is "the" invoice. A canceled
+    // one (or a void one with no payment) bills nothing, and its link blocks
+    // any new invoice for this estimate (uq_invoices_estimate): refuse with
+    // the same reason the insert-collision path gives.
+    if (invoiceStillBills(alreadyConverted)) return alreadyConverted;
+    throw new ConflictError(estimateLinkHeldByDeadConversionReason(alreadyConverted));
+  }
 
   // Bill only the items the customer selected (tiers + add-ons), falling
   // back to defaults when no selection was captured.
@@ -151,8 +159,7 @@ export async function convertEstimateToInvoice(
         throw new ConflictError(
           holder.scheduleId !== undefined
             ? estimateLinkHeldByMilestoneReason(holder)
-            : `This estimate is linked to ${holder.invoiceNumber}, which is ${holder.status}, so no new invoice ` +
-              'can be linked to it and none was created. Invoice it by hand (without choosing the estimate).',
+            : estimateLinkHeldByDeadConversionReason(holder),
         );
       }
     }
