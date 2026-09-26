@@ -21,7 +21,7 @@ function usage(overrides: Record<string, unknown>) {
     status: 200,
     json: async () => ({
       kind: 'period', planId: 'starter', usedMinutes: 0, includedMinutes: 20, overageMinutes: 0,
-      overageCentsPerMinute: 125, projectedChargeCents: 0, capCents: 7900, ...overrides,
+      overageCentsPerMinute: 125, projectedChargeCents: 0, capCents: 7900, capReached: false, ...overrides,
     }),
   } as unknown as Response;
 }
@@ -57,7 +57,7 @@ describe('UsageBanner', () => {
 
   it('says calls are ringing the owner once the cap is reached, and links to the cap', async () => {
     apiFetchMock.mockResolvedValue(
-      usage({ usedMinutes: 84, overageMinutes: 64, projectedChargeCents: 7900, capCents: 7900 }),
+      usage({ usedMinutes: 84, overageMinutes: 64, projectedChargeCents: 7900, capCents: 7900, capReached: true }),
     );
     renderBanner();
     expect(
@@ -66,6 +66,13 @@ describe('UsageBanner', () => {
     const link = screen.getByRole('link', { name: /raise the cap/i });
     expect(link).toHaveAttribute('href', '/settings');
     expect(link).toHaveClass('min-h-11');
+  });
+
+  it("trusts the API's capReached — a $0 cap with bundle minutes left is not 'cap reached'", async () => {
+    apiFetchMock.mockResolvedValue(usage({ usedMinutes: 17, capCents: 0, capReached: false }));
+    renderBanner();
+    expect(await screen.findByText("You've used 17 of your 20 AI answering minutes.")).toBeInTheDocument();
+    expect(screen.queryByText(/overage cap is reached/)).not.toBeInTheDocument();
   });
 
   it('never shows during the trial (the trial has its own nudge)', async () => {
