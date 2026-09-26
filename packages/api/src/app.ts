@@ -1075,7 +1075,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
-  // time is layered on top in send-service / appointment-confirmation-notifier.
+  // time is layered on top in send-service / transactional-comms-service.
   // STOP/START handler registration is deferred until the consent ledger and
   // customer repos exist (Story 10.6 unifies DNC + consent_events + the
   // customers.consent_status rollup) — see registration below.
