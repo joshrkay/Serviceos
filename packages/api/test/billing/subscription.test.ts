@@ -529,6 +529,27 @@ describe('BillingService', () => {
       expect(fetchFn).not.toHaveBeenCalled();
     });
 
+    it('#1282 — resumes the still-open Stripe session instead of refusing a retry for 32 min', async () => {
+      pool.responses.set('SELECT subscription_status, pending_checkout_at', {
+        rows: [
+          {
+            subscription_status: null,
+            pending_checkout_at: new Date(Date.now() - 2 * 60 * 1000),
+            pending_checkout_session_id: 'cs_live',
+          },
+        ],
+      });
+      fetchFn.mockResolvedValueOnce(
+        jsonOk({ id: 'cs_live', status: 'open', url: 'https://checkout.stripe.com/c/pay/cs_live', metadata: {} }),
+      );
+      const result = await makeSvc().createTrialCheckoutSession(INPUT);
+      expect(result.url).toBe('https://checkout.stripe.com/c/pay/cs_live');
+      // Read the live session; never minted a second one.
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(fetchFn.mock.calls[0][0]).toBe('https://api.stripe.com/v1/checkout/sessions/cs_live');
+      expect(fetchFn.mock.calls[0][1].method ?? 'GET').toBe('GET');
+    });
+
     it('proceeds when the pending marker is stale (>32 min)', async () => {
       pool.responses.set('SELECT subscription_status, pending_checkout_at', {
         rows: [
@@ -643,6 +664,45 @@ describe('BillingService', () => {
       expect(body.get('billing_address_collection')).toBe('required');
       expect(body.get('customer_update[name]')).toBe('auto');
       expect(body.get('customer_update[address]')).toBe('auto');
+    });
+
+    it('#1282 — switching plan mid-checkout expires the open session for the OTHER plan and mints a fresh one', async () => {
+      pool.responses.set('SELECT subscription_status, pending_checkout_at', {
+        rows: [
+          {
+            subscription_status: null,
+            pending_checkout_at: new Date(Date.now() - 2 * 60 * 1000),
+            pending_checkout_session_id: 'cs_starter_open',
+          },
+        ],
+      });
+      fetchFn
+        .mockResolvedValueOnce(
+          validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
+        )
+        .mockResolvedValueOnce(
+          jsonOk({
+            id: 'cs_starter_open',
+            status: 'open',
+            url: 'https://checkout.stripe.com/c/pay/cs_starter_open',
+            metadata: { plan_id: 'starter' },
+          }),
+        )
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_starter_open', status: 'expired' }))
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_growth', url: 'https://checkout.stripe.com/c/pay/cs_growth' }));
+
+      const result = await makeSvc().createTrialCheckoutSession({ ...INPUT, planId: 'growth' });
+
+      expect(result.url).toBe('https://checkout.stripe.com/c/pay/cs_growth');
+      expect(fetchFn.mock.calls[2][0]).toBe(
+        'https://api.stripe.com/v1/checkout/sessions/cs_starter_open/expire',
+      );
+      expect(fetchFn.mock.calls[2][1].method).toBe('POST');
+      const body = fetchFn.mock.calls[3][1].body as URLSearchParams;
+      expect(body.get('line_items[0][price]')).toBe('price_growth_live');
+      // The session itself carries the plan so a later retry can tell
+      // whether resuming it matches what the owner picked.
+      expect(body.get('metadata[plan_id]')).toBe('growth');
     });
 
     it('maps planId=growth to STRIPE_GROWTH_PRICE_ID and validates $199.00/month', async () => {
