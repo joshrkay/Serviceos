@@ -1,4 +1,5 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';

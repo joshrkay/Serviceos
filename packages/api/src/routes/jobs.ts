@@ -573,6 +573,15 @@ export function createJobRouter(
     notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        // #1279 — the job's technician is DERIVED from the appointment-level
+        // assignment (D-007, syncJobAssignment). A direct write here bypassed
+        // appointment_assignments, so the dispatch board and double-booking
+        // guard never saw it. Refuse it and point at the canonical paths.
+        if (req.body && typeof req.body === 'object' && 'assignedTechnicianId' in req.body) {
+          throw new ValidationError(
+            'assignedTechnicianId is derived from the appointment assignment — use POST /api/jobs/:id/reassign or POST /api/appointments/:id/assignments',
+          );
+        }
         const result = await updateJob(
           req.auth!.tenantId,
           req.params.id,

@@ -274,8 +274,8 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:delete'),
+    customerNotFoundOnMalformedId,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      if (rejectMalformedId(res, req.params.id)) return;
       const result = await restoreCustomer(
         req.auth!.tenantId,
         req.params.id,

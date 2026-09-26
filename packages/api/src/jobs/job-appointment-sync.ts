@@ -182,8 +182,21 @@ async function findCancelableAppointment(
  * assignment pre-flight in `assignTechnician` surfaces a double-booking as a
  * `ConflictError` BEFORE any DB write, so a conflict never poisons the txn.
  */
-async function ensurePrimaryTechnician(
-  deps: JobAppointmentSyncDeps,
+export type PrimaryTechnicianDeps = Pick<
+  JobAppointmentSyncDeps,
+  'appointmentRepo' | 'assignmentRepo' | 'userRepo' | 'auditRepo' | 'workingHoursRepo' | 'unavailableBlockRepo'
+>;
+
+/**
+ * #1279 — THE single write path for "who is the primary technician on this
+ * appointment" (appointment_assignments is canonical, D-007). Exported so the
+ * appointment routes (Schedule "New appointment", the Reassign dialog) share
+ * it with the job-schedule projection instead of writing the derived
+ * `jobs.assigned_technician_id` directly. Callers follow it with
+ * `syncJobAssignment` to re-derive the job field.
+ */
+export async function ensurePrimaryTechnician(
+  deps: PrimaryTechnicianDeps,
   tenantId: string,
   appointmentId: string,
   technicianId: string | null,

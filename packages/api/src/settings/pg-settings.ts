@@ -75,6 +75,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    // #1033 — migration 289 (NOT NULL DEFAULT true).
+    notifyTechniciansBySms: row.notify_technicians_by_sms as boolean | undefined,
     appointmentReminderOffsetsHours: normalizeReminderOffsets(
       parseJsonbArray(row.appointment_reminder_offsets_hours),
     ),
@@ -391,6 +393,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Tier 4 — migration 075.
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
+        // #1033 — migration 289.
+        notifyTechniciansBySms: 'notify_technicians_by_sms',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
         // Migration 194.
         sendThankYouSms: 'send_thank_you_sms',

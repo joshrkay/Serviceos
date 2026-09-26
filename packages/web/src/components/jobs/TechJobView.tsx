@@ -6,7 +6,7 @@ import {
   Sparkles, ChevronDown, ChevronUp, RotateCcw,
   MessageSquare, Check, Pencil,
 } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { Textarea, ConfirmDialog } from '../ui';
 import { ActivityTimeline } from './ActivityTimeline';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
