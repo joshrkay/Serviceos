@@ -15,7 +15,7 @@ import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
-import { createTelephonyRouter } from './routes/telephony';
+import { createTelephonyRouter, createDidTenantResolver } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import {
@@ -3953,41 +3953,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     return decision ?? process.env.TWILIO_AUTH_TOKEN;
   };
 
-  const resolveTenantIdByPhoneNumber = async (
-    to: string,
-  ): Promise<string | undefined> => {
-    if (!to || !pool) return process.env.TWILIO_DEFAULT_TENANT_ID;
-    try {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-        const result = await client.query<{ tenant_id: string }>(
-          `SELECT tenant_id FROM tenant_integrations
-           WHERE provider = 'twilio'
-             AND provider_data->>'phoneE164' = $1
-           LIMIT 1`,
-          [to],
-        );
-        await client.query('COMMIT');
-        return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
-      } catch (err) {
-        // Same dirty-connection guard as the credential resolver's lookups.
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch {
-      return process.env.TWILIO_DEFAULT_TENANT_ID;
-    }
-  };
-
-  // D2-3 — real phone-number → tenant lookup for inbound /voice. The
-  // legacy `resolveTenantId` callback is still wired for `/gather` and
-  // `/dial-result`, which already run inside an established call; the
-  // /voice handler consults this repo first and only falls through to
-  // the env-var seam in dev (with a loud WARN).
+  // D2-3 / #1061 — the ONE phone-number → tenant lookup for inbound
+  // telephony. /voice, /voice/gather-fallback, /gather, /dial-result and
+  // /callback-message all resolve through it (resolveInboundTenantId); the
+  // payload-alias `resolveTenantId` callback below — the /recording and
+  // /voicemail-status no-session fallbacks — goes through the same repository
+  // via createDidTenantResolver. There is no second copy of the DID SQL, and
+  // TWILIO_DEFAULT_TENANT_ID is only ever a dev seam (with a WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
   // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
@@ -4028,7 +4000,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
-      resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
+      resolveTenantId: createDidTenantResolver(phoneNumberRepo ? { phoneNumberRepo } : {}),
       // WS8 — a worker-role process never attaches the media-streams WS
       // handler (see the role gate on attachMediaStreamServer below), so its
       // /voice must never emit <Connect><Stream/> pointing at a socket this

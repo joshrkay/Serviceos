@@ -92,18 +92,18 @@ export interface TelephonyRouterDeps {
    * carry only the dialed "To" number; we resolve that to a tenant via
    * the `tenant_integrations.provider_data->>'phoneE164'` mapping.
    *
-   * When omitted, falls back to the legacy `resolveTenantId` callback
-   * (existing tests and the dispatched recording/dial-result paths
-   * still use that path). New wiring SHOULD provide the repo so unknown
-   * numbers can be rejected with a polite TwiML instead of silently
-   * routing to `TWILIO_DEFAULT_TENANT_ID`.
+   * #1061 — `/voice`, `/voice/gather-fallback`, `/gather`, `/dial-result`
+   * and `/callback-message` all resolve through this repo. When omitted,
+   * those handlers fall straight to the dev-only legacy/env seam (refused
+   * in production/staging). Production wiring MUST provide it.
    */
   phoneNumberRepo?: PhoneNumberRepository;
   /**
-   * Legacy phone-number → tenant lookup callback. Kept for the
-   * `/gather` and `/dial-result` endpoints (which already have a
-   * tenant from /voice) and for callers that pre-date `phoneNumberRepo`.
-   * For `/voice`, `phoneNumberRepo` is consulted first.
+   * Payload-alias phone-number → tenant callback. Consulted (a) by the
+   * session-scoped handlers only as the dev-only fallback inside
+   * `resolveInboundTenantId`, never in production/staging, and (b) by the
+   * `/recording` + `/voicemail-status` no-session fallbacks. app.ts wires
+   * `createDidTenantResolver`, which goes through the same repository.
    */
   resolveTenantId: (opts: { to: string; from: string }) => Promise<string | undefined> | string | undefined;
   /**
@@ -395,6 +395,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         from,
         callSid,
         deps,
+        req,
       });
     } catch (err) {
       // Codex P1 (PR #384) — transient infra failures (DB outage during
@@ -595,7 +596,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
     let tenantId: string | undefined;
     try {
-      tenantId = await resolveInboundTenantId({ to, from, callSid, deps });
+      tenantId = await resolveInboundTenantId({ to, from, callSid, deps, req });
     } catch (err) {
       logger.error('telephony/gather-fallback: tenant lookup failed', {
         callSid,
@@ -646,12 +647,18 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
+    // #1061 — same DID → tenant path as /voice (phoneNumberRepo, dev-only
+    // env fallback), never the legacy callback directly: that callback
+    // answered TWILIO_DEFAULT_TENANT_ID on a miss in every environment.
     let tenantId: string | undefined;
     try {
-      tenantId = await Promise.resolve(deps.resolveTenantId({
+      tenantId = await resolveInboundTenantId({
         to: body.To ?? '',
         from: body.From ?? '',
-      }));
+        callSid,
+        deps,
+        req,
+      });
     } catch (err) {
       // Transient infra failure (e.g. DB outage during tenant lookup).
       // Respond 503 so Twilio retries the webhook rather than the caller
@@ -740,12 +747,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
+    // #1061 — same DID → tenant path as /voice; see /gather.
     let tenantId: string | undefined;
     try {
-      tenantId = await Promise.resolve(deps.resolveTenantId({
+      tenantId = await resolveInboundTenantId({
         to: body.To ?? '',
         from: body.From ?? '',
-      }));
+        callSid,
+        deps,
+        req,
+      });
     } catch (err) {
       // Transient infra failure — 503 so Twilio retries rather than
       // dropping the dial leg. Mirrors /voice + /gather handling.
@@ -967,9 +978,14 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     let tenantId: string | undefined;
     try {
-      tenantId = await Promise.resolve(
-        deps.resolveTenantId({ to: body.To ?? '', from: body.From ?? '' }),
-      );
+      // #1061 — same DID → tenant path as /voice; see /gather.
+      tenantId = await resolveInboundTenantId({
+        to: body.To ?? '',
+        from: body.From ?? '',
+        callSid: body.CallSid ?? '',
+        deps,
+        req,
+      });
     } catch (err) {
       logger.error('telephony/callback-message: tenant lookup failed', {
         sessionId,
@@ -1306,12 +1322,14 @@ async function resolveInboundTenantId(opts: {
   from: string;
   callSid: string;
   deps: TelephonyRouterDeps;
+  req: Request;
 }): Promise<string | undefined> {
   const { to, from, callSid, deps } = opts;
   const normalizedTo = normalizeE164(to);
 
-  // 1) Primary path — phone-numbers repo lookup.
-  if (deps.phoneNumberRepo) {
+  // 1) Primary path — phone-numbers repo lookup. A payload with no `To` has
+  // no DID to look up: it is a miss, never a query for the empty string.
+  if (deps.phoneNumberRepo && normalizedTo) {
     try {
       const lookup = await deps.phoneNumberRepo.findByNumber(normalizedTo);
       if (lookup) {
@@ -1400,6 +1418,55 @@ async function resolveInboundTenantId(opts: {
   const sentry = deps.sentry ?? getSentryClient();
   sentry.captureMessage('telephony.tenant_lookup_miss', 'error');
   return undefined;
+}
+
+function isProdLikeEnv(nodeEnv: string): boolean {
+  return nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
+}
+
+/**
+ * #1061 — the payload-alias `{to, from} → tenant` callback app.ts wires as
+ * `resolveTenantId` (and, through it, the `/recording` + `/voicemail-status`
+ * no-session fallbacks). It resolves through the SAME `PhoneNumberRepository`
+ * `/voice` uses — there is no second copy of the DID SQL — and applies the
+ * same env rule as `resolveInboundTenantId`: `TWILIO_DEFAULT_TENANT_ID` is a
+ * dev-only seam, answered with a loud WARN, and never outside dev.
+ *
+ * A lookup error answers `undefined` rather than throwing: the status-callback
+ * fallbacks treat "no tenant" as a logged skip, and the session-scoped
+ * handlers no longer call this directly (they use `resolveInboundTenantId`,
+ * which surfaces a prod outage as a 503 so Twilio retries).
+ */
+export function createDidTenantResolver(opts: {
+  phoneNumberRepo?: PhoneNumberRepository;
+  /** `process.env.NODE_ENV` override — test seam. */
+  nodeEnv?: string;
+}): (args: { to: string; from: string }) => Promise<string | undefined> {
+  return async ({ to }) => {
+    const normalizedTo = normalizeE164(to ?? '');
+    if (opts.phoneNumberRepo && normalizedTo) {
+      try {
+        const lookup = await opts.phoneNumberRepo.findByNumber(normalizedTo);
+        if (lookup) return lookup.tenantId;
+      } catch (err) {
+        logger.warn('telephony.tenant_lookup_error', {
+          to: normalizedTo,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const nodeEnv = opts.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+    if (isProdLikeEnv(nodeEnv)) return undefined;
+    const envFallback = process.env.TWILIO_DEFAULT_TENANT_ID;
+    if (envFallback) {
+      logger.warn('telephony.tenant_lookup_dev_fallback', {
+        to: normalizedTo,
+        source: 'TWILIO_DEFAULT_TENANT_ID',
+        env: nodeEnv,
+      });
+    }
+    return envFallback || undefined;
+  };
 }
 
 /** Voicemail TwiML when inbound voice gates block AI routing. */
