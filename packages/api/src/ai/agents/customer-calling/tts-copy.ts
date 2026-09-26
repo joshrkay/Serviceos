@@ -198,6 +198,27 @@ export const VOICE_APPROVAL_REFUSAL =
   "Tap the card to approve — I don't take approvals by voice here yet.";
 
 /**
+ * #1272 — closing line for a proposal that was persisted WITH unfilled
+ * `missingFields` (approve refuses it until someone fills them). The generic
+ * "Great, I've got that taken care of. You'll receive a confirmation
+ * shortly." claimed completion for exactly these drafts (QA rows SCH-03 /
+ * VOX-05). These state only what is true: a draft exists and still needs
+ * details — no confirmation is promised.
+ *
+ * In-app: the speaker is the authenticated operator who owns the card.
+ */
+export const INAPP_INCOMPLETE_DRAFT_COPY =
+  "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?";
+
+/**
+ * #1272 — phone (S1/owner line) twin of {@link INAPP_INCOMPLETE_DRAFT_COPY}.
+ * The caller cannot fill the card, so the honest next step is a person
+ * following up — never a promised confirmation.
+ */
+export const CALLER_INCOMPLETE_REQUEST_COPY =
+  "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -261,6 +282,11 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
   // English mid-flow just because the operator asked to approve by voice.
   [VOICE_APPROVAL_REFUSAL]:
     'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
+  // #1272 — honest closing lines for a draft that still has missingFields.
+  [INAPP_INCOMPLETE_DRAFT_COPY]:
+    'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
+  [CALLER_INCOMPLETE_REQUEST_COPY]:
+    'Ya pasé su solicitud, pero faltan algunos detalles antes de que quede lista — alguien de nuestro equipo se comunicará con usted. ¿Hay algo más en lo que pueda ayudarle?',
 };
 
 /**
