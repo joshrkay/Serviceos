@@ -179,6 +179,38 @@ describe('job-photo router (P12-001)', () => {
     expect(r.status).toBe(404);
   });
 
+  it('#1200 item 3 — attach refuses a file that was uploaded for a different job (404, nothing written)', async () => {
+    const presign = await request(app)
+      .post(`/api/jobs/${JOB_ISO_ID}/photos/presign-upload`)
+      .send({ filename: 'other.jpg', contentType: 'image/jpeg', sizeBytes: 100 });
+    expect(presign.status).toBe(201);
+    const r = await request(app)
+      .post(`/api/jobs/${JOB_BAD_CAT_ID}/photos`)
+      .send({ fileId: presign.body.fileId, category: 'before' });
+    expect(r.status).toBe(404);
+    const list = await request(app).get(`/api/jobs/${JOB_BAD_CAT_ID}/photos`);
+    expect(list.body).toHaveLength(0);
+  });
+
+  it('#1200 item 3 — attach refuses a generic upload with no job linkage (404)', async () => {
+    const file = await fileRepo.create({
+      id: 'generic-upload-1',
+      tenantId: TENANT_A,
+      filename: 'loose.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 10,
+      storageBucket: BUCKET,
+      storageKey: 'k-loose',
+      uploadedBy: `user-${TENANT_A}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const r = await request(app)
+      .post(`/api/jobs/${JOB_BAD_CAT_ID}/photos`)
+      .send({ fileId: file.id, category: 'before' });
+    expect(r.status).toBe(404);
+  });
+
   it('attach rejects bad category with 400', async () => {
     const jobId = JOB_BAD_CAT_ID;
     const presign = await request(app)
@@ -232,6 +264,8 @@ describe('job-photo dual-write shadow into attachments (RV-005)', () => {
       sizeBytes: 1024,
       storageBucket: 'b',
       storageKey: 'k',
+      entityType: 'job',
+      entityId: JOB_ID,
       uploadedBy: USER_ID,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -445,6 +479,8 @@ describe('job-photo image post-process enqueue (RV-006)', () => {
       sizeBytes: 1024,
       storageBucket: 'b',
       storageKey: 'k',
+      entityType: 'job',
+      entityId: JOB_ID,
       uploadedBy: USER_ID,
       createdAt: new Date(),
       updatedAt: new Date(),

@@ -5707,7 +5707,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
   app.use(
     '/api/files',
-    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
+    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo, jobRepo })
   );
   app.use(
     '/api/assistant',

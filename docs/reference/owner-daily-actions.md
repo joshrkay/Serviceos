@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **56** |
+| Owner-only routes in code | **57** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **6** |
-| `cadence: occasional` | **48** |
+| `cadence: occasional` | **49** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **6** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 56,
+  "ownerOnlyRoutes": 57,
   "daily": 2,
   "onboarding": 6,
-  "occasional": 48,
+  "occasional": 49,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 6
 }
@@ -155,6 +155,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/billing/end-trial-now` | occasional | Ends the trial early — a one-time subscription act. | false | none | |
 | `POST /api/billing/portal-session` | occasional | Opens the Stripe customer portal for payment method / cancellation. | false | none | |
 | `POST /api/customers/:id/archive` | occasional | CRM housekeeping. | false | none | |
+| `POST /api/customers/:id/restore` | occasional | Undo of an archive (#1281); CRM housekeeping. | false | none | |
 | `POST /api/dnc/` | occasional | Manual do-not-call entry. An SMS `STOP` already writes the list automatically, so the web route covers only verbal requests. | false | none | |
 | `POST /api/job-custom-fields/defs` | occasional | Custom-field schema configuration. | false | none | |
 | `POST /api/job-custom-fields/defs/:fieldDefId/archive` | occasional | Custom-field schema cleanup. | false | none | |
