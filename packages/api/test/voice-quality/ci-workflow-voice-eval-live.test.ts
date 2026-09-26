@@ -10,6 +10,12 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import { loadIntentTestSplit, loadSlotTranscripts } from '../../../voice-eval/corpus';
+import {
+  DEFAULT_COST_CAP_CENTS,
+  checkCostCap,
+  sampleDeterministic,
+} from '../../../voice-eval/live-support';
 
 const repoRoot = path.resolve(__dirname, '../../../..');
 const workflowPath = path.join(repoRoot, '.github/workflows/voice-eval-live.yml');
@@ -67,5 +73,55 @@ describe('voice-eval-live.yml — scheduled live eval workflow', () => {
     expect(src).not.toMatch(/^\s*services:/m);
     expect(src).not.toMatch(/docker pull|pgvector\/pgvector/);
     expect(src).not.toMatch(/apt-get install[^\n]*ffmpeg/);
+  });
+});
+
+/** The step block (text between its `- ` list markers) whose run line invokes `script`. */
+function stepBlock(src: string, script: string): string {
+  const at = src.indexOf(script);
+  expect(at, `${script} is not invoked by the workflow`).toBeGreaterThan(-1);
+  const start = src.lastIndexOf('\n      - ', at);
+  const next = src.indexOf('\n      - ', at);
+  return src.slice(start, next === -1 ? undefined : next);
+}
+
+/** Effective VOICE_EVAL_COST_CAP_CENTS for a step: step env wins over job env. */
+function effectiveCapCents(src: string, step: string): number {
+  const capRe = /VOICE_EVAL_COST_CAP_CENTS:\s*'?(\d+)'?/;
+  const stepCap = capRe.exec(step);
+  if (stepCap) return Number(stepCap[1]);
+  const jobCap = capRe.exec(src.slice(0, src.indexOf('steps:')));
+  return jobCap ? Number(jobCap[1]) : DEFAULT_COST_CAP_CENTS;
+}
+
+function maxUtterances(step: string): number {
+  const m = /--max-utterances[ =](\d+)/.exec(step);
+  expect(m, 'live step must bound its sample with --max-utterances').not.toBeNull();
+  return Number(m![1]);
+}
+
+// #839 — the cap and the sample were configured independently, and the
+// sample outgrew the cap: at the conservative preflight rate a 200-row
+// intent run projects ~1,280c and a 100-row slot run ~640c, both over the
+// workflow's 500c cap, so the moment ANTHROPIC_API_KEY was set every weekly
+// run would have aborted with exit 3 before classifying anything. This pins
+// the two together against the REAL golden set the runners load.
+describe('voice-eval-live.yml — every configured live sample fits its cost cap (#839)', () => {
+  it('the intent step projects within its cap', () => {
+    const src = read();
+    const step = stepBlock(src, 'run-intent-eval.ts --live');
+    const sample = sampleDeterministic(loadIntentTestSplit(), (r) => r.utterance, maxUtterances(step));
+    const cap = effectiveCapCents(src, step);
+    const cost = checkCostCap(sample.map((r) => r.utterance), cap);
+    expect(cost.withinCap, `projected ${cost.projectedCents.toFixed(1)}c > cap ${cap}c`).toBe(true);
+  });
+
+  it('the slot step projects within its cap', () => {
+    const src = read();
+    const step = stepBlock(src, 'run-slot-eval.ts --live');
+    const sample = sampleDeterministic(loadSlotTranscripts(), (t) => t.transcript, maxUtterances(step));
+    const cap = effectiveCapCents(src, step);
+    const cost = checkCostCap(sample.map((t) => t.transcript), cap);
+    expect(cost.withinCap, `projected ${cost.projectedCents.toFixed(1)}c > cap ${cap}c`).toBe(true);
   });
 });
