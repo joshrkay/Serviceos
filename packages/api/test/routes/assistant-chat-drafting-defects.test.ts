@@ -109,3 +109,45 @@ describe('#1271 — chat create_customer keeps the spoken address', () => {
     expect(card.addressCapture?.address).toBe('456 Oak Ave, Phoenix AZ 85002');
   });
 });
+
+describe('#1276A — a bare first name asks for the last name instead of guessing', () => {
+  async function draftTaylor() {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway([classifierReply('create_customer', { displayName: 'Taylor' })]),
+      proposalRepo,
+    );
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a new customer named Taylor.' }] });
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    return { res, proposalRepo, persisted };
+  }
+
+  it('drafts the customer gated on lastName, so approval is refused until it is filled', async () => {
+    const { res, proposalRepo, persisted } = await draftTaylor();
+    expect(res.status).toBe(200);
+    expect(missingFieldsFor(persisted)).toContain('lastName');
+    await expect(
+      approveProposal(proposalRepo, TENANT, persisted.id, USER, 'owner'),
+    ).rejects.toThrow(/lastName/);
+  });
+
+  it('asks for the last name in the reply and offers a Last name field on the card', async () => {
+    const { res } = await draftTaylor();
+    expect(res.body.message.content).toMatch(/Taylor's last name/);
+    const card = res.body.message.proposal;
+    expect(card.editFields).toEqual(
+      expect.arrayContaining([{ label: 'Last name', key: 'lastName', value: '' }]),
+    );
+    expect(card.confidence).not.toBe('High');
+  });
+
+  it('filling the last name on the card lifts the gate and the draft approves', async () => {
+    const { proposalRepo, persisted } = await draftTaylor();
+    await editProposal(proposalRepo, TENANT, persisted.id, USER, 'owner', { lastName: 'Brooks' });
+    await expect(
+      approveProposal(proposalRepo, TENANT, persisted.id, USER, 'owner'),
+    ).resolves.toMatchObject({ status: 'approved' });
+  });
+});

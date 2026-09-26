@@ -148,7 +148,12 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
       return { success: true, resultEntityId: uuidv4() };
     }
 
-    const { firstName, lastName, companyName } = splitName(payload.name);
+    const split = splitName(payload.name);
+    const { firstName, companyName } = split;
+    // #1276A — a one-word spoken name is gated on `lastName` at draft time;
+    // the approver's value fills what splitName could not.
+    const suppliedLastName = typeof payload.lastName === 'string' ? payload.lastName.trim() : '';
+    const lastName = split.lastName || suppliedLastName;
     const email = typeof payload.email === 'string' ? payload.email : undefined;
     const phone = typeof payload.phone === 'string' ? payload.phone : undefined;
     const notes = typeof payload.notes === 'string' ? payload.notes : undefined;

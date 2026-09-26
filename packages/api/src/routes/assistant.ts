@@ -880,6 +880,13 @@ function customerProposalToUI({
   // has to be visible on the card that authorises the write.
   const spokenAddress = typeof payload.address === 'string' ? payload.address.trim() : '';
 
+  // #1276A — the draft is gated on a last name (see `gateOnLastName`); the
+  // card must offer the field that lifts the gate, and a gated draft is not
+  // a High-confidence one.
+  const needsLastName = Array.isArray(sourceContext?.missingFields)
+    && (sourceContext.missingFields as unknown[]).includes('lastName');
+  const lastName = typeof payload.lastName === 'string' ? payload.lastName : '';
+
   const title = name ? `New customer: ${name}` : 'New customer (needs details)';
   const summary = [
     name ? `Name: ${name}` : 'Name not provided',
@@ -897,13 +904,14 @@ function customerProposalToUI({
     explanation: cardExplanation(explanation, sourceMessage),
     editFields: [
       { label: 'Name', key: 'name', value: name ?? '' },
+      ...(needsLastName ? [{ label: 'Last name', key: 'lastName', value: lastName }] : []),
       { label: 'Email', key: 'email', value: email ?? '' },
       { label: 'Phone', key: 'phone', value: phone ?? '' },
       // The verbatim spoken address is editable here too. It is the payload's
       // `address` key, unrenamed, so an edit lands where the executor reads.
       { label: 'Address (as spoken)', key: 'address', value: spokenAddress },
     ],
-    confidence: confidenceScore >= 0.85 ? 'High' : 'Medium',
+    confidence: confidenceScore >= 0.85 && !needsLastName ? 'High' : 'Medium',
     type: 'Customer',
     status: 'Pending',
     proposalType: 'create_customer',
@@ -914,6 +922,18 @@ function customerProposalToUI({
     // create_customer with only a name carries missingFields).
     ...proposalSignals(payload, sourceContext),
   };
+}
+
+/** #1276A — a one-word name ("Taylor") is a first name with the rest unsaid. */
+function isBareFirstName(name: unknown): boolean {
+  return typeof name === 'string' && name.trim().length > 0 && !/\s/.test(name.trim());
+}
+
+function gateOnLastName(proposal: Proposal): void {
+  const ctx = { ...((proposal.sourceContext ?? {}) as Record<string, unknown>) };
+  const existing = Array.isArray(ctx.missingFields) ? (ctx.missingFields as string[]) : [];
+  ctx.missingFields = [...new Set([...existing, 'lastName'])];
+  proposal.sourceContext = ctx;
 }
 
 
@@ -3515,6 +3535,13 @@ async function generateAssistantReply(
             ? { tenantThresholdOverride: await getTenantThresholdOverride() }
             : {}),
         });
+        // #1276A — "Add a new customer named Taylor." used to execute with
+        // lastName '' at High confidence: splitName keeps a single token as a
+        // first name and nothing asked for the rest. Ask, don't guess (D-029):
+        // gate the draft on `lastName`, which the card's Edit fills
+        // (editProposal clears the gate on fill) and the executor reads.
+        const needsLastName = isBareFirstName(customerPayload.name);
+        if (needsLastName) gateOnLastName(proposal);
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
         // inapp-adapter.handleCreateProposal). create-customer-task builds
@@ -3542,7 +3569,9 @@ async function generateAssistantReply(
           usage: classifierUsage,
           message: {
             role: 'assistant' as const,
-            content: uiProposal.title + '. Review and approve to add them to your CRM.',
+            content: needsLastName
+              ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
+              : uiProposal.title + '. Review and approve to add them to your CRM.',
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
