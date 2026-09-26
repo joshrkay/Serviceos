@@ -3461,6 +3461,15 @@ async function generateAssistantReply(
         if (entities?.displayName) customerPayload.name = entities.displayName;
         if (entities?.email) customerPayload.email = entities.email;
         if (entities?.phone) customerPayload.phone = entities.phone;
+        // #1271 — the FIFTH place a spoken address had to survive. This
+        // translation used to rebuild the handler's entities from name /
+        // email / phone only, so the address the classifier extracted never
+        // reached `readEntities` (create-customer-task.ts), the card's
+        // addressCapture slice, or the executor's service_location write:
+        // every chat-created customer landed with zero locations. Forward
+        // both keys the handler reads; it owns the precedence.
+        if (entities?.address) customerPayload.address = entities.address;
+        if (entities?.serviceAddress) customerPayload.serviceAddress = entities.serviceAddress;
 
         // A create_customer intent classified from an under-specified command
         // ("Add a new customer" — e.g. the one-tap assistant suggestion chip)

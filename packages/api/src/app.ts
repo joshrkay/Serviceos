@@ -137,7 +137,7 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
-import { invoiceReferenceCheck } from './proposals/approval-reference-checks';
+import { invoiceReferenceCheck, serviceLocationReferenceCheck } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -1007,7 +1007,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // QA 2026-09-16 (AST-04) — approval-time reference checks, applied on every
   // approval channel (dashboard single + batch, voice): an id in a payload must
   // name a record this tenant owns (proposals/approval-reference-checks.ts).
-  const approvalReferenceChecks = [invoiceReferenceCheck(invoiceRepo)];
+  const approvalReferenceChecks = [
+    invoiceReferenceCheck(invoiceRepo),
+    // #1271 — a resolved estimate/invoice with no job cannot approve without
+    // a service location to open the job at.
+    serviceLocationReferenceCheck(locationRepo),
+  ];
 
   const webhookSettingsRepo = settingsRepo;
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
