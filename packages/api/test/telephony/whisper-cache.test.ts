@@ -14,8 +14,8 @@ describe('WhisperCache', () => {
   });
 
   it('stores and retrieves whisper text by escalationId', () => {
-    cache.set('esc_abc', 'Incoming call from Sarah Chen.');
-    expect(cache.get('esc_abc')).toBe('Incoming call from Sarah Chen.');
+    cache.set('esc_abc', 'Incoming call from Sarah Chen.', 'tenant-1');
+    expect(cache.get('esc_abc')).toEqual({ text: 'Incoming call from Sarah Chen.', tenantId: 'tenant-1' });
   });
 
   it('returns undefined for unknown id', () => {
@@ -23,22 +23,22 @@ describe('WhisperCache', () => {
   });
 
   it('expires entries after TTL', () => {
-    cache.set('esc_abc', 'whisper');
+    cache.set('esc_abc', 'whisper', 'tenant-1');
     vi.advanceTimersByTime(5 * 60 * 1000 + 1);
     expect(cache.get('esc_abc')).toBeUndefined();
   });
 
   it('does not expire entries before TTL', () => {
-    cache.set('esc_abc', 'whisper');
+    cache.set('esc_abc', 'whisper', 'tenant-1');
     vi.advanceTimersByTime(4 * 60 * 1000);
-    expect(cache.get('esc_abc')).toBe('whisper');
+    expect(cache.get('esc_abc')?.text).toBe('whisper');
   });
 
   it('overwriting an entry resets its TTL', () => {
-    cache.set('esc_abc', 'first');
+    cache.set('esc_abc', 'first', 'tenant-1');
     vi.advanceTimersByTime(4 * 60 * 1000);
-    cache.set('esc_abc', 'second');
+    cache.set('esc_abc', 'second', 'tenant-1');
     vi.advanceTimersByTime(4 * 60 * 1000);
-    expect(cache.get('esc_abc')).toBe('second');
+    expect(cache.get('esc_abc')?.text).toBe('second');
   });
 });

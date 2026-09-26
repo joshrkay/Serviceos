@@ -8,25 +8,12 @@ import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
-import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
+import { capturePostHog } from '../helpers/posthog-capture';
 import { checkAndFireUpgradeNudge } from '../../src/voice/check-upgrade-nudge';
 import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
 
 const OWNER_PHONE = '+14805550100';
 
-/** Fake PostHog client — POSTHOG_API_KEY set so funnel events are captured. */
-function capturePostHog() {
-  const capture = vi.fn();
-  process.env.POSTHOG_API_KEY = 'phc_test';
-  __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
-  return {
-    events: () => capture.mock.calls.map((c) => c[0] as { event: string; properties: Record<string, unknown> }),
-    restore: () => {
-      __resetAnalyticsForTests();
-      delete process.env.POSTHOG_API_KEY;
-    },
-  };
-}
 
 describe('Postgres integration — trial upgrade nudge', () => {
   let pool: Pool;

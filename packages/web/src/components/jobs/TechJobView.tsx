@@ -6,8 +6,8 @@ import {
   Sparkles, ChevronDown, ChevronUp, RotateCcw,
   MessageSquare, Check, Pencil,
 } from 'lucide-react';
-import { Link, useNavigate } from 'react-router';
-import { Textarea } from '../ui';
+import { useNavigate } from 'react-router';
+import { Textarea, ConfirmDialog } from '../ui';
 import { ActivityTimeline } from './ActivityTimeline';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
 import { CallScreen, TextSheet } from './JobSheets';
@@ -777,20 +777,27 @@ export function TechJobView({
   // U2 (E9 follow-up): delete a wrong photo/video behind a confirm. On success
   // drop the row from local state; on failure surface the error and keep the
   // photo (no phantom removal). The DELETE endpoint audits + gates server-side.
-  const handleDeletePhoto = useCallback(
-    async (photo: JobPhoto) => {
-      if (!id) return;
-      if (!window.confirm('Delete this photo? This cannot be undone.')) return;
-      setPhotoError(null);
-      try {
-        await deletePhoto(id, photo.id);
-        setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
-      } catch (err) {
-        setPhotoError(err instanceof Error ? err.message : 'Failed to delete photo');
-      }
-    },
-    [id, deletePhoto],
-  );
+  // #907 — window.confirm replaced with ConfirmDialog: `handleDeletePhoto`
+  // (the gallery's onDelete) now only stages the target; `confirmDeletePhoto`
+  // runs the actual delete once the dialog is confirmed.
+  const [pendingDeletePhoto, setPendingDeletePhoto] = useState<JobPhoto | null>(null);
+
+  const handleDeletePhoto = useCallback((photo: JobPhoto) => {
+    setPendingDeletePhoto(photo);
+  }, []);
+
+  const confirmDeletePhoto = useCallback(async () => {
+    const photo = pendingDeletePhoto;
+    setPendingDeletePhoto(null);
+    if (!id || !photo) return;
+    setPhotoError(null);
+    try {
+      await deletePhoto(id, photo.id);
+      setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+    } catch (err) {
+      setPhotoError(err instanceof Error ? err.message : 'Failed to delete photo');
+    }
+  }, [id, deletePhoto, pendingDeletePhoto]);
 
   useEffect(() => {
     void loadJob();
@@ -1294,6 +1301,17 @@ export function TechJobView({
         <TextSheet name={customerName} phone={customerPhone} customerId={jobData.customerId} onClose={() => setSheet(null)} />
       )}
       {cameraOpen && <CameraCapture onClose={media => void handleCameraClose(media)} />}
+
+      {/* #907 — window.confirm replaced with ConfirmDialog. */}
+      <ConfirmDialog
+        open={pendingDeletePhoto !== null}
+        title="Delete this photo?"
+        description="This cannot be undone."
+        confirmLabel="Delete"
+        tone="danger"
+        onConfirm={() => void confirmDeletePhoto()}
+        onCancel={() => setPendingDeletePhoto(null)}
+      />
 
       <style>{`
         @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }

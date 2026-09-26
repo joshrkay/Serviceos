@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # WS7 — fail fast (and loud) when the 11 QA-matrix secrets are absent,
       # mirroring mms-vision-smoke.yml. qa:doctor also validates these, but it
@@ -70,7 +70,7 @@ jobs:
           E2E_TENANT_B_CUSTOMER_ID: ${{ secrets.E2E_TENANT_B_CUSTOMER_ID }}
           E2E_TENANT_B_JOB_ID: ${{ secrets.E2E_TENANT_B_JOB_ID }}
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -127,7 +127,7 @@ jobs:
 
       - name: Upload QA report artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qa-matrix-report-${{ github.run_id }}
           path: qa/reports/

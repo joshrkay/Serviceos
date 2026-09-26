@@ -61,6 +61,66 @@ describe('InboxPage', () => {
     });
   });
 
+  // #1278 — the inbox was hard-capped at 100 with no way to see the rest
+  // ("(showing first 100)" and nothing else). The API now paginates
+  // (offset/limit) and reports `pagination`; the web inbox offers a
+  // "Load more" affordance that appends the next page.
+  describe('pagination — Load more (#1278)', () => {
+    function pageRow(id: string) {
+      return {
+        proposal: { id, proposalType: 'add_note', summary: `Note ${id}`, status: 'ready_for_review', createdAt: new Date().toISOString() },
+        urgency: 'normal' as const,
+        reason: 'Awaiting review',
+      };
+    }
+
+    it('shows a "Load more" affordance when the summary reports truncation, and hides it once exhausted', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [pageRow('p-1'), pageRow('p-2')],
+          summary: { totalCount: 3, criticalCount: 0, highCount: 0, normalCount: 3, lowCount: 0, truncated: true },
+          pagination: { offset: 0, limit: 2, hasMore: true, nextOffset: 2 },
+        }),
+      );
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note p-1'));
+      expect(screen.getByTestId('inbox-load-more')).toBeInTheDocument();
+
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [pageRow('p-3')],
+          summary: { totalCount: 3, criticalCount: 0, highCount: 0, normalCount: 3, lowCount: 0, truncated: false },
+          pagination: { offset: 2, limit: 2, hasMore: false, nextOffset: null },
+        }),
+      );
+      fireEvent.click(screen.getByTestId('inbox-load-more'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Note p-3')).toBeInTheDocument();
+      });
+      // Page one's rows are still there — Load more APPENDS, not replaces.
+      expect(screen.getByText('Note p-1')).toBeInTheDocument();
+      expect(screen.getByText('Note p-2')).toBeInTheDocument();
+      expect(screen.queryByTestId('inbox-load-more')).not.toBeInTheDocument();
+
+      expect(apiFetch).toHaveBeenLastCalledWith(
+        expect.stringMatching(/\/api\/proposals\/inbox\?.*offset=2/),
+      );
+    });
+
+    it('does not show "Load more" when pagination is absent (older/mocked server response)', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [pageRow('p-1')],
+          summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+        }),
+      );
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note p-1'));
+      expect(screen.queryByTestId('inbox-load-more')).not.toBeInTheDocument();
+    });
+  });
+
   it('approves a proposal and removes it from the list optimistically', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

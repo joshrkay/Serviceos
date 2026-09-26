@@ -9,7 +9,7 @@ import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue }
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
-import { Spinner, EmptyState } from '../ui';
+import { Spinner, EmptyState, ConfirmDialog } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
@@ -1024,6 +1024,8 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [templateOpen, setTemplateOpen] = useState(false);
   const [actionBusy,   setActionBusy]   = useState(false);
   const [actionError,  setActionError]  = useState<string | null>(null);
+  // #907 — window.confirm replaced with ConfirmDialog for the destructive delete/withdraw act.
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   async function handleClone() {
     setActionBusy(true);
@@ -1043,7 +1045,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   async function handleDelete() {
     const statusForRetract = wasSent ? 'sent' : (est?.status ?? 'draft');
     const retract = getEstimateRetractCopy(statusForRetract, estimateTerm);
-    if (!window.confirm(retract.confirm)) return;
+    setDeleteConfirmOpen(false);
     setActionBusy(true);
     setActionError(null);
     try {
@@ -1511,7 +1513,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </button>
                   {est.status !== 'accepted' && (
                     <button
-                      onClick={() => void handleDelete()}
+                      onClick={() => setDeleteConfirmOpen(true)}
                       disabled={actionBusy}
                       className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-destructive/30 bg-card text-destructive py-3 text-sm hover:bg-destructive/10 transition-colors disabled:opacity-50"
                     >
@@ -1624,6 +1626,16 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           }}
         />
       )}
+      {/* #907 — window.confirm replaced with ConfirmDialog. */}
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        title={retractCopy.confirm}
+        confirmLabel={retractCopy.label}
+        tone="danger"
+        busy={actionBusy}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setDeleteConfirmOpen(false)}
+      />
     </>
   );
 }

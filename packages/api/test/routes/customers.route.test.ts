@@ -12,6 +12,7 @@ import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
 import type { Express, NextFunction, Request, Response } from 'express';
 import { createCustomerRouter } from '../../src/routes/customers';
 import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
+import { InMemoryContactRepository } from '../../src/customers/contact';
 import { InMemoryCustomerMergeRepository } from '../../src/customers/merge';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -407,6 +408,55 @@ function buildPgLikeApp(): Express {
   );
   return app;
 }
+
+// #908 — a malformed :id on the nested CRM sub-resource routes (contacts,
+// tags, custom-fields) used to reach `loadCustomerOr404` -> `getCustomer` ->
+// `customerRepo.findById`, which is exactly the same Postgres uuid-column
+// comparison the direct /:id routes above hit — but no existing test wired
+// a sub-resource repo into this harness to prove it. Consolidating onto the
+// shared `notFoundOnMalformedId` middleware (see routes/customers.ts) closes
+// that gap for all nine nested routes at once; this pins one of them.
+function buildPgLikeAppWithContacts(): Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER_ID,
+      sessionId: 'session-test-1',
+      tenantId: TEST_TENANT_ID,
+      role: 'owner',
+    };
+    next();
+  });
+  const customerRepo = new PgLikeCustomerRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  app.use(
+    '/api/customers',
+    createCustomerRouter(
+      customerRepo,
+      auditRepo,
+      undefined,
+      new InMemoryContactRepository(),
+    ),
+  );
+  return app;
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison (nested CRM sub-resources, #908)', () => {
+  it('GET /api/customers/new/contacts returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(buildPgLikeAppWithContacts()).get('/api/customers/new/contacts');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Customer not found' });
+  });
+
+  it('POST /api/customers/new/contacts returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(buildPgLikeAppWithContacts())
+      .post('/api/customers/new/contacts')
+      .send({ firstName: 'X' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Customer not found' });
+  });
+});
 
 describe('malformed :id never reaches Postgres as a raw uuid comparison', () => {
   let app: Express;

@@ -919,15 +919,14 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
 
   // §8.12 G1 (ticket #1023) — the recurring-agreements sweep
   // (workers/recurring-agreements-worker.ts:38, wired at app.ts:5793) iterates
-  // tenants and had no entry here either. Note its isolation shape differs
-  // from the sweeps above: a tenant's failure is logged and swallowed WITHOUT
-  // a counter (recurring-agreements-worker.ts:103-108), so `failed` counts
-  // failed RUNS, not failed tenants — the proof that the loop survived is that
-  // every later tenant was still reached.
+  // tenants and had no entry here either. Its `failed` counts failed RUNS;
+  // tenant-level failures are counted separately in `failedTenants` (#1059 —
+  // they used to be logged and swallowed with no counter at all), so this
+  // entry can assert the failure was OBSERVED, as its siblings do.
   describe('recurring-agreements (membership) sweep', () => {
     const run = async (failFirstOf: string[] | null) => {
       const { visited, fn, doomed } = recordingSeam(failFirstOf, []);
-      await runRecurringAgreementsSweep({
+      const result = await runRecurringAgreementsSweep({
         agreementRepo: { findRenewable: async () => [], findDue: fn } as never,
         runRepo: {} as never,
         jobsService: {} as never,
@@ -935,7 +934,7 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
         listTenantIds: () => listAllTenantIds(pool),
         logger,
       });
-      return { visited, doomed: doomed() };
+      return { visited, failedTenants: result.failedTenants, doomed: doomed() };
     };
 
     it('reaches every tenant through the real enumerator', async () => {
@@ -989,12 +988,14 @@ describe('Postgres integration — enumerator-driven sweep fan-out (T4)', () => 
 
     it('keeps going when one tenant throws', async () => {
       const ours = await seedTrio(pool);
-      const { visited, doomed } = await run(ours);
+      const { visited, doomed, failedTenants } = await run(ours);
       // Whoever the enumerator reached first is the thrower, so every other
       // tenant in `visited` was reached AFTER a failure — which is the claim.
       expect(doomed).not.toBeNull();
       expect(ours).toContain(doomed);
       expect(visited).toEqual(expect.arrayContaining(ours));
+      // #1059 — the swallowed failure is counted, not just logged.
+      expect(failedTenants).toBeGreaterThanOrEqual(1);
     });
 
     // Real repositories and the PRODUCTION ports (app.ts:5658-5713), so

@@ -383,22 +383,42 @@ describe('EstimatesPage retract controls (D-020)', () => {
   }
 
   it('shows Withdraw on a sent estimate and confirms with approval-link copy', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderDetail('sent');
     const withdrawBtn = await screen.findByRole('button', { name: /Withdraw/i });
     expect(withdrawBtn).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Delete$/i })).not.toBeInTheDocument();
     expect(screen.getByText(/Withdraw to retract the customer approval link/i)).toBeInTheDocument();
     fireEvent.click(withdrawBtn);
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/approval link will stop working/i));
+    // #907 — window.confirm replaced with ConfirmDialog.
+    expect(
+      await screen.findByText(/approval link will stop working/i),
+    ).toBeInTheDocument();
   });
 
   it('shows Delete on a draft estimate', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderDetail('draft');
     const deleteBtn = await screen.findByRole('button', { name: /^Delete$/i });
     fireEvent.click(deleteBtn);
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/^Delete this estimate\?/i));
+    // #907 — window.confirm replaced with ConfirmDialog.
+    expect(
+      await screen.findByText(/^Delete this estimate\?/i),
+    ).toBeInTheDocument();
+  });
+
+  it('cancelling the ConfirmDialog closes it without deleting', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderDetail('draft');
+    fireEvent.click(await screen.findByRole('button', { name: /^Delete$/i }));
+    fireEvent.click(await screen.findByTestId('confirm-dialog-cancel'));
+    await waitFor(() =>
+      expect(screen.queryByText(/^Delete this estimate\?/i)).not.toBeInTheDocument(),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      '/api/estimates/e1',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
   });
 
   it('hides Delete/Withdraw when the estimate is accepted', async () => {
@@ -409,7 +429,6 @@ describe('EstimatesPage retract controls (D-020)', () => {
   });
 
   it('calls DELETE when Withdraw is confirmed on a sent estimate', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === '/api/estimates/e1' && init?.method === 'DELETE') {
@@ -430,6 +449,8 @@ describe('EstimatesPage retract controls (D-020)', () => {
       </MemoryRouter>,
     );
     fireEvent.click(await screen.findByRole('button', { name: /Withdraw/i }));
+    // #907 — window.confirm replaced with ConfirmDialog.
+    fireEvent.click(await screen.findByTestId('confirm-dialog-confirm'));
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/estimates/e1',

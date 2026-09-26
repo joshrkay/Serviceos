@@ -320,6 +320,15 @@ interface InboxSummary {
   truncated: boolean;
 }
 
+// #1278 — optional so older/mocked API responses without it still render
+// (no "Load more" affordance offered, matching the pre-pagination behavior).
+interface InboxPagination {
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
 // §5.5 — an expired schedule proposal card the operator can re-propose.
 interface ExpiredCard {
   id: string;
@@ -348,6 +357,7 @@ interface InboxResponse {
   summary: InboxSummary;
   expired?: ExpiredCard[];
   failed?: FailedCard[];
+  pagination?: InboxPagination;
 }
 
 /** Per-id outcome of POST /api/proposals/approve-batch (mirrors the API's
@@ -591,6 +601,11 @@ export function InboxPage() {
   const [failed, setFailed] = useState<FailedCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // #1278 — pagination state for "Load more". `pagination` mirrors the
+  // API's own field (undefined for an older/mocked response, which simply
+  // hides the button rather than crashing).
+  const [pagination, setPagination] = useState<InboxPagination | undefined>(undefined);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // D5 / Finding 2 — approval-undo toast, now driven by the SERVER's undo
   // window via the shared hook (the countdown is anchored to `undoExpiresAt`,
@@ -620,6 +635,7 @@ export function InboxPage() {
         setSummary(body.summary);
         setExpired(body.expired ?? []);
         setFailed(body.failed ?? []);
+        setPagination(body.pagination);
         setError(null);
       } catch (err) {
         if (background) return;
@@ -630,6 +646,28 @@ export function InboxPage() {
     },
     [apiFetch],
   );
+
+  // #1278 — appends the next page onto `rows` rather than replacing them.
+  // `expired`/`failed` are NOT paginated (the endpoint always returns the
+  // full recent-window set for those), so they're left untouched here.
+  const loadMore = useCallback(async () => {
+    if (!pagination?.hasMore || pagination.nextOffset == null || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const res = await apiFetch(
+        `/api/proposals/inbox?offset=${pagination.nextOffset}&limit=${pagination.limit}`,
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as InboxResponse;
+      setRows((prev) => [...prev, ...body.data]);
+      setSummary(body.summary);
+      setPagination(body.pagination);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load more');
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [apiFetch, pagination, isLoadingMore]);
 
   useEffect(() => {
     void loadInbox({ background: hasLoadedRef.current });
@@ -934,7 +972,10 @@ export function InboxPage() {
             <p className="text-xs text-muted-foreground mt-1">
               {summary.totalCount} waiting
               {summary.criticalCount > 0 && ` · ${summary.criticalCount} urgent`}
-              {summary.truncated && ' (showing first 100)'}
+              {/* #1278 — was a hardcoded "(showing first 100)" dead end;
+                  now reflects how many of the total are actually loaded, and
+                  "Load more" below closes the gap. */}
+              {summary.truncated && ` (showing ${rows.length} of ${summary.totalCount})`}
             </p>
           )}
         </div>
@@ -1125,6 +1166,25 @@ export function InboxPage() {
             );
           })}
         </ul>
+
+        {/* #1278 — appends the next page onto the list above; only rendered
+            when the server actually reports more (undefined `pagination`,
+            e.g. an older/mocked response, renders nothing here). */}
+        {pagination?.hasMore && (
+          <div className="mt-3 flex justify-center">
+            <button
+              type="button"
+              data-testid="inbox-load-more"
+              onClick={() => void loadMore()}
+              disabled={isLoadingMore}
+              className="min-h-11 rounded-lg border border-border bg-card px-4 py-1.5 text-sm font-medium text-foreground hover:bg-secondary disabled:opacity-50"
+            >
+              {isLoadingMore
+                ? 'Loading…'
+                : `Load more${summary ? ` (${summary.totalCount - rows.length} remaining)` : ''}`}
+            </button>
+          </div>
+        )}
 
         {/* Journey QA 2026-07-02 (bug 10) — approvals that failed to execute.
             Without this section an approved-then-failed proposal silently

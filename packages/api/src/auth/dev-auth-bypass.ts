@@ -221,9 +221,12 @@ export function devAuthBypass(deps: DevAuthBypassDeps) {
           : 'owner';
 
       if (deps.settingsRepo) {
-        await ensureTenantSettings(tenant.id, deps.settingsRepo, {
-          businessName: tenant.name,
-        });
+        // #1275 — tenant.name here is an internal-only label ("X's dev
+        // workspace") synthesized from the dev email; never seed the
+        // customer-facing businessName from it (same fix as
+        // auth/clerk.ts's bootstrapTenant). Let ensureTenantSettings apply
+        // its own generic 'My Business' default.
+        await ensureTenantSettings(tenant.id, deps.settingsRepo);
       }
 
       const canonicalUserId = await ensureDevOwnerUser(

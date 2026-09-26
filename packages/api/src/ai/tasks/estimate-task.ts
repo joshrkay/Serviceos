@@ -25,7 +25,7 @@ import {
   buildStandingInstructionsSection,
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
-import { contractErrorsFrom, contractGapFields } from './task-input';
+import { contractErrorsFrom, contractGapFields, untrustedTaskTextForPrompt } from './task-input';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
@@ -461,7 +461,10 @@ export class EstimateTaskHandler implements TaskHandler {
   private buildUserMessage(context: TaskContext): string {
     const parts: string[] = [];
     const message = (context.message || '').slice(0, 5000);
-    parts.push(`<user_request>${message}</user_request>`);
+    // #1232 — a caller's voicemail rides the fence inside the tag (a caller
+    // can type `</user_request>`; they cannot close the fence).
+    const fenced = untrustedTaskTextForPrompt(context, message);
+    parts.push(fenced === undefined ? `<user_request>${message}</user_request>` : `<user_request>\n${fenced}\n</user_request>`);
 
     if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
       const entities = JSON.stringify(context.existingEntities).slice(0, 5000);

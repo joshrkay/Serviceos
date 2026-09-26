@@ -13,6 +13,18 @@ export const proposalFilterSchema = z.object({
 
 export type ProposalFilter = z.infer<typeof proposalFilterSchema>;
 
+// #1278 — GET /api/proposals/inbox was hard-capped at 100 with no query
+// params at all. `limit` defaults to 100 (not proposalFilterSchema's 20)
+// to keep the endpoint's existing behavior byte-for-byte identical for
+// every caller that doesn't pass offset/limit yet (the web inbox, until
+// its own PR lands; ai/skills/lookup-day-overview.ts's internal count).
+export const proposalInboxQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+export type ProposalInboxQuery = z.infer<typeof proposalInboxQuerySchema>;
+
 export const rejectProposalBodySchema = z.object({
   reason: z.string().min(1, 'reason is required'),
   details: z.string().optional(),

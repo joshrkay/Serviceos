@@ -11,6 +11,7 @@ const CATEGORIES: ReadonlyArray<{ type: NotificationType; label: string }> = [
   { type: 'payment_received', label: 'Payments received' },
   { type: 'invoice_overdue', label: 'Overdue invoices' },
   { type: 'lead_captured', label: 'New leads' },
+  { type: 'low_rating_feedback', label: 'Low customer ratings' },
   { type: 'escalation', label: 'Escalations' },
   { type: 'emergency', label: 'Emergencies' },
   { type: 'proposal_needs_approval', label: 'Approvals needed' },
