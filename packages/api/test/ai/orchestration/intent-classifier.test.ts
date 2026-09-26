@@ -1592,6 +1592,23 @@ describe('A02 — draft_estimate routing determinism (2026-08-29 live sweep)', (
     expect(matchDraftEstimatePhrase('Draft an estimate for Bob Jones for a water heater')).toBeNull();
     expect(matchDraftEstimatePhrase('Can you check on the estimate for Bob Jones?')).toBeNull();
   });
+
+  // #1276B — the capture ran to the first colon, so natural phrasing between
+  // the name and the line items became part of the customer reference and
+  // resolution failed ("Priya Whitfield for the water heater replacement").
+  it('matchDraftEstimatePhrase stops the customer reference at the phrase that follows the name', async () => {
+    const { matchDraftEstimatePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchDraftEstimatePhrase(
+        'Draft an estimate for Priya Whitfield for the water heater replacement: install 1170 dollars',
+      ),
+    ).toEqual({ customerName: 'Priya Whitfield' });
+    expect(
+      matchDraftEstimatePhrase('Create an estimate for Priya Whitfield, water heater job: install 1170 dollars'),
+    ).toEqual({ customerName: 'Priya Whitfield' });
+  });
 });
 
 describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () => {

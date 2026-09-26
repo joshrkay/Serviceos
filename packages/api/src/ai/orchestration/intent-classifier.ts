@@ -1801,10 +1801,19 @@ export function matchDraftEstimatePhrase(
   if (!transcript) return null;
   const match = DRAFT_ESTIMATE_PATTERN.exec(transcript);
   if (!match) return null;
-  const customerName = match[1].trim();
+  const customerName = match[1].split(DRAFT_ESTIMATE_REFERENCE_TAIL)[0].trim();
   if (!customerName) return null;
   return { customerName };
 }
+
+/**
+ * #1276B — what follows the customer's name before the line-item colon is
+ * the job, not the name: "for Priya Whitfield for the water heater
+ * replacement: …", "for Priya Whitfield, water heater job: …". Cut the
+ * reference at the first comma or connective so the
+ * resolver sees the name alone.
+ */
+const DRAFT_ESTIMATE_REFERENCE_TAIL = /\s*,\s*|\s+(?:for|to|on|about|regarding|covering)\s+/i;
 
 /**
  * #910 completion / L03 — deterministic short-circuit for the stereotyped
