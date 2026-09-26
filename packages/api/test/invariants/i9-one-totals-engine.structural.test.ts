@@ -29,18 +29,23 @@
  *
  * ## Finding: the universal does NOT hold today
  *
- * NINE second implementations exist, listed in the inventory below. Two of
- * them are the same member-discount subtotal written twice —
- * `routes/invoices.ts:178` over every line, `routes/estimates.ts:239` over the
- * default selection only — so the repo already carries two disagreeing
- * definitions of one discount base. And one is demonstrably divergent rather
- * than merely duplicative, as the test below proves with numbers:
- * `proposals/estimate-editor.ts:31`'s
- * `calculateEstimateTotal` sums `quantity × unitPrice` with **no per-line
- * rounding**, so on a fractional quantity it returns a NON-INTEGER — which
- * CLAUDE.md's first core pattern ("all money: integer cents") forbids outright
- * and which the engine's own `normalizeLineItemTotals` doc comment describes
- * as the P0-2 bug it was written to close.
+ * Several second implementations exist, listed in the inventory below. Two
+ * of them used to be the same member-discount subtotal written twice —
+ * `routes/invoices.ts` over every line, `routes/estimates.ts:243` over the
+ * default selection only — so the repo carried two disagreeing definitions of
+ * one discount base; #1064 fixed the invoices.ts half to derive its base from
+ * the engine's own subtotal instead (the estimates.ts half is a separate,
+ * unfixed violation — same shape, not yet routed through the engine). One was
+ * demonstrably divergent rather than merely duplicative:
+ * `proposals/estimate-editor.ts`'s `calculateEstimateTotal` summed
+ * `quantity × unitPrice` with **no per-line rounding**, so on a fractional
+ * quantity it returned a NON-INTEGER — CLAUDE.md's first core pattern ("all
+ * money: integer cents") broken outright, and exactly the P0-2 bug the
+ * engine's own `normalizeLineItemTotals` was written to close. #1064 deleted
+ * it (zero callers in `src`). #1064 also swapped
+ * `proposals/execution/handlers.ts`'s `Math.round(quantity * unitPriceCents)`
+ * for the engine's `calculateLineItemTotal` (numerically identical; one
+ * definition instead of two).
  *
  * Two MORE unrounded copies sit on the SPOKEN quote readback
  * (formerly `ai/voice-turn/quote-readback.ts:82` and `create-voice-turn-processor.ts:444`; the readback now derives from the engine),
@@ -49,7 +54,7 @@
  * sweep matched only `quantity * unitPrice`, and multiplication commutes.
  *
  * The engine's math is NOT touched here (§5 lane rule: never touch
- * discount/tax math). The violations are recorded and reported.
+ * discount/tax math). The remaining violations are recorded and reported.
  *
  * Evidence class: STRUCTURAL (negative controls plant each shape).
  */
@@ -66,7 +71,6 @@ import {
   calculateDocumentTotals,
   type LineItem,
 } from '../../src/shared/billing-engine';
-import { calculateEstimateTotal } from '../../src/proposals/estimate-editor';
 
 const SRC = path.resolve(__dirname, '../../src');
 
@@ -213,16 +217,6 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: 'Pipeline value for the daily digest — sums `e.totals.totalCents` across sent estimates.',
   },
   {
-    at: 'src/proposals/estimate-editor.ts:33',
-    as: 'violation',
-    why: "`calculateEstimateTotal` is a SECOND totals engine: `sum + item.quantity * item.unitPrice` with NO per-line rounding, so a fractional quantity yields non-integer cents — CLAUDE.md's \"all money: integer cents\" broken outright, and exactly the P0-2 divergence `normalizeLineItemTotals` exists to close. It also has ZERO callers in src (only its own unit test), so the cheapest fix is deletion — which CLAUDE.md's hygiene rule already requires of an unused export.",
-  },
-  {
-    at: 'src/proposals/execution/handlers.ts:839',
-    as: 'violation',
-    why: "`Math.round(quantity * unitPriceCents)` in the execution line-item normalizer duplicates `calculateLineItemTotal` byte for byte. Numerically identical today; a second definition tomorrow. The file already imports `buildLineItem` from the engine, so the fix is a one-line swap.",
-  },
-  {
     at: 'src/proposals/resolve-line.ts:237',
     as: 'violation',
     why: '`Math.round(chosen.unitPriceCents * qty)` duplicates `calculateLineItemTotal`. Rounded, so numerically right today — a second definition tomorrow.',
@@ -241,11 +235,6 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     at: 'src/routes/estimates.ts:243',
     as: 'violation',
     why: "The SAME hand-rolled member-discount subtotal as routes/invoices.ts:178 — and the two ALREADY DISAGREE. This one sums `resolveSelectedLineItems(parsed.lineItems)` (the default selection, per its own EE-1 comment: \"Summing every tier option here would over-discount a tiered estimate\"); the invoice one sums every line. One feature, two definitions of the discount base, neither in the engine. Found in review (PR #1063) once the sweep read wrapped expressions — it is formatted across four lines, so a line-at-a-time scan could not see `.reduce(` and `+ li.totalCents` together.",
-  },
-  {
-    at: 'src/routes/invoices.ts:199',
-    as: 'violation',
-    why: "Recomputes an invoice subtotal by hand (`parsed.lineItems.reduce(... + li.totalCents)`) to feed the member-discount `applyBps`. It reaches for the engine's `applyBps` and then defines `subtotal` itself — so if the engine's subtotal ever stops meaning \"every line\" (optional and tier lines are already selectable), the member discount silently uses a different base than the invoice does.",
   },
 ];
 
@@ -295,7 +284,7 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
    * fails, and the row is forced back for re-grading.
    */
   it.fails(
-    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: 9 sites)',
+    'I9′ as written — no module outside the engine computes document totals (KNOWN GAP: #1064 fixed 3 of 7 sites; 4 remain)',
     () => {
       const violations = totalsMathOutsideEngine([SRC]).filter(
         (h) => classificationOf(h.at) === 'violation',
@@ -305,24 +294,20 @@ describe('§5 I9′ (STRUCTURAL) — the billing engine is the only source of to
   );
 
   /**
-   * The finding made concrete rather than stylistic. This is not a guard on
-   * the engine's math (untouchable on this lane) — it is a measurement of the
-   * SECOND implementation, run against the first.
+   * #1064 — the finding this proved (`proposals/estimate-editor.ts`'s
+   * `calculateEstimateTotal` disagreeing with the engine and returning
+   * non-integer cents) is fixed: that second implementation is deleted (it
+   * had zero callers in `src`). What remains is a plain regression pin that
+   * the engine itself still rounds correctly and that its document total
+   * agrees with its own line total — no second implementation to compare
+   * against anymore.
    */
-  it('PROOF the duplication is not harmless: calculateEstimateTotal disagrees with the engine and returns non-integer cents', () => {
+  it('the engine rounds a fractional-quantity line to integer cents and the document total agrees', () => {
     // 0.5 × 29¢ — the engine's own P0-2 example.
     const engineLineTotal = calculateLineItemTotal(0.5, 29);
     expect(engineLineTotal).toBe(15);
     expect(Number.isInteger(engineLineTotal)).toBe(true);
 
-    const secondEngineTotal = calculateEstimateTotal({
-      lineItems: [{ description: 'Fitting', quantity: 0.5, unitPrice: 29 }],
-    });
-    expect(secondEngineTotal).toBe(14.5);
-    expect(Number.isInteger(secondEngineTotal)).toBe(false);
-    expect(secondEngineTotal).not.toBe(engineLineTotal);
-
-    // And the engine's document total for the same line is the integer.
     const lineItems: LineItem[] = [
       {
         id: 'li-1',
