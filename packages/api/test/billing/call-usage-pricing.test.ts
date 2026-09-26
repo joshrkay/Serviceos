@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { priceMinuteUsage } from "../../src/billing/call-usage-pricing";
+import { isOverageCapReached, priceMinuteUsage } from "../../src/billing/call-usage-pricing";
 
 describe("AI answering minute pricing", () => {
   it("charges nothing for Starter's 20 included minutes", () => {
@@ -53,5 +53,26 @@ describe("AI answering minute pricing", () => {
     expect(() =>
       priceMinuteUsage({ planId: "starter", billableSeconds: 60, overageCapCents: -100 }),
     ).toThrow(RangeError);
+  });
+});
+
+describe("overage cap reached", () => {
+  const starter = (minutes: number, overageCapCents?: number | null) =>
+    isOverageCapReached({ planId: "starter", billableSeconds: minutes * 60, overageCapCents });
+
+  it("is reached once overage would pass the default $79 Starter cap", () => {
+    expect(starter(83)).toBe(false); // 63 over x $1.25 = $78.75
+    expect(starter(84)).toBe(true); // 64 over x $1.25 = $80.00
+  });
+
+  it("honours a raised cap and is never reached without one", () => {
+    expect(starter(150, 20_000)).toBe(false); // $162.50
+    expect(starter(200, 20_000)).toBe(true); // $225.00
+    expect(starter(10_000, null)).toBe(false);
+  });
+
+  it("treats a $0 cap as 'no overage': answered within the bundle, reached once it is used", () => {
+    expect(starter(19, 0)).toBe(false);
+    expect(starter(20, 0)).toBe(true);
   });
 });
