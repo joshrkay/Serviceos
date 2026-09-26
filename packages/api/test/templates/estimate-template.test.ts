@@ -149,7 +149,9 @@ describe('7.9 — buildTemplateInputFromEstimate', () => {
     lineItems: [
       buildLineItem('a', 'Diagnostic', 1, 8900, 0, true, 'labor'),
       { ...buildLineItem('b', 'Refrigerant', 2, 7500, 1, true, 'material'), isOptional: true },
-      buildLineItem('c', 'Misc', 1, 1000, 2, false), // no category → 'other'
+      // Taxable like its siblings: a mixed-taxability doc with a discount + tax
+      // is refused by the engine (#1288 Q12), which this fixture isn't about.
+      buildLineItem('c', 'Misc', 1, 1000, 2, true), // no category → 'other'
     ],
     totals: { discountCents: 500, taxRateBps: 825 },
     customerMessage: 'Thanks for your business',

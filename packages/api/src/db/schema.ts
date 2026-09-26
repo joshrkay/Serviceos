@@ -7092,6 +7092,15 @@ export const MIGRATIONS = {
         AND payment_method = 'card_present'
         AND status IN ('completed', 'processing');
   `,
+  // #1288 — the tenant's default tax rate (basis points), applied when an
+  // estimate or invoice is created without an explicit rate. 0 = no tax, the
+  // pre-migration behaviour, so existing tenants are unchanged. Column-level
+  // CHECK mirrors the per-document taxRateBps bound (0–10000).
+  '289_tenant_settings_default_tax_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_tax_rate_bps INTEGER NOT NULL DEFAULT 0
+        CHECK (default_tax_rate_bps >= 0 AND default_tax_rate_bps <= 10000);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

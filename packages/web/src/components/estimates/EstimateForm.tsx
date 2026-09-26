@@ -452,7 +452,7 @@ export function EstimateForm({
             value={form.taxRatePercent}
             onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
-            placeholder="0"
+            placeholder="Your default"
           />
         </Field>
         <Field label="Discount ($)">

@@ -15,6 +15,7 @@ import {
   applyBps,
   calculateLineItemTotal,
   calculateDocumentTotals,
+  DiscountTaxAllocationError,
   type LineItem,
 } from '../../src/shared/billing-engine';
 
@@ -63,9 +64,22 @@ describe('billing-engine — money invariants (property-based)', () => {
       const discountCents = Math.floor(rand() * (subtotal * 1.5 + 10000));
       const taxRateBps = Math.floor(rand() * 10001); // 0..100%
       const processingFeeBps = Math.floor(rand() * 2001); // 0..20%
+      const ctx = `seed=${SEED} iter=${iter} discount=${discountCents} taxBps=${taxRateBps} feeBps=${processingFeeBps}`;
+
+      // #1288 Q12 — fail closed: mixed taxability + discount + tax is refused
+      // with the typed error, never totalled on a wrong tax base.
+      const mixed =
+        items.some((li) => li.taxable && li.totalCents !== 0) &&
+        items.some((li) => !li.taxable && li.totalCents !== 0);
+      if (mixed && discountCents > 0 && taxRateBps > 0) {
+        expect(
+          () => calculateDocumentTotals(items, discountCents, taxRateBps, processingFeeBps),
+          ctx,
+        ).toThrow(DiscountTaxAllocationError);
+        continue;
+      }
 
       const t = calculateDocumentTotals(items, discountCents, taxRateBps, processingFeeBps);
-      const ctx = `seed=${SEED} iter=${iter} discount=${discountCents} taxBps=${taxRateBps} feeBps=${processingFeeBps}`;
 
       // Integer-cents invariant on EVERY money field.
       for (const [k, v] of Object.entries(t)) {
