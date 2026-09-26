@@ -569,4 +569,39 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     );
     expect(rows[0].sent_at).toBeInstanceOf(Date);
   });
+
+  it('#1238 item 4 — a settings save racing a PIN rotation cannot bring the old PIN hash back', async () => {
+    const tenant = await freshTenant();
+    await enrollAt(tenant.tenantId, PIN, new Date(Date.now() - HOUR));
+    const newHash = hashVoiceApprovalPin(NEW_PIN, tenant.tenantId, PIN_SECRET);
+
+    // The "other tab": the owner rotates the leaked PIN AFTER the generic
+    // PUT read the settings and BEFORE its write lands.
+    let raced = false;
+    const racingRepo = Object.create(settingsRepo) as PgSettingsRepository;
+    racingRepo.update = async (tenantId, updates, options) => {
+      if (!raced && updates.escalationSettings) {
+        raced = true;
+        await enrollAt(tenant.tenantId, NEW_PIN, new Date());
+      }
+      return settingsRepo.update(tenantId, updates, options);
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: tenant.userId, sessionId: 'i3-race', tenantId: tenant.tenantId, role: 'owner' };
+      next();
+    });
+    app.use('/api/settings', createSettingsRouter(racingRepo, undefined, auditRepo));
+
+    const res = await request(app)
+      .put('/api/settings')
+      .send({ escalationSettings: { ...DEFAULT_ESCALATION_SETTINGS, after_hours_voice_mode: 'ai_answering' } });
+    expect(res.status).toBe(200);
+    expect(raced).toBe(true);
+
+    const stored = await settingsRepo.findByTenant(tenant.tenantId);
+    expect(stored!.escalationSettings!.voice_approval_pin_hash).toBe(newHash);
+    expect(stored!.escalationSettings!.after_hours_voice_mode).toBe('ai_answering');
+  });
 });
