@@ -206,6 +206,7 @@ describe('POST /api/telephony/gather', () => {
 describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
   function buildAppWithResolver(
     resolveTenantId: () => string | undefined | Promise<string | undefined>,
+    opts: { phoneNumberRepo?: { findByNumber: () => Promise<null> }; nodeEnv?: string } = {},
   ): express.Application {
     const store = new VoiceSessionStore({ startInterval: false });
     const gateway = makeGateway('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
@@ -223,10 +224,18 @@ describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
         authTokenGetter: () => AUTH_TOKEN,
         publicBaseUrl: PUBLIC_BASE_URL,
         resolveTenantId,
+        ...(opts.phoneNumberRepo ? { phoneNumberRepo: opts.phoneNumberRepo } : {}),
+        ...(opts.nodeEnv ? { nodeEnv: opts.nodeEnv } : {}),
       }),
     );
     return app;
   }
+
+  // #1061 — /gather and /dial-result resolve through phoneNumberRepo, like
+  // /voice; a transient failure is the repo throwing in production.
+  const throwingRepo = () => ({
+    findByNumber: () => Promise.reject(new Error('db down')),
+  });
 
   function signedPost(
     app: express.Application,
@@ -266,8 +275,9 @@ describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
   });
 
   it('gather: 503 (Twilio retries) when tenant lookup throws (transient)', async () => {
-    const app = buildAppWithResolver(() => {
-      throw new Error('db down');
+    const app = buildAppWithResolver(() => undefined, {
+      phoneNumberRepo: throwingRepo(),
+      nodeEnv: 'production',
     });
     const res = await signedPost(app, '/api/telephony/gather?sid=sess-x', GATHER_PARAMS);
     expect(res.status).toBe(503);
@@ -283,8 +293,9 @@ describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
   });
 
   it('dial-result: 503 (Twilio retries) when tenant lookup throws (transient)', async () => {
-    const app = buildAppWithResolver(() => {
-      throw new Error('db down');
+    const app = buildAppWithResolver(() => undefined, {
+      phoneNumberRepo: throwingRepo(),
+      nodeEnv: 'production',
     });
     const res = await signedPost(app, '/api/telephony/dial-result?sid=sess-x', DIAL_PARAMS);
     expect(res.status).toBe(503);

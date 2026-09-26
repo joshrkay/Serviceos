@@ -29,6 +29,7 @@ import { BrandVoiceSheet } from './BrandVoiceSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
+import { TaxRateSheet } from './TaxRateSheet';
 import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
@@ -91,6 +92,8 @@ interface SettingsSection {
 const SETTINGS_TOGGLE_FIELDS = {
   aiAuto: 'autoApplyInternalUpdates',
   reminders: 'autoSendAppointmentReminders',
+  // #1033 — text technicians on assign / move-off (push is unaffected).
+  techAssignmentSms: 'notifyTechniciansBySms',
   // 9.6 — the daily digest switch (added by #1010), folded into the same table.
   digestEnabled: 'digestEnabled',
   thankYouSms: 'sendThankYouSms',
@@ -177,6 +180,8 @@ export function SettingsPage() {
   // opt-OUT; autonomous_close_enabled defaults FALSE).
   const [thankYouSms, setThankYouSms] = useState(true);
   const [reviewRequest, setReviewRequest] = useState(true);
+  // #1033 — notify_technicians_by_sms is NOT NULL DEFAULT TRUE.
+  const [techAssignmentSms, setTechAssignmentSms] = useState(true);
   const [weeklyFeedback, setWeeklyFeedback] = useState(true);
   const [autonomousClose, setAutonomousClose] = useState(false);
   // The cap is money: held as integer CENTS (the repo invariant) and edited as
@@ -234,6 +239,7 @@ export function SettingsPage() {
           serviceAreaZips?: string[] | null;
           sendThankYouSms?: boolean;
           sendReviewRequest?: boolean;
+          notifyTechniciansBySms?: boolean;
           weeklyFeedbackEnabled?: boolean;
           autonomousCloseEnabled?: boolean;
           autonomousCloseMaxCents?: number | null;
@@ -262,6 +268,9 @@ export function SettingsPage() {
         // #1011 — hydrate the five owner toggles.
         if (typeof data.sendThankYouSms === 'boolean') setThankYouSms(data.sendThankYouSms);
         if (typeof data.sendReviewRequest === 'boolean') setReviewRequest(data.sendReviewRequest);
+        if (typeof data.notifyTechniciansBySms === 'boolean') {
+          setTechAssignmentSms(data.notifyTechniciansBySms);
+        }
         if (typeof data.weeklyFeedbackEnabled === 'boolean') {
           setWeeklyFeedback(data.weeklyFeedbackEnabled);
         }
@@ -396,6 +405,7 @@ export function SettingsPage() {
     digestEnabled: setDigestEnabledState,
     thankYouSms: setThankYouSms,
     reviewRequest: setReviewRequest,
+    techAssignmentSms: setTechAssignmentSms,
     weeklyFeedback: setWeeklyFeedback,
     autonomousClose: setAutonomousClose,
   };
@@ -562,6 +572,7 @@ export function SettingsPage() {
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
+  const [taxRateOpen, setTaxRateOpen] = useState(false);
   const [lateFeesOpen, setLateFeesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
@@ -893,6 +904,7 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
+        { icon: FileText,   label: 'Tax rate',               description: 'Default tax rate for new estimates and invoices', action: () => setTaxRateOpen(true) },
         // #1143 (row 8.10) — the only surface that sets the tenant's late-fee
         // policy; the overdue sweep drafts each fee for owner approval.
         { icon: FileText,   label: 'Late fees',              description: 'Fee on invoices still unpaid after a grace period', action: () => setLateFeesOpen(true) },
@@ -1227,6 +1239,11 @@ export function SettingsPage() {
               value: reminders, onChange: toggleReminders,
             },
             {
+              label: 'Text technicians about assignments',
+              description: 'Text a technician when they are assigned to or moved off a job. Quick back-and-forth changes send only the final one.',
+              value: techAssignmentSms, onChange: (v: boolean) => toggleSetting('techAssignmentSms', v),
+            },
+            {
               label: 'Spanish language mode',
               description: 'Customer messages & AI phone calls in Español',
               value: spanishMode, onChange: toggleSpanishMode,
@@ -1275,8 +1292,14 @@ export function SettingsPage() {
                 <p className="text-xs text-slate-400 mt-0.5">{description}</p>
               </div>
               <button
+                type="button"
+                role="switch"
+                aria-checked={value}
+                aria-label={label}
                 onClick={() => onChange(!value)}
-                className={`relative shrink-0 mt-0.5 inline-flex h-5 w-9 items-center rounded-full transition-colors ${value ? 'bg-blue-600' : 'bg-slate-200'}`}
+                // The 20px track keeps its look; the ::before overlay grows the
+                // hit area by 12px each side to a 44px-tall tap target.
+                className={`relative shrink-0 mt-0.5 inline-flex h-5 w-9 items-center rounded-full transition-colors before:absolute before:-inset-3 before:content-[''] ${value ? 'bg-blue-600' : 'bg-slate-200'}`}
               >
                 <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${value ? 'translate-x-4' : 'translate-x-0.5'}`} />
               </button>
@@ -1622,6 +1645,9 @@ export function SettingsPage() {
       {discountPolicyOpen && (
         <DiscountPolicySheet onClose={() => setDiscountPolicyOpen(false)} />
       )}
+
+      {/* #1288 — tenant default tax rate for new estimates/invoices. */}
+      {taxRateOpen && <TaxRateSheet onClose={() => setTaxRateOpen(false)} />}
 
       {/* Late fees sheet — dunning late-fee policy (type, amount, grace, cap). */}
       {lateFeesOpen && (

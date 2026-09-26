@@ -1,4 +1,5 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
@@ -533,7 +534,7 @@ export class EstimateEditTaskHandler implements TaskHandler {
 
   private buildUserMessage(context: TaskContext, catalogItems: CatalogItem[] = []): string {
     const parts: string[] = [];
-    parts.push(`Transcript: ${context.message}`);
+    parts.push(taskMessageForPrompt(context, 'Transcript')); // #1232 — fenced for a voicemail
     if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
       parts.push(`Classifier hints: ${JSON.stringify(context.existingEntities)}`);
     }

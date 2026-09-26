@@ -318,6 +318,9 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     const ownership = permissiveTenantOwnership();
     app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
     app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, options));
+    // #1279 — PUT /api/jobs/:id no longer accepts the derived
+    // assignedTechnicianId, so fixtures seed it on the repo directly.
+    app.locals.jobRepo = jobRepo;
     return app;
   }
 
@@ -329,11 +332,12 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     });
     expect(jobRes.status).toBe(201);
 
-    const assigned = await request(app)
-      .put(`/api/jobs/${jobRes.body.id}`)
-      .set('x-test-role', 'dispatcher')
-      .send({ assignedTechnicianId });
-    expect(assigned.status).toBe(200);
+    const assigned = await (app.locals.jobRepo as InMemoryJobRepository).update(
+      'tenant-delay-ack',
+      jobRes.body.id,
+      { assignedTechnicianId, updatedAt: new Date() },
+    );
+    expect(assigned?.assignedTechnicianId).toBe(assignedTechnicianId);
 
     const start = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const end = new Date(Date.now() + 90 * 60 * 1000).toISOString();
@@ -472,5 +476,128 @@ describe('POST /api/appointments/:id/delay-ack', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+});
+
+// #1279 — the canonical appointment-level technician assignment routes.
+// Real-Postgres proof (EXCLUDE constraint, board lanes, atomicity) lives in
+// test/integration/assignment-canonical-path-1279.test.ts; these pin the
+// route contract with in-memory repos.
+describe('#1279 — appointment technician assignment routes', () => {
+  const TENANT = 'tenant-1279';
+  const TECH = '0b7f6a64-2f0f-4c52-9d7b-0e6a4b6b1279';
+  const OWNER_USER = '5f2b9b35-51c3-4a7a-8f6e-6d1a0c5c1279';
+
+  async function buildApp(withAssignment: boolean) {
+    const { InMemoryUserRepository } = await import('../../src/users/user');
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
+    const jobRepo = new InMemoryJobRepository();
+    const userRepo = new InMemoryUserRepository();
+    await userRepo.create({ id: TECH, tenantId: TENANT, email: 't@x.test', role: 'technician', canFieldServe: true });
+    await userRepo.create({ id: OWNER_USER, tenantId: TENANT, email: 'o@x.test', role: 'owner', canFieldServe: true });
+    const job = await jobRepo.create({
+      id: 'job-1279',
+      tenantId: TENANT,
+      customerId: 'c',
+      locationId: 'l',
+      jobNumber: 'JOB-1279',
+      summary: 'x',
+      status: 'new',
+      priority: 'normal',
+      createdBy: OWNER_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: OWNER_USER,
+        sessionId: 's',
+        tenantId: TENANT,
+        role: 'owner',
+      } as AuthenticatedRequest['auth'];
+      next();
+    });
+    app.use(
+      '/api/appointments',
+      createAppointmentRouter(
+        appointmentRepo,
+        permissiveTenantOwnership(),
+        jobRepo,
+        new InMemoryJobTimelineRepository(),
+        withAssignment ? { assignment: { assignmentRepo, userRepo } } : undefined,
+        new InMemoryAuditRepository(),
+      ),
+    );
+    return { app, jobRepo, assignmentRepo, jobId: job.id };
+  }
+
+  const window = tomorrowIso(24, 26);
+
+  it('create with technicianId → 503 when assignment is not configured (never a silent drop)', async () => {
+    const { app, jobId } = await buildApp(false);
+    const res = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: TECH,
+    });
+    expect(res.status).toBe(503);
+  });
+
+  it('create with technicianId writes the primary assignment and derives the job technician', async () => {
+    const { app, jobRepo, assignmentRepo, jobId } = await buildApp(true);
+    const res = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: TECH,
+    });
+    expect(res.status).toBe(201);
+    const rows = await assignmentRepo.findByAppointment(TENANT, res.body.id);
+    expect(rows.map((r) => [r.technicianId, r.isPrimary])).toEqual([[TECH, true]]);
+    expect((await jobRepo.findById(TENANT, jobId))?.assignedTechnicianId).toBe(TECH);
+  });
+
+  it('create with a non-technician → 400 and no appointment is written', async () => {
+    const { app, jobId } = await buildApp(true);
+    const res = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: OWNER_USER,
+    });
+    expect(res.status).toBe(400);
+    const list = await request(app).get(`/api/appointments?jobId=${jobId}`);
+    expect(list.body).toEqual([]);
+  });
+
+  it('create rejects a non-uuid technicianId (400)', async () => {
+    const { app, jobId } = await buildApp(true);
+    const res = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: 'nope',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /:id/assignments → 503 when not configured, 404 on a malformed id', async () => {
+    const off = await buildApp(false);
+    expect((await request(off.app).post(`/api/appointments/${TECH}/assignments`).send({ technicianId: TECH })).status).toBe(503);
+    const on = await buildApp(true);
+    expect((await request(on.app).post('/api/appointments/not-a-uuid/assignments').send({ technicianId: TECH })).status).toBe(404);
+  });
+
+  it('POST /:id/assignments → 404 for an unknown appointment, 400 for a bad body or a non-technician', async () => {
+    const { app, jobId } = await buildApp(true);
+    const unknown = await request(app)
+      .post('/api/appointments/11111111-1111-4111-8111-111111111111/assignments')
+      .send({ technicianId: TECH });
+    expect(unknown.status).toBe(404);
+
+    const created = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC',
+    });
+    const id: string = created.body.id;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect((await request(app).post(`/api/appointments/${id}/assignments`).send({})).status).toBe(400);
+    expect(
+      (await request(app).post(`/api/appointments/${id}/assignments`).send({ technicianId: OWNER_USER })).status,
+    ).toBe(400);
+    const ok = await request(app).post(`/api/appointments/${id}/assignments`).send({ technicianId: TECH });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ appointmentId: id, technicianId: TECH });
   });
 });

@@ -301,6 +301,7 @@ export default defineConfig<DevAuthFixtures>({
               'job-scheduling-mobile.spec.ts',
               'settings-mobile.spec.ts',
               'technician-day-mobile.spec.ts',
+              'customer-archive-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

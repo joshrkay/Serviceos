@@ -131,6 +131,28 @@ describe('buildClassifierSystemPrompt — per-profile assembly', () => {
     expect(buildClassifierSystemPrompt('caller')).toMatch(/>"\n {2}\}\n\}/);
   });
 
+  it('#891: the caller prompt frames the speaker as an inbound customer caller, never an operator', () => {
+    const caller = buildClassifierSystemPrompt('caller');
+    const opening = caller.split('\n').slice(0, 2).join('\n');
+    expect(caller).not.toMatch(/transcript from a field service operator/i);
+    expect(opening).toMatch(/inbound customer caller/i);
+    // Only the S1 caller surface is reframed: the operator surface really is
+    // an operator speaking.
+    expect(SYSTEM_PROMPT).toContain('Given a voice transcript from a field service operator');
+  });
+
+  it('#893: draft_estimate carries a never-invent-prices grounding rule on every profile that advertises it', () => {
+    for (const profile of ['caller', 'field_tech', 'owner_line', 'operator'] as const) {
+      const prompt = buildClassifierSystemPrompt(profile);
+      const start = prompt.indexOf('- "draft_estimate"');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const nextBlock = prompt.indexOf('\n- "', start + 1);
+      const block = prompt.slice(start, nextBlock);
+      expect(block).toMatch(/never invent prices/i);
+      expect(block).toMatch(/amount only if explicitly stated/i);
+    }
+  });
+
   it('caller create_customer / jobTitle / noteBody use the short caller variants', () => {
     const prompt = buildClassifierSystemPrompt('caller');
     expect(prompt).toContain('an inbound CALLER is signing up');

@@ -346,6 +346,32 @@ describe('SchedulePage', () => {
     expect(screen.queryByText('Session expired — please reload')).not.toBeInTheDocument();
     expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
   });
+
+  // ── #1289: confirmed-vs-pending colour on the schedule ──────────────────
+  // Scope decision (2026-09-26): only the status colour is built here. The
+  // week/month grid and SMS-confirmation preview are deferred/dropped — see
+  // the PR description for the recorded n/a reasons.
+  describe('#1289 — confirmed-vs-pending status colour', () => {
+    it('renders a confirmed appointment status pill in green', async () => {
+      setupApi([{ ...appt1, status: 'confirmed' }, appt2]);
+      renderPage();
+      await screen.findByText('Alice Smith');
+      const pill = screen.getByText('confirmed');
+      expect(pill.className).toContain('bg-green-100');
+      expect(pill.className).toContain('text-green-700');
+    });
+
+    it('renders a non-confirmed (pending) appointment status pill in amber, not green', async () => {
+      renderPage(); // appt1/appt2 default to status: 'scheduled'
+      await screen.findByText('Alice Smith');
+      const pills = screen.getAllByText('scheduled');
+      expect(pills.length).toBeGreaterThan(0);
+      for (const pill of pills) {
+        expect(pill.className).toContain('bg-amber-100');
+        expect(pill.className).not.toContain('bg-green-100');
+      }
+    });
+  });
 });
 
 // ─── Journey QA 2026-07-02 (bug 4): appointment times post in TENANT tz ──────
@@ -536,5 +562,62 @@ describe('U8 — schedule day keys derive from the tenant tz', () => {
     await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-01'));
     fireEvent.click(navButtons()[0]); // prev
     await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-10-31'));
+  });
+});
+
+// ─── #1279: the technician is written through the canonical assignment ──────
+
+describe('#1279 — new appointment assigns through appointment_assignments', () => {
+  async function openAndFill(techId: string) {
+    renderPage();
+    await screen.findByText('Alice Smith');
+    fireEvent.click(screen.getByRole('button', { name: /new appointment/i }));
+    fireEvent.change(screen.getByLabelText('job-search'), { target: { value: 'JOB-001' } });
+    fireEvent.click(await screen.findByTestId('job-option-j1'));
+    fireEvent.change(screen.getByLabelText(/assign technician/i), { target: { value: techId } });
+  }
+
+  function createCall() {
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.find(([url, i]) => url === '/api/appointments' && i?.method === 'POST');
+  }
+
+  it('sends technicianId on the appointment create and never PUTs the job', async () => {
+    await openAndFill('t2');
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+
+    await waitFor(() => expect(createCall()).toBeDefined());
+    expect(JSON.parse(String(createCall()![1]!.body)).technicianId).toBe('t2');
+    expect(vi.mocked(apiFetch).mock.calls.filter(([, i]) => i?.method === 'PUT')).toEqual([]);
+  });
+
+  it('omits technicianId when Unassigned is chosen', async () => {
+    await openAndFill('');
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+    await waitFor(() => expect(createCall()).toBeDefined());
+    expect(JSON.parse(String(createCall()![1]!.body))).not.toHaveProperty('technicianId');
+  });
+
+  it('shows the 409 double-booking message and keeps the form open', async () => {
+    const base = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input) === '/api/appointments' && init?.method === 'POST') {
+        return mockResponse({ message: 'Technician is already booked at this time' }, false, 409);
+      }
+      return base(input, init);
+    });
+    await openAndFill('t1');
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+
+    expect(await screen.findByText(/already booked/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /create appointment/i })).toBeInTheDocument();
+  });
+
+  it('form controls meet the 44px tap-target contract', async () => {
+    await openAndFill('t1');
+    expect(screen.getByLabelText(/assign technician/i).className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: /create appointment/i }).className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: /close new appointment/i }).className).toContain('min-h-11');
   });
 });

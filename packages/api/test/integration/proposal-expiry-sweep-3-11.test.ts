@@ -314,18 +314,15 @@ describe('Postgres integration — §8.3 row 3.11 stale schedule proposals expir
   });
 
   /**
-   * THE ROW'S GAP. The PRD's "two TTL regimes coexist" is true as source but
-   * false as behaviour: only the 48 h regime runs. What remains is an unwired
-   * module whose numbers contradict the live ones, which is exactly the state
-   * §8.0's CODE-ONLY class exists to describe — a reader of
-   * `ai/guardrails/expiration.ts` would conclude `create_appointment` cards
-   * die after 4 h. The desired end state is ONE regime in the tree.
-   *
-   * Whether that means deleting the guardrail module or wiring it in place of
-   * the worker's is Josh's call — this lane recommends, it does not delete.
+   * THE ROW'S GAP, RESOLVED (#1078). `src/ai/guardrails/expiration.ts` and its
+   * unit test (`test/ai/guardrails-expiration.test.ts`, its only importer)
+   * are deleted: the module was tested but dead — zero runtime importers, and
+   * its 24 h/4 h numbers contradicted the worker's live 48 h regime. ONE
+   * proposal-TTL regime remains in the tree (the worker's 48 h). This was
+   * `it.fails` until the deletion; now it passes, so it's a plain `it`.
    */
-  it.fails(
-    'DESIRED (row 3.11): exactly ONE proposal-TTL regime exists in the tree — src/ai/guardrails/expiration.ts is either wired or gone, so no reader can mistake its 24 h/4 h numbers for live behaviour',
+  it(
+    'DESIRED (row 3.11), NOW TRUE: exactly ONE proposal-TTL regime exists in the tree — src/ai/guardrails/expiration.ts is gone, so no reader can mistake its 24 h/4 h numbers for live behaviour',
     () => {
       const importers = runtimeImportersOf('ai/guardrails/expiration');
       const moduleExists = (() => {

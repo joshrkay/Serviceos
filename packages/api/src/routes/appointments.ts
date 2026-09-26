@@ -2,8 +2,13 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createAppointmentSchema, delayAcknowledgmentSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
+import {
+  createAppointmentSchema,
+  delayAcknowledgmentSchema,
+  setAppointmentTechnicianSchema,
+} from '../shared/contracts';
+import { NotFoundError, ValidationError, toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createAppointment,
@@ -24,6 +29,17 @@ import {
   JOB_TIMELINE_EVENT_TYPES,
 } from '../jobs/job-lifecycle';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import {
+  AssignmentRepository,
+  assertNoDoubleBooking,
+  syncJobAssignment,
+} from '../appointments/assignment';
+import { UserRepository } from '../users/user';
+import { WorkingHoursRepository } from '../availability/working-hours';
+import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import { ensurePrimaryTechnician } from '../jobs/job-appointment-sync';
+import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
+import { runAfterCommit } from '../middleware/tenant-context';
 export interface DelayNotificationEnqueuer {
   enqueueDelayNotice(input: {
     tenantId: string;
@@ -37,6 +53,17 @@ export interface DelayNotificationEnqueuer {
 
 interface AppointmentRouterOptions {
   delayNotificationCoordinator?: DelayNotificationEnqueuer;
+  /**
+   * #1279 — canonical technician-assignment deps. Enables `technicianId` on
+   * create and `POST /:id/assignments`; both write appointment_assignments
+   * (never the derived jobs.assigned_technician_id) and 503 when absent.
+   */
+  assignment?: {
+    assignmentRepo: AssignmentRepository;
+    userRepo: UserRepository;
+    workingHoursRepo?: WorkingHoursRepository;
+    unavailableBlockRepo?: UnavailableBlockRepository;
+  };
 }
 
 // Body for POST /:id/running-late. Not the shared delayMinutesSchema
@@ -206,9 +233,34 @@ export function createAppointmentRouter(
     requirePermission('appointments:create'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const parsed = createAppointmentSchema.parse(req.body);
+        const { technicianId, ...parsed } = createAppointmentSchema.parse(req.body);
         // Cross-entity tenant guard: jobId must belong to the requesting tenant.
         await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
+        const assignmentDeps = options?.assignment;
+        if (technicianId) {
+          if (!assignmentDeps) {
+            res.status(503).json({
+              error: 'NOT_CONFIGURED',
+              message: 'Technician assignment is not configured',
+            });
+            return;
+          }
+          // Refuse a non-technician or a double-booking BEFORE the appointment
+          // row is written so a 400/409 never leaves an orphan behind. The EXCLUDE
+          // constraint (migration 131) stays the race-safe backstop, and the
+          // request transaction rolls the insert back if it fires.
+          const tech = await assignmentDeps.userRepo.findById(req.auth!.tenantId, technicianId);
+          if (!tech || tech.role !== 'technician') {
+            throw new ValidationError('technicianId must reference a user with the technician role');
+          }
+          await assertNoDoubleBooking(
+            req.auth!.tenantId,
+            technicianId,
+            { start: new Date(parsed.scheduledStart), end: new Date(parsed.scheduledEnd) },
+            assignmentDeps.assignmentRepo,
+            appointmentRepo,
+          );
+        }
         const result = await createAppointment(
           {
             ...parsed,
@@ -223,6 +275,26 @@ export function createAppointmentRouter(
           undefined,
           auditRepo,
           req.auth!.role,
+        );
+        if (technicianId && assignmentDeps) {
+          await ensurePrimaryTechnician(
+            { ...assignmentDeps, appointmentRepo, auditRepo },
+            req.auth!.tenantId,
+            result.id,
+            technicianId,
+            req.auth!.userId,
+            req.auth!.role,
+          );
+          await syncJobAssignment(
+            req.auth!.tenantId,
+            result.jobId,
+            result.id,
+            assignmentDeps.assignmentRepo,
+            jobRepo,
+          );
+        }
+        runAfterCommit(res, () =>
+          notifyDispatchBoardChanged(req.auth!.tenantId, result.scheduledStart, result.timezone),
         );
         res.status(201).json(result);
       } catch (err) {
@@ -396,6 +468,59 @@ export function createAppointmentRouter(
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  // #1279 — set (uuid) or clear (null) an appointment's primary technician.
+  // The one appointment-level assignment write the web forms use: it goes
+  // through ensurePrimaryTechnician (double-booking + availability pre-flight,
+  // audit, technician notification) and re-derives the job's
+  // assignedTechnicianId, so the dispatch board, conflict detection and the
+  // job view all read the same relation.
+  router.post(
+    '/:id/assignments',
+    requireAuth,
+    requireTenant,
+    requirePermission('appointments:update'),
+    notFoundOnMalformedId('Appointment not found'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const assignmentDeps = options?.assignment;
+        if (!assignmentDeps) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Technician assignment is not configured',
+          });
+          return;
+        }
+        const body = setAppointmentTechnicianSchema.parse(req.body ?? {});
+        const tenantId = req.auth!.tenantId;
+        const appointment = await getAppointment(tenantId, req.params.id, appointmentRepo);
+        if (!appointment) throw new NotFoundError('Appointment', req.params.id);
+
+        await ensurePrimaryTechnician(
+          { ...assignmentDeps, appointmentRepo, auditRepo },
+          tenantId,
+          appointment.id,
+          body.technicianId,
+          req.auth!.userId,
+          req.auth!.role,
+        );
+        await syncJobAssignment(
+          tenantId,
+          appointment.jobId,
+          appointment.id,
+          assignmentDeps.assignmentRepo,
+          jobRepo,
+        );
+        runAfterCommit(res, () =>
+          notifyDispatchBoardChanged(tenantId, appointment.scheduledStart, appointment.timezone),
+        );
+        res.status(200).json({ appointmentId: appointment.id, technicianId: body.technicianId });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   // Technician-reachable running-late notice. Technicians deliberately hold

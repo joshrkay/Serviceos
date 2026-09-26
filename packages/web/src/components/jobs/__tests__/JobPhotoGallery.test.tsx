@@ -131,4 +131,68 @@ describe('JobPhotoGallery (P12-001)', () => {
       expect(screen.getByRole('img')).toBeInTheDocument();
     });
   });
+
+  // #1122 — before/after pairing, reachable from the gallery the technician
+  // is now linked to (was API-only: RV-005 POST /api/attachments/:id/pair).
+  describe('#1122 — before/after pairing', () => {
+    it('offers a "pair with" control on a before photo when an after photo exists', () => {
+      const onPair = vi.fn();
+      const before = makePhoto({ id: 'p-before', category: 'before' });
+      const after = makePhoto({ id: 'p-after', category: 'after' });
+      render(<JobPhotoGallery photos={[before, after]} onPair={onPair} />);
+
+      expect(screen.getByTestId('job-photo-pair-select-p-before')).toBeInTheDocument();
+      expect(screen.getByTestId('job-photo-pair-select-p-after')).toBeInTheDocument();
+    });
+
+    it('does not offer pairing when there is no opposite-category candidate', () => {
+      const onPair = vi.fn();
+      const before = makePhoto({ id: 'p-before', category: 'before' });
+      render(<JobPhotoGallery photos={[before]} onPair={onPair} />);
+      expect(screen.queryByTestId('job-photo-pair-select-p-before')).not.toBeInTheDocument();
+    });
+
+    it('does not offer pairing for problem/completion/other categories', () => {
+      const onPair = vi.fn();
+      const other = makePhoto({ id: 'p-other', category: 'other' });
+      const before = makePhoto({ id: 'p-before', category: 'before' });
+      render(<JobPhotoGallery photos={[other, before]} onPair={onPair} />);
+      expect(screen.queryByTestId('job-photo-pair-select-p-other')).not.toBeInTheDocument();
+    });
+
+    it('does not render pairing controls when onPair is not provided', () => {
+      const before = makePhoto({ id: 'p-before', category: 'before' });
+      const after = makePhoto({ id: 'p-after', category: 'after' });
+      render(<JobPhotoGallery photos={[before, after]} />);
+      expect(screen.queryByTestId('job-photo-pair-select-p-before')).not.toBeInTheDocument();
+    });
+
+    it('calls onPair with the photo and the selected candidate', () => {
+      const onPair = vi.fn();
+      const before = makePhoto({ id: 'p-before', category: 'before' });
+      const after = makePhoto({ id: 'p-after', category: 'after' });
+      render(<JobPhotoGallery photos={[before, after]} onPair={onPair} />);
+
+      fireEvent.change(screen.getByTestId('job-photo-pair-select-p-before'), {
+        target: { value: 'p-after' },
+      });
+      fireEvent.click(screen.getByTestId('job-photo-pair-button-p-before'));
+
+      expect(onPair).toHaveBeenCalledWith(before, after);
+    });
+
+    it('the pair button is disabled until a candidate is selected', () => {
+      const onPair = vi.fn();
+      const before = makePhoto({ id: 'p-before', category: 'before' });
+      const after = makePhoto({ id: 'p-after', category: 'after' });
+      render(<JobPhotoGallery photos={[before, after]} onPair={onPair} />);
+
+      const button = screen.getByTestId('job-photo-pair-button-p-before') as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.change(screen.getByTestId('job-photo-pair-select-p-before'), {
+        target: { value: 'p-after' },
+      });
+      expect(button.disabled).toBe(false);
+    });
+  });
 });

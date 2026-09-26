@@ -10,6 +10,10 @@ import {
 } from '../feedback/feedback-response';
 import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
+
+/** Ratings at or below this are pushed to the owner (#1071); 4★+ get review links. */
+const LOW_RATING_MAX = 3;
 
 const submitSchema = z.object({
   rating: z.number().int().min(1).max(5),
@@ -122,6 +126,19 @@ export function createPublicFeedbackRouter(
             },
           }),
         );
+      }
+
+      // #1071 — route an unhappy customer (≤3★) to the owner privately via
+      // the shared owner-notification push seam. The request row is the
+      // tenant anchor (resolved from the token), so only this tenant's
+      // devices are targeted. Best-effort: notifyOwner never throws, and the
+      // submission is already persisted + audited above.
+      if (parsed.rating <= LOW_RATING_MAX) {
+        await notifyOwner(request.tenantId, 'low_rating_feedback', {
+          jobId: request.jobId,
+          rating: response.rating,
+          comment: response.comment,
+        });
       }
 
       // Surface the tenant's public review links only to satisfied

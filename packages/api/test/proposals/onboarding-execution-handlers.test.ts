@@ -266,9 +266,6 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
       expect.objectContaining({
         businessName: 'Acme Plumbing',
         serviceAreaText: 'Austin, TX',
-        // The same default IdentityStep pre-fills, so a silent form user and a
-        // silent conversation user land on the identical column value.
-        jobBufferMinutes: 30,
         // The operator-supplied zone reaches the SAME column PUT /identity
         // writes. Without it the tenant derives identity-done but every spoken
         // booking gates as a timezone clarification.
@@ -276,6 +273,10 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
       }),
     );
     expect(activatePackWithSeed).toHaveBeenCalledTimes(2);
+    // #1201 — the conversation never asks for a job buffer, so none is
+    // written (NULL = default, applied by readers).
+    const identityFields = vi.mocked(settingsRepo.upsertIdentityFields).mock.calls[0][1];
+    expect(identityFields).not.toHaveProperty('jobBufferMinutes');
   });
 
   // Still "never writes a timezone it was not told" — the refusal is just

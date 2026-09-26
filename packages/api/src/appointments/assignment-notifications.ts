@@ -27,6 +27,7 @@ import type {
   NotificationContextMap,
 } from '../notifications/owner-notification-service';
 import type { Logger } from '../logging/logger';
+import type { SettingsRepository } from '../settings/settings';
 import { isValidTimezone } from '../shared/timezone';
 
 export type AssignmentChangeKind = 'assigned' | 'unassigned';
@@ -70,7 +71,32 @@ export interface TechnicianAssignmentNotifierDeps {
   locationRepo?: Pick<LocationRepository, 'findById'>;
   /** Optional — when set, an SMS is also sent to the tech's mobile. */
   smsSender?: StaffSmsSender;
+  /**
+   * #1033 — reads the tenant's `notifyTechniciansBySms` toggle before each
+   * SMS. Unset/unreadable → SMS stays ON (the pre-toggle behaviour).
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
+  /**
+   * #1033 — churn window. When > 0, each (appointment, technician) SMS is
+   * held for this long (sliding: every further hop restarts it) and only the
+   * NET change is texted — assign → unassign inside the window sends
+   * nothing, assign → unassign → assign sends one "assigned". 0 / unset sends
+   * immediately. Push notifications are never delayed. The window is
+   * in-process: a restart inside it drops the pending text, and churn spread
+   * across API replicas collapses per replica.
+   */
+  smsChurnWindowMs?: number;
   logger?: Logger;
+}
+
+/** #1033 — production churn window for technician assignment SMS. */
+export const TECH_ASSIGNMENT_SMS_CHURN_WINDOW_MS = 60_000;
+
+interface PendingSms {
+  change: TechnicianAssignmentChange;
+  /** The first hop's kind — the state before the burst was its opposite. */
+  firstKind: AssignmentChangeKind;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -118,6 +144,8 @@ interface ResolvedAssignmentContext {
 }
 
 export class TechnicianAssignmentNotifier {
+  private readonly pendingSms = new Map<string, PendingSms>();
+
   constructor(private readonly deps: TechnicianAssignmentNotifierDeps) {}
 
   /**
@@ -129,36 +157,100 @@ export class TechnicianAssignmentNotifier {
   async notifyChange(change: TechnicianAssignmentChange): Promise<void> {
     const { tenantId, appointmentId, technicianId, kind } = change;
     try {
-      // The user and appointment lookups are independent — run them together.
-      const [user, appointment] = await Promise.all([
-        this.deps.userRepo.findById(tenantId, technicianId),
-        this.deps.appointmentRepo.findById(tenantId, appointmentId),
+      const resolved = await this.resolve(change);
+      if (!resolved) return;
+      const { user, ctx } = resolved;
+
+      // In-app push (targeted by Clerk subject — device tokens key on it, not
+      // users.id) and SMS (to the tech's own mobile) are independent channels —
+      // run them in parallel; each is failure-isolated internally. With a
+      // churn window the SMS is queued instead (#1033) — push stays immediate.
+      const windowed = (this.deps.smsChurnWindowMs ?? 0) > 0 && Boolean(this.deps.smsSender);
+      if (windowed) this.queueSms(change);
+      await Promise.all([
+        this.sendPush(tenantId, user.clerkUserId ?? null, kind, ctx),
+        windowed ? Promise.resolve() : this.sendSms(tenantId, user.mobileNumber ?? null, kind, ctx),
       ]);
-      if (!user || !appointment) return;
+    } catch (err) {
+      this.warn('technician assignment notification failed', tenantId, { appointmentId, technicianId, kind }, err);
+    }
+  }
 
-      const job = await this.deps.jobRepo.findById(tenantId, appointment.jobId);
-      const customer = job
-        ? await this.deps.customerRepo.findById(tenantId, job.customerId)
-        : null;
+  private async resolve(
+    change: TechnicianAssignmentChange,
+  ): Promise<{ user: { clerkUserId?: string | null; mobileNumber?: string | null }; ctx: ResolvedAssignmentContext } | null> {
+    const { tenantId, appointmentId, technicianId } = change;
+    // The user and appointment lookups are independent — run them together.
+    const [user, appointment] = await Promise.all([
+      this.deps.userRepo.findById(tenantId, technicianId),
+      this.deps.appointmentRepo.findById(tenantId, appointmentId),
+    ]);
+    if (!user || !appointment) return null;
 
-      const ctx: ResolvedAssignmentContext = {
+    const job = await this.deps.jobRepo.findById(tenantId, appointment.jobId);
+    const customer = job
+      ? await this.deps.customerRepo.findById(tenantId, job.customerId)
+      : null;
+
+    return {
+      user,
+      ctx: {
         appointmentId,
         technicianId,
         customerName: customer?.displayName?.trim() || 'A customer',
         whenLabel: formatAssignmentWhenLabel(appointment.scheduledStart, appointment.timezone),
         serviceLabel: job?.summary?.trim() || appointment.appointmentType || 'Service visit',
         job,
-      };
+      },
+    };
+  }
 
-      // In-app push (targeted by Clerk subject — device tokens key on it, not
-      // users.id) and SMS (to the tech's own mobile) are independent channels —
-      // run them in parallel; each is failure-isolated internally.
-      await Promise.all([
-        this.sendPush(tenantId, user.clerkUserId ?? null, kind, ctx),
-        this.sendSms(tenantId, user.mobileNumber ?? null, kind, ctx),
-      ]);
+  /**
+   * #1033 — hold the SMS for this (appointment, technician) until the churn
+   * window closes; every further hop restarts the window and records the
+   * latest kind. States alternate, so the net change is "the first hop's
+   * kind" iff the last hop matches it; otherwise the burst cancelled out.
+   */
+  private queueSms(change: TechnicianAssignmentChange): void {
+    const key = `${change.tenantId}:${change.appointmentId}:${change.technicianId}`;
+    const existing = this.pendingSms.get(key);
+    if (existing) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      void this.flushSms(key);
+    }, this.deps.smsChurnWindowMs);
+    timer.unref?.();
+    this.pendingSms.set(key, {
+      change,
+      firstKind: existing?.firstKind ?? change.kind,
+      timer,
+    });
+  }
+
+  private async flushSms(key: string): Promise<void> {
+    const pending = this.pendingSms.get(key);
+    if (!pending) return;
+    this.pendingSms.delete(key);
+    const { change, firstKind } = pending;
+    if (change.kind !== firstKind) return; // net no change — the burst cancelled out
+    try {
+      // Re-resolve at send time so the text reflects the final appointment.
+      const resolved = await this.resolve(change);
+      if (!resolved) return;
+      await this.sendSms(change.tenantId, resolved.user.mobileNumber ?? null, change.kind, resolved.ctx);
     } catch (err) {
-      this.warn('technician assignment notification failed', tenantId, { appointmentId, technicianId, kind }, err);
+      this.warn('technician assignment SMS failed', change.tenantId, { ...change }, err);
+    }
+  }
+
+  /** #1033 — the tenant toggle; unset or unreadable keeps SMS ON. */
+  private async smsEnabledForTenant(tenantId: string): Promise<boolean> {
+    if (!this.deps.settingsRepo) return true;
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+      return settings?.notifyTechniciansBySms !== false;
+    } catch (err) {
+      this.warn('technician SMS setting lookup failed; sending', tenantId, {}, err);
+      return true;
     }
   }
 
@@ -197,6 +289,7 @@ export class TechnicianAssignmentNotifier {
   ): Promise<void> {
     const sender = this.deps.smsSender;
     if (!sender || !mobileNumber) return; // SMS not wired, or tech has no mobile on file
+    if (!(await this.smsEnabledForTenant(tenantId))) return; // #1033 tenant toggle OFF
     try {
       const body =
         kind === 'assigned'

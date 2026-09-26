@@ -1663,8 +1663,15 @@ describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () =
   });
 
   it('negative control: reschedule / cancel / lookup phrasings never match', async () => {
+    // The bare, entity-free "I need to reschedule my appointment" now has its
+    // OWN short-circuit (#1119, below) — it must still never be read as a
+    // NEW booking.
+    {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent('I need to reschedule my appointment', inappContext, gateway);
+      expect(result.intentType).toBe('reschedule_appointment');
+    }
     for (const transcript of [
-      'I need to reschedule my appointment',
       'Cancel the appointment for the Miller job',
       'Move my appointment to Thursday',
       'What appointments are scheduled today?',
@@ -1744,6 +1751,82 @@ describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () =
     expect(gateway.complete).toHaveBeenCalledTimes(1);
     expect(result.intentType).toBe('create_appointment');
     expect(result.extractedEntities?.customerName).toBe('Jordan Lee');
+  });
+});
+
+describe('#1119 — reschedule / cancel opening turns are deterministic (no model)', () => {
+  const operator = { tenantId: 't1' };
+
+  it.each([
+    'I need to reschedule my appointment',
+    "I'd like to reschedule my appointment",
+    'Can I reschedule my appointment?',
+    'I want to move my appointment',
+    'Reschedule my visit',
+    'I need to reschedule',
+  ])('"%s" routes to reschedule_appointment with NO LLM call', async (transcript) => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(transcript, operator, gateway);
+    expect(result.intentType).toBe('reschedule_appointment');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'I need to cancel my appointment',
+    "I'd like to cancel my appointment",
+    'Can you cancel my visit?',
+    'Cancel my appointment',
+  ])('"%s" routes to cancel_appointment with NO LLM call', async (transcript) => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(transcript, operator, gateway);
+    expect(result.intentType).toBe('cancel_appointment');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('reschedule short-circuits on the S1 caller + field_tech profiles too (both offer it)', async () => {
+    for (const classifierProfile of ['caller', 'field_tech'] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        'I need to reschedule my appointment',
+        { tenantId: 't1', classifierProfile },
+        gateway,
+      );
+      expect(result.intentType).toBe('reschedule_appointment');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('cancel does NOT short-circuit on a profile that does not offer cancel_appointment', async () => {
+    // caller (S1) and field_tech do not accept cancel_appointment — a
+    // deterministic matcher must not mint an off-surface intent. It falls
+    // through to the LLM path, whose post-parse guard owns off-surface.
+    for (const classifierProfile of ['caller', 'field_tech'] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        'I need to cancel my appointment',
+        { tenantId: 't1', classifierProfile },
+        gateway,
+      );
+      expect(result.intentType).not.toBe('cancel_appointment');
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('negative control: an utterance carrying a slot stays LLM-routed so entity extraction survives', async () => {
+    for (const transcript of [
+      'Move my appointment to Thursday',
+      'Cancel the appointment for the Miller job',
+      'Reschedule the Johnson visit to Friday at 2',
+      'I need to reschedule my appointment and add a filter change',
+    ]) {
+      const gateway = mockGateway(
+        '{"intentType":"reschedule_appointment","confidence":0.9,"extractedEntities":{"customerName":"Miller"}}',
+      );
+      await classifyIntent(transcript, operator, gateway);
+      expect(gateway.complete, `"${transcript}" must stay LLM-routed`).toHaveBeenCalledTimes(1);
+    }
   });
 });
 

@@ -1,4 +1,5 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
@@ -17,6 +18,7 @@ import {
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
 import { contractErrorsFrom, contractGapFields } from './task-input';
+import { calculateLineItemTotal } from '../../shared/billing-engine';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
@@ -302,7 +304,7 @@ export class InvoiceTaskHandler implements TaskHandler {
           })(),
           quantity: qty,
           ...(unitPriceCents !== undefined
-            ? { unitPriceCents, totalCents: Math.round(unitPriceCents * qty) }
+            ? { unitPriceCents, totalCents: calculateLineItemTotal(qty, unitPriceCents) }
             : {}),
           ...(typeof li.unit === 'string' ? { unit: li.unit } : {}),
           sortOrder: idx,
@@ -467,7 +469,8 @@ export class InvoiceTaskHandler implements TaskHandler {
 
   private buildUserMessage(context: TaskContext, catalogItems: CatalogItem[] = []): string {
     const parts: string[] = [];
-    parts.push(`Request: ${context.message}`);
+    // #1232 — fenced when the message is a caller's voicemail.
+    parts.push(taskMessageForPrompt(context, 'Request'));
     if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
       parts.push(`Context entities: ${JSON.stringify(context.existingEntities)}`);
     }

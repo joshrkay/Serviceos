@@ -101,7 +101,7 @@ import {
   SendCustomerMessageExecutionHandler,
   type CustomerMessenger,
 } from './send-customer-message-handler';
-import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
+import { LineItem, LineItemCategory, buildLineItem, calculateLineItemTotal } from '../../shared/billing-engine';
 import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
   EmergencyDispatchExecutionHandler,
@@ -836,7 +836,9 @@ export function normalizeDraftLineItems(raw: unknown[]): {
     const totalCents =
       typeof li.totalCents === 'number' && Number.isFinite(li.totalCents)
         ? Math.round(li.totalCents)
-        : Math.round(quantity * unitPriceCents);
+        // #1064 — route through the engine's rounding rather than a second
+        // `Math.round(quantity * unitPriceCents)` copy (I9′).
+        : calculateLineItemTotal(quantity, unitPriceCents);
 
     const rawCategory = typeof li.category === 'string' ? li.category.toLowerCase() : '';
 

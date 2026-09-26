@@ -56,6 +56,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     nextEstimateNumber: row.next_estimate_number as number,
     nextInvoiceNumber: row.next_invoice_number as number,
     defaultPaymentTermDays: row.default_payment_term_days as number,
+    // #1288 — migration 289. Absent on narrow SELECTs that don't project it.
+    ...(row.default_tax_rate_bps !== undefined && row.default_tax_rate_bps !== null
+      ? { defaultTaxRateBps: Number(row.default_tax_rate_bps) }
+      : {}),
     terminologyPreferences,
     activeVerticalPacks,
     // Phase 12 — columns added in migration 063 (P12-001).
@@ -71,6 +75,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    // #1033 — migration 289 (NOT NULL DEFAULT true).
+    notifyTechniciansBySms: row.notify_technicians_by_sms as boolean | undefined,
     appointmentReminderOffsetsHours: normalizeReminderOffsets(
       parseJsonbArray(row.appointment_reminder_offsets_hours),
     ),
@@ -317,6 +323,23 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
 
   async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // #1031 — update() must never be a silent no-op for a tenant whose
+      // tenant_settings row doesn't exist yet (every tenant-creation path
+      // seeds one, but a correction-lesson cascade or onboarding write can
+      // race that bootstrap). Seed a minimal row first — same "seed a
+      // minimal row" convention as upsertIdentityFields / ensureActiveVerticalPack
+      // — so the rest of this method (including the terminology-merge
+      // pre-check below) always has a row to work against, turning every
+      // caller of update() into an upsert instead of a discarded write.
+      await client.query(
+        `INSERT INTO tenant_settings (
+           id, tenant_id, business_name, estimate_prefix, invoice_prefix,
+           next_estimate_number, next_invoice_number, default_payment_term_days
+         ) VALUES (gen_random_uuid(), $1, '', 'EST-', 'INV-', 1001, 1001, 30)
+         ON CONFLICT (tenant_id) DO NOTHING`,
+        [tenantId],
+      );
+
       // If terminology or packs are being updated, we need to merge with existing.
       // Sweep-2 S1: an `undefined` VALUE means "untouched", never "clear" —
       // the contract types these keys as `string[]` / `Record<string,string>`
@@ -334,9 +357,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           'SELECT terminology_preferences FROM tenant_settings WHERE tenant_id = $1',
           [tenantId]
         );
-        if (existing.rows.length === 0) return null;
+        // Unreachable in practice — the seed above guarantees a row — but
+        // kept as defense in depth rather than assuming rows.length is 1.
 
-        const currentRaw = existing.rows[0].terminology_preferences as Record<string, unknown> | null;
+        const currentRaw = existing.rows[0]?.terminology_preferences as Record<string, unknown> | null;
         const { _activeVerticalPacks: currentPacks, ...currentTerms } = currentRaw ?? {};
 
         const newTerms = touchesTerms
@@ -361,12 +385,16 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         nextEstimateNumber: 'next_estimate_number',
         nextInvoiceNumber: 'next_invoice_number',
         defaultPaymentTermDays: 'default_payment_term_days',
+        // #1288 — migration 289.
+        defaultTaxRateBps: 'default_tax_rate_bps',
         // Phase 12 — migration 063.
         backupSupervisorUserId: 'backup_supervisor_user_id',
         unsupervisedProposalRouting: 'unsupervised_proposal_routing',
         // Tier 4 — migration 075.
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
+        // #1033 — migration 289.
+        notifyTechniciansBySms: 'notify_technicians_by_sms',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
         // Migration 194.
         sendThankYouSms: 'send_thank_you_sms',
