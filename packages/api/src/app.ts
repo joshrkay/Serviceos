@@ -327,7 +327,7 @@ import {
   InMemoryTransactionRunner,
 } from './db/tenant-transaction';
 import { createJob as createJobDomain } from './jobs/job';
-import { createInvoice as createInvoiceDomain } from './invoices/invoice';
+import { createAgreementInvoicesService } from './agreements/agreement-invoices-port';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
@@ -5874,39 +5874,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       return { id: job.id };
     },
   };
-  const agreementsInvoicesService = {
-    async createDraftInvoice(input: {
-      tenantId: string;
-      jobId: string;
-      priceCents: number;
-      description: string;
-      createdBy: string;
-    }) {
-      const invoice = await createInvoiceDomain(
-        {
-          tenantId: input.tenantId,
-          jobId: input.jobId,
-          invoiceNumber: `AGREEMENT-${Date.now()}`,
-          lineItems: [
-            {
-              id: `agreement-${Date.now()}`,
-              description: input.description,
-              quantity: 1,
-              unitPriceCents: input.priceCents,
-              totalCents: input.priceCents,
-              sortOrder: 0,
-              taxable: false,
-            },
-          ],
-          customerMessage: undefined,
-          createdBy: input.createdBy,
-        },
-        invoiceRepo,
-        auditRepo,
-      );
-      return { id: invoice.id };
-    },
-  };
+  // #1058 — the production port lives in agreements/agreement-invoices-port
+  // so the integration suite drives what ships, not a hand-copied replica.
+  const agreementsInvoicesService = createAgreementInvoicesService({
+    invoiceRepo,
+    settingsRepo,
+    auditRepo,
+  });
   app.use(
     '/api/agreements',
     createAgreementsRouter({
