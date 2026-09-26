@@ -58,7 +58,7 @@ describe('VQ2-017 — Layer 2 weekly-trend CI workflow', () => {
 
   it('VQ2-017 — workflow uploads trend artifact with retention-days: 90', () => {
     const src = readWorkflow();
-    expect(src).toMatch(/actions\/upload-artifact@v4/);
+    expect(src).toMatch(/actions\/upload-artifact@[0-9a-f]{40} # v4/);
     expect(src).toMatch(/voice-quality-trend-report/);
     expect(src).toMatch(/voice-quality-trend-report\.json/);
     expect(src).toMatch(/retention-days:\s*90/);

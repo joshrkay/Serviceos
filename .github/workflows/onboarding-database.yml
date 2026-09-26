@@ -37,8 +37,8 @@ jobs:
       EMAIL_ENABLED: 'false'
       PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/onboarding-results.json
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -62,7 +62,7 @@ jobs:
       - name: Require every selected journey to execute and pass
         if: always()
         run: node scripts/release/verify.mjs test-results/onboarding-results.json
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:
           name: onboarding-database-results
