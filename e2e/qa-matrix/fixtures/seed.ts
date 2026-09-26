@@ -22,6 +22,12 @@ import { randomUUID } from 'node:crypto';
  * keeps resolving to exactly one customer for SCH-02/SMS-01's callerPhone.
  */
 const AMBIGUOUS_PHONE = '555-0200';
+// VOX-13 pair. `legacySuffix` is the pre-#1268 display_name tail the seeder
+// migrates away from; the new names must never contain the tenant slug.
+const AMBIGUOUS_PAIR = [
+  { legacySuffix: 'ambiguous-1', firstName: 'Riley', lastName: 'Twinsley' },
+  { legacySuffix: 'ambiguous-2', firstName: 'Rowan', lastName: 'Twinsley' },
+] as const;
 
 async function main() {
   const connectionString = process.env.E2E_DB_URL_READWRITE;
@@ -158,21 +164,34 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
   // resolution). Exercises the "0 or 2+ matches are left unresolved" branch
   // of InAppVoiceAdapter.startSession — the adapter must never guess between
   // them. display_name is the idempotency handle, same pattern as above.
-  for (const suffix of ['ambiguous-1', 'ambiguous-2']) {
-    const display = `${slug}-${suffix}`;
+  //
+  // The names deliberately share no token with the tenant slug or with
+  // "QA Matrix": the pair used to be `${slug}-ambiguous-1/2`, which made every
+  // "the QA Matrix job" utterance (VOX-05/07/11, SCH-03) a three-way customer
+  // tie that the resolver correctly refused to guess (#1268). A pre-rename row
+  // is migrated in place so an existing tenant does not end up with a third
+  // customer on the shared phone.
+  for (const pair of AMBIGUOUS_PAIR) {
+    const display = `${pair.firstName} ${pair.lastName}`;
     const existingAmbiguous = await client.query(
       `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
       [tenantId, display]
     );
-    if (!existingAmbiguous.rows[0]) {
-      await client.query(
-        `INSERT INTO customers
-           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
-            sms_consent, is_archived, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())`,
-        [randomUUID(), tenantId, 'QA', suffix, display, AMBIGUOUS_PHONE, systemUser]
-      );
-    }
+    if (existingAmbiguous.rows[0]) continue;
+    const migrated = await client.query(
+      `UPDATE customers
+          SET first_name = $3, last_name = $4, display_name = $5, updated_at = now()
+        WHERE tenant_id = $1 AND display_name = $2`,
+      [tenantId, `${slug}-${pair.legacySuffix}`, pair.firstName, pair.lastName, display]
+    );
+    if (migrated.rowCount) continue;
+    await client.query(
+      `INSERT INTO customers
+         (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
+          sms_consent, is_archived, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())`,
+      [randomUUID(), tenantId, pair.firstName, pair.lastName, display, AMBIGUOUS_PHONE, systemUser]
+    );
   }
 
   // Service location (jobs require a location_id).

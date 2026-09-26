@@ -1,5 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
-import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+import { startVoiceSession, voiceInput, approveAndAwaitExecution, describeOutcome } from './helpers/voice-flow';
 // QA-2026-07-26 — VOX-11 asserts against the SHIPPED inbox response type, not a
 // hand-written structural cast. GET /api/proposals/inbox returns
 // `data: PrioritizedProposal[]`, i.e. the proposal is NESTED at `.proposal`.
@@ -64,7 +64,7 @@ matrixTest('VOX-05', 'Voice-triggered estimate draft creation', async (h) => {
 
   const outcome = await approveAndAwaitExecution(h, token, flow.proposalId, '05');
   if (outcome.status !== 'executed') {
-    h.evidence.fail(`Estimate proposal did not execute (status=${outcome.status}).`);
+    h.evidence.fail(`Estimate proposal did not execute (${describeOutcome(outcome)}).`);
     return;
   }
   if (!outcome.resultEntityId) {

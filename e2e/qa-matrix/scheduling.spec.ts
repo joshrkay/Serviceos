@@ -1,5 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
-import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+import { startVoiceSession, voiceInput, approveAndAwaitExecution, describeOutcome } from './helpers/voice-flow';
 
 /**
  * SCH-01 — create + reschedule an appointment via the REST API (deterministic).
@@ -144,6 +144,12 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
   // asserting around it.
   const { token, tenantId } = h.tenantB;
 
+  // Repeated runs must not depend on a manual reset: an attempt that fails
+  // past the seed leaves its appointment behind, and the next run's "exactly
+  // one" guard trips on it (two rows on tenant B after one run, #1268).
+  // Cancel any earlier QA-seeded upcoming appointment over REST first.
+  await cancelLeftoverQaAppointments(h, h.tenantB, '03-cleanup');
+
   // Something to cancel — the only upcoming appointment this tenant has.
   const appt = await createAppointment(h, '03-seed-appt', h.tenantB);
 
@@ -190,7 +196,7 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
     h.evidence.pass();
   } else {
     h.evidence.fail(
-      `Cancel-by-voice incomplete (proposal=${outcome.status}, appointment=${status}). ` +
+      `Cancel-by-voice incomplete (proposal ${describeOutcome(outcome)}, appointment=${status}). ` +
         'Voice agent must resolve which appointment to cancel; verify entity resolution live.'
     );
   }
@@ -198,6 +204,37 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
 });
 
 // ---------------- helpers ----------------
+
+/**
+ * Cancel every upcoming appointment this harness seeded earlier (notes =
+ * 'QA scheduling') so a row that needs "exactly one" starts clean without a
+ * full tenant reset. Real cancellations go through PUT /api/appointments/:id
+ * — the same transition a dispatcher uses — so audit rows stay honest.
+ */
+async function cancelLeftoverQaAppointments(
+  h: RowHarness,
+  tenant: RowHarness['tenantA'],
+  label: string,
+): Promise<void> {
+  const leftovers = await h.db.query({
+    label,
+    tenantId: tenant.tenantId,
+    sql: `SELECT id FROM appointments
+           WHERE tenant_id = $1 AND status <> 'canceled' AND scheduled_start >= now()
+             AND notes = 'QA scheduling'`,
+    params: [tenant.tenantId],
+  });
+  for (const row of leftovers.rows as { id: string }[]) {
+    await h.api.call({
+      method: 'PUT',
+      path: `/api/appointments/${row.id}`,
+      body: { status: 'canceled' },
+      token: tenant.token,
+      label: `${label}-${row.id.slice(0, 8)}`,
+      expectStatus: [200, 404, 409],
+    });
+  }
+}
 
 async function gotoUi(h: RowHarness, path: string, label: string): Promise<void> {
   const baseUrl = process.env.E2E_BASE_URL!;

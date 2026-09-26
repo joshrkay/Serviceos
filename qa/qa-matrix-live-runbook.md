@@ -235,6 +235,46 @@ npm run qa:doctor
 ./scripts/qa-matrix-run.sh
 ```
 
+### B.1 — Tenant leftovers from repeated runs (SCH-03, VOX-05/07/11 trip on duplicates)
+
+Symptom: rows that reference "the QA Matrix job" or "our customer" come back
+as a clarification instead of a proposal, or SCH-03 finds several open
+appointments. `SELECT count(*) FROM customers WHERE tenant_id = $E2E_TENANT_A_ID`
+is far above 3.
+
+Cause: the seeder is idempotent on `tenants.owner_id`, but every matrix run
+*adds* customers, proposals, appointments and audit rows to the same two
+tenants and nothing removes them. After enough runs the entity resolver sees
+duplicates and (correctly) refuses to guess. On 2026-09-19 Tenant A+B held
+72 customers, 818 proposals and 5631 audit events before the first reset.
+
+Fix, pick one:
+
+```bash
+# (a) Fresh tenants for this run — no deletes anywhere. Both seeder and reset
+#     derive owner_id from the prefix (`qa:<prefix>-A` / `qa:<prefix>-B`).
+export QA_MATRIX_SEED_PREFIX="qa-matrix-$(date +%Y%m%d)"
+npx tsx e2e/qa-matrix/fixtures/seed.ts      # prints 6 fresh export lines
+# paste them (or rerun `npm run qa:setup`), then:
+./scripts/qa-matrix-run.sh
+
+# (b) Sanctioned reset of the two shared matrix tenants ONLY. The reset script
+#     resolves a closed owner_id list and refuses anything outside it; the
+#     journey prefix is pointed at a slug that does not exist so the qa-journey
+#     tenants are left alone. It prints per-table before/after counts — keep
+#     them in the ticket.
+QA_JOURNEY_SEED_PREFIX=no-such-journey-tenant E2E_DB_ALLOW_UNSAFE=1 \
+  npx tsx e2e/fixtures/reset-tenant-fixtures.ts
+npx tsx e2e/qa-matrix/fixtures/seed.ts      # re-seed; customer/job UUIDs change
+# refresh .env.qa.local with the new UUIDs (tenant ids stay the same)
+```
+
+Never combine (b) with `E2E_USE_TEST_DB=true` or run it with a prefix you did
+not seed yourself. The VOX-13 ambiguous pair is seeded as "Riley Twinsley" /
+"Rowan Twinsley" (shared phone 555-0200) precisely so it never collides with
+"QA Matrix" lookups; older tenants carrying `<slug>-ambiguous-1/2` are renamed
+in place by the seeder.
+
 ### C. RLS denial — DB verifier sees 0 rows even though API returned 200
 
 Symptom: `api/<row>.json` shows `status: 200` and a real created object, but

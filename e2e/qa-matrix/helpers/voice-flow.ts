@@ -15,6 +15,10 @@ export interface ProposalOutcome {
   status: string;
   resultEntityId?: string;
   proposalType?: string;
+  /** HTTP status of POST /approve; anything but 200 means the gate held. */
+  approveStatus?: number;
+  /** Server message when the approve was refused (e.g. unfilled required fields). */
+  approveError?: string;
 }
 
 export async function startVoiceSession(
@@ -106,7 +110,7 @@ export async function approveAndAwaitExecution(
   proposalId: string,
   label: string
 ): Promise<ProposalOutcome> {
-  await h.api.call({
+  const approve = await h.api.call({
     method: 'POST',
     path: `/api/proposals/${proposalId}/approve`,
     body: {},
@@ -114,10 +118,16 @@ export async function approveAndAwaitExecution(
     label: `${label}-approve`,
     expectStatus: [200, 400, 409],
   });
+  const approveStatus = approve.response.status;
+  const approveError = (approve.response.body as { message?: string } | undefined)?.message;
 
-  // Poll silently past the undo window for the execution worker.
+  // Poll silently past the undo window for the execution worker — but only
+  // when the approve was accepted. A 400/409 means the gate held (missing
+  // fields, stale state); nothing will move, and 15 x 2 s of polling overran
+  // the row's own timeout, leaving "no manifest" instead of the real reason
+  // (#1268, 2026-09-19).
   let status = 'pending';
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; approveStatus === 200 && i < 15; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     try {
       const res = await fetch(`${apiBase()}/api/proposals/${proposalId}`, {
@@ -151,5 +161,16 @@ export async function approveAndAwaitExecution(
     status: body.status ?? status,
     resultEntityId: body.resultEntityId ?? body.result_entity_id,
     proposalType: body.proposalType ?? body.proposal_type,
+    approveStatus,
+    approveError: approveStatus === 200 ? undefined : approveError,
   };
+}
+
+/** One-line reason for evidence text: proposal status plus the approve refusal, if any. */
+export function describeOutcome(outcome: ProposalOutcome): string {
+  const approve =
+    outcome.approveStatus && outcome.approveStatus !== 200
+      ? `; approve → ${outcome.approveStatus}${outcome.approveError ? ` "${outcome.approveError}"` : ''}`
+      : '';
+  return `status=${outcome.status}${approve}`;
 }
