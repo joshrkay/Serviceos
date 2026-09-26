@@ -86,7 +86,7 @@ describe('captureServerError', () => {
   });
 });
 
-describe('#1205 — route tag carries the route pattern, never the query string', () => {
+describe('#1205 — route tag never carries the query string', () => {
   afterEach(() => resetSentryClient());
 
   it('a 500 on a customer search does not put the searched name/phone in the route tag', () => {
@@ -94,9 +94,7 @@ describe('#1205 — route tag carries the route pattern, never the query string'
     setSentryClient(client);
     const req = fakeReq({
       path: '/',
-      baseUrl: '/api/customers',
       originalUrl: '/api/customers?search=Jane%20Doe%20602-555-0199',
-      route: { path: '/' },
       // request logging ran and redacted only token-like params
       safeRequestLog: { route: '/api/customers?search=Jane%20Doe%20602-555-0199' },
     });
@@ -104,7 +102,7 @@ describe('#1205 — route tag carries the route pattern, never the query string'
     captureServerError(new Error('boom'), req);
 
     const route = calls.tags.find(([k]) => k === 'route')?.[1];
-    expect(route).toBe('/api/customers/');
+    expect(route).toBe('/api/customers');
     expect(JSON.stringify(calls.tags)).not.toMatch(/Jane|602-555/);
   });
 });

@@ -11,20 +11,13 @@ import { getSentryClient } from './sentry';
  * tag, which `beforeSend` never inspects.
  */
 export function redactedRoute(req: Request): string {
-  // #1205 — prefer the matched route PATTERN (`/api/customers/:id`): it is
-  // stable for grouping and carries no request data. The query string is
-  // never part of the label — `?search=Jane Doe 602-555-0199` on a 500 would
-  // otherwise land in an indexed Sentry tag (redactUrlValue only scrubs
-  // token-like params, not free-text search).
-  const anyReq = req as unknown as {
-    safeRequestLog?: { route?: string };
-    route?: { path?: unknown };
-    baseUrl?: string;
-  };
-  const pattern = anyReq.route?.path;
-  if (typeof pattern === 'string' && pattern.length > 0) {
-    return `${anyReq.baseUrl ?? ''}${pattern}`;
-  }
+  // #1205 — the query string is never part of the label: `?search=Jane Doe
+  // 602-555-0199` on a 500 would otherwise land in an indexed Sentry tag
+  // (redactUrlValue only scrubs token-like params, not free-text search).
+  // (The matched route pattern is not usable here: by the time the global
+  // error handler runs, Express has already reset req.baseUrl, so
+  // req.route.path alone would collapse every router's `/` into one label.)
+  const anyReq = req as unknown as { safeRequestLog?: { route?: string } };
   const logged = anyReq.safeRequestLog?.route;
   const raw =
     typeof logged === 'string' && logged.length > 0
@@ -51,8 +44,7 @@ function stripQuery(url: string): string {
  * but redactSentryEvent (logging/redact.ts) deliberately leaves them
  * unmasked so tenant_id stays filterable (#1205) — which is exactly why they
  * must be built from redacted sources here: the route is redactedRoute()
- * (the matched route PATTERN, or the token-scrubbed path with the query
- * string dropped); the request id is the
+ * (the token-scrubbed path with the query string dropped); the request id is the
  * correlation_id request logging minted; the tenant comes from req.auth
  * (webhook/telephony paths have no tenant store — the tag is simply
  * omitted). Callers gate on the mapped status so 4xx never captures. The
