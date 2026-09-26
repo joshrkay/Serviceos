@@ -12,9 +12,9 @@
 # regression signal); it does not block merges.
 #
 # Cost shape: each run hits the real Anthropic API for the classify calls.
-# Spend is bounded two ways: --max-utterances caps the sample size, and
-# VOICE_EVAL_COST_CAP_CENTS makes each script abort (exit 3) BEFORE spending if
-# its conservative projection exceeds the cap. No Postgres/Docker/ffmpeg — the
+# Spend is bounded two ways: --max-utterances caps the sample size, and a
+# per-step VOICE_EVAL_COST_CAP_CENTS makes each script abort (exit 3) BEFORE
+# spending if its conservative projection exceeds the cap. No Postgres/Docker/ffmpeg — the
 # classifier with a gateway needs no DB (repo deps are not exercised).
 name: Voice Eval Live (intent + slot)
 
@@ -33,11 +33,8 @@ jobs:
     env:
       # The eval only needs the Anthropic key for live classification.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # Per-script cost ceiling (cents). Each runner projects cost conservatively
-      # (no cache) and aborts before spending if the sample would exceed this.
-      VOICE_EVAL_COST_CAP_CENTS: '500'   # $5 per script
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Verify API key is present
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -46,25 +43,39 @@ jobs:
             exit 1
           fi
           echo "API key present."
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - name: Install deps
         run: npm ci
+      # Per-script cost ceilings (cents), set PER STEP so each cap is sized to
+      # its own --max-utterances sample (#839: a single $5 cap sat below both
+      # samples' projections, so every keyed run would have aborted with exit
+      # 3 before classifying anything). Each runner projects cost
+      # conservatively — no cache discount, EST_SYSTEM_PROMPT_TOKENS headroom,
+      # Haiku priced at the eval harness's pinned $3/$15 per MTok (roughly 3x
+      # the current $1/$5 list rate) — and aborts before spending if the
+      # projection exceeds the cap; the same cap then bounds recorded spend
+      # row by row. Real spend for a 200-row intent run is ~$3.
+      # ci-workflow-voice-eval-live.test.ts fails if a sample outgrows its cap.
       - name: Live intent eval (gated, sampled)
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '1500'   # projection ~1,280c at N=200
         run: |
           set -o pipefail
           npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 \
             | tee voice-eval-live-report.txt
       - name: Live slot eval (gated, sampled)
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '800'    # projection ~640c at N=100
         run: |
           set -o pipefail
           npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 \
             | tee -a voice-eval-live-report.txt
       - name: Upload eval report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: voice-eval-live-report
           path: voice-eval-live-report.txt

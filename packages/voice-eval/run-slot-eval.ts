@@ -29,11 +29,9 @@
  *   (name, address, time_window, problem_description). service_type live
  *   coverage is a separate, out-of-scope concern (the vertical resolver).
  */
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { slotReport } from './metrics';
 import { extractSlots } from './slot-extractor';
+import { loadSlotTranscripts as loadTranscripts, type Transcript } from './corpus';
 import {
   ActualCostCapExceededError,
   assertActualCostWithinCap,
@@ -49,9 +47,6 @@ import {
   sampleDeterministic,
   type SlotExample,
 } from './live-support';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const TRANSCRIPTS = resolve(__dirname, '../../data/fixtures/transcripts');
 
 const CRITICAL = ['name', 'address', 'service_type', 'time_window', 'problem_description'];
 const OFFLINE_FLOOR = 0.50;
@@ -72,8 +67,6 @@ function matchFn(slot: string, gold: string, pred: string): boolean {
   return norm(gold) === norm(pred) || norm(pred).includes(norm(gold)) || norm(gold).includes(norm(pred));
 }
 
-interface Transcript { transcript: string; service_type?: string; expected_entities?: Record<string, string> }
-
 function goldSlots(t: Transcript): Record<string, string> {
   const e = t.expected_entities ?? {};
   return {
@@ -83,12 +76,6 @@ function goldSlots(t: Transcript): Record<string, string> {
     time_window: e.appointment_window ?? '',
     problem_description: e.issue ?? '',
   };
-}
-
-function loadTranscripts(): Transcript[] {
-  return readdirSync(TRANSCRIPTS)
-    .filter((x) => x.endsWith('.json'))
-    .map((f) => JSON.parse(readFileSync(join(TRANSCRIPTS, f), 'utf8')) as Transcript);
 }
 
 const LIVE_NO_KEY =

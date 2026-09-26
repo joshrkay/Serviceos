@@ -26,11 +26,9 @@
  * Held-out split: deterministic 20% by stable hash of the utterance, so the test
  * set is stable across runs and independent of row order.
  */
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { classificationReport, stableHash } from './metrics';
+import { classificationReport } from './metrics';
 import { classifyBaseline } from './baseline-classifier';
+import { loadIntentTestSplit as loadTestSplit } from './corpus';
 import {
   ActualCostCapExceededError,
   assertActualCostWithinCap,
@@ -45,27 +43,7 @@ import {
   sampleDeterministic,
 } from './live-support';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const UTTERANCES = resolve(__dirname, '../../data/corpus/utterances.jsonl');
-
-const TEST_FRACTION = 0.20;
 const OFFLINE_FLOOR = 0.50; // regression guard for the rule baseline on this data
-
-interface Row { utterance: string; intent: string }
-
-// The corpus jsonl carries the utterance under `text` (current schema) or
-// `utterance` (older rows) — normalize to a canonical `{ utterance, intent }`.
-interface RawRow { text?: string; utterance?: string; intent?: string }
-
-function loadTestSplit(): Row[] {
-  const rows = readFileSync(UTTERANCES, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as RawRow)
-    .map((r): Row => ({ utterance: r.text ?? r.utterance ?? '', intent: r.intent ?? '' }))
-    .filter((r) => r.utterance !== '' && r.intent !== '');
-  return rows.filter((r) => stableHash(r.utterance) < TEST_FRACTION);
-}
 
 // --live is now WIRED and credential-gated: it needs a real LLM key. This is the
 // fail-fast message shown when the key is absent (exit 2 — distinct from a gate

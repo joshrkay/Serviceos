@@ -46,6 +46,11 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
   $5, per script) caps spend: each run projects cost conservatively (no cache
   discount) and **aborts (exit 3) before spending** if the projection exceeds
   the cap. Exit codes: `1` gate fail, `2` no key, `3` over cost cap.
+  The projection prices Haiku at the harness's pinned $3/$15 per MTok (about
+  3x the current $1/$5 list rate), so a cap must be sized to its sample: the
+  scheduled workflow sets it per step (intent N=200 → 1500c, slot N=100 →
+  800c), and `ci-workflow-voice-eval-live.test.ts` fails if a configured sample
+  ever projects over its cap (#839 — the old shared 500c cap sat below both).
 
 ## Run
 
