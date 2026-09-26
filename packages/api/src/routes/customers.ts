@@ -11,6 +11,7 @@ import {
   listCustomers,
   listCustomersWithMeta,
   archiveCustomer,
+  restoreCustomer,
   CustomerRepository,
   MAX_LIST_LIMIT,
   DEFAULT_LIST_LIMIT,
@@ -140,6 +141,8 @@ export function createCustomerRouter(
     requirePermission('customers:view'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const includeArchived = req.query.includeArchived === 'true';
+      // #1281 — `?archived=only` backs the directory's "Archived" view.
+      const archivedOnly = req.query.archived === 'only';
       const search = req.query.search as string | undefined;
       const tag = req.query.tag as string | undefined;
       const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
@@ -175,6 +178,7 @@ export function createCustomerRouter(
       if (wantsPaginated) {
         const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
           includeArchived,
+          archivedOnly,
           search,
           tag,
           limit,
@@ -187,6 +191,7 @@ export function createCustomerRouter(
 
       const result = await listCustomers(req.auth!.tenantId, customerRepo, {
         includeArchived,
+        archivedOnly,
         search,
         tag,
         sort,
@@ -247,6 +252,31 @@ export function createCustomerRouter(
     customerNotFoundOnMalformedId,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await archiveCustomer(
+        req.auth!.tenantId,
+        req.params.id,
+        customerRepo,
+        req.auth!.userId,
+        auditRepo
+      );
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
+      res.json(result);
+    })
+  );
+
+  // #1281 — undo an archive. Same permission as archive (owner-only
+  // `customers:delete`) so whoever can archive can take it back. Idempotent
+  // on an already-active customer; emits `customer.restored`.
+  router.post(
+    '/:id/restore',
+    requireAuth,
+    requireTenant,
+    requirePermission('customers:delete'),
+    customerNotFoundOnMalformedId,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await restoreCustomer(
         req.auth!.tenantId,
         req.params.id,
         customerRepo,

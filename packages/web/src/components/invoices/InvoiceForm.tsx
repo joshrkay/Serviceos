@@ -287,7 +287,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
             value={form.taxRatePercent}
             onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
-            placeholder="0"
+            placeholder="Your default"
             className="min-h-11"
           />
         </Field>

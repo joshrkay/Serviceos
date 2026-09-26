@@ -72,9 +72,12 @@ const PROVISIONING_ENQUEUE_TIMEOUT_MS = 10_000;
  * PaymentMethod. Prefers the actual charged method
  * (`charges.data[0].payment_method_details.type`), then the declared
  * `payment_method_types`. ACH / bank-debit variants collapse to
- * 'bank_transfer'; everything else defaults to 'credit_card'. The value is
- * informational (balances don't depend on it), so an unknown shape falling
- * back to 'credit_card' is harmless.
+ * 'bank_transfer'; an in-person Terminal tap (`card_present` /
+ * `interac_present` — charged, or the only types the intent declared) maps to
+ * 'card_present' (#1099) so doorstep and online card revenue stay separable;
+ * everything else defaults to 'credit_card'. The value is informational
+ * (balances don't depend on it), so an unknown shape falling back to
+ * 'credit_card' is harmless.
  */
 function mapStripePaymentMethod(obj: {
   payment_method_types?: unknown;
@@ -97,6 +100,13 @@ function mapStripePaymentMethod(obj: {
     )
   ) {
     return 'bank_transfer';
+  }
+  const isPresent = (t: string) => t === 'card_present' || t === 'interac_present';
+  if (
+    (charged !== undefined && isPresent(charged)) ||
+    (charged === undefined && declared.length > 0 && declared.every(isPresent))
+  ) {
+    return 'card_present';
   }
   return 'credit_card';
 }

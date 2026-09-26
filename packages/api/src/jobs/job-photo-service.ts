@@ -89,6 +89,13 @@ export class JobPhotoService {
     // 400 instead of a 500 and keeps in-memory tests honest.
     const file = await this.fileRepo.findById(tenantId, fileId);
     if (!file) throw new NotFoundError('File', fileId);
+    // #1200 — the file must have been uploaded FOR this job (the presign
+    // route stamps entityType 'job' + entityId). Otherwise a same-tenant file
+    // uploaded for another job, or a loose generic upload, could be linked
+    // here. Answered as "not found" for this job, like a missing file.
+    if (file.entityType !== 'job' || file.entityId !== jobId) {
+      throw new NotFoundError('File', fileId);
+    }
 
     const input: CreateJobPhotoInput = {
       tenantId,

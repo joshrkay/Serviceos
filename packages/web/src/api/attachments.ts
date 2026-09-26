@@ -9,6 +9,7 @@
 import { apiFetch } from '../utils/api-fetch';
 
 export type AttachmentEntityType = 'job' | 'invoice' | 'estimate';
+export type AttachmentPairRole = 'before' | 'after';
 export type AttachmentCategory =
   | 'before'
   | 'after'
@@ -85,6 +86,30 @@ export async function attachFileToEntity(payload: {
   });
   if (!res.ok) throw new Error(`Attach failed: ${res.status}`);
   return (await res.json()) as Attachment;
+}
+
+export interface PairAttachmentsResult {
+  pairGroupId: string;
+  attachment: Attachment;
+  other: Attachment;
+}
+
+/**
+ * #1122 — pair two attachments of the same entity as a before/after set
+ * (RV-005, POST /api/attachments/:id/pair). `role` is assigned to `id`;
+ * the API assigns the opposite role to `otherId`.
+ */
+export async function pairAttachments(
+  id: string,
+  otherId: string,
+  role: AttachmentPairRole,
+): Promise<PairAttachmentsResult> {
+  const res = await apiFetch(`/api/attachments/${encodeURIComponent(id)}/pair`, {
+    method: 'POST',
+    body: JSON.stringify({ otherId, role }),
+  });
+  if (!res.ok) throw new Error(`Pair failed: ${res.status}`);
+  return (await res.json()) as PairAttachmentsResult;
 }
 
 export async function listAttachments(

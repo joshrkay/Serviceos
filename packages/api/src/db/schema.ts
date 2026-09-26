@@ -7072,6 +7072,35 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_usage_alerts ON usage_alerts
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // #1099 — a doorstep (Stripe Terminal) tap is recorded as 'card_present',
+  // separable from an online 'credit_card' in the ledger. Widens the CHECK
+  // that 133 last set (same DROP + ADD shape 133 used on its predecessor; the
+  // runner re-runs 133 every boot, then this re-widens it). NOT VALID so a
+  // boot never re-scans the table (see 070). The Stripe-reference dedup index
+  // (232) only covers credit_card/bank_transfer, and must not be dropped here
+  // (232 re-creates it every boot), so card_present gets its own partial
+  // unique index with the same scope — a redelivered terminal intent can
+  // never double-credit. No card_present row predates this migration, so it
+  // needs no 232-style quarantine preflight.
+  '288_payments_card_present_method': `
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'card_present', 'bank_transfer', 'other')) NOT VALID;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_card_present_reference_unique
+      ON payments (tenant_id, reference_number)
+      WHERE reference_number IS NOT NULL
+        AND payment_method = 'card_present'
+        AND status IN ('completed', 'processing');
+  `,
+  // #1288 — the tenant's default tax rate (basis points), applied when an
+  // estimate or invoice is created without an explicit rate. 0 = no tax, the
+  // pre-migration behaviour, so existing tenants are unchanged. Column-level
+  // CHECK mirrors the per-document taxRateBps bound (0–10000).
+  '289_tenant_settings_default_tax_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_tax_rate_bps INTEGER NOT NULL DEFAULT 0
+        CHECK (default_tax_rate_bps >= 0 AND default_tax_rate_bps <= 10000);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

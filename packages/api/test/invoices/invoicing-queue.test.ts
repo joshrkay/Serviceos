@@ -143,4 +143,32 @@ describe('findJobsRequiringInvoicing', () => {
     expect(byJob.get(jobC.id)?.amountCents).toBe(45000);
     expect(candidates).toHaveLength(2);
   });
+
+  it('#1288 Q12 — a legacy accepted estimate the engine now refuses does not break the queue', async () => {
+    // A pre-#1288 estimate persisted with mixed taxability + discount + tax.
+    // The engine refuses to total it (fail closed); the queue must still list
+    // every OTHER job rather than 500 the whole screen, and must not invent an
+    // amount for the refused one.
+    const ok = await jobRepo.create(makeJob());
+    await seedAcceptedEstimate(ok.id, [buildLineItem('i1', 'Repair', 1, 20000, 0, true)]);
+
+    const legacy = await jobRepo.create(makeJob());
+    await seedAcceptedEstimate(legacy.id, [buildLineItem('i2', 'Repair', 1, 20000, 0, true)], {
+      lineItems: [
+        buildLineItem('i2', 'Part', 1, 10000, 0, true),
+        buildLineItem('i3', 'Labor', 1, 10000, 1, false),
+      ],
+      totals: {
+        subtotalCents: 20000,
+        discountCents: 10000,
+        taxRateBps: 1000,
+        taxableSubtotalCents: 10000,
+        taxCents: 0,
+        totalCents: 10000,
+      },
+    });
+
+    const candidates = await findJobsRequiringInvoicing(TENANT, deps());
+    expect(candidates.map((c) => c.jobId)).toEqual([ok.id]);
+  });
 });

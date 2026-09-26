@@ -13,6 +13,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import {
   LineItem,
   calculateDocumentTotals,
+  DiscountTaxAllocationError,
   resolveSelectedLineItems,
 } from '../shared/billing-engine';
 
@@ -102,6 +103,18 @@ export async function findJobsRequiringInvoicing(
     const discountCents = accepted?.totals.discountCents ?? 0;
     const taxRateBps = accepted?.totals.taxRateBps ?? 0;
 
+    // #1288 Q12 — a legacy accepted estimate mixing taxability with a
+    // discount + tax is refused by the engine (fail closed). Invoicing it
+    // would be refused too, so it is left out rather than listed with an
+    // invented amount — and one such job never 500s the whole queue.
+    let amountCents: number;
+    try {
+      amountCents = calculateDocumentTotals(lineItems, discountCents, taxRateBps).totalCents;
+    } catch (err) {
+      if (err instanceof DiscountTaxAllocationError) continue;
+      throw err;
+    }
+
     candidates.push({
       jobId: job.id,
       customerId: job.customerId,
@@ -109,7 +122,7 @@ export async function findJobsRequiringInvoicing(
       lineItems,
       discountCents,
       taxRateBps,
-      amountCents: calculateDocumentTotals(lineItems, discountCents, taxRateBps).totalCents,
+      amountCents,
     });
   }
 
