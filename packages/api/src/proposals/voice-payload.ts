@@ -506,8 +506,13 @@ export async function buildVoiceProposalPayload(
     // SYSTEM_SUPPLIED_ID_FIELDS) is a drafting defect no operator can clear.
     // Gating it — or gating the draft on its OTHER fields while the id is
     // still missing — mints a card that can never be approved, so the draft
-    // is not gateable at all: an empty `missingFieldPaths` with `ok: false`
-    // makes both live voice legs degrade to a clarification.
+    // is not gateable at all: an empty `missingFieldPaths` with `ok: false`.
+    // The telephony leg degrades that to a clarification
+    // (create-voice-turn-processor.ts `gateable`). The in-app leg keeps its
+    // documented S2 persist-unchanged posture for real types, but neither
+    // system-supplied type reaches it through this builder: respond_to_review
+    // is intercepted before the generic path, and adopt_entity_alias has no
+    // voice intent at all.
     if (fieldPathsFrom(errors).some((field) => isSystemSuppliedIdField(proposalType, field))) {
       return { ...common, ok: false, errors, missingFieldPaths: [] };
     }

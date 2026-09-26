@@ -10,9 +10,9 @@
  *
  * The decision (owner, 2026-09-26): make that structural. The contract layer
  * declares these fields system-supplied, and the voice payload builder
- * refuses to turn a failure on one of them into a gate — the draft degrades
- * to a clarification instead (both live voice legs degrade on
- * `ok: false` + empty `missingFieldPaths`).
+ * refuses to turn a failure on one of them into a gate (`ok: false` + empty
+ * `missingFieldPaths`, which the telephony leg degrades to a clarification;
+ * see the comment at the call site in voice-payload.ts for the in-app leg).
  */
 import { describe, it, expect } from 'vitest';
 import { buildVoiceProposalPayload } from '../../src/proposals/voice-payload';
