@@ -7072,6 +7072,86 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_usage_alerts ON usage_alerts
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // #1279 — appointment_assignments is the canonical technician assignment
+  // (D-007). Until this fix the Schedule "New appointment" form and the
+  // Reassign dialog wrote only jobs.assigned_technician_id, so their
+  // appointments reached neither the dispatch board lanes nor the
+  // no_double_booking constraint. ADDITIVE backfill: for every not-yet-
+  // finished appointment with NO assignment row whose job carries a
+  // technician, insert that technician as primary.
+  //
+  //  - Would-be double-bookings are skipped (earliest appointment wins; the
+  //    rest stay unassigned for a dispatcher to resolve) — never a boot
+  //    failure, never a new overlap.
+  //  - Only users with the technician role, same tenant (assignTechnician's
+  //    rule).
+  //  - Backfilled rows carry backfill_source = 'job_assigned_technician' so
+  //    they are auditable and reversible.
+  //  - One-shot: the runner has no ledger and re-runs every migration on each
+  //    boot, so the whole block is guarded on the backfill_source column not
+  //    yet existing (it is added here). Re-running must never resurrect an
+  //    assignment a dispatcher removed on purpose.
+  // The migrate role bypasses RLS (see 119), so the backfill sees every tenant.
+  '288_backfill_appointment_assignments_from_jobs': `
+    DO $$
+    DECLARE
+      r RECORD;
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'appointment_assignments'
+           AND column_name = 'backfill_source'
+      ) THEN
+        RETURN;
+      END IF;
+
+      ALTER TABLE appointment_assignments ADD COLUMN backfill_source TEXT;
+
+      FOR r IN
+        SELECT a.id AS appointment_id, a.tenant_id, j.assigned_technician_id AS technician_id,
+               a.scheduled_start, a.scheduled_end
+          FROM appointments a
+          JOIN jobs j ON j.id = a.job_id AND j.tenant_id = a.tenant_id
+          JOIN users u ON u.id = j.assigned_technician_id
+                      AND u.tenant_id = j.tenant_id
+                      AND u.role = 'technician'
+         WHERE j.assigned_technician_id IS NOT NULL
+           AND a.status IN ('scheduled', 'confirmed', 'in_progress')
+           AND NOT EXISTS (
+             SELECT 1 FROM appointment_assignments aa
+              WHERE aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id
+           )
+         ORDER BY a.scheduled_start, a.id
+      LOOP
+        IF EXISTS (
+          SELECT 1 FROM appointment_assignments aa
+           WHERE aa.tenant_id = r.tenant_id
+             AND aa.technician_id = r.technician_id
+             AND aa.appointment_status NOT IN ('canceled', 'no_show')
+             AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+                 && tstzrange(r.scheduled_start, r.scheduled_end)
+        ) THEN
+          RAISE NOTICE 'backfill 288: skipped appointment % (technician already booked)', r.appointment_id;
+          CONTINUE;
+        END IF;
+        BEGIN
+          INSERT INTO appointment_assignments
+            (tenant_id, appointment_id, technician_id, is_primary, assigned_by, backfill_source)
+          VALUES
+            (r.tenant_id, r.appointment_id, r.technician_id, true, 'system', 'job_assigned_technician');
+        EXCEPTION WHEN exclusion_violation OR unique_violation THEN
+          RAISE NOTICE 'backfill 288: skipped appointment % (constraint)', r.appointment_id;
+        END;
+      END LOOP;
+    END $$;
+  `,
+  // #1033 — per-tenant switch for technician assignment SMS (in-app push is
+  // unaffected). Default ON so no tenant's behaviour changes on deploy.
+  '289_tenant_settings_notify_technicians_by_sms': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS notify_technicians_by_sms BOOLEAN NOT NULL DEFAULT true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

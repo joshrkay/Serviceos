@@ -551,6 +551,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['285_add_tenant_current_period', '73ffede053301c1c8fb32c4d167fe5e834b7946f3d5be7a07fd9d0cdf3395754'],
   ['286_add_ai_overage_cap', 'da903203a9652e9bffbe5b32e31f4db5b7b7bda2c5a5649d385fc29b4bf891d1'],
   ['287_create_usage_alerts', '390e9355861d2344fe1cbd25650f8433fcd1cd8aaf08e546ff13cae6728ccf96'],
+  ['288_backfill_appointment_assignments_from_jobs', 'cd2d08fa8c0404df320d8a498f384e9822ba3a602355a2bae78f9b9c7e4c88bb'],
+  ['289_tenant_settings_notify_technicians_by_sms', 'f5f7b81000e4bbff1e7941484798c722aea49e99e8d026cd02745bc1fe872daf'],
 ];
 
 function hashMigration(value: string): string {
