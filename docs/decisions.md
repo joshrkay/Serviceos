@@ -1085,9 +1085,63 @@ entity resolver shipping with nonexistent column names because its `Pool` was mo
 - *Grade every row now from the existing scan.* Rejected: the scan is a keyword heuristic. It is
   sound as an aggregate and not sound per row, and a wrong grade is worse than an absent one.
 
+## D-033 — Five sanctioned AI-side operational writes; everything else is a proposal (I1′)
+
+**Date:** 2026-09-26
+**Status:** Accepted (owner, 2026-09-26 — "accept all recommendations" on #1066)
+**Amends:** D-004 (proposal-first AI safety model) — by naming its exceptions, not by relaxing it.
+
+**Context.** D-004 says the AI never writes an operational entity. The I1′ structural guard
+(`packages/api/test/invariants/i1-no-ai-repository-writes.structural.test.ts`, #1021) enumerates
+every repository write under `packages/api/src/ai` and found six that write operational rows with
+no proposal (#1066). Five of them sit on live-call paths where waiting for an approval would
+itself be the failure; the sixth — `ai/tasks/estimate-template.ts`, minting a priced estimate
+template — does not.
+
+**Decision.**
+
+1. **These five writes are sanctioned exceptions to D-004,** each for the reason given, and are
+   the only ones:
+
+   | Site (`packages/api/src/ai/…`) | Write | Why it cannot wait for a proposal |
+   |---|---|---|
+   | `skills/find-or-create-customer.ts` | `customerRepo.create` | Mints the CALLER's own record mid-call (actor `system:inbound-call`, audited `customer.created`) so every proposal the call drafts has a customer to attach to. It records who is on the line; it commits the business to nothing. |
+   | `skills/find-or-create-lead.ts` | `leadRepo.create` | Same shape for an unknown inbound contact (call or message): captures them as a lead (audited `lead.created`). No money, no schedule, no customer-facing message. |
+   | `skills/patch-owner-through.ts` | `callMeBackRepo.create` | The vulnerable-caller patch-through MISSED — the call-back task is the durable record that a human must call this person back. Gating it behind approval would hide the one row that says someone needs help. |
+   | `voice-turn/create-voice-turn-processor.ts` | `callMeBackRepo.create` (`createE1FollowUpTask`) | E1 emergency follow-up task — the life-safety alert and the revoked-booking notice. Same reason: an internal to-do for a human, never an action on the customer. |
+   | `voice-turn/create-voice-turn-processor.ts` | `appointmentRepo.update` (E1 revoke) | On an emergency, releases a TENTATIVE hold (`holdPendingApproval: true`) the same call created — `status: 'canceled'`. It only ever touches a hold that was never approved, it withdraws rather than commits, and a stale hold booking a slot during a life-safety event is the worse failure. |
+
+   Every one of them is an internal/capture-class write: none moves money, none sends anything to
+   a customer, none approves or commits work.
+
+2. **Everything else under `src/ai` drafts a proposal.** The estimate-template site is NOT
+   sanctioned: a template is priced and flows into every future estimate. It now drafts an
+   `onboarding_estimate_template` proposal (`draftEstimateTemplateProposal`), which is created as
+   `draft` (no trust tier — never auto-approved) and is written only by that type's deterministic
+   handler after a human approves it — the same `templates/estimate-template.ts createTemplate`
+   the templates route uses.
+
+3. **The guard enforces the list.** I1′ is asserted as amended: zero operational writes under
+   `src/ai` other than these five. Each is matched by file, receiver and method with an exact
+   count per file, so a sixth write — even a second `appointmentRepo.update` in the same file —
+   fails the build. Adding a sanctioned exception requires amending this decision.
+
+**Consequences.**
+- The I1′ `it.fails` over six recorded violations becomes a passing assertion of I1′-as-amended.
+- A sanctioned write is still a mutation: each one keeps its audit event (CLAUDE.md), and none may
+  grow a customer-facing side effect without coming back here.
+
+**Alternatives rejected:**
+- *Route all six through proposals.* Rejected for the five: a caller's own record, a call-back
+  task, and a hold release on an emergency are exactly the writes whose delay is the harm.
+- *Allow-list them in the guard without a decision.* Rejected: an exception with no written reason
+  is the gap I1′ exists to close.
+- *Sanction the estimate template too.* Rejected: it is priced, persistent and customer-facing via
+  every future estimate — the case D-004 was written for.
+
 ---
 
-## D-033 — A capability is declared once; every surface's map derives from the declaration
+## D-034 — A capability is declared once; every surface's map derives from the declaration
 
 **Date:** 2026-09-26
 **Status:** Accepted

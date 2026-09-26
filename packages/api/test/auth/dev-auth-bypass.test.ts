@@ -92,4 +92,30 @@ describe('devAuthBypass — role claim', () => {
     await mw(req, {} as Response, () => undefined);
     expect(await userRepo.findByTenant(req.auth!.tenantId)).toHaveLength(1);
   });
+
+  // #1275 — same leak as auth/clerk.ts's bootstrapTenant: the internal
+  // tenant.name this bypass invents from the synthesized dev email must
+  // never become the seeded customer-facing business name.
+  it('does not seed the customer-facing businessName from the internal dev-workspace tenant.name (#1275)', async () => {
+    const { InMemorySettingsRepository } = await import('../../src/settings/settings');
+
+    const tenantRepo = new DevInMemoryTenantRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const mw = devAuthBypass({ tenantRepo, settingsRepo });
+    const req = {
+      headers: {
+        authorization: `Bearer ${unsignedJwt({
+          sub: 'seed-owner-2',
+          email: 'jane+clerk_test@example.com',
+          role: 'owner',
+        })}`,
+      },
+    } as unknown as AuthenticatedRequest;
+    await mw(req, {} as Response, () => undefined);
+
+    const settings = await settingsRepo.findByTenant(req.auth!.tenantId);
+    expect(settings?.businessName).not.toContain('dev workspace');
+    expect(settings?.businessName).not.toContain('jane+clerk_test');
+    expect(settings?.businessName).toBe('My Business');
+  });
 });

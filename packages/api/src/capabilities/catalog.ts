@@ -8,7 +8,7 @@
  * contract test already checked the enumerable parts; both errors survived
  * because they lived in parts it could not check.
  *
- * The decision (D-033 part 3): every part of the catalog that makes a
+ * The decision (D-034 part 3): every part of the catalog that makes a
  * checkable claim — which capabilities exist, their proposal type, action
  * class, surfaces, execution proof, lookups, gated intents, direct acts, and
  * the machine-readable block — is GENERATED between markers. What remains

@@ -20,6 +20,7 @@ import { apiFetch } from '../../utils/api-fetch';
 import {
   Badge,
   Button,
+  ConfirmDialog,
   Field,
   Input,
   Select,
@@ -119,6 +120,10 @@ export function CustomerDetail({
   const [locationForm, setLocationForm] =
     useState<LocationFormState>(emptyLocationForm);
   const [locationSaving, setLocationSaving] = useState(false);
+  // #1281 — archive goes through a confirm; restore undoes it.
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [restoring, setRestoring] = useState(false);
 
   const loadLocations = useCallback(async () => {
     setLocationsError(null);
@@ -259,11 +264,43 @@ export function CustomerDetail({
   );
 
   const handleArchive = useCallback(async () => {
-    const res = await apiFetch(`/api/customers/${customerId}/archive`, {
-      method: 'POST',
-    });
-    if (res.ok) onArchived?.();
+    setArchiving(true);
+    try {
+      const res = await apiFetch(`/api/customers/${customerId}/archive`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.message ?? `HTTP ${res.status}`);
+      }
+      setConfirmArchive(false);
+      toast.success('Customer archived');
+      onArchived?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to archive customer');
+    } finally {
+      setArchiving(false);
+    }
   }, [customerId, onArchived]);
+
+  const handleRestore = useCallback(async () => {
+    setRestoring(true);
+    try {
+      const res = await apiFetch(`/api/customers/${customerId}/restore`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.message ?? `HTTP ${res.status}`);
+      }
+      toast.success('Customer restored');
+      refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to restore customer');
+    } finally {
+      setRestoring(false);
+    }
+  }, [customerId, refetch]);
 
   if (!data) {
     return (
@@ -279,355 +316,398 @@ export function CustomerDetail({
   }
 
   return (
-    <DetailPage
-      title={data.displayName}
-      subtitle={data.companyName}
-      isLoading={isLoading}
-      error={error}
-      onBack={onBack}
-      onRetry={refetch}
-      actions={[
-        { label: 'Edit', onClick: () => onEdit?.(), variant: 'primary' },
-        {
-          label: data.isArchived ? 'Archived' : 'Archive',
-          onClick: handleArchive,
-          variant: 'danger',
-          disabled: data.isArchived,
-        },
-      ]}
-      sections={[
-        {
-          // 4.5 — quick actions: schedule, estimate, message. Each deep-links
-          // into the matching create/compose flow with this customer attached.
-          title: 'Quick Actions',
-          content: (
-            <div className="grid grid-cols-3 gap-2" data-testid="customer-quick-actions">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  navigate(`/jobs/new?customerId=${encodeURIComponent(customerId)}`)
-                }
-              >
-                <CalendarPlus size={14} className="mr-1.5" />
-                Schedule
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  navigate(`/estimates/new?customerId=${encodeURIComponent(customerId)}`)
-                }
-              >
-                <FileText size={14} className="mr-1.5" />
-                Estimate
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  navigate(`/comms-inbox?customerId=${encodeURIComponent(customerId)}`)
-                }
-              >
-                <MessageSquare size={14} className="mr-1.5" />
-                Message
-              </Button>
-            </div>
-          ),
-        },
-        {
-          // US-069 — the customer's Jobs / Estimates / Invoices + lifetime
-          // revenue. Messages are in the Activity section's CommunicationTimeline.
-          title: 'Records',
-          content: <CustomerRecordsPanel customerId={customerId} />,
-        },
-        {
-          title: 'Contact Information',
-          content: (
-            <dl className="flex flex-col gap-2 text-sm">
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Email</dt>
-                <dd className="text-foreground">{data.email || '—'}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Phone</dt>
-                <dd className="text-foreground">{data.primaryPhone || '—'}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Secondary</dt>
-                <dd className="text-foreground">{data.secondaryPhone || '—'}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Preferred channel</dt>
-                <dd className="text-foreground capitalize">
-                  {data.preferredChannel}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <dt className="text-muted-foreground">Messaging</dt>
-                <dd>
-                  {data.consentStatus === 'revoked' ? (
-                    <Badge variant="danger">Opted out</Badge>
-                  ) : data.smsConsent === false ? (
-                    <Badge variant="warning">No SMS consent</Badge>
-                  ) : (
-                    <Badge variant="success">Subscribed</Badge>
-                  )}
-                </dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Source</dt>
-                <dd className="text-foreground">
-                  {data.source ? toTitleCase(data.source) : '—'}
-                </dd>
-              </div>
-              {/* P11-002: spoken-language preference, now persisted on change
-                  so dispatchers can route Spanish callers correctly. */}
-              <div className="flex items-center justify-between gap-4 pt-1">
-                <dt className="flex items-center gap-2 text-muted-foreground">
-                  Language
-                  <LanguageBadge
-                    language={(language || null) as 'en' | 'es' | null}
-                  />
-                </dt>
-                <dd className="w-32">
-                  <Select
-                    aria-label="Preferred language"
-                    value={language}
-                    disabled={languageSaving}
-                    onChange={(e) => handleLanguageChange(e.target.value)}
-                  >
-                    <option value="">—</option>
-                    <option value="en">English</option>
-                    <option value="es">Español</option>
-                  </Select>
-                </dd>
-              </div>
-            </dl>
-          ),
-        },
-        {
-          title: 'Contacts',
-          content: <ContactsPanel customerId={customerId} />,
-        },
-        {
-          // Customer portal access — mint a link (copyable, shown once) or
-          // send it by SMS/email through the consent/DNC-gated send path.
-          title: 'Customer Portal',
-          content: <PortalAccessPanel customerId={customerId} />,
-        },
-        {
-          title: 'Customer Notes',
-          content: (
-            <div className="flex flex-col gap-3">
-              {note.trim() ? (
-                <p className="whitespace-pre-wrap text-sm text-foreground">
-                  {note}
-                </p>
-              ) : (
-                <p className="text-sm text-muted-foreground">No customer notes yet.</p>
-              )}
-              <Field label="Edit customer notes" error={noteError}>
-                <Textarea
-                  aria-label="Customer notes"
-                  value={note}
-                  onChange={(event) => setNote(event.target.value)}
-                  rows={3}
-                />
-              </Field>
-              <div>
+    <>
+      <DetailPage
+        title={data.displayName}
+        subtitle={data.companyName}
+        isLoading={isLoading}
+        error={error}
+        onBack={onBack}
+        onRetry={refetch}
+        actions={[
+          { label: 'Edit', onClick: () => onEdit?.(), variant: 'primary' },
+          // #1281 — an archived customer is restored from the banner below.
+          ...(data.isArchived
+            ? []
+            : [
+                {
+                  label: 'Archive',
+                  onClick: () => setConfirmArchive(true),
+                  variant: 'danger' as const,
+                },
+              ]),
+        ]}
+        sections={[
+          ...(data.isArchived
+            ? [
+                {
+                  title: 'Archived',
+                  content: (
+                    <div
+                      data-testid="customer-archived-banner"
+                      className="flex flex-wrap items-center justify-between gap-3"
+                    >
+                      <p className="min-w-0 flex-1 text-sm text-muted-foreground">
+                        This customer is archived and hidden from the customer list.
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="lg"
+                        className="min-h-11"
+                        loading={restoring}
+                        onClick={handleRestore}
+                        aria-label="Restore customer"
+                      >
+                        Restore
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]
+            : []),
+          {
+            // 4.5 — quick actions: schedule, estimate, message. Each deep-links
+            // into the matching create/compose flow with this customer attached.
+            title: 'Quick Actions',
+            content: (
+              <div className="grid grid-cols-3 gap-2" data-testid="customer-quick-actions">
                 <Button
+                  variant="outline"
                   size="sm"
-                  loading={noteSaving}
-                  onClick={handleSaveNote}
+                  onClick={() =>
+                    navigate(`/jobs/new?customerId=${encodeURIComponent(customerId)}`)
+                  }
                 >
-                  Save note
+                  <CalendarPlus size={14} className="mr-1.5" />
+                  Schedule
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    navigate(`/estimates/new?customerId=${encodeURIComponent(customerId)}`)
+                  }
+                >
+                  <FileText size={14} className="mr-1.5" />
+                  Estimate
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    navigate(`/comms-inbox?customerId=${encodeURIComponent(customerId)}`)
+                  }
+                >
+                  <MessageSquare size={14} className="mr-1.5" />
+                  Message
                 </Button>
               </div>
-            </div>
-          ),
-        },
-        {
-          title: 'Tags',
-          content: <TagsPanel customerId={customerId} />,
-        },
-        {
-          title: 'Groups',
-          content: <CustomerGroupsPanel customerId={customerId} />,
-        },
-        {
-          title: 'Recurring Jobs',
-          content: <RecurringJobsPanel customerId={customerId} />,
-        },
-        {
-          title: 'Custom Fields',
-          content: <CustomFieldsPanel customerId={customerId} />,
-        },
-        {
-          // 4.6 — merge a duplicate into this (surviving) record.
-          title: 'Merge Duplicate',
-          content: (
-            <MergeCustomerPanel
-              survivingId={customerId}
-              survivingName={data.displayName}
-              onMerged={refetch}
-            />
-          ),
-        },
-        {
-          title: 'Service Locations',
-          content: (
-            <div className="flex flex-col gap-4">
-              {locationsError && (
-                <p role="alert" className="text-sm text-destructive">
-                  {locationsError}
-                </p>
-              )}
-              <div className="flex flex-col gap-2">
-                {locations.map((location) => (
-                  <div
-                    key={location.id}
-                    className="rounded-xl border border-border p-3"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <MapPin size={13} className="shrink-0 text-muted-foreground" />
-                      <p className="text-sm text-foreground">
-                        {location.label || 'Service location'}
-                      </p>
-                      {location.isPrimary && (
-                        <Badge variant="info">Primary</Badge>
-                      )}
-                      {(location.addressType === 'billing' ||
-                        location.addressType === 'both') && (
-                        <Badge variant="success">Billing</Badge>
-                      )}
-                      {location.addressType !== 'billing' &&
-                        location.addressType !== 'both' && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="ml-auto"
-                            onClick={() => handleSetBilling(location.id)}
-                          >
-                            Set as billing
-                          </Button>
-                        )}
-                    </div>
-                    <p className="mt-1 pl-5 text-sm text-foreground">
-                      {formatLocation(location)}
-                    </p>
-                    {location.accessNotes && (
-                      <p className="mt-1 pl-5 text-xs text-warning">
-                        {location.accessNotes}
-                      </p>
+            ),
+          },
+          {
+            // US-069 — the customer's Jobs / Estimates / Invoices + lifetime
+            // revenue. Messages are in the Activity section's CommunicationTimeline.
+            title: 'Records',
+            content: <CustomerRecordsPanel customerId={customerId} />,
+          },
+          {
+            title: 'Contact Information',
+            content: (
+              <dl className="flex flex-col gap-2 text-sm">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Email</dt>
+                  <dd className="text-foreground">{data.email || '—'}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Phone</dt>
+                  <dd className="text-foreground">{data.primaryPhone || '—'}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Secondary</dt>
+                  <dd className="text-foreground">{data.secondaryPhone || '—'}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Preferred channel</dt>
+                  <dd className="text-foreground capitalize">
+                    {data.preferredChannel}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="text-muted-foreground">Messaging</dt>
+                  <dd>
+                    {data.consentStatus === 'revoked' ? (
+                      <Badge variant="danger">Opted out</Badge>
+                    ) : data.smsConsent === false ? (
+                      <Badge variant="warning">No SMS consent</Badge>
+                    ) : (
+                      <Badge variant="success">Subscribed</Badge>
                     )}
-                  </div>
-                ))}
-                {locations.length === 0 && (
-                  <p className="text-sm text-muted-foreground">
-                    No service locations yet.
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-foreground">Source</dt>
+                  <dd className="text-foreground">
+                    {data.source ? toTitleCase(data.source) : '—'}
+                  </dd>
+                </div>
+                {/* P11-002: spoken-language preference, now persisted on change
+                    so dispatchers can route Spanish callers correctly. */}
+                <div className="flex items-center justify-between gap-4 pt-1">
+                  <dt className="flex items-center gap-2 text-muted-foreground">
+                    Language
+                    <LanguageBadge
+                      language={(language || null) as 'en' | 'es' | null}
+                    />
+                  </dt>
+                  <dd className="w-32">
+                    <Select
+                      aria-label="Preferred language"
+                      value={language}
+                      disabled={languageSaving}
+                      onChange={(e) => handleLanguageChange(e.target.value)}
+                    >
+                      <option value="">—</option>
+                      <option value="en">English</option>
+                      <option value="es">Español</option>
+                    </Select>
+                  </dd>
+                </div>
+              </dl>
+            ),
+          },
+          {
+            title: 'Contacts',
+            content: <ContactsPanel customerId={customerId} />,
+          },
+          {
+            // Customer portal access — mint a link (copyable, shown once) or
+            // send it by SMS/email through the consent/DNC-gated send path.
+            title: 'Customer Portal',
+            content: <PortalAccessPanel customerId={customerId} />,
+          },
+          {
+            title: 'Customer Notes',
+            content: (
+              <div className="flex flex-col gap-3">
+                {note.trim() ? (
+                  <p className="whitespace-pre-wrap text-sm text-foreground">
+                    {note}
                   </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No customer notes yet.</p>
                 )}
-              </div>
-              <form
-                onSubmit={handleAddLocation}
-                className="grid grid-cols-1 gap-3 md:grid-cols-2"
-              >
-                <Field label="Label" className="md:col-span-2">
-                  <Input
-                    placeholder="e.g. Home, Office"
-                    value={locationForm.label}
-                    onChange={(event) =>
-                      setLocationForm((prev) => ({
-                        ...prev,
-                        label: event.target.value,
-                      }))
-                    }
+                <Field label="Edit customer notes" error={noteError}>
+                  <Textarea
+                    aria-label="Customer notes"
+                    value={note}
+                    onChange={(event) => setNote(event.target.value)}
+                    rows={3}
                   />
                 </Field>
-                <Field label="Street address" required className="md:col-span-2">
-                  <Input
-                    required
-                    value={locationForm.street1}
-                    onChange={(event) =>
-                      setLocationForm((prev) => ({
-                        ...prev,
-                        street1: event.target.value,
-                      }))
-                    }
-                  />
-                </Field>
-                <Field label="City" required>
-                  <Input
-                    required
-                    value={locationForm.city}
-                    onChange={(event) =>
-                      setLocationForm((prev) => ({
-                        ...prev,
-                        city: event.target.value,
-                      }))
-                    }
-                  />
-                </Field>
-                <Field label="State" required>
-                  <Input
-                    required
-                    value={locationForm.state}
-                    onChange={(event) =>
-                      setLocationForm((prev) => ({
-                        ...prev,
-                        state: event.target.value,
-                      }))
-                    }
-                  />
-                </Field>
-                <Field label="Postal code" required>
-                  <Input
-                    required
-                    value={locationForm.postalCode}
-                    onChange={(event) =>
-                      setLocationForm((prev) => ({
-                        ...prev,
-                        postalCode: event.target.value,
-                      }))
-                    }
-                  />
-                </Field>
-                <div className="flex items-end md:col-span-2">
+                <div>
                   <Button
-                    type="submit"
-                    variant="outline"
-                    loading={locationSaving}
+                    size="sm"
+                    loading={noteSaving}
+                    onClick={handleSaveNote}
                   >
-                    Add service location
+                    Save note
                   </Button>
                 </div>
-              </form>
-            </div>
-          ),
-        },
-        {
-          title: 'Activity',
-          content: (
-            <div className="space-y-3">
-              {data.originatingLeadId ? (
-                <p className="text-sm text-foreground">
-                  Converted from lead{' '}
-                  <Link
-                    to={`/leads/${data.originatingLeadId}`}
-                    className="text-primary hover:underline"
-                  >
-                    {data.originatingLeadId}
-                  </Link>
-                  .
-                </p>
-              ) : null}
-              <CustomerProfitCard customerId={customerId} />
-              <CommunicationTimeline customerId={customerId} />
-            </div>
-          ),
-        },
-      ]}
-    />
+              </div>
+            ),
+          },
+          {
+            title: 'Tags',
+            content: <TagsPanel customerId={customerId} />,
+          },
+          {
+            title: 'Groups',
+            content: <CustomerGroupsPanel customerId={customerId} />,
+          },
+          {
+            title: 'Recurring Jobs',
+            content: <RecurringJobsPanel customerId={customerId} />,
+          },
+          {
+            title: 'Custom Fields',
+            content: <CustomFieldsPanel customerId={customerId} />,
+          },
+          {
+            // 4.6 — merge a duplicate into this (surviving) record.
+            title: 'Merge Duplicate',
+            content: (
+              <MergeCustomerPanel
+                survivingId={customerId}
+                survivingName={data.displayName}
+                onMerged={refetch}
+              />
+            ),
+          },
+          {
+            title: 'Service Locations',
+            content: (
+              <div className="flex flex-col gap-4">
+                {locationsError && (
+                  <p role="alert" className="text-sm text-destructive">
+                    {locationsError}
+                  </p>
+                )}
+                <div className="flex flex-col gap-2">
+                  {locations.map((location) => (
+                    <div
+                      key={location.id}
+                      className="rounded-xl border border-border p-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <MapPin size={13} className="shrink-0 text-muted-foreground" />
+                        <p className="text-sm text-foreground">
+                          {location.label || 'Service location'}
+                        </p>
+                        {location.isPrimary && (
+                          <Badge variant="info">Primary</Badge>
+                        )}
+                        {(location.addressType === 'billing' ||
+                          location.addressType === 'both') && (
+                          <Badge variant="success">Billing</Badge>
+                        )}
+                        {location.addressType !== 'billing' &&
+                          location.addressType !== 'both' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="ml-auto"
+                              onClick={() => handleSetBilling(location.id)}
+                            >
+                              Set as billing
+                            </Button>
+                          )}
+                      </div>
+                      <p className="mt-1 pl-5 text-sm text-foreground">
+                        {formatLocation(location)}
+                      </p>
+                      {location.accessNotes && (
+                        <p className="mt-1 pl-5 text-xs text-warning">
+                          {location.accessNotes}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                  {locations.length === 0 && (
+                    <p className="text-sm text-muted-foreground">
+                      No service locations yet.
+                    </p>
+                  )}
+                </div>
+                <form
+                  onSubmit={handleAddLocation}
+                  className="grid grid-cols-1 gap-3 md:grid-cols-2"
+                >
+                  <Field label="Label" className="md:col-span-2">
+                    <Input
+                      placeholder="e.g. Home, Office"
+                      value={locationForm.label}
+                      onChange={(event) =>
+                        setLocationForm((prev) => ({
+                          ...prev,
+                          label: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="Street address" required className="md:col-span-2">
+                    <Input
+                      required
+                      value={locationForm.street1}
+                      onChange={(event) =>
+                        setLocationForm((prev) => ({
+                          ...prev,
+                          street1: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="City" required>
+                    <Input
+                      required
+                      value={locationForm.city}
+                      onChange={(event) =>
+                        setLocationForm((prev) => ({
+                          ...prev,
+                          city: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="State" required>
+                    <Input
+                      required
+                      value={locationForm.state}
+                      onChange={(event) =>
+                        setLocationForm((prev) => ({
+                          ...prev,
+                          state: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="Postal code" required>
+                    <Input
+                      required
+                      value={locationForm.postalCode}
+                      onChange={(event) =>
+                        setLocationForm((prev) => ({
+                          ...prev,
+                          postalCode: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
+                  <div className="flex items-end md:col-span-2">
+                    <Button
+                      type="submit"
+                      variant="outline"
+                      loading={locationSaving}
+                    >
+                      Add service location
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            ),
+          },
+          {
+            title: 'Activity',
+            content: (
+              <div className="space-y-3">
+                {data.originatingLeadId ? (
+                  <p className="text-sm text-foreground">
+                    Converted from lead{' '}
+                    <Link
+                      to={`/leads/${data.originatingLeadId}`}
+                      className="text-primary hover:underline"
+                    >
+                      {data.originatingLeadId}
+                    </Link>
+                    .
+                  </p>
+                ) : null}
+                <CustomerProfitCard customerId={customerId} />
+                <CommunicationTimeline customerId={customerId} />
+              </div>
+            ),
+          },
+        ]}
+      />
+      <ConfirmDialog
+        open={confirmArchive}
+        title={`Archive ${data.displayName}?`}
+        description="They'll be hidden from your customer list. Their jobs, estimates and invoices are kept, and you can restore them from the Archived view."
+        confirmLabel="Archive"
+        tone="danger"
+        busy={archiving}
+        onConfirm={handleArchive}
+        onCancel={() => setConfirmArchive(false)}
+      />
+    </>
   );
 }

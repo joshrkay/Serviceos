@@ -6,7 +6,8 @@ import { loadVoiceAgentLiveAt } from './go-live';
 import { decideTrialCall, type GateReason, type SubscriptionStatus } from './trial-limits';
 import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { PgOverageCapStore } from '../billing/overage-cap';
-import { CALL_PLAN_USAGE, priceMinuteUsage, type CallPlanId } from '../billing/call-usage-pricing';
+import { isOverageCapReached } from '../billing/call-usage-pricing';
+import { readTenantBillingState } from '../billing/tenant-billing-state';
 
 export interface VoiceGateInput {
   tenantId: string;
@@ -40,18 +41,8 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   const ledger = new PgCallUsageRepository(deps.pool);
   const overageCaps = new PgOverageCapStore(deps.pool);
   return async ({ tenantId, callSid }) => {
-    const subRes = await deps.pool.query<{
-      subscription_status: string | null;
-      plan_id: CallPlanId | null;
-      current_period_start: Date | null;
-      current_period_end: Date | null;
-    }>(
-      `SELECT subscription_status, plan_id, current_period_start, current_period_end
-         FROM tenants WHERE id = $1`,
-      [tenantId],
-    );
-    const tenant = subRes.rows[0];
-    const rawStatus = tenant?.subscription_status ?? null;
+    const tenant = await readTenantBillingState(deps.pool, tenantId);
+    const rawStatus = tenant?.status ?? null;
     const status = normalizeStatus(rawStatus);
 
     if (status !== 'trialing' && status !== 'active') {
@@ -102,11 +93,7 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
         [tenantId],
       );
       // The whole trial: every billable second recorded so far.
-      const billableSecondsUsed = await ledger.sumBillableSeconds(
-        tenantId,
-        new Date(0),
-        new Date(8.64e15),
-      );
+      const billableSecondsUsed = await ledger.sumTrialBillableSeconds(tenantId);
       const decision = decideTrialCall({
         billableSecondsUsed,
         concurrentCalls: concurrentRes.rows[0]?.concurrent ?? 0,
@@ -125,19 +112,12 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
     // Paid: forward once this period's overage has reached the owner's cap
     // (one plan price by default; none if they removed it). Without a
     // mirrored period, nothing to measure.
-    const cap =
-      tenant?.current_period_start && tenant.current_period_end
-        ? await overageCaps.get(tenantId)
-        : null;
-    if (cap !== null && tenant?.current_period_start && tenant.current_period_end) {
-      const planId = tenant.plan_id ?? 'starter';
-      const billableSeconds = await ledger.sumBillableSeconds(
-        tenantId,
-        new Date(tenant.current_period_start),
-        new Date(tenant.current_period_end),
-      );
-      const uncapped = priceMinuteUsage({ planId, billableSeconds, overageCapCents: null });
-      if (uncapped.customerChargeCents >= (cap ?? CALL_PLAN_USAGE[planId].monthlyPriceCents)) {
+    const period = tenant?.period ?? null;
+    const cap = period ? await overageCaps.get(tenantId) : null;
+    if (cap !== null && period) {
+      const planId = tenant?.planId ?? 'starter';
+      const billableSeconds = await ledger.sumBillableSeconds(tenantId, period.start, period.end);
+      if (isOverageCapReached({ planId, billableSeconds, overageCapCents: cap })) {
         return block(deps, {
           tenantId,
           callSid,

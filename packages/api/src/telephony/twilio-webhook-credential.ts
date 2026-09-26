@@ -60,6 +60,8 @@ interface IntegrationRow {
   tenant_id: string;
   subaccount_sid: string | null;
   auth_token_primary_enc: string | null;
+  /** #1084 — the rotation-overlap token; consulted after the primary. */
+  auth_token_secondary_enc: string | null;
 }
 
 export interface TwilioWebhookCredentialResolverDeps {
@@ -103,7 +105,7 @@ async function findByPhoneNumber(pool: Pool, to: string): Promise<IntegrationRow
   if (!normalized) return null;
   return systemLookup(pool, async (client) => {
     const { rows } = await client.query<IntegrationRow>(
-      `SELECT tenant_id, subaccount_sid, auth_token_primary_enc
+      `SELECT tenant_id, subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc
          FROM tenant_integrations
         WHERE provider = 'twilio'
           AND provider_data->>'phoneE164' = $1
@@ -117,7 +119,7 @@ async function findByPhoneNumber(pool: Pool, to: string): Promise<IntegrationRow
 async function findByTenant(pool: Pool, tenantId: string): Promise<IntegrationRow | null> {
   return systemLookup(pool, async (client) => {
     const { rows } = await client.query<IntegrationRow>(
-      `SELECT tenant_id, subaccount_sid, auth_token_primary_enc
+      `SELECT tenant_id, subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc
          FROM tenant_integrations
         WHERE provider = 'twilio' AND tenant_id = $1
         LIMIT 1`,
@@ -130,7 +132,7 @@ async function findByTenant(pool: Pool, tenantId: string): Promise<IntegrationRo
 async function findBySubaccount(pool: Pool, accountSid: string): Promise<IntegrationRow | null> {
   return systemLookup(pool, async (client) => {
     const { rows } = await client.query<IntegrationRow>(
-      `SELECT tenant_id, subaccount_sid, auth_token_primary_enc
+      `SELECT tenant_id, subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc
          FROM tenant_integrations
         WHERE provider = 'twilio' AND subaccount_sid = $1
         LIMIT 1`,
@@ -138,6 +140,29 @@ async function findBySubaccount(pool: Pool, accountSid: string): Promise<Integra
     );
     return rows[0] ?? null;
   });
+}
+
+/**
+ * #1084 — the row's secondary token, decrypted, as an optional decision field.
+ * A secondary that cannot be decrypted is dropped with an error log rather
+ * than failing the request: the primary alone is the pre-#1084 behaviour, and
+ * a broken rotation token must not take down verification with a good one.
+ */
+async function secondaryTokenField(
+  row: IntegrationRow,
+  encKey: string,
+): Promise<{ secondaryAuthToken?: string }> {
+  if (!row.auth_token_secondary_enc) return {};
+  try {
+    const { decrypt } = await import('../integrations/crypto');
+    return { secondaryAuthToken: decrypt(row.auth_token_secondary_enc, encKey) };
+  } catch (err) {
+    logger.error('telephony.tenant_secondary_credential_undecryptable', {
+      tenantId: row.tenant_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
 }
 
 /**
@@ -208,9 +233,11 @@ export function createTwilioWebhookCredentialResolver(
         }
         try {
           const { decrypt } = await import('../integrations/crypto');
+          const authToken = decrypt(owner.auth_token_primary_enc, encKey);
           return {
             outcome: 'verify',
-            authToken: decrypt(owner.auth_token_primary_enc, encKey),
+            authToken,
+            ...(await secondaryTokenField(owner, encKey)),
             path: 'tenant_integration',
             tenantId: owner.tenant_id,
           };
@@ -268,9 +295,11 @@ export function createTwilioWebhookCredentialResolver(
         }
         try {
           const { decrypt } = await import('../integrations/crypto');
+          const authToken = decrypt(row.auth_token_primary_enc, encKey);
           return {
             outcome: 'verify',
-            authToken: decrypt(row.auth_token_primary_enc, encKey),
+            authToken,
+            ...(await secondaryTokenField(row, encKey)),
             path: 'subaccount_lookup',
             tenantId: row.tenant_id,
           };
@@ -285,5 +314,37 @@ export function createTwilioWebhookCredentialResolver(
     }
 
     return deploymentFallback();
+  };
+}
+
+/**
+ * The AccountSid-only view of the resolver, for the callers that must NOT be
+ * bound to a dialled number (see app.ts): the whisper leg — whose `To` is the
+ * DISPATCHER's number — the outbound REST client and the call-bridge
+ * callbacks. The payload's `to` is deliberately dropped.
+ *
+ * #1084 — it answers a `TwilioCredentialDecision`, not a bare token, so the
+ * signature middleware logs the credential path that actually answered
+ * (`subaccount_lookup`, not `deployment_fallback`) and records the verifying
+ * tenant, which the whisper route checks its cache entry against.
+ *
+ * A non-`verify` decision keeps the pre-#1072 behaviour of these paths: the
+ * deployment token (an error on the whisper URL risks dropping the call), and
+ * `misconfigured` only when the deployment has no token at all.
+ */
+export function createSubaccountCredentialView(
+  resolve: TwilioAuthTokenGetter,
+  env: () => NodeJS.ProcessEnv = () => process.env,
+): (ctx: { accountSid?: string; to?: string }) => Promise<TwilioCredentialDecision> {
+  return async ({ accountSid }) => {
+    const decision = await Promise.resolve(resolve(accountSid ? { accountSid } : {}));
+    if (typeof decision === 'object' && decision.outcome === 'verify') return decision;
+    if (typeof decision === 'string' && decision) {
+      return { outcome: 'verify', authToken: decision, path: 'deployment_fallback' };
+    }
+    const deploymentToken = env().TWILIO_AUTH_TOKEN;
+    return deploymentToken
+      ? { outcome: 'verify', authToken: deploymentToken, path: 'deployment_fallback' }
+      : { outcome: 'misconfigured', reason: 'no_twilio_auth_token_configured' };
   };
 }

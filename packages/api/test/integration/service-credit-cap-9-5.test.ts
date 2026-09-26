@@ -63,6 +63,7 @@ import {
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
 import { provesExecution } from '../../src/capabilities/proven-bar';
+import { ReviewResponseExecutionHandler } from '../../src/proposals/execution/review-response-handler';
 
 const DOLLARS_80 = 8000;
 const DOLLARS_50 = 5000;
@@ -462,56 +463,91 @@ describe(provesExecution('review_response_proposal') + 'Postgres integration —
   });
 
   /**
-   * THE ROW'S REMAINING GAP. The cap is enforced at DRAFT time only — and
-   * `build-proposal.ts`'s own header says so: "a delayed approval after a
-   * separate credit was issued in the meantime is still capped at-execute by
-   * the issuance path (today the handler does not re-check; documented as a
-   * known trade-off in the handler)".
+   * THE ROW'S FORMER GAP (#1080), now closed. The cap used to be enforced at
+   * DRAFT time only: a $50 credit drafted while the customer sat at $40,
+   * approved after another $50 landed, executed into a $140 rolling total
+   * against a $100 cap. `executeServiceCredit` now re-reads the rolling sum
+   * from Postgres inside the insert's own transaction and REFUSES (it does not
+   * clamp — clamping would reintroduce the "$0 credit" the row exists to
+   * avoid), surfacing the reason on the sub-result and the proposal.
    *
-   * That trade-off is exactly the over-giving the row exists to prevent: a
-   * $50 credit drafted while the customer sat at $40, approved a week later
-   * after another $50 landed, executes into a ledger $100 over the cap. The
-   * handler's `executeServiceCredit` (review-response-handler.ts:340) inserts
-   * whatever the payload carries, with no re-read of the rolling sum.
-   *
-   * Whether to close it (re-check at execute) or keep it (draft-time only,
-   * accepted) is Josh's call — see the drafted issue in the lane report.
+   * Worked example: $40 + $50 already in the window = $90; +$50 requested =
+   * $140 > $100 → refused; ledger stays at $90.
    */
-  it('CURRENT: the cap is enforced at DRAFT time only — a credit approved after the customer crossed the cap IS inserted at execution, and the credit sub-action reports ok', async () => {
+  it('DESIRED (row 9.5, #1080): a credit approved after the customer crossed the cap is REFUSED at execution, with a reason, and nothing is inserted', async () => {
     const { seeded, result, creditSubResult, total } =
       await runDelayedApprovalScenario('Echo');
 
-    // The execution genuinely ran and the credit genuinely landed. These are
-    // the assertions that make the it.fails below meaningful: if a future FK,
-    // schema or RLS error ever swallows the insert, THIS test fails loudly
-    // instead of the it.fails quietly greening on a ledger that stayed small.
-    expect(result.success).toBe(true);
+    // The execution genuinely reached the credit leg (preconditions held — see
+    // the helper) and the credit leg refused it, visibly.
     expect(creditSubResult).toBeDefined();
-    expect(creditSubResult?.ok).toBe(true);
-    expect(creditSubResult?.error).toBeUndefined();
-    expect(creditSubResult?.id).toBeDefined();
+    expect(creditSubResult?.ok).toBe(false);
+    expect(creditSubResult?.id).toBeUndefined();
+    expect(creditSubResult?.error).toMatch(/cap/i);
+    expect(creditSubResult?.error).toContain('9000');
+    expect(creditSubResult?.error).toContain('5000');
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/credit: .*cap/i);
 
-    // The row is really in the ledger, carrying its review linkage.
+    // No row carries a review: the refused credit never touched the table.
     const { rows } = await pool.query(
-      `SELECT amount_cents, review_id FROM service_credits WHERE id = $1 AND tenant_id = $2`,
-      [creditSubResult!.id, seeded.tenant.tenantId],
+      `SELECT amount_cents FROM service_credits WHERE tenant_id = $1 AND review_id IS NOT NULL`,
+      [seeded.tenant.tenantId],
     );
-    expect(rows).toHaveLength(1);
-    expect(Number(rows[0].amount_cents)).toBe(DOLLARS_50);
-    expect(rows[0].review_id).not.toBeNull();
+    expect(rows).toHaveLength(0);
 
-    // $40 + $50 + $50 = $140 against a $100 cap. This is the gap, stated
-    // positively as current behaviour.
-    expect(total).toBe(14000);
-    expect(total).toBeGreaterThan(CREDIT_CAP_CENTS_PER_12_MONTHS);
+    // $40 + $50 = $90 — the ledger is exactly where it was before execution.
+    expect(total).toBe(9000);
   });
 
-  it.fails(
-    'DESIRED (row 9.5): a $50 credit approved after the customer crossed the cap is refused at EXECUTION time too, not just omitted at draft time',
-    async () => {
-      const { total } = await runDelayedApprovalScenario('Delta');
-      // DESIRED: the rolling total never exceeds the cap.
-      expect(total).toBeLessThanOrEqual(CREDIT_CAP_CENTS_PER_12_MONTHS);
-    },
-  );
+  it('DESIRED (row 9.5): the rolling total never exceeds the cap after a delayed approval executes', async () => {
+    const { total } = await runDelayedApprovalScenario('Delta');
+    expect(total).toBeLessThanOrEqual(CREDIT_CAP_CENTS_PER_12_MONTHS);
+  });
+
+  /**
+   * #1080, concurrency. Two approved credit proposals for the same customer,
+   * executed at the same moment, each individually within the cap: $50 prior
+   * + $50 + $50. Only one may land ($50 + $50 = $100 = cap, allowed); the
+   * other must be refused ($150 > $100). A check-then-insert without a
+   * per-customer lock lets both read $50 and both insert.
+   */
+  it('DESIRED (#1080): two concurrent executions for one customer cannot jointly exceed the cap', async () => {
+    const seeded = await seedTenant('Foxtrot');
+    await issueCredit(seeded, DOLLARS_50, new Date(Date.now() - 10 * DAY_MS));
+
+    const handler = new ReviewResponseExecutionHandler(creditRepo);
+    const makeApproved = async (): Promise<Proposal> => {
+      const review = await seedReview(seeded);
+      const proposal = createProposal({
+        tenantId: seeded.tenant.tenantId,
+        proposalType: 'review_response_proposal',
+        payload: {
+          reviewId: review.id,
+          classification: 'specific_complaint',
+          publicResponse: { text: 'Sorry.', approved: false },
+          privateFollowUp: null,
+          serviceCredit: { customerId: seeded.customerId, amountCents: DOLLARS_50, approved: true },
+        } as unknown as Record<string, unknown>,
+        summary: 'concurrent credit',
+        createdBy: seeded.tenant.userId,
+      });
+      await proposalRepo.create(proposal);
+      return proposal;
+    };
+    const [p1, p2] = await Promise.all([makeApproved(), makeApproved()]);
+    const ctx: ExecutionContext = {
+      tenantId: seeded.tenant.tenantId,
+      executedBy: seeded.tenant.userId,
+    };
+
+    const results = await Promise.all([handler.execute(p1, ctx), handler.execute(p2, ctx)]);
+
+    expect(results.filter((r) => r.success)).toHaveLength(1);
+    expect(results.filter((r) => !r.success)).toHaveLength(1);
+    expect(
+      await creditRepo.sumIssuedInLast12Months(seeded.tenant.tenantId, seeded.customerId),
+    ).toBe(10000);
+    expect(await ledgerRows(seeded.tenant.tenantId)).toHaveLength(2);
+  });
 });

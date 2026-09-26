@@ -2340,6 +2340,50 @@ export const CHAT_CONTEXT_CUSTOMER_ID_INTENTS: ReadonlySet<string> = new Set([
  */
 export const CHAT_DISPATCH_EXCLUDED_INTENTS: ReadonlySet<string> = CHAT_DISPATCH.excluded;
 
+/**
+ * #1201 — the text a photo turn with BLANK text is treated as: the web
+ * Assistant's own photo prompt (AssistantPage.tsx), which classifies
+ * `unknown` and so drafts an estimate from the photo (#1173).
+ */
+const PHOTO_ONLY_TURN_TEXT = "Here's the photo — can you identify the issue?";
+
+/**
+ * #1173 — the multimodal path's audit semantics (customer_mms.estimate_drafted):
+ * which photos informed this draft. Shared by the single-intent and (#1201)
+ * chain paths. Best-effort — the proposal itself is the source of truth.
+ */
+async function auditPhotoEstimateDraft(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  userId: string,
+  correlationId: string | undefined,
+  proposalId: string,
+  images: readonly TaskImage[],
+  conversationId: string | undefined,
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  try {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: userId,
+        actorRole: 'user',
+        eventType: 'assistant.photo_estimate_drafted',
+        entityType: 'proposal',
+        entityId: proposalId,
+        correlationId,
+        metadata: {
+          fileIds: images.flatMap((image) => (image.fileId ? [image.fileId] : [])),
+          photos: images.length,
+          ...(conversationId ? { conversationId } : {}),
+        },
+      }),
+    );
+  } catch {
+    /* audit best-effort — the proposal itself is the source of truth */
+  }
+}
+
 async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   tenantId: string,
@@ -2392,7 +2436,16 @@ async function generateAssistantReply(
   attachments?: ReadonlyArray<{ fileId: string }>,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-  const lastUserText = lastUser?.content ?? '';
+  // #1201 — an API caller can send a photo with BLANK text (the web client
+  // always sends its photo prompt). Without text the whole intent/photo block
+  // below was skipped and the turn fell through to a text-only reply that
+  // never saw the photo. Treat it exactly like the web client's photo-only
+  // turn, which drafts an estimate FROM the photo.
+  const rawUserText = lastUser?.content ?? '';
+  const lastUserText =
+    rawUserText.trim().length === 0 && attachments && attachments.length > 0
+      ? PHOTO_ONLY_TURN_TEXT
+      : rawUserText;
 
   // ── Intent path: AST-01b ──────────────────────────────────────────
   // Run the same classifier the voice pipeline uses. If the message is
@@ -3002,6 +3055,13 @@ async function generateAssistantReply(
             ...(segTenantThresholdOverride
               ? { tenantThresholdOverride: segTenantThresholdOverride }
               : {}),
+            // #1201 — the turn's photos reach the chain's estimate step too
+            // (same rule as the single-intent path: only draft_estimate
+            // consumes them). Before this a "quote this, then schedule it"
+            // turn drafted the estimate from text alone.
+            ...(registryKey === 'draft_estimate' && chatImages.length > 0
+              ? { images: chatImages }
+              : {}),
           });
           if (!proposal) continue;
           stampVerifiedIds(proposal, segVerifiedIds);
@@ -3095,6 +3155,9 @@ async function generateAssistantReply(
           await deps.proposalRepo.create(proposal);
           if (proposal.status === 'draft') {
             await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+          }
+          if (registryKey === 'draft_estimate' && chatImages.length > 0) {
+            await auditPhotoEstimateDraft(deps, tenantId, userId, correlationId, proposal.id, chatImages, conversationId);
           }
           // Carry the customer reference into later steps so "for her" /
           // "their estimate" resolves at execution time.
@@ -3362,27 +3425,8 @@ async function generateAssistantReply(
         }
         // #1173 — the multimodal path's audit semantics
         // (customer_mms.estimate_drafted): which photos informed this draft.
-        if (registryKey === 'draft_estimate' && chatImages.length > 0 && deps.auditRepo) {
-          try {
-            await deps.auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: userId,
-                actorRole: 'user',
-                eventType: 'assistant.photo_estimate_drafted',
-                entityType: 'proposal',
-                entityId: proposal.id,
-                correlationId,
-                metadata: {
-                  fileIds: chatImages.flatMap((image) => (image.fileId ? [image.fileId] : [])),
-                  photos: chatImages.length,
-                  ...(conversationId ? { conversationId } : {}),
-                },
-              }),
-            );
-          } catch {
-            /* audit best-effort — the proposal itself is the source of truth */
-          }
+        if (registryKey === 'draft_estimate' && chatImages.length > 0) {
+          await auditPhotoEstimateDraft(deps, tenantId, userId, correlationId, proposal.id, chatImages, conversationId);
         }
         const uiProposal = proposalToUI(proposal, lastUserText);
         return {

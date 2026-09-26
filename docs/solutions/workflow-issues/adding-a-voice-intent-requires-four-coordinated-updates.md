@@ -30,7 +30,7 @@ budgets**, and adding an intent changes that prompt.
 3. **`EST_SYSTEM_PROMPT_TOKENS`** (`packages/voice-eval/live-support.ts`) is a cost-cap
    overestimate asserted with a 1.15 safety margin. A longer prompt overruns it. Raise the
    constant — never weaken the margin or the assertion; the constant is the thing that should move.
-4. **The capability declaration + the generated catalog (D-033, since 2026-09-26).** A new
+4. **The capability declaration + the generated catalog (D-034, since 2026-09-26).** A new
    intent does not compile until it has an entry in
    `packages/api/src/capabilities/capabilities.ts#CAPABILITIES` — including a **deliberately
    non-proposal** intent (`kind: 'lookup' | 'dialogue' | …`). A `kind: 'proposal'` declaration is

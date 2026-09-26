@@ -213,6 +213,81 @@ describe('GET /api/proposals/inbox', () => {
   });
 });
 
+// #1278 — the inbox was hard-capped at 100 with `truncated: true` and no
+// way to see the rest (VOX-11). Pins offset/limit query-param pagination
+// end-to-end through the real router.
+describe('GET /api/proposals/inbox pagination (#1278)', () => {
+  async function seedNProposals(proposalRepo: InMemoryProposalRepository, n: number) {
+    for (let i = 0; i < n; i++) {
+      const p = createProposal({
+        tenantId: 'tenant-i1',
+        proposalType: 'draft_invoice',
+        payload: {},
+        summary: `Proposal ${String(i).padStart(3, '0')}`,
+        createdBy: 'user-i1',
+        // Deterministic ordering: prioritizeProposals falls back to
+        // createdAt for same-urgency rows.
+        createdAt: new Date(Date.now() - i * 1000),
+      });
+      // eslint-disable-next-line no-await-in-loop
+      await proposalRepo.create({ ...p, status: 'ready_for_review' });
+    }
+  }
+
+  it('defaults to the first 100 with no query params (backward compatible)', async () => {
+    const { app, proposalRepo } = buildApp();
+    await seedNProposals(proposalRepo, 150);
+
+    const res = await request(app).get('/api/proposals/inbox');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(100);
+    expect(res.body.summary.totalCount).toBe(150);
+    expect(res.body.summary.truncated).toBe(true);
+    expect(res.body.pagination).toEqual({ offset: 0, limit: 100, hasMore: true, nextOffset: 100 });
+  });
+
+  it('returns the next page via ?offset=, with no overlap with page one', async () => {
+    const { app, proposalRepo } = buildApp();
+    await seedNProposals(proposalRepo, 150);
+
+    const page1 = await request(app).get('/api/proposals/inbox');
+    const page2 = await request(app).get('/api/proposals/inbox?offset=100');
+    expect(page2.status).toBe(200);
+    expect(page2.body.data).toHaveLength(50);
+    expect(page2.body.pagination).toEqual({ offset: 100, limit: 100, hasMore: false, nextOffset: null });
+
+    const page1Ids = new Set(page1.body.data.map((r: { proposal: { id: string } }) => r.proposal.id));
+    const page2Ids = new Set(page2.body.data.map((r: { proposal: { id: string } }) => r.proposal.id));
+    expect([...page1Ids].some((id) => page2Ids.has(id))).toBe(false);
+  });
+
+  it('honors a caller-supplied ?limit=', async () => {
+    const { app, proposalRepo } = buildApp();
+    await seedNProposals(proposalRepo, 30);
+
+    const res = await request(app).get('/api/proposals/inbox?limit=10');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(10);
+    expect(res.body.pagination).toEqual({ offset: 0, limit: 10, hasMore: true, nextOffset: 10 });
+  });
+
+  it('rejects an out-of-range limit with 400 rather than silently clamping', async () => {
+    const { app, proposalRepo } = buildApp();
+    await seedNProposals(proposalRepo, 5);
+
+    const res = await request(app).get('/api/proposals/inbox?limit=500');
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a negative offset with 400', async () => {
+    const { app, proposalRepo } = buildApp();
+    await seedNProposals(proposalRepo, 5);
+
+    const res = await request(app).get('/api/proposals/inbox?offset=-1');
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /api/proposals/:id/re-propose (§5.5)', () => {
   it('clones an expired schedule proposal into a fresh draft with a new 48h expiry', async () => {
     const { app, proposalRepo } = buildApp();

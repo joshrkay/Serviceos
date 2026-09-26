@@ -16,18 +16,35 @@ import {
   deleteJobPhoto,
   listJobPhotos,
 } from '../../api/job-photos';
+import {
+  Attachment,
+  AttachmentPairRole,
+  PairAttachmentsResult,
+  listAttachments,
+  pairAttachments,
+} from '../../api/attachments';
 
 export interface JobPhotosProps {
   jobId: string;
   /** Test seam: lets unit tests inject deterministic data. */
   fetcher?: (jobId: string) => Promise<JobPhoto[]>;
   remover?: (jobId: string, photoId: string) => Promise<void>;
+  /**
+   * #1122 — job-photo uploads dual-write a shadow row into the generalized
+   * `attachments` table (RV-005, same fileId); pairing lives there, so
+   * pairing two JobPhoto rows means resolving each one's attachment id
+   * first. Test seams mirror `fetcher`/`remover` above.
+   */
+  listAttachmentsFn?: (entityType: 'job', entityId: string) => Promise<Attachment[]>;
+  pairFn?: (id: string, otherId: string, role: AttachmentPairRole) => Promise<PairAttachmentsResult>;
 }
 
 export function JobPhotos({
   jobId,
   fetcher = listJobPhotos,
   remover = deleteJobPhoto,
+  listAttachmentsFn = listAttachments,
+  pairFn = pairAttachments,
 }: JobPhotosProps) {
   const [photos, setPhotos] = useState<JobPhoto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +84,28 @@ export function JobPhotos({
     [remover, jobId]
   );
 
+  // #1122 — resolve each JobPhoto's shadow attachment id by fileId, then
+  // pair through the existing attachments endpoint. `role` is the role
+  // assigned to `photo` itself; the API assigns the opposite to `other`.
+  const handlePair = useCallback(
+    async (photo: JobPhoto, other: JobPhoto) => {
+      setError(null);
+      try {
+        const attachments = await listAttachmentsFn('job', jobId);
+        const mine = attachments.find((a) => a.fileId === photo.fileId);
+        const theirs = attachments.find((a) => a.fileId === other.fileId);
+        if (!mine || !theirs) {
+          throw new Error('Could not find a matching attachment to pair — try again after the upload finishes.');
+        }
+        const role: AttachmentPairRole = photo.category === 'before' ? 'before' : 'after';
+        await pairFn(mine.id, theirs.id, role);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to pair photos');
+      }
+    },
+    [listAttachmentsFn, pairFn, jobId]
+  );
+
   return (
     <div data-testid="job-photos-page" className="space-y-4 p-4">
       <h1 className="text-xl font-semibold">Job photos</h1>
@@ -82,6 +121,7 @@ export function JobPhotos({
         activeCategory={activeCategory}
         onCategoryChange={setActiveCategory}
         onDelete={handleDelete}
+        onPair={handlePair}
       />
     </div>
   );

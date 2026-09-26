@@ -1,7 +1,8 @@
-import { v4 as uuidv4 } from 'uuid';
 import { VerticalType, ServiceCategory } from '../../shared/vertical-types';
 import { LineItemCategory } from '../../shared/billing-engine';
 import { ValidationError } from '../../shared/errors';
+import { createProposal, type Proposal } from '../../proposals/proposal';
+import type { OnboardingEstimateTemplatePayload } from './onboarding/types';
 
 export interface TemplateLineItem {
   description: string;
@@ -72,29 +73,51 @@ export interface EstimateTemplateRepository {
   list(): Promise<EstimateTemplate[]>;
 }
 
-export async function createTemplate(
+/**
+ * #1066 / D-033 — the AI never writes an estimate template. A template is
+ * priced and flows into every future estimate, so it is drafted as an
+ * `onboarding_estimate_template` PROPOSAL and written only by that type's
+ * deterministic handler after a human approves it
+ * (proposals/execution/onboarding-handlers.ts, which calls the same
+ * templates/estimate-template.ts `createTemplate` the templates route uses).
+ * This used to be `createTemplate(input, repository)`, which wrote the
+ * template from an AI module with no proposal — the sixth I1′ site.
+ *
+ * No trust tier is passed, so the proposal is always created as `draft`
+ * (never auto-approved).
+ */
+export function draftEstimateTemplateProposal(
   input: CreateTemplateInput,
-  repository: EstimateTemplateRepository
-): Promise<EstimateTemplate> {
+  ctx: { tenantId: string; createdBy: string },
+): Proposal {
   const errors = validateTemplateInput(input);
   if (errors.length > 0) {
     throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
   }
 
-  const template: EstimateTemplate = {
-    id: uuidv4(),
-    packId: input.packId,
+  const payload: OnboardingEstimateTemplatePayload = {
     verticalType: input.verticalType,
-    serviceCategory: input.serviceCategory,
-    name: input.name,
-    defaultLineItems: input.defaultLineItems,
-    defaultNotes: input.defaultNotes,
-    sortOrder: input.sortOrder ?? 0,
-    metadata: input.metadata,
-    createdAt: new Date(),
+    categoryId: input.serviceCategory,
+    templateName: input.name,
+    lineItems: input.defaultLineItems.map((item) => ({
+      description: item.description,
+      ...(item.category ? { category: item.category } : {}),
+      defaultQuantity: item.quantity,
+      defaultUnitPriceCents: item.unitPriceCents,
+      taxable: item.taxable,
+      sortOrder: item.sortOrder,
+    })),
+    ...(input.defaultNotes !== undefined ? { defaultNotes: input.defaultNotes } : {}),
   };
 
-  return repository.create(template);
+  return createProposal({
+    tenantId: ctx.tenantId,
+    proposalType: 'onboarding_estimate_template',
+    payload: payload as unknown as Record<string, unknown>,
+    summary: `Estimate template: ${input.name} (${input.verticalType})`,
+    sourceContext: { packId: input.packId },
+    createdBy: ctx.createdBy,
+  });
 }
 
 export async function findTemplate(

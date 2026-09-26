@@ -1,7 +1,7 @@
 # Voice action catalog — what a tradesperson can do by speaking
 
 **Audience:** product + engineering. **Source of truth:** the capability
-declarations in `packages/api/src/capabilities/capabilities.ts` (D-033). Every
+declarations in `packages/api/src/capabilities/capabilities.ts` (D-034). Every
 block between `BEGIN generated` / `END generated` markers — and the
 machine-readable block at the bottom — is **generated** from them by
 `npm run catalog:generate` (in `packages/api`), and
@@ -65,7 +65,7 @@ Each row can be spoken, drafted as a proposal, approved, and executed.
 "Execution proof" means a Docker-gated integration test that proves the row +
 audit event land in Postgres (vs. mocked-DB-only coverage, which cannot catch
 schema drift or a missing dependency). It is derived from `provesExecution(...)`
-tags in the tests (D-033 part 2); a capability with none is either in the
+tags in the tests (D-034 part 2); a capability with none is either in the
 shrink-only grandfather register or fails CI.
 
 <!-- BEGIN generated: speakable -->

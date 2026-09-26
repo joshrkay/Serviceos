@@ -260,7 +260,9 @@ describe('Feature 7 — context SMS to transfer_number before the bridge', () =>
     expect(sent[0]?.body).toMatch(/Gold Plan member|Member/i);
     const escMatch = sent[0]?.body.match(/\/c\/(esc_[A-Za-z0-9-]+)/);
     expect(escMatch).toBeTruthy();
-    const whisperText = whisperCache.get(escMatch![1]);
+    const whisperEntry = whisperCache.get(escMatch![1]);
+    expect(whisperEntry?.tenantId).toBe(TENANT_ID);
+    const whisperText = whisperEntry?.text;
     expect(whisperText).toMatch(/Gold Plan member|Member/i);
   });
 

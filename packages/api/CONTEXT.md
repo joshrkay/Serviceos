@@ -4,7 +4,7 @@ Terms the backend uses with a specific meaning. This is one context of a
 multi-context repo — the root `CONTEXT-MAP.md` says which package owns which
 vocabulary. System-wide decisions live in `docs/decisions.md` (D-NNN); the
 speakable capability inventory in `docs/reference/voice-action-catalog.md`
-(generated from the capability declarations — D-033). Coined during the voice-first effort (#833); add to it rather than letting
+(generated from the capability declarations — D-034). Coined during the voice-first effort (#833); add to it rather than letting
 terms float.
 
 - **Surface** — a way a person reaches the product: the live phone, a recorded
@@ -36,7 +36,7 @@ terms float.
   whatever answers or executes it. The catalog lists them; the map (#833) is
   about making their surface coverage structural.
 - **Capability declaration** — the one entry per intent in
-  `capabilities/capabilities.ts#CAPABILITIES` (D-033): kind, proposal type,
+  `capabilities/capabilities.ts#CAPABILITIES` (D-034): kind, proposal type,
   spoken example, and per-surface opt-outs (`unavailableOn`, each with a
   reason). Every surface's intent map is derived from it, so a new
   declaration is served everywhere unless it opts out.
@@ -48,7 +48,7 @@ terms float.
 - **Proven** — a capability has a real-database integration test on the
   surface in question (`test/integration/`), not only an in-memory one. For
   execution, claimed by a `provesExecution('<key>')` title tag in a file that
-  opens a real pool, and gated over every writing capability (D-033 part 2,
+  opens a real pool, and gated over every writing capability (D-034 part 2,
   `test/capabilities/proven-bar.test.ts`).
 - **Proposal-first** (D-004) — the AI never writes to operational entities;
   it drafts a typed proposal a human approves. Lookups are read-only and are

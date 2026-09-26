@@ -341,17 +341,27 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     expect(Number.isInteger(conversationSettings?.hourlyRateCents)).toBe(true);
   });
 
-  it('identity: jobBufferMinutes defaults to 30 on the conversational path, matching the wizard form default (parity, not a guess — see onboarding-handlers.ts)', async () => {
-    // The conversation never asks about job buffer at all — there is no
-    // capture state for it. The handler writes the SAME default the form
-    // wizard pre-fills (IdentityStep.tsx:77 `useState<number>(30)`), which
-    // is why this is asserted as parity rather than skipped like timezone
-    // (a buffer default has no correctness cliff a wrong timezone has).
-    const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
-    const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
+  it('#1201 — identity: the conversational path stores NO job buffer (NULL = default), while the wizard stores the chosen one', async () => {
+    // The conversation never asks about job buffer, so writing 30 recorded a
+    // "choice" the owner never made — migration 277 treats a stored 30 with a
+    // tenant.identity_set audit carrying jobBufferMinutes as a real choice,
+    // so those tenants stayed labelled 'tenant' instead of 'default'. NULL
+    // means "not configured"; readers apply the 30-minute default in code
+    // (effectiveBufferMinutes), so scheduling behaviour is unchanged.
+    const raw = await pool.query<{ tenant_id: string; job_buffer_minutes: number | null }>(
+      'SELECT tenant_id, job_buffer_minutes FROM tenant_settings WHERE tenant_id = ANY($1::uuid[])',
+      [[wizardTenant.tenantId, conversationTenant.tenantId]],
+    );
+    const byTenant = new Map(raw.rows.map((r) => [r.tenant_id, r.job_buffer_minutes]));
+    expect(byTenant.get(wizardTenant.tenantId)).toBe(JOB_BUFFER_MINUTES);
+    expect(byTenant.get(conversationTenant.tenantId)).toBeNull();
 
-    expect(wizardSettings?.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
-    expect(conversationSettings?.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
+    const audit = await pool.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM audit_events WHERE tenant_id = $1 AND event_type = 'tenant.identity_set'`,
+      [conversationTenant.tenantId],
+    );
+    expect(audit.rows.length).toBeGreaterThan(0);
+    for (const row of audit.rows) expect(row.metadata).not.toHaveProperty('jobBufferMinutes');
   });
 
   it('timezone: BOTH paths store the client-supplied zone, in the same column, as the same value', async () => {
