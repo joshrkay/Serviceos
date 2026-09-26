@@ -354,7 +354,25 @@ export const createAppointmentSchema = z.object({
   arrivalWindowEnd: z.string().datetime().optional(),
   timezone: z.string().min(1),
   notes: z.string().optional(),
+  /**
+   * #1279 — optional primary technician. Written through the canonical
+   * appointment_assignments path (double-booking refused with 409) in the
+   * same request; the job's assignedTechnicianId is derived from it.
+   */
+  technicianId: z.string().uuid().optional(),
 });
+
+/**
+ * Body for `POST /api/appointments/:id/assignments` (#1279) — set (uuid) or
+ * CLEAR (null) the appointment's primary technician. The single appointment-
+ * level assignment write the web forms use; the job's assignedTechnicianId is
+ * re-derived from it.
+ */
+export const setAppointmentTechnicianSchema = z
+  .object({
+    technicianId: z.string().uuid().nullable(),
+  })
+  .strict();
 
 export const delayMinutesSchema = z.union([
   z.literal(10),
@@ -496,6 +514,7 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  notifyTechniciansBySms: z.boolean().optional(),
   // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
   autoInvoiceOnCompletion: z.boolean().optional(),
   // Feature (launch) — opt into recomputing auto-invoice labor from actual time entries.

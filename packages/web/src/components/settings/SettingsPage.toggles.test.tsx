@@ -130,6 +130,46 @@ describe('SettingsPage Quick toggles persistence', () => {
     });
   });
 
+  it('#1033 — hydrates the technician SMS toggle OFF and persists turning it back ON', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return jsonResponse({ notifyTechniciansBySms: true });
+      if (url === '/api/settings') return jsonResponse({ notifyTechniciansBySms: false });
+      return jsonResponse({});
+    });
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+
+    renderPage();
+    const toggle = await screen.findByRole('switch', { name: 'Text technicians about assignments' });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
+    // ≥44px tap target: the 20px (h-5) track plus a 12px ::before overlay on
+    // every side (before:-inset-3) = a 44px-tall, 60px-wide hit area.
+    expect(toggle.className).toContain('h-5');
+    expect(toggle.className).toContain('before:absolute');
+    expect(toggle.className).toContain('before:-inset-3');
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      const putCall = apiFetchMock.mock.calls.find(
+        (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+      );
+      expect(putCall).toBeDefined();
+      expect(JSON.parse((putCall![1] as RequestInit).body as string)).toEqual({
+        notifyTechniciansBySms: true,
+      });
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('switch', { name: 'Text technicians about assignments' }),
+      ).toHaveAttribute('aria-checked', 'true'),
+    );
+  });
+
   it('9.6 — hydrates the Daily digest toggle from /api/settings on mount', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ digestEnabled: true }));
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));

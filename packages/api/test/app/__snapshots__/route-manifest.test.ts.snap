@@ -240,6 +240,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /
          └─ GET /:id
          └─ POST /
+         └─ POST /:id/assignments
          └─ POST /:id/delay-ack
          └─ POST /:id/running-late
          └─ PUT /:id

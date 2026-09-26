@@ -355,12 +355,16 @@ const SANCTIONED_EXCEPTIONS: ReadonlyArray<{
     why: 'D-033 — same shape for an unknown inbound contact: captures them as a lead (audited lead.created). No money, no schedule, no customer-facing message.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2713',
-    why: 'callMeBackRepo.create — same entity from the voice-turn processor.',
+    file: 'ai/skills/patch-owner-through.ts',
+    call: 'callMeBackRepo.create',
+    count: 1,
+    why: 'D-033 — the vulnerable-caller patch-through missed; the call-back task is the durable record that a human must call this person back. Gating it would hide the row that says someone needs help.',
   },
   {
-    at: 'ai/voice-turn/create-voice-turn-processor.ts:2878',
-    why: 'appointmentRepo.update — the E1 revoke path CANCELS a held appointment (`status: canceled`) without a proposal. The strongest of the six: a state-changing write to a scheduled entity.',
+    file: 'ai/voice-turn/create-voice-turn-processor.ts',
+    call: 'callMeBackRepo.create',
+    count: 1,
+    why: 'D-033 — createE1FollowUpTask: the E1 life-safety alert / revoked-booking follow-up task. An internal to-do for a human, never an action on the customer.',
   },
   {
     file: 'ai/voice-turn/create-voice-turn-processor.ts',
