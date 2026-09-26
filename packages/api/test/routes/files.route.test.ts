@@ -10,10 +10,21 @@ import {
 } from '../../src/files/file-service';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
+import type { JobRepository } from '../../src/jobs/job';
 
 const TENANT_ID = 'tenant-files-1';
 const OTHER_TENANT_ID = 'tenant-files-2';
 const BUCKET = 'serviceos-test';
+const KNOWN_JOB_ID = '0f3c2a1b-4d5e-4f60-8a7b-9c0d1e2f3a4b';
+
+/** Tenant-scoped stand-in for JobRepository.findById: one job, in TENANT_ID only. */
+const oneJob: Pick<JobRepository, 'findById'> = {
+  findById: async (tenantId: string, id: string) =>
+    tenantId === TENANT_ID && id === KNOWN_JOB_ID
+      ? ({ id, tenantId } as unknown as Awaited<ReturnType<JobRepository['findById']>>)
+      : null,
+};
+const noJobs: Pick<JobRepository, 'findById'> = { findById: async () => null };
 
 class FakeStorageProvider implements StorageProvider {
   generateUploadCalls: Array<{ bucket: string; key: string; contentType: string }> = [];
@@ -78,7 +89,52 @@ describe('files router', () => {
     fileRepo = new InMemoryFileRepository();
     auditRepo = new InMemoryAuditRepository();
     storage = new FakeStorageProvider();
-    app.use('/api/files', createFilesRouter({ fileRepo, storage, bucket: BUCKET, auditRepo }));
+    app.use('/api/files', createFilesRouter({ fileRepo, storage, bucket: BUCKET, auditRepo, jobRepo: noJobs }));
+  });
+
+  describe('#1200 item 3 — a job-scoped generic upload must name a real job in this tenant', () => {
+    function appFor(tenantId: string) {
+      const a = createAuthedApp(tenantId);
+      a.use('/api/files', createFilesRouter({ fileRepo, storage, bucket: BUCKET, auditRepo, jobRepo: oneJob }));
+      return a;
+    }
+    const body = (entityId: string) => ({
+      filename: 'site.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 100,
+      entityType: 'job',
+      entityId,
+    });
+
+    it('404s and writes no files row for a well-formed unknown job id', async () => {
+      const res = await request(appFor(TENANT_ID)).post('/api/files/upload-url').send(body('7b1e2c3d-4f5a-4b6c-8d7e-9f0a1b2c3d4e'));
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Job not found' });
+      expect(await fileRepo.findByEntity(TENANT_ID, 'job', '7b1e2c3d-4f5a-4b6c-8d7e-9f0a1b2c3d4e')).toEqual([]);
+      expect(storage.generateUploadCalls).toHaveLength(0);
+    });
+
+    it("404s for another tenant's job id (tenant-scoped lookup)", async () => {
+      const res = await request(appFor(OTHER_TENANT_ID)).post('/api/files/upload').send(body(KNOWN_JOB_ID));
+      expect(res.status).toBe(404);
+      expect(await fileRepo.findByEntity(OTHER_TENANT_ID, 'job', KNOWN_JOB_ID)).toEqual([]);
+    });
+
+    it('404s (not 500) for a malformed job id', async () => {
+      const res = await request(appFor(TENANT_ID)).post('/api/files/upload-url').send(body('not-a-uuid'));
+      expect(res.status).toBe(404);
+      expect(await fileRepo.findByEntity(TENANT_ID, 'job', 'not-a-uuid')).toEqual([]);
+    });
+
+    it('still 201s for a real job in this tenant, and for uploads with no job linkage', async () => {
+      const ok = await request(appFor(TENANT_ID)).post('/api/files/upload-url').send(body(KNOWN_JOB_ID));
+      expect(ok.status).toBe(201);
+      expect(ok.body.fileRecord).toMatchObject({ entityType: 'job', entityId: KNOWN_JOB_ID });
+      const loose = await request(appFor(TENANT_ID))
+        .post('/api/files/upload-url')
+        .send({ filename: 'a.webm', contentType: 'audio/webm', sizeBytes: 5, entityType: 'voice_recording' });
+      expect(loose.status).toBe(201);
+    });
   });
 
   describe('POST /api/files/upload-url', () => {
@@ -128,7 +184,7 @@ describe('files router', () => {
       const brokenRepo = new ExplodingFileRepository();
       brokenApp.use(
         '/api/files',
-        createFilesRouter({ fileRepo: brokenRepo, storage, bucket: BUCKET, auditRepo })
+        createFilesRouter({ fileRepo: brokenRepo, storage, bucket: BUCKET, auditRepo, jobRepo: noJobs })
       );
       const res = await request(brokenApp)
         .post('/api/files/upload-url')
@@ -215,7 +271,7 @@ describe('files router', () => {
       const otherApp = createAuthedApp(OTHER_TENANT_ID);
       otherApp.use(
         '/api/files',
-        createFilesRouter({ fileRepo, storage, bucket: BUCKET, auditRepo })
+        createFilesRouter({ fileRepo, storage, bucket: BUCKET, auditRepo, jobRepo: noJobs })
       );
 
       const res = await request(otherApp).get(`/api/files/${fileId}`);

@@ -346,6 +346,32 @@ describe('SchedulePage', () => {
     expect(screen.queryByText('Session expired — please reload')).not.toBeInTheDocument();
     expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
   });
+
+  // ── #1289: confirmed-vs-pending colour on the schedule ──────────────────
+  // Scope decision (2026-09-26): only the status colour is built here. The
+  // week/month grid and SMS-confirmation preview are deferred/dropped — see
+  // the PR description for the recorded n/a reasons.
+  describe('#1289 — confirmed-vs-pending status colour', () => {
+    it('renders a confirmed appointment status pill in green', async () => {
+      setupApi([{ ...appt1, status: 'confirmed' }, appt2]);
+      renderPage();
+      await screen.findByText('Alice Smith');
+      const pill = screen.getByText('confirmed');
+      expect(pill.className).toContain('bg-green-100');
+      expect(pill.className).toContain('text-green-700');
+    });
+
+    it('renders a non-confirmed (pending) appointment status pill in amber, not green', async () => {
+      renderPage(); // appt1/appt2 default to status: 'scheduled'
+      await screen.findByText('Alice Smith');
+      const pills = screen.getAllByText('scheduled');
+      expect(pills.length).toBeGreaterThan(0);
+      for (const pill of pills) {
+        expect(pill.className).toContain('bg-amber-100');
+        expect(pill.className).not.toContain('bg-green-100');
+      }
+    });
+  });
 });
 
 // ─── Journey QA 2026-07-02 (bug 4): appointment times post in TENANT tz ──────

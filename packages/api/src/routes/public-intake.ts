@@ -279,7 +279,12 @@ export function createPublicIntakeRouter(
     }
 
     res.status(200).json({
-      businessName: settings?.businessName ?? tenant.name,
+      // #1275 — tenant.name is an internal-only label, never a substitute
+      // for the customer-facing business name (see auth/clerk.ts's
+      // bootstrapTenant). When settings/businessName is absent, omit the
+      // field entirely rather than leak it; the web client already has a
+      // generic display fallback for that case.
+      ...(settings?.businessName ? { businessName: settings.businessName } : {}),
       businessPhone,
       serviceTypes,
       businessHoursSummary: formatBusinessHoursSummary(

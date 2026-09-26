@@ -320,6 +320,15 @@ interface InboxSummary {
   truncated: boolean;
 }
 
+// #1278 — optional so older/mocked API responses without it still render
+// (no "Load more" affordance offered, matching the pre-pagination behavior).
+interface InboxPagination {
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
 // §5.5 — an expired schedule proposal card the operator can re-propose.
 interface ExpiredCard {
   id: string;
@@ -348,6 +357,7 @@ interface InboxResponse {
   summary: InboxSummary;
   expired?: ExpiredCard[];
   failed?: FailedCard[];
+  pagination?: InboxPagination;
 }
 
 /** Per-id outcome of POST /api/proposals/approve-batch (mirrors the API's
@@ -591,6 +601,11 @@ export function InboxPage() {
   const [failed, setFailed] = useState<FailedCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // #1278 — pagination state for "Load more". `pagination` mirrors the
+  // API's own field (undefined for an older/mocked response, which simply
+  // hides the button rather than crashing).
+  const [pagination, setPagination] = useState<InboxPagination | undefined>(undefined);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // D5 / Finding 2 — approval-undo toast, now driven by the SERVER's undo
   // window via the shared hook (the countdown is anchored to `undoExpiresAt`,
@@ -620,6 +635,7 @@ export function InboxPage() {
         setSummary(body.summary);
         setExpired(body.expired ?? []);
         setFailed(body.failed ?? []);
+        setPagination(body.pagination);
         setError(null);
       } catch (err) {
         if (background) return;
@@ -630,6 +646,28 @@ export function InboxPage() {
     },
     [apiFetch],
   );
+
+  // #1278 — appends the next page onto `rows` rather than replacing them.
+  // `expired`/`failed` are NOT paginated (the endpoint always returns the
+  // full recent-window set for those), so they're left untouched here.
+  const loadMore = useCallback(async () => {
+    if (!pagination?.hasMore || pagination.nextOffset == null || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const res = await apiFetch(
+        `/api/proposals/inbox?offset=${pagination.nextOffset}&limit=${pagination.limit}`,
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as InboxResponse;
+      setRows((prev) => [...prev, ...body.data]);
+      setSummary(body.summary);
+      setPagination(body.pagination);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load more');
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [apiFetch, pagination, isLoadingMore]);
 
   useEffect(() => {
     void loadInbox({ background: hasLoadedRef.current });
@@ -666,7 +704,18 @@ export function InboxPage() {
   const reviewSelectionFor = (row: InboxProposalRow): ReviewResponseSelection =>
     reviewSelections[row.proposal.id] ?? initialReviewResponseSelection(row.proposal.payload);
 
-  async function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<void> {
+  /**
+   * #1291 — per-row typed reject reason, keyed by proposal id. The reject
+   * endpoint's `reason` field (rejectProposalBodySchema) is REQUIRED and
+   * flows straight into the proposal's `rejectionReason`; previously this
+   * surface always sent the constant "Rejected from inbox" with no way for
+   * the operator to say why. An untouched/blank input still falls back to
+   * that same default, so this is additive — no existing reject behavior
+   * changes when nothing is typed.
+   */
+  const [rejectReasonDrafts, setRejectReasonDrafts] = useState<Record<string, string>>({});
+
+  async function actOnProposal(id: string, action: 'approve' | 'reject', rejectReason?: string): Promise<void> {
     const removed = rows.find((r) => r.proposal.id === id);
     setRows((prev) => prev.filter((r) => r.proposal.id !== id));
     try {
@@ -712,21 +761,30 @@ export function InboxPage() {
         }
       }
       // The reject endpoint validates `rejectProposalBodySchema` — `reason`
-      // is REQUIRED, so a body-less POST 400s for every proposal type. The
-      // inbox is a one-tap surface with no reason form (unlike mobile's
-      // useProposalReview, which collects one), so send the surface as the
-      // reason — same spirit as the route's 'ui' rejection-source stamp.
+      // is REQUIRED, so a body-less POST 400s for every proposal type.
+      // #1291 — the operator can type a reason (rejectReasonDrafts); an
+      // untouched/blank input keeps the prior constant default so this is
+      // additive, same spirit as the route's 'ui' rejection-source stamp.
+      const typedReason = rejectReason?.trim();
       const res = await apiFetch(
         `/api/proposals/${id}/${action}`,
         action === 'reject'
           ? {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ reason: 'Rejected from inbox' }),
+              body: JSON.stringify({ reason: typedReason || 'Rejected from inbox' }),
             }
           : { method: 'POST' },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (action === 'reject') {
+        setRejectReasonDrafts((prev) => {
+          if (!(id in prev)) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      }
       emitProposalsChanged();
       // D5 / Finding 2 — show the undo toast for approvals, anchored to the
       // server's real undo window (approvedAt / undoExpiresAt ride the approve
@@ -914,7 +972,10 @@ export function InboxPage() {
             <p className="text-xs text-muted-foreground mt-1">
               {summary.totalCount} waiting
               {summary.criticalCount > 0 && ` · ${summary.criticalCount} urgent`}
-              {summary.truncated && ' (showing first 100)'}
+              {/* #1278 — was a hardcoded "(showing first 100)" dead end;
+                  now reflects how many of the total are actually loaded, and
+                  "Load more" below closes the gap. */}
+              {summary.truncated && ` (showing ${rows.length} of ${summary.totalCount})`}
             </p>
           )}
         </div>
@@ -1069,9 +1130,24 @@ export function InboxPage() {
                     data-testid="row-actions"
                     className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center"
                   >
+                    {/* #1291 — optional typed reject reason, reaching the
+                        API's existing `rejectionReason` via the reject
+                        endpoint's `reason` field. Left blank, Reject keeps
+                        sending the prior constant default. */}
+                    <input
+                      type="text"
+                      id={`reject-reason-${row.proposal.id}`}
+                      aria-label={`Reason for reject — ${row.proposal.summary}`}
+                      placeholder="Reason for reject (optional)"
+                      value={rejectReasonDrafts[row.proposal.id] ?? ''}
+                      onChange={(e) =>
+                        setRejectReasonDrafts((prev) => ({ ...prev, [row.proposal.id]: e.target.value }))
+                      }
+                      className="min-h-11 w-full min-w-0 rounded-lg border border-border bg-card px-2 text-sm text-foreground sm:w-32"
+                    />
                     <button
                       type="button"
-                      onClick={() => actOnProposal(row.proposal.id, 'reject')}
+                      onClick={() => actOnProposal(row.proposal.id, 'reject', rejectReasonDrafts[row.proposal.id])}
                       className="min-h-11 rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
                     >
                       Reject
@@ -1090,6 +1166,25 @@ export function InboxPage() {
             );
           })}
         </ul>
+
+        {/* #1278 — appends the next page onto the list above; only rendered
+            when the server actually reports more (undefined `pagination`,
+            e.g. an older/mocked response, renders nothing here). */}
+        {pagination?.hasMore && (
+          <div className="mt-3 flex justify-center">
+            <button
+              type="button"
+              data-testid="inbox-load-more"
+              onClick={() => void loadMore()}
+              disabled={isLoadingMore}
+              className="min-h-11 rounded-lg border border-border bg-card px-4 py-1.5 text-sm font-medium text-foreground hover:bg-secondary disabled:opacity-50"
+            >
+              {isLoadingMore
+                ? 'Loading…'
+                : `Load more${summary ? ` (${summary.totalCount - rows.length} remaining)` : ''}`}
+            </button>
+          </div>
+        )}
 
         {/* Journey QA 2026-07-02 (bug 10) — approvals that failed to execute.
             Without this section an approved-then-failed proposal silently

@@ -13,6 +13,9 @@ import {
 } from '../files/file-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppError } from '../shared/errors';
+import type { JobRepository } from '../jobs/job';
+import { z } from 'zod';
+import { verifyDevStorageToken } from '../files/storage-provider';
 
 interface UploadUrlBody {
   filename?: string;
@@ -27,10 +30,18 @@ export interface FilesRouterDeps {
   storage: StorageProvider;
   bucket: string;
   auditRepo: AuditRepository;
+  /**
+   * #1200 — a job-scoped generic upload (`entityType: 'job'`) must name a
+   * real job in the caller's tenant, same as the job-files / job-photo
+   * routes (#1187). files.entity_id is TEXT (no FK), so without this an
+   * unknown job id wrote an orphan row and still answered 201. Only
+   * `findById` is used, tenant-scoped.
+   */
+  jobRepo: Pick<JobRepository, 'findById'>;
 }
 
 export function createFilesRouter(deps: FilesRouterDeps): Router {
-  const { fileRepo, storage, bucket, auditRepo } = deps;
+  const { fileRepo, storage, bucket, auditRepo, jobRepo } = deps;
   const router = Router();
 
   const uploadHandler = asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
@@ -49,6 +60,19 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     if (errors.length > 0) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
       return;
+    }
+
+    // #1200 — tenant-scoped parent lookup before any write. A malformed id
+    // is "not found" too (the Pg lookup would otherwise raise on the uuid cast).
+    if (uploadRequest.entityType === 'job' && uploadRequest.entityId !== undefined) {
+      const jobId = uploadRequest.entityId;
+      const job = z.string().uuid().safeParse(jobId).success
+        ? await jobRepo.findById(uploadRequest.tenantId, jobId)
+        : null;
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
     }
 
     const record = createFileRecord(uploadRequest, bucket);
@@ -193,17 +217,26 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
 // Keeps uploaded bytes in an in-memory map so later GETs (e.g. the
 // transcription worker fetching audio before sending to Whisper) see the
 // actual bytes, not a 204 empty body. Mounted outside /api so it bypasses
-// Clerk auth — the signed URL itself is the authorization in prod; in dev
-// this is best-effort and gated by NODE_ENV in createApp.
-export function createDevStorageRouter(): Router {
+// Clerk auth — a real S3 presigned URL needs no Clerk session either, its
+// signature IS the authorization. This dev equivalent needs the same:
+// `secret` is the per-boot HMAC key createStorageProvider() generated
+// alongside the DevStorageProvider instance whose URLs this validates
+// (#1273 — before this, any PUT/GET to this path succeeded with no check
+// at all, so the route was live unauthenticated attack surface whenever it
+// was mounted).
+export function createDevStorageRouter(secret: string): Router {
   const router = Router();
   const store = new Map<string, { bytes: Buffer; contentType: string }>();
 
   router.put('/*', (req, res) => {
+    const key = req.path.replace(/^\/+/, '');
+    if (!verifyDevStorageToken(secret, 'PUT', key, req.query.token as string | undefined)) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing or invalid dev-storage token' });
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
-      const key = req.path;
       const bytes = Buffer.concat(chunks);
       const contentType = (req.headers['content-type'] as string) || 'application/octet-stream';
       store.set(key, { bytes, contentType });
@@ -213,7 +246,12 @@ export function createDevStorageRouter(): Router {
   });
 
   router.get('/*', (req, res) => {
-    const entry = store.get(req.path);
+    const key = req.path.replace(/^\/+/, '');
+    if (!verifyDevStorageToken(secret, 'GET', key, req.query.token as string | undefined)) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing or invalid dev-storage token' });
+      return;
+    }
+    const entry = store.get(key);
     if (!entry) {
       res.status(404).end();
       return;

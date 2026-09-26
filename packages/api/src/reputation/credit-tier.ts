@@ -76,6 +76,17 @@ export function applyCreditCap(
   priorIssuedCents: number,
 ): CreditTierCents {
   if (requestedTier === 0) return 0;
-  if (priorIssuedCents + requestedTier > CREDIT_CAP_CENTS_PER_12_MONTHS) return 0;
+  if (exceedsCreditCap(priorIssuedCents, requestedTier)) return 0;
   return requestedTier;
+}
+
+/**
+ * The single definition of "over the cap", shared by the DRAFT-time
+ * `applyCreditCap` above and the EXECUTE-time re-check in
+ * `ReviewResponseExecutionHandler.executeServiceCredit` (#1080), so the
+ * two can never disagree about the boundary. Strict overflow only:
+ * landing exactly on the cap is allowed.
+ */
+export function exceedsCreditCap(priorIssuedCents: number, requestedCents: number): boolean {
+  return priorIssuedCents + requestedCents > CREDIT_CAP_CENTS_PER_12_MONTHS;
 }

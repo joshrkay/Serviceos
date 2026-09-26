@@ -49,7 +49,7 @@ export class PgCallTranscriptTurnRepository
 
   async recordTurn(input: RecordTurnInput): Promise<CallTranscriptTurn> {
     validateRecordTurnInput(input);
-    // Two keys, one upsert each (migration 274). The mid-call key conflicts
+    // Two keys, one upsert each (migration 278_call_transcript_turns_call_sid). The mid-call key conflicts
     // on the partial unique index, so its ON CONFLICT target must repeat the
     // index predicate for the planner to match it.
     const conflictTarget = input.voiceRecordingId

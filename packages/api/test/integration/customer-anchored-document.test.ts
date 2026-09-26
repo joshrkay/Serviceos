@@ -132,7 +132,7 @@ describe('Postgres integration — customer-anchored estimate/invoice resolution
       {
         tenantId: tenant.tenantId,
         jobId,
-        estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+        estimateNumber: `EST-0${crypto.randomUUID().slice(0, 7)}`,
         lineItems: [buildLineItem('li-1', 'Diagnostic', 1, totalCents, 0, false, 'labor')],
         customerMessage: 'Here is the quote for the work we talked through.',
         createdBy: tenant.userId,
@@ -155,7 +155,10 @@ describe('Postgres integration — customer-anchored estimate/invoice resolution
       {
         tenantId: tenant.tenantId,
         jobId,
-        invoiceNumber: `INV-${crypto.randomUUID().slice(0, 8)}`,
+        // #1235 — always carry a digit, like real sequence numbers: an
+        // all-letter hex suffix (≈1 in 2,500 runs) fails looksLikeDocumentNumber
+        // and routes an exact number through the customer-anchored path.
+        invoiceNumber: `INV-0${crypto.randomUUID().slice(0, 7)}`,
         lineItems: [buildLineItem('li-1', 'Labor', 1, amountDueCents, 0, false, 'labor')],
         createdBy: tenant.userId,
       },

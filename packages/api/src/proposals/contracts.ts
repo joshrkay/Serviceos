@@ -805,6 +805,33 @@ export const voiceClarificationPayloadSchema = z.object({
     .optional(),
 });
 
+/**
+ * #1067 — entity ids a contract declares that are SYSTEM-SUPPLIED: the code
+ * that drafts the proposal picks the row, and no operator can name it.
+ *
+ * - `review_response_proposal.reviewId` — the review is picked from the
+ *   reputation queue by the drafting paths (workers/google-reviews.ts,
+ *   ai/tasks/review-response-task.ts), never named by the operator.
+ * - `adopt_entity_alias.entityId` / `.groundedProposalId` — the entity an
+ *   earlier resolution grounded and the proposal it grounded it on
+ *   (learning/entity-aliases/candidate-service.ts); both exist before the
+ *   alias proposal is drafted.
+ *
+ * A failure on one of these is a drafting defect, never a blank the operator
+ * can fill, so it must never become a `missingFields` gate (D-029 rule 1: a
+ * gate on an entity id is only legitimate if something can lift it). The
+ * voice payload builder reads this to refuse gating such a draft; the I6
+ * structural guard reads it to know these keys are not emittable.
+ */
+export const SYSTEM_SUPPLIED_ID_FIELDS: Readonly<Partial<Record<ProposalType, readonly string[]>>> = {
+  review_response_proposal: ['reviewId'],
+  adopt_entity_alias: ['entityId', 'groundedProposalId'],
+};
+
+export function isSystemSuppliedIdField(proposalType: string, field: string): boolean {
+  return (SYSTEM_SUPPLIED_ID_FIELDS[proposalType as ProposalType] ?? []).includes(field);
+}
+
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,

@@ -33,14 +33,14 @@ describe('NotificationPreferences (U10 settings)', () => {
     expect(getByText('Incoming calls')).toBeTruthy();
     expect(getByText('Text messages')).toBeTruthy();
     expect(getByText('Emergencies')).toBeTruthy();
-    expect(getAllByText('On').length).toBe(11);
+    expect(getAllByText('On').length).toBe(12);
   });
 
   it('reflects a muted category as Off', () => {
     h.preferences = { inbound_sms: false };
     const { getAllByText } = render(createElement(NotificationPreferences));
     expect(getAllByText('Off').length).toBe(1);
-    expect(getAllByText('On').length).toBe(10);
+    expect(getAllByText('On').length).toBe(11);
   });
 
   it('pressing a row toggles it via setEnabled(type, !enabled)', () => {
@@ -59,6 +59,6 @@ describe('NotificationPreferences (U10 settings)', () => {
   it('every toggle row meets the 44px tap-target contract (min-h-11)', () => {
     const { container } = render(createElement(NotificationPreferences));
     const rows = container.querySelectorAll('[class*="min-h-11"]');
-    expect(rows.length).toBe(11);
+    expect(rows.length).toBe(12);
   });
 });

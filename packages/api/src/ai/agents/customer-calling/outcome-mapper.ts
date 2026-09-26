@@ -1,5 +1,6 @@
 import type { CallOutcome } from '../../../voice/voice-service';
 import type { CallingAgentContext, CallingAgentState } from './types';
+import type { VoiceSession } from './voice-session-store';
 
 export interface DeriveOutcomeInput {
   finalState: CallingAgentState;
@@ -87,4 +88,50 @@ export function deriveCallOutcome(input: DeriveOutcomeInput): CallOutcome {
   }
 
   return 'failed';
+}
+
+/**
+ * #351 — canonical adapter from a live `VoiceSession` to {@link
+ * deriveCallOutcome}'s pure-function shape. Replaces two independent
+ * `deriveOutcomeFromSession` duplicates that used to live on
+ * `telephony/twilio-adapter.ts` (private method, called by the now-dead
+ * `stampCallOutcomeByCallSid`) and `ai/voice-turn/create-voice-turn-
+ * processor.ts` (used by `runSummary` to stamp `voice_recordings.outcome`).
+ *
+ * Those duplicates read ONLY `session.machine.currentContext
+ * .escalationReason`, `proposalIds`, and transcript caller-speech — they
+ * never saw the FSM's `endedReason` string this module's `deriveCallOutcome`
+ * keys off. That gap was a real, silently-diverging bug: an abuse-terminated
+ * call's `escalationReason` starts with `abuse_detected`, which the old
+ * duplicates mapped to `'failed'`, while `deriveCallOutcome`'s endedReason
+ * check (`endedReason.startsWith('abuse_detected:')`) maps the SAME call to
+ * `'escalated_to_human'` — so `voice_sessions.outcome` and
+ * `voice_recordings.outcome` disagreed for every abuse-terminated call.
+ *
+ * `finalizeTerminatedSession` (the processor's own terminal hook) always
+ * runs before either duplicate's call site and stashes both
+ * `session.terminalOutcome` and `session.terminalReason` on the session
+ * BEFORE `runSummary` (or the dead `stampCallOutcomeByCallSid`) runs. So:
+ *
+ *  - When `session.terminalOutcome` is already stashed, return it verbatim
+ *    — this is not just an optimization, it GUARANTEES
+ *    `voice_recordings.outcome` agrees with the `voice_sessions.outcome`
+ *    already persisted for the same call, closing the disagreement above.
+ *  - Otherwise (e.g. a session finalized outside this hook, or a unit test
+ *    constructing a session directly), fall back to computing it fresh from
+ *    the same inputs `finalizeTerminatedSession` would have used —
+ *    `session.terminalReason` for `endedReason`, defaulting to
+ *    `'session_ended'` (itself one of `deriveCallOutcome`'s recognized
+ *    "normal close" reasons, matching the old duplicates' behavior when no
+ *    escalation was in progress).
+ */
+export function deriveCallOutcomeFromSession(session: VoiceSession): CallOutcome {
+  if (session.terminalOutcome) return session.terminalOutcome;
+  return deriveCallOutcome({
+    finalState: session.machine.currentState,
+    endedReason: session.terminalReason ?? 'session_ended',
+    context: session.machine.currentContext,
+    transcript: session.transcript,
+    proposalIds: session.proposalIds,
+  });
 }

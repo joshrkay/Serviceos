@@ -46,9 +46,11 @@
  * agreement is structural — there is nothing to compare that is not already
  * equal. `/voice` and the fresh-session branch of `/voice/gather-fallback` use
  * it and are therefore exempt from the guard requirement. (The dev-only
- * `TWILIO_DEFAULT_TENANT_ID` seam inside that resolver is the one place this
- * can still diverge; it is refused in production/staging and is tracked on
- * #1084, not papered over here.)
+ * `TWILIO_DEFAULT_TENANT_ID` seam inside that resolver was the one place this
+ * could still diverge; it is refused in production/staging, and since #1084 it
+ * runs `actingTenantMismatchesCredential` itself before accepting a tenant.
+ * Since #1061 `/gather`, `/dial-result` and `/callback-message` also resolve
+ * through it, and keep their own `?sid=` session guard.)
  *
  * Evidence class: STRUCTURAL — the negative controls plant an unguarded
  * session-bound handler and an unguarded fallback-bound handler, and prove the

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   applyCreditCap,
   creditTierForReview,
+  exceedsCreditCap,
   CREDIT_CAP_CENTS_PER_12_MONTHS,
 } from '../../src/reputation/credit-tier';
 
@@ -32,6 +33,16 @@ describe('P7-026 credit-tier', () => {
     it('out-of-range ratings fall through to 0 (safe default)', () => {
       expect(creditTierForReview('specific_complaint', 0)).toBe(0);
       expect(creditTierForReview('specific_complaint', 6)).toBe(0);
+    });
+  });
+
+  describe('exceedsCreditCap (#1080 — shared by draft and execute)', () => {
+    it('is strict overflow only: exactly $100 is allowed, one cent more is not', () => {
+      expect(exceedsCreditCap(5000, 5000)).toBe(false); // 10000 = cap
+      expect(exceedsCreditCap(5001, 5000)).toBe(true); // 10001 > cap
+      expect(exceedsCreditCap(9000, 5000)).toBe(true); // 14000 > cap
+      expect(exceedsCreditCap(0, 10000)).toBe(false);
+      expect(exceedsCreditCap(0, 10001)).toBe(true);
     });
   });
 

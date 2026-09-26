@@ -272,7 +272,10 @@ export function proposalAccountContext(ctx: B2bAccountContext): ProposalAccountC
     accountType: ctx.accountType,
     priority: ctx.priority,
     ...(ctx.parentAccount ? { parentAccountId: ctx.parentAccount.customerId } : {}),
-    managedPropertyCount: ctx.subAccounts.length,
+    // #1200 — for a sub-account caller the portfolio is loaded off the parent
+    // and the caller is excluded from `subAccounts` (it is not its own
+    // sibling), but it is still one of the parent's managed properties.
+    managedPropertyCount: ctx.subAccounts.length + (ctx.parentAccount ? 1 : 0),
   };
 }
 
@@ -285,6 +288,28 @@ export function proposalAccountContext(ctx: B2bAccountContext): ProposalAccountC
  */
 const MAX_PROMPTED_SUB_ACCOUNTS = 8;
 
+/** #1200 — longest account name interpolated into the prompt. */
+const MAX_PROMPTED_NAME_LENGTH = 80;
+
+/**
+ * #1200 — account names can originate as external input (a lead form, a
+ * caller-given name on an approved create_customer), and this section rides
+ * in the classifier's system-role prompt. Strip control characters (incl.
+ * newlines and Unicode line/paragraph separators) so a name cannot start a
+ * new prompt line, turn double quotes into single ones so the parent name
+ * cannot close its own quoting, collapse whitespace, and cap the length.
+ */
+function promptSafeName(name: string): string {
+  const flat = name
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/"/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+  return flat.length > MAX_PROMPTED_NAME_LENGTH
+    ? `${flat.slice(0, MAX_PROMPTED_NAME_LENGTH)}…`
+    : flat;
+}
+
 export function buildAccountContextPromptSection(
   ctx: B2bAccountContext,
 ): string {
@@ -296,12 +321,12 @@ export function buildAccountContextPromptSection(
   ];
   if (ctx.parentAccount) {
     lines.push(
-      `It is a managed property under the account "${ctx.parentAccount.displayName}".`,
+      `It is a managed property under the account "${promptSafeName(ctx.parentAccount.displayName)}".`,
     );
   }
   if (ctx.subAccounts.length > 0) {
     const shown = ctx.subAccounts.slice(0, MAX_PROMPTED_SUB_ACCOUNTS);
-    const names = shown.map((s) => s.displayName).join(', ');
+    const names = shown.map((s) => promptSafeName(s.displayName)).join(', ');
     const more =
       ctx.subAccounts.length > shown.length
         ? ` (+${ctx.subAccounts.length - shown.length} more)`

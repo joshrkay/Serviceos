@@ -130,6 +130,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/contacts
          └─ POST /:id/contacts/:contactId/archive
          └─ POST /:id/merge
+         └─ POST /:id/restore
          └─ POST /:id/tags
          └─ PUT /:id
          └─ PUT /:id/contacts/:contactId

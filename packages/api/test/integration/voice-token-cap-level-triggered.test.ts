@@ -397,6 +397,9 @@ describe('#1204 — token cap crossed between turns ends the call, audit row at 
       });
       expect(rows.map((r) => r.eventType)).toContain('agent.calling.intent_capture.emergency_dispatch');
       expect(rows.some((r) => r.eventType.endsWith('.cost_cap_exceeded'))).toBe(false);
+      // #1230 — one incident, one escalation.requested: the FSM's notify_oncall
+      // reuses the immediate-dial result instead of walking the rotation again.
+      expect(rows.filter((r) => r.eventType === 'escalation.requested')).toHaveLength(1);
     });
 
     it('T1 — neighbour tenant B (no rotation) gets none of the emergency rows and no proposals', async () => {

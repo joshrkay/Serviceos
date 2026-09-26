@@ -21,10 +21,11 @@
  * Cap enforcement at DRAFT time (not approval time) keeps the owner
  * UI honest: if the cap is exhausted, the credit component is
  * `null` and the operator never sees a vacuous "approve a $0 credit"
- * affordance. Trade-off: a delayed approval after a separate credit
- * was issued in the meantime is still capped at-execute by the
- * issuance path (today the handler does not re-check; documented as
- * a known trade-off in the handler).
+ * affordance. A delayed approval after a separate credit was issued in
+ * the meantime is caught at EXECUTE time: the handler re-reads the
+ * rolling sum under a per-customer lock and refuses (never clamps) a
+ * credit that would now exceed the cap (#1080; both halves share
+ * `exceedsCreditCap`).
  */
 
 import { LLMGateway } from '../ai/gateway/gateway';

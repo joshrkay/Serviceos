@@ -166,7 +166,9 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     const params: unknown[] = [tenantId];
     let paramIndex = 2;
 
-    if (!options?.includeArchived) {
+    if (options?.archivedOnly) {
+      conditions.push('is_archived = true');
+    } else if (!options?.includeArchived) {
       conditions.push('is_archived = false');
     }
 

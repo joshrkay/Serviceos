@@ -70,6 +70,7 @@ import {
   type LLMRequest,
   type LLMResponse,
 } from '../gateway/gateway';
+import { normalizeUntrustedFenceIds } from '../untrusted-content';
 
 export type CassetteMode = 'replay' | 'record' | 'refresh';
 
@@ -441,9 +442,13 @@ function snapshotRequest(
   request: LLMRequest
 ): { model: string; prompt: string; schema: string } {
   const model = request.model ?? '(default)';
+  // #1240 — an untrusted-content fence carries a random per-request fence id
+  // by design; it is replaced with a fixed placeholder so a fenced request
+  // hashes (and snapshots) the same on every run. Text with no fence is
+  // unchanged, so every existing hash is unchanged.
   const messages = (request.messages ?? []).map((m) => ({
     role: m.role,
-    content: m.content,
+    content: typeof m.content === 'string' ? normalizeUntrustedFenceIds(m.content) : m.content,
   }));
   const prompt = JSON.stringify(canonicalize(messages));
   const schema = request.responseFormat ?? 'text';

@@ -392,6 +392,15 @@ describe('Postgres integration — #1102 Stripe settlement is bound to the tenan
   // ═════════════════ payment_intent.succeeded ═════════════════
 
   describe('payment_intent.succeeded', () => {
+    it('#1110 — REFUSES (403, not 500) a connected-account delivery whose metadata tenant_id is not a UUID', async () => {
+      const eventId = `evt_${randomUUID()}`;
+      const res = await postSigned(
+        piSucceeded(eventId, `pi_${eventId}`, 'not-a-tenant', randomUUID(), ACCOUNT_B),
+      );
+      expect(res.status).toBe(403);
+      expect((await webhookRow(eventId))?.status).toBe('failed');
+    });
+
     it('REFUSES a delivery whose event.account is another tenant\'s, when the named tenant HAS its own account', async () => {
       const invoiceId = await seedOpenInvoice(tenantA);
       const paymentsBefore = await countPayments(tenantA.tenantId);
