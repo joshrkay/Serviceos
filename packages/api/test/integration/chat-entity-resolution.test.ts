@@ -1240,7 +1240,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
         {
           tenantId: seed.tenantId,
           jobId: seed.jobId,
-          estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+          estimateNumber: `EST-0${crypto.randomUUID().slice(0, 7)}`,
           lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
           createdBy: seed.userId,
         },
