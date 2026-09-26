@@ -192,8 +192,10 @@ describe('TechJobView delay acknowledgement prompt', () => {
     expect(chip20).not.toHaveClass('bg-primary');
   });
 
-  it('deletes a photo behind a confirm: calls deletePhoto and removes it from the gallery', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  // #907 — window.confirm replaced with ConfirmDialog: the delete button
+  // stages the photo and opens the dialog; the delete only fires from the
+  // dialog's confirm button (data-testid "confirm-dialog-confirm").
+  it('deletes a photo behind a ConfirmDialog: calls deletePhoto and removes it from the gallery', async () => {
     const photo = {
       id: 'p-del',
       tenantId: 't1',
@@ -225,16 +227,16 @@ describe('TechJobView delay acknowledgement prompt', () => {
     );
 
     fireEvent.click(screen.getByTestId('job-photo-delete-p-del'));
+    expect(await screen.findByText('Delete this photo?')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
 
     await waitFor(() => expect(deletePhoto).toHaveBeenCalledWith('j1', 'p-del'));
     await waitFor(() =>
       expect(screen.queryByTestId('job-photo-card-p-del')).not.toBeInTheDocument(),
     );
-    confirmSpy.mockRestore();
   });
 
   it('surfaces a delete error and keeps the photo (no phantom removal)', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const photo = {
       id: 'p-err',
       tenantId: 't1',
@@ -266,12 +268,12 @@ describe('TechJobView delay acknowledgement prompt', () => {
     );
 
     fireEvent.click(screen.getByTestId('job-photo-delete-p-err'));
+    fireEvent.click(await screen.findByTestId('confirm-dialog-confirm'));
 
     await waitFor(() =>
       expect(screen.getByTestId('tech-photo-error')).toHaveTextContent('Delete failed: 403'),
     );
     expect(screen.getByTestId('job-photo-card-p-err')).toBeInTheDocument();
-    confirmSpy.mockRestore();
   });
 
   // U10c — Path A class contract: the tech view renders on brand tokens only.
