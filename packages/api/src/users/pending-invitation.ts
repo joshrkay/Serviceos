@@ -128,8 +128,9 @@ export class InMemoryPendingInvitationRepository implements PendingInvitationRep
 
   async findPendingByEmail(email: string): Promise<PendingInvitation | null> {
     const lc = email.toLowerCase();
+    const now = new Date();
     for (const row of this.rows.values()) {
-      if (row.email === lc && !row.acceptedAt) return { ...row };
+      if (row.email === lc && !row.acceptedAt && row.expiresAt > now) return { ...row };
     }
     return null;
   }
@@ -149,7 +150,10 @@ export class InMemoryPendingInvitationRepository implements PendingInvitationRep
 
   async findById(id: string): Promise<PendingInvitation | null> {
     const row = this.rows.get(id);
-    return row ? { ...row } : null;
+    if (!row) return null;
+    // #1032 — an expired invitation must not be joinable, even when the
+    // caller has its id (e.g. forwarded via Clerk public_metadata).
+    return row.expiresAt > new Date() ? { ...row } : null;
   }
 
   async markAccepted(id: string): Promise<PendingInvitation | null> {

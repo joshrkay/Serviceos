@@ -3,7 +3,8 @@ import { recordFunnelEvent } from "../analytics/posthog";
 import { randomUUID } from "node:crypto";
 import { ValidationError } from "../shared/errors";
 import { PgBaseRepository } from "../db/pg-base";
-import { priceMinuteUsage, type CallPlanId } from "./call-usage-pricing";
+import { OVERAGE_CENTS_PER_MINUTE, priceMinuteUsage, type CallPlanId } from "./call-usage-pricing";
+import { formatUsdCentsFixed } from "@ai-service-os/shared";
 import type { PgCallUsageRepository } from "./call-usage-events";
 import type { OverageCapStore } from "./overage-cap";
 
@@ -204,7 +205,10 @@ export class CallUsageBillingService {
     if (input.stripeInvoiceId) body.set("invoice", input.stripeInvoiceId);
     body.set("amount", String(settlement.customerChargeCents));
     body.set("currency", "usd");
-    body.set("description", `AI answering minutes over plan: ${settlement.overageMinutes} at $1.25/min`);
+    body.set(
+      "description",
+      `AI answering minutes over plan: ${settlement.overageMinutes} at ${formatUsdCentsFixed(OVERAGE_CENTS_PER_MINUTE)}/min`,
+    );
     const response = await (this.deps.fetchFn ?? fetch)("https://api.stripe.com/v1/invoiceitems", {
       method: "POST",
       headers: {

@@ -226,10 +226,18 @@ describe('B1 — Stripe checkout dedup through the injected durable repo', () =>
   });
 
   it('marks a failed delivery re-processable: failure → failed (not stuck), retry succeeds and records once', async () => {
-    // First delivery fails: the invoice doesn't exist yet (out-of-order
-    // delivery), recordPayment throws, the route 500s and the row is
-    // marked 'failed' — NOT left at received/processing.
-    invoiceRepo = new InMemoryInvoiceRepository(); // empty — no invoice
+    // First delivery fails transiently (the invoice read throws — e.g. the
+    // database is briefly unavailable), the route 500s and the row is marked
+    // 'failed' — NOT left at received/processing. (A permanently missing
+    // invoice is ACKed instead, #1060.)
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(makeInvoice());
+    const findById = invoiceRepo.findById.bind(invoiceRepo);
+    let dbDown = true;
+    invoiceRepo.findById = async (...args: Parameters<typeof findById>) => {
+      if (dbDown) throw new Error('database unavailable');
+      return findById(...args);
+    };
     const app = buildStripeApp(deps());
     const event = checkoutEvent('evt_fail_then_retry_1');
 
@@ -239,9 +247,9 @@ describe('B1 — Stripe checkout dedup through the injected durable repo', () =>
     const afterFailure = await sharedRepo.findByIdempotencyKey('stripe', 'evt_fail_then_retry_1');
     expect(afterFailure?.status).toBe('failed');
 
-    // The invoice now exists; Stripe's retry of the SAME event id must
+    // The database is back; Stripe's retry of the SAME event id must
     // re-execute (failed rows are not duplicates) and record the payment.
-    await invoiceRepo.create(makeInvoice());
+    dbDown = false;
     const retry = await postStripe(app, event);
     expect(retry.status).toBe(200);
     expect(retry.body).toEqual({ received: true });

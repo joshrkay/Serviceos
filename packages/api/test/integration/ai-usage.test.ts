@@ -70,16 +70,17 @@ describe('Postgres integration — AI minute usage summary', () => {
       overageCentsPerMinute: 125,
       projectedChargeCents: 625,
       capCents: 7_900,
+      capReached: false,
     });
   });
 
   it('shows the capped projection and a removed cap as null', async () => {
     const tenantId = await tenantOn('active', 'starter');
     await use(tenantId, 200 * 60);
-    expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 7_900, capCents: 7_900 });
+    expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 7_900, capCents: 7_900, capReached: true });
 
     await caps.set(tenantId, null);
-    expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 22_500, capCents: null });
+    expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 22_500, capCents: null, capReached: false });
   });
 
   it('reports trial minutes against the 60-minute trial', async () => {
