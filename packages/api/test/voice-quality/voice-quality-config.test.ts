@@ -99,3 +99,27 @@ describe('VQ-009 — vitest config + corpus entry plumbing', () => {
     expect(tenantId.endsWith(scriptId)).toBe(true);
   });
 });
+
+/**
+ * #888 — a gate that points at a config file that does not exist is a gate
+ * that never runs. PR Checks' cassette-drift job and the cassette seed/prune
+ * script both ran `vitest run -c vitest.voice-quality.config.ts` after the
+ * config became `.mts`: the drift job swallowed the startup error with
+ * `|| true` and could never report drift, and `--prune` refused to run.
+ */
+describe('#888 — every voice-quality vitest config reference resolves', () => {
+  const apiRoot = path.resolve(__dirname, '../..');
+  const sources = [
+    path.resolve(apiRoot, '../../.github/workflows/pr-checks.yml'),
+    path.resolve(apiRoot, 'scripts/seed-voice-quality-cassettes.ts'),
+    path.resolve(apiRoot, 'package.json'),
+  ];
+
+  it.each(sources)('%s names only vitest configs that exist', (file) => {
+    const text = fs.readFileSync(file, 'utf-8');
+    const referenced = [...text.matchAll(/vitest\.voice-quality[\w.-]*\.config\.[cm]?ts/g)].map((m) => m[0]);
+    expect(referenced.length).toBeGreaterThan(0);
+    const missing = [...new Set(referenced)].filter((c) => !fs.existsSync(path.join(apiRoot, c)));
+    expect(missing).toEqual([]);
+  });
+});
