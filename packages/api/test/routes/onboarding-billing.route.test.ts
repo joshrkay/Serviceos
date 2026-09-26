@@ -3,7 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Pool } from 'pg';
 import { createOnboardingRouter } from '../../src/routes/onboarding';
-import { __setClientForTests, __resetAnalyticsForTests } from '../../src/analytics/posthog';
+import { capturePostHog } from '../helpers/posthog-capture';
 import { BillingService } from '../../src/billing/subscription';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
@@ -192,9 +192,8 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
   });
 
   it('records a plan_selected funnel event for the chosen plan', async () => {
-    const capture = vi.fn();
-    process.env.POSTHOG_API_KEY = 'phc_test';
-    __setClientForTests({ capture, groupIdentify: vi.fn(), shutdown: vi.fn() } as never);
+    const posthog = capturePostHog();
+    const { capture } = posthog;
     try {
       const fetchFn = vi
         .fn()
@@ -202,20 +201,6 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
           validPrice({ unit_amount: 19_900, product: { id: 'prod_growth', active: true, name: 'Rivet Growth' } }),
         )
         .mockResolvedValueOnce(jsonOk({ id: 'cs_growth', url: 'https://checkout.stripe.com/c/pay/cs_growth' }));
-  it('builds the Stripe success and cancel URLs from config.publicOrigins.web, not raw env', async () => {
-    // The route used to read WEB_URL ?? APP_PUBLIC_URL straight from
-    // process.env with a localhost fallback. The origin now comes from the
-    // config seam, so a deployment whose config resolves the web origin
-    // returns the customer to the app domain regardless of what process.env
-    // happens to hold.
-    const { loadConfig, resetConfig } = await import('../../src/shared/config');
-    resetConfig();
-    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.example.com' });
-    try {
-      const fetchFn = vi
-        .fn()
-        .mockResolvedValueOnce(validPrice({ unit_amount: 5_000 }))
-        .mockResolvedValueOnce(jsonOk({ id: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2' }));
       const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
 
       const res = await request(buildApp(svc))
@@ -231,9 +216,29 @@ describe('POST /api/onboarding/billing/checkout-session', () => {
         }),
       );
     } finally {
-      __resetAnalyticsForTests();
-      delete process.env.POSTHOG_API_KEY;
-        .send({ planId: 'basic' });
+      posthog.restore();
+    }
+  });
+
+  it('builds the Stripe success and cancel URLs from config.publicOrigins.web, not raw env', async () => {
+    // The route used to read WEB_URL ?? APP_PUBLIC_URL straight from
+    // process.env with a localhost fallback. The origin now comes from the
+    // config seam, so a deployment whose config resolves the web origin
+    // returns the customer to the app domain regardless of what process.env
+    // happens to hold.
+    const { loadConfig, resetConfig } = await import('../../src/shared/config');
+    resetConfig();
+    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.example.com' });
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(validPrice({ unit_amount: 7_900 }))
+        .mockResolvedValueOnce(jsonOk({ id: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2' }));
+      const svc = new BillingService({ pool: fakePool(), config: { apiKey: 'sk_test' }, fetchFn: fetchFn as unknown as typeof fetch });
+
+      const res = await request(buildApp(svc))
+        .post('/api/onboarding/billing/checkout-session')
+        .send({ planId: 'starter' });
       expect(res.status).toBe(200);
       const body = fetchFn.mock.calls[1][1].body as URLSearchParams;
       expect(body.get('success_url')).toBe('https://app.example.com/onboarding?billing=ok');
