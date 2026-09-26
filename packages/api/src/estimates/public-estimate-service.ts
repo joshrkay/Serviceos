@@ -12,12 +12,15 @@ import { LocationRepository } from '../locations/location';
 import { SettingsRepository } from '../settings/settings';
 import { FileRepository, StorageProvider } from '../files/file-service';
 import { evaluateDepositRule, deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
-import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
+import { AppError, ValidationError, NotFoundError, ConflictError } from '../shared/errors';
+import { createLogger } from '../logging/logger';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { estimateApprovedProps } from '../analytics/estimate-event-props';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import type { CatalogUnitValue } from '@ai-service-os/shared';
+
+const logger = createLogger({ service: 'public-estimates', environment: process.env.NODE_ENV || 'development' });
 
 /**
  * Service layer for the unauthenticated customer-facing estimate
@@ -881,12 +884,18 @@ export class PublicEstimateService {
       }),
     });
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Stripe API error (${res.status}): ${body}`);
+      // #1110 — a customer-facing route: map the refusal, log the detail, and
+      // never echo Stripe's body (it can name the key) or answer a bare 500.
+      const body = await res.text().catch(() => '');
+      logger.error('Deposit payment link: Stripe refused', { status: res.status, body: body.slice(0, 500) });
+      if (res.status === 401 || res.status === 403) {
+        throw new AppError('PAYMENTS_UNAVAILABLE', 'Payment processing is temporarily unavailable', 503);
+      }
+      throw new AppError('PAYMENT_PROVIDER_ERROR', 'The payment provider could not create a checkout link', 502);
     }
     const data = (await res.json()) as { id?: string; url?: string };
     if (!data.id || !data.url) {
-      throw new Error('Stripe API returned incomplete payment link (missing id or url)');
+      throw new AppError('PAYMENT_PROVIDER_ERROR', 'The payment provider could not create a checkout link', 502);
     }
 
     // Own the deadline the link claims. Prefer the estimate's own

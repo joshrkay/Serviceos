@@ -37,7 +37,11 @@
  * so no `ai/` type has to be named here.
  */
 import type { ProposalType } from './proposal';
-import { validateProposalPayload, type ProposalConfidenceMeta } from './contracts';
+import {
+  isSystemSuppliedIdField,
+  validateProposalPayload,
+  type ProposalConfidenceMeta,
+} from './contracts';
 import { parseJobEditFields } from './job-edit-phrases';
 
 /**
@@ -448,6 +452,21 @@ export async function buildVoiceProposalPayload(
     if (reference) flat.invoiceReference = reference;
   }
 
+  // cancel_appointment (#1272): the classifier emits `cancellationReason`,
+  // `cancelAppointmentPayloadSchema` wants `reason` + a `cancellationType`
+  // enum a spoken cancel almost never names. Same defaults, same precedence,
+  // as `CancelAppointmentTaskHandler` (ai/tasks/voice-extended-tasks.ts) on
+  // the memo/chat leg (`cancellationType ?? 'other'`, `cancellationReason ??
+  // the spoken request`). Without them every live voice cancel minted an
+  // approve-to-fail card gated on `cancellationType` (QA row SCH-03).
+  if (proposalType === 'cancel_appointment') {
+    if (flat.cancellationType === undefined) flat.cancellationType = 'other';
+    if (flat.reason === undefined) {
+      const reason = nonEmptyString(entities.cancellationReason) ?? nonEmptyString(input.utterance);
+      if (reason) flat.reason = reason;
+    }
+  }
+
   // Whole-object contract refines carry `path: []`, so `fieldPathsFrom` below
   // can name nothing and `missingFieldPaths` comes back EMPTY even when the
   // check fails — leaving the caller with an invalid payload it cannot gate
@@ -498,6 +517,20 @@ export async function buildVoiceProposalPayload(
   const validation = validateProposalPayload(proposalType, payload);
   if (!validation.valid) {
     const errors = validation.errors ?? ['payload failed contract validation'];
+    // #1067 — a failure on a SYSTEM-SUPPLIED id (contracts.ts
+    // SYSTEM_SUPPLIED_ID_FIELDS) is a drafting defect no operator can clear.
+    // Gating it — or gating the draft on its OTHER fields while the id is
+    // still missing — mints a card that can never be approved, so the draft
+    // is not gateable at all: an empty `missingFieldPaths` with `ok: false`.
+    // The telephony leg degrades that to a clarification
+    // (create-voice-turn-processor.ts `gateable`). The in-app leg keeps its
+    // documented S2 persist-unchanged posture for real types, but neither
+    // system-supplied type reaches it through this builder: respond_to_review
+    // is intercepted before the generic path, and adopt_entity_alias has no
+    // voice intent at all.
+    if (fieldPathsFrom(errors).some((field) => isSystemSuppliedIdField(proposalType, field))) {
+      return { ...common, ok: false, errors, missingFieldPaths: [] };
+    }
     // D01 — merge in the whole-object-refine gap `fieldPathsFrom` cannot
     // name (see contractGapFields above); deduped, since a payload can also
     // independently fail a field-specific check (e.g. scheduledStart).

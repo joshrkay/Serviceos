@@ -35,9 +35,24 @@ export interface RecurringAgreementsWorkerDeps {
   logger: Logger;
 }
 
+export interface RecurringAgreementsSweepResult {
+  tenants: number;
+  renewed: number;
+  generated: number;
+  skipped: number;
+  /** Agreement RUNS that failed inside an otherwise-successful tenant pass. */
+  failed: number;
+  /**
+   * #1059 — tenants whose renewal or billing phase THREW (counted once per
+   * tenant). Same observability as the overdue-invoice / money-reconciliation
+   * sweeps: a swallowed tenant failure is still a counted one.
+   */
+  failedTenants: number;
+}
+
 export async function runRecurringAgreementsSweep(
   deps: RecurringAgreementsWorkerDeps,
-): Promise<{ tenants: number; renewed: number; generated: number; skipped: number; failed: number }> {
+): Promise<RecurringAgreementsSweepResult> {
   let tenantIds: string[];
   try {
     tenantIds = await deps.listTenantIds();
@@ -45,15 +60,17 @@ export async function runRecurringAgreementsSweep(
     deps.logger.error('Recurring-agreements sweep: failed to list tenants', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { tenants: 0, renewed: 0, generated: 0, skipped: 0, failed: 0 };
+    return { tenants: 0, renewed: 0, generated: 0, skipped: 0, failed: 0, failedTenants: 0 };
   }
 
   let renewed = 0;
   let generated = 0;
   let skipped = 0;
   let failed = 0;
+  let failedTenants = 0;
 
   for (const tenantId of tenantIds) {
+    let tenantFailed = false;
     // Renew lapsed memberships first so a just-renewed agreement that is also
     // due fires in the same sweep. Isolated try: a renewal failure must not
     // block this tenant's run sweep.
@@ -70,6 +87,7 @@ export async function runRecurringAgreementsSweep(
         });
       }
     } catch (err) {
+      tenantFailed = true;
       deps.logger.warn('Recurring-agreements sweep: renewal failed', {
         tenantId,
         error: err instanceof Error ? err.message : String(err),
@@ -101,13 +119,23 @@ export async function runRecurringAgreementsSweep(
       }
     } catch (err) {
       // Mirror execution-worker.ts: a single tenant's failure is logged
-      // and swallowed so the sweep keeps going.
+      // and swallowed so the sweep keeps going — but counted (#1059).
+      tenantFailed = true;
       deps.logger.warn('Recurring-agreements sweep: tenant failed', {
         tenantId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
+
+    if (tenantFailed) failedTenants += 1;
   }
 
-  return { tenants: tenantIds.length, renewed, generated, skipped, failed };
+  if (failedTenants > 0) {
+    deps.logger.warn('Recurring-agreements sweep: tenants failed', {
+      failedTenants,
+      tenants: tenantIds.length,
+    });
+  }
+
+  return { tenants: tenantIds.length, renewed, generated, skipped, failed, failedTenants };
 }

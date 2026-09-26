@@ -2,8 +2,8 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createCustomerSchema, updateCustomerAccountTypeSchema } from '../shared/contracts';
-import { uuidSchema } from '../shared/validation';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createCustomer,
   getCustomer,
@@ -87,20 +87,24 @@ export function createCustomerRouter(
   // asyncRoute turns into a bare 500. Treat a malformed id the same as
   // "not found" — every handler below already 404s a well-formed id that
   // doesn't match a row, so this just widens that same response.
-  const rejectMalformedId = (res: Response, id: string): boolean => {
-    if (uuidSchema.safeParse(id).success) return false;
-    res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
-    return true;
-  };
+  //
+  // #908 — this used to be a hand-rolled `rejectMalformedId` helper called
+  // as the first line of each handler, predating the shared
+  // `notFoundOnMalformedId` middleware (#882) that now guards nine other
+  // routers. Every `:id` route below wires that middleware into its chain
+  // instead (same insertion point the middleware's own doc comment
+  // prescribes: after requirePermission, before asyncRoute).
+  const customerNotFoundOnMalformedId = notFoundOnMalformedId('Customer not found');
 
   // Shared by the nested CRM sub-resource routes (contacts, tags, custom
   // fields): confirm the parent customer exists within the tenant so a
-  // cross-tenant or bogus customerId 404s before any child write.
+  // cross-tenant or bogus customerId 404s before any child write. Malformed
+  // ids are already rejected upstream by `customerNotFoundOnMalformedId` in
+  // each of those routes' own chains, so this only needs the existence check.
   const loadCustomerOr404 = async (
     req: AuthenticatedRequest,
     res: Response
   ): Promise<boolean> => {
-    if (rejectMalformedId(res, req.params.id)) return false;
     const customer = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
     if (!customer) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
@@ -201,8 +205,8 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
+    customerNotFoundOnMalformedId,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      if (rejectMalformedId(res, req.params.id)) return;
       const result = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
@@ -217,8 +221,8 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    customerNotFoundOnMalformedId,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      if (rejectMalformedId(res, req.params.id)) return;
       // #1155 — accountType is enum-validated (ZodError → 400) before the body
       // reaches updateCustomer; the edit is audited with the other changed
       // keys in customer.updated.
@@ -245,8 +249,8 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:delete'),
+    customerNotFoundOnMalformedId,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      if (rejectMalformedId(res, req.params.id)) return;
       const result = await archiveCustomer(
         req.auth!.tenantId,
         req.params.id,
@@ -298,8 +302,8 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-        if (rejectMalformedId(res, req.params.id)) return;
         const losingId = (req.body?.losingId ?? '') as string;
         if (typeof losingId !== 'string' || losingId.trim() === '') {
           res.status(400).json({
@@ -333,8 +337,8 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-        if (rejectMalformedId(res, req.params.id)) return;
         const customer = await getCustomer(
           req.auth!.tenantId,
           req.params.id,
@@ -370,6 +374,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const includeArchived = req.query.includeArchived === 'true';
@@ -388,6 +393,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const parsed = createCustomerContactSchema.parse(req.body);
@@ -411,6 +417,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const parsed = updateCustomerContactSchema.parse(req.body);
@@ -436,6 +443,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
@@ -462,6 +470,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
@@ -474,6 +483,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const { tag } = addCustomerTagSchema.parse(req.body);
@@ -495,6 +505,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         await removeCustomerTag(
@@ -519,6 +530,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const fields = await listResolvedCustomFields(
@@ -535,6 +547,7 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
+      customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const { value } = setCustomFieldValueSchema.parse(req.body);

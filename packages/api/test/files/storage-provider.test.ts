@@ -4,6 +4,8 @@ import {
   DevStorageProvider,
   createStorageProvider,
   signS3Request,
+  signDevStorageToken,
+  verifyDevStorageToken,
 } from '../../src/files/storage-provider';
 
 describe('signS3Request (pure SigV4)', () => {
@@ -147,25 +149,73 @@ describe('S3StorageProvider', () => {
 });
 
 describe('DevStorageProvider', () => {
-  it('returns a URL under the configured public base', async () => {
+  it('returns a URL under the configured public base, signed with a PUT token (#1273)', async () => {
     const provider = new DevStorageProvider({
       bucket: 'serviceos-dev',
       publicUrlBase: 'http://localhost:3000/storage-dev',
+      secret: 'test-secret',
     });
     const url = await provider.generateUploadUrl(
       'serviceos-dev',
       'tenant-1/file-1/voice.webm',
       'audio/webm'
     );
-    expect(url).toBe('http://localhost:3000/storage-dev/tenant-1/file-1/voice.webm');
+    const parsed = new URL(url);
+    expect(`${parsed.origin}${parsed.pathname}`).toBe(
+      'http://localhost:3000/storage-dev/tenant-1/file-1/voice.webm'
+    );
+    const token = parsed.searchParams.get('token');
+    expect(token).toBe(signDevStorageToken('test-secret', 'PUT', 'tenant-1/file-1/voice.webm'));
+  });
+
+  it('signs the download URL with a distinct GET token so a PUT token cannot read it back (#1273)', async () => {
+    const provider = new DevStorageProvider({
+      bucket: 'serviceos-dev',
+      publicUrlBase: 'http://localhost:3000/storage-dev',
+      secret: 'test-secret',
+    });
+    const uploadUrl = await provider.generateUploadUrl('serviceos-dev', 'tenant-1/x.webm', 'audio/webm');
+    const downloadUrl = await provider.generateDownloadUrl('serviceos-dev', 'tenant-1/x.webm');
+    const putToken = new URL(uploadUrl).searchParams.get('token');
+    const getToken = new URL(downloadUrl).searchParams.get('token');
+    expect(putToken).not.toBe(getToken);
+    expect(verifyDevStorageToken('test-secret', 'GET', 'tenant-1/x.webm', getToken ?? undefined)).toBe(true);
+    expect(verifyDevStorageToken('test-secret', 'GET', 'tenant-1/x.webm', putToken ?? undefined)).toBe(false);
   });
 
   it('getObjectMetadata returns null (metadata not available)', async () => {
     const provider = new DevStorageProvider({
       bucket: 'serviceos-dev',
       publicUrlBase: 'http://localhost:3000/storage-dev',
+      secret: 'test-secret',
     });
     expect(await provider.getObjectMetadata('serviceos-dev', 'tenant-1/file-1/voice.webm')).toBeNull();
+  });
+});
+
+describe('signDevStorageToken / verifyDevStorageToken (#1273)', () => {
+  it('verifies a token signed with the same secret/method/key', () => {
+    const token = signDevStorageToken('s1', 'PUT', 'a/b/c.jpg');
+    expect(verifyDevStorageToken('s1', 'PUT', 'a/b/c.jpg', token)).toBe(true);
+  });
+
+  it('rejects a missing token', () => {
+    expect(verifyDevStorageToken('s1', 'PUT', 'a/b/c.jpg', undefined)).toBe(false);
+  });
+
+  it('rejects a token signed with a different secret', () => {
+    const token = signDevStorageToken('s1', 'PUT', 'a/b/c.jpg');
+    expect(verifyDevStorageToken('s2', 'PUT', 'a/b/c.jpg', token)).toBe(false);
+  });
+
+  it('rejects a token whose method does not match (GET token used for PUT)', () => {
+    const token = signDevStorageToken('s1', 'GET', 'a/b/c.jpg');
+    expect(verifyDevStorageToken('s1', 'PUT', 'a/b/c.jpg', token)).toBe(false);
+  });
+
+  it('rejects a token whose key does not match', () => {
+    const token = signDevStorageToken('s1', 'PUT', 'a/b/c.jpg');
+    expect(verifyDevStorageToken('s1', 'PUT', 'other/key.jpg', token)).toBe(false);
   });
 });
 
@@ -208,5 +258,53 @@ describe('createStorageProvider factory', () => {
     const { provider } = createStorageProvider({ NODE_ENV: 'development', API_PORT: '4321' });
     const url = await provider.generateUploadUrl('b', 'k', 'audio/webm');
     expect(url.startsWith('http://localhost:4321/storage-dev/')).toBe(true);
+  });
+
+  // #1273 — a browser hitting a deployed dev host cannot reach
+  // http://localhost:PORT (that resolves to the browser's own machine).
+  // When PUBLIC_API_URL is set (the canonical "where machines/browsers can
+  // reach this API" var — see shared/config.ts), the dev presign must use
+  // it instead of localhost.
+  it('prefers PUBLIC_API_URL over localhost when presigning dev uploads (#1273)', async () => {
+    const { provider } = createStorageProvider({
+      NODE_ENV: 'development',
+      PUBLIC_API_URL: 'https://dev-api.example.com',
+    });
+    const url = await provider.generateUploadUrl('b', 'tenant-1/k.webm', 'audio/webm');
+    expect(url.startsWith('https://dev-api.example.com/storage-dev/')).toBe(true);
+  });
+
+  it('strips a trailing slash from PUBLIC_API_URL before appending /storage-dev (#1273)', async () => {
+    const { provider } = createStorageProvider({
+      NODE_ENV: 'development',
+      PUBLIC_API_URL: 'https://dev-api.example.com/',
+    });
+    const url = await provider.generateUploadUrl('b', 'tenant-1/k.webm', 'audio/webm');
+    expect(url.startsWith('https://dev-api.example.com/storage-dev/')).toBe(true);
+    expect(url).not.toContain('.com//storage-dev');
+  });
+
+  // #1273 — the dev storage receiver must not be exposed as unauthenticated
+  // attack surface when it isn't even the active backend: a "dev" host with
+  // real S3 credentials configured has no business also mounting a route
+  // that accepts arbitrary PUT/GET. createStorageProvider only returns a
+  // devStorageSecret (app.ts's signal to mount /storage-dev) in dev mode.
+  it('does not return a devStorageSecret when the S3 provider is active (#1273)', () => {
+    const { mode, devStorageSecret } = createStorageProvider({
+      STORAGE_BUCKET: 'b',
+      STORAGE_ENDPOINT: 'https://x.example.com',
+      STORAGE_REGION: 'auto',
+      STORAGE_ACCESS_KEY_ID: 'k',
+      STORAGE_SECRET_ACCESS_KEY: 's',
+      NODE_ENV: 'development',
+    });
+    expect(mode).toBe('s3');
+    expect(devStorageSecret).toBeUndefined();
+  });
+
+  it('returns a devStorageSecret when the dev provider is active (#1273)', () => {
+    const { mode, devStorageSecret } = createStorageProvider({ NODE_ENV: 'development' });
+    expect(mode).toBe('dev');
+    expect(devStorageSecret).toBeTruthy();
   });
 });

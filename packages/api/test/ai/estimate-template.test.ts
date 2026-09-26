@@ -1,12 +1,14 @@
 import {
   InMemoryEstimateTemplateRepository,
-  createTemplate,
-  findTemplate,
+  draftEstimateTemplateProposal,
   validateTemplateInput,
   CreateTemplateInput,
 } from '../../src/ai/tasks/estimate-template';
 import { calculateLineItemTotal } from '../../src/shared/billing-engine';
 import { ValidationError } from '../../src/shared/errors';
+import { validateProposalPayload } from '../../src/proposals/contracts';
+
+const DRAFT_CTX = { tenantId: 'tenant-1', createdBy: 'user-1' };
 
 describe('P4-004A — Vertical estimate template schema', () => {
   let repo: InMemoryEstimateTemplateRepository;
@@ -27,19 +29,30 @@ describe('P4-004A — Vertical estimate template schema', () => {
     defaultNotes: 'Standard HVAC diagnostic visit',
   };
 
-  it('happy path — creates and retrieves a template', async () => {
-    const template = await createTemplate(validInput, repo);
+  it('#1066 — drafts an onboarding_estimate_template PROPOSAL instead of writing the template', async () => {
+    const proposal = draftEstimateTemplateProposal(validInput, DRAFT_CTX);
 
-    expect(template.id).toBeDefined();
-    expect(template.packId).toBe('hvac-v1');
-    expect(template.verticalType).toBe('hvac');
-    expect(template.serviceCategory).toBe('diagnostic');
-    expect(template.defaultLineItems).toHaveLength(2);
-    expect(template.defaultNotes).toBe('Standard HVAC diagnostic visit');
+    expect(proposal.proposalType).toBe('onboarding_estimate_template');
+    expect(proposal.tenantId).toBe('tenant-1');
+    // Never auto-executed: a template is priced, so it waits for a human.
+    expect(proposal.status).toBe('draft');
+    expect(proposal.payload).toEqual({
+      verticalType: 'hvac',
+      categoryId: 'diagnostic',
+      templateName: 'HVAC Diagnostic Template',
+      lineItems: [
+        { description: 'Diagnostic service call', category: 'labor', defaultQuantity: 1, defaultUnitPriceCents: 8900, taxable: true, sortOrder: 1 },
+        { description: 'System inspection', category: 'labor', defaultQuantity: 1, defaultUnitPriceCents: 0, taxable: false, sortOrder: 2 },
+      ],
+      defaultNotes: 'Standard HVAC diagnostic visit',
+    });
+    expect(proposal.sourceContext).toMatchObject({ packId: 'hvac-v1' });
+    // The payload is what the deterministic handler executes after approval,
+    // so it must pass that proposal type's own contract.
+    expect(validateProposalPayload('onboarding_estimate_template', proposal.payload)).toEqual({ valid: true });
 
-    const found = await repo.findById(template.id);
-    expect(found).not.toBeNull();
-    expect(found!.name).toBe('HVAC Diagnostic Template');
+    // …and NOTHING was written: the AI module no longer touches the store.
+    expect(await repo.list()).toEqual([]);
   });
 
   it('happy path — template line items produce valid billing totals', () => {
@@ -55,17 +68,17 @@ describe('P4-004A — Vertical estimate template schema', () => {
     expect(errors).toContain('packId is required');
   });
 
-  it('runtime validation — createTemplate rejects malformed payloads with typed error', async () => {
+  it('runtime validation — draftEstimateTemplateProposal rejects malformed input with typed error', () => {
     const invalidInput = { ...validInput, packId: '', defaultLineItems: [] };
 
-    await expect(createTemplate(invalidInput, repo)).rejects.toThrow(ValidationError);
-    await expect(createTemplate(invalidInput, repo)).rejects.toThrow(
+    expect(() => draftEstimateTemplateProposal(invalidInput, DRAFT_CTX)).toThrow(ValidationError);
+    expect(() => draftEstimateTemplateProposal(invalidInput, DRAFT_CTX)).toThrow(
       'Validation failed: packId is required, At least one default line item is required'
     );
 
     try {
-      await createTemplate(invalidInput, repo);
-      throw new Error('Expected createTemplate to throw ValidationError');
+      draftEstimateTemplateProposal(invalidInput, DRAFT_CTX);
+      throw new Error('Expected draftEstimateTemplateProposal to throw ValidationError');
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
       expect((error as ValidationError).details).toEqual({
@@ -101,7 +114,7 @@ describe('P4-004A — Vertical estimate template schema', () => {
   });
 
   it('deep-clones line items — mutations do not affect stored templates', async () => {
-    const template = await createTemplate(validInput, repo);
+    const template = await repo.create({ ...validInput, id: 'tpl-1', sortOrder: 0, createdAt: new Date() });
     const retrieved = await repo.findById(template.id);
     expect(retrieved).not.toBeNull();
 
