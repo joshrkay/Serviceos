@@ -225,6 +225,45 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
       expect(created).toEqual([result.tenantId]);
     });
 
+    // #1275 — customer-facing pages (public intake, estimate approval, pay)
+    // display `tenant_settings.business_name`. `tenant.name` is an
+    // internal-only label bootstrapTenant invents from the owner's email
+    // local-part in the same style Clerk itself uses for an unnamed
+    // organization ("<local-part>'s Organization") — never something a
+    // customer should see. Seeding the customer-facing businessName from
+    // that internal label meant a tenant who hadn't yet completed the
+    // identity step (PUT /api/onboarding/identity) leaked it straight to
+    // customers. The seed must stay the same generic, non-identifying
+    // placeholder ensureTenantSettings already uses for every OTHER
+    // caller that doesn't supply a businessName (settings.ts's own 'My
+    // Business' default).
+    it('does not seed the customer-facing businessName from the internal Clerk-org-style tenant.name (#1275)', async () => {
+      let capturedBusinessName: string | undefined;
+      const settingsRepository = {
+        findByTenant: async () => null,
+        create: async (settings: { tenantId: string; businessName: string }) => {
+          capturedBusinessName = settings.businessName;
+          return settings as never;
+        },
+        update: async () => null,
+        incrementEstimateNumber: async () => 1,
+        incrementInvoiceNumber: async () => 1,
+      };
+
+      const result = await bootstrapTenant('user_1', 'jane+clerk_test@example.com', mockRepo, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        settingsRepository: settingsRepository as any,
+      });
+
+      expect(result.created).toBe(true);
+      // The bug's exact symptom: the internal tenant.name (an email-derived
+      // "X's Organization" placeholder) must never become the seeded
+      // customer-facing business name.
+      expect(capturedBusinessName).not.toContain('Organization');
+      expect(capturedBusinessName).not.toContain('jane+clerk_test');
+      expect(capturedBusinessName).toBe('My Business');
+    });
+
     it('ensures settings idempotently for an already-bootstrapped tenant', async () => {
       const first = await bootstrapTenant('user_1', 'jane@example.com', mockRepo);
 

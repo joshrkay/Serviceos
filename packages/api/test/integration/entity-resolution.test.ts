@@ -1771,7 +1771,7 @@ describe('Postgres integration — entity resolution (P8)', () => {
           {
             tenantId: seed.tenantId,
             jobId,
-            estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+            estimateNumber: `EST-0${crypto.randomUUID().slice(0, 7)}`,
             lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
             customerMessage:
               opts?.customerMessage ?? 'Here is the quote for the work we talked through.',
@@ -2544,7 +2544,7 @@ describe('Postgres integration — entity resolution (P8)', () => {
             {
               tenantId: seed.tenantId,
               jobId: seed.jobId,
-              invoiceNumber: `INV-${crypto.randomUUID().slice(0, 8)}`,
+              invoiceNumber: `INV-0${crypto.randomUUID().slice(0, 7)}`,
               lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
               createdBy: seed.userId,
             },

@@ -13,6 +13,7 @@ import {
 } from '../files/file-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppError } from '../shared/errors';
+import { verifyDevStorageToken } from '../files/storage-provider';
 
 interface UploadUrlBody {
   filename?: string;
@@ -193,17 +194,26 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
 // Keeps uploaded bytes in an in-memory map so later GETs (e.g. the
 // transcription worker fetching audio before sending to Whisper) see the
 // actual bytes, not a 204 empty body. Mounted outside /api so it bypasses
-// Clerk auth — the signed URL itself is the authorization in prod; in dev
-// this is best-effort and gated by NODE_ENV in createApp.
-export function createDevStorageRouter(): Router {
+// Clerk auth — a real S3 presigned URL needs no Clerk session either, its
+// signature IS the authorization. This dev equivalent needs the same:
+// `secret` is the per-boot HMAC key createStorageProvider() generated
+// alongside the DevStorageProvider instance whose URLs this validates
+// (#1273 — before this, any PUT/GET to this path succeeded with no check
+// at all, so the route was live unauthenticated attack surface whenever it
+// was mounted).
+export function createDevStorageRouter(secret: string): Router {
   const router = Router();
   const store = new Map<string, { bytes: Buffer; contentType: string }>();
 
   router.put('/*', (req, res) => {
+    const key = req.path.replace(/^\/+/, '');
+    if (!verifyDevStorageToken(secret, 'PUT', key, req.query.token as string | undefined)) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing or invalid dev-storage token' });
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
-      const key = req.path;
       const bytes = Buffer.concat(chunks);
       const contentType = (req.headers['content-type'] as string) || 'application/octet-stream';
       store.set(key, { bytes, contentType });
@@ -213,7 +223,12 @@ export function createDevStorageRouter(): Router {
   });
 
   router.get('/*', (req, res) => {
-    const entry = store.get(req.path);
+    const key = req.path.replace(/^\/+/, '');
+    if (!verifyDevStorageToken(secret, 'GET', key, req.query.token as string | undefined)) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing or invalid dev-storage token' });
+      return;
+    }
+    const entry = store.get(key);
     if (!entry) {
       res.status(404).end();
       return;

@@ -366,7 +366,9 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
 
     // Metadata forged/mixed: the NEIGHBOUR's tenant_id with THIS tenant's
     // invoice_id. The tenant-scoped read finds no such invoice, so nothing is
-    // credited and the delivery is not ACKed as success (Stripe retries).
+    // credited. It is a permanent condition (#1060): ACK it so Stripe stops
+    // retrying, and record the capture as unapplied on the tenant the event
+    // named so reconciliation can find it.
     const crossEventId = `evt_${randomUUID()}`;
     const cross = await postSigned({
       id: crossEventId,
@@ -380,7 +382,14 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
         },
       },
     });
-    expect(cross.status).toBe(500);
+    expect(cross.status).toBe(200);
+    const unapplied = await auditRepo.findByEntity(otherTenant.tenantId, 'invoice', mineInvoiceId);
+    expect(unapplied).toEqual([
+      expect.objectContaining({
+        eventType: 'payment.unapplied_capture',
+        metadata: expect.objectContaining({ reason: 'invoice_not_found', creditedCents: 0 }),
+      }),
+    ]);
 
     const untouched = await invoiceRepo.findById(tenant.tenantId, mineInvoiceId);
     expect(untouched?.status).toBe('open');
@@ -429,9 +438,13 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
         (e) => e.eventType === 'payment.recorded',
       ),
     ).toHaveLength(1);
-    expect(await auditRepo.findByEntity(otherTenant.tenantId, 'invoice', mineInvoiceId)).toEqual(
-      [],
-    );
+    // Its only row on my invoice id is the #1060 unapplied-capture record for
+    // the event it was named in — never a settlement.
+    expect(
+      (await auditRepo.findByEntity(otherTenant.tenantId, 'invoice', mineInvoiceId)).filter(
+        (e) => e.eventType === 'payment.recorded',
+      ),
+    ).toEqual([]);
     expect(await auditRepo.findByEntity(tenant.tenantId, 'invoice', theirInvoiceId)).toEqual([]);
   });
 });
