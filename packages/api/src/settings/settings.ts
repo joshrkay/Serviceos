@@ -252,6 +252,12 @@ export interface TenantSettings {
   nextEstimateNumber: number;
   nextInvoiceNumber: number;
   defaultPaymentTermDays: number;
+  /**
+   * #1288 — default tax rate (basis points, 0–10000) stamped onto an estimate
+   * or invoice created without an explicit `taxRateBps`. Optional: absent
+   * reads as 0 (no tax), the pre-migration-289 behaviour.
+   */
+  defaultTaxRateBps?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
   /**
@@ -641,6 +647,8 @@ export interface UpdateSettingsInput {
   estimatePrefix?: string;
   invoicePrefix?: string;
   defaultPaymentTermDays?: number;
+  /** #1288 — tenant default tax rate, basis points 0–10000. */
+  defaultTaxRateBps?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
   /** Phase 12 — null clears the backup. */
@@ -896,6 +904,7 @@ function validateCommonSettingsFields(
     estimatePrefix?: string;
     invoicePrefix?: string;
     defaultPaymentTermDays?: number;
+    defaultTaxRateBps?: number;
     digestTime?: string;
     digestChannel?: string;
     discountMaxBps?: number | null;
@@ -916,6 +925,14 @@ function validateCommonSettingsFields(
   }
   if (input.defaultPaymentTermDays !== undefined && input.defaultPaymentTermDays < 0) {
     errors.push('defaultPaymentTermDays must be non-negative');
+  }
+  if (
+    input.defaultTaxRateBps !== undefined &&
+    (!Number.isInteger(input.defaultTaxRateBps) ||
+      input.defaultTaxRateBps < 0 ||
+      input.defaultTaxRateBps > 10000)
+  ) {
+    errors.push('defaultTaxRateBps must be an integer between 0 and 10000');
   }
   // P2-036 V2 (Discount policy — U1) — shape guard mirroring the migration
   // CHECKs. `null` is "clear this column" and is allowed; only present,
@@ -1213,6 +1230,20 @@ export async function ensureTenantSettings(
       `ensureTenantSettings: could not create or refetch settings for tenant ${tenantId}`
     );
   }
+}
+
+/**
+ * #1288 — the rate a new estimate/invoice gets when its create omits
+ * `taxRateBps`: the tenant's `defaultTaxRateBps`, or 0 (no tax) when the
+ * tenant never set one / has no settings row. An explicit rate — 0 included —
+ * is always the caller's to pass and never reaches here.
+ */
+export async function resolveDefaultTaxRateBps(
+  tenantId: string,
+  repository: SettingsRepository,
+): Promise<number> {
+  const settings = await repository.findByTenant(tenantId);
+  return settings?.defaultTaxRateBps ?? 0;
 }
 
 export async function getNextEstimateNumber(

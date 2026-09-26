@@ -20,7 +20,7 @@ import {
   MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { SettingsRepository } from '../settings/settings';
+import { resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
 import { SendService } from '../notifications/send-service';
@@ -209,10 +209,15 @@ export function createInvoiceRouter(
           }
         }
 
+        // #1288 — no explicit rate ⇒ the tenant's default (0 when unset).
+        const taxRateBps =
+          parsed.taxRateBps ?? (await resolveDefaultTaxRateBps(req.auth!.tenantId, settingsRepo));
+
         const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
             discountCents,
+            taxRateBps,
             originatingLeadId: job?.originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,

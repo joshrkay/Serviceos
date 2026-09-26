@@ -502,6 +502,8 @@ export const updateSettingsSchema = z.object({
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),
+  // #1288 — tenant default tax rate (basis points; 825 = 8.25%).
+  defaultTaxRateBps: z.number().int().min(0).max(10000).optional(),
   terminologyPreferences: z.record(z.string()).optional(),
   // Phase 12 — supervisor backup + unsupervised proposal routing.
   // `backupSupervisorUserId: null` explicitly clears the backup.

@@ -34,7 +34,7 @@ import {
 import { DocumentRevisionRepository } from '../ai/document-revision';
 import { EditDeltaRepository } from '../estimates/edit-delta';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { getNextEstimateNumber, SettingsRepository } from '../settings/settings';
+import { getNextEstimateNumber, resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
@@ -228,6 +228,9 @@ export function createEstimateRouter(
         // Cross-entity tenant guard: jobId must belong to the requesting tenant.
         await ownership.requireExists(tenantId, 'job', parsed.jobId);
         const estimateNumber = await getNextEstimateNumber(tenantId, settingsRepo);
+        // #1288 — no explicit rate ⇒ the tenant's default (0 when unset).
+        const taxRateBps =
+          parsed.taxRateBps ?? (await resolveDefaultTaxRateBps(tenantId, settingsRepo));
 
         // Member pricing (#6): fold an active membership's discount into this
         // estimate, additive to any manual discount. Resolved server-side from
@@ -265,6 +268,7 @@ export function createEstimateRouter(
           {
             ...parsed,
             discountCents,
+            taxRateBps,
             tenantId,
             estimateNumber,
             validUntil: parsed.validUntil ? new Date(parsed.validUntil) : undefined,

@@ -56,6 +56,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     nextEstimateNumber: row.next_estimate_number as number,
     nextInvoiceNumber: row.next_invoice_number as number,
     defaultPaymentTermDays: row.default_payment_term_days as number,
+    // #1288 — migration 289. Absent on narrow SELECTs that don't project it.
+    ...(row.default_tax_rate_bps !== undefined && row.default_tax_rate_bps !== null
+      ? { defaultTaxRateBps: Number(row.default_tax_rate_bps) }
+      : {}),
     terminologyPreferences,
     activeVerticalPacks,
     // Phase 12 — columns added in migration 063 (P12-001).
@@ -381,6 +385,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         nextEstimateNumber: 'next_estimate_number',
         nextInvoiceNumber: 'next_invoice_number',
         defaultPaymentTermDays: 'default_payment_term_days',
+        // #1288 — migration 289.
+        defaultTaxRateBps: 'default_tax_rate_bps',
         // Phase 12 — migration 063.
         backupSupervisorUserId: 'backup_supervisor_user_id',
         unsupervisedProposalRouting: 'unsupervised_proposal_routing',

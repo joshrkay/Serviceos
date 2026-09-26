@@ -211,6 +211,7 @@ describe('Postgres integration — the SERVER total is what persists (I9 / row 8
     const SEED = 0x5c0ffee;
     const ITERATIONS = 1000;
     const rand = mulberry32(SEED);
+    let refused = 0;
 
     for (let iter = 0; iter < ITERATIONS; iter++) {
       const n = 1 + Math.floor(rand() * 6); // 1..6 lines (createInvoice needs ≥1)
@@ -232,11 +233,45 @@ describe('Postgres integration — the SERVER total is what persists (I9 / row 8
       const processingFeeBps = Math.floor(rand() * 400);
 
       const lineItems = toLineItems(lines);
+      const invoiceNumber = `INV-FUZZ-${iter}-${crypto.randomUUID().slice(0, 8)}`;
+
+      // #1288 Q12 — fail closed: a document mixing taxable and non-taxable
+      // (non-zero) lines with a discount AND a tax rate is refused with a
+      // typed error and persists NOTHING, instead of a wrong tax base.
+      const serverTotals = lines.map((l) => Math.round(l.quantity * l.unitPriceCents));
+      const mixed =
+        lines.some((l, i) => l.taxable && serverTotals[i] !== 0) &&
+        lines.some((l, i) => !l.taxable && serverTotals[i] !== 0);
+      if (mixed && discountCents > 0 && taxRateBps > 0) {
+        await expect(
+          createInvoice(
+            {
+              tenantId: tenant.tenantId,
+              jobId,
+              invoiceNumber,
+              lineItems,
+              discountCents,
+              taxRateBps,
+              processingFeeBps,
+              createdBy: tenant.userId,
+            },
+            invoiceRepo,
+          ),
+        ).rejects.toMatchObject({ code: 'DISCOUNT_TAX_ALLOCATION_UNSUPPORTED', statusCode: 422 });
+        const none = await pool.query(
+          `SELECT 1 FROM invoices WHERE tenant_id = $1 AND invoice_number = $2`,
+          [tenant.tenantId, invoiceNumber],
+        );
+        expect(none.rows, `iter=${iter}`).toHaveLength(0);
+        refused += 1;
+        continue;
+      }
+
       const created = await createInvoice(
         {
           tenantId: tenant.tenantId,
           jobId,
-          invoiceNumber: `INV-FUZZ-${iter}-${crypto.randomUUID().slice(0, 8)}`,
+          invoiceNumber,
           lineItems,
           discountCents,
           taxRateBps,
@@ -291,6 +326,9 @@ describe('Postgres integration — the SERVER total is what persists (I9 / row 8
       expect(money.due, ctx).toBe(oracle.totalCents);
       expect(money.paid, ctx).toBe(0);
     }
+    // The fuzz really exercised the Q12 refusal, and still totalled most docs.
+    expect(refused).toBeGreaterThan(0);
+    expect(refused).toBeLessThan(ITERATIONS);
   });
 
   it("a neighbour tenant's identical payload persists its own totals, invisible to this tenant", async () => {

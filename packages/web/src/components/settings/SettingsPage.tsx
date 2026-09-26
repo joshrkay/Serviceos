@@ -29,6 +29,7 @@ import { BrandVoiceSheet } from './BrandVoiceSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
+import { TaxRateSheet } from './TaxRateSheet';
 import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
@@ -571,6 +572,7 @@ export function SettingsPage() {
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
+  const [taxRateOpen, setTaxRateOpen] = useState(false);
   const [lateFeesOpen, setLateFeesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
@@ -902,6 +904,7 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
+        { icon: FileText,   label: 'Tax rate',               description: 'Default tax rate for new estimates and invoices', action: () => setTaxRateOpen(true) },
         // #1143 (row 8.10) — the only surface that sets the tenant's late-fee
         // policy; the overdue sweep drafts each fee for owner approval.
         { icon: FileText,   label: 'Late fees',              description: 'Fee on invoices still unpaid after a grace period', action: () => setLateFeesOpen(true) },
@@ -1642,6 +1645,9 @@ export function SettingsPage() {
       {discountPolicyOpen && (
         <DiscountPolicySheet onClose={() => setDiscountPolicyOpen(false)} />
       )}
+
+      {/* #1288 — tenant default tax rate for new estimates/invoices. */}
+      {taxRateOpen && <TaxRateSheet onClose={() => setTaxRateOpen(false)} />}
 
       {/* Late fees sheet — dunning late-fee policy (type, amount, grace, cap). */}
       {lateFeesOpen && (
