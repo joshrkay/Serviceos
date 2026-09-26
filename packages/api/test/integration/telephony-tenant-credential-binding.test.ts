@@ -106,6 +106,8 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     did: string;
     subaccountSid: string;
     authToken: string | null;
+    /** #1084 — the rotation-overlap token, stored the same way as the primary. */
+    secondaryAuthToken?: string;
   }): Promise<TenantFixture> {
     const tenantId = crypto.randomUUID();
     const userId = crypto.randomUUID();
@@ -133,13 +135,15 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
       await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
       await client.query(
         `INSERT INTO tenant_integrations
-           (tenant_id, provider, status, provider_data, subaccount_sid, auth_token_primary_enc)
-         VALUES ($1, 'twilio', 'full_readiness', $2::jsonb, $3, $4)`,
+           (tenant_id, provider, status, provider_data, subaccount_sid,
+            auth_token_primary_enc, auth_token_secondary_enc)
+         VALUES ($1, 'twilio', 'full_readiness', $2::jsonb, $3, $4, $5)`,
         [
           tenantId,
           JSON.stringify({ phoneE164: opts.did }),
           opts.subaccountSid,
           opts.authToken ? encrypt(opts.authToken, ENCRYPTION_KEY) : null,
+          opts.secondaryAuthToken ? encrypt(opts.secondaryAuthToken, ENCRYPTION_KEY) : null,
         ],
       );
       await client.query('COMMIT');
@@ -800,5 +804,58 @@ describe('#1072 — telephony webhooks verify with the dialled number owner\'s c
     await settle();
     expect(await sessionsForCall(callSid)).toHaveLength(0);
     expect(await victimCounts(tenantB.tenantId)).toEqual(before);
+  });
+
+  it('(#1084-1) tenant A\'s own credential + an unowned DID is NOT routed into the dev default tenant', async () => {
+    const before = await settledVictimCounts(tenantDefault.tenantId);
+    const callSid = `CA-1084-seam-${crypto.randomUUID().slice(0, 8)}`;
+
+    // A's own AccountSid and token: the unowned DID falls to the AccountSid
+    // credential path and verifies as A. The dev seam must not then run the
+    // call as TWILIO_DEFAULT_TENANT_ID — a different tenant from the one
+    // whose credential verified it.
+    const res = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: A_SUBACCOUNT, From: CALLER, To: UNOWNED_DID },
+      A_TOKEN,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/not in service/i);
+    await settle();
+    expect(await sessionsForCall(callSid)).toHaveLength(0);
+    expect(await victimCounts(tenantDefault.tenantId)).toEqual(before);
+  });
+
+  it('(#1084-2) a webhook signed with the owning tenant\'s SECONDARY token verifies (rotation overlap)', async () => {
+    const C_SUBACCOUNT = 'AC1084cccccccccccccccccccccccccccc';
+    const C_PRIMARY = 'tenant-c-primary-token-1084';
+    const C_SECONDARY = 'tenant-c-secondary-token-1084';
+    const tenantC = await provision({
+      did: `+1512${RUN}4`,
+      subaccountSid: C_SUBACCOUNT,
+      authToken: C_PRIMARY,
+      secondaryAuthToken: C_SECONDARY,
+    });
+    const callSid = `CA-1084-rot-${crypto.randomUUID().slice(0, 8)}`;
+
+    const res = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: callSid, AccountSid: C_SUBACCOUNT, From: CALLER, To: tenantC.did },
+      C_SECONDARY,
+    );
+
+    expect(res.status).toBe(200);
+    const rows = await waitForSession(callSid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tenant_id).toBe(tenantC.tenantId);
+
+    // A token that is neither C's primary nor its secondary is still refused.
+    const forged = await signedPost(
+      '/api/telephony/voice',
+      { CallSid: `${callSid}-x`, AccountSid: C_SUBACCOUNT, From: CALLER, To: tenantC.did },
+      'not-tenant-c-token',
+    );
+    expect(forged.status).toBe(403);
   });
 });

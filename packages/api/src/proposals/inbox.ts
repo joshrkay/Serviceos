@@ -14,32 +14,73 @@ export interface InboxSummary {
   highCount: number;
   normalCount: number;
   lowCount: number;
-  /** True when `data.length < totalCount`. */
+  /**
+   * True when this response's page doesn't reach the end of the full
+   * prioritized set, i.e. `offset + data.length < totalCount`. At the
+   * default offset of 0 this is exactly the old "capped at 100" meaning;
+   * #1278 generalizes it across pages.
+   */
   truncated: boolean;
+}
+
+// #1278 — the inbox was hard-capped at 100 (`buildInboxPayload(all, 100)`)
+// with no way to see the rest. `offset` paginates over the SAME
+// already-prioritized order every page shares (the ordering depends on
+// live urgency — expiresAt proximity, etc — so it can only be computed
+// once the full set is loaded and sorted; there's no DB column to
+// LIMIT/OFFSET on ahead of that). `limit`/`cap` keeps its original name at
+// the call site for backward compat with the two existing 2-arg callers
+// (routes/proposals.ts pre-fix and ai/skills/lookup-day-overview.ts).
+export interface InboxPagination {
+  offset: number;
+  limit: number;
+  /** True when a further page (offset + limit) would return more rows. */
+  hasMore: boolean;
+  /** The `offset` to request for the next page, or null once exhausted. */
+  nextOffset: number | null;
 }
 
 export interface InboxPayload {
   data: PrioritizedProposal[];
   summary: InboxSummary;
+  pagination: InboxPagination;
 }
 
-export function buildInboxPayload(proposals: Proposal[], cap: number): InboxPayload {
+export function buildInboxPayload(
+  proposals: Proposal[],
+  cap: number,
+  offset = 0,
+): InboxPayload {
   const prioritized = prioritizeProposals(proposals);
+  const page = prioritized.slice(offset, offset + cap);
+  const truncated = offset + page.length < prioritized.length;
   const summary: InboxSummary = {
     totalCount: prioritized.length,
     criticalCount: 0,
     highCount: 0,
     normalCount: 0,
     lowCount: 0,
-    truncated: prioritized.length > cap,
+    truncated,
   };
+  // Per-tier counts are totals over the WHOLE prioritized set (not just
+  // this page) — the operator's "12 critical" pill must reflect everything
+  // waiting, regardless of which page they're viewing.
   for (const p of prioritized) {
     if (p.urgency === 'critical') summary.criticalCount++;
     else if (p.urgency === 'high') summary.highCount++;
     else if (p.urgency === 'normal') summary.normalCount++;
     else summary.lowCount++;
   }
-  return { data: prioritized.slice(0, cap), summary };
+  return {
+    data: page,
+    summary,
+    pagination: {
+      offset,
+      limit: cap,
+      hasMore: truncated,
+      nextOffset: truncated ? offset + page.length : null,
+    },
+  };
 }
 
 /**

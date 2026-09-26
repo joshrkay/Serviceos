@@ -102,6 +102,20 @@ describe("Postgres integration — AI answering usage ledger", () => {
     expect(await repo.sumBillableSeconds(tenantId, PERIOD_START, PERIOD_END)).toBe(before);
   });
 
+  it("sums a tenant's billable seconds across the whole trial, any period", async () => {
+    const { tenantId } = await createTestTenant(pool);
+    for (const [callId, endedAt, seconds] of [
+      ["trial-a", new Date("2025-01-15T10:00:00.000Z"), 300],
+      ["trial-b", new Date("2026-09-20T10:00:00.000Z"), 90],
+    ] as const) {
+      await repo.recordCallEnded({
+        tenantId, callId, channel: "voice_inbound", callerPhone: "+16025550333", endedAt, usageSeconds: seconds,
+      });
+    }
+
+    expect(await repo.sumTrialBillableSeconds(tenantId)).toBe(390);
+  });
+
   it("RLS prevents another tenant from reading the call ledger", async () => {
     const client = await pool.connect();
     try {

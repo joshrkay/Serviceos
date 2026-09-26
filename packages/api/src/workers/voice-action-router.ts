@@ -1745,6 +1745,11 @@ async function processSegment(
     tenantId,
     userId,
     message: segmentText,
+    // #1232 — a voicemail segment is the CALLER's words (the owner-line
+    // caller-ID match that enqueued it is spoofable): drafting handlers fence
+    // it (task-input.ts taskMessageForPrompt). Owner memos: absent, prompts
+    // byte-identical.
+    ...(params.sourceChannel === 'voicemail' ? { untrustedMessage: true } : {}),
     conversationId,
     // Quality-review fix (2026-08-09, Task 11) — the raw classified intent,
     // for handlers that alias multiple intents onto the same taskType (see

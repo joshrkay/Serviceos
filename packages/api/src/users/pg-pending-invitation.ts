@@ -110,6 +110,7 @@ export class PgPendingInvitationRepository
       `SELECT * FROM pending_invitations
        WHERE LOWER(email) = LOWER($1)
          AND accepted_at IS NULL
+         AND expires_at > NOW()
        ORDER BY created_at DESC
        LIMIT 1`,
       [email],
@@ -126,8 +127,10 @@ export class PgPendingInvitationRepository
    * the same address simultaneously — PR 319 review P1).
    */
   async findById(id: string): Promise<PendingInvitation | null> {
+    // #1032 — an expired invitation must not be joinable, even when the
+    // caller has its id (e.g. forwarded via Clerk public_metadata).
     const result = await this.pool.query(
-      `SELECT * FROM pending_invitations WHERE id = $1`,
+      `SELECT * FROM pending_invitations WHERE id = $1 AND expires_at > NOW()`,
       [id],
     );
     return result.rows.length > 0
