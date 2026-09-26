@@ -640,10 +640,15 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     expect(payments[0].amountCents).toBe(AMOUNT_CENTS);
     expect(payments[0].status).toBe('completed');
     expect(payments[0].providerReference).toBe(paymentIntentId);
-    // NOTE: the webhook's method mapper has no card_present branch — a
-    // doorstep tap lands as `credit_card`, the same as an online card
-    // (webhooks/routes.ts:77 mapStripePaymentMethod). Pinned as-is.
-    expect(payments[0].method).toBe('credit_card');
+    // #1099 — a doorstep tap is recorded as `card_present`, separable from an
+    // online card (`credit_card`) in the ledger. Read back by raw SQL too, so
+    // the migration's widened CHECK is what accepted it.
+    expect(payments[0].method).toBe('card_present');
+    const methodRow = await pool.query<{ payment_method: string }>(
+      `SELECT payment_method FROM payments WHERE id = $1`,
+      [payments[0].id],
+    );
+    expect(methodRow.rows[0].payment_method).toBe('card_present');
 
     const paid = await invoiceRepo.findById(connected.tenantId, invoiceId);
     expect(paid?.status).toBe('paid');
