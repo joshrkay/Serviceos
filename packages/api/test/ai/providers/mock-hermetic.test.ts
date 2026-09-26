@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { MockLLMProvider, scriptHermeticResponse } from '../../../src/ai/providers/mock';
 import { createHermeticMockLLMGateway } from '../../../src/ai/gateway/factory';
 import type { LLMRequest } from '../../../src/ai/gateway/gateway';
+import { confirmIntent } from '../../../src/ai/skills/confirm-intent';
 import {
   buildUntrustedContentSection,
   UNTRUSTED_CONTENT_BLOCK_BEGIN,
@@ -216,5 +217,53 @@ describe('MockLLMProvider hermetic mode', () => {
       messages: [{ role: 'user', content: 'Create a customer named Pat Lee' }],
     });
     expect(JSON.parse(res.content).intentType).toBe('create_customer');
+  });
+});
+
+/**
+ * #1119 — the confirm turn of a phone booking must be deterministic under the
+ * hermetic (no-key) gateway. Driven through the REAL `confirmIntent` skill and
+ * the real hermetic gateway, so the prompt the mock reads is the one
+ * production sends — not a hand-built request.
+ */
+describe('#1119 — hermetic confirm_intent is deterministic', () => {
+  function confirmWith(callerResponse: string, intentSummary = 'create appointment') {
+    const { gateway } = createHermeticMockLLMGateway();
+    return confirmIntent({
+      intentSummary,
+      callerResponse,
+      tenantId: 'tenant-hermetic-confirm',
+      gateway,
+    });
+  }
+
+  it.each([
+    'Yes, that is right',
+    'yes',
+    "yep, that's right",
+    'Correct.',
+    'sounds good, go ahead',
+    'Yeah please',
+  ])('a clear affirmative confirms: %s', async (said) => {
+    const result = await confirmWith(said);
+    expect(result.confirmed).toBe(true);
+  });
+
+  it.each([
+    'no',
+    'No, I said Thursday not Friday',
+    "wait, that's not right",
+    'yes but make it Thursday',
+    'um, I think so maybe',
+    "actually it's for the Smith account",
+  ])('a negative, correction or ambiguous reply does NOT confirm: %s', async (said) => {
+    const result = await confirmWith(said);
+    expect(result.confirmed).toBe(false);
+    expect(result.correction).toBe(said);
+  });
+
+  it('a readback that names a customer is not mistaken for a create_customer classification', async () => {
+    const result = await confirmWith('Yes, that is right', 'create customer named Pat Lee');
+    expect(result.confirmed).toBe(true);
   });
 });

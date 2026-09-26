@@ -206,6 +206,77 @@ function extractAddress(text: string): string | undefined {
   return match[1].replace(/[\s,.]+$/, '').trim();
 }
 
+/** The fixed first line of confirmIntent's yes/no prompt. */
+const CONFIRM_PROMPT_HEAD = "Classify the caller's response as YES or NO.";
+
+function isConfirmIntentRequest(request: LLMRequest, text: string): boolean {
+  return request.metadata?.skill === 'confirm_intent' || text.startsWith(CONFIRM_PROMPT_HEAD);
+}
+
+/**
+ * Affirmative phrases a hermetic confirm accepts. CLOSED on purpose: the
+ * caller's whole reply must be made of these (plus politeness fillers) to
+ * count as a yes. Anything else — a "no", a correction, a "yes but…", a
+ * hedge — is answered "no", which is exactly the rule the confirm prompt
+ * gives the real model ("Ambiguous responses → NO").
+ */
+const CONFIRM_AFFIRMATIVES: readonly string[] = [
+  'yes',
+  'yeah',
+  'yep',
+  'yup',
+  'correct',
+  "that's correct",
+  'that is correct',
+  "that's right",
+  'that is right',
+  'right',
+  'exactly',
+  'sure',
+  'sounds good',
+  'go ahead',
+  'ok',
+  'okay',
+  'perfect',
+  'that works',
+  'affirmative',
+  'sí',
+  'si',
+  'correcto',
+  'claro',
+];
+const CONFIRM_FILLERS: readonly string[] = ['please', 'thanks', 'thank you'];
+
+/** Longest first, so "that is right" is consumed before "right". */
+const CONFIRM_PHRASES = [...CONFIRM_AFFIRMATIVES, ...CONFIRM_FILLERS].sort(
+  (a, b) => b.length - a.length,
+);
+
+function callerSaidInConfirmPrompt(text: string): string {
+  const match = text.match(/^The caller said: "([\s\S]*)"$/m);
+  return match?.[1] ?? '';
+}
+
+/** Deterministic yes/no for confirmIntent's prompt (#1119). */
+function scriptConfirmAnswer(text: string): { answer: 'yes' | 'no'; reasoning: string } {
+  let rest = callerSaidInConfirmPrompt(text)
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[^\p{L}\p{N}'\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let sawAffirmative = false;
+  while (rest.length > 0) {
+    const phrase = CONFIRM_PHRASES.find((p) => rest === p || rest.startsWith(`${p} `));
+    if (!phrase) break;
+    if (CONFIRM_AFFIRMATIVES.includes(phrase)) sawAffirmative = true;
+    rest = rest.slice(phrase.length).trim();
+  }
+  return rest.length === 0 && sawAffirmative
+    ? { answer: 'yes', reasoning: 'hermetic: reply is a clear affirmative' }
+    : { answer: 'no', reasoning: 'hermetic: negative, correction or ambiguous reply' };
+}
+
 /**
  * Scripted hermetic completions used when AI_PROVIDER_API_KEY is unset.
  * Intentionally conservative: only operator CRM/money drafting intents that
@@ -282,6 +353,15 @@ export function scriptHermeticResponse(request: LLMRequest): string {
       `sorry for the schedule change and will follow up shortly with next steps.` +
       (signoff ? ` ${signoff}` : '');
     return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
+  if (taskType === 'classify_intent' && isConfirmIntentRequest(request, text)) {
+    // #1119 — confirmIntent (ai/skills/confirm-intent.ts) rides the
+    // `classify_intent` task type. Before this branch the confirm prompt fell
+    // into the intent script below, which answers `{intentType,...}` with no
+    // `answer` field — so `parseYesNo` returned null and EVERY hermetic
+    // confirm turn, "Yes, that is right" included, became a correction.
+    return JSON.stringify(scriptConfirmAnswer(text));
   }
 
   if (taskType === 'classify_intent' || taskType.startsWith('classify')) {
