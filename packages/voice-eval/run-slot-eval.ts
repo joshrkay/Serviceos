@@ -28,10 +28,24 @@
  *   otherwise-perfect run. So live measures only the four LLM-derived slots
  *   (name, address, time_window, problem_description). service_type live
  *   coverage is a separate, out-of-scope concern (the vertical resolver).
+ *
+ * Baseline regression gate (#839, both modes — see baseline.ts):
+ *   --baseline <file>          fail (exit 1) if micro-F1 or any per-slot F1
+ *                              dropped past the baseline's tolerance or the gold
+ *                              set changed; exit 4 on an unrecorded placeholder.
+ *   --record-baseline <file>   write this run's metrics as the new baseline.
  */
-import { slotReport } from './metrics';
+import { slotReport, type SlotReport } from './metrics';
 import { extractSlots } from './slot-extractor';
-import { loadSlotTranscripts as loadTranscripts, type Transcript } from './corpus';
+import { loadSlotTranscripts as loadTranscripts, slotGoldenKey, type Transcript } from './corpus';
+import {
+  LIVE_BASELINE_TOLERANCE,
+  OFFLINE_BASELINE_TOLERANCE,
+  applyBaselineGate,
+  fingerprintGoldenSet,
+  parseBaselineArgs,
+  type EvalMode,
+} from './baseline';
 import {
   ActualCostCapExceededError,
   assertActualCostWithinCap,
@@ -50,6 +64,32 @@ import {
 
 const CRITICAL = ['name', 'address', 'service_type', 'time_window', 'problem_description'];
 const OFFLINE_FLOOR = 0.50;
+
+const RECORD_COMMANDS: Record<EvalMode, string> = {
+  offline: 'npx tsx packages/voice-eval/run-slot-eval.ts --record-baseline packages/voice-eval/baselines/slot-offline.json',
+  live: 'ANTHROPIC_API_KEY=... VOICE_EVAL_COST_CAP_CENTS=800 npx tsx packages/voice-eval/run-slot-eval.ts --live --max-utterances 100 --record-baseline packages/voice-eval/baselines/slot-live.json',
+};
+
+/** Compare/record against a baseline when asked; returns the exit code it demands. */
+function baselineStep(mode: EvalMode, gold: Transcript[], report: SlotReport, slots: string[]): number {
+  const metrics: Record<string, number> = { microF1: report.microF1 };
+  for (const s of slots) metrics[`f1.${s}`] = report.perSlot[s].f1;
+  const r = applyBaselineGate(
+    {
+      eval: 'slot',
+      mode,
+      goldenSet: { rows: gold.length, fingerprint: fingerprintGoldenSet(gold.map(slotGoldenKey)) },
+      metrics,
+    },
+    parseBaselineArgs(process.argv),
+    {
+      tolerance: mode === 'live' ? LIVE_BASELINE_TOLERANCE : OFFLINE_BASELINE_TOLERANCE,
+      recordCommand: RECORD_COMMANDS[mode],
+    },
+  );
+  if (r.message) (r.exitCode === 0 ? console.log : console.error)(`\n${r.exitCode === 0 ? '📏' : '❌'} ${r.message}`);
+  return r.exitCode;
+}
 
 function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -134,8 +174,10 @@ async function runLive(gate: boolean): Promise<void> {
   console.log(`   fast-path hits:  ${fastPathHits}/${results.length} (${llmCalls} LLM calls)`);
   console.log(`   actual spend:    ${spentCents.toFixed(1)}c`);
 
+  const baselineExit = baselineStep('live', sampled, report, slots);
   const g = evaluateGate(report.microF1, LIVE_SLOT_TARGET, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%`);
+  if (baselineExit !== 0) process.exit(baselineExit);
   if (!g.pass) {
     console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
     process.exit(1);
@@ -144,7 +186,8 @@ async function runLive(gate: boolean): Promise<void> {
 }
 
 function runOffline(gate: boolean): void {
-  const examples = loadTranscripts().map((t) => {
+  const transcripts = loadTranscripts();
+  const examples = transcripts.map((t) => {
     const gold = goldSlots(t);
     const ex = extractSlots(t.transcript);
     const pred: Record<string, string> = {
@@ -163,8 +206,10 @@ function runOffline(gate: boolean): void {
   }
   console.log(`   micro F1: ${(report.microF1 * 100).toFixed(1)}%`);
 
+  const baselineExit = baselineStep('offline', transcripts, report, CRITICAL);
   const g = evaluateGate(report.microF1, OFFLINE_FLOOR, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%  (LIVE target ${LIVE_SLOT_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
+  if (baselineExit !== 0) process.exit(baselineExit);
   if (!g.pass) {
     console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
     process.exit(1);

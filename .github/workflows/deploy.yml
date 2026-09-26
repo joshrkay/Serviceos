@@ -99,6 +99,12 @@ jobs:
         run: npm run voice-quality --workspace=packages/api
         env:
           VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
+      # #839 — the voice-eval baseline gate on the deploy path too (same
+      # offline comparisons as PR Checks' voice-eval-gate job).
+      - name: Intent eval vs committed baseline
+        run: npx tsx packages/voice-eval/run-intent-eval.ts --gate --baseline packages/voice-eval/baselines/intent-offline.json
+      - name: Slot eval vs committed baseline
+        run: npx tsx packages/voice-eval/run-slot-eval.ts --gate --baseline packages/voice-eval/baselines/slot-offline.json
       - name: Upload voice quality report
         if: always()
         uses: actions/upload-artifact@v5

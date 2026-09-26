@@ -41,6 +41,16 @@ export interface Transcript {
   expected_entities?: Record<string, string>;
 }
 
+/** Per-row key for the golden-set fingerprint: the utterance AND its label. */
+export function intentGoldenKey(row: IntentGoldRow): string {
+  return `${row.utterance}\t${row.intent}`;
+}
+
+/** Per-transcript key: the transcript plus every gold field the slot eval reads. */
+export function slotGoldenKey(t: Transcript): string {
+  return JSON.stringify([t.transcript, t.service_type ?? '', t.expected_entities ?? {}]);
+}
+
 /** Every transcript fixture — the slot eval's gold set. */
 export function loadSlotTranscripts(dir: string = TRANSCRIPTS_DIR): Transcript[] {
   return readdirSync(dir)

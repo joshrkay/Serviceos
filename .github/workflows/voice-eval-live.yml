@@ -11,6 +11,12 @@
 # pull_request. A --gate failure turns this run red (a visible quality
 # regression signal); it does not block merges.
 #
+# #839 — each run is also compared against its committed live baseline
+# (packages/voice-eval/baselines/*-live.json). Those start as placeholders, so
+# this run exits 4 until the owner records them: dispatch with
+# record_baseline=true and commit the uploaded voice-eval-live-baselines
+# artifact (or run each file's recordCommand locally with a key).
+#
 # Cost shape: each run hits the real Anthropic API for the classify calls.
 # Spend is bounded two ways: --max-utterances caps the sample size, and a
 # per-step VOICE_EVAL_COST_CAP_CENTS makes each script abort (exit 3) BEFORE
@@ -22,6 +28,11 @@ on:
   schedule:
     - cron: '0 7 * * 1'   # Monday 07:00 UTC (offset from the Layer-2 weekly at 06:00)
   workflow_dispatch:
+    inputs:
+      record_baseline:
+        description: 'Record the live baselines (packages/voice-eval/baselines/*-live.json) instead of comparing; download the voice-eval-live-baselines artifact and commit it'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +44,11 @@ jobs:
     env:
       # The eval only needs the Anthropic key for live classification.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # #839 — compare each live run against its committed baseline
+      # (baselines/*-live.json; exit 1 on a regression past tolerance, exit 4
+      # while the file is still an unrecorded placeholder), or — on a manual
+      # dispatch with record_baseline — write fresh baselines to commit.
+      BASELINE_FLAG: ${{ inputs.record_baseline && '--record-baseline' || '--baseline' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Verify API key is present
@@ -48,6 +64,7 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - name: Install deps
+        id: install
         run: npm ci
       # Per-script cost ceilings (cents), set PER STEP so each cap is sized to
       # its own --max-utterances sample (#839: a single $5 cap sat below both
@@ -64,14 +81,16 @@ jobs:
           VOICE_EVAL_COST_CAP_CENTS: '1500'   # projection ~1,280c at N=200
         run: |
           set -o pipefail
-          npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 \
+          npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 "$BASELINE_FLAG" packages/voice-eval/baselines/intent-live.json \
             | tee voice-eval-live-report.txt
+      # Runs even when the intent eval failed, so one run reports both.
       - name: Live slot eval (gated, sampled)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
           VOICE_EVAL_COST_CAP_CENTS: '800'    # projection ~640c at N=100
         run: |
           set -o pipefail
-          npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 \
+          npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 "$BASELINE_FLAG" packages/voice-eval/baselines/slot-live.json \
             | tee -a voice-eval-live-report.txt
       - name: Upload eval report
         if: always()
@@ -79,4 +98,11 @@ jobs:
         with:
           name: voice-eval-live-report
           path: voice-eval-live-report.txt
+          retention-days: 90
+      - name: Upload recorded live baselines
+        if: ${{ always() && inputs.record_baseline }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voice-eval-live-baselines
+          path: packages/voice-eval/baselines/*-live.json
           retention-days: 90
