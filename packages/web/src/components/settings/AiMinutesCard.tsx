@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { formatCurrency } from '../../utils/currency';
 import { Phone } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
@@ -16,10 +17,6 @@ type AiUsage =
       capCents: number | null;
     }
   | { kind: 'none' };
-
-function dollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
 
 /**
  * AI answering minutes on Settings: usage against the plan bundle (or the
@@ -61,7 +58,7 @@ export function AiMinutesCard({ canManage }: { canManage: boolean }) {
       if (!res.ok) throw new Error(String(res.status));
       setUsage((u) => (u && u.kind === 'period' ? { ...u, capCents } : u));
       if (capCents === null) setCapDollars('');
-      toast.success(capCents === null ? 'Overage cap removed' : `Overage cap set to ${dollars(capCents)}`);
+      toast.success(capCents === null ? 'Overage cap removed' : `Overage cap set to ${formatCurrency(capCents)}`);
     } catch {
       toast.error('Could not update the overage cap');
     } finally {
@@ -89,8 +86,8 @@ export function AiMinutesCard({ canManage }: { canManage: boolean }) {
           {usage.kind === 'period' && (
             <p className="text-xs text-slate-400 mt-0.5">
               {usage.overageMinutes > 0
-                ? `${usage.overageMinutes} extra minutes at ${dollars(usage.overageCentsPerMinute)}/min · ${dollars(usage.projectedChargeCents)} so far this period`
-                : `Extra minutes are ${dollars(usage.overageCentsPerMinute)}/min`}
+                ? `${usage.overageMinutes} extra minutes at ${formatCurrency(usage.overageCentsPerMinute)}/min · ${formatCurrency(usage.projectedChargeCents)} so far this period`
+                : `Extra minutes are ${formatCurrency(usage.overageCentsPerMinute)}/min`}
             </p>
           )}
         </div>
