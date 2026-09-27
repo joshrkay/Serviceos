@@ -142,6 +142,32 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
     void refetch();
   }, [refetch]);
 
+  // #1406 D10 — show the assignee's name, never the raw user id. Best-effort:
+  // a caller who can't list users sees a neutral label instead.
+  const [assigneeName, setAssigneeName] = useState<string | null>(null);
+  const assignedUserId = lead?.assignedUserId;
+  useEffect(() => {
+    setAssigneeName(null);
+    if (!assignedUserId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch('/api/users');
+        if (!res.ok) return;
+        const json = (await res.json()) as
+          | { data?: Array<{ id: string; firstName?: string; lastName?: string; email?: string }> }
+          | Array<{ id: string; firstName?: string; lastName?: string; email?: string }>;
+        const users = Array.isArray(json) ? json : json?.data ?? [];
+        const user = users.find((u) => u.id === assignedUserId);
+        const name = user
+          ? [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.email || null
+          : null;
+        if (!cancelled && name) setAssigneeName(name);
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [assignedUserId]);
+
   const openConvertConfirm = useCallback(() => {
     if (lead) setConvertAddress(addressFromLead(lead));
     setConfirmOpen(true);
@@ -405,7 +431,9 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
                 ? formatCurrency(lead.estimatedValueCents)
                 : '—'}
             </p>
-            <p className="text-sm text-slate-700">Assigned user: {lead.assignedUserId ?? '—'}</p>
+            <p className="text-sm text-slate-700">
+              Assigned user: {lead.assignedUserId ? assigneeName ?? 'Team member' : '—'}
+            </p>
             {lead.lostReason && (
               <p className="mt-2 text-sm text-red-700">Lost reason: {lead.lostReason}</p>
             )}

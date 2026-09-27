@@ -326,4 +326,25 @@ describe('Leads — LeadDetail (P9-001)', () => {
     await screen.findByText('Alice Wong');
     expect(screen.queryByLabelText('Lead stage')).not.toBeInTheDocument();
   });
+
+  it('#1406 D10 — shows the assignee by name, never a raw user id', async () => {
+    vi.mocked(apiFetch).mockImplementation((async (url: string) => {
+      if (url === '/api/leads/lead-1') {
+        return { ok: true, status: 200, json: async () => ({ ...baseLead, assignedUserId: 'user-9f3c' }) };
+      }
+      if (url === '/api/users') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [{ id: 'user-9f3c', firstName: 'Maya', lastName: 'Chen', email: 'maya@example.com' }] }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }) as never);
+
+    render(<LeadDetail leadId="lead-1" />);
+
+    expect(await screen.findByText('Assigned user: Maya Chen')).toBeInTheDocument();
+    expect(screen.queryByText(/user-9f3c/)).not.toBeInTheDocument();
+  });
 });

@@ -187,4 +187,19 @@ describe('Leads — LeadList kanban (P9-001)', () => {
 
     expect(onSelectLead).toHaveBeenCalledWith('lead-1');
   });
+
+  it('#1406 D10 — the source filter offers every lead source, including sms and customer_portal', async () => {
+    mockListOnce();
+    mockListOnce();
+    render(<LeadList />);
+    await screen.findByText('Alice Wong');
+
+    fireEvent.click(screen.getByRole('button', { name: 'sms' }));
+
+    await waitFor(() => {
+      const urls = vi.mocked(apiFetch).mock.calls.map((c) => String(c[0]));
+      expect(urls.some((u) => u.includes('source=sms'))).toBe(true);
+    });
+    expect(screen.getByRole('button', { name: 'customer_portal' })).toBeInTheDocument();
+  });
 });
