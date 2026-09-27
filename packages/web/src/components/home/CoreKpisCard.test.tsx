@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CoreKpisCard } from './CoreKpisCard';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 const mockApiFetch = vi.fn();
 const mockNavigate = vi.fn();
@@ -77,6 +78,13 @@ describe('CoreKpisCard', () => {
     const link = await screen.findByText(/money dashboard/i);
     link.click();
     expect(mockNavigate).toHaveBeenCalledWith('/reports/money');
+  });
+
+  it('#1398 — the Money dashboard link is a ≥44px tap target', async () => {
+    resolveWith(BASE);
+    render(<CoreKpisCard />);
+    const link = (await screen.findByText(/money dashboard/i)).closest('button')!;
+    expectTapTarget(link, 'Money dashboard');
   });
 
   it('renders nothing when the money dashboard errors', async () => {

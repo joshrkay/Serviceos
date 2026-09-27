@@ -140,7 +140,7 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
         <button
           type="button"
           onClick={() => setSourceFilter(null)}
-          className={`min-h-11 text-xs rounded-full px-3 py-1 border ${
+          className={`min-h-11 min-w-11 text-xs rounded-full px-3 py-1 border ${
             sourceFilter === null
               ? 'bg-slate-900 text-white border-slate-900'
               : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
@@ -153,7 +153,7 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
             key={src}
             type="button"
             onClick={() => setSourceFilter(src)}
-            className={`min-h-11 text-xs rounded-full px-3 py-1 border ${
+            className={`min-h-11 min-w-11 text-xs rounded-full px-3 py-1 border ${
               sourceFilter === src
                 ? 'bg-slate-900 text-white border-slate-900'
                 : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'

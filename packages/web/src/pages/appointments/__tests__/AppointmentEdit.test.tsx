@@ -40,6 +40,20 @@ describe('P11-007 AppointmentEdit', () => {
     expect(screen.getByRole('button', { name: /cancel appointment/i })).toBeInTheDocument();
   });
 
+  it('#1401 — shows the cancellation reason on a canceled appointment', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseAppt, status: 'canceled', notes: 'Customer rescheduled with another company' }),
+    } as unknown as Response);
+
+    render(<AppointmentEdit appointmentId="a-1" />);
+
+    const reason = await screen.findByTestId('appointment-cancel-reason');
+    expect(reason).toHaveTextContent('Cancellation reason');
+    expect(reason).toHaveTextContent('Customer rescheduled with another company');
+  });
+
   it('opens the Reschedule dialog when Reschedule is clicked', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,

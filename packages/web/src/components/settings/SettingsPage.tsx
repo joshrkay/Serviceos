@@ -878,6 +878,8 @@ export function SettingsPage() {
           onToggle: requestVoiceToggle,
         },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
+        // #1389 / O-2 — the reviewed E1 life-safety script + its two sign-offs.
+        { icon: ScrollText, label: 'Emergency safety script',       description: 'The reviewed script the AI reads on gas, CO, fire and injury calls', action: () => navigate('/settings/e1-script') },
         { icon: ScrollText, label: 'Standing instructions',         description: 'Rules the AI follows on every draft ("always add a trip fee")', action: () => setStandingInstructionsOpen(true) },
         // N-011 — gated behind the brand_voice_configurator flag (default off).
         ...(me?.brand_voice_configurator_enabled
@@ -1157,7 +1159,7 @@ export function SettingsPage() {
             <button
               onClick={() => intakePath && navigate(intakePath)}
               disabled={!intakePath}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
+              className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
             >
               <ExternalLink size={11} /> Preview
             </button>
@@ -1167,7 +1169,7 @@ export function SettingsPage() {
             <button
               onClick={copyIntakeUrl}
               disabled={!intakeUrlAbsolute}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
+              className={`min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
                 copied
                   ? 'bg-green-100 text-green-700'
                   : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300'
@@ -1196,7 +1198,7 @@ export function SettingsPage() {
             <button
               onClick={() => bookingPath && navigate(bookingPath)}
               disabled={!bookingPath}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
+              className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
             >
               <ExternalLink size={11} /> Preview
             </button>
@@ -1206,7 +1208,7 @@ export function SettingsPage() {
             <button
               onClick={copyBookingUrl}
               disabled={!bookingUrlAbsolute}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
+              className={`min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
                 bookingCopied
                   ? 'bg-green-100 text-green-700'
                   : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300'
@@ -1367,15 +1369,23 @@ export function SettingsPage() {
                     aria-label={label}
                     disabled={frozen}
                     onClick={() => void toggleCapability(key, !state.enabled)}
-                    className={`relative shrink-0 mt-0.5 inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                      state.enabled ? 'bg-blue-600' : 'bg-slate-200'
-                    } ${frozen ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    // The switch element itself is the 44px tap target; the
+                    // 20px track is drawn inside it (same pattern as the
+                    // settings toggles above, #1374).
+                    className={`-my-3 flex min-h-11 min-w-11 shrink-0 items-center justify-center ${frozen ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <span
-                      className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${
-                        state.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                      aria-hidden="true"
+                      className={`inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                        state.enabled ? 'bg-blue-600' : 'bg-slate-200'
                       }`}
-                    />
+                    >
+                      <span
+                        className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${
+                          state.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                        }`}
+                      />
+                    </span>
                   </button>
                 </div>
               );
@@ -1405,7 +1415,7 @@ export function SettingsPage() {
                 value={googleReviewUrl}
                 onChange={e => setGoogleReviewUrl(e.target.value)}
                 placeholder="https://g.page/r/..."
-                className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
               />
               <span className="block text-xs text-slate-400 mt-1">
                 Customers with a 4+ rating will see a button linking here.
@@ -1420,7 +1430,7 @@ export function SettingsPage() {
                 value={yelpReviewUrl}
                 onChange={e => setYelpReviewUrl(e.target.value)}
                 placeholder="https://www.yelp.com/biz/..."
-                className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
               />
               <span className="block text-xs text-slate-400 mt-1">
                 Customers with a 4+ rating will see a button linking here.
@@ -1441,7 +1451,7 @@ export function SettingsPage() {
                 type="button"
                 onClick={saveReviewUrls}
                 disabled={savingReviews}
-                className="rounded-xl bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-700 active:scale-[0.98] transition disabled:opacity-50"
+                className="min-h-11 min-w-11 rounded-xl bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-700 active:scale-[0.98] transition disabled:opacity-50"
               >
                 {savingReviews ? 'Saving…' : 'Save'}
               </button>

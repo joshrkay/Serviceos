@@ -50,8 +50,8 @@
  *      question that was asked.
  *
  * TRANSPORT-NEUTRAL BY DESIGN. Input is a session + intent + entities; output
- * is a line to speak. Gather calls it today; media-streams' `speechTurn` calls
- * the same function when #860 step 2 lands (held on #838 Q2). Nothing here
+ * is a line to speak. Gather's loop and media-streams' `speechTurn` (#1395)
+ * both call it, with the same bundle. Nothing here
  * knows which transport it serves.
  *
  * FSM CONTRACT (unchanged). The CALLER must not dispatch `intent_classified`

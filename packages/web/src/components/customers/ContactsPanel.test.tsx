@@ -16,6 +16,7 @@ import {
   updateContact,
   archiveContact,
 } from '../../api/customers';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 const contact = (over: Partial<Record<string, unknown>> = {}) => ({
   id: 'c1',
@@ -35,6 +36,15 @@ describe('ContactsPanel (U1)', () => {
     vi.mocked(createContact).mockReset().mockResolvedValue(contact() as never);
     vi.mocked(updateContact).mockReset().mockResolvedValue(contact() as never);
     vi.mocked(archiveContact).mockReset().mockResolvedValue(undefined as never);
+  });
+
+  it('#1398 — contact rows and the add-contact form are ≥44×44 tap targets', async () => {
+    vi.mocked(listContacts).mockResolvedValue([
+      contact({ id: 'c1', name: 'Pat Primary', role: 'primary', isPrimary: true }),
+    ] as never);
+    render(<ContactsPanel customerId="1" />);
+    await screen.findByText('Pat Primary');
+    expectAllTapTargets(document.body, 'ContactsPanel');
   });
 
   it('renders contacts with role and primary badges', async () => {

@@ -108,6 +108,8 @@ interface Appointment {
   scheduledStart: string;
   scheduledEnd: string;
   assignedUserId?: string;
+  /** CancelDialog persists the cancellation reason here (#1401). */
+  notes?: string;
 }
 
 type DialogMode = 'reschedule' | 'cancel' | 'reassign' | 'delay' | null;
@@ -198,6 +200,12 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
         <p>Status: {data.status}</p>
         <p>Start: {formatDateTimeInTenantTz(data.scheduledStart, timezone)}</p>
         <p>End: {formatDateTimeInTenantTz(data.scheduledEnd, timezone)}</p>
+        {/* #1401 — CancelDialog stores the reason in `notes`; surface it. */}
+        {(data.status === 'canceled' || data.status === 'cancelled') && data.notes && (
+          <p data-testid="appointment-cancel-reason">
+            Cancellation reason: {data.notes}
+          </p>
+        )}
       </div>
 
       {notice && (

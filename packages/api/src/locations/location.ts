@@ -36,6 +36,13 @@ export interface ServiceLocation {
   isPrimary: boolean;
   /** U3 — service vs billing classification. Defaults to 'service'. */
   addressType: ServiceLocationAddressType;
+  /**
+   * #1401 — trades this location is serviced for (e.g. 'HVAC', 'Plumbing').
+   * Persisted in `service_locations.service_types` (migration 294); drives the
+   * customers directory's service-type chips. Optional so hand-built fixtures
+   * keep type-checking; repositories always return an array.
+   */
+  serviceTypes?: string[];
   isArchived: boolean;
   archivedAt?: Date;
   createdAt: Date;
@@ -57,6 +64,7 @@ export interface CreateLocationInput {
   accessNotes?: string;
   isPrimary?: boolean;
   addressType?: ServiceLocationAddressType;
+  serviceTypes?: string[];
 }
 
 export interface UpdateLocationInput {
@@ -71,6 +79,7 @@ export interface UpdateLocationInput {
   longitude?: number;
   accessNotes?: string;
   addressType?: ServiceLocationAddressType;
+  serviceTypes?: string[];
 }
 
 export interface LocationRepository {
@@ -94,6 +103,19 @@ export interface LocationRepository {
 
 export type ServiceLocationWithWarnings = ServiceLocation & { warnings?: DuplicateWarning[] };
 
+const MAX_SERVICE_TYPES = 10;
+const MAX_SERVICE_TYPE_LENGTH = 50;
+
+function isValidServiceTypes(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_SERVICE_TYPES &&
+    value.every(
+      (t) => typeof t === 'string' && t.trim().length > 0 && t.length <= MAX_SERVICE_TYPE_LENGTH
+    )
+  );
+}
+
 export function validateLocationInput(input: CreateLocationInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
@@ -102,6 +124,9 @@ export function validateLocationInput(input: CreateLocationInput): string[] {
   if (!input.city) errors.push('city is required');
   if (!input.state) errors.push('state is required');
   if (!input.postalCode) errors.push('postalCode is required');
+  if (input.serviceTypes !== undefined && !isValidServiceTypes(input.serviceTypes)) {
+    errors.push(`serviceTypes must be an array of at most ${MAX_SERVICE_TYPES} non-empty strings`);
+  }
   return errors;
 }
 
@@ -123,6 +148,7 @@ export function validateLocationUpdateInput(
     longitude: input.longitude ?? existing.longitude,
     accessNotes: input.accessNotes ?? existing.accessNotes,
     isPrimary: existing.isPrimary,
+    serviceTypes: input.serviceTypes,
   });
 }
 
@@ -169,6 +195,7 @@ export async function createLocation(
     accessNotes: input.accessNotes,
     isPrimary: input.isPrimary ?? false,
     addressType: input.addressType ?? 'service',
+    serviceTypes: input.serviceTypes ? [...new Set(input.serviceTypes)] : [],
     isArchived: false,
     createdAt: new Date(),
     updatedAt: new Date(),

@@ -44,7 +44,8 @@ describe('POST /api/customers', () => {
     expect(typeof cust.id).toBe('string');
     expect(cust.firstName).toBe('Alice');
     expect(cust.lastName).toBe('Smith');
-    expect(cust.primaryPhone).toBe('555-123-4567');
+    // #1401 — stored in E.164.
+    expect(cust.primaryPhone).toBe('+15551234567');
     expect(cust.email).toBe('alice@example.com');
     expect(cust.tenantId).toBe(TEST_TENANT_ID);
     expect(cust.createdBy).toBe(TEST_USER_ID);
@@ -93,6 +94,55 @@ describe('POST /api/customers', () => {
       message: 'Invalid request data',
     });
     expect(res.body.details.fields.firstName).toEqual(expect.arrayContaining([expect.stringMatching(/100/)]));
+  });
+
+  it('#1397: an invalid primaryPhone is a 400 VALIDATION_ERROR naming primaryPhone, not a 500', async () => {
+    const res = await createCustomer(app, { primaryPhone: 'not-a-phone' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.message).toMatch(/primaryPhone/);
+  });
+});
+
+describe('#1401 — customer phones are stored in E.164', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('POST normalises human-formatted US phones to E.164', async () => {
+    const res = await createCustomer(app, {
+      primaryPhone: '(602) 555-0144',
+      secondaryPhone: '1-480-555-0199',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.primaryPhone).toBe('+16025550144');
+    expect(res.body.secondaryPhone).toBe('+14805550199');
+  });
+
+  it('POST rejects an un-normalisable phone with 400 and creates nothing', async () => {
+    const res = await createCustomer(app, { primaryPhone: '555-0100' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    const list = await request(app).get('/api/customers');
+    expect(list.body).toEqual([]);
+  });
+
+  it('PUT normalises an edited phone and rejects an un-normalisable one with 400', async () => {
+    const created = await createCustomer(app);
+    const id = created.body.id as string;
+
+    const ok = await request(app).put(`/api/customers/${id}`).send({ primaryPhone: '602.555.0177' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.primaryPhone).toBe('+16025550177');
+
+    const bad = await request(app).put(`/api/customers/${id}`).send({ primaryPhone: 'call me' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('VALIDATION_ERROR');
+    const after = await request(app).get(`/api/customers/${id}`);
+    expect(after.body.primaryPhone).toBe('+16025550177');
   });
 });
 
@@ -541,5 +591,38 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison', () => 
       .send({ losingId: '11111111-1111-1111-1111-111111111111' });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
+describe('#1397 — customer audit rows carry the request actor role, not "unknown"', () => {
+  let app: Express;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(async () => {
+    ({ app, auditRepo } = await buildTestApp());
+  });
+
+  it('customer.updated is attributed to the resolved role (owner)', async () => {
+    const created = await createCustomer(app);
+    const id = created.body.id as string;
+
+    const res = await request(app).put(`/api/customers/${id}`).send({ lastName: 'Jones' });
+    expect(res.status).toBe(200);
+
+    const events = await auditRepo.findByEntity(TEST_TENANT_ID, 'customer', id);
+    const updated = events.find((e) => e.eventType === 'customer.updated');
+    expect(updated?.actorRole).toBe('owner');
+  });
+
+  it('customer.archived and customer.restored are attributed to the resolved role (owner)', async () => {
+    const created = await createCustomer(app);
+    const id = created.body.id as string;
+
+    expect((await request(app).post(`/api/customers/${id}/archive`)).status).toBe(200);
+    expect((await request(app).post(`/api/customers/${id}/restore`)).status).toBe(200);
+
+    const events = await auditRepo.findByEntity(TEST_TENANT_ID, 'customer', id);
+    expect(events.find((e) => e.eventType === 'customer.archived')?.actorRole).toBe('owner');
+    expect(events.find((e) => e.eventType === 'customer.restored')?.actorRole).toBe('owner');
   });
 });

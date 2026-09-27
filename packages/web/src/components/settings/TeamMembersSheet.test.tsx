@@ -58,6 +58,16 @@ describe('TeamMembersSheet — read-only list', () => {
     toastError.mockReset();
   });
 
+  it('#1397: does not claim role/invite editing is a future release (the controls ship)', async () => {
+    mockUsersAndInvitations({
+      users: { body: { data: [{ id: 'u1', email: 'jane@example.com', role: 'owner', canFieldServe: true }] } },
+    });
+    render(<TeamMembersSheet onClose={() => {}} />);
+    await screen.findByTestId('team-members-list');
+
+    expect(screen.queryByText(/follow-up release/i)).not.toBeInTheDocument();
+  });
+
   it('renders each user with role badge', async () => {
     mockUsersAndInvitations({
       users: {
