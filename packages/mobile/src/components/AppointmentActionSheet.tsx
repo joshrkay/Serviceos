@@ -75,6 +75,8 @@ export function AppointmentActionSheet({
   const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [slotsError, setSlotsError] = useState<string | null>(null);
+  // #1243 — owner-facing "these times use defaults" lines.
+  const [configNotes, setConfigNotes] = useState<string[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<AvailabilitySlot | null>(null);
 
   // Crew/reassign tech pick.
@@ -103,9 +105,11 @@ export function AppointmentActionSheet({
       const from = tenantLocalDate(new Date(), timezone);
       const res = await fetchAvailability(api, { from, to: addDaysYmd(from, BOOKING_HORIZON_DAYS) });
       setSlots(res.slots);
+      setConfigNotes(res.config?.notes ?? []);
     } catch (e) {
       setSlotsError(copyForError(e).body);
       setSlots([]);
+      setConfigNotes([]);
     } finally {
       setSlotsLoading(false);
     }
@@ -267,6 +271,7 @@ export function AppointmentActionSheet({
                 onSelect={setSelectedSlot}
                 isLoading={slotsLoading}
                 error={slotsError}
+                configNotes={configNotes}
                 onRetry={() => void loadSlots()}
               />
               <View className="mt-4 flex-row gap-3">

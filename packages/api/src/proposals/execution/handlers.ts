@@ -72,6 +72,7 @@ import { EditDeltaRepository } from '../../estimates/edit-delta';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
+import { UndeliveredConfirmationRecorder } from '../../notifications/undelivered-confirmation-recorder';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
 import {
@@ -1343,6 +1344,22 @@ export function createExecutionHandlerRegistry(deps?: {
         }
       : undefined;
 
+  // #1077 / PRD 3.8 — no delivery provider (app.ts mode 'none') means no
+  // schedulingNotifier. Rather than the handler's silent no-op default, record
+  // the skipped confirmation as a FAILED dispatch row so the owner can see the
+  // customer was never confirmed.
+  const confirmationNotifier: SchedulingConfirmationNotifier | undefined =
+    deps?.schedulingNotifier ??
+    (deps?.dispatchRepo && deps.appointmentRepo && deps.jobRepo && deps.customerRepo
+      ? new UndeliveredConfirmationRecorder({
+          appointmentRepo: deps.appointmentRepo,
+          jobRepo: deps.jobRepo,
+          customerRepo: deps.customerRepo,
+          dispatchRepo: deps.dispatchRepo,
+          ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+        })
+      : undefined);
+
   const handlers: ExecutionHandler[] = [
     // `noteRepo` is the never-lose-it net: a spoken address that can't satisfy
     // service_locations' NOT NULL columns is preserved as a pinned customer
@@ -1359,7 +1376,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateAppointmentExecutionHandler(
       deps?.appointmentRepo,
       deps?.assignmentRepo,
-      deps?.schedulingNotifier,
+      confirmationNotifier,
       deps?.auditRepo,
       deps?.jobRepo,
       // feasibilityDeps carries the availability repos — the same wiring the

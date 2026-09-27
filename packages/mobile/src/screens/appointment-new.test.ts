@@ -41,10 +41,19 @@ vi.mock('../components/JobPicker', () => ({
     createElement('button', { onClick: () => onSelect('job-1') }, 'pick-job'),
 }));
 vi.mock('../components/SlotPicker', () => ({
-  SlotPicker: ({ slots, onSelect }: { slots: { start: string; end: string }[]; onSelect: (s: unknown) => void }) =>
+  SlotPicker: ({
+    slots,
+    onSelect,
+    configNotes,
+  }: {
+    slots: { start: string; end: string }[];
+    onSelect: (s: unknown) => void;
+    configNotes?: string[];
+  }) =>
     createElement(
       'div',
       null,
+      (configNotes ?? []).map((n) => createElement('p', { key: n }, `note-${n}`)),
       slots.map((s) =>
         createElement('button', { key: s.start, onClick: () => onSelect(s) }, `slot-${s.start}`),
       ),
@@ -104,5 +113,27 @@ describe('New appointment (manual booking) screen', () => {
       }),
     );
     await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/schedule'));
+  });
+
+  it('#1243: the time step hands the availability defaults notes to the slot picker', async () => {
+    const note = 'Travel buffer not configured — using the 30-minute default.';
+    h.fetchAvailability.mockResolvedValue({
+      timezone: 'America/New_York',
+      durationMin: 60,
+      slots: [SLOT],
+      config: {
+        timezoneSource: 'tenant',
+        businessHoursSource: 'tenant',
+        bufferSource: 'default',
+        bufferMinutes: 30,
+        notes: [note],
+      },
+    });
+    const { getByText, findByText } = render(createElement(NewAppointment));
+    fireEvent.click(getByText('Acme Co').closest('button')!);
+    fireEvent.click(getByText('Next: job').closest('button')!);
+    fireEvent.click(getByText('pick-job').closest('button')!);
+    fireEvent.click(getByText('Next: time').closest('button')!);
+    expect(await findByText(`note-${note}`)).toBeTruthy();
   });
 });
