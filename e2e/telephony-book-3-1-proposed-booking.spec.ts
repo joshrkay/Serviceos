@@ -164,7 +164,7 @@ test.describe('#1015 row 3.1 — a call produces a PROPOSED booking, not a booki
   const appointmentsFor = (tenantId: string) =>
     pool.query<{ id: string }>(`SELECT id FROM appointments WHERE tenant_id = $1`, [tenantId]);
 
-  test('reaches the create_appointment intent readback deterministically, drafts NO proposal and books NO appointment — the confirm turn is the model-dependent seam', async ({
+  test('the caller confirms, a create_appointment PROPOSAL is drafted for the owner, and NO appointment is booked', async ({
     request,
   }) => {
     const callSid = `CA-book31-a-${crypto.randomUUID().slice(0, 8)}`;
@@ -178,36 +178,38 @@ test.describe('#1015 row 3.1 — a call produces a PROPOSED booking, not a booki
     expect(identifyTwiml).toContain('How can I help you today?');
 
     // Turn 2: the deterministic, model-free classification landed on
-    // create_appointment and read it back for confirmation — proving the
-    // ENTITY-FREE opener reaches the right intent with zero gateway calls.
+    // create_appointment and read it back for confirmation.
     expect(openingTwiml.toLowerCase()).toContain('create appointment');
     expect(openingTwiml.toLowerCase()).toContain('is that right');
 
-    // Turn 3 (the seam): even a clear "Yes, that is right" cannot confirm —
-    // confirmIntent's own gateway call classifies THAT answer, and the
-    // hermetic mock can never return {answer: 'yes'} for it. The FSM falls
-    // back to its safe default (unparseable → correction) and re-prompts.
-    expect(confirmAttemptTwiml).not.toContain('create appointment');
-    expect(confirmAttemptTwiml.toLowerCase()).toMatch(/try again|what would you like to do/);
+    // Turn 3: since #1119 (PR #1365) the hermetic gateway answers a clear
+    // affirmative "yes", so the confirm succeeds — and the caller is told a
+    // person will confirm, never that it is booked.
+    expect(confirmAttemptTwiml.toLowerCase()).toContain('someone from our team will confirm');
 
-    // The gate this row cares about, PROVEN the strong way: nothing is ever
-    // drafted or booked while the model-dependent confirm can't succeed.
-    expect((await proposalsFor(tenantA.tenantId)).rows).toHaveLength(0);
+    // The row's claim, proven at the rows: exactly one PROPOSED booking,
+    // not executed, and nothing on the calendar.
+    const proposals = (await proposalsFor(tenantA.tenantId)).rows;
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposal_type).toBe('create_appointment');
+    expect(['draft', 'ready_for_review']).toContain(proposals[0].status);
     expect((await appointmentsFor(tenantA.tenantId)).rows).toHaveLength(0);
   });
 
-  test("T2: tenant B's identical call reaches its OWN confirm readback independently, and neither tenant's empty proposal/appointment state is perturbed by the other", async ({
+  test("T2: tenant B's identical call drafts ITS OWN proposal, and tenant A's proposal set is unchanged by it", async ({
     request,
   }) => {
     const beforeA = await proposalsFor(tenantA.tenantId);
 
     const callSid = `CA-book31-b-${crypto.randomUUID().slice(0, 8)}`;
-    const { openingTwiml } = await driveToConfirmAttempt(request, tenantB, callSid);
+    const { openingTwiml, confirmAttemptTwiml } = await driveToConfirmAttempt(request, tenantB, callSid);
 
     expect(openingTwiml.toLowerCase()).toContain('create appointment');
-    expect(openingTwiml.toLowerCase()).toContain('is that right');
+    expect(confirmAttemptTwiml.toLowerCase()).toContain('someone from our team will confirm');
 
-    expect((await proposalsFor(tenantB.tenantId)).rows).toHaveLength(0);
+    const proposalsB = (await proposalsFor(tenantB.tenantId)).rows;
+    expect(proposalsB).toHaveLength(1);
+    expect(proposalsB[0].proposal_type).toBe('create_appointment');
     expect((await appointmentsFor(tenantB.tenantId)).rows).toHaveLength(0);
 
     // Tenant A's state (from the previous test in this serial file) is
