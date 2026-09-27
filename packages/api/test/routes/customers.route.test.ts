@@ -44,7 +44,8 @@ describe('POST /api/customers', () => {
     expect(typeof cust.id).toBe('string');
     expect(cust.firstName).toBe('Alice');
     expect(cust.lastName).toBe('Smith');
-    expect(cust.primaryPhone).toBe('555-123-4567');
+    // #1401 — stored in E.164.
+    expect(cust.primaryPhone).toBe('+15551234567');
     expect(cust.email).toBe('alice@example.com');
     expect(cust.tenantId).toBe(TEST_TENANT_ID);
     expect(cust.createdBy).toBe(TEST_USER_ID);
@@ -93,6 +94,47 @@ describe('POST /api/customers', () => {
       message: 'Invalid request data',
     });
     expect(res.body.details.fields.firstName).toEqual(expect.arrayContaining([expect.stringMatching(/100/)]));
+  });
+});
+
+describe('#1401 — customer phones are stored in E.164', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('POST normalises human-formatted US phones to E.164', async () => {
+    const res = await createCustomer(app, {
+      primaryPhone: '(602) 555-0144',
+      secondaryPhone: '1-480-555-0199',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.primaryPhone).toBe('+16025550144');
+    expect(res.body.secondaryPhone).toBe('+14805550199');
+  });
+
+  it('POST rejects an un-normalisable phone with 400 and creates nothing', async () => {
+    const res = await createCustomer(app, { primaryPhone: '555-0100' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    const list = await request(app).get('/api/customers');
+    expect(list.body).toEqual([]);
+  });
+
+  it('PUT normalises an edited phone and rejects an un-normalisable one with 400', async () => {
+    const created = await createCustomer(app);
+    const id = created.body.id as string;
+
+    const ok = await request(app).put(`/api/customers/${id}`).send({ primaryPhone: '602.555.0177' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.primaryPhone).toBe('+16025550177');
+
+    const bad = await request(app).put(`/api/customers/${id}`).send({ primaryPhone: 'call me' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('VALIDATION_ERROR');
+    const after = await request(app).get(`/api/customers/${id}`);
+    expect(after.body.primaryPhone).toBe('+16025550177');
   });
 });
 

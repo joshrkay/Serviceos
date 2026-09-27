@@ -7181,6 +7181,21 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS e1_reviewed_by_role TEXT,
       ADD COLUMN IF NOT EXISTS e1_reviewed_at TIMESTAMPTZ;
   `,
+
+  '294_service_location_service_types': `
+    -- #1401 — the trades a service location is serviced for (HVAC / Plumbing /
+    -- Painting chips in the customers directory). The shared contract
+    -- (customerLocationSummarySchema) and the web ServiceLocation model both
+    -- put serviceTypes on the location; until now the add-customer sheet
+    -- collected them and dropped them. Free strings (the authoritative set is
+    -- client-side for now); defaults to empty so existing rows are unaffected.
+    -- Read/written by src/locations/pg-location.ts; filtered by
+    -- PgCustomerRepository.buildListWhere (?serviceType=).
+    ALTER TABLE service_locations
+      ADD COLUMN IF NOT EXISTS service_types TEXT[] NOT NULL DEFAULT '{}';
+    CREATE INDEX IF NOT EXISTS idx_service_locations_service_types
+      ON service_locations USING GIN (service_types);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

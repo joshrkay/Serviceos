@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { CustomersPage } from './CustomersPage';
@@ -162,6 +162,22 @@ describe('CustomersPage', () => {
     expect(setFilters).toHaveBeenLastCalledWith({});
   });
 
+  it('#1401 — a service-type chip filters server-side (and composes with Archived)', () => {
+    const setFilters = vi.fn();
+    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, setFilters });
+    renderPage();
+
+    const chips = within(screen.getByTestId('service-filters'));
+    fireEvent.click(chips.getByRole('button', { name: /Plumbing/ }));
+    expect(setFilters).toHaveBeenLastCalledWith({ serviceType: 'Plumbing' });
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived/ }));
+    expect(setFilters).toHaveBeenLastCalledWith({ serviceType: 'Plumbing', archived: 'only' });
+
+    fireEvent.click(chips.getByRole('button', { name: /^All$/ }));
+    expect(setFilters).toHaveBeenLastCalledWith({ archived: 'only' });
+  });
+
   it('#1281 — an archived row carries an Archived pill', () => {
     vi.mocked(useListQuery).mockReturnValue({
       ...defaultListResult,
@@ -296,6 +312,19 @@ describe('AddCustomerSheet — save guard + retry (duplicate-customer fix)', () 
     expect(createCustomerMock).toHaveBeenCalledTimes(1);
     expect(createLocationMock).toHaveBeenCalledTimes(1);
     expect(defaultListResult.refetch).toHaveBeenCalled();
+  });
+
+  it('#1401 — persists the chosen service types on the new location', async () => {
+    createCustomerMock.mockResolvedValue({ id: 'c9' });
+    createLocationMock.mockResolvedValue({ id: 'loc-1' });
+
+    const saveBtn = fillSheetToSave();
+    fireEvent.click(saveBtn);
+
+    await screen.findByText('Charlie Brown added');
+    expect(createLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: 'c9', serviceTypes: ['HVAC'] }),
+    );
   });
 
   it('createLocation failure surfaces a toast; retry POSTs only the location with the cached customer id', async () => {

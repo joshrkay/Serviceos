@@ -158,6 +158,9 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
         ...address,
         accessNotes: form.locNotes || undefined,
         isPrimary: true,
+        // #1401 — persisted on the location (service_locations.service_types)
+        // so the directory's service-type chips can match it.
+        serviceTypes: form.locServiceTypes,
       });
       onCreate();
       setStep('done');
@@ -510,10 +513,25 @@ export function CustomersPage() {
 
   const { data, total, isLoading, error, setSearch, setFilters, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
+  // #1401 — service-type chips and the Archived view both filter server-side
+  // (`?serviceType=` / `?archived=only`), so a paginated list's data and
+  // total agree. They compose into one filter set.
+  const applyFilters = (svc: Filter, archived: boolean) => {
+    setFilters({
+      ...(svc !== 'All' ? { serviceType: svc } : {}),
+      ...(archived ? { archived: 'only' } : {}),
+    });
+  };
+
   const toggleArchived = () => {
     const next = !showArchived;
     setShowArchived(next);
-    setFilters(next ? { archived: 'only' } : {});
+    applyFilters(filter, next);
+  };
+
+  const selectFilter = (next: Filter) => {
+    setFilter(next);
+    applyFilters(next, showArchived);
   };
 
   // customer_search_run (U6) — a debounced "search executed" signal, once the
@@ -533,10 +551,8 @@ export function CustomersPage() {
   // service-type filter above).
   const availableTags = [...new Set(data.flatMap(c => c.tags ?? []))].sort();
 
-  // Client-side service type filter (API doesn't support this filter)
-  let filtered = filter === 'All'
-    ? data
-    : data.filter(c => customerServiceTypes(c).includes(filter));
+  // #1401 — the service-type filter is applied server-side (see applyFilters).
+  let filtered = data;
   if (tagFilter) {
     filtered = filtered.filter(c => (c.tags ?? []).includes(tagFilter));
   }
@@ -575,9 +591,9 @@ export function CustomersPage() {
         </div>
 
         {/* filter chips */}
-        <div className="flex gap-2 mt-3 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+        <div data-testid="service-filters" className="flex gap-2 mt-3 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
           {(['All', 'HVAC', 'Plumbing', 'Painting'] as Filter[]).map(f => (
-            <button key={f} onClick={() => setFilter(f)}
+            <button key={f} type="button" onClick={() => selectFilter(f)} aria-pressed={filter === f}
               className={`flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                 filter === f
                   ? 'bg-primary border-primary text-primary-foreground'
