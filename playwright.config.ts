@@ -305,6 +305,7 @@ export default defineConfig<DevAuthFixtures>({
               'shell-mobile.spec.ts',
               'chat-proposal-card-mobile.spec.ts',
               'assistant-header-mobile.spec.ts',
+              'e1-script-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],
