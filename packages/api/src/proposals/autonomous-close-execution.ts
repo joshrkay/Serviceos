@@ -23,6 +23,7 @@
  * ONLY path that approves the staged chain, with the D-009 undo window and the
  * standard executor unchanged.
  */
+import type { HoldFeasibility } from '../ai/scheduling/place-hold';
 import { v4 as uuidv4 } from 'uuid';
 import {
   createProposal as buildProposal,
@@ -74,6 +75,12 @@ export interface CloseFallbackArgs {
     holdExpiryAt: Date;
     /** Human-readable booking summary for the SMS + the create_booking member. */
     summary: string;
+    /**
+     * #1045 / PRD 3.12 — the hold's back-to-back drivability result, carried
+     * onto the create_booking member so the owner sees any travel warning
+     * before the one-tap approval.
+     */
+    holdFeasibility?: HoldFeasibility;
   };
 }
 
@@ -183,6 +190,9 @@ export async function queueCloseFallbackChain(
         dependsOnChainIndices: [],
         chainRefs: [],
         ...stamp,
+        ...(args.booking.holdFeasibility
+          ? { holdFeasibility: args.booking.holdFeasibility }
+          : {}),
       },
       createdBy: AUTONOMOUS_CLOSE_ACTOR,
       expiresAt: args.booking.holdExpiryAt,

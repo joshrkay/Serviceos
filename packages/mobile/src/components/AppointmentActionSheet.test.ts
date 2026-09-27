@@ -121,4 +121,24 @@ describe('AppointmentActionSheet', () => {
     // Confirm and Cancel are direct (no version) and stay enabled.
     expect(getByText('Confirm appointment').closest('button')!.disabled).toBe(false);
   });
+
+  it('#1243: Reschedule shows the availability defaults notes for a tenant with no configured hours', async () => {
+    const note =
+      'Business hours not configured — using the 08:00–17:00 default. Set them in Settings → Business profile.';
+    h.fetchAvailability.mockResolvedValueOnce({
+      timezone: 'America/New_York',
+      durationMin: 60,
+      slots: [{ start: '2026-06-22T13:00:00Z', end: '2026-06-22T14:00:00Z' }],
+      config: {
+        timezoneSource: 'tenant',
+        businessHoursSource: 'default',
+        bufferSource: 'tenant',
+        bufferMinutes: 30,
+        notes: [note],
+      },
+    });
+    const { getByText, findByText } = renderSheet();
+    fireEvent.click(getByText('Reschedule…').closest('button')!);
+    expect(await findByText(note)).toBeTruthy();
+  });
 });

@@ -19,6 +19,7 @@ import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
 import { isRuntimeTimezone } from '../../shared/timezone';
 import type { LocationRepository } from '../../locations/location';
 import type { CustomerRepository } from '../../customers/customer';
+import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
 import {
   appointmentTypeSchema,
   type AppointmentTypeValue,
@@ -522,6 +523,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   private readonly appointmentRepo?: AppointmentRepository;
   private readonly jobRepo?: JobRepository;
   private readonly bookabilityRepos?: ServiceLocationGapDeps;
+  private readonly feasibilityDeps?: FeasibilityDependencies;
 
   constructor(
     gateway: LLMGateway,
@@ -534,6 +536,12 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
      * absent ⇒ no gate, byte-identical to the pre-gate handler.
      */
     bookabilityRepos?: ServiceLocationGapDeps,
+    /**
+     * #1045 / PRD 3.12 — back-to-back drivability on the held slot. Wired, the
+     * hold is run through `checkFeasibility` and the result rides the
+     * create_booking card as `sourceContext.holdFeasibility`.
+     */
+    feasibilityDeps?: FeasibilityDependencies,
   ) {
     this.gateway = gateway;
     this.slotConflictChecker = slotConflictChecker;
@@ -541,6 +549,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     this.appointmentRepo = appointmentRepo;
     this.jobRepo = jobRepo;
     this.bookabilityRepos = bookabilityRepos;
+    this.feasibilityDeps = feasibilityDeps;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -827,6 +836,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         {
           appointmentRepo: repo,
           ...(this.jobRepo ? { jobRepo: this.jobRepo } : {}),
+          ...(this.feasibilityDeps ? { feasibility: this.feasibilityDeps } : {}),
         },
         {
           tenantId: context.tenantId,
@@ -919,6 +929,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         // added a contract gate at the chat chokepoint and watched every
         // `create_booking` come back gated on the id it had just created.
         verifiedIds: { appointmentId: holdResult.appointmentId },
+        // #1045 / PRD 3.12 — the back-to-back travel warning for the held
+        // slot, or `checked: false` when the check could not run. Advisory:
+        // it never blocks the hold; the operator reads it before approving.
+        holdFeasibility: holdResult.feasibility,
       };
 
       const bookingInput: CreateProposalInput = {

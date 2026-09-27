@@ -28,10 +28,13 @@
  *    prod/staging with no Twilio and no SendGrid credentials
  *    (src/notifications/delivery-provider-factory.ts:163-176).
  *
- * So the row's failure is real but narrower than "always a no-op": it is
- * conditional on the boot-time delivery wiring, and nothing records the
- * omission when it happens. These tests pin BOTH wirings at real Postgres and
- * leave the one desired-state assertion as the single `it.fails`.
+ * So the row's failure was real but narrower than "always a no-op": it was
+ * conditional on the boot-time delivery wiring, and nothing recorded the
+ * omission. #1077 (2026-09-26) closed both decisions: the dormant
+ * `AppointmentConfirmationNotifier` is deleted, and with no delivery provider
+ * the execution registry falls back to `UndeliveredConfirmationRecorder`,
+ * which writes a `status: 'failed'` dispatch row per reachable channel so the
+ * skipped confirmation is visible. The former `it.fails` is now passing.
  *
  * Table under test: `message_dispatches` (src/notifications/dispatch-repository.ts:188),
  * written through `PgDispatchRepository` (same file, line 178).
@@ -58,7 +61,6 @@ import { GatedMessageDelivery } from '../../src/notifications/gated-message-deli
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
-import { AppointmentConfirmationNotifier } from '../../src/notifications/appointment-confirmation-notifier';
 import type { SchedulingConfirmationNotifier } from '../../src/proposals/execution/scheduling-notifications';
 import {
   createProposal,
@@ -289,21 +291,6 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     });
   }
 
-  function dormantNotifier(): AppointmentConfirmationNotifier {
-    // The construction app.ts would have to perform to make
-    // `AppointmentConfirmationNotifier` live — the same six deps its
-    // `AppointmentConfirmationNotifierDeps` declares
-    // (src/notifications/appointment-confirmation-notifier.ts:12).
-    return new AppointmentConfirmationNotifier({
-      delivery: gatedDelivery(),
-      appointmentRepo,
-      jobRepo,
-      customerRepo,
-      settingsRepo,
-      dispatchRepo,
-    });
-  }
-
   beforeAll(async () => {
     pool = await getSharedTestDb();
     customerRepo = new PgCustomerRepository(pool);
@@ -321,22 +308,35 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     await closeSharedTestDb();
   });
 
-  it('CURRENT: with no delivery provider (app.ts mode "none"), an approved create_appointment writes the appointment but NO appointment_confirmation dispatch row', async () => {
+  it('#1077 (row 3.8): with no delivery provider (app.ts mode "none"), an approved create_appointment records the skipped confirmation as FAILED appointment_confirmation rows — never silent', async () => {
     const appointmentId = await executeApprovedCreateAppointment(tenantA, undefined);
 
     const appointment = await appointmentRepo.findById(tenantA.tenant.tenantId, appointmentId);
     expect(appointment).not.toBeNull();
 
-    const rows = await confirmationRows(tenantA.tenant.tenantId, appointmentId);
-    expect(rows).toHaveLength(0);
-
-    // …and nothing else records the omission either: no dispatch row of ANY
-    // entity type exists for this appointment.
-    const { rows: anyDispatch } = await pool.query(
-      `SELECT entity_type FROM message_dispatches WHERE tenant_id = $1 AND entity_id = $2`,
+    const { rows } = await pool.query(
+      `SELECT channel, recipient, status, provider, error_message
+         FROM message_dispatches
+        WHERE tenant_id = $1 AND entity_type = 'appointment_confirmation' AND entity_id = $2
+        ORDER BY channel`,
       [tenantA.tenant.tenantId, appointmentId],
     );
-    expect(anyDispatch).toHaveLength(0);
+    expect(rows).toEqual([
+      {
+        channel: 'email',
+        recipient: tenantA.email,
+        status: 'failed',
+        provider: 'none',
+        error_message: 'No message delivery provider is configured — confirmation not sent',
+      },
+      {
+        channel: 'sms',
+        recipient: tenantA.phone,
+        status: 'failed',
+        provider: 'none',
+        error_message: 'No message delivery provider is configured — confirmation not sent',
+      },
+    ]);
   });
 
   it('CURRENT: the SAME execution through the SAME registry DOES write sms+email appointment_confirmation rows once TransactionalCommsService is wired as app.ts:1910 wires it', async () => {
@@ -350,14 +350,6 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     expect(rows.every((r) => r.entity_id === appointmentId)).toBe(true);
     expect(rows.find((r) => r.channel === 'sms')?.recipient).toBe(tenantA.phone);
     expect(rows.find((r) => r.channel === 'email')?.recipient).toBe(tenantA.email);
-  });
-
-  it('CURRENT: the dormant AppointmentConfirmationNotifier, constructed the way app.ts would have to, also writes the confirmation rows — it is a second, unused implementation of the same behaviour', async () => {
-    const appointmentId = await executeApprovedCreateAppointment(tenantA, dormantNotifier());
-
-    const rows = await confirmationRows(tenantA.tenant.tenantId, appointmentId);
-    expect(rows.map((r) => r.channel)).toEqual(['email', 'sms']);
-    expect(rows.find((r) => r.channel === 'sms')?.recipient).toBe(tenantA.phone);
   });
 
   it('CURRENT (T1): a neighbour tenant booking through the live notifier writes only its OWN confirmation rows, and tenant A keeps exactly the rows it had', async () => {
@@ -415,9 +407,8 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
    */
   it('CURRENT (T3): a delivery provider is NOT sufficient — a tenant with autoSendAppointmentReminders=false gets no confirmation row, while a differently-configured neighbour in the same run does', async () => {
     // The second silent-skip path, and unlike delivery mode 'none' this one is
-    // reachable by the owner from settings. Both live notifier implementations
-    // return early on it: transactional-comms-service.ts:355 and the dormant
-    // appointment-confirmation-notifier.ts:42.
+    // reachable by the owner from settings — an owner CHOICE, so it is not
+    // recorded as a failure (transactional-comms-service.ts sendAppointmentNotice).
     const quiet = await seedTenant('Quiet');
     await settingsRepo.create({
       id: crypto.randomUUID(),
@@ -464,11 +455,6 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     expect(
       (await confirmationRows(tenantB.tenant.tenantId, loudAppointment)).map((r) => r.channel),
     ).toEqual(['email', 'sms']);
-
-    // The dormant class agrees — it carries the same early return, so
-    // promoting it would not close this path either.
-    const quietAgain = await executeApprovedCreateAppointment(quiet, dormantNotifier());
-    expect(await confirmationRows(quiet.tenant.tenantId, quietAgain)).toHaveLength(0);
   });
 
   it('CURRENT: a configured provider is still not sufficient — a customer with only ONE contact method gets only that channel`s confirmation', async () => {
@@ -526,13 +512,4 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
     );
     expect(await confirmationRows(emailOnly.tenant.tenantId, stranded)).toHaveLength(0);
   });
-
-  it.fails(
-    'DESIRED (row 3.8): an approved create_appointment writes an appointment_confirmation dispatch row even when app.ts resolves NO delivery provider, so a booked customer is never silently left unconfirmed',
-    async () => {
-      const appointmentId = await executeApprovedCreateAppointment(tenantA, undefined);
-      const rows = await confirmationRows(tenantA.tenant.tenantId, appointmentId);
-      expect(rows.length).toBeGreaterThan(0);
-    },
-  );
 });
