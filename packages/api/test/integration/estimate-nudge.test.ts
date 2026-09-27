@@ -546,19 +546,26 @@ describe(provesExecution('send_estimate_nudge') + 'Postgres integration — voic
     await closeSharedTestDb();
   });
 
-  it('the ILIKE display-text search CANNOT reach this estimate from the spoken name — only the customer→jobs→estimates traversal can', async () => {
-    // The fixture is arranged against the weak query, not for it: neither
-    // estimate_number nor customer_message contains the customer's name, so
-    // `findByTenant({ search })` — the pre-fix resolution path — returns
-    // nothing. This is the assertion that makes the drafting proof above
-    // non-vacuous.
-    const byText = await estimateRepo.findByTenant(tenant.tenantId, {
+  it('only the customer→jobs→estimates traversal resolves the spoken name — the resolution-path document search cannot, while the #1400 list search can', async () => {
+    // #1400 (PR #1413) made the LIST search (the estimates search box) also
+    // match the customer's name. The resolution path must not ride on that:
+    // its document search stays estimate_number/customer_message only, so a
+    // spoken person's name reaches estimates solely through the resolved
+    // customer (and an ambiguous customer is asked about first — A19 in
+    // chat-entity-resolution.test.ts). That is what keeps the drafting proof
+    // above non-vacuous.
+    const byListSearch = await estimateRepo.findByTenant(tenant.tenantId, {
       search: CUSTOMER_DISPLAY_NAME,
       limit: 5,
     });
-    expect(byText).toHaveLength(0);
+    expect(byListSearch.map((e) => e.id)).toEqual([estimate.id]);
+    const byDocumentSearch = await estimateRepo.findByTenant(tenant.tenantId, {
+      documentSearch: CUSTOMER_DISPLAY_NAME,
+      limit: 5,
+    });
+    expect(byDocumentSearch).toHaveLength(0);
     const bySpokenSurname = await estimateRepo.findByTenant(tenant.tenantId, {
-      search: SPOKEN_CUSTOMER_NAME,
+      documentSearch: SPOKEN_CUSTOMER_NAME,
       limit: 5,
     });
     expect(bySpokenSurname).toHaveLength(0);
