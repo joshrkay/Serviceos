@@ -114,6 +114,14 @@ export class TwilioStreamEmulator {
   private receivedFrames: OutboundFrame[] = [];
   /** Auto-incrementing turn index for `eot-<n>` mark names. */
   private turnIndex = 0;
+  /**
+   * Simulated playback clock (performance.now() ms): when the agent audio
+   * received so far finishes "playing" at 20 ms per frame. Server marks are
+   * acknowledged at this time, as Twilio does (#1387).
+   */
+  private playbackEndsAt = 0;
+  /** Scheduled mark acknowledgements, cancelled on hangup. */
+  private readonly pendingMarkAcks = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: TwilioStreamEmulatorDeps) {}
 
@@ -182,23 +190,48 @@ export class TwilioStreamEmulator {
   /**
    * Receive handler. Captures inbound `media` frames (the agent's TTS)
    * along with their wall-clock arrival timestamp via `performance.now()`
-   * for honest TTFA accounting. Other events (`mark`, `clear`, `stop`)
-   * are observed but not acted on — the emulator is a passive collector
-   * of agent audio.
+   * for honest TTFA accounting.
+   *
+   * Server `mark`s are acknowledged the way Twilio does: echoed back once
+   * the audio queued before them has finished playing (20 ms per frame on
+   * a simulated playback clock). The production adapter pauses outbound
+   * TTS after 3 unacknowledged marks, so without this every agent reply
+   * stalled after ~1.5 s of audio (#1387). Layer 2 scripts never barge
+   * in, so `clear` / `stop` are observed but not acted on.
    */
   private onMessage(raw: string): void {
-    let msg: { event?: string; media?: { payload?: string } };
+    let msg: { event?: string; media?: { payload?: string }; mark?: { name?: string } };
     try {
-      msg = JSON.parse(raw) as { event?: string; media?: { payload?: string } };
+      msg = JSON.parse(raw) as typeof msg;
     } catch {
       // The production server only sends JSON; ignore non-JSON debug frames.
       return;
     }
     if (msg.event === 'media' && typeof msg.media?.payload === 'string') {
+      const now = performance.now();
       this.receivedFrames.push({
         payload: msg.media.payload,
-        ts: performance.now(),
+        ts: now,
       });
+      this.playbackEndsAt = Math.max(this.playbackEndsAt, now) + FRAME_PACING_MS;
+    } else if (msg.event === 'mark' && typeof msg.mark?.name === 'string') {
+      const name = msg.mark.name;
+      const delayMs = Math.max(0, this.playbackEndsAt - performance.now());
+      const timer = setTimeout(() => {
+        this.pendingMarkAcks.delete(timer);
+        this.ackMark(name);
+      }, delayMs);
+      this.pendingMarkAcks.add(timer);
+    }
+  }
+
+  private ackMark(name: string): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ event: 'mark', streamSid: this.streamSid, mark: { name } }));
+    } catch {
+      /* socket closing — the ack no longer matters */
     }
   }
 
@@ -314,6 +347,8 @@ export class TwilioStreamEmulator {
    * the socket has already closed are no-ops.
    */
   async hangup(): Promise<void> {
+    for (const timer of this.pendingMarkAcks) clearTimeout(timer);
+    this.pendingMarkAcks.clear();
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try {
