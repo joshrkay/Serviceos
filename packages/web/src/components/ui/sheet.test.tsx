@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { Sheet } from './sheet';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 describe('Sheet', () => {
   it('renders nothing when closed', () => {
@@ -34,5 +35,16 @@ describe('Sheet', () => {
     );
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     expect(onClose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Sheet — #1398 mobile bar', () => {
+  it('the Close button is a ≥44×44 tap target', () => {
+    render(
+      <Sheet open onClose={() => {}} title="Edit">
+        body
+      </Sheet>,
+    );
+    expectTapTarget(screen.getByLabelText('Close'), 'Sheet Close');
   });
 });

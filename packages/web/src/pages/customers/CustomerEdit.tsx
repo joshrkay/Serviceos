@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Check } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { Field, Input, Select, Textarea, Button } from '../../components/ui';
 import { formatApiErrorMessage } from '../../utils/api-errors';
@@ -292,21 +293,34 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
           </Select>
         </Field>
         {/* D4: SMS consent checkbox */}
-        <div className="md:col-span-2 flex items-start gap-3 rounded-lg border border-border bg-secondary/30 p-3">
+        {/* #1398 — the whole ≥44px row is the checkbox's tap target: the
+            native box is visually hidden (still focusable/announced) and
+            drawn as the indicator span. */}
+        <label
+          htmlFor="smsConsent"
+          className="md:col-span-2 flex w-full min-h-11 cursor-pointer items-start gap-3 rounded-lg border border-border bg-secondary/30 p-3"
+        >
           <input
             type="checkbox"
             id="smsConsent"
             checked={form.smsConsent}
             onChange={(e) => setField('smsConsent', e.target.checked)}
-            className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+            aria-describedby="smsConsent-help"
+            className="peer sr-only"
           />
-          <label htmlFor="smsConsent" className="flex-1 cursor-pointer">
-            <span className="text-sm text-foreground">SMS messaging consent</span>
-            <p className="text-xs text-muted-foreground mt-0.5">
+          <span
+            aria-hidden="true"
+            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border border-border bg-card text-primary-foreground peer-checked:border-primary peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary/40"
+          >
+            {form.smsConsent && <Check size={12} />}
+          </span>
+          <span className="flex-1">
+            <span className="block text-sm text-foreground">SMS messaging consent</span>
+            <span id="smsConsent-help" className="block text-xs text-muted-foreground mt-0.5">
               Customer has consented to receive SMS messages including appointment reminders, estimates, and invoices.
-            </p>
-          </label>
-        </div>
+            </span>
+          </span>
+        </label>
         <Field label="Customer notes" className="md:col-span-2">
           <Textarea
             aria-label="communicationNotes"

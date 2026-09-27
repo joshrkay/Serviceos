@@ -588,7 +588,8 @@ export function createJobRouter(
           req.body,
           jobRepo,
           req.auth!.userId,
-          auditRepo
+          auditRepo,
+          req.auth!.role
         );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });

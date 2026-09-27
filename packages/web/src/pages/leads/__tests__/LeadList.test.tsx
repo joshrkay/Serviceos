@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LeadList } from '../LeadList';
+import { expectAllTapTargets } from '../../../test-utils/tap-target';
 
 vi.mock('../../../utils/api-fetch', () => ({
   apiFetch: vi.fn(),
@@ -49,6 +50,13 @@ describe('Leads — LeadList kanban (P9-001)', () => {
     for (const chip of chips) {
       expect(chip.className, chip.textContent ?? '').toMatch(/(^|\s)min-h-11(\s|$)/);
     }
+  });
+
+  it('#1398 — every page-level control (New Lead, chips, owner filter, cards) is a ≥44×44 tap target', async () => {
+    mockListOnce();
+    const { container } = render(<LeadList />);
+    await screen.findByText('Alice Wong');
+    expectAllTapTargets(container, 'LeadList');
   });
 
   it('renders kanban columns and lead cards from the API', async () => {

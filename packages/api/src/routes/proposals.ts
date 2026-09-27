@@ -37,6 +37,7 @@ import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
+import type { EstimateRepository } from '../estimates/estimate';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -103,6 +104,9 @@ export function createProposalsRouter(
   // QA 2026-09-16 (AST-04) — approval-time reference checks (an id in the
   // payload must name a record this tenant owns). Absent → missingFields only.
   approvalReferenceChecks?: ApprovalReferenceCheck[],
+  // #1405 — the card's "which accepted estimate?" pick re-drafts the invoice
+  // from the picked estimate. Absent → the pick fills the id only.
+  estimateRepo?: Pick<EstimateRepository, 'findById'>,
 ): Router {
   const router = Router();
 
@@ -508,6 +512,7 @@ export function createProposalsRouter(
           auditRepo,
           correctionRepo,
           entityAliasCandidateCapture,
+          estimateRepo,
         );
         res.json(result);
       } catch (err) {

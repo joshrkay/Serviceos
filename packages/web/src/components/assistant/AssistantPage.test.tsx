@@ -1,8 +1,9 @@
 import React from 'react';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { AssistantPage } from './AssistantPage';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 // Mock the authenticated fetch wrapper so tests can assert the page uses it
@@ -171,6 +172,48 @@ describe('AssistantPage', () => {
 });
 
 // ─── Journey QA 2026-07-02 (bug 11): thread must survive the post-turn refetch ─
+
+describe('#1398 — mobile bar', () => {
+  it('every control on the welcome screen (header, chips, composer) is a ≥44×44 tap target', async () => {
+    const { container } = renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    expectAllTapTargets(container, 'AssistantPage');
+  });
+
+  // #1412 — a reply's reaction/copy actions appeared only on mouse hover, so a
+  // touch user could never reach them, and they were 24px.
+  it('a reply’s reaction and copy actions are reachable without hover and ≥44×44', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: 'Two estimates are waiting.' }, conversationId: 'c-1412' }),
+    );
+    const { container } = renderPage();
+    const input = await screen.findByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'What is waiting?' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    const reply = (await screen.findByText('Two estimates are waiting.')).closest('.group') as HTMLElement;
+
+    expect(within(reply).getByRole('button', { name: 'Helpful' })).toBeInTheDocument();
+    expect(within(reply).getByRole('button', { name: 'Not helpful' })).toBeInTheDocument();
+    expect(within(reply).getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+    expectAllTapTargets(container, 'AssistantPage with a reply');
+  });
+
+  // #1412 — the scroll-to-latest button was 36px.
+  it('the scroll-to-latest button is ≥44×44', async () => {
+    const { container } = renderPage();
+    await screen.findByText(/I'm your AI assistant/);
+    const thread = container.querySelector('.flex-1.overflow-y-auto') as HTMLElement;
+    Object.defineProperty(thread, 'scrollHeight', { configurable: true, value: 2000 });
+    Object.defineProperty(thread, 'clientHeight', { configurable: true, value: 500 });
+    Object.defineProperty(thread, 'scrollTop', { configurable: true, value: 0 });
+    fireEvent.scroll(thread);
+
+    const button = await screen.findByRole('button', { name: 'Scroll to latest' });
+    expectAllTapTargets(button.parentElement!, 'scroll-to-latest');
+  });
+});
 
 describe('journey QA bug 11 — reply survives the post-turn refetch', () => {
   async function sendFirstTurn() {

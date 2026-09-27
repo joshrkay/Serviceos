@@ -151,14 +151,14 @@ export function HomeConversationPanel() {
               onKeyDown={handleKeyDown}
               placeholder={dictation.isRecording ? 'Listening…' : 'Ask anything or give a command…'}
               aria-label="Message the assistant"
-              className="flex-1 bg-transparent text-sm text-foreground placeholder-muted-foreground outline-none min-w-0 py-2"
+              className="flex-1 min-h-11 bg-transparent text-sm text-foreground placeholder-muted-foreground outline-none min-w-0 py-2"
             />
             <button
               type="button"
               onClick={toggleDictation}
               aria-label={dictation.isRecording ? 'Stop dictation' : 'Voice'}
               aria-pressed={dictation.isRecording}
-              className={`flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors ${
+              className={`-mr-2 flex size-11 shrink-0 items-center justify-center rounded-lg transition-colors ${
                 dictation.isRecording
                   ? 'bg-destructive/10 text-destructive'
                   : 'text-muted-foreground hover:text-primary hover:bg-primary/10'

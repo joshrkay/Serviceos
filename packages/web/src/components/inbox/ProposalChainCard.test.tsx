@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { InboxPage } from './InboxPage';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 const apiFetch = vi.fn();
 vi.mock('../../lib/apiClient', () => ({
@@ -144,6 +145,22 @@ describe('InboxPage — multi-action chains', () => {
         body: JSON.stringify({ proposalIds: ['p-cust', 'p-job'] }),
       }),
     );
+  });
+
+  it('#1398 — the chain\'s Approve all / Reject all actions are ≥44×44 tap targets', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          chainProposal('p-cust', 'create_customer', 'Create customer Jane Doe', 0, []),
+          chainProposal('p-job', 'create_job', 'Open a job for Jane', 1, [0]),
+        ],
+        summary: { totalCount: 2, criticalCount: 0, highCount: 0, normalCount: 2, lowCount: 0, truncated: false },
+      }),
+    );
+    render(<InboxPage />);
+    const chain = await waitFor(() => screen.getByTestId('inbox-chain'));
+    expectTapTarget(within(chain).getByRole('button', { name: /approve all/i }), 'Approve all');
+    expectTapTarget(within(chain).getByRole('button', { name: /reject all/i }), 'Reject all');
   });
 
   it('renders standalone proposals as normal rows alongside chains', async () => {

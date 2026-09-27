@@ -150,7 +150,7 @@ export function CustomerRecordsPanel({ customerId }: { customerId: string }) {
             role="tab"
             aria-selected={tab === t.key}
             onClick={() => setTab(t.key)}
-            className={`rounded-full border px-3.5 py-1.5 text-xs transition-colors ${
+            className={`min-h-11 min-w-11 rounded-full border px-3.5 py-1.5 text-xs transition-colors ${
               tab === t.key
                 ? 'bg-primary border-primary text-primary-foreground'
                 : 'border-border text-muted-foreground hover:border-border'
@@ -182,7 +182,7 @@ export function CustomerRecordsPanel({ customerId }: { customerId: string }) {
             <li key={row.id}>
               <Link
                 to={row.href}
-                className="flex items-center gap-3 rounded-xl border border-border px-3.5 py-2.5 transition-colors hover:border-primary/40 hover:bg-secondary/30"
+                className="min-h-11 min-w-11 flex items-center gap-3 rounded-xl border border-border px-3.5 py-2.5 transition-colors hover:border-primary/40 hover:bg-secondary/30"
               >
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-foreground">{row.title}</span>

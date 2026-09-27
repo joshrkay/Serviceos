@@ -218,7 +218,6 @@ function MessageBubble({
   onApproved?: (input: StartUndoInput) => void;
 }) {
   const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
-  const [showActions, setShowActions] = useState(false);
   const isUser = msg.role === 'user';
 
   // Format markdown-ish bold
@@ -281,8 +280,6 @@ function MessageBubble({
     <div
       className="flex gap-3 mb-4 group"
       style={{ animation: 'fadeSlideUp 0.25s ease' }}
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
     >
       <AvatarAI />
 
@@ -384,26 +381,37 @@ function MessageBubble({
         <div className="flex items-center gap-3 mt-1.5 ml-1">
           <p className="text-xs text-slate-400">{msg.time}</p>
 
-          {/* Hover actions */}
-          {showActions && !msg.proposal && (
-            <div className="flex items-center gap-1" style={{ animation: 'fadeIn 0.15s ease' }}>
+          {/* Reply actions. #1412 — always rendered so a touch user can reach
+              them (hover never fires on a phone), each a 44px target; on a
+              pointer device they stay quiet until the row is hovered or
+              focused. */}
+          {!msg.proposal && (
+            <div className="flex items-center md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100 transition-opacity">
               <button
+                type="button"
+                aria-label="Helpful"
+                aria-pressed={reaction === 'up'}
                 onClick={() => setReaction(r => r === 'up' ? null : 'up')}
-                className={`flex size-6 items-center justify-center rounded-full transition-colors ${reaction === 'up' ? 'bg-green-100 text-green-600' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
+                className={`flex size-11 items-center justify-center rounded-full transition-colors ${reaction === 'up' ? 'bg-green-100 text-green-600' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
               >
-                <ThumbsUp size={11} />
+                <ThumbsUp size={13} />
               </button>
               <button
+                type="button"
+                aria-label="Not helpful"
+                aria-pressed={reaction === 'down'}
                 onClick={() => setReaction(r => r === 'down' ? null : 'down')}
-                className={`flex size-6 items-center justify-center rounded-full transition-colors ${reaction === 'down' ? 'bg-red-100 text-red-500' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
+                className={`flex size-11 items-center justify-center rounded-full transition-colors ${reaction === 'down' ? 'bg-red-100 text-red-500' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
               >
-                <ThumbsDown size={11} />
+                <ThumbsDown size={13} />
               </button>
               <button
+                type="button"
+                aria-label="Copy message"
                 onClick={() => navigator.clipboard?.writeText(msg.content)}
-                className="flex size-6 items-center justify-center rounded-full text-slate-300 hover:text-slate-500 hover:bg-slate-100 transition-colors"
+                className="flex size-11 items-center justify-center rounded-full text-slate-300 hover:text-slate-500 hover:bg-slate-100 transition-colors"
               >
-                <Copy size={11} />
+                <Copy size={13} />
               </button>
             </div>
           )}
@@ -1250,7 +1258,7 @@ export function AssistantPage() {
                 setLocalFlag('rivet:tts-enabled', String(next));
                 if (!next) stopTTS();
               }}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+              className={`flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors ${
                 ttsEnabled
                   ? 'border-indigo-200 bg-indigo-50 text-indigo-600'
                   : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'
@@ -1266,7 +1274,7 @@ export function AssistantPage() {
               title={voiceConversation.active ? 'End conversation mode' : 'Start conversation mode'}
               aria-pressed={voiceConversation.active}
               disabled={!voiceConversation.supported}
-              className={`flex items-center gap-1.5 min-h-11 rounded-lg border px-3 text-xs transition-colors disabled:opacity-40 ${
+              className={`flex items-center gap-1.5 min-h-11 min-w-11 rounded-lg border px-3 text-xs transition-colors disabled:opacity-40 ${
                 voiceConversation.active
                   ? 'border-green-300 bg-green-50 text-green-700'
                   : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
@@ -1278,7 +1286,7 @@ export function AssistantPage() {
             <button
               onClick={() => setLiveSessionOpen(v => !v)}
               title="Live voice session"
-              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+              className={`flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg border px-3 text-xs transition-colors ${
                 liveSessionOpen
                   ? 'border-blue-300 bg-blue-50 text-blue-700'
                   : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
@@ -1286,7 +1294,7 @@ export function AssistantPage() {
             >
               <PhoneCall size={12} /> Live session
             </button>
-            <button className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
+            <button className="flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
               <ChevronDown size={12} /> Context
             </button>
           </div>
@@ -1321,8 +1329,10 @@ export function AssistantPage() {
         {/* Scroll to bottom btn */}
         {showScrollBtn && (
           <button
+            type="button"
+            aria-label="Scroll to latest"
             onClick={scrollToBottom}
-            className="fixed bottom-32 right-6 flex size-9 items-center justify-center rounded-full bg-white border border-slate-200 shadow-md text-slate-500 hover:bg-slate-50 transition-all z-10"
+            className="fixed bottom-32 right-6 flex size-11 items-center justify-center rounded-full bg-white border border-slate-200 shadow-md text-slate-500 hover:bg-slate-50 transition-all z-10"
             style={{ animation: 'fadeIn 0.2s ease' }}
           >
             <ChevronDown size={16} />
@@ -1338,7 +1348,7 @@ export function AssistantPage() {
               <button
                 key={text}
                 onClick={() => send(text)}
-                className="shrink-0 flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:border-blue-300 hover:text-blue-700 hover:bg-blue-50 transition-colors"
+                className="shrink-0 flex min-h-11 min-w-11 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs text-slate-600 hover:border-blue-300 hover:text-blue-700 hover:bg-blue-50 transition-colors"
               >
                 <Icon size={10} className="text-slate-400" />
                 {text}
@@ -1463,7 +1473,7 @@ export function AssistantPage() {
                 <button
                   onClick={() => setAttachPickerOpen(v => !v)}
                   aria-label="Attach"
-                  className={`flex size-10 items-center justify-center rounded-xl border transition-colors ${
+                  className={`flex size-11 items-center justify-center rounded-xl border transition-colors ${
                     attachPickerOpen
                       ? 'border-blue-300 bg-blue-50 text-blue-600'
                       : 'border-slate-200 bg-white text-slate-400 hover:text-slate-600 hover:border-slate-300'
@@ -1480,7 +1490,7 @@ export function AssistantPage() {
               </div>
 
               {/* Text input */}
-              <div className={`flex flex-1 items-end gap-2 rounded-2xl border px-3 py-2.5 transition-colors ${
+              <div className={`flex flex-1 items-end gap-2 rounded-2xl border px-3 transition-colors ${
                 input.length > 0 || pendingAttachment?.length
                   ? 'border-blue-300 bg-white shadow-sm'
                   : 'border-slate-200 bg-slate-50'
@@ -1497,14 +1507,14 @@ export function AssistantPage() {
                   onKeyDown={handleKeyDown}
                   placeholder={pendingAttachment?.length ? 'Add a note about this attachment…' : 'Ask anything or give a command…'}
                   rows={1}
-                  className="flex-1 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none leading-relaxed"
+                  className="flex-1 min-h-11 py-2.5 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none leading-relaxed"
                   style={{ maxHeight: 120 }}
                 />
 
                 {/* Mic inside box */}
                 <button
                   onClick={() => setVoiceMode(true)}
-                  className="shrink-0 flex size-7 items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors mb-0.5"
+                  className="-mr-2 shrink-0 flex size-11 items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
                 >
                   <Mic size={15} />
                 </button>
@@ -1514,7 +1524,7 @@ export function AssistantPage() {
               <button
                 onClick={handleSend}
                 disabled={!canSend && !typing}
-                className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-all ${
+                className={`flex size-11 shrink-0 items-center justify-center rounded-xl transition-all ${
                   canSend
                     ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-md active:scale-95'
                     : 'bg-slate-100 text-slate-300 cursor-not-allowed'

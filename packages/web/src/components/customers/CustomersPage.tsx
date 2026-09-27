@@ -158,6 +158,9 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
         ...address,
         accessNotes: form.locNotes || undefined,
         isPrimary: true,
+        // #1401 — persisted on the location (service_locations.service_types)
+        // so the directory's service-type chips can match it.
+        serviceTypes: form.locServiceTypes,
       });
       onCreate();
       setStep('done');
@@ -387,22 +390,35 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                 />
               </div>
 
-              {/* D4: SMS consent checkbox */}
-              <div className="flex items-start gap-3 rounded-xl border border-border bg-secondary/30 p-3">
+              {/* D4: SMS consent checkbox. #1412 — the same labelled-row pattern
+                  as CustomerEdit: the whole ≥44px row is the tap target; the
+                  native box is visually hidden (still focusable/announced) and
+                  drawn as the indicator span. */}
+              <label
+                htmlFor="smsConsentCreate"
+                className="flex w-full min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-border bg-secondary/30 p-3"
+              >
                 <input
                   type="checkbox"
                   id="smsConsentCreate"
                   checked={form.smsConsent}
                   onChange={(e) => setForm(f => ({ ...f, smsConsent: e.target.checked }))}
-                  className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                  aria-describedby="smsConsentCreate-help"
+                  className="peer sr-only"
                 />
-                <label htmlFor="smsConsentCreate" className="flex-1 cursor-pointer">
-                  <span className="text-sm text-foreground">SMS consent</span>
-                  <p className="text-xs text-muted-foreground mt-0.5">
+                <span
+                  aria-hidden="true"
+                  className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border border-border bg-card text-primary-foreground peer-checked:border-primary peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary/40"
+                >
+                  {form.smsConsent && <Check size={12} />}
+                </span>
+                <span className="flex-1">
+                  <span className="block text-sm text-foreground">SMS consent</span>
+                  <span id="smsConsentCreate-help" className="block text-xs text-muted-foreground mt-0.5">
                     Customer agrees to receive text messages for appointments, estimates, and invoices.
-                  </p>
-                </label>
-              </div>
+                  </span>
+                </span>
+              </label>
 
               <button
                 onClick={handleAddCustomer}
@@ -510,10 +526,25 @@ export function CustomersPage() {
 
   const { data, total, isLoading, error, setSearch, setFilters, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
+  // #1401 — service-type chips and the Archived view both filter server-side
+  // (`?serviceType=` / `?archived=only`), so a paginated list's data and
+  // total agree. They compose into one filter set.
+  const applyFilters = (svc: Filter, archived: boolean) => {
+    setFilters({
+      ...(svc !== 'All' ? { serviceType: svc } : {}),
+      ...(archived ? { archived: 'only' } : {}),
+    });
+  };
+
   const toggleArchived = () => {
     const next = !showArchived;
     setShowArchived(next);
-    setFilters(next ? { archived: 'only' } : {});
+    applyFilters(filter, next);
+  };
+
+  const selectFilter = (next: Filter) => {
+    setFilter(next);
+    applyFilters(next, showArchived);
   };
 
   // customer_search_run (U6) — a debounced "search executed" signal, once the
@@ -533,10 +564,8 @@ export function CustomersPage() {
   // service-type filter above).
   const availableTags = [...new Set(data.flatMap(c => c.tags ?? []))].sort();
 
-  // Client-side service type filter (API doesn't support this filter)
-  let filtered = filter === 'All'
-    ? data
-    : data.filter(c => customerServiceTypes(c).includes(filter));
+  // #1401 — the service-type filter is applied server-side (see applyFilters).
+  let filtered = data;
   if (tagFilter) {
     filtered = filtered.filter(c => (c.tags ?? []).includes(tagFilter));
   }
@@ -559,26 +588,26 @@ export function CustomersPage() {
           </div>
           <button
             onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors">
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors">
             <Plus size={14} /> Add customer
           </button>
         </div>
 
         {/* search */}
-        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 mt-4">
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 mt-4">
           <Search size={15} className="text-muted-foreground shrink-0" />
           <input
             onChange={e => { setSearchTerm(e.target.value); setSearch(e.target.value); }}
             placeholder="Search name, address, phone…"
-            className="flex-1 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
+            className="flex-1 min-h-11 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
           />
         </div>
 
         {/* filter chips */}
-        <div className="flex gap-2 mt-3 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+        <div data-testid="service-filters" className="flex gap-2 mt-3 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
           {(['All', 'HVAC', 'Plumbing', 'Painting'] as Filter[]).map(f => (
-            <button key={f} onClick={() => setFilter(f)}
-              className={`flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+            <button key={f} type="button" onClick={() => selectFilter(f)} aria-pressed={filter === f}
+              className={`flex min-h-11 min-w-11 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                 filter === f
                   ? 'bg-primary border-primary text-primary-foreground'
                   : 'border-border text-muted-foreground hover:border-border'
@@ -591,7 +620,7 @@ export function CustomersPage() {
             type="button"
             onClick={toggleArchived}
             aria-pressed={showArchived}
-            className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+            className={`flex min-h-11 min-w-11 items-center gap-1.5 rounded-full border px-3.5 text-xs whitespace-nowrap transition-all shrink-0 ${
               showArchived
                 ? 'bg-primary border-primary text-primary-foreground'
                 : 'border-border text-muted-foreground hover:border-border'
@@ -609,7 +638,7 @@ export function CustomersPage() {
           >
             <button
               onClick={() => setTagFilter('')}
-              className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+              className={`min-h-11 min-w-11 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                 tagFilter === ''
                   ? 'bg-primary border-primary text-primary-foreground'
                   : 'border-border text-muted-foreground hover:border-border'
@@ -621,7 +650,7 @@ export function CustomersPage() {
               <button
                 key={tag}
                 onClick={() => setTagFilter(t => (t === tag ? '' : tag))}
-                className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                className={`min-h-11 min-w-11 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                   tagFilter === tag
                     ? 'bg-primary border-primary text-primary-foreground'
                     : 'border-border text-muted-foreground hover:border-border'
@@ -653,7 +682,7 @@ export function CustomersPage() {
                 <button
                   key={c.id}
                   onClick={() => navigate(`/customers/${c.id}`)}
-                  className="flex items-center gap-3.5 rounded-2xl bg-card border border-border px-4 py-3.5 text-left hover:border-border hover:shadow-sm transition-all active:scale-[0.99]"
+                  className="min-h-11 min-w-11 flex items-center gap-3.5 rounded-2xl bg-card border border-border px-4 py-3.5 text-left hover:border-border hover:shadow-sm transition-all active:scale-[0.99]"
                 >
                   <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs">
                     {name.split(' ').map(n => n[0]).join('')}

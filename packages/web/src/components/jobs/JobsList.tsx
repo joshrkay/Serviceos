@@ -96,7 +96,7 @@ export function JobsList() {
           </div>
           <button
             onClick={() => setShowNew(true)}
-            className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2 text-sm hover:bg-primary/90 transition-colors">
+            className="flex min-h-11 min-w-11 items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2 text-sm hover:bg-primary/90 transition-colors">
             <Plus size={14} /> New job
           </button>
         </div>
@@ -132,7 +132,7 @@ export function JobsList() {
             <button
               key={t.value}
               onClick={() => applyTabFilter(t.value)}
-              className={`shrink-0 min-h-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 min-h-11 min-w-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-card border border-border text-foreground hover:bg-secondary'
@@ -238,9 +238,12 @@ export function JobsList() {
                       {techName && (uiStatus === 'Scheduled' || uiStatus === 'In Progress') && (
                         <button
                           onClick={e => { e.stopPropagation(); navigate(`/jobs/${job.id}?view=tech`); }}
-                          className="ml-auto flex items-center gap-1 text-xs bg-primary/10 text-primary border border-primary/30 rounded-full px-2 py-0.5 hover:bg-primary/15 transition-colors shrink-0"
+                          // The button is the 44px hit area; the pill is drawn inside it.
+                          className="group ml-auto -my-3 flex min-h-11 min-w-11 shrink-0 items-center justify-center"
                         >
-                          <Mic size={9} /> Field
+                          <span className="flex items-center gap-1 text-xs bg-primary/10 text-primary border border-primary/30 rounded-full px-2 py-0.5 group-hover:bg-primary/15 transition-colors">
+                            <Mic size={9} /> Field
+                          </span>
                         </button>
                       )}
                     </div>

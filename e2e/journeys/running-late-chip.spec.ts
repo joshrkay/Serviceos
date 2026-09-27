@@ -261,7 +261,7 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
     const customer = await postJson(apiCtx, `${API_URL}/api/customers`, owner.authHeaders, {
       firstName: 'ChipRow',
       lastName: `Customer ${Date.now()}`,
-      primaryPhone: '555-0166',
+      primaryPhone: '+15555550166', // #1401 — customer phones must normalise to E.164
       email: `chiprow+${Date.now()}@example.com`,
       preferredChannel: 'sms',
       smsConsent: true,
@@ -297,7 +297,7 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
     const nextCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, owner.authHeaders, {
       firstName: 'ChipRowNext',
       lastName: `Customer ${Date.now()}`,
-      primaryPhone: '555-0177',
+      primaryPhone: '+15555550177', // #1401 — customer phones must normalise to E.164
       email: `chiprownext+${Date.now()}@example.com`,
       preferredChannel: 'sms',
       smsConsent: true,
@@ -334,7 +334,7 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
     const neighbourCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, neighbour.authHeaders, {
       firstName: 'Neighbour',
       lastName: `Customer ${Date.now()}`,
-      primaryPhone: '555-0188',
+      primaryPhone: '602-555-0188',
       email: `neighbour+${Date.now()}@example.com`,
       preferredChannel: 'sms',
       smsConsent: true,
@@ -364,7 +364,7 @@ test.describe('running-late chip row (4.6) — real Postgres, no DEV_AUTH_BYPASS
     const neighbourNextCustomer = await postJson(apiCtx, `${API_URL}/api/customers`, neighbour.authHeaders, {
       firstName: 'NeighbourNext',
       lastName: `Customer ${Date.now()}`,
-      primaryPhone: '555-0199',
+      primaryPhone: '602-555-0199',
       email: `neighbournext+${Date.now()}@example.com`,
       preferredChannel: 'sms',
       smsConsent: true,

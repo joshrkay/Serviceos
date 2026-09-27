@@ -23,10 +23,13 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
     'bg-destructive text-destructive-foreground hover:bg-destructive/90 active:bg-destructive/80 disabled:hover:bg-destructive',
 };
 
+// Every size clears the 44×44 mobile tap-target bar (CLAUDE.md, #1398): `sm`
+// and `md` keep their compact visual height and padding, but the box itself
+// never drops below min-h-11 / min-w-11.
 const SIZE_CLASSES: Record<ButtonSize, string> = {
-  sm: 'h-8 px-3 text-xs gap-1.5 rounded-lg',
-  md: 'h-10 px-4 text-sm gap-2 rounded-xl',
-  lg: 'h-12 px-5 text-sm gap-2 rounded-xl',
+  sm: 'h-8 min-h-11 min-w-11 px-3 text-xs gap-1.5 rounded-lg',
+  md: 'h-10 min-h-11 min-w-11 px-4 text-sm gap-2 rounded-xl',
+  lg: 'h-12 min-h-11 min-w-11 px-5 text-sm gap-2 rounded-xl',
 };
 
 export interface ButtonProps
