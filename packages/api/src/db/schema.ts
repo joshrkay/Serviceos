@@ -7182,7 +7182,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS e1_reviewed_at TIMESTAMPTZ;
   `,
 
-  '294_service_location_service_types': `
+  '295_service_location_service_types': `
     -- #1401 — the trades a service location is serviced for (HVAC / Plumbing /
     -- Painting chips in the customers directory). The shared contract
     -- (customerLocationSummarySchema) and the web ServiceLocation model both
