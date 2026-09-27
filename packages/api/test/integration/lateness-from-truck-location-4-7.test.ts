@@ -30,9 +30,12 @@
  *    dependency at all, so `lateness` is `undefined` on every board item the
  *    product has ever served.
  *
- * The decision this row needs — wire the evaluator or retire it — is Josh's.
- * These tests take neither: they pin the ingestion that works, the absence of
- * the runtime edge, and state the criterion as the one `it.fails`.
+ * #1079 (2026-09-26) took the "wire it" option: `createDispatchRoutes` now
+ * accepts the ping repository and, when it is wired, supplies
+ * `getAppointmentLateness` (dispatch/lateness-resolver.ts), which reads the
+ * appointment's pings + service-location coordinates and calls
+ * `computeDispatchLateness`. The board is read-only — nothing here notifies a
+ * customer. The former `it.fails` desired state is now a passing assertion.
  *
  * Run: cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run \
  *   --config vitest.integration.config.ts --reporter=verbose \
@@ -41,8 +44,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
-import { readFileSync, readdirSync, statSync } from 'fs';
-import { join, resolve } from 'path';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, TestTenant } from './shared';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
@@ -62,34 +63,6 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 /** Service address the fixture pings sit on top of (Phoenix). */
 const SITE = { lat: 33.4484, lng: -112.074 };
 
-/** Every .ts file under packages/api/src. */
-function srcFiles(dir: string, acc: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      srcFiles(full, acc);
-    } else if (entry.endsWith('.ts')) {
-      acc.push(full);
-    }
-  }
-  return acc;
-}
-
-/**
- * Files under `src/` that mention `symbol` at all, excluding the file that
- * declares it. A value export with no such file has no runtime caller: a
- * type-only binding cannot survive emit, and a call cannot happen without the
- * name appearing.
- */
-function srcFilesReferencing(symbol: string, declaredIn: string): string[] {
-  const srcRoot = resolve(__dirname, '../../src');
-  const declaringFile = resolve(srcRoot, declaredIn);
-  const pattern = new RegExp(`\\b${symbol}\\b`);
-  return srcFiles(srcRoot)
-    .filter((file) => file !== declaringFile)
-    .filter((file) => pattern.test(readFileSync(file, 'utf8')))
-    .map((file) => file.slice(srcRoot.length + 1));
-}
 
 interface SeededTenant {
   tenant: TestTenant;
@@ -330,7 +303,17 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     });
     app.use(
       '/api/dispatch',
-      createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo, auditRepo }),
+      // The deps app.ts passes — including the ping repo (#1079), which is
+      // what turns on the board's lateness evaluation.
+      createDispatchRoutes({
+        appointmentRepo,
+        assignmentRepo,
+        jobRepo,
+        customerRepo,
+        locationRepo,
+        auditRepo,
+        locationPingRepo: pingRepo,
+      }),
     );
     return app;
   }
@@ -396,24 +379,6 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     await closeSharedTestDb();
   });
 
-  it('STRUCTURAL: computeDispatchLateness — the only value export of dispatch/lateness.ts — is referenced by NO file under src/; negative control: getDispatchBoardData is referenced by the dispatch route', () => {
-    // Negative control FIRST. A scanner that can only return [] proves
-    // nothing, so show it finds a function the product really does call.
-    const control = srcFilesReferencing('getDispatchBoardData', 'dispatch/board-query.ts');
-    expect(control).toContain('dispatch/routes.ts');
-    expect(control.length).toBeGreaterThan(0);
-
-    // The claim under test: no runtime caller of the evaluator.
-    expect(srcFilesReferencing('computeDispatchLateness', 'dispatch/lateness.ts')).toEqual([]);
-
-    // And the module's single importer binds only the RESULT TYPE, never a value.
-    const boardQuery = readFileSync(
-      resolve(__dirname, '../../src/dispatch/board-query.ts'),
-      'utf8',
-    );
-    expect(boardQuery).toContain("import { DispatchLatenessResult } from './lateness'");
-  });
-
   it('CURRENT: a technician location update persists to technician_location_pings and reads back tenant-scoped through the repository the route wires', async () => {
     const byAppointment = await pingRepo.listByAppointment(
       tenantA.tenant.tenantId,
@@ -456,12 +421,6 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
       tenantB.appointmentId,
     );
     expect(bSeesOwn).toHaveLength(4);
-  });
-
-  it('CURRENT: with those pings in the database, the dispatch board built the way the production route builds it carries NO lateness on any item', async () => {
-    const items = await boardItems(tenantA);
-    expect(items.some((item) => item.id === tenantA.appointmentId)).toBe(true);
-    expect(items.every((item) => item.lateness === undefined)).toBe(true);
   });
 
   it('CURRENT: ingestion through the PRODUCTION route emits technician_location.batch_ingested, readable back via findByEntity on the technician entity', async () => {
@@ -586,25 +545,27 @@ describe('Postgres integration — §8.4 row 4.7 lateness from truck location', 
     expect(crossTenant).toHaveLength(0);
   });
 
-  /**
-   * THE ROW'S GAP, stated as the row states it. Where it WOULD land:
-   * `DispatchBoardItem.lateness` (board-query.ts:40) — the field
-   * `GET /api/dispatch/board` already serializes, populated by the
-   * `getAppointmentLateness` hook (board-query.ts:91) that the production
-   * route never supplies.
-   *
-   * Wire or retire is Josh's decision — see the drafted issue in the lane
-   * report. This test only pins that the criterion does not hold today.
-   */
-  it.fails(
-    'DESIRED (row 4.7): with dwell pings on the service location, the dispatch board item for that appointment carries a lateness state and a confidence breakdown',
-    async () => {
-      const items = await boardItems(tenantA);
-      const item = items.find((i) => i.id === tenantA.appointmentId) as
-        | { lateness?: { latenessState?: string; confidenceBreakdown?: unknown } }
-        | undefined;
-      expect(item?.lateness?.latenessState).toBeDefined();
-      expect(item?.lateness?.confidenceBreakdown).toBeDefined();
-    },
-  );
+  it('#1079 (row 4.7): with dwell pings on the service location, the dispatch board item for that appointment carries a lateness state and a confidence breakdown', async () => {
+    const items = await boardItems(tenantA);
+    const item = items.find((i) => i.id === tenantA.appointmentId) as
+      | {
+          lateness?: {
+            progressState?: string;
+            latenessState?: string;
+            confidenceBreakdown?: Record<string, number>;
+            promptAudit?: { filteredPingCount?: number };
+          };
+        }
+      | undefined;
+    // Six accurate pings parked on the site for ~30 minutes: the truck is AT
+    // the site, and every ping passed the accuracy filter.
+    expect(item?.lateness?.progressState).toBe('at_site');
+    expect(item?.lateness?.promptAudit?.filteredPingCount).toBe(6);
+    expect(item?.lateness?.latenessState).toMatch(/^(on_track|at_risk|late_prompt_required|late_confirmed)$/);
+    expect(Object.keys(item?.lateness?.confidenceBreakdown ?? {}).sort()).toEqual([
+      'accuracy',
+      'movementConsistency',
+      'recency',
+    ]);
+  });
 });

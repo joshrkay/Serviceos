@@ -46,13 +46,14 @@ describe('redactedRoute', () => {
     expect(redactedRoute(req)).toBe('/public/estimates/[REDACTED]/accept');
   });
 
-  it('scrubs a token path segment and ?token= when request logging never ran', () => {
+  it('scrubs a token path segment and drops the query when request logging never ran', () => {
     const req = fakeReq({
       path: '/public/estimates/SECRET-TOKEN/accept',
       originalUrl: '/public/estimates/SECRET-TOKEN/accept?token=QUERY-SECRET&tier=2',
     });
     const route = redactedRoute(req);
-    expect(route).toBe('/public/estimates/[REDACTED]/accept?token=[REDACTED]&tier=2');
+    // #1205 — the query string is dropped entirely, not just token-scrubbed.
+    expect(route).toBe('/public/estimates/[REDACTED]/accept');
     expect(route).not.toContain('SECRET');
   });
 
@@ -79,8 +80,29 @@ describe('captureServerError', () => {
 
     expect(calls.captured).toHaveLength(1);
     const route = calls.tags.find(([k]) => k === 'route')?.[1];
-    expect(route).toBe('/public/invoices/[REDACTED]/pay?token=[REDACTED]');
+    expect(route).toBe('/public/invoices/[REDACTED]/pay');
     expect(JSON.stringify(calls.tags)).not.toContain('SECRET');
     expect(calls.tags).toContainEqual(['tenant_id', 'tenant-1']);
+  });
+});
+
+describe('#1205 — route tag never carries the query string', () => {
+  afterEach(() => resetSentryClient());
+
+  it('a 500 on a customer search does not put the searched name/phone in the route tag', () => {
+    const { client, calls } = makeFakeClient();
+    setSentryClient(client);
+    const req = fakeReq({
+      path: '/',
+      originalUrl: '/api/customers?search=Jane%20Doe%20602-555-0199',
+      // request logging ran and redacted only token-like params
+      safeRequestLog: { route: '/api/customers?search=Jane%20Doe%20602-555-0199' },
+    });
+
+    captureServerError(new Error('boom'), req);
+
+    const route = calls.tags.find(([k]) => k === 'route')?.[1];
+    expect(route).toBe('/api/customers');
+    expect(JSON.stringify(calls.tags)).not.toMatch(/Jane|602-555/);
   });
 });

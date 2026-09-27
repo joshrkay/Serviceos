@@ -4,6 +4,11 @@ import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import type { JobRepository } from '../../src/jobs/job';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
+import { InMemoryWorkingHoursRepository } from '../../src/availability/working-hours';
+import { InMemoryUnavailableBlockRepository } from '../../src/availability/unavailable-block';
+import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import type { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
 // Round 4b — must be a genuine hex uuid: create-appointment-task.ts now
@@ -210,5 +215,102 @@ describe('CreateAppointmentAITaskHandler — held-slot ownership (jobRepo wired)
 
     expect(result.proposal.proposalType).toBe('create_appointment');
     expect(result.proposal.status).toBe('draft');
+  });
+});
+
+// #1045 / PRD 3.12 — the recorded-voice hold path runs the back-to-back
+// drivability check and surfaces the warning on the booking proposal the
+// operator reviews. The feasibility composer itself is pinned at real
+// Postgres in test/integration/place-hold-feasibility-gap.integration.test.ts;
+// this pins that the HANDLER wires it and carries the result to the card.
+describe('CreateAppointmentAITaskHandler — held-slot feasibility (#1045)', () => {
+  const technicianId = '00000000-0000-4000-8000-0000000000e1';
+  const prevJobId = '00000000-0000-4000-8000-0000000000f2';
+  const prevApptId = '00000000-0000-4000-8000-0000000000a1';
+
+  async function feasibilityFixture(appointmentRepo: InMemoryAppointmentRepository): Promise<FeasibilityDependencies> {
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    // Carlos is across town until 17:55Z; the spoken slot ("next Tuesday at 2pm"
+    // from a fixed Thursday) resolves to 18:00Z (14:00 America/New_York).
+    await appointmentRepo.create({
+      id: prevApptId,
+      tenantId: tenantA,
+      jobId: prevJobId,
+      scheduledStart: new Date('2026-06-02T17:00:00Z'),
+      scheduledEnd: new Date('2026-06-02T17:55:00Z'),
+      timezone: TZ,
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: 'seed',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await assignmentRepo.create({
+      id: '00000000-0000-4000-8000-0000000000b1',
+      tenantId: tenantA,
+      appointmentId: prevApptId,
+      technicianId,
+      isPrimary: true,
+      assignedBy: 'seed',
+      assignedAt: new Date(),
+    });
+    return {
+      appointmentRepo,
+      assignmentRepo,
+      jobRepo: {
+        findById: async (_t: string, id: string) => ({ id, locationId: `loc-${id}` }),
+      } as unknown as JobRepository,
+      locationRepo: {
+        findById: async () => ({ latitude: 37.77, longitude: -122.41 }),
+      } as unknown as FeasibilityDependencies['locationRepo'],
+      workingHoursRepo: new InMemoryWorkingHoursRepository(),
+      unavailableBlockRepo: new InMemoryUnavailableBlockRepository(),
+      travelTimeProvider: {
+        estimateDriveTime: async () => ({ seconds: 1200, source: 'haversine', degraded: false }),
+      },
+      skillMatcher: new StubSkillMatcher(),
+    };
+  }
+
+  it('stamps the travel_time warning for the neighbouring technician on the create_booking proposal', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const feasibility = await feasibilityFixture(appointmentRepo);
+    const handler = new CreateAppointmentAITaskHandler(
+      fakeGateway(completeBooking),
+      undefined,
+      undefined,
+      appointmentRepo,
+      undefined,
+      undefined,
+      feasibility,
+    );
+
+    const result = await handler.handle({ ...context(), now: new Date('2026-05-28T12:00:00Z') });
+
+    expect(result.taskType).toBe('create_booking');
+    const stamp = result.proposal.sourceContext?.holdFeasibility as
+      | { checked: boolean; warnings: Array<Record<string, unknown>> }
+      | undefined;
+    expect(stamp?.checked).toBe(true);
+    expect(stamp?.warnings).toEqual([
+      expect.objectContaining({
+        check: 'travel_time',
+        severity: 'warning',
+        conflictingEntityId: prevApptId,
+        metadata: expect.objectContaining({ technicianId }),
+      }),
+    ]);
+  });
+
+  it('says the check did not run when no feasibility deps are wired', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const handler = new CreateAppointmentAITaskHandler(
+      fakeGateway(completeBooking),
+      undefined,
+      undefined,
+      appointmentRepo,
+    );
+    const result = await handler.handle(context());
+    expect(result.proposal.sourceContext?.holdFeasibility).toEqual({ checked: false, warnings: [] });
   });
 });

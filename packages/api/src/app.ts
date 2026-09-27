@@ -1076,7 +1076,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
-  // time is layered on top in send-service / appointment-confirmation-notifier.
+  // time is layered on top in send-service / transactional-comms-service.
   // STOP/START handler registration is deferred until the consent ledger and
   // customer repos exist (Story 10.6 unifies DNC + consent_events + the
   // customers.consent_status rollup) — see registration below.
@@ -2685,6 +2685,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // `detectServiceLocationGap` no-ops and an unbookable customer's booking
     // auto-approves at confidence 1 and fails in a log.
     locationRepo,
+    // #1045 — back-to-back travel warning on held slots.
+    feasibilityDeps,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -3644,6 +3646,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // here. agreementRepo lives a few hundred lines down.
     jobRepo,
     appointmentRepo,
+    // #1045 — live-call holds run the back-to-back drivability check.
+    feasibilityDeps,
     invoiceRepo,
     estimateRepo,
     customerRepo,
@@ -5128,6 +5132,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       userRepo,
       settingsRepo,
       auditRepo,
+      // #1079 / PRD 4.7 — board lateness from truck-location pings.
+      locationPingRepo: technicianLocationPingRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -5762,6 +5768,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1045 — back-to-back travel warning on held slots.
+      feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was
       // uploaded through (POST /api/files/upload-url), so a photo turn's
       // fileIds resolve tenant-scoped into image parts on the estimate draft.

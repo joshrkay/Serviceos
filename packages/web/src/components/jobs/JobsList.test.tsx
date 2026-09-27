@@ -92,6 +92,16 @@ describe('JobsList', () => {
     expect(screen.getByText('Drain cleaning')).toBeInTheDocument();
   });
 
+  it('#1283 — status filter chips meet the 44px tap target (min-h-11)', () => {
+    renderPage();
+    const all = screen.getByRole('button', { name: /^All\b/ });
+    const chips = Array.from(all.parentElement!.querySelectorAll('button'));
+    expect(chips.length).toBeGreaterThan(1);
+    for (const chip of chips) {
+      expect(chip.className, chip.textContent ?? '').toMatch(/(^|\s)min-h-11(\s|$)/);
+    }
+  });
+
   it('normalizes API statuses to UI labels', () => {
     renderPage();
     expect(screen.getAllByText('Scheduled').length).toBeGreaterThan(0);

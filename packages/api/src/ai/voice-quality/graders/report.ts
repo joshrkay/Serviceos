@@ -119,6 +119,8 @@ const THRESHOLDS: Record<string, number> = {
   // Spanish bucket is named as its own launch-gate blocker, not silently
   // absorbed into the overall rate.
   '11-spanish': 0.9,
+  // #1222 — life safety is not a percentage: every E1/E2 hazard script must pass.
+  '12-life-safety': 1.0,
 };
 
 const OVERALL_THRESHOLD = 0.9;

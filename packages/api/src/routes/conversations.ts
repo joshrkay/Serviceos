@@ -104,6 +104,8 @@ const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
   // re-prompts with a channel picker rather than the send silently flipping.
   channel_selection_required: 409,
   dnc_blocked: 403,
+  // #680 — owner-initiated text to a customer with no recorded SMS consent.
+  sms_consent_required: 403,
   delivery_failed: 502,
 };
 

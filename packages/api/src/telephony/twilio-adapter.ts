@@ -18,6 +18,7 @@
  * - No real-time / streaming work happens here. That's P8-012.
  */
 
+import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import type { Pool } from 'pg';
 import {
   classifyIntent,
@@ -47,10 +48,7 @@ import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import type { ConversationRepository } from '../conversations/conversation-service';
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
-import {
-  assembleB2bAccountContext,
-  buildAccountContextPromptSection,
-} from '../ai/agents/customer-calling/b2b-account-context';
+import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
 import {
@@ -93,7 +91,6 @@ import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-
 import { answerPhoneEnRoute, type PhoneEnRouteDeps } from '../ai/voice-turn/phone-en-route-surface';
 import {
   createVoiceTurnProcessor,
-  classifierProfileForSession,
   auditOffSurfaceClassification,
   appendAgentTts,
   callerTranscriptText,
@@ -255,6 +252,8 @@ export interface TwilioAdapterDeps {
    */
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
+  /** #1045 — see VoiceTurnProcessorDeps.feasibilityDeps. */
+  feasibilityDeps?: FeasibilityDependencies;
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
@@ -2525,48 +2524,19 @@ export class TwilioGatherAdapter {
       // #866 — captured alongside the intent so the lookup branch below reads
       // it directly rather than re-narrowing `classifierEvent`.
       let classifiedEntities: Record<string, unknown> = {};
-      const verticalPromptSection = await this.processor.resolveVerticalPromptSection(opts.tenantId);
-      const planPromptSection = await this.processor.resolvePlanPromptSection(
+      // #897 — the one shared classify-context assembly (speechTurn and the
+      // voice-quality driver call the same function), so every phone surface
+      // and the corpus send the same prompt. The profile is hoisted so the
+      // off-surface audit below records the same profile the guard enforced.
+      const classifyContext = await this.processor.buildPhoneClassifyContext(
+        session,
         opts.tenantId,
-        session.customerId,
       );
-      // #1155 (row 2.12) — the SAME B2B/property-manager account section the
-      // media-streams turn sends (create-voice-turn-processor.ts speechTurn),
-      // from the context loadB2bAccountContext stashed at caller
-      // identification. Absent for a residential or unmatched caller, so that
-      // call's classify prompt stays byte-identical.
-      const b2bAccountPromptSection = session.b2bAccountContext
-        ? buildAccountContextPromptSection(session.b2bAccountContext)
-        : undefined;
-      // #886/#887 — surface-conditional taxonomy: derived from session
-      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
-      // so the off-surface audit below records the same profile the guard
-      // enforced.
-      const classifierProfile = classifierProfileForSession(session);
+      const classifierProfile = classifyContext.classifierProfile ?? 'operator';
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          {
-            tenantId: opts.tenantId,
-            // U10 — trace-session grouping (metadata only; prompt unchanged).
-            sessionId: session.id,
-            ...(session.callSid ? { callSid: session.callSid } : {}),
-            verticalPromptSection,
-            planPromptSection,
-            classifierProfile,
-            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
-            // RV-071 — appended ONLY on verified owner sessions so every
-            // other call's prompt stays byte-identical (cassette hashes).
-            ...(session.machine.currentContext.ownerSession === true
-              ? { ownerSession: true }
-              : {}),
-            ...(session.machine.currentContext.extendedIntents === true
-              ? { extendedIntents: true }
-              : {}),
-            ...(session.machine.currentContext.customerProtectionIntents === true
-              ? { customerProtectionIntents: true }
-              : {}),
-          },
+          classifyContext,
           this.deps.gateway,
         );
         session.aiInfraRetryCount = 0;

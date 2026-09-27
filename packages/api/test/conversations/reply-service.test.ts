@@ -141,6 +141,34 @@ describe('U6 — sendConversationReply', () => {
     });
   });
 
+  it('#680 — an owner-initiated SMS to a customer without SMS consent is refused (no delivery), email still goes', async () => {
+    h = harness({ customer: customer({ smsConsent: false }) });
+    const id = await customerThread(h.conversationRepo, { entityType: 'customer', entityId: 'cust-1' });
+
+    await expect(
+      sendConversationReply(h.deps, {
+        tenantId: TENANT,
+        conversationId: id,
+        body: 'Following up on your quote',
+        actorId: 'owner-1',
+        actorRole: 'owner',
+        channel: 'sms',
+      }),
+    ).rejects.toMatchObject({ code: 'sms_consent_required' });
+    expect(h.delivery.sendSms).not.toHaveBeenCalled();
+    expect(h.dispatchRepo.create).not.toHaveBeenCalled();
+
+    const sent = await sendConversationReply(h.deps, {
+      tenantId: TENANT,
+      conversationId: id,
+      body: 'Following up on your quote',
+      actorId: 'owner-1',
+      actorRole: 'owner',
+      channel: 'email',
+    });
+    expect(sent.channel).toBe('email');
+  });
+
   it('passes a stable idempotency key (conversation + channel + minute + body) to the provider', async () => {
     const id = await customerThread(h.conversationRepo, {
       entityType: 'customer',

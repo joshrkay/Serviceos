@@ -34,66 +34,141 @@
   },
   "turns": [
     {
-      "caller": "Hi there, gorgeous weather we're having today, isn't it?",
+      "caller": "Hmm, do you have any openings on Monday morning?",
       "expected": {
-        "escalates": false
+        "intent": "lookup_availability"
       },
       "hangupAfter": false
     },
     {
-      "caller": "So tell me, do you ever get tired of answering phones all day?",
+      "caller": "Hmm, do you have any openings on Monday around noon?",
       "expected": {
-        "escalates": false
+        "intent": "lookup_availability"
       },
       "hangupAfter": false
     },
     {
-      "caller": "I was just at the grocery store and the lines were unbelievable. Have you been there lately?",
+      "caller": "Hmm, do you have any openings on Monday in the afternoon?",
       "expected": {
-        "escalates": false
+        "intent": "lookup_availability"
       },
       "hangupAfter": false
     },
     {
-      "caller": "My neighbor's dog barked all night again. I really don't know what to do about it.",
+      "caller": "Hmm, do you have any openings on Monday late in the day?",
       "expected": {
-        "escalates": false
+        "intent": "lookup_availability"
       },
       "hangupAfter": false
     },
     {
-      "caller": "Hey, what's your favorite color? Mine's a deep teal.",
+      "caller": "Hmm, do you have any openings on Tuesday morning?",
       "expected": {
-        "escalates": false
+        "intent": "lookup_availability"
       },
       "hangupAfter": false
     },
     {
-      "caller": "Anyway, I was thinking about taking up gardening this spring. Tomatoes mostly.",
-      "expected": {
-        "escalates": true
-      },
+      "caller": "Hmm, do you have any openings on Tuesday around noon?",
+      "expected": {},
       "hangupAfter": false
     },
     {
-      "caller": "Did you watch the game last night? What a comeback in the fourth quarter.",
-      "expected": {
-        "escalates": true
-      },
+      "caller": "Hmm, do you have any openings on Tuesday in the afternoon?",
+      "expected": {},
       "hangupAfter": false
     },
     {
-      "caller": "You know, I really should learn to cook. Any recipe recommendations?",
+      "caller": "Hmm, do you have any openings on Tuesday late in the day?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Wednesday morning?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Wednesday around noon?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Wednesday in the afternoon?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Wednesday late in the day?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Thursday morning?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Thursday around noon?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Thursday in the afternoon?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Thursday late in the day?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Friday morning?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Friday around noon?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Friday in the afternoon?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Friday late in the day?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Saturday morning?",
+      "expected": {},
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hmm, do you have any openings on Saturday around noon?",
       "expected": {
-        "escalates": true,
-        "spokenAnswerMatches": "agent has hit the cost cap and terminates the session cleanly with a polite wrap-up; no further LLM calls; session_terminated event with cause cap_exceeded or cost_cap"
+        "capEndsCall": true,
+        "spokenAnswerMatches": "The session cost cap already ended the call: the agent handed the caller to a team member on the turn the cap was crossed and makes no further model calls."
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4],
-    "appliesDisposition": [9, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }

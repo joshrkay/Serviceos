@@ -1,4 +1,4 @@
-import { redactByTier, redactSentryUser } from '../logging/redact';
+import { redactByTier, redactSentryEvent, redactSentryUser } from '../logging/redact';
 
 export interface SentryConfig {
   dsn?: string;
@@ -75,7 +75,7 @@ export function initSentry(config: SentryConfig): SentryClient {
     release: config.release,
     tracesSampleRate: config.tracesSampleRate ?? (config.environment === 'production' ? 0.1 : 1.0),
     beforeSend(event: unknown) {
-      return redactByTier(event, 'strict') as any;
+      return redactSentryEvent(event) as any;
     },
     beforeBreadcrumb(breadcrumb: unknown) {
       return redactByTier(breadcrumb, 'strict') as any;

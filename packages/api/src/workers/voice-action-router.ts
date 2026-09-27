@@ -1,4 +1,5 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
+import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType, actionClassForProposalType } from '../proposals/proposal';
@@ -428,6 +429,8 @@ export interface VoiceActionRouterDeps {
    * gate (pre-existing behavior).
    */
   locationRepo?: LocationRepository;
+  /** #1045 — see HandlerRegistryDeps.feasibilityDeps. */
+  feasibilityDeps?: FeasibilityDependencies;
   /**
    * U3 (E-lane answers) — routed-outcome back-channel for the recorded-memo
    * path. When wired, the worker stamps `voice_recordings.answer_status`
@@ -505,6 +508,8 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     // Draft-time bookability gate for create_appointment (no service
     // location ⇒ missingFields, never an auto-approved doomed execution).
     ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
+    // #1045 / PRD 3.12 — back-to-back travel warning on the held slot.
+    ...(deps.feasibilityDeps ? { feasibilityDeps: deps.feasibilityDeps } : {}),
   });
   // The handlers below stay surface-specific by design — see the doc
   // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)

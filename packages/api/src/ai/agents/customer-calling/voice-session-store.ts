@@ -117,7 +117,7 @@ export type VoiceSessionEvent =
   /** VQ-003: session ended for one of the canonical reasons. */
   | {
       type: 'session_terminated';
-      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed';
+      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed' | 'life_safety_e1';
       ts: number;
     }
   /**

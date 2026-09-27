@@ -5,6 +5,7 @@
   "callerIdBlocked": false,
   "fixtures": {
     "tenant": {
+      "harnessOperatorTaxonomy": true,
       "id": "t_03_mark_lead_lost",
       "display_name": "Test HVAC Co",
       "timezone": "America/Los_Angeles"

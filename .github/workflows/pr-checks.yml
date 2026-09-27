@@ -471,7 +471,7 @@ jobs:
       - name: Replay voice-quality corpus (drift detection only)
         run: |
           set -o pipefail
-          npx vitest run -c vitest.voice-quality.config.ts 2>&1 \
+          npx vitest run -c vitest.voice-quality.config.mts 2>&1 \
             | tee /tmp/vq-replay.log || true
         working-directory: packages/api
       - name: Fail on cassette drift
