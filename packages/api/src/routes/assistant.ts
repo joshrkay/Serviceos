@@ -1293,6 +1293,61 @@ async function resolveLiteralJobReference(
 }
 
 /**
+ * "Create (and send) an invoice", "draft a new invoice" — the create verb
+ * governs the invoice noun directly, so "make sure you send the invoice"
+ * (a plain send) does not match.
+ */
+const CREATE_INVOICE_WORDING_RE =
+  /\b(?:create|draft|make|write\s+up|generate)\s+(?:(?:and|&)\s+(?:send|text|email)\s+)?(?:(?:a|an|the)\s+)?(?:new\s+)?invoice\b/i;
+
+/** Appended to the drafted card's reply: sending is the operator's next step. */
+const CREATE_AND_SEND_NEXT_STEP =
+  "\n\nThere's no invoice on that yet, so I drafted one. Once you approve it, issue it and I can send it.";
+
+/** An invoice still in flight — the thing a send could act on (or will, once issued). */
+const IN_FLIGHT_INVOICE_STATUSES: ReadonlySet<string> = new Set(['draft', 'open', 'partially_paid']);
+
+/**
+ * #1393 (QA AST-04) — "Create and send an invoice for job <id> totaling $250"
+ * classifies `send_invoice`: the classifier's distinction rule reads "send"
+ * as the act, and there is no single intent for "create, then send". When no
+ * invoice for that job exists, the send draft is gated on an `invoiceId`
+ * nothing can ever supply — the card asked for an "Invoice # or ID" — so the
+ * request is re-routed to `create_invoice`: draft the invoice from the job,
+ * and sending becomes the next step once the draft is approved (D-023 keeps
+ * issue/send separate taps anyway).
+ *
+ * Dispatch-time, not a prompt rule, on purpose: whether an invoice EXISTS is a
+ * database fact the classifier cannot see, and the classifier prompt has no
+ * budget to spare (classifier-prompt-budget.test.ts). Narrow: only when the
+ * operator's own words ask to create one, and only when the literal ids they
+ * named carry no in-flight invoice — an existing invoice keeps the send path.
+ * With no literal id at all ("create and send an invoice for Henderson"), the
+ * words ask for a new invoice and that is what gets drafted.
+ */
+async function isCreateAndSendWithNoInvoice(
+  invoiceRepo: InvoiceRepository | undefined,
+  tenantId: string,
+  intentType: string,
+  text: string,
+): Promise<boolean> {
+  if (intentType !== 'send_invoice' || !CREATE_INVOICE_WORDING_RE.test(text)) return false;
+  const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
+  if (!invoiceRepo) return true;
+  try {
+    for (const id of ids) {
+      if (await invoiceRepo.findById(tenantId, id)) return false;
+      const onJob = await invoiceRepo.findByJob(tenantId, id);
+      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return false;
+    }
+  } catch {
+    // Failure-soft toward the draft: a draft never sends anything.
+    return true;
+  }
+  return true;
+}
+
+/**
  * The pre-draft pass for one request: the resolver's ids, joined by a literal
  * job id's job and customer (#1276B) for the drafts that bill a job. A name
  * the resolver verified wins; a job whose customer contradicts it is dropped
@@ -2122,6 +2177,9 @@ async function applyDisambiguationAnswer(
  * `confirmAppointmentPayloadSchema`, etc.). Used only to prefill the Edit
  * input with context — never copied into the payload itself.
  */
+/** The whole value is one UUID (no /g — `.test` stays stateless). */
+const WHOLE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const REFERENCE_FIELD_FOR_MISSING: Record<string, string> = {
   invoiceId: 'invoiceReference',
   estimateId: 'estimateReference',
@@ -2165,10 +2223,14 @@ export function editFieldsForMissing(
       }
       const referenceKey = REFERENCE_FIELD_FOR_MISSING[key];
       const referenceValue = referenceKey ? payload[referenceKey] : undefined;
+      // #1393 — a UUID-shaped reference is never context for an id box: had
+      // it named a record of this kind the gate would already be lifted, so
+      // it names something else (AST-04: a JOB id prefilled into "Invoice #
+      // or ID", one tap from being submitted as an invoice id).
       const value =
         typeof existing === 'string'
           ? existing
-          : typeof referenceValue === 'string'
+          : typeof referenceValue === 'string' && !WHOLE_UUID_RE.test(referenceValue.trim())
             ? referenceValue
             : '';
       return { label, key, kind: 'text' as const, value };
@@ -2922,7 +2984,7 @@ async function generateAssistantReply(
       // `unknown` — is a request to draft an estimate FROM the photo (row 7.1:
       // "given … a customer photo, a real estimate/proposal row persists").
       // A photo riding a real request keeps that request's intent.
-      const classification =
+      const photoRouted =
         chatImages.length > 0 && classified.intentType === 'unknown'
           ? {
               ...classified,
@@ -2930,6 +2992,21 @@ async function generateAssistantReply(
               reasoning: 'Photo attached with no other request — drafting an estimate from the photo.',
             }
           : classified;
+      // #1393 — "create and send" with no invoice to send drafts the invoice.
+      const createAndSend = await isCreateAndSendWithNoInvoice(
+        deps.invoiceRepo,
+        tenantId,
+        photoRouted.intentType,
+        lastUserText,
+      );
+      const classification = createAndSend
+        ? {
+            ...photoRouted,
+            intentType: 'create_invoice' as const,
+            reasoning:
+              'Asked to create and send an invoice that does not exist yet — drafting it first; sending follows approval.',
+          }
+        : photoRouted;
       classifierUsage = usageOf(classification.tokenUsage);
       guardIntent = classification.intentType;
       guardConfidence = classification.confidence;
@@ -3686,9 +3763,11 @@ async function generateAssistantReply(
             // announcing a card the operator cannot approve. The card still
             // rides along: the question is the fast path, the picker on the
             // card is the fallback if they would rather point at it.
-            content: clarification
-              ? `${uiProposal.title}.\n\n${clarification}`
-              : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`,
+            content:
+              (clarification
+                ? `${uiProposal.title}.\n\n${clarification}`
+                : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
+              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : ''),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
