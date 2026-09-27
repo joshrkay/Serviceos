@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router';
 import { CustomerDetail } from './CustomerDetail';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 /** Renders the router's current URL so navigate() targets can be asserted. */
 function LocationProbe() {
@@ -104,6 +105,14 @@ describe('CustomerDetail', () => {
     await waitFor(() => {
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
     });
+  });
+
+  it('#1398 — every control CustomerDetail itself renders (header, quick actions, tabs, notes, locations) is ≥44×44', async () => {
+    const { container } = renderCustomerDetail();
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
+    });
+    expectAllTapTargets(container, 'CustomerDetail');
   });
 
   it('offers schedule / estimate / message quick actions (4.5)', async () => {

@@ -165,7 +165,7 @@ async function seedJobAt(
   const customer = await postJson(page, `${API_URL}/api/customers`, authHeaders, {
     firstName: label,
     lastName: `Customer ${stamp}`,
-    primaryPhone: '555-0142',
+    primaryPhone: '602-555-0142',
     email: `${label}.customer+${stamp}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

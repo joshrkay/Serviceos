@@ -239,7 +239,7 @@ test.describe('dispatch availability (3.2 business hours/buffer/isolation + 3.3 
     const customerA = await postJson(page.request, `${API_URL}/api/customers`, tenantA.authHeaders, {
       firstName: 'Avail',
       lastName: 'Customer A',
-      primaryPhone: '555-0161',
+      primaryPhone: '602-555-0161',
       preferredChannel: 'phone',
     });
     const locationA = await postJson(page.request, `${API_URL}/api/locations`, tenantA.authHeaders, {
