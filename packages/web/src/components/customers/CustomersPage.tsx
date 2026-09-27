@@ -594,7 +594,7 @@ export function CustomersPage() {
         <div data-testid="service-filters" className="flex gap-2 mt-3 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
           {(['All', 'HVAC', 'Plumbing', 'Painting'] as Filter[]).map(f => (
             <button key={f} type="button" onClick={() => selectFilter(f)} aria-pressed={filter === f}
-              className={`flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+              className={`flex min-h-11 min-w-11 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                 filter === f
                   ? 'bg-primary border-primary text-primary-foreground'
                   : 'border-border text-muted-foreground hover:border-border'
