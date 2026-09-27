@@ -1159,6 +1159,14 @@ export interface ClassifyContext {
    * request is byte-identical to before (in-app memos, chat, evals).
    */
   untrustedTranscript?: boolean;
+  /**
+   * #890 — the call's spoken language (session.language on the phone
+   * transports). 'es' appends the Spanish-caller section
+   * (`buildSpanishCallerPromptSection`) so a Spanish sentence is classified
+   * by meaning rather than read as a language-switch request. Absent / 'en':
+   * byte-identical request.
+   */
+  language?: 'en' | 'es';
 }
 
 /**
@@ -1231,6 +1239,54 @@ Notes:
   invoice", "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
 - Do not change the JSON output schema; proposalReference and editInstruction are
   just extra optional keys inside extractedEntities.`;
+
+/**
+ * #890 — Spanish example utterances, keyed by the intent they demonstrate.
+ * Filtered per profile in `buildSpanishCallerPromptSection` so an S1 caller
+ * is never shown an example for an intent its profile refuses (the post-parse
+ * PROFILE_INTENTS guard would intercept it anyway — advertising it would only
+ * steer the model toward an off-surface answer).
+ */
+const SPANISH_INTENT_EXAMPLES: ReadonlyArray<readonly [IntentType, string]> = [
+  ['create_appointment', 'Quisiera agendar una cita para el martes a las dos de la tarde.'],
+  ['create_appointment', 'Necesito que alguien venga a revisar mi calentador de agua.'],
+  ['reschedule_appointment', '¿Puedo cambiar mi cita del jueves para el viernes en la mañana?'],
+  ['cancel_appointment', 'Quiero cancelar la cita de mañana.'],
+  ['lookup_appointments', '¿A qué hora viene el técnico mañana?'],
+  ['lookup_invoices', '¿Me pueden decir cuánto debo en mi última factura?'],
+  ['lookup_balance', '¿Cuál es mi saldo pendiente?'],
+  ['lookup_availability', '¿Tienen disponibilidad esta semana?'],
+  ['create_customer', 'Soy cliente nuevo, me llamo Ana Torres y quiero registrarme.'],
+  ['draft_estimate', '¿Me pueden dar un presupuesto para cambiar el aire acondicionado?'],
+  ['create_invoice', 'Haz una factura para los Rivera por 450 dólares.'],
+  ['complaint', 'El técnico dejó todo sucio y el aire sigue sin enfriar; no estoy contento.'],
+  ['negotiation', 'Ese precio es muy alto, ¿me pueden hacer un descuento?'],
+  ['confirm', 'Sí, así está bien.'],
+  ['operator_request', 'Quiero hablar con una persona, por favor.'],
+];
+
+/**
+ * #890 — the system section a Spanish call gets. Separate message (like the
+ * vertical / plan / owner sections) so the JSON contract in the base prompt is
+ * untouched, and so an English call's request stays byte-identical.
+ */
+export function buildSpanishCallerPromptSection(profile: ClassifierProfile): string {
+  const allowed = PROFILE_INTENTS[profile];
+  const examples = SPANISH_INTENT_EXAMPLES.filter(([intent]) => allowed.has(intent)).map(
+    ([intent, utterance]) => `- "${utterance}" → "${intent}"`,
+  );
+  return [
+    'Call language: The caller is speaking Spanish. The transcript is Spanish speech.',
+    '- Classify by MEANING into the SAME intent identifiers listed above (the English ids,',
+    '  e.g. "create_appointment") — never invent a Spanish intent name.',
+    '- Speaking Spanish is NOT a "language_switch". Return "language_switch" only when the',
+    '  caller explicitly asks to change the call language (e.g. "¿podemos hablar en inglés?").',
+    '- Put extracted entities (names, addresses, date/time phrases) in extractedEntities',
+    '  verbatim as spoken, in Spanish; do not translate them.',
+    'Spanish examples:',
+    ...examples,
+  ].join('\n');
+}
 
 /**
  * Customer protection intents — complaint + negotiation. Appended when
@@ -2953,6 +3009,11 @@ async function classifyIntentRaw(
   // caller-authored — an S1 profile, or `untrustedTranscript` (voicemail →
   // router, which keeps the operator taxonomy above untouched). Owner
   // requests keep byte-identical messages.
+  // #890 — Spanish call: tell the model the transcript is Spanish and show it
+  // Spanish examples for this profile's intents. English calls unchanged.
+  if (context.language === 'es') {
+    systemMessages.push({ role: 'system', content: buildSpanishCallerPromptSection(profile) });
+  }
   const fenceTranscript = isUntrustedClassifierInput(profile, context.untrustedTranscript);
   if (fenceTranscript) {
     systemMessages.push({ role: 'system', content: CALLER_UTTERANCE_FENCE_PROMPT_SECTION });

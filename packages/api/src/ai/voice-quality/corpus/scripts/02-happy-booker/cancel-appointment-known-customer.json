@@ -5,6 +5,7 @@
   "callerIdBlocked": false,
   "fixtures": {
     "tenant": {
+      "harnessOperatorTaxonomy": true,
       "id": "t_02_cancel_appointment",
       "display_name": "Test HVAC Co",
       "timezone": "America/Los_Angeles"

@@ -261,4 +261,10 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
     expect(cells[2].textContent).toBe('$42.00');
     expect(cells[3].textContent).toBe('$504.00');
   });
+
+  it('#1283 — the "Decline this estimate" link meets the 44px glove target (min-h-11)', async () => {
+    renderPage();
+    const decline = await screen.findByRole('button', { name: /decline this estimate/i });
+    expect(decline.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+  });
 });

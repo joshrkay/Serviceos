@@ -53,7 +53,7 @@
  *
  * ── Why the exit code of that subprocess is not trusted ───────────────────
  *
- * `vitest.voice-quality.config.ts` sets `passWithNoTests: true`, so a run
+ * `vitest.voice-quality.config.mts` sets `passWithNoTests: true`, so a run
  * whose include-glob matches nothing exits 0 — and `execFileSync` only
  * throws on a NON-zero exit. Trusting it meant include-glob drift read as
  * "refresh succeeded" while nothing ran, after which every entry is
@@ -85,9 +85,9 @@ import {
 } from '../test/voice-quality/voice-quality-driver-factory';
 
 const PACKAGE_ROOT = path.resolve(__dirname, '..');
-/** Emitted by vitest.voice-quality.config.ts's `outputFile.json`. */
+/** Emitted by vitest.voice-quality.config.mts's `outputFile.json`. */
 const REFRESH_REPORT = path.join(PACKAGE_ROOT, 'voice-quality-vitest.json');
-const CORPUS_VITEST_ARGS = ['vitest', 'run', '-c', 'vitest.voice-quality.config.ts'];
+const CORPUS_VITEST_ARGS = ['vitest', 'run', '-c', 'vitest.voice-quality.config.mts'];
 
 async function seed(): Promise<void> {
   const scripts = loadCorpus().filter((s) => !s.layer2Only);

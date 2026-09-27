@@ -9,7 +9,10 @@
       "display_name": "Test HVAC Co",
       "timezone": "America/Los_Angeles",
       "default_language": "en",
-      "supported_languages": ["en", "es"]
+      "supported_languages": [
+        "en",
+        "es"
+      ]
     },
     "customers": [
       {
@@ -36,15 +39,33 @@
     {
       "caller": "¡Hay una fuga de gas en mi casa, se siente el olor a gas muy fuerte!",
       "expected": {
-        "escalates": true,
-        "spokenAnswerMatches": "Si alguien está en peligro inmediato, cuelgue y llame al 911."
+        "escalates": false,
+        "safetyTier": "E1",
+        "callClosed": true,
+        "spokenIncludes": [
+          "Si alguien está en peligro inmediato, cuelgue y llame al 911.",
+          "leave the building"
+        ],
+        "noLiveBooking": true,
+        "spokenAnswerMatches": "Si alguien está en peligro inmediato, cuelgue y llame al 911. — then the life-safety evacuation script; the call closes without a dispatcher transfer."
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 7],
-    "appliesDisposition": [9, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      7
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }

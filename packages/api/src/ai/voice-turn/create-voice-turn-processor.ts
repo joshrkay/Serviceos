@@ -45,6 +45,7 @@
  * same voice-event emissions.
  */
 
+import type { PinLockAlertRetryScheduler } from '../tasks/voice-approval-pin-lock-alert';
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import type { Pool } from 'pg';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
@@ -54,6 +55,7 @@ import {
   isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
+  type ClassifyContext,
   type IntentClassification,
   type IntentType,
 } from '../orchestration/intent-classifier';
@@ -156,7 +158,11 @@ import {
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
 } from '../../proposals/autonomous-close-execution';
-import { resolveAndPlaceAppointmentHold } from '../scheduling/place-hold';
+import {
+  resolveAndPlaceAppointmentHold,
+  type HoldFeasibility,
+} from '../scheduling/place-hold';
+import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
 import { formatForReadback } from '../scheduling/resolve-datetime';
 import { checkBusinessHours } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
@@ -716,6 +722,12 @@ export interface VoiceTurnProcessorDeps {
   businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
+  /**
+   * #1045 / PRD 3.12 — shared feasibility composer deps. Wired, every hold the
+   * live call places is checked for a back-to-back drive that does not fit,
+   * and the result rides the create_booking proposal as `holdFeasibility`.
+   */
+  feasibilityDeps?: FeasibilityDependencies;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
   /** Customer tags for escalation CRM hydration (handoff context pack). */
@@ -856,6 +868,8 @@ export interface VoiceTurnProcessorDeps {
   voiceApprovalOneTap?: OneTapFallbackDeps;
   /** #1233 review — claims the tenant PIN-lock owner alert before it is sent. */
   voiceApprovalPinLockAlertRepo?: VoiceApprovalPinLockAlertRepository;
+  /** #1238 — durable retry for a claimed PIN-lock alert that was not delivered. */
+  voiceApprovalPinLockAlertRetry?: PinLockAlertRetryScheduler;
 }
 
 export interface VoiceTurnProcessor {
@@ -933,6 +947,17 @@ export interface VoiceTurnProcessor {
     sideEffects: SideEffect[],
     intentType: string,
   ): void;
+  /**
+   * #897 / #890 — the ONE assembly of a phone turn's classifier context:
+   * vertical + plan + B2B sections, the surface profile, the owner /
+   * extended / customer-protection flags and the call language. Called by
+   * `speechTurn`, the Gather adapter and the voice-quality text-mode driver,
+   * so the corpus classifies with exactly the prompt production sends.
+   */
+  buildPhoneClassifyContext(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<ClassifyContext>;
   resolveVerticalPromptSection(
     tenantId: string,
   ): Promise<string | undefined>;
@@ -1129,6 +1154,44 @@ export function createVoiceTurnProcessor(
     } catch {
       return undefined;
     }
+  }
+
+  async function buildPhoneClassifyContext(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<ClassifyContext> {
+    const verticalPromptSection = await resolveVerticalPromptSection(tenantId);
+    const planPromptSection = await resolvePlanPromptSection(tenantId, session.customerId);
+    // 2.12 — B2B/property-manager account context, assembled once by the
+    // twilio adapter at caller identification and stashed on the session.
+    // Absent for a residential or unmatched caller, so that session's prompt
+    // stays byte-identical.
+    const b2bAccountPromptSection = session.b2bAccountContext
+      ? buildAccountContextPromptSection(session.b2bAccountContext)
+      : undefined;
+    const context = session.machine.currentContext;
+    return {
+      tenantId,
+      // U10 — trace-session grouping (metadata only; prompt unchanged).
+      sessionId: session.id,
+      ...(session.callSid ? { callSid: session.callSid } : {}),
+      verticalPromptSection,
+      planPromptSection,
+      // #886/#887 — surface-conditional taxonomy, derived from session
+      // identity (owner line / trusted channel / D-026 phone actor).
+      classifierProfile: classifierProfileForSession(session),
+      ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
+      // RV-071 — appended ONLY on verified owner sessions so every other
+      // call's prompt stays byte-identical.
+      ...(context.ownerSession === true ? { ownerSession: true } : {}),
+      ...(context.extendedIntents === true ? { extendedIntents: true } : {}),
+      ...(context.customerProtectionIntents === true
+        ? { customerProtectionIntents: true }
+        : {}),
+      // #890 — a Spanish call is classified as Spanish; English stays
+      // byte-identical (no field).
+      ...(session.language === 'es' ? { language: 'es' as const } : {}),
+    };
   }
 
   async function resolveThresholdOverride(
@@ -2109,6 +2172,8 @@ export function createVoiceTurnProcessor(
         | { eligible: true; threshold: number }
         | undefined;
       let laneSourceStamp: Record<string, unknown> | undefined;
+      // #1045 — the held slot's back-to-back drivability result.
+      let holdFeasibilityStamp: HoldFeasibility | undefined;
       if (
         !degradedFromContract &&
         surfaceAllowed &&
@@ -2137,6 +2202,7 @@ export function createVoiceTurnProcessor(
               {
                 appointmentRepo: deps.appointmentRepo,
                 ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+                ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
               },
               {
                 tenantId,
@@ -2190,6 +2256,7 @@ export function createVoiceTurnProcessor(
               bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
               payloadProposalType = 'create_booking';
               payload = bookingPayload;
+              holdFeasibilityStamp = hold.feasibility;
               if (laneEval.eligible) {
                 autonomousLaneForCreate = laneEval;
               } else if (!laneEval.eligible) {
@@ -2259,6 +2326,7 @@ export function createVoiceTurnProcessor(
             ? { catalogResolution: estimateQuote.catalogResolution }
             : {}),
           ...(laneSourceStamp ?? {}),
+          ...(holdFeasibilityStamp ? { holdFeasibility: holdFeasibilityStamp } : {}),
         },
         // WS5 — thread the (uncatalogued-capped) confidence and force 'draft'
         // for an ambiguous line, matching the EstimateTaskHandler. The voice
@@ -3150,6 +3218,9 @@ export function createVoiceTurnProcessor(
       ...(deps.voiceApprovalPinLockAlertRepo
         ? { pinLockAlertRepo: deps.voiceApprovalPinLockAlertRepo }
         : {}),
+      ...(deps.voiceApprovalPinLockAlertRetry
+        ? { pinLockAlertRetry: deps.voiceApprovalPinLockAlertRetry }
+        : {}),
       // RV-225 — the voice edit dialogue interprets deltas through the
       // SAME LLM seam as the SMS EDIT reply (proposals/edit-interpreter.ts).
       editInterpreter: createLlmEditInterpreter(deps.gateway),
@@ -3351,7 +3422,12 @@ export function createVoiceTurnProcessor(
     session: VoiceSession,
     tenantId: string,
     evaluation: AutonomousCloseEvaluation,
-    booking?: { appointmentId: string; holdExpiryAt: Date; summary: string },
+    booking?: {
+      appointmentId: string;
+      holdExpiryAt: Date;
+      summary: string;
+      holdFeasibility?: HoldFeasibility;
+    },
   ): Promise<void> {
     const pq = session.machine.currentContext.pendingQuote;
     if (!pq || !deps.proposalRepo) return;
@@ -3606,6 +3682,7 @@ export function createVoiceTurnProcessor(
       {
         appointmentRepo: deps.appointmentRepo,
         ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+        ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
       },
       {
         tenantId,
@@ -3721,6 +3798,7 @@ export function createVoiceTurnProcessor(
       appointmentId: hold.appointmentId,
       holdExpiryAt: hold.holdExpiryAt,
       summary,
+      holdFeasibility: hold.feasibility,
     });
 
     out.push({
@@ -4532,50 +4610,15 @@ export function createVoiceTurnProcessor(
       }
 
       let classifierEvent: CallingAgentEvent | null = null;
-      const verticalPromptSection = await resolveVerticalPromptSection(tenantId);
-      const planPromptSection = await resolvePlanPromptSection(
-        tenantId,
-        session.customerId,
-      );
-      // 2.12 — B2B/property-manager account context, assembled once by the
-      // twilio adapter at caller identification (twilio-adapter.ts:953) and
-      // stashed on the session. Resolved into its prompt-ready string here,
-      // same treatment as vertical/plan above — absent for a residential or
-      // unmatched caller, so that session's prompt stays byte-identical.
-      const b2bAccountPromptSection = session.b2bAccountContext
-        ? buildAccountContextPromptSection(session.b2bAccountContext)
-        : undefined;
-      // #886/#887 — surface-conditional taxonomy: derived from session
-      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
-      // so the off-surface audit below records the same profile the guard
-      // enforced.
-      const classifierProfile = classifierProfileForSession(session);
+      // #897 — the one shared context assembly (Gather + the voice-quality
+      // driver call the same function). The profile is hoisted so the
+      // off-surface audit below records the same profile the guard enforced.
+      const classifyContext = await buildPhoneClassifyContext(session, tenantId);
+      const classifierProfile = classifyContext.classifierProfile ?? 'operator';
       try {
         const classification = await classifyIntent(
           speechResult,
-          {
-            tenantId,
-            // U10 — trace-session grouping (metadata only; prompt unchanged).
-            sessionId: session.id,
-            ...(session.callSid ? { callSid: session.callSid } : {}),
-            verticalPromptSection,
-            planPromptSection,
-            classifierProfile,
-            ...(b2bAccountPromptSection ? { b2bAccountPromptSection } : {}),
-            // RV-071 — the owner-approval prompt section is appended ONLY
-            // on a recognized owner line (caller-ID match; see
-            // approver-identity.ts), keeping every other call's
-            // prompt byte-identical (cassettes / gateway cache).
-            ...(session.machine.currentContext.ownerSession === true
-              ? { ownerSession: true }
-              : {}),
-            ...(session.machine.currentContext.extendedIntents === true
-              ? { extendedIntents: true }
-              : {}),
-            ...(session.machine.currentContext.customerProtectionIntents === true
-              ? { customerProtectionIntents: true }
-              : {}),
-          },
+          classifyContext,
           deps.gateway,
         );
         // Successful classify clears infra-retry budget for this session.
@@ -4991,6 +5034,7 @@ export function createVoiceTurnProcessor(
     expandIntentConfirmTemplate,
     resolveVerticalPromptSection,
     resolvePlanPromptSection,
+    buildPhoneClassifyContext,
     resolveThresholdOverride,
     runSummary,
     handlePendingVoiceApproval,

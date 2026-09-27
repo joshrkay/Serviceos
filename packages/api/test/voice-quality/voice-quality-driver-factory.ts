@@ -29,6 +29,15 @@ import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
+import { estimateTokens } from '../../src/ai/gateway/tenant-quota';
+import { InMemoryPackActivationRepository, activatePack } from '../../src/settings/pack-activation';
+import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
+import { seedCanonicalVerticalPacks } from '../../src/shared/canonical-vertical-packs';
+import { buildVerticalPromptResolver } from '../../src/verticals/resolve-active-pack';
+import {
+  buildCallerPlanContext,
+  formatCallerPlanForPrompt,
+} from '../../src/ai/orchestration/caller-plan-context';
 import {
   hashVoiceApprovalPin,
   isEnrollablePin,
@@ -98,12 +107,22 @@ const OPERATOR_REQUEST_SCRIPTS = new Set([
   'vague-complaint-escalated',
 ]);
 
-/** Token usage a classify call reports, per script (drives the cost cap). */
-function classifyTokenUsage(script: VoiceQualityScript): { input: number; output: number; total: number } {
-  // The chatty caller burns output tokens each turn until the per-session
-  // telephony cap (1500 output tokens) trips on the 6th turn.
-  if (script.id === 'cost-cap-drain') return { input: 0, output: 260, total: 260 };
-  return { input: 10, output: 10, total: 20 };
+/**
+ * #888 — token usage a classify call reports: SIZED TO THE REQUEST, using
+ * the gateway's own 4-chars-per-token estimator (tenant-quota.ts), instead of
+ * a fixed 10/10 that took 500 turns to reach any cap. The recorded cassette
+ * therefore carries the real prompt's weight, so a prompt that grows (or a
+ * profile that stops gating) moves every script's cost — and a long call
+ * reaches the production session cap exactly when a live one would
+ * (cost-cap-drain, #898). No per-script special case.
+ */
+function classifyTokenUsage(
+  request: LLMRequest,
+  content: string,
+): { input: number; output: number; total: number } {
+  const input = estimateTokens(request.messages.map((m) => m.content).join('\n'));
+  const output = estimateTokens(content);
+  return { input, output, total: input + output };
 }
 
 /**
@@ -131,7 +150,6 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   // NOTE: derived from expected.intent — see the tautology warning above.
   let intent = turn.expected.intent ?? 'unknown';
   if (OPERATOR_REQUEST_SCRIPTS.has(script.id)) intent = 'operator_request';
-  if (script.id === 'cost-cap-drain') intent = 'lookup_account_summary';
 
   const slots = (turn.expected.slots ?? {}) as Record<string, unknown>;
   const entities: Record<string, unknown> = {};
@@ -389,12 +407,13 @@ export class ScriptAwareMockGateway extends LLMGateway {
     if (request.taskType === 'classify_intent') {
       const userLine = request.messages.find((m) => m.role === 'user')?.content ?? '';
       const idx = turnIndexForUserMessage(this.script, userLine);
+      const content = classifierJsonForTurn(this.script, idx);
       return {
-        content: classifierJsonForTurn(this.script, idx),
+        content,
         model: request.model ?? 'mock-model',
         provider: 'mock',
         latencyMs: 1,
-        tokenUsage: classifyTokenUsage(this.script),
+        tokenUsage: classifyTokenUsage(request, content),
       };
     }
 
@@ -459,6 +478,37 @@ export function buildCassetteGatewayForScript(
     mode: mode ?? cassetteModeFromEnv(),
     realGateway,
   });
+}
+
+/**
+ * #897 — the corpus tenant's vertical prompt resolver, built exactly as app.ts
+ * builds production's (`buildVerticalPromptResolver` over the pack-activation
+ * repo + the seeded canonical registry). The tenant activates the pack its
+ * fixture names (`fixtures.tenant.verticalPack`), defaulting to `hvac-v1` —
+ * every corpus tenant is an HVAC shop. `null` opts a script out (no pack).
+ */
+function corpusVerticalPromptResolver(
+  script: VoiceQualityScript,
+  tenantId: string,
+): ((tenantId: string) => Promise<string | undefined>) | undefined {
+  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
+  const packId = tenant.verticalPack === undefined ? 'hvac-v1' : tenant.verticalPack;
+  if (typeof packId !== 'string') return undefined;
+  const canonicalPackRegistry = new InMemoryVerticalPackRegistry();
+  const packActivationRepo = new InMemoryPackActivationRepository();
+  const resolver = buildVerticalPromptResolver({
+    packActivationRepo,
+    canonicalPackRegistry,
+    cacheTtlMs: 0,
+  });
+  const ready = (async () => {
+    await seedCanonicalVerticalPacks(canonicalPackRegistry);
+    await activatePack({ tenantId, packId }, packActivationRepo);
+  })();
+  return async (t: string) => {
+    await ready;
+    return resolver(t);
+  };
 }
 
 export function makeVoiceQualityDriverFactory(
@@ -531,6 +581,15 @@ export function makeVoiceQualityDriverFactory(
             businessHoursSchedule: businessHours?.schedule ?? [],
             ...(ownerPhone ? { ownerPhone } : {}),
             ...(escalationSettings ? { escalationSettings } : {}),
+            // #890 — the tenant's greeting language + supported stack
+            // (tenant_settings.default_language / supported_languages), so a
+            // Spanish tenant's call is classified as Spanish.
+            ...(tenant.default_language === 'es' || tenant.default_language === 'en'
+              ? { defaultLanguage: tenant.default_language }
+              : {}),
+            ...(Array.isArray(tenant.supported_languages)
+              ? { supportedLanguages: tenant.supported_languages }
+              : {}),
           } as unknown as TenantSettings)
         : null;
     // Tooling fix (2026-08-09) — `SettingsRepository` grew
@@ -589,6 +648,11 @@ export function makeVoiceQualityDriverFactory(
       }
     }
 
+    // #897 — one agreement repo for the lookup bundle AND the caller-plan
+    // resolver (app.ts shares one too), so a plan a lookup can see is the
+    // plan the classifier is told about.
+    const agreementRepo = new InMemoryAgreementRepository();
+
     const driver = new TextModeDriver({
       voiceSessionStore: store,
       bus: fctx.bus,
@@ -612,7 +676,7 @@ export function makeVoiceQualityDriverFactory(
           invoiceRepo: fctx.repos.invoiceRepo,
           estimateRepo: fctx.repos.estimateRepo,
           leadRepo: fctx.repos.leadRepo,
-          agreementRepo: new InMemoryAgreementRepository(),
+          agreementRepo,
           moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
           catalogRepo,
           settingsRepo,
@@ -636,6 +700,17 @@ export function makeVoiceQualityDriverFactory(
         tenantTimezoneResolver: async (t: string) =>
           (await settingsRepo.findByTenant(t))?.timezone,
         ...(now ? { now } : {}),
+      },
+      // #888/#897 — production surface profile unless the script declares
+      // it asks operator-only actions from a customer's line (D-028 follow-up).
+      ...(tenant.harnessOperatorTaxonomy === true ? { operatorTaxonomyOverride: true } : {}),
+      // #897 — the prompt-section resolvers production wires (app.ts).
+      verticalPromptResolver: corpusVerticalPromptResolver(script, fctx.tenantId),
+      callerPlanResolver: async (tenantId: string, customerId: string) => {
+        const section = formatCallerPlanForPrompt(
+          await buildCallerPlanContext(tenantId, customerId, agreementRepo),
+        );
+        return section.length > 0 ? section : undefined;
       },
       onCallRepo,
       dncRepo,

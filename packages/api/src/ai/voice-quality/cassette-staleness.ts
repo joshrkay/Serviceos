@@ -317,7 +317,7 @@ export interface CassettePruneResult {
  * THIS design sidesteps the whole problem by not grouping at all: a
  * cutoff timestamp captured immediately BEFORE an authoritative refresh
  * pass (the REAL `npm run voice-quality:refresh` — i.e. `vitest run -c
- * vitest.voice-quality.config.ts` with `VOICE_QUALITY_CASSETTE_MODE=
+ * vitest.voice-quality.config.mts` with `VOICE_QUALITY_CASSETTE_MODE=
  * refresh`, not a hand-rolled re-implementation of it — see the caller)
  * is compared against each entry's own `recordedAt`. `CassetteLLMGateway.
  * recordOrRefresh` bumps `recordedAt` to "now" for EVERY hash it touches

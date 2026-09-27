@@ -18,6 +18,13 @@
  *                          cancelled
  *   - RUN_URL            : link to the run, appended to every write
  *
+ * Optional (#1205):
+ *   - GATE_REF           : `${{ github.ref }}`
+ *   - DEFAULT_BRANCH     : `${{ github.event.repository.default_branch }}`
+ *   When both are set and the run is NOT on the default branch (e.g. a
+ *   manual run on a feature branch), the script makes no write: the
+ *   gate-red issue tracks the default branch only.
+ *
  * Behaviour:
  *   - failure  : find the open issue titled `gate-red: <GATE_NAME>`
  *                labelled `gate-red`. Found → comment with the run URL.
@@ -254,6 +261,20 @@ export async function run(opts: RunOptions = {}): Promise<number> {
       `${LOG_PREFIX} JOB_STATUS must be success | failure | cancelled, got "${env.JOB_STATUS}"`,
     );
     return 1;
+  }
+
+  // #1205 — the gate-red issue tracks the DEFAULT branch. A manual
+  // (workflow_dispatch) run on a feature branch must neither close it when
+  // green nor open it when red. Both inputs are optional so gates that
+  // haven't wired them keep the old behaviour.
+  const ref = env.GATE_REF;
+  const defaultBranch = env.DEFAULT_BRANCH;
+  if (ref && defaultBranch && ref !== defaultBranch && ref !== `refs/heads/${defaultBranch}`) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `${LOG_PREFIX} run is on ${ref}, not the default branch (${defaultBranch}); leaving gate-red issues untouched`,
+    );
+    return 0;
   }
 
   try {

@@ -58,6 +58,8 @@ export default function NewAppointment() {
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [slotsError, setSlotsError] = useState<string | null>(null);
   const [selected, setSelected] = useState<AvailabilitySlot | null>(null);
+  // #1243 — owner-facing "these times use defaults" lines.
+  const [configNotes, setConfigNotes] = useState<string[]>([]);
 
   const selectedCustomer = useMemo(
     () => customers.find((c) => c.id === customerId),
@@ -76,9 +78,11 @@ export default function NewAppointment() {
         durationMin,
       });
       setSlots(res.slots);
+      setConfigNotes(res.config?.notes ?? []);
     } catch (e) {
       setSlotsError(copyForError(e).body);
       setSlots([]);
+      setConfigNotes([]);
     } finally {
       setSlotsLoading(false);
     }
@@ -168,6 +172,7 @@ export default function NewAppointment() {
             isLoading={slotsLoading}
             error={slotsError}
             onRetry={() => void loadSlots()}
+            configNotes={configNotes}
           />
 
           <View className="mt-4 flex-row gap-2">

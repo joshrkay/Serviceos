@@ -332,7 +332,11 @@ export function OnboardingShell() {
           )}
           {activeId === 'billing' && <BillingStep />}
           {activeId === 'ai_check' && (
-            <AiCheckStep status={data} onRetryComplete={() => void refetch()} />
+            <AiCheckStep
+              status={data}
+              onRetryComplete={() => void refetch()}
+              onGoToStep={handleSelect}
+            />
           )}
           {activeId === 'test_call' && (
             <TestCallStep

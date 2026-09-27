@@ -7,6 +7,8 @@ import {
   TenantIdentityUpsertFields,
   TenantSettings,
   normalizeReminderOffsets,
+  VOICE_APPROVAL_PIN_CREDENTIAL_KEYS,
+  type SettingsUpdateOptions,
 } from './settings';
 
 /**
@@ -264,6 +266,13 @@ function buildTerminologyJson(
   return result;
 }
 
+/** #1238 item 4 — `text[]` literal of the PIN credential keys. */
+const PIN_KEYS_SQL_ARRAY = `ARRAY[${VOICE_APPROVAL_PIN_CREDENTIAL_KEYS.map((k) => `'${k}'`).join(', ')}]::text[]`;
+/** The PIN credential keys as currently stored in the row (absent keys dropped). */
+const PRESERVED_PIN_SQL = `jsonb_strip_nulls(jsonb_build_object(${VOICE_APPROVAL_PIN_CREDENTIAL_KEYS.map(
+  (k) => `'${k}', COALESCE(escalation_settings, '{}'::jsonb)->'${k}'`,
+).join(', ')}))`;
+
 export class PgSettingsRepository extends PgBaseRepository implements SettingsRepository {
   constructor(pool: Pool) {
     super(pool);
@@ -321,7 +330,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
     });
   }
 
-  async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
+  async update(
+    tenantId: string,
+    updates: Partial<TenantSettings>,
+    options?: SettingsUpdateOptions,
+  ): Promise<TenantSettings | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       // #1031 — update() must never be a silent no-op for a tenant whose
       // tenant_settings row doesn't exist yet (every tenant-creation path
@@ -512,7 +525,13 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           continue;
         }
         if (key === 'escalationSettings') {
-          setClauses.push(`escalation_settings = $${paramIndex}::jsonb`);
+          // #1238 item 4 — the PIN credential is re-read from the row inside
+          // this UPDATE (under its row lock), so a concurrent rotation wins.
+          setClauses.push(
+            options?.preserveVoiceApprovalPin
+              ? `escalation_settings = ($${paramIndex}::jsonb - ${PIN_KEYS_SQL_ARRAY}) || ${PRESERVED_PIN_SQL}`
+              : `escalation_settings = $${paramIndex}::jsonb`,
+          );
           const v = value as Partial<EscalationSettings> | undefined | null;
           params.push(
             v && typeof v === 'object' && Object.keys(v).length > 0

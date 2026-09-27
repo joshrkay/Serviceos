@@ -44,6 +44,11 @@ import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import type { CatalogItem, CatalogItemRepository } from '../../../src/catalog/catalog-item';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
+import type { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
+import { InMemoryAssignmentRepository } from '../../../src/appointments/assignment';
+import { InMemoryWorkingHoursRepository } from '../../../src/availability/working-hours';
+import { InMemoryUnavailableBlockRepository } from '../../../src/availability/unavailable-block';
+import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
 
 const TENANT = 'tenant-close';
 const JOB_ID = '22222222-2222-4222-8222-222222222222';
@@ -162,6 +167,7 @@ function jobRow(): Job {
 async function makeHarness(opts: {
   settings?: Partial<TenantSettings>;
   ownerSms?: boolean;
+  feasibilityDeps?: FeasibilityDependencies;
 } = {}) {
   const store = new VoiceSessionStore({ startInterval: false });
   const proposalRepo = new InMemoryProposalRepository();
@@ -202,6 +208,7 @@ async function makeHarness(opts: {
     settingsRepo,
     estimateRepo,
     catalogRepo: stubCatalogRepo(),
+    ...(opts.feasibilityDeps ? { feasibilityDeps: opts.feasibilityDeps } : {}),
     autonomousClose: {
       platformDisabled: false,
       bookingPlatformDisabled: false,
@@ -430,5 +437,41 @@ describe('WS2 — fallback modes (no held booking staged)', () => {
     expect(chain).toHaveLength(2);
     expect(chain.find((p) => p.proposalType === 'create_booking')).toBeUndefined();
     expect(chain.every((p) => p.status === 'draft')).toBe(true);
+  });
+});
+
+// #1045 / PRD 3.12 — the live-call close places a hold through the shared
+// seam; the staged create_booking must carry the hold's drivability result so
+// the owner sees it before the one-tap approval.
+describe('#1045 — live-call close carries the hold feasibility onto the staged create_booking', () => {
+  async function stagedBooking(feasibilityDeps?: FeasibilityDependencies) {
+    const h = await makeHarness(feasibilityDeps ? { feasibilityDeps } : {});
+    await reachClosing(h);
+    await turn(h, 'yes book it');
+    await turn(h, 'yes that is fine');
+    const proposals = await h.proposalRepo.findByTenant(TENANT);
+    return proposals.find((p) => p.chainId && p.proposalType === 'create_booking')!;
+  }
+
+  it('no feasibility deps wired → holdFeasibility says the check did not run', async () => {
+    const booking = await stagedBooking();
+    expect(booking.sourceContext?.holdFeasibility).toEqual({ checked: false, warnings: [] });
+  });
+
+  it('feasibility deps wired → the check ran against the hold', async () => {
+    const feasibilityDeps: FeasibilityDependencies = {
+      appointmentRepo: new InMemoryAppointmentRepository(),
+      assignmentRepo: new InMemoryAssignmentRepository(),
+      jobRepo: new InMemoryJobRepository(),
+      locationRepo: { findById: async () => null } as unknown as FeasibilityDependencies['locationRepo'],
+      workingHoursRepo: new InMemoryWorkingHoursRepository(),
+      unavailableBlockRepo: new InMemoryUnavailableBlockRepository(),
+      travelTimeProvider: {
+        estimateDriveTime: async () => ({ seconds: 60, source: 'haversine', degraded: false }),
+      },
+      skillMatcher: new StubSkillMatcher(),
+    };
+    const booking = await stagedBooking(feasibilityDeps);
+    expect(booking.sourceContext?.holdFeasibility).toEqual({ checked: true, warnings: [] });
   });
 });

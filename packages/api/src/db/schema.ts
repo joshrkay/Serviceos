@@ -7161,6 +7161,16 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS notify_technicians_by_sms BOOLEAN NOT NULL DEFAULT true;
   `,
+  // #1238 — the PIN-lock owner alert is retried until it is actually SENT.
+  // sent_at NULL = claimed but not yet delivered (the retry worker re-sends);
+  // stamped once on a successful send. Claims that predate this migration
+  // are settled as-is (their delivery outcome is unknown and they must not
+  // be re-sent days later). Additive, idempotent; drops nothing.
+  '292_voice_approval_pin_lock_alerts_sent_at': `
+    ALTER TABLE voice_approval_pin_lock_alerts
+      ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    UPDATE voice_approval_pin_lock_alerts SET sent_at = created_at WHERE sent_at IS NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

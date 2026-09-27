@@ -519,8 +519,9 @@ export class BillingService {
       const statusRows = await client.query<{
         subscription_status: string | null;
         pending_checkout_at: Date | null;
+        pending_checkout_session_id: string | null;
       }>(
-        `SELECT subscription_status, pending_checkout_at
+        `SELECT subscription_status, pending_checkout_at, pending_checkout_session_id
            FROM tenants WHERE id = $1`,
         [input.tenantId],
       );
@@ -537,9 +538,26 @@ export class BillingService {
         // never reopens while the previous session could still be
         // completed from browser history.
         if (ageMs < 32 * 60 * 1000) {
-          throw new ValidationError(
-            'A checkout was just started for this tenant. Complete it or wait a moment before trying again.',
-          );
+          // #1282 — a retry within the window used to 400 for up to 32 min
+          // with no way forward. When the outstanding Stripe session is still
+          // open, hand the caller ITS url back: completing that session is
+          // exactly what the gate is protecting, and it can never mint a
+          // second subscription (one session, one subscription).
+          // A session for a DIFFERENT plan is expired first so the owner's
+          // new pick wins; an already-expired session no longer blocks.
+          const pendingSessionId = statusRows.rows[0]?.pending_checkout_session_id ?? null;
+          const outcome = pendingSessionId
+            ? await this.reconcilePendingCheckoutSession(pendingSessionId, input.planId)
+            : 'unknown';
+          if (typeof outcome === 'object') {
+            await client.query('COMMIT');
+            return outcome;
+          }
+          if (outcome !== 'released') {
+            throw new ValidationError(
+              'A checkout was just started for this tenant. Complete it or wait a moment before trying again.',
+            );
+          }
         }
       }
 
@@ -566,6 +584,9 @@ export class BillingService {
         body.set('subscription_data[metadata][plan_id]', input.planId);
         body.set('subscription_data[metadata][stripe_price_id]', priceId);
         body.set('subscription_data[metadata][stripe_product_id]', validatedPlan.productId);
+        // #1282 — on the session too, so a retry can tell whether resuming
+        // this session matches the plan the owner is asking for now.
+        body.set('metadata[plan_id]', input.planId);
       }
       body.set('payment_method_collection', 'always');
       // Collect name + billing address on the Stripe-hosted page. We
@@ -641,6 +662,38 @@ export class BillingService {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * #1282 — decide what to do with the tenant's outstanding Checkout session
+   * when a retry arrives inside the pending window:
+   *   - `{ url }`     — still open for the same plan (or no plan asked): resume it.
+   *   - 'released'    — it can no longer complete (Stripe reports it expired,
+   *                     or it was open for a different plan and we just
+   *                     expired it): the caller may mint a fresh session.
+   *   - 'unknown'     — completed / lookup failed: keep refusing, the gate's
+   *                     double-subscription protection stays in force.
+   */
+  private async reconcilePendingCheckoutSession(
+    sessionId: string,
+    planId: BillingPlanId | undefined,
+  ): Promise<{ url: string } | 'released' | 'unknown'> {
+    const fetchFn = this.deps.fetchFn ?? fetch;
+    const auth = { Authorization: `Bearer ${this.deps.config!.apiKey}` };
+    const base = `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`;
+    const res = await fetchFn(base, { method: 'GET', headers: auth });
+    if (!res.ok) return 'unknown';
+    const session = (await res.json()) as {
+      status?: string;
+      url?: string | null;
+      metadata?: Record<string, string> | null;
+    };
+    if (session.status === 'expired') return 'released';
+    if (session.status !== 'open' || !session.url) return 'unknown';
+    const sessionPlan = session.metadata?.plan_id;
+    if (!planId || !sessionPlan || sessionPlan === planId) return { url: session.url };
+    const expired = await fetchFn(`${base}/expire`, { method: 'POST', headers: auth });
+    return expired.ok || expired.status === 404 ? 'released' : 'unknown';
   }
 
   /**
