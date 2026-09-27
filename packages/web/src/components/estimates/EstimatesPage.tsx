@@ -1685,8 +1685,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
             customerName: estCompat.customer,
             description: estCompat.description,
             lineItems: uiLineItems,
-            discountCents: est.totals.discountCents,
-            taxRateBps: 0,
+            totals,
             approvedLabel: status === 'Approved' ? 'Customer approved' : undefined,
           }}
           onClose={() => setConvertOpen(false)}
