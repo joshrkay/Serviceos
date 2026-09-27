@@ -14,6 +14,7 @@ import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
 import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
+import { formatApiErrorMessage } from '../../utils/api-errors';
 import { UndoToast } from '../common/UndoToast';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
@@ -128,6 +129,24 @@ async function sendToConversationAPI(
 }
 
 // ─── Message timestamp helper ───────────────────────────────────
+/**
+ * #1277 — the server's own reason for a refused proposal call, thrown so the
+ * card shows it (a bare "400 Bad Request" told the operator nothing).
+ */
+async function refusal(res: Response, fallback: string): Promise<Error> {
+  const body: unknown = await res.json().catch(() => null);
+  return new Error(formatApiErrorMessage(body, `${fallback} (HTTP ${res.status})`));
+}
+
+/** #1277 — the proposal's remaining gates, from a proposal-shaped response. */
+async function remainingMissingFields(res: Response): Promise<string[] | undefined> {
+  const body = (await res.json().catch(() => null)) as
+    | { sourceContext?: { missingFields?: unknown }; data?: { sourceContext?: { missingFields?: unknown } } }
+    | null;
+  const raw = body?.sourceContext?.missingFields ?? body?.data?.sourceContext?.missingFields;
+  return Array.isArray(raw) ? raw.filter((f): f is string => typeof f === 'string') : undefined;
+}
+
 function now() { return new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
 
 // ─── Typing Indicator ───────────────────────────────────────────
@@ -301,7 +320,7 @@ function MessageBubble({
                     body: JSON.stringify({ edits }),
                   });
                   if (!editRes.ok) {
-                    throw new Error(`Saving edits failed: ${editRes.status} ${editRes.statusText}`);
+                    throw await refusal(editRes, 'Saving edits failed');
                   }
                 }
                 // Use apiFetch so the Clerk bearer token is attached — a
@@ -324,6 +343,27 @@ function MessageBubble({
                   summary: msg.proposal!.title,
                   response: body,
                 });
+              }}
+              // #1277 — the inbox's gate-lifting calls, from the chat card.
+              // Neither approves; both answer with the remaining gates.
+              onResolveLine={async (lineIndex, catalogItemId) => {
+                const res = await apiFetch(`/api/proposals/${msg.proposal!.id}/resolve-line`, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ lineIndex, catalogItemId }),
+                });
+                if (!res.ok) throw await refusal(res, 'That pick was not saved');
+                emitProposalsChanged();
+                return remainingMissingFields(res);
+              }}
+              onSaveEdits={async (edits) => {
+                const res = await apiFetch(`/api/proposals/${msg.proposal!.id}`, {
+                  method: 'PUT',
+                  body: JSON.stringify({ edits }),
+                });
+                if (!res.ok) throw await refusal(res, 'Saving edits failed');
+                emitProposalsChanged();
+                return remainingMissingFields(res);
               }}
               onReject={async () => {
                 // Same authenticated client + throw-on-failure contract as

@@ -554,6 +554,15 @@ export interface TenantSettings {
    */
   e1ReviewedScript?: string | null;
   /**
+   * #1386 / O-2 — the reviewer attestation stored with `e1ReviewedScript`
+   * (migration 293): who signed it off, in what capacity (licensed trade
+   * professional / counsel), and when. Written only by the owner-only
+   * PUT /api/settings/e1-script, together with the script.
+   */
+  e1ReviewedByName?: string | null;
+  e1ReviewedByRole?: string | null;
+  e1ReviewedAt?: Date | null;
+  /**
    * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
    * migration 204), so pilots receive it unless they turn it off. Optional
    * on the type so pre-migration rows / legacy fixtures read as "on" via
@@ -727,6 +736,10 @@ export interface UpdateSettingsInput {
   digestChannel?: DigestChannel;
   /** FIX 10(i) (ANS-001) — reviewed E1 script; null clears (reverts to the placeholder). */
   e1ReviewedScript?: string | null;
+  /** #1386 / O-2 — reviewer attestation; null clears (with the script). */
+  e1ReviewedByName?: string | null;
+  e1ReviewedByRole?: string | null;
+  e1ReviewedAt?: Date | null;
   /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */

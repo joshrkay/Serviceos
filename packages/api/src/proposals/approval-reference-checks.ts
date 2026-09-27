@@ -18,6 +18,7 @@
  */
 import type { Proposal, ProposalType } from './proposal';
 import type { InvoiceRepository } from '../invoices/invoice';
+import type { LocationRepository } from '../locations/location';
 import { isChainRefToken } from './chain';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
@@ -46,4 +47,47 @@ export function invoiceReferenceCheck(
     const invoice = await invoiceRepo.findById(tenantId, id);
     return invoice ? [] : ['invoiceId'];
   };
+}
+
+/**
+ * #1271 — proposal types whose executor, handed a resolved `customerId` and no
+ * `jobId`, opens a job at the customer's primary (else first live) service
+ * location and fails "Customer has no service location — add one before
+ * approving" when there is none (DraftEstimateExecutionHandler,
+ * CreateInvoiceExecutionHandler). The executor's own copy calls it a
+ * pre-approval condition, so approval enforces it.
+ */
+const JOB_AUTO_OPEN_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'draft_estimate',
+  'draft_invoice',
+]);
+
+export function serviceLocationReferenceCheck(
+  locationRepo: Pick<LocationRepository, 'findByCustomer'>,
+): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (!JOB_AUTO_OPEN_PROPOSAL_TYPES.has(proposal.proposalType)) return [];
+    const { customerId, jobId } = proposal.payload;
+    // A named job is the container; no job is opened, so no location is read.
+    if (typeof jobId === 'string' && jobId.length > 0) return [];
+    if (typeof customerId !== 'string' || customerId.length === 0) return [];
+    if (isChainRefToken(customerId)) return [];
+    const locations = await locationRepo.findByCustomer(tenantId, customerId);
+    return locations.some((loc) => !loc.isArchived) ? [] : ['locationId'];
+  };
+}
+
+/**
+ * The operator-facing refusal for a set of dangling references. A missing
+ * service location is not "a record that does not exist" — it is a record the
+ * operator has to add — so it gets its own sentence.
+ */
+export function describeDanglingReferences(fields: readonly string[]): string {
+  const ids = fields.filter((f) => f !== 'locationId');
+  const parts: string[] = [];
+  if (ids.length > 0) parts.push(`${ids.join(', ')} does not name an existing record`);
+  if (fields.includes('locationId')) {
+    parts.push('the customer has no service location — add one before approving');
+  }
+  return `Cannot approve proposal: ${parts.join('; ')}`;
 }

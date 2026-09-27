@@ -140,7 +140,16 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     const voice = await signedPost(
       request,
       '/api/telephony/voice',
-      { CallSid: callSid, AccountSid: tenant.subaccountSid, From: ownerPhone, To: tenant.did },
+      // #1223 — the owner line is trusted only with full STIR/SHAKEN
+      // A-attestation, which Twilio sends on /voice as StirVerstat. Without it
+      // the owner is an untrusted caller and owner intents never classify.
+      {
+        CallSid: callSid,
+        AccountSid: tenant.subaccountSid,
+        From: ownerPhone,
+        To: tenant.did,
+        StirVerstat: 'TN-Validation-Passed-A',
+      },
       tenant.authToken,
     );
     expect(voice.status()).toBe(200);

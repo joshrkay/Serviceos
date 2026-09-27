@@ -22,6 +22,7 @@
  */
 import { LLMGateway } from '../ai/gateway/gateway';
 import { CatalogItemRepository } from '../catalog/catalog-item';
+import type { EstimateRepository } from '../estimates/estimate';
 import { IntentType } from '../ai/orchestration/intent-classifier';
 import { TaskHandler } from '../ai/tasks/task-handlers';
 import { ProposalType } from './proposal';
@@ -48,6 +49,12 @@ export interface RedraftHandlerFactoryDeps {
    * the pre-P22 behavior.
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * #1276F — the invoice re-draft reads the estimate it bills, so a picked
+   * "invoice Bob from the accepted estimate" copies the estimate's lines like
+   * the non-ambiguous chat path does instead of the model's placeholder.
+   */
+  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
 }
 
 /**
@@ -61,7 +68,7 @@ export function createRedraftHandlerFactory(
   const byProposalType = new Map<ProposalType, TaskHandler>();
   // Catalog-grounded drafting handlers (the common ambiguity case: "invoice
   // Bob" / "estimate for the Rodriguez job").
-  byProposalType.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
+  byProposalType.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, estimateRepo: deps.estimateRepo }));
   byProposalType.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   // Passthrough capture handlers — the resolved id is stamped onto the payload
   // by resolveProposalEntity via existingEntities, exactly like the

@@ -16,11 +16,12 @@ import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
 import { clearSatisfiedMissingFields } from './missing-fields';
-import type { ApprovalOptions } from './approval-reference-checks';
+import { describeDanglingReferences, type ApprovalOptions } from './approval-reference-checks';
 import {
   clearPendingReferencesForEdit,
   type EntityAliasCandidateCapture,
 } from '../learning/entity-aliases/candidate-service';
+import { clearPendingAmbiguity, pendingAmbiguityOf } from '../ai/resolution/gated-reference-resolution';
 
 const logger = createLogger({
   service: 'proposals.actions',
@@ -326,7 +327,7 @@ export async function approveProposal(
     ).flat();
     if (dangling.length > 0) {
       throw new ValidationError(
-        `Cannot approve proposal: ${dangling.join(', ')} does not name an existing record`,
+        describeDanglingReferences(dangling),
         { missingFields: dangling },
       );
     }
@@ -818,8 +819,23 @@ export async function editProposal(
     nextSourceContext = pendingReferenceClear.sourceContext;
   }
 
+  // #1276 — an edit that fills the id a chat question is waiting on (the
+  // card's pick PUTs it) answers that question. Left stored, a later "1" in
+  // chat was still read as an answer to it and claimed a different pick.
+  const pendingQuestion = pendingAmbiguityOf({ sourceContext: nextSourceContext });
+  const answersPendingQuestion =
+    pendingQuestion !== undefined &&
+    editedFields.includes(pendingQuestion.refKey) &&
+    typeof updatedPayload[pendingQuestion.refKey] === 'string' &&
+    (updatedPayload[pendingQuestion.refKey] as string).trim() !== '';
+  if (answersPendingQuestion) {
+    const answered = { sourceContext: nextSourceContext };
+    clearPendingAmbiguity(answered);
+    nextSourceContext = answered.sourceContext;
+  }
+
   const sourceContextUpdate =
-    clearedMissingFields.length > 0 || pendingReferenceClear.cleared
+    clearedMissingFields.length > 0 || pendingReferenceClear.cleared || answersPendingQuestion
       ? nextSourceContext
       : undefined;
 

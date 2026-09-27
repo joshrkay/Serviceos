@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **57** |
+| Owner-only routes in code | **59** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **6** |
-| `cadence: occasional` | **49** |
+| `cadence: occasional` | **51** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **6** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 57,
+  "ownerOnlyRoutes": 59,
   "daily": 2,
   "onboarding": 6,
-  "occasional": 49,
+  "occasional": 51,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 6
 }
@@ -141,6 +141,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `DELETE /api/estimates/:id` | occasional | Cleanup. The daily path is draft → approve → send, not delete. | false | none | |
 | `DELETE /api/notes/:id` | occasional | Cleanup of a note the day already captured. | false | none | |
 | `DELETE /api/settings/packs/:packId` | occasional | Vertical-pack configuration. | false | none | |
+| `DELETE /api/settings/e1-script` | occasional | Reverts the tenant's E1 life-safety script to the hard-flagged placeholder (#1386, O-2) — e.g. a sign-off withdrawn. Rare by construction. | false | none | |
 | `DELETE /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken money/irreversible challenge. | false | none | |
 | `PATCH /api/entity-aliases/:id/deactivate` | occasional | Revokes a learned tenant alias — a correction to what the AI inferred, not a step in a normal day. Owner-only per the router's own header ("Owner-only revoke path for learned tenant aliases"). **Gated inside the handler, not by a middleware guard**, so the executed-guard derivation cannot see it; declared in `IN_HANDLER_OWNER_ROUTES` and cross-checked against the mounted app and the source. | false | none | |
 | `GET /api/evaluation/shadow-comparisons` | occasional | Internal AI-evaluation surface; not part of running the business. | false | none | |
@@ -181,6 +182,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |
 | `PUT /api/settings/capabilities/:key` | occasional | Per-tenant capability flags (#1011). Configuration. | false | none | |
 | `PUT /api/settings/dunning` | occasional | The tenant's late-fee and dunning policy (#1143). Configuration set once and revisited rarely; the overdue sweep applies it with no owner action on a normal day. | false | none | |
+| `PUT /api/settings/e1-script` | occasional | Records the reviewed E1 life-safety script with its reviewer attestation (#1386, O-2: a licensed trade pro + counsel sign it). Done once per sign-off; until then calls run the hard-flagged placeholder with no owner action. | false | none | |
 | `PUT /api/settings/packs/:packId/activate` | occasional | Vertical-pack activation. | false | none | |
 | `PUT /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken challenge. | false | none | |
 

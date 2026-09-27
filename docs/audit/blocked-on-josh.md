@@ -12,11 +12,60 @@ waiting* names the §5/§8 rows and the rung they cannot reach until the answer 
 
 ---
 
+## Reconciliation 2026-09-26 (#1024 close-out, `origin/main` @ 284ff29d2)
+
+Every parked entry below, checked against its ticket and its row. The entries
+themselves are kept as written (history); this table is the current state.
+
+| Entry | Ticket | State now | Row(s) now |
+|---|---|---|---|
+| O-2 E1 script sign-off | #1000 (closed) | **Answered 2026-09-26** (trade professional + counsel; placeholder hard-flagged until then; engineering adds a write path). **Not yet reconciled with the code — see the new entry below:** since 52157b6f0 the voice gate refuses AI answering on any tenant without a reviewed script, and the promised write path does not exist | 2.5 4 (T1), I8 4; phone rows 3.1 / 3.7 / 3.10 held at 4 by it |
+| O-4 static PIN | #1000 | Answered 2026-09-26 (accept for now) | I3 4 (T1) |
+| O-6 approval transport | #1000 | Answered 2026-09-26 (`speechTurn`, Gather degrade, #838) | I3; §8.6 voice-approval rows |
+| O-9 second classifier | #1000 | Answered 2026-09-26 (amend the commitment to name the covered surfaces) — the PRD text amendment is not yet made | C5 2, 7.11 3 |
+| Q12 discount/tax | #1000 | Answered 2026-09-26 (fail closed; implemented with #1288) | no story row |
+| Intuit consent click | #1000 | Answered 2026-09-26 (Josh clicks through on a sandbox company) — **not yet done**. The fan-out half this entry also named is **done** (lane Z: accounting-sync entry in `sweep-tenant-fanout.test.ts`) | 9.11 3 → **4− (T1·T4)**; 5 waits on the click |
+| Google Business Profile | #1000 | Answered 2026-09-26 (Josh connects one tenant) — not yet done | 9.4 sweep 4 (T4) / approval half 5 |
+| Railway census | #999 / #1000 | Resolved (rung 5 is the map's ceiling) | — |
+| §8.12 memberships minimum | #1058 (closed) | Lane T built all three of (a)/(b)/(c) on every path; **Josh's "intended minimum" answer is still not recorded** — if it is "auto-collect is the path", the port reverts | 8.12 3 → **4 (T1·T4)** |
+| Stripe test key (dues, off-session, Terminal) | #1000 | Open — no key issued | 8.5b/c 3; 5.5 live-charge half |
+| Spanish E1 (#1056) | #1056 (closed) | **Fixed** — "fuga de gas" reaches E1 at the real handler (`e1-life-safety-handler.test.ts`, 31/31) | 2.5 4 (T1), Spanish clause met |
+| §8.5 card-on-file audit | — | Open (money-class emission not landed) | 8.5 card-on-file 4− |
+| #1011 §E (E1–E7) | #995 | E1: superseded by the O-2 answer (a write path is promised) · E2–E5: no answer recorded · E6: runner adopted by practice (`chromium` + CLI testcontainer; `chromium-noauthbypass` for technician sessions), not formally ratified · E7: no answer | 2.6, 2.7 |
+| 3.8 no-provider silence | #1077 (closed) | **Fixed** by PR #1375 — `UndeliveredConfirmationRecorder` writes one `failed` / `provider: none` row per reachable channel; dead class deleted | 3.8 **4 (T1·T3)** |
+| 4.7 wire or retire | #1079 (closed) | **Wired** by PR #1375 — the board API serves `lateness`; no board renders it | 4.7 2 → **4 (T1)** |
+| 9.5 execute-time cap | #1080 (closed) | Closed | 9.5 5 (T2) |
+| 1.6 live Twilio subaccount | #1016 | Open — no credential | 1.6 3 |
+| 1.10 brand-voice flag | #1016 | Open — no answer | 1.10 4 |
+| 5.5 simulated reader | #1018 | Open — needs the Stripe test key above | 5.5 live-charge half |
+| #1102 refuse vs skip | #1102 (closed) | Fixed by PR #1107 (refuse); #1109 closed too | 5.5 4 (T1) both halves |
+
+**Count still parked on Josh:** 9 — the O-2/voice-gate conflict (new, below),
+the Intuit click, the GBP connect, the Stripe test key (covers 8.5b/c and
+5.5), the 8.12 minimum, 1.6's Twilio subaccount, 1.10's flag, the §E questions
+E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
+
+### NEW 2026-09-26 — the O-2 answer and the shipped voice gate disagree (from lane Z's re-grade of #1015)
+- **What:** O-2's answer says E1 may launch publicly *with the placeholder hard-flagged* until a trade
+  professional and counsel sign off, and that engineering adds a write path for `e1_reviewed_script`.
+  The code does the opposite: since `52157b6f0` (2026-09-15, "fail closed on safety and billing
+  gaps") `createVoiceGate` (`packages/api/src/voice/voice-gate.ts`) sends **every** call on a tenant
+  with no `tenant_settings.e1_reviewed_script` to voicemail ("We're completing this line's safety
+  setup"), and nothing but SQL writes that column. So no tenant's phone line can be answered by the
+  AI in production today, and every phone-lane Playwright spec was red at `origin/main` until its
+  fixture wrote the column by SQL.
+- **Josh's call:** (a) keep the fail-closed gate and ship the promised write path (then a reviewed
+  script is a precondition of go-live, which O-2's answer did not say), or (b) let the gate pass on
+  the hard-flagged placeholder, as the O-2 answer reads.
+- **Until decided:** phone-surface rows that reach 5 only with the SQL-provisioned script are held at
+  4 (3.1, 3.7 phone, 3.10), and 2.5 stays at 4.
+- **Parked:** 2026-09-26 · **Answer:**
+
 ## Decisions (product, not engineering)
 
 | Decision | What blocks | Rows waiting | Parked | Answer |
 |---|---|---|---|---|
-| **O-2** Who signs off on the E1 life-safety script? | `E1_SCRIPT_REVIEW_REQUIRED=true` is hard-coded and boot only warns (*"E1 life-safety script is an UNREVIEWED PLACEHOLDER"* on every API start); no write surface exists for `tenant_settings.e1_reviewed_script` — it is one of the twelve keys absent from `updateSettingsSchema` (PRD §12.4c). Not an engineering decision. | **2.5**, **I8** — both can reach 4 (Docker proof) and 5 (reachable) speaking the placeholder; **rung 6 / launch** waits here | 2026-09-12 || **Answered 2026-09-26:** a licensed trade professional plus counsel sign off; until then E1 may launch publicly only with the placeholder hard-flagged. Engineering adds a settings write path for `e1_reviewed_script`. Sign-off itself stays with Josh. |
+| **O-2** Who signs off on the E1 life-safety script? | `E1_SCRIPT_REVIEW_REQUIRED=true` is hard-coded and boot only warns (*"E1 life-safety script is an UNREVIEWED PLACEHOLDER"* on every API start); no write surface exists for `tenant_settings.e1_reviewed_script` — it is one of the twelve keys absent from `updateSettingsSchema` (PRD §12.4c). Not an engineering decision. | **2.5**, **I8** — both can reach 4 (Docker proof) and 5 (reachable) speaking the placeholder; **rung 6 / launch** waits here | 2026-09-12 || **Answered 2026-09-26:** a licensed trade professional plus counsel sign off; until then E1 may launch publicly only with the placeholder hard-flagged. Engineering adds a settings write path for `e1_reviewed_script`. Sign-off itself stays with Josh. **Write path built (#1386):** owner-only, audited `PUT`/`DELETE /api/settings/e1-script` stores the script with the reviewer attestation (name, role, reviewed-at; migration 293); the voice gate no longer sends calls to voicemail for a missing script — E1 runs the placeholder hard-flagged (`e1ScriptPlaceholder: true` on every E1 audit row, a persistent owner banner, the boot warning). **Still Josh's:** obtaining the trade + counsel sign-off and saving the signed script. |
 | **O-4** Per-approval voice codes, or accept static PIN exposure? | The voice-approval PIN is a static per-tenant secret re-spoken on every recorded approval; redaction shipped, per-approval codes did not (§12.2). PRD §14: *"Money-class voice approval should not be considered shipped until this resolves."* | **I3** (spoken challenge on money/irreversible) — stops at 4; 5 is claimable only if the static PIN is accepted | 2026-09-12 || **Answered 2026-09-26:** accept the static PIN for now (#850 redaction, #1051 attempt reservation and the 3-strike lockout have shipped). Revisit per-approval SMS codes once money-by-voice usage appears. |
 | **O-6** Which realtime transport carries voice approval? | An approval exchange does not fit inside the resilient transport's hang timer (§14). | **I3**; the §8.6 voice-approval rows on the phone surface | 2026-09-12 || **Answered 2026-09-26:** the `speechTurn` pipeline (Media Streams), with Gather as the degrade path, per #838 (map #962). |
 | **O-9** Does "a second classifier reviews every booking and quote" still hold, or does the commitment change? | `getSupervisorReviewGate()` has 2 call sites against 93 `createProposal(` sites; the conditional site skips `draft` (low-confidence) quotes; default mode `shadow` never holds; `pricing_anomaly` is not in `CUSTOMER_HARM_CHECKS` so it cannot hold in any mode (§12.4e). Two honest resolutions; *continuing to state it as written is the one option that is not available.* The supervisor gate is untouchable on this map. | **C5** (rung 2, NOT KEPT), **7.11** (rung 3) — neither moves | 2026-09-12 || **Answered 2026-09-26:** amend the commitment to name the surfaces the supervisor gate actually covers; wiring every `createProposal` site is a separate effort. |
@@ -93,9 +142,12 @@ named, not answered — see this file's own rule at the top.
   design pass raised when it kept `e1ReviewedScript` out of the generic
   settings PUT (decision #7, PR-2): if an owner is ever allowed to edit it,
   the write needs its own reviewed/gated path (legal + trade sign-off,
-  per O-2), not a bare boolean/string field on `PUT /api/settings`. **Until
-  decided:** `e1ReviewedScript` stays unreachable from every settings
-  surface; rows 2.5/I8 are unaffected (they speak the placeholder either way).
+  per O-2), not a bare boolean/string field on `PUT /api/settings`. **Resolved
+  by O-2's answer (#1386):** the script is written only through its own
+  owner-only `PUT /api/settings/e1-script`, which refuses a save without the
+  reviewer attestation and audits every save/revert; it stays off the generic
+  `PUT /api/settings`. Rows 2.5/I8 are unaffected (they speak the placeholder,
+  now hard-flagged, until a signed script is saved).
 - **(E2) `aiModel` after provisioning — ever owner-editable, or fixed for the
   tenant's lifetime?** PRD §12.4c (decision #8) leaves `aiModel` as a
   dedicated-writer / not-user-settable field, untouched by this ticket's

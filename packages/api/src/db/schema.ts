@@ -7171,6 +7171,16 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
     UPDATE voice_approval_pin_lock_alerts SET sent_at = created_at WHERE sent_at IS NULL;
   `,
+  // #1386 / O-2 — the reviewer attestation stored alongside the reviewed E1
+  // life-safety script (migration 267). Written ONLY by the owner-only
+  // PUT /api/settings/e1-script together with the script; all NULL = the
+  // placeholder is in effect. Additive, nullable; drops nothing.
+  '293_tenant_settings_e1_script_attestation': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS e1_reviewed_by_name TEXT,
+      ADD COLUMN IF NOT EXISTS e1_reviewed_by_role TEXT,
+      ADD COLUMN IF NOT EXISTS e1_reviewed_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

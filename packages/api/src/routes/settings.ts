@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { requireAuth, requireTenant, requirePermission, requireRole } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
@@ -115,6 +115,35 @@ const languagePatchSchema = z.object({
 const voiceApprovalPinSchema = z.object({
   pin: z.string().min(1).max(32),
 });
+
+// #1386 / O-2 — the reviewed E1 life-safety script plus its reviewer
+// attestation. Strict: the tenant comes from the session, and no other
+// settings key rides along. 2000 = the column's CHECK (migration 267).
+const e1ScriptSchema = z
+  .object({
+    script: z.string().trim().min(1).max(2000),
+    reviewedByName: z.string().trim().min(1).max(200),
+    reviewedByRole: z.string().trim().min(1).max(200),
+    reviewedAt: z
+      .string()
+      .datetime({ offset: true })
+      .refine((v) => Date.parse(v) <= Date.now(), {
+        message: 'reviewedAt cannot be in the future',
+      }),
+  })
+  .strict();
+
+/** What the owner (and the web banner) sees about the live E1 script. */
+function projectE1Script(settings: TenantSettings | null) {
+  const script = settings?.e1ReviewedScript?.trim() || null;
+  return {
+    status: script ? ('reviewed' as const) : ('placeholder' as const),
+    reviewedScript: script,
+    reviewedByName: script ? settings?.e1ReviewedByName ?? null : null,
+    reviewedByRole: script ? settings?.e1ReviewedByRole ?? null : null,
+    reviewedAt: script && settings?.e1ReviewedAt ? settings.e1ReviewedAt.toISOString() : null,
+  };
+}
 
 // #1051 follow-up — the refusal copy for a guessable PIN. Deliberately free of
 // example digits: the response must never echo (or hint at) the PIN sent.
@@ -664,6 +693,137 @@ export function createSettingsRouter(
         }
 
         res.status(204).end();
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // ── #1386 / O-2 — the reviewed E1 life-safety script ─────────────────────
+  // O-2 (owner, 2026-09-26): a licensed trade professional plus counsel sign
+  // the E1 script; until then E1 runs the embedded placeholder HARD-FLAGGED
+  // (every E1 audit row carries `e1ScriptPlaceholder: true`, the owner sees a
+  // banner fed by the GET below, and boot warns). This is the ONE write path
+  // for `e1_reviewed_script` — deliberately not a key on the generic
+  // `PUT /api/settings` (#1011 decision #7): the script cannot be saved
+  // without the reviewer attestation, and only the owner role may save it.
+  // Sign-off itself stays with the owner; this route only records it.
+
+  router.get(
+    '/e1-script',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const settings = await getSettings(req.auth!.tenantId, settingsRepo);
+        res.json(projectE1Script(settings));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.put(
+    '/e1-script',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const input = e1ScriptSchema.parse(req.body ?? {});
+        const existing = await ensureTenantSettings(tenantId, settingsRepo);
+        const reviewedAt = new Date(input.reviewedAt);
+        const updated = await updateSettings(
+          tenantId,
+          {
+            e1ReviewedScript: input.script,
+            e1ReviewedByName: input.reviewedByName,
+            e1ReviewedByRole: input.reviewedByRole,
+            e1ReviewedAt: reviewedAt,
+          },
+          settingsRepo,
+        );
+        if (!updated) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
+          return;
+        }
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.e1_script.reviewed',
+              entityType: 'tenant_settings',
+              entityId: updated.id,
+              // The attestation is the point of the record; the script text
+              // itself lives on the row (and its length is enough to tell
+              // two saves apart here).
+              metadata: {
+                reviewedByName: input.reviewedByName,
+                reviewedByRole: input.reviewedByRole,
+                reviewedAt: reviewedAt.toISOString(),
+                scriptLength: input.script.length,
+                previousStatus: projectE1Script(existing).status,
+              },
+            }),
+          );
+        }
+
+        res.json(projectE1Script(updated));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // Revert to the placeholder (e.g. a sign-off withdrawn). Clears the script
+  // AND its attestation together so no stale reviewer is left on the row.
+  router.delete(
+    '/e1-script',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const existing = await ensureTenantSettings(tenantId, settingsRepo);
+        const updated = await updateSettings(
+          tenantId,
+          {
+            e1ReviewedScript: null,
+            e1ReviewedByName: null,
+            e1ReviewedByRole: null,
+            e1ReviewedAt: null,
+          },
+          settingsRepo,
+        );
+        if (!updated) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
+          return;
+        }
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.e1_script.cleared',
+              entityType: 'tenant_settings',
+              entityId: updated.id,
+              metadata: { previousStatus: projectE1Script(existing).status },
+            }),
+          );
+        }
+        res.json(projectE1Script(updated));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
