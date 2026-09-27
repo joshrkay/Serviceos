@@ -110,7 +110,9 @@ const lineItemSchema = z.object({
   id: z.string().min(1),
   description: z.string().min(1),
   category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
-  quantity: z.number().nonnegative(),
+  // #1400 — a zero-quantity line is refused on create exactly as the web
+  // editor refuses it on edit (it was accepted on create, refused on edit).
+  quantity: z.number().positive('quantity must be more than 0 — remove the line to drop it'),
   // B7.5 — descriptive unit of measure. Must be declared here or Zod strips it
   // on create/update/revise, exactly like pricingSource and imageFileId below:
   // both repositories DELETE and re-INSERT every line-item row on a lineItems

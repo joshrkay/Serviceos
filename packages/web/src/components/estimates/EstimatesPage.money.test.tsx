@@ -70,4 +70,20 @@ describe('EstimatesPage money (#1400)', () => {
     expect(html).toContain('$24.83');
     expect(html).toMatch(/<span>Total<\/span>\s*<span>\$325\.82<\/span>/);
   });
+
+  it('the approval tracker shows the real sent / viewed / approved dates (they were hard-coded blank)', async () => {
+    renderDetail(apiEstimate({
+      id: '00000000-0000-4000-8000-0000000000e2',
+      status: 'accepted',
+      sentAt: '2026-09-20T15:00:00.000Z',
+      firstViewedAt: '2026-09-21T15:00:00.000Z',
+      acceptedAt: '2026-09-22T15:00:00.000Z',
+      customer: { id: '00000000-0000-4000-8000-0000000000c1', displayName: 'Alice Smith' },
+    }));
+    await screen.findByText('Approval tracking');
+    const tracker = screen.getByText('Approval tracking').parentElement!;
+    expect(within(tracker).getByText('Sep 20')).toBeInTheDocument();
+    expect(within(tracker).getByText('Sep 21')).toBeInTheDocument();
+    expect(within(tracker).getByText('Sep 22')).toBeInTheDocument();
+  });
 });

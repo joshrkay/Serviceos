@@ -45,3 +45,16 @@ describe('GET /api/estimates?stage= (#1400)', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 });
+
+describe('estimate line quantity is validated the same on create and edit (#1400)', () => {
+  it('POST /api/estimates refuses a quantity-0 line, as the editor already does on edit', async () => {
+    const { app } = await buildTestApp();
+    const res = await request(app).post('/api/estimates').send({
+      jobId: 'job-1', estimateNumber: 'X',
+      lineItems: [{ ...LINES[0], quantity: 0, totalCents: 0 }],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(JSON.stringify(res.body)).toContain('quantity must be more than 0');
+  });
+});

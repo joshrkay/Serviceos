@@ -1419,14 +1419,14 @@ function DeclineButton({ token, onDeclined }: {
         <button
           onClick={() => setConfirming(false)}
           disabled={submitting}
-          className="flex-1 rounded-lg border border-slate-200 bg-white py-2 text-xs text-slate-700 hover:bg-slate-50"
+          className="flex-1 min-h-11 rounded-lg border border-slate-200 bg-white py-2 text-xs text-slate-700 hover:bg-slate-50"
         >
           Cancel
         </button>
         <button
           onClick={submit}
           disabled={submitting}
-          className="flex-1 rounded-lg bg-slate-700 text-white py-2 text-xs hover:bg-slate-800 disabled:opacity-60"
+          className="flex-1 min-h-11 rounded-lg bg-slate-700 text-white py-2 text-xs hover:bg-slate-800 disabled:opacity-60"
         >
           {submitting ? 'Declining…' : 'Confirm decline'}
         </button>

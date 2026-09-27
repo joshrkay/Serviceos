@@ -1296,9 +1296,11 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     status,
     lineItems: uiLineItems,
     createdDate: est.createdAt ? formatDateInTenantTz(est.createdAt, tz) : '',
-    sentDate: undefined as string | undefined,
-    viewedDate: undefined as string | undefined,
-    approvedDate: undefined as string | undefined,
+    // #1400 — the tracker's dates come from the estimate (they were
+    // hard-coded undefined, so every step rendered undated).
+    sentDate: est.sentAt ? formatDateInTenantTz(est.sentAt, tz) : undefined,
+    viewedDate: est.firstViewedAt ? formatDateInTenantTz(est.firstViewedAt, tz) : undefined,
+    approvedDate: est.acceptedAt ? formatDateInTenantTz(est.acceptedAt, tz) : undefined,
     validUntil: est.validUntil,
   };
 
