@@ -351,9 +351,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
               customerRepo: factoryCtx.repos.customerRepo,
               appointmentRepo: factoryCtx.repos.appointmentRepo,
               jobRepo: factoryCtx.repos.jobRepo,
-              invoiceRepo: factoryCtx.repos.invoiceRepo,
-              estimateRepo: factoryCtx.repos.estimateRepo,
-              leadRepo: factoryCtx.repos.leadRepo,
+              // Invoice / estimate / lead reads reach the phone only through
+              // the `lookups` bundle, and the media_streams surface has no
+              // lookup branch yet (coverage-table `lookup.media_streams`,
+              // #1395) — wire the bundle when that branch lands.
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
               onSessionTerminated: async (session) => {
