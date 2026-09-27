@@ -257,7 +257,7 @@ export function CommunicationTimeline({
                 onClick={() => toggleKind(kind)}
                 aria-pressed={active}
                 className={
-                  'px-2 py-1 text-xs rounded-full border ' +
+                  'min-h-11 min-w-11 px-3 py-1 text-xs rounded-full border ' +
                   (active
                     ? 'bg-primary text-primary-foreground border-primary'
                     : 'bg-card text-foreground border-border')
@@ -302,7 +302,7 @@ export function CommunicationTimeline({
                 {href && (
                   <a
                     href={href}
-                    className="text-xs text-primary hover:underline mt-1"
+                    className="inline-flex min-h-11 min-w-11 items-center text-xs text-primary hover:underline"
                     data-testid="timeline-source-link"
                   >
                     View source
@@ -320,7 +320,7 @@ export function CommunicationTimeline({
             type="button"
             onClick={loadOlder}
             disabled={isLoadingMore}
-            className="text-xs text-primary hover:underline disabled:opacity-50"
+            className="min-h-11 min-w-11 text-xs text-primary hover:underline disabled:opacity-50"
             data-testid="timeline-load-older"
           >
             {isLoadingMore ? 'Loading...' : 'Load older'}

@@ -43,9 +43,9 @@ export function SearchBar({ onSearch, placeholder = 'Search conversations...', d
   );
 
   return (
-    <div className="search-bar" data-testid="search-bar">
+    <div className="search-bar flex items-center gap-2" data-testid="search-bar">
       <input
-        className="search-input"
+        className="search-input min-h-11 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground"
         data-testid="search-input"
         type="text"
         value={query}
@@ -53,7 +53,7 @@ export function SearchBar({ onSearch, placeholder = 'Search conversations...', d
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
       />
-      <button className="search-button" data-testid="search-button" onClick={handleSearch}>
+      <button type="button" className="search-button min-h-11 min-w-11 shrink-0 rounded-lg border border-border bg-card px-3 text-sm text-foreground hover:bg-secondary" data-testid="search-button" onClick={handleSearch}>
         Search
       </button>
     </div>

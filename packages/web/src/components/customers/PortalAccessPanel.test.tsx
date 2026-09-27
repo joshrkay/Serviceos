@@ -13,6 +13,7 @@ vi.mock('sonner', () => ({
 }));
 
 import { apiFetch } from '../../utils/api-fetch';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 const PORTAL_URL = `https://app.example.com/portal/${'a'.repeat(64)}`;
 
@@ -30,6 +31,23 @@ describe('PortalAccessPanel — mint link', () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('#1398 — generate/copy/send portal-link controls are ≥44×44 tap targets', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonResponse(201, {
+        id: 'ps-1',
+        token: 'a'.repeat(64),
+        url: PORTAL_URL,
+        expiresAt: '2026-09-04T00:00:00.000Z',
+        customerId: '1',
+      }),
+    );
+    render(<PortalAccessPanel customerId="1" />);
+    expectAllTapTargets(document.body, 'PortalAccessPanel (before mint)');
+    fireEvent.click(screen.getByRole('button', { name: 'Generate portal link' }));
+    await screen.findByDisplayValue(PORTAL_URL);
+    expectAllTapTargets(document.body, 'PortalAccessPanel (after mint)');
   });
 
   it('mints a session via POST /api/portal-sessions and renders the link', async () => {

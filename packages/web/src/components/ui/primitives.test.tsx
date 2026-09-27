@@ -6,6 +6,9 @@ import { Avatar } from './avatar';
 import { Tooltip } from './tooltip';
 import { StatCard } from './stat-card';
 import { Stepper } from './stepper';
+import { Button } from './button';
+import { Input, Select, Textarea } from './input';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 describe('Progress', () => {
   it('reports value via aria and clamps width', () => {
@@ -68,5 +71,29 @@ describe('Stepper', () => {
     render(<Stepper steps={steps} current="sent" />);
     const current = screen.getByText('Sent').closest('li');
     expect(current).toHaveAttribute('aria-current', 'step');
+  });
+});
+
+describe('Button — #1398 mobile bar', () => {
+  it.each(['sm', 'md', 'lg'] as const)('size="%s" is a ≥44×44 tap target', (size) => {
+    render(<Button size={size}>Go</Button>);
+    expectTapTarget(screen.getByRole('button', { name: 'Go' }), `Button size=${size}`);
+  });
+});
+
+describe('form fields — #1398 mobile bar', () => {
+  it('Input, Select and Textarea are ≥44×44 tap targets even when a caller narrows them', () => {
+    render(
+      <>
+        <Input aria-label="in" className="w-40 px-2.5 py-1.5 text-xs" />
+        <Select aria-label="sel" className="w-32">
+          <option>a</option>
+        </Select>
+        <Textarea aria-label="ta" className="w-40" />
+      </>,
+    );
+    expectTapTarget(screen.getByLabelText('in'), 'Input');
+    expectTapTarget(screen.getByLabelText('sel'), 'Select');
+    expectTapTarget(screen.getByLabelText('ta'), 'Textarea');
   });
 });

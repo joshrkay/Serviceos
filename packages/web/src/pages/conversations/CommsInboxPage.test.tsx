@@ -10,6 +10,7 @@ vi.mock('../../utils/api-fetch', () => ({
 
 import { CommsInboxPage } from './CommsInboxPage';
 import type { InboxThread } from '../../api/conversations';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 function renderInbox(initialEntry = '/comms-inbox') {
   return render(
@@ -100,6 +101,13 @@ describe('CommsInboxPage', () => {
     expect(await screen.findByText('Dana Diaz')).toBeInTheDocument();
     expect(screen.getByText('one more question')).toBeInTheDocument();
     expect(screen.getByLabelText('Needs reply')).toBeInTheDocument();
+  });
+
+  it('#1398 — the thread-list search field and its Search button are ≥44×44 tap targets', async () => {
+    renderInbox();
+    await screen.findByText('Dana Diaz');
+    expectTapTarget(screen.getByPlaceholderText(/search by customer or message/i), 'search input');
+    expectTapTarget(screen.getByRole('button', { name: 'Search' }), 'Search button');
   });
 
   it('mobile layout contract — grid tracks use minmax(0,…) and rows are ≥44px tap targets', async () => {

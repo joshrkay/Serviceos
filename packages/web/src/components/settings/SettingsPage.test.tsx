@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { SettingsPage } from './SettingsPage';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useMe', () => ({
   useMe: () => ({
@@ -38,6 +39,18 @@ describe('SettingsPage', () => {
       </MemoryRouter>
     );
 
+    const previews = screen.getAllByRole('button', { name: /preview/i });
+    const copies = screen.getAllByRole('button', { name: /copy link/i });
+    expect(previews.length).toBe(2);
+    expect(copies.length).toBe(2);
+    for (const b of [...previews, ...copies]) expectTapTarget(b, b.textContent ?? 'link action');
+
+    const google = screen.getByLabelText(/google review url/i);
+    expectTapTarget(google, 'Google Review URL');
+    expectTapTarget(screen.getByLabelText(/yelp review url/i), 'Yelp Review URL');
+    const reviewsSave = google.closest('div')!.querySelector('button[type="button"]:last-of-type');
+    expect(reviewsSave?.textContent).toMatch(/save/i);
+    expectTapTarget(reviewsSave!, 'review URLs Save');
     expect(screen.getByText('Emergency safety script')).toBeInTheDocument();
   });
 

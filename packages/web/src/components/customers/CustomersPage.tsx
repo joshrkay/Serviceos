@@ -575,18 +575,18 @@ export function CustomersPage() {
           </div>
           <button
             onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors">
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors">
             <Plus size={14} /> Add customer
           </button>
         </div>
 
         {/* search */}
-        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 mt-4">
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 mt-4">
           <Search size={15} className="text-muted-foreground shrink-0" />
           <input
             onChange={e => { setSearchTerm(e.target.value); setSearch(e.target.value); }}
             placeholder="Search name, address, phone…"
-            className="flex-1 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
+            className="flex-1 min-h-11 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
           />
         </div>
 
@@ -607,7 +607,7 @@ export function CustomersPage() {
             type="button"
             onClick={toggleArchived}
             aria-pressed={showArchived}
-            className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+            className={`flex min-h-11 min-w-11 items-center gap-1.5 rounded-full border px-3.5 text-xs whitespace-nowrap transition-all shrink-0 ${
               showArchived
                 ? 'bg-primary border-primary text-primary-foreground'
                 : 'border-border text-muted-foreground hover:border-border'
@@ -625,7 +625,7 @@ export function CustomersPage() {
           >
             <button
               onClick={() => setTagFilter('')}
-              className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+              className={`min-h-11 min-w-11 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                 tagFilter === ''
                   ? 'bg-primary border-primary text-primary-foreground'
                   : 'border-border text-muted-foreground hover:border-border'
@@ -637,7 +637,7 @@ export function CustomersPage() {
               <button
                 key={tag}
                 onClick={() => setTagFilter(t => (t === tag ? '' : tag))}
-                className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                className={`min-h-11 min-w-11 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                   tagFilter === tag
                     ? 'bg-primary border-primary text-primary-foreground'
                     : 'border-border text-muted-foreground hover:border-border'
@@ -669,7 +669,7 @@ export function CustomersPage() {
                 <button
                   key={c.id}
                   onClick={() => navigate(`/customers/${c.id}`)}
-                  className="flex items-center gap-3.5 rounded-2xl bg-card border border-border px-4 py-3.5 text-left hover:border-border hover:shadow-sm transition-all active:scale-[0.99]"
+                  className="min-h-11 min-w-11 flex items-center gap-3.5 rounded-2xl bg-card border border-border px-4 py-3.5 text-left hover:border-border hover:shadow-sm transition-all active:scale-[0.99]"
                 >
                   <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs">
                     {name.split(' ').map(n => n[0]).join('')}

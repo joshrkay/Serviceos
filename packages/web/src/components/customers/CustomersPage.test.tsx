@@ -13,6 +13,7 @@ vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { toast } from 'sonner';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 const mockCustomers = [
   {
@@ -349,5 +350,12 @@ describe('AddCustomerSheet — save guard + retry (duplicate-customer fix)', () 
     expect(createLocationMock).toHaveBeenCalledTimes(2);
     expect(createLocationMock.mock.calls[1][0]).toMatchObject({ customerId: 'c9' });
     expect(defaultListResult.refetch).toHaveBeenCalled();
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('every page-level control (Add customer, search, filters, rows) is a ≥44×44 tap target', () => {
+    const { container } = renderPage();
+    expectAllTapTargets(container, 'CustomersPage');
   });
 });
