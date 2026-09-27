@@ -29,6 +29,48 @@ function isUploadBody(body: RequestInit['body']): boolean {
   return true;
 }
 
+/**
+ * #1416 (from #1408) — the deadline above only covers the wait for HEADERS.
+ * A body that stalls after them left `res.json()` pending forever. Each
+ * buffered body read (json / text / blob / arrayBuffer / formData) gets its
+ * own deadline: past it the request is aborted and the read rejects with the
+ * same ApiTimeoutError. `res.body` (a stream a caller reads incrementally)
+ * is deliberately left unbounded.
+ */
+const BUFFERED_BODY_READS = ['json', 'text', 'blob', 'arrayBuffer', 'formData'] as const;
+
+function boundBodyReads(
+  response: Response,
+  controller: AbortController,
+  timeoutMs: number,
+): Response {
+  for (const method of BUFFERED_BODY_READS) {
+    if (typeof response[method] !== 'function') continue;
+    const read = response[method].bind(response) as () => Promise<unknown>;
+    Object.defineProperty(response, method, {
+      configurable: true,
+      value: () =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            controller.abort();
+            reject(new ApiTimeoutError());
+          }, timeoutMs);
+          read().then(
+            (value) => {
+              clearTimeout(timer);
+              resolve(value);
+            },
+            (err: unknown) => {
+              clearTimeout(timer);
+              reject(err);
+            },
+          );
+        }),
+    });
+  }
+  return response;
+}
+
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -53,7 +95,8 @@ export async function fetchWithTimeout(
   }, timeoutMs);
 
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    const response = await fetch(input, { ...init, signal: controller.signal });
+    return boundBodyReads(response, controller, timeoutMs);
   } catch (err) {
     if (timedOut) throw new ApiTimeoutError();
     throw err;

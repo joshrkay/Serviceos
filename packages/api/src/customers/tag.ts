@@ -44,7 +44,9 @@ export async function addCustomerTag(
   tag: string,
   repository: TagRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<string> {
   const errors = validateTag(tag);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
@@ -58,7 +60,7 @@ export async function addCustomerTag(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer.tagged',
         entityType: 'customer',
         entityId: customerId,
@@ -76,7 +78,9 @@ export async function removeCustomerTag(
   tag: string,
   repository: TagRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<void> {
   const normalized = normalizeTag(tag);
   await repository.removeTag(tenantId, customerId, normalized);
@@ -86,7 +90,7 @@ export async function removeCustomerTag(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer.untagged',
         entityType: 'customer',
         entityId: customerId,

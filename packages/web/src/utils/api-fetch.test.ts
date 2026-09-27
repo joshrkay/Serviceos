@@ -410,3 +410,54 @@ describe('apiFetch — request timeout (#1397)', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
+
+// #1416 (from #1408) — the #1397 deadline only covered the wait for HEADERS.
+// A response whose body stalls after the headers arrive left `res.json()`
+// hanging forever. Reading the body is now bounded too, with the same
+// user-facing ApiTimeoutError.
+describe('apiFetch — body-stall timeout (#1416)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Headers arrive at once; the body never sends a byte. */
+  function stalledBody(): Response {
+    return new Response(new ReadableStream({ start() { /* never enqueues */ } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  it('a body that stalls after the headers rejects the read with the timeout error after 30s', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(stalledBody());
+    setTokenGetter(async () => TOKEN);
+
+    const res = await apiFetch('/api/jobs');
+    const outcome = res.json().then(
+      () => 'resolved',
+      (err: unknown) => err,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await outcome;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe('ApiTimeoutError');
+    expect((err as Error).message).toMatch(/took too long/i);
+  });
+
+  it('a body that arrives in time is read normally', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: [1, 2] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    setTokenGetter(async () => TOKEN);
+
+    const res = await apiFetch('/api/jobs');
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(await res.json()).toEqual({ data: [1, 2] });
+  });
+});

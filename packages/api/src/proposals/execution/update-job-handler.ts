@@ -209,7 +209,7 @@ export class UpdateJobExecutionHandler implements ExecutionHandler {
         createAuditEvent({
           tenantId: context.tenantId,
           actorId: context.executedBy,
-          actorRole: 'unknown',
+          actorRole: context.executedByRole ?? 'unknown',
           eventType: 'job.updated',
           entityType: 'job',
           entityId: jobId,

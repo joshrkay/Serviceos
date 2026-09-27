@@ -163,6 +163,7 @@ import { holdIfUnsupervised } from '../workers/voice-action-router';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
+import { redraftInvoiceOnEstimatePick } from '../ai/tasks/invoice-task';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { JobRepository } from '../jobs/job';
 import type { DunningEventRepository } from '../invoices/dunning-config';
@@ -2072,6 +2073,14 @@ async function applyDisambiguationAnswer(
   if (match.status === 'resolved') {
     clearPendingAmbiguity(proposal);
     applyGatedReferences(proposal, { [pending.refKey]: match.candidateId });
+    // #1405 — a picked accepted estimate re-drafts the invoice's lines from it.
+    await redraftInvoiceOnEstimatePick(
+      deps.estimateRepo,
+      tenantId,
+      proposal,
+      pending.refKey,
+      match.candidateId,
+    );
 
     // The answered reference may unblock a SECOND lookup that could not run
     // before it — an appointment reachable only once its customer is known,

@@ -5879,6 +5879,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // QA 2026-09-16 (AST-04) — an approvable proposal must be an executable
       // one: a payload invoiceId must name an invoice this tenant owns.
       approvalReferenceChecks,
+      // #1405 — the card's "which accepted estimate?" pick re-drafts the
+      // invoice's lines, discount and tax from the picked estimate.
+      estimateRepo,
     ),
   );
   if (entityAliasRepo) {
