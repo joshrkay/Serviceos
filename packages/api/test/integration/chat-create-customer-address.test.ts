@@ -34,7 +34,7 @@ import { serviceLocationReferenceCheck } from '../../src/proposals/approval-refe
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
-import type { AuthenticatedRequest } from '../../src/middleware/auth';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 
 function classifierGateway(entities: Record<string, unknown>): LLMGateway {

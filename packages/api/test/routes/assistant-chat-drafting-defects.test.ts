@@ -18,10 +18,11 @@ import request from 'supertest';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import { InMemoryProposalRepository, missingFieldsFor } from '../../src/proposals/proposal';
 import { approveProposal, editProposal } from '../../src/proposals/actions';
-import type { AuthenticatedRequest } from '../../src/middleware/auth';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { EntityResolver } from '../../src/ai/resolution/entity-resolver';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { buildEstimate } from '../factories/estimate.factory';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import {
   setSupervisorPresenceLoader,
@@ -214,7 +215,7 @@ describe('#1276F — chat "invoice from the accepted estimate" bills the estimat
       buildLineItem('li-1', 'Water heater install', 1, 100000, 0, true),
       buildLineItem('li-2', 'Haul-away and permit', 1, 17000, 1, false),
     ];
-    await estimateRepo.create({
+    await estimateRepo.create(buildEstimate({
       id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
       tenantId: TENANT,
       jobId: '9b2c4d6e-1f3a-4b5c-8d7e-0a1b2c3d4e5f',
@@ -225,7 +226,7 @@ describe('#1276F — chat "invoice from the accepted estimate" bills the estimat
       createdBy: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
-    });
+    }));
     const proposalRepo = new InMemoryProposalRepository();
     const app = buildApp(
       scriptedGateway([
