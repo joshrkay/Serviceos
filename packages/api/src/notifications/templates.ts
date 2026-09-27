@@ -344,6 +344,29 @@ export function renderPaymentReceiptSms(ctx: PaymentReceiptContext): RenderedSms
   };
 }
 
+/** #1400 — confirmation to the customer after they approve an estimate. */
+export interface EstimateApprovedContext {
+  customerName: string;
+  businessName: string;
+  estimateNumber: string;
+  /** The accepted total (the API's `totals.totalCents`), integer cents. */
+  totalCents: number;
+  language?: Language;
+}
+
+export function renderEstimateApprovedSms(ctx: EstimateApprovedContext): RenderedSms {
+  const lang = ctx.language ?? 'en';
+  return {
+    body: [
+      tn('sms.estimate_approved.line1', lang, { name: ctx.customerName, business: ctx.businessName }),
+      tn('sms.estimate_approved.line2', lang, {
+        number: ctx.estimateNumber,
+        total: formatMoney(ctx.totalCents),
+      }),
+    ].join('\n'),
+  };
+}
+
 export interface InvoiceOverdueContext {
   customerName: string;
   businessName: string;

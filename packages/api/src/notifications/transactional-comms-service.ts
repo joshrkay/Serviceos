@@ -3,6 +3,8 @@ import { JobRepository } from '../jobs/job';
 import { CustomerRepository } from '../customers/customer';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
+import type { EstimateRepository } from '../estimates/estimate';
+import type { EstimateApprovalNotifier } from '../estimates/public-estimate-service';
 import {
   SchedulingConfirmationNotifier,
   SchedulingConfirmationRequest,
@@ -19,6 +21,7 @@ import {
   renderAppointmentReminderSms,
   renderPaymentReceiptSms,
   renderInvoiceOverdueSms,
+  renderEstimateApprovedSms,
 } from './templates';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { tn } from './i18n';
@@ -30,6 +33,8 @@ export interface TransactionalCommsServiceDeps extends CustomerMessageDeliveryDe
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   invoiceRepo: InvoiceRepository;
+  /** #1400 — needed only for the estimate-approved confirmation. */
+  estimateRepo?: EstimateRepository;
 }
 
 /** Why an overdue-reminder send was suppressed at fire time (RIVET I10). */
@@ -92,8 +97,50 @@ function customerDisplayName(customer: {
  * Layer A transactional customer communications — booking confirmation,
  * reschedule/cancel notices, T-24h reminders, payment receipts, overdue nudges.
  */
-export class TransactionalCommsService implements SchedulingConfirmationNotifier {
+export class TransactionalCommsService implements SchedulingConfirmationNotifier, EstimateApprovalNotifier {
   constructor(private readonly deps: TransactionalCommsServiceDeps) {}
+
+  /**
+   * #1400 — confirm a public approval to the customer. Keyed per estimate
+   * (`estimate-approved:{estimateId}`): an estimate is accepted once, so a
+   * second call is a duplicate the claim gate suppresses.
+   */
+  async notifyEstimateApproved(tenantId: string, estimateId: string): Promise<void> {
+    if (!this.deps.estimateRepo) return;
+    const estimate = await this.deps.estimateRepo.findById(tenantId, estimateId);
+    if (!estimate || estimate.status !== 'accepted') return;
+
+    const job = await this.deps.jobRepo.findById(tenantId, estimate.jobId);
+    if (!job) return;
+    const customer = await this.deps.customerRepo.findById(tenantId, job.customerId);
+    if (!customer) return;
+
+    const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+    const businessName = settings?.businessName ?? 'Your service team';
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage: settings?.defaultLanguage,
+    });
+    const sms = renderEstimateApprovedSms({
+      customerName: customerDisplayName(customer),
+      businessName,
+      estimateNumber: estimate.estimateNumber,
+      totalCents: estimate.totals.totalCents,
+      language,
+    });
+
+    await sendCustomerMessage(this.deps, {
+      tenantId,
+      customer,
+      entityType: 'estimate',
+      entityId: estimateId,
+      channels: ['sms', 'email'],
+      smsBody: sms.body,
+      emailSubject: tn('email.estimate_approved.subject', language, { business: businessName }),
+      emailText: sms.body,
+      idempotencyKeyPrefix: `estimate-approved:${estimateId}`,
+    });
+  }
 
   async enqueue(request: SchedulingConfirmationRequest): Promise<void> {
     await this.sendAppointmentNotice(

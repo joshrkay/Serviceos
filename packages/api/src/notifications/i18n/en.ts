@@ -38,6 +38,11 @@ export const en = {
     'Hi {{name}}, we received your payment to {{business}}.',
   'sms.payment_receipt.line2': 'Invoice {{number}}: {{amount}}. Thank you!',
 
+  // ── Estimate approved confirmation SMS (#1400) ───────────────────────
+  'sms.estimate_approved.line1':
+    'Hi {{name}}, thanks for approving your estimate with {{business}}.',
+  'sms.estimate_approved.line2': 'Estimate {{number}}: {{total}}. We will be in touch to schedule the work.',
+
   // ── Invoice overdue SMS ──────────────────────────────────────────────
   'sms.invoice_overdue.line1':
     'Hi {{name}}, your invoice from {{business}} is past due.',
@@ -82,6 +87,7 @@ export const en = {
 
   // ── Transactional email subjects ─────────────────────────────────────
   'email.payment_receipt.subject': 'Payment received — {{business}}',
+  'email.estimate_approved.subject': 'Estimate approved — {{business}}',
   'email.invoice_overdue.subject': 'Invoice overdue — {{business}}',
   'email.appointment.subject': '{{business}} — appointment update',
 
