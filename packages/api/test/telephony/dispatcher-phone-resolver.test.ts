@@ -62,4 +62,16 @@ describe('createBusinessPhoneFallback', () => {
     expect(await createBusinessPhoneFallback(settingsStub(undefined))(TENANT)).toBeNull();
     expect(await createBusinessPhoneFallback(settingsStub('  '))(TENANT)).toBeNull();
   });
+
+  // #1397 — rows saved before the route normalised business_phone hold the
+  // number as typed; the dialer must receive E.164, never "(602) 555-0142".
+  it('dials a legacy as-typed business_phone in E.164', async () => {
+    const fb = createBusinessPhoneFallback(settingsStub('(602) 555-0142'));
+    expect(await fb(TENANT)).toBe('+16025550142');
+  });
+
+  it('returns null for a legacy business_phone that cannot be dialed', async () => {
+    const fb = createBusinessPhoneFallback(settingsStub('512-555-0100 ext. 4'));
+    expect(await fb(TENANT)).toBeNull();
+  });
 });

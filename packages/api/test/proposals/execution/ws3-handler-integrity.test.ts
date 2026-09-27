@@ -83,6 +83,24 @@ describe('WS3 — UpdateCustomerExecutionHandler', () => {
     expect(events[0].entityId).toBe(created.id);
   });
 
+  it('#1397: attributes customer.updated to the executing role, not "unknown"', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const created = await createCustomer(
+      { tenantId: TENANT, firstName: 'Jane', lastName: 'Doe', createdBy: EXECUTOR },
+      customerRepo,
+    );
+    const handler = new UpdateCustomerExecutionHandler(customerRepo, auditRepo);
+
+    await handler.execute(
+      makeProposal('update_customer', { customerId: created.id, email: 'jane@x.com' }),
+      { ...CTX, executedByRole: 'dispatcher' },
+    );
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'customer.updated');
+    expect(events[0].actorRole).toBe('dispatcher');
+  });
+
   it('appends to the consent ledger on an smsConsent change', async () => {
     const customerRepo = new InMemoryCustomerRepository();
     const auditRepo = new InMemoryAuditRepository();

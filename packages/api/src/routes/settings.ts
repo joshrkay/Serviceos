@@ -3,7 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission, requireRole } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
-import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { normalizeBusinessPhoneE164, normalizeMobileE164 } from '../shared/phone/normalize';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
 import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
@@ -474,32 +474,30 @@ export function createSettingsRouter(
         // #880 — reject Twilio magic test numbers (+1500555xxxx) as the
         // business phone: it's what public intake / booking pages display and
         // tel:-link for customers, and a magic number is never a dialable
-        // line. Unlike owner_phone above, the value is stored AS TYPED —
-        // businessPhone is a display field that may legitimately be
-        // international or carry an extension, which the NANP-only
-        // normalizeMobileE164 would reject; forcing it here 400'd
-        // previously-savable numbers (beyond #880's scope). Normalization is
-        // attempted purely so a human-formatted magic number
-        // ("(500) 555-0006") can't slip past the E.164-shaped predicate.
+        // line.
+        // #1397 — businessPhone is also DIALED (dispatcher-phone-resolver's
+        // escalation fallback), so it is normalised to E.164 like ownerPhone:
+        // NANP → +1XXXXXXXXXX; an international number typed with a leading
+        // '+' → '+' + digits. Anything else is a 400 naming the field.
         if (parsed.businessPhone !== undefined && parsed.businessPhone !== null) {
           const trimmed = parsed.businessPhone.trim();
           if (trimmed === '') {
             parsed.businessPhone = null;
           } else {
-            let checkable = trimmed;
-            try {
-              checkable = normalizeMobileE164(trimmed);
-            } catch {
-              // Not NANP-normalizable (international, extension, …) — check
-              // the raw value and store it verbatim.
+            const normalized = normalizeBusinessPhoneE164(trimmed);
+            if (normalized === null) {
+              throw new ValidationError(
+                'Business phone must be a valid phone number (US 10-digit, or international starting with +)',
+                { field: 'businessPhone' },
+              );
             }
-            if (isTwilioTestNumber(checkable)) {
+            if (isTwilioTestNumber(normalized)) {
               throw new ValidationError(
                 'This is a Twilio test number and cannot be used as the business phone',
                 { field: 'businessPhone' },
               );
             }
-            parsed.businessPhone = trimmed;
+            parsed.businessPhone = normalized;
           }
         }
 
