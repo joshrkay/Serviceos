@@ -75,12 +75,15 @@ interface ApiLead {
   sourceDetail?: string;
 }
 
+// #1400 — mirrors the shared invoiceResponseSchema (GET /api/invoices): money
+// is the API's `totals` + `amountDueCents` (integer cents); there is no
+// top-level `totalCents`. The dashboard renders these, never recomputes them.
 interface ApiInvoice {
   id: string;
   invoiceNumber: string;
   status: string;
-  totalCents: number;
-  amountDueCents?: number;
+  totals: { totalCents: number };
+  amountDueCents: number;
   customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
   dueDate?: string;
 }
@@ -318,7 +321,8 @@ export function HomePage() {
 
   // Epic 12.2 — the home dashboard auto-refreshes the "today" panels so the
   // owner sees new jobs/estimates/invoices/leads without a manual reload.
-  const LIVE_REFETCH_MS = 60_000;
+  // #1400 — the freshness budget is 30s (changes visible within 30s).
+  const LIVE_REFETCH_MS = 30_000;
   // Today's scheduled work: the appointments API supports a fromDate/toDate
   // day window (GET /api/jobs does not — it ignores scheduledDate). Bound the
   // query by the tenant-local day expressed as UTC instants.
@@ -361,7 +365,7 @@ export function HomePage() {
   // The "today" panel depends on both queries; surface loading/errors from
   // either and retry both.
   // Only treat as "loading" when we have nothing to show yet. Background
-  // polls (60s refetchInterval) keep isLoading false once data has landed,
+  // polls (30s refetchInterval) keep isLoading false once data has landed,
   // so these sections no longer flash spinners every minute.
   const todayLoading =
     (appointmentsQuery.isLoading && appointmentsQuery.data.length === 0) ||
@@ -377,7 +381,7 @@ export function HomePage() {
     return uiStatus === 'Sent';
   });
   const unpaidInvs   = invoicesQuery.data;
-  const totalOut     = unpaidInvs.reduce((s, i) => s + (i.totalCents ?? 0), 0) / 100;
+  const totalOutCents = unpaidInvs.reduce((s, i) => s + i.amountDueCents, 0);
   const activeCount  = todayJobs.filter(j => {
     const s = normalizeJobStatus(j.status);
     return s === 'In Progress' || s === 'New';
@@ -397,7 +401,7 @@ export function HomePage() {
     ...overdueInvs.map(i => ({
       id: `inv-${i.id}`, type: 'overdue' as const,
       message: `${customerName(i.customer)} — invoice overdue`,
-      sub: `${i.invoiceNumber} · ${centsToDisplay(i.totalCents)} · Was due ${i.dueDate ?? ''}`,
+      sub: `${i.invoiceNumber} · ${centsToDisplay(i.amountDueCents)} · Was due ${formatDate(i.dueDate, tz)}`,
       action: 'Remind', to: `/invoices/${i.id}`,
     })),
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
@@ -464,7 +468,7 @@ export function HomePage() {
                 className="h-full"
                 tone="warning"
                 label="Outstanding"
-                value={`$${totalOut.toLocaleString()}`}
+                value={centsToDisplay(totalOutCents)}
                 hint={`${unpaidInvs.length} unpaid`}
                 icon={<DollarSign size={16} />}
               />
@@ -711,7 +715,7 @@ export function HomePage() {
                     <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-secondary text-xs text-muted-foreground px-1.5">{unpaidInvs.length}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-sm text-warning">${totalOut.toLocaleString()}</span>
+                    <span className="text-sm text-warning">{centsToDisplay(totalOutCents)}</span>
                     <button onClick={() => navigate('/reports/money')} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary">
                       Money summary <ArrowRight size={11} />
                     </button>
@@ -745,11 +749,11 @@ export function HomePage() {
                             <p className="text-sm text-foreground truncate">{customerName(inv.customer)}</p>
                             <p className={`text-xs mt-0.5 ${overdue ? 'text-destructive' : 'text-muted-foreground'}`}>
                               {inv.invoiceNumber}
-                              {overdue ? ` · OVERDUE since ${inv.dueDate ?? ''}` : inv.dueDate ? ` · Due ${inv.dueDate}` : ''}
+                              {overdue ? ` · OVERDUE since ${formatDate(inv.dueDate, tz)}` : inv.dueDate ? ` · Due ${formatDate(inv.dueDate, tz)}` : ''}
                             </p>
                           </div>
                           <div className="flex flex-col items-end gap-1 shrink-0">
-                            <p className="text-sm text-foreground">{centsToDisplay(inv.totalCents)}</p>
+                            <p className="text-sm text-foreground">{centsToDisplay(inv.amountDueCents)}</p>
                             <StatusBadge status={overdue ? 'Overdue' : 'Unpaid'} size="sm" />
                           </div>
                         </button>
