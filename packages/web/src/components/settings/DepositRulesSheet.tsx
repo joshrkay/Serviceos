@@ -202,8 +202,8 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
           <p className="text-xs text-slate-500">
             Require a deposit before work begins on an estimate. Deposits encourage
             customers to confirm the job and reduce no-show risk.{' '}
-            <strong>This setting persists today; estimates start enforcing it
-            in a follow-up release.</strong>
+            Customers see the deposit and a Pay deposit button on the estimate
+            you send them.
           </p>
 
           {loading ? (

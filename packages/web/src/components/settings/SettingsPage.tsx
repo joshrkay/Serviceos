@@ -878,6 +878,8 @@ export function SettingsPage() {
           onToggle: requestVoiceToggle,
         },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
+        // #1389 / O-2 — the reviewed E1 life-safety script + its two sign-offs.
+        { icon: ScrollText, label: 'Emergency safety script',       description: 'The reviewed script the AI reads on gas, CO, fire and injury calls', action: () => navigate('/settings/e1-script') },
         { icon: ScrollText, label: 'Standing instructions',         description: 'Rules the AI follows on every draft ("always add a trip fee")', action: () => setStandingInstructionsOpen(true) },
         // N-011 — gated behind the brand_voice_configurator flag (default off).
         ...(me?.brand_voice_configurator_enabled

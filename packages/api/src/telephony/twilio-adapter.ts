@@ -84,7 +84,7 @@ import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
-import { resolveEscalationSettings } from '../settings/settings';
+import { liveE1Script, resolveEscalationSettings } from '../settings/settings';
 import { resolvePhoneActor } from './phone-actor';
 import type { WhisperCache } from './whisper-cache';
 import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-lookup-surface';
@@ -1794,9 +1794,10 @@ export class TwilioGatherAdapter {
     let scriptSource: 'reviewed' | 'placeholder' = 'placeholder';
     if (safety.tier === 'E1' && this.deps.settingsRepo) {
       try {
-        const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-        if (settings?.e1ReviewedScript) {
-          responseScript = settings.e1ReviewedScript;
+        // #1389 / O-2 — live only with BOTH sign-offs (trade pro + counsel).
+        const reviewed = liveE1Script(await this.deps.settingsRepo.findByTenant(tenantId));
+        if (reviewed) {
+          responseScript = reviewed;
           scriptSource = 'reviewed';
         }
       } catch (err) {

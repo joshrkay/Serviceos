@@ -414,7 +414,12 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     });
     const handler = new EstimateTaskHandler(makeGateway(stub), repo);
 
-    const { proposal } = await handler.handle(makeContext());
+    // #1399 — the conflict carve-out is for a price the operator actually
+    // quoted; an unspoken (model-invented) price now snaps to the catalog
+    // (test/ai/tasks/estimate-task-unspoken-price.test.ts).
+    const { proposal } = await handler.handle(
+      makeContext({ message: 'Quote a water heater install at $999' }),
+    );
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
     // Spoken price kept verbatim — never silently overwritten.

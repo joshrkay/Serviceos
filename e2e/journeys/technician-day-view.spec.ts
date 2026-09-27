@@ -323,7 +323,7 @@ test.describe('technician day view (4.4) — real Postgres, no DEV_AUTH_BYPASS (
     const customer = await postJson(apiCtx, `${API_URL}/api/customers`, ownerA.authHeaders, {
       firstName: 'LateNight',
       lastName: `Customer ${Date.now()}`,
-      primaryPhone: '555-0177',
+      primaryPhone: '602-555-0177',
       email: `latenight+${Date.now()}@example.com`,
       preferredChannel: 'sms',
       smsConsent: true,

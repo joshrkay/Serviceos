@@ -32,7 +32,7 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Price book')).toBeInTheDocument();
   });
 
-  it('#1398 — intake/booking link actions and the review-URL form are ≥44×44 tap targets', () => {
+  it('#1389: lists the Emergency safety script form under AI & Automation', () => {
     render(
       <MemoryRouter>
         <SettingsPage />
@@ -51,6 +51,7 @@ describe('SettingsPage', () => {
     const reviewsSave = google.closest('div')!.querySelector('button[type="button"]:last-of-type');
     expect(reviewsSave?.textContent).toMatch(/save/i);
     expectTapTarget(reviewsSave!, 'review URLs Save');
+    expect(screen.getByText('Emergency safety script')).toBeInTheDocument();
   });
 
   it('shows tenant-scoped intake link when me is loaded', () => {

@@ -14,6 +14,8 @@ import { createRedraftHandlerFactory } from '../../../src/proposals/redraft-hand
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
 import { buildEstimate } from '../../factories/estimate.factory';
+import { buildJob } from '../../factories/job.factory';
+import { InMemoryJobRepository } from '../../../src/jobs/job';
 import { buildLineItem, calculateDocumentTotals } from '../../../src/shared/billing-engine';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
@@ -96,6 +98,33 @@ describe('#1276F — an invoice drafted from an estimate bills the estimate, not
     const lines = proposal.payload.lineItems as Array<{ unitPriceCents: number }>;
     expect(lines.map((l) => l.unitPriceCents)).toEqual([100000, 17000]);
     expect(proposal.payload.estimateId).toBe(ESTIMATE);
+  });
+});
+
+describe('#1399 N4 — an invoice drafted from an estimate takes the customer from it', () => {
+  // Live: "Create an invoice from the accepted estimate EST-0003." resolved
+  // the estimate and copied its lines, but the draft 400'd on approve with
+  // "unfilled required fields: customerId" — the estimate names its customer
+  // (through its job), so asking the operator for one is a dead end.
+  it('stamps the estimate job\'s customer and does not gate on customerId', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
+    const handler = new InvoiceTaskHandler(gateway(), {
+      estimateRepo: await acceptedEstimateRepo(),
+      jobRepo,
+    });
+
+    const { proposal } = await handler.handle({
+      tenantId: TENANT,
+      userId: 'user-1',
+      message: 'Create an invoice from the accepted estimate EST-0003.',
+      existingEntities: { estimateId: ESTIMATE },
+    });
+
+    expect(proposal.payload.customerId).toBe(CUSTOMER);
+    expect(proposal.payload.customerReference).toBeUndefined();
+    const ctx = (proposal.sourceContext ?? {}) as Record<string, unknown>;
+    expect(ctx.missingFields ?? []).not.toContain('customerId');
   });
 });
 

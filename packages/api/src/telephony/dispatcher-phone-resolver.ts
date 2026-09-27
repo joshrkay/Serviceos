@@ -17,6 +17,7 @@
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
+import { normalizeBusinessPhoneE164 } from '../shared/phone/normalize';
 
 /** Per-user resolver: the rotation user's own mobile, or null to advance. */
 export function createUserPhoneDispatcherResolver(
@@ -40,6 +41,8 @@ export function createBusinessPhoneFallback(
   return async (tenantId: string): Promise<string | null> => {
     const settings = await settingsRepo.findByTenant(tenantId);
     const phone = settings?.businessPhone?.trim();
-    return phone && phone.length > 0 ? phone : null;
+    // #1397 — rows saved before the settings route normalised business_phone
+    // hold it as typed; hand the dialer E.164 or nothing.
+    return phone && phone.length > 0 ? normalizeBusinessPhoneE164(phone) : null;
   };
 }

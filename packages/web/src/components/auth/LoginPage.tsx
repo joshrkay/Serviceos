@@ -41,6 +41,9 @@ export function resolveRedirectTarget(
   return extractFromPath(state);
 }
 
+/** #1401 — minimum touch-target height for the Clerk sign-in card. */
+const TAP_TARGET = { minHeight: '44px' } as const;
+
 export function LoginPage() {
   const { isLoaded, isSignedIn } = useAuth();
   const location = useLocation();
@@ -69,6 +72,14 @@ export function LoginPage() {
             elements: {
               rootBox: 'w-full max-w-sm',
               card: 'shadow-none border-0 bg-transparent',
+              // #1401 — Clerk's defaults render these 30px (24px for the
+              // show-password toggle) at 375px; lift every tap target on the
+              // card to the 44px floor. Style objects (not utility classes)
+              // so they merge into Clerk's own CSS-in-JS and win.
+              socialButtonsBlockButton: TAP_TARGET,
+              formFieldInput: TAP_TARGET,
+              formFieldInputShowPasswordButton: { ...TAP_TARGET, minWidth: '44px' },
+              formButtonPrimary: TAP_TARGET,
             },
           }}
         />

@@ -233,7 +233,7 @@ async function seedTenantWithTwoOwners(
   const customer = await postJson(page, `${API_URL}/api/customers`, owner1Headers, {
     firstName: label,
     lastName: `Presence Customer ${stamp}`,
-    primaryPhone: '555-0199',
+    primaryPhone: '602-555-0199',
     email: `${label}.presence.customer+${stamp}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,
