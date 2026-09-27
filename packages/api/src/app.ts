@@ -5871,11 +5871,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // invoice/estimate) with the chosen id and replaces the voice_clarification
       // with the drafted, executable proposal. Same gateway + catalog the voice
       // router uses, so grounding/summary/confidence stay identical.
-      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo, estimateRepo }),
+      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo, estimateRepo, jobRepo }),
       entityAliasCandidateCapture,
       // QA 2026-09-16 (AST-04) — an approvable proposal must be an executable
       // one: a payload invoiceId must name an invoice this tenant owns.
       approvalReferenceChecks,
+      // #1405 — the card's "which accepted estimate?" pick re-drafts the
+      // invoice's lines, discount and tax from the picked estimate.
+      estimateRepo,
     ),
   );
   if (entityAliasRepo) {

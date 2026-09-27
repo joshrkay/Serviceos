@@ -273,6 +273,7 @@ export function createEstimateRouter(
             estimateNumber,
             validUntil: parsed.validUntil ? new Date(parsed.validUntil) : undefined,
             createdBy: req.auth!.userId,
+            actorRole: req.auth!.role,
           },
           estimateRepo,
           auditRepo
@@ -649,6 +650,7 @@ export function createEstimateRouter(
           req.auth!.userId,
           estimateRepo,
           auditRepo,
+          req.auth!.role,
         );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
@@ -745,6 +747,7 @@ export function createEstimateRouter(
           paymentRepo,
           moneyStateDeps: refreshDeps,
           actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
           logger,
           scheduleRepo,
         });

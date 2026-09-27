@@ -173,7 +173,9 @@ export async function sendCampaign(
   tenantId: string,
   campaignId: string,
   deps: SendCampaignDeps,
-  actorId?: string
+  actorId?: string,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<Campaign> {
   // Single-flight: atomically claim the draft before any email goes out, so two
   // concurrent sends can't both blast the recipient list.
@@ -227,7 +229,7 @@ export async function sendCampaign(
       createAuditEvent({
         tenantId,
         actorId: actorId ?? campaign.createdBy,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'marketing_campaign.sent',
         entityType: 'marketing_campaign',
         entityId: saved.id,

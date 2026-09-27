@@ -58,6 +58,32 @@ describe('#1277 — gated catalog picks resolve in the chat card', () => {
     await waitFor(() => expect(onResolveLine).toHaveBeenCalledWith(0, 'cat-50'));
   });
 
+  it('#1399 — the "Needs a pick" badge and its marker clear once the pick is saved', async () => {
+    render(
+      <AIProposalCard
+        proposal={gatedEstimate({
+          lineItems: [{ description: 'Water heater', pricingSource: 'ambiguous' }],
+          meta: {
+            overallConfidence: 'medium',
+            markers: [
+              {
+                path: 'lineItems[0].unitPrice',
+                reason: '"Water heater" matched multiple catalog items — pick the right one to set the price',
+              },
+            ],
+          },
+        })}
+        onResolveLine={vi.fn(async () => [])}
+      />,
+    );
+    expect(screen.getByText('Needs a pick')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Water heater 50 gal/ }));
+
+    await waitFor(() => expect(screen.queryByText('Needs a pick')).not.toBeInTheDocument());
+    expect(screen.queryByText(/matched multiple catalog items/)).not.toBeInTheDocument();
+  });
+
   it('does not promise an Edit the card does not have', () => {
     render(<AIProposalCard proposal={gatedEstimate()} onResolveLine={vi.fn(async () => [])} />);
     expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();

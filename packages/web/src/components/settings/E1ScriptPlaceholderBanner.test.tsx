@@ -39,6 +39,14 @@ describe('E1ScriptPlaceholderBanner', () => {
     expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 
+  it('#1389: links the owner to the form where the reviewed script and both sign-offs are entered, as a ≥44px target', async () => {
+    apiFetchMock.mockResolvedValue(status({ status: 'placeholder', reviewedScript: null }));
+    renderBanner();
+    const link = await screen.findByRole('link', { name: /add reviewed script/i });
+    expect(link).toHaveAttribute('href', '/settings/e1-script');
+    expect(link.className).toMatch(/\bmin-h-11\b/);
+  });
+
   it('stays hidden once a reviewed script is saved', async () => {
     apiFetchMock.mockResolvedValue(status({ status: 'reviewed', reviewedScript: 'Reviewed.' }));
     const { container } = renderBanner();

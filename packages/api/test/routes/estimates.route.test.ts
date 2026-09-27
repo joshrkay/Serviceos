@@ -672,3 +672,14 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     expect(res.body.error).toBe('NOT_FOUND');
   });
 });
+
+describe('#1397 — estimate.created audit row carries the request actor role', () => {
+  it('attributes estimate.created to the resolved role (owner), not "unknown"', async () => {
+    const { app, auditRepo } = await buildTestApp();
+    const res = await createEstimate(app);
+    expect(res.status).toBe(201);
+
+    const events = await auditRepo.findByEntity(TEST_TENANT_ID, 'estimate', res.body.id);
+    expect(events.find((e) => e.eventType === 'estimate.created')?.actorRole).toBe('owner');
+  });
+});

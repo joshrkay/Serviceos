@@ -284,7 +284,7 @@ test.describe('job-photo-attach (5.2) — real Postgres, real technician screen'
     //      (tenant-local) and assigned to the technician in one call. ───────
     const customerRes = await page.request.post(`${API_URL}/api/customers`, {
       headers: { 'content-type': 'application/json', ...ownerHeaders },
-      data: JSON.stringify({ firstName: 'Photo', lastName: 'Customer', primaryPhone: '555-0100' }),
+      data: JSON.stringify({ firstName: 'Photo', lastName: 'Customer', primaryPhone: '602-555-0100' }),
     });
     expect(customerRes.status(), `POST /api/customers -> ${await customerRes.text()}`).toBe(201);
     const customerId = ((await customerRes.json()) as { id: string }).id;
@@ -529,7 +529,7 @@ test.describe('job-photo-attach (5.2) — real Postgres, real technician screen'
     // against it — the file itself is invisible under RLS.
     const bCustomer = await page.request.post(`${API_URL}/api/customers`, {
       headers: { 'content-type': 'application/json', ...otherOwnerHeaders },
-      data: JSON.stringify({ firstName: 'Other', lastName: 'Customer', primaryPhone: '555-0200' }),
+      data: JSON.stringify({ firstName: 'Other', lastName: 'Customer', primaryPhone: '602-555-0200' }),
     });
     const bCustomerId = ((await bCustomer.json()) as { id: string }).id;
     const bLocation = await page.request.post(`${API_URL}/api/locations`, {

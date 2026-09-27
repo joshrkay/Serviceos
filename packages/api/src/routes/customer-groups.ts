@@ -158,7 +158,8 @@ export function createCustomerGroupRouter(
         req.params.customerId,
         repo,
         req.auth!.userId,
-        auditRepo
+        auditRepo,
+        req.auth!.role
       );
       res.status(added ? 201 : 200).json({ added });
     })
@@ -178,7 +179,8 @@ export function createCustomerGroupRouter(
         req.params.customerId,
         repo,
         req.auth!.userId,
-        auditRepo
+        auditRepo,
+        req.auth!.role
       );
       res.json({ removed: true });
     })

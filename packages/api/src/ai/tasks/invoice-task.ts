@@ -1,6 +1,6 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { taskMessageForPrompt } from './task-input';
-import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { createProposal, CreateProposalInput, type Proposal } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import { assertValidProposalPayload } from '../../proposals/contracts';
@@ -20,9 +20,14 @@ import {
 import { contractErrorsFrom, contractGapFields } from './task-input';
 import { calculateLineItemTotal, resolveSelectedLineItems } from '../../shared/billing-engine';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
+import type { JobRepository } from '../../jobs/job';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
+import { PENDING_AMBIGUITY_KEY } from '../resolution/gated-reference-resolution';
+import type { PendingEntityAmbiguity } from '../agents/customer-calling/entity-resolution';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
+  operatorMentionsPrice,
 } from '../resolution/price-scale-guard';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
@@ -30,7 +35,7 @@ Given the job context, customer information, and completed work details, generat
 Return valid JSON with the following shape:
 {
   "lineItems": [
-    { "description": "<string>", "quantity": <number>, "unitPrice": <number>, "category": "<string, optional>" }
+    { "description": "<string>", "quantity": <number>, "unitPrice": <integer cents>, "category": "<string, optional>" }
   ],
   "discountCents": <number, optional>,
   "taxRateBps": <number, optional>,
@@ -39,6 +44,7 @@ Return valid JSON with the following shape:
   "confidence_score": <number between 0 and 1>
 }
 Always include at least one line item.
+unitPrice is integer CENTS, never dollars: $350.00 is 35000, $79 is 7900.
 Never output a "customerId", "jobId", or "estimateId" field. The customer, job
 and estimate are attached by the system from verified tenant records — any id
 you write would be invented and is discarded.`;
@@ -65,6 +71,82 @@ const CONTRACT_VIOLATION_CONFIDENCE_CAP = 0.5;
 
 /** #1276F — "invoice … from/for the accepted (approved, signed) estimate". */
 const REFERS_TO_ACCEPTED_ESTIMATE = /\b(?:accepted|approved|signed)\s+estimate\b/i;
+
+/** #1405 — the most accepted estimates one "which one?" question lists. */
+const MAX_ESTIMATE_CHOICES = 5;
+
+/** #1405 — what the operator said, carried on the gated draft. */
+const ACCEPTED_ESTIMATE_REFERENCE = 'the accepted estimate';
+
+/**
+ * #1276F / #1405 — bill THIS estimate: its customer-selected lines, its
+ * discount and its tax rate replace whatever the draft carried, verbatim —
+ * the same selection REST convert-to-invoice bills. Used when the handler
+ * drafts from a known estimate and when the operator picks one of several.
+ */
+export function copyEstimateOntoInvoicePayload(
+  payload: Record<string, unknown>,
+  estimate: Estimate,
+): void {
+  payload.lineItems = resolveSelectedLineItems(estimate.lineItems, estimate.acceptedSelection).map(
+    (li) => ({ ...li }),
+  );
+  payload.estimateId = estimate.id;
+  if (!payload.jobId) payload.jobId = estimate.jobId;
+  payload.discountCents = estimate.totals.discountCents;
+  payload.taxRateBps = estimate.totals.taxRateBps;
+  delete payload.estimateReference;
+}
+
+/**
+ * #1405 — the operator picked which accepted estimate a gated draft_invoice
+ * bills: re-draft it from that estimate. The model's placeholder lines — and
+ * everything derived from them (catalog picks gated on
+ * `lineItems[n].catalogItemId`, their candidates, their confidence markers) —
+ * are replaced by the estimate's agreed lines, discount and tax.
+ *
+ * Only the lines change: status, approval and the remaining gates are left
+ * exactly as they were (D-004 — a pick never approves anything).
+ */
+function redraftInvoiceFromPickedEstimate(
+  proposal: Pick<Proposal, 'payload' | 'sourceContext'>,
+  estimate: Estimate,
+): void {
+  copyEstimateOntoInvoicePayload(proposal.payload, estimate);
+  const meta = proposal.payload._meta as ProposalConfidenceMeta | undefined;
+  if (meta) {
+    delete meta.fieldConfidence;
+    delete meta.markers;
+  }
+  const ctx = { ...((proposal.sourceContext ?? {}) as Record<string, unknown>) };
+  delete ctx.catalogResolution;
+  if (Array.isArray(ctx.missingFields)) {
+    ctx.missingFields = (ctx.missingFields as unknown[]).filter(
+      (f) => !(typeof f === 'string' && f.startsWith('lineItems[')),
+    );
+  }
+  proposal.sourceContext = ctx;
+}
+
+/**
+ * #1405 — the ONE place a pick of "which accepted estimate?" becomes a
+ * re-drafted invoice, for both pick surfaces: the typed chat answer
+ * (routes/assistant.ts) and the card's one-tap pick (PUT /api/proposals/:id,
+ * proposals/actions.ts editProposal). A no-op for any other proposal type or
+ * gated field. Tenant-scoped read; an estimate that cannot be read leaves the
+ * draft as it was, with the picked id — the operator still reviews it.
+ */
+export async function redraftInvoiceOnEstimatePick(
+  estimateRepo: Pick<EstimateRepository, 'findById'> | undefined,
+  tenantId: string,
+  proposal: Pick<Proposal, 'proposalType' | 'payload' | 'sourceContext'>,
+  refKey: string,
+  estimateId: string,
+): Promise<void> {
+  if (proposal.proposalType !== 'draft_invoice' || refKey !== 'estimateId' || !estimateRepo) return;
+  const estimate = await estimateRepo.findById(tenantId, estimateId);
+  if (estimate) redraftInvoiceFromPickedEstimate(proposal, estimate);
+}
 
 /**
  * Zod's `z.string().uuid()` regex, mirrored so a value this module accepts is
@@ -159,6 +241,12 @@ export interface InvoiceTaskDeps {
   catalogRepo?: CatalogItemRepository;
   /** #1276F — reads the estimate an invoice is drafted from. */
   estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  /**
+   * #1399 N4 — reads the estimate's job so an invoice drafted from an
+   * estimate bills that estimate's customer (estimates carry no customerId
+   * of their own; their job does).
+   */
+  jobRepo?: Pick<JobRepository, 'findById' | 'findByCustomer'>;
 }
 
 export class InvoiceTaskHandler implements TaskHandler {
@@ -173,11 +261,13 @@ export class InvoiceTaskHandler implements TaskHandler {
    */
   private readonly catalogRepo?: CatalogItemRepository;
   private readonly estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  private readonly jobRepo?: Pick<JobRepository, 'findById' | 'findByCustomer'>;
 
   constructor(gateway: LLMGateway, deps?: CatalogItemRepository | InvoiceTaskDeps) {
     this.gateway = gateway;
     this.catalogRepo = deps && 'listByTenant' in deps ? deps : deps?.catalogRepo;
     this.estimateRepo = deps && !('listByTenant' in deps) ? deps.estimateRepo : undefined;
+    this.jobRepo = deps && !('listByTenant' in deps) ? deps.jobRepo : undefined;
   }
 
   /**
@@ -194,23 +284,49 @@ export class InvoiceTaskHandler implements TaskHandler {
     }
   }
 
+  /**
+   * The estimate this invoice bills, or — #1405 — the accepted estimates the
+   * operator must choose between when "the accepted estimate" names several.
+   */
   private async findSourceEstimate(
     tenantId: string,
     estimateId: string | undefined,
     jobId: string | undefined,
+    customerId: string | undefined,
     message: string,
-  ): Promise<Estimate | undefined> {
-    if (!this.estimateRepo) return undefined;
+  ): Promise<{ estimate?: Estimate; choices?: Estimate[] }> {
+    if (!this.estimateRepo) return {};
     try {
-      if (estimateId) return (await this.estimateRepo.findById(tenantId, estimateId)) ?? undefined;
-      if (!REFERS_TO_ACCEPTED_ESTIMATE.test(message)) return undefined;
+      if (estimateId) {
+        const estimate = await this.estimateRepo.findById(tenantId, estimateId);
+        return estimate ? { estimate } : {};
+      }
+      if (!REFERS_TO_ACCEPTED_ESTIMATE.test(message)) return {};
       // "The accepted estimate" names one only when there is exactly one —
-      // on the resolved job when there is one. Several is not a pick.
+      // on the resolved job when there is one, else on the resolved
+      // customer's jobs (#1405: an estimate carries no customerId; its job
+      // does). Several is not a pick: the operator is asked which, up to a
+      // one-tap-sized list.
+      const customerJobIds =
+        !jobId && customerId && this.jobRepo?.findByCustomer
+          ? (await this.jobRepo.findByCustomer(tenantId, customerId)).map((j) => j.id)
+          : undefined;
       const accepted = await this.estimateRepo.findByTenant(tenantId, {
         status: 'accepted',
-        ...(jobId ? { jobId } : {}),
+        ...(jobId ? { jobId } : customerJobIds ? { jobIds: customerJobIds } : {}),
       });
-      return accepted.length === 1 ? accepted[0] : undefined;
+      if (accepted.length === 1) return { estimate: accepted[0] };
+      if (accepted.length > 1 && accepted.length <= MAX_ESTIMATE_CHOICES) return { choices: accepted };
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  private async customerOfJob(tenantId: string, jobId: string): Promise<string | undefined> {
+    if (!this.jobRepo) return undefined;
+    try {
+      return (await this.jobRepo.findById(tenantId, jobId))?.customerId ?? undefined;
     } catch {
       return undefined;
     }
@@ -287,21 +403,47 @@ export class InvoiceTaskHandler implements TaskHandler {
     // against a $1,170 estimate). The estimate's billed lines, discount and
     // tax replace them verbatim — the same selection REST convert-to-invoice
     // bills — and skip catalog re-pricing, which would move agreed money.
-    const sourceEstimate = await this.findSourceEstimate(
+    const { estimate: sourceEstimate, choices: estimateChoices } = await this.findSourceEstimate(
       context.tenantId,
       resolvedEstimateId,
       resolvedJobId,
+      resolvedCustomerId,
       context.message,
     );
     if (sourceEstimate) {
-      payload.lineItems = resolveSelectedLineItems(
-        sourceEstimate.lineItems,
-        sourceEstimate.acceptedSelection,
-      ).map((li) => ({ ...li }));
-      payload.estimateId = sourceEstimate.id;
-      if (!payload.jobId) payload.jobId = sourceEstimate.jobId;
-      payload.discountCents = sourceEstimate.totals.discountCents;
-      payload.taxRateBps = sourceEstimate.totals.taxRateBps;
+      copyEstimateOntoInvoicePayload(payload, sourceEstimate);
+      // #1399 N4 — the estimate names its customer through its job. With no
+      // resolved customer, take that one (a verified tenant record, never the
+      // model's) instead of gating approval on a customerId nobody can fill.
+      if (!resolvedCustomerId) {
+        const estimateCustomerId = await this.customerOfJob(context.tenantId, sourceEstimate.jobId);
+        if (estimateCustomerId) {
+          payload.customerId = estimateCustomerId;
+          delete payload.customerReference;
+          missingFields.splice(missingFields.indexOf('customerId'), 1);
+        }
+      }
+    }
+    // #1405 — several accepted estimates: never a silent guess. The draft is
+    // gated on `estimateId` and carries ONE question listing them; the pick
+    // (chat answer or card pick) re-drafts the lines from the chosen one.
+    let estimateQuestion: PendingEntityAmbiguity | undefined;
+    if (estimateChoices) {
+      payload.estimateReference = ACCEPTED_ESTIMATE_REFERENCE;
+      missingFields.push('estimateId');
+      estimateQuestion = {
+        entityKind: 'estimate',
+        reference: ACCEPTED_ESTIMATE_REFERENCE,
+        refKey: 'estimateId',
+        candidates: estimateChoices.map((e) => ({
+          id: e.id,
+          name: e.estimateNumber,
+          hint: `accepted · ${formatUsdCentsFixed(e.totals.totalCents)}`,
+          score: 1,
+        })),
+        partialRefs: {},
+        attemptCount: 0,
+      };
     }
 
     // QA-2026-06-05: normalize line items to the execution contract — the
@@ -383,6 +525,9 @@ export class InvoiceTaskHandler implements TaskHandler {
         lineItems,
         'unitPriceCents',
         this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
+        // #1399 N1 — an unspoken (model-invented) price never outranks a
+        // strong catalog match.
+        { operatorMentionedPrice: operatorMentionsPrice(context.message) },
       );
       payload.lineItems = catalogOutcome.lineItems;
     }
@@ -480,6 +625,7 @@ export class InvoiceTaskHandler implements TaskHandler {
         ? { catalogResolution: catalogOutcome.catalogResolution }
         : {}),
       ...(payloadContractErrors ? { payloadContractErrors } : {}),
+      ...(estimateQuestion ? { [PENDING_AMBIGUITY_KEY]: estimateQuestion } : {}),
     };
 
     const input: CreateProposalInput = {

@@ -367,6 +367,24 @@ describe('SchedulePage', () => {
         expect(pill.className).not.toContain('bg-green-100');
       }
     });
+
+    it('#1401 — renders a completed appointment in its own colour, not the amber pending pill', async () => {
+      setupApi([{ ...appt1, status: 'completed' }, appt2]);
+      renderPage();
+      await screen.findByText('Alice Smith');
+      const pill = screen.getByText('completed');
+      expect(pill.className).toContain('bg-slate-100');
+      expect(pill.className).toContain('text-slate-600');
+      expect(pill.className).not.toContain('bg-amber-100');
+      expect(pill.className).not.toContain('bg-green-100');
+    });
+
+    it('#1401 — shows the cancellation reason on a canceled appointment card', async () => {
+      setupApi([{ ...appt1, status: 'canceled', notes: 'Customer sold the house' }, appt2]);
+      renderPage();
+      await screen.findByText('Alice Smith');
+      expect(screen.getByText(/Cancellation reason: Customer sold the house/)).toBeInTheDocument();
+    });
   });
 });
 

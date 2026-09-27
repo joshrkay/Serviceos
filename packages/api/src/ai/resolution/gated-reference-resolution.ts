@@ -347,7 +347,19 @@ export async function resolveGatedReferences(
   const lookups = planGatedReferenceLookups(proposal, entities);
   if (lookups.length === 0) return outcome;
 
+  // #1405 — a drafting handler that already knows the EXACT candidate set
+  // (the customer's accepted estimates for "invoice the accepted estimate")
+  // stamps its own question. Re-resolving the field from free text would
+  // replace that set with a broader, fuzzier one — or silently pick one — so
+  // the handler's question stands and the resolver is not asked.
+  const handlerQuestion = pendingAmbiguityOf(proposal);
+
   for (const lookup of lookups) {
+    if (handlerQuestion && handlerQuestion.refKey === lookup.idField) {
+      if (!outcome.ambiguity) outcome.ambiguity = handlerQuestion;
+      outcome.unresolved.push(lookup.idField);
+      continue;
+    }
     let settled = false;
     // Every reference tried for this field came back `not_found` — see
     // `GatedReferenceOutcome.notFound`. Starts true only when there IS a

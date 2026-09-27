@@ -127,7 +127,7 @@ import { escalateToHuman } from '../skills/escalate-to-human';
 import { toEscalationReason } from '../agents/customer-calling/inapp-adapter';
 import { createAuditEvent } from '../../audit/audit';
 import { normalizePhone, type DncRepository } from '../../compliance/dnc';
-import type { SettingsRepository } from '../../settings/settings';
+import { liveE1Script, type SettingsRepository } from '../../settings/settings';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { Customer } from '../../customers/customer';
 
@@ -1220,9 +1220,10 @@ export class TextModeDriver implements AgentDriver {
     let scriptSource: 'reviewed' | 'placeholder' = 'placeholder';
     if (this.deps.settingsRepo) {
       try {
-        const settings = await this.deps.settingsRepo.findByTenant(session.tenantId);
-        if (settings?.e1ReviewedScript) {
-          responseScript = settings.e1ReviewedScript;
+        // #1389 / O-2 — the same liveness rule as the Twilio adapter.
+        const reviewed = liveE1Script(await this.deps.settingsRepo.findByTenant(session.tenantId));
+        if (reviewed) {
+          responseScript = reviewed;
           scriptSource = 'reviewed';
         }
       } catch {
