@@ -9,17 +9,29 @@ import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 const DELAY_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
 type DelayMinutes = typeof DELAY_OPTIONS[number];
 
+/**
+ * #1406 D10 — what the API says happened, in words. The old dialog showed a
+ * 1.2s "queued" flash (then the page reloaded) even when nothing was queued.
+ */
+function delayOutcomeMessage(body: { queued?: boolean; reason?: string }): string {
+  if (body.queued) return 'Delay notice queued — the next customer will receive an SMS.';
+  if (body.reason === 'NO_CUSTOMER_TO_NOTIFY') {
+    return 'No customer was notified — there is no later visit for this technician today (or that customer opted out of texts).';
+  }
+  return 'No customer was notified — the delay notice could not be queued.';
+}
+
 function NotifyDelayDialog({
   appointmentId,
   onDone,
   onCancel,
 }: {
   appointmentId: string;
-  onDone: () => void;
+  onDone: (message: string) => void;
   onCancel: () => void;
 }) {
   const [minutes, setMinutes] = useState<DelayMinutes>(20);
-  const [status, setStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'sending' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   async function send() {
@@ -31,24 +43,19 @@ function NotifyDelayDialog({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'running_late', delayMinutes: minutes }),
       });
+      const body = (await res.json().catch(() => ({}))) as {
+        message?: string;
+        queued?: boolean;
+        reason?: string;
+      };
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { message?: string }).message ?? `HTTP ${res.status}`);
+        throw new Error(body.message ?? `HTTP ${res.status}`);
       }
-      setStatus('done');
-      setTimeout(onDone, 1200);
+      onDone(delayOutcomeMessage(body));
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to send delay notice');
       setStatus('error');
     }
-  }
-
-  if (status === 'done') {
-    return (
-      <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-        Delay notice queued — next customer will receive an SMS.
-      </div>
-    );
   }
 
   return (
@@ -105,6 +112,8 @@ interface Appointment {
 
 type DialogMode = 'reschedule' | 'cancel' | 'reassign' | 'delay' | null;
 
+const TERMINAL_APPOINTMENT_STATUSES = new Set(['canceled', 'completed', 'no_show']);
+
 export interface AppointmentEditProps {
   appointmentId: string;
   onSaved?: () => void;
@@ -123,6 +132,7 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<DialogMode>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const timezone = useTenantTimezone();
 
   const load = useCallback(async () => {
@@ -175,6 +185,10 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
     );
   }
 
+  // #1406 D10 — a finished visit (canceled / completed / no-show) can't be
+  // rescheduled, reassigned, delayed or canceled again; offer only Back.
+  const isActionable = !TERMINAL_APPOINTMENT_STATUSES.has(data.status);
+
   return (
     <div className="p-4 md:p-6 max-w-2xl mx-auto" data-testid="appointment-edit">
       <h1 className="text-lg text-slate-900 mb-4">Edit Appointment</h1>
@@ -186,36 +200,49 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
         <p>End: {formatDateTimeInTenantTz(data.scheduledEnd, timezone)}</p>
       </div>
 
+      {notice && (
+        <div
+          role="status"
+          className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800"
+        >
+          {notice}
+        </div>
+      )}
+
       {mode === null && (
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => setMode('reschedule')}
-            className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800"
-          >
-            Reschedule
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('reassign')}
-            className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-          >
-            Reassign
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('delay')}
-            className="rounded-lg border border-amber-400 bg-amber-50 text-amber-800 text-sm px-4 py-2 hover:bg-amber-100"
-          >
-            Notify delay
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('cancel')}
-            className="rounded-lg bg-red-600 text-white text-sm px-4 py-2 hover:bg-red-700"
-          >
-            Cancel appointment
-          </button>
+          {isActionable && (
+            <>
+              <button
+                type="button"
+                onClick={() => setMode('reschedule')}
+                className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800"
+              >
+                Reschedule
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('reassign')}
+                className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
+              >
+                Reassign
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('delay')}
+                className="rounded-lg border border-amber-400 bg-amber-50 text-amber-800 text-sm px-4 py-2 hover:bg-amber-100"
+              >
+                Notify delay
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('cancel')}
+                className="rounded-lg bg-red-600 text-white text-sm px-4 py-2 hover:bg-red-700"
+              >
+                Cancel appointment
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={onBack}
@@ -256,7 +283,7 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
       {mode === 'delay' && (
         <NotifyDelayDialog
           appointmentId={appointmentId}
-          onDone={handleSaved}
+          onDone={(message) => { setNotice(message); handleSaved(); }}
           onCancel={() => setMode(null)}
         />
       )}

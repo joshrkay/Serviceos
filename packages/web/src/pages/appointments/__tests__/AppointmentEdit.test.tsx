@@ -160,4 +160,47 @@ describe('P11-007 AppointmentEdit', () => {
 
     expect(await screen.findByRole('alert')).toBeInTheDocument();
   });
+
+  it('#1406 D10 — a canceled appointment offers no reschedule / reassign / delay actions', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseAppt, status: 'canceled' }),
+    } as unknown as Response);
+
+    render(<AppointmentEdit appointmentId="a-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Status: canceled')).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: /reschedule/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reassign/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /notify delay/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /cancel appointment/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /back/i })).toBeInTheDocument();
+  });
+
+  it('#1406 D10 — Notify delay reports the outcome and it stays on screen', async () => {
+    vi.mocked(apiFetch).mockImplementation((async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ appointmentId: 'a-1', delayMinutes: 20, queued: false, reason: 'NO_CUSTOMER_TO_NOTIFY' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => baseAppt };
+    }) as never);
+
+    render(<AppointmentEdit appointmentId="a-1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /notify delay/i }));
+    fireEvent.click(screen.getByRole('button', { name: /confirm delay/i }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /No customer was notified/i,
+    );
+    // Still there once the page has reloaded the appointment.
+    await waitFor(() => expect(screen.getByRole('button', { name: /reschedule/i })).toBeInTheDocument());
+    expect(screen.getByRole('status')).toHaveTextContent(/No customer was notified/i);
+  });
 });

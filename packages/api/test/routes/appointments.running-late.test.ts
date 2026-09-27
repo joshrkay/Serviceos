@@ -269,4 +269,24 @@ describe('POST /api/appointments/:id/running-late', () => {
     expect(res.status).toBe(403);
     expect(enqueueDelayNotice).not.toHaveBeenCalled();
   });
+
+  it('#1406 D10 — says nothing was queued when there is no customer to notify', async () => {
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    // The coordinator found no later appointment / customer to notify.
+    enqueueDelayNotice.mockResolvedValue(null);
+    const { appointmentId } = await seedAppointment(app, jobRepo);
+
+    const res = await request(app)
+      .put(`/api/appointments/${appointmentId}`)
+      .set('x-test-role', 'dispatcher')
+      .send({ status: 'running_late', delayMinutes: 20 });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      appointmentId,
+      delayMinutes: 20,
+      queued: false,
+      reason: 'NO_CUSTOMER_TO_NOTIFY',
+    });
+  });
 });
