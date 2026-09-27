@@ -30,6 +30,7 @@ import {
   EstimateMutationDeps,
   DEFAULT_ESTIMATE_LIMIT,
   MAX_ESTIMATE_LIMIT,
+  type EstimateListStageFilter,
 } from '../estimates/estimate';
 import { DocumentRevisionRepository } from '../ai/document-revision';
 import { EditDeltaRepository } from '../estimates/edit-delta';
@@ -321,6 +322,16 @@ export function createEstimateRouter(
         const status = typeof req.query.status === 'string' ? req.query.status as EstimateStatus : undefined;
         const search = typeof req.query.search === 'string' ? req.query.search : undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+        // #1400 — derived tab bucket (Sent / Viewed / Expired).
+        const stageRaw = req.query.stage;
+        let stage: EstimateListStageFilter | undefined;
+        if (stageRaw !== undefined) {
+          if (stageRaw !== 'sent' && stageRaw !== 'viewed' && stageRaw !== 'expired') {
+            res.status(400).json({ error: 'VALIDATION_ERROR', message: 'stage must be one of sent, viewed, expired' });
+            return;
+          }
+          stage = stageRaw;
+        }
 
         // Legacy single-job lookup: bare-array shape, no extra filters.
         // Preserves the existing UI contract for `?jobId=...` consumers.
@@ -328,6 +339,7 @@ export function createEstimateRouter(
           jobId &&
           customerId === undefined &&
           status === undefined &&
+          stage === undefined &&
           search === undefined &&
           req.query.paginated !== 'true' &&
           req.query.limit === undefined &&
@@ -384,7 +396,7 @@ export function createEstimateRouter(
           }
         }
 
-        const baseOptions = { status, jobId, jobIds, search, sort };
+        const baseOptions = { status, stage, jobId, jobIds, search, sort };
 
         if (wantsPaginated) {
           const result = await listEstimatesWithMeta(req.auth!.tenantId, estimateRepo, {

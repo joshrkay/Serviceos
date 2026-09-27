@@ -5,7 +5,8 @@ import {
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
   Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
-import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue } from '@ai-service-os/shared';
+import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue, EstimateListStage } from '@ai-service-os/shared';
+import { estimateListStage } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -1707,18 +1708,29 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   );
 }
 
-// ─── API status → UI tab value mapping ───────────────────────────────────
-const API_STATUS_FOR_TAB: Record<EstimateStatus | 'All', string[]> = {
-  All:      [],
-  Draft:    ['draft'],
-  Sent:     ['ready_for_review', 'sent'],
-  Viewed:   [],
-  Approved: ['accepted'],
-  Declined: ['rejected'],
-  Expired:  ['expired'],
+// ─── UI tab → list query filter ──────────────────────────────────────────
+// #1400 — Sent / Viewed / Expired are DERIVED buckets (opened? past
+// validUntil?), not stored statuses, so they query the API's `stage` filter.
+// Sent used to query only `ready_for_review`; Viewed never queried at all.
+const TAB_FILTERS: Record<EstimateStatus | 'All', Record<string, string>> = {
+  All:      {},
+  Draft:    { status: 'draft' },
+  Sent:     { stage: 'sent' },
+  Viewed:   { stage: 'viewed' },
+  Approved: { status: 'accepted' },
+  Declined: { status: 'rejected' },
+  Expired:  { stage: 'expired' },
 };
 
-// ─── Estimates List ───────────────────────────────────────────────────────
+const STAGE_LABEL: Record<EstimateListStage, EstimateStatus> = {
+  draft: 'Draft',
+  sent: 'Sent',
+  viewed: 'Viewed',
+  accepted: 'Approved',
+  rejected: 'Declined',
+  expired: 'Expired',
+};
+
 const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
   { label: 'All',      value: 'All'      },
   { label: 'Draft',    value: 'Draft'    },
@@ -1755,9 +1767,10 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     }} />;
   }
 
+  const now = Date.now();
   const normalizedData = data.map(e => ({
     ...e,
-    uiStatus: normalizeEstimateStatus(e.status) as EstimateStatus,
+    uiStatus: STAGE_LABEL[estimateListStage(e, now)],
   }));
 
   // Customer filter (7.10). Options are the distinct customers present in the
@@ -1833,12 +1846,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               key={t.value}
               onClick={() => {
                 setTab(t.value);
-                if (t.value !== 'All') {
-                  const apiStatuses = API_STATUS_FOR_TAB[t.value];
-                  if (apiStatuses.length > 0) setFilters({ status: apiStatuses[0] });
-                } else {
-                  setFilters({});
-                }
+                setFilters(TAB_FILTERS[t.value]);
               }}
               className={`shrink-0 min-h-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
