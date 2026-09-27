@@ -36,6 +36,14 @@ describe('DepositRulesSheet', () => {
     toastError.mockReset();
   });
 
+  it('#1397: describes the deposit as enforced today, not a future release', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    render(<DepositRulesSheet onClose={() => {}} />);
+    await screen.findByLabelText(/No deposit/i);
+
+    expect(screen.queryByText(/follow-up release/i)).not.toBeInTheDocument();
+  });
+
   it('hydrates with "No deposit" when no settings exist yet', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     render(<DepositRulesSheet onClose={() => {}} />);

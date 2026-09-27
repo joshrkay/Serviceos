@@ -38,6 +38,7 @@ import {
   makeUnauthenticatedAbort,
   shouldInjectAuth,
 } from '../lib/apiClient';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout';
 
 /**
  * Token getter — supports the `forceRefresh` option that `useApiClient`
@@ -140,14 +141,14 @@ export async function apiFetch(
   // reach a foreign host, and foreign 401s must never trigger our
   // login redirect.
   if (path === null) {
-    return fetch(input, { ...init, headers });
+    return fetchWithTimeout(input, { ...init, headers });
   }
 
   // Public, view-token-gated paths — pass through with no Authorization
   // and no 401 redirect. This matches `useApiClient`'s isPublicApiPath
   // branch.
   if (isPublicApiPath(path)) {
-    return fetch(input, { ...init, headers });
+    return fetchWithTimeout(input, { ...init, headers });
   }
 
   // Same-origin non-`/api/` paths (assets etc.) — attach a token
@@ -162,7 +163,7 @@ export async function apiFetch(
         // best-effort — don't block a public-ish call on token errors
       }
     }
-    return fetch(input, { ...init, headers });
+    return fetchWithTimeout(input, { ...init, headers });
   }
 
   // Authenticated /api/ path. If a token getter is wired (production /
@@ -188,7 +189,7 @@ export async function apiFetch(
   // Request inputs are consumed by the first fetch; clone up front so the
   // 401 retry re-sends a live body instead of throwing 'body already used'.
   const retryInput = input instanceof Request ? input.clone() : input;
-  const response = await fetch(input, { ...init, headers });
+  const response = await fetchWithTimeout(input, { ...init, headers });
 
   if (response.status !== 401 || !getToken) return response;
 
@@ -205,7 +206,7 @@ export async function apiFetch(
       ...headers,
       Authorization: `Bearer ${fresh}`,
     };
-    const retry = await fetch(retryInput, { ...init, headers: retryHeaders });
+    const retry = await fetchWithTimeout(retryInput, { ...init, headers: retryHeaders });
     if (retry.status !== 401) return retry;
   }
   // Still unauthorized after a refresh — the server rejects a session the
