@@ -694,4 +694,28 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     const after = await rowsOfType(tenant.tenantId, PIN_ATTEMPT);
     expect(after.filter((e) => e.correlationId === 'i3t-in-request')).toHaveLength(1);
   });
+
+  it('#1238 item 7 — a legacy plaintext PIN still approves; the re-enroll nudge is spoken ONCE across calls (claimed in Postgres)', async () => {
+    const tenant = await freshTenant();
+    const existing = await ensureTenantSettings(tenant.tenantId, settingsRepo);
+    // Enrolled before hashing at rest: the deprecated plaintext key only.
+    await settingsRepo.update(tenant.tenantId, {
+      escalationSettings: { ...DEFAULT_ESCALATION_SETTINGS, ...existing.escalationSettings, voice_approval_challenge: '6048' },
+    });
+    const { deps } = makeDeps('+15125550210');
+    const first = await seedMoney(tenant.tenantId, 'Alder Paving', 5100);
+    const second = await seedMoney(tenant.tenantId, 'Birch Paving', 5200);
+    const ref = { tenantId: tenant.tenantId, ownerSession: true } as const;
+
+    const a = await callWithCodes(deps, { ...ref, sessionId: 'i3t-nudge-1' }, 'the Alder payment', ['6048']);
+    const b = await callWithCodes(deps, { ...ref, sessionId: 'i3t-nudge-2' }, 'the Birch payment', ['6048']);
+    expect([a.outcomes, b.outcomes]).toEqual([['approved'], ['approved']]);
+    for (const p of [first, second]) {
+      expect((await proposalRepo.findById(tenant.tenantId, p.id))?.status).toBe('approved');
+    }
+    expect(a.last.speak).toMatch(/set a new approval PIN/i);
+    expect(b.last.speak).not.toMatch(/set a new approval PIN/i);
+    const nudged = await rowsOfType(tenant.tenantId, 'proposal.voice_approval_pin_reenroll_nudged');
+    expect(nudged.map((e) => e.metadata?.reason)).toEqual(['legacy_plaintext']);
+  });
 });

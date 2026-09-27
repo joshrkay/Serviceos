@@ -92,6 +92,7 @@ import { resolveEscalationSettings } from '../../settings/settings';
 import {
   resolveVoiceApprovalPinSecret,
   voiceApprovalPinMatches,
+  weakPinReason,
 } from '../../settings/voice-approval-pin';
 import { ValidationError } from '../../shared/errors';
 import {
@@ -892,11 +893,24 @@ async function recordStrike(
 interface VoiceApprovalChallengeState {
   enrolled: boolean;
   verify(utterance: string): boolean;
+  /**
+   * #1238 item 7 — why the owner should re-enroll the PIN that just matched
+   * (it was enrolled under the old rules), or null. Never gates approval.
+   */
+  staleEnrollment(matchedUtterance: string): PinReenrollReason | null;
 }
+
+/**
+ * #1238 item 7 — `legacy_plaintext`: enrolled before hashing at rest;
+ * `weak_pin`: hashed, but a PIN the enrollment route now refuses as too easy
+ * to guess (checkable only once it matches — the spoken digits ARE the PIN).
+ */
+type PinReenrollReason = 'legacy_plaintext' | 'weak_pin';
 
 const NO_CHALLENGE: VoiceApprovalChallengeState = {
   enrolled: false,
   verify: () => false,
+  staleEnrollment: () => null,
 };
 
 /** Legacy plaintext compare — digit PINs on extracted digits ("four two seven
@@ -931,6 +945,7 @@ async function readChallengeState(
         verify: (utterance: string) =>
           !!secret &&
           voiceApprovalPinMatches(spokenDigits(utterance), pinHash, tenantId, secret),
+        staleEnrollment: (matched: string) => (weakPinReason(spokenDigits(matched)) ? 'weak_pin' : null),
       };
     }
     if (legacyPlaintext) {
@@ -939,6 +954,7 @@ async function readChallengeState(
       return {
         enrolled: true,
         verify: (utterance: string) => legacyPlaintextMatches(utterance, legacyPlaintext),
+        staleEnrollment: () => 'legacy_plaintext',
       };
     }
     return NO_CHALLENGE;
@@ -2077,7 +2093,53 @@ export async function continueVoiceApproval(
   }
   await clearPinAttempt(deps, input, proposal.id, attemptId, 'passed');
   await audit(deps, input, 'proposal.voice_approval_challenge_passed', proposal.id);
-  return executeApprove(deps, input, proposal.id);
+  const approved = await executeApprove(deps, input, proposal.id);
+  const reenrollReason = challengeState.staleEnrollment(input.utterance);
+  if (approved.outcome !== 'approved' || !reenrollReason) return approved;
+  const nudged = await claimPinReenrollNudge(deps, input, proposal.id, reenrollReason);
+  return nudged ? { ...approved, speak: `${approved.speak} ${PIN_REENROLL_NUDGE_LINE}` } : approved;
+}
+
+// ─── #1238 item 7 — one-time nudge to re-enroll a PIN set under the old rules ─
+
+const PIN_REENROLL_NUDGED_EVENT = 'proposal.voice_approval_pin_reenroll_nudged';
+/** The claim key: one nudge per tenant, ever (a new PIN can only be enrolled under the current rules). */
+const PIN_REENROLL_NUDGE_CLAIM_KEY = 'pin-reenroll-nudge';
+const PIN_REENROLL_NUDGE_LINE =
+  'One more thing: your voice approval PIN was set up under our older security rules. It still works, but please set a new approval PIN in the app.';
+
+/**
+ * Claim the tenant's one re-enroll nudge (insert-if-absent on the PIN-alert
+ * claim table, so it is spoken once across every call and replica). No claim
+ * store, a lost claim or a claim error → no nudge; approval is never affected.
+ */
+async function claimPinReenrollNudge(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  proposalId: string,
+  reason: PinReenrollReason,
+): Promise<boolean> {
+  if (!deps.pinLockAlertRepo) return false;
+  let won: boolean;
+  try {
+    won = await deps.pinLockAlertRepo.claim({
+      tenantId: ref.tenantId,
+      episodeKey: PIN_REENROLL_NUDGE_CLAIM_KEY,
+      sessionId: ref.sessionId,
+      strikeCount: 0,
+    });
+    // Delivered in this reply — nothing for the lock-alert retry worker to owe.
+    if (won) await deps.pinLockAlertRepo.markSent(ref.tenantId, PIN_REENROLL_NUDGE_CLAIM_KEY);
+  } catch (err) {
+    logger.warn('voice approval PIN re-enroll nudge could not be claimed — not spoken this time', {
+      tenantId: ref.tenantId,
+      sessionId: ref.sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+  if (won) await audit(deps, ref, PIN_REENROLL_NUDGED_EVENT, proposalId, { reason });
+  return won;
 }
 
 // ─── WS19 — batch voice approval (session-flow over the single-item engine) ──
