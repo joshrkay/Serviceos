@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { InvoiceTaskHandler } from '../../../src/ai/tasks/invoice-task';
+import { createRedraftHandlerFactory } from '../../../src/proposals/redraft-handler-factory';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
 import { buildEstimate } from '../../factories/estimate.factory';
@@ -94,6 +95,30 @@ describe('#1276F — an invoice drafted from an estimate bills the estimate, not
 
     const lines = proposal.payload.lineItems as Array<{ unitPriceCents: number }>;
     expect(lines.map((l) => l.unitPriceCents)).toEqual([100000, 17000]);
+    expect(proposal.payload.estimateId).toBe(ESTIMATE);
+  });
+});
+
+describe('#1276F — the entity-resolution re-draft also bills the estimate', () => {
+  it("createRedraftHandlerFactory's draft_invoice handler copies the accepted estimate's lines", async () => {
+    const factory = createRedraftHandlerFactory({
+      gateway: gateway(),
+      estimateRepo: await acceptedEstimateRepo(),
+    });
+    const handler = factory('create_invoice');
+
+    const { proposal } = await handler!.handle({
+      tenantId: TENANT,
+      userId: 'user-1',
+      message: 'Create an invoice from the accepted estimate',
+      existingEntities: { customerId: CUSTOMER },
+    });
+
+    const lines = proposal.payload.lineItems as Array<{ description: string; unitPriceCents: number }>;
+    expect(lines.map((l) => [l.description, l.unitPriceCents])).toEqual([
+      ['Water heater install', 100000],
+      ['Haul-away and permit', 17000],
+    ]);
     expect(proposal.payload.estimateId).toBe(ESTIMATE);
   });
 });

@@ -23,6 +23,8 @@ import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { EntityResolver } from '../../src/ai/resolution/entity-resolver';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { buildEstimate } from '../factories/estimate.factory';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { buildJob } from '../factories/job.factory';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import {
   setSupervisorPresenceLoader,
@@ -164,6 +166,43 @@ describe('#1276C — a numeric reply answers the customer question even when the
     expect(persisted.payload.customerId).toBe(MORGAN);
     expect(missingFieldsFor(persisted)).not.toContain('customerId');
   });
+
+  // #1276 leftover — a pick on the card (PUT /api/proposals/:id → editProposal)
+  // answers the chat question too. The question used to stay stored on the
+  // proposal, so a later "1" was still read as an answer to it: the reply
+  // claimed "Morgan Ashworth — got it" over a card that says Riley.
+  it('after the card pick fills customerId, a later "1" is no longer an answer to the question', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway([
+        classifierReply('create_invoice', { customerName: 'Ashworth', amount: 40000 }),
+        JSON.stringify({ lineItems: [{ description: 'Repair', quantity: 1, unitPrice: 40000 }] }),
+      ]),
+      proposalRepo,
+      ambiguousCustomers,
+    );
+    const ask = 'Invoice Ashworth $400 for the repair';
+    const first = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: ask }] });
+    const [drafted] = await proposalRepo.findByTenant(TENANT);
+
+    await editProposal(proposalRepo, TENANT, drafted.id, USER, 'owner', { customerId: RILEY });
+
+    const later = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        conversationId: first.body.conversationId,
+        messages: [
+          { role: 'user', content: ask },
+          { role: 'assistant', content: first.body.message.content },
+          { role: 'user', content: '1' },
+        ],
+      });
+
+    expect(later.body.taskType).not.toBe('assistant.entity_resolution');
+    expect(later.body.message.content).not.toContain('Morgan Ashworth — got it');
+    const picked = await proposalRepo.findById(TENANT, drafted.id);
+    expect(picked!.payload.customerId).toBe(RILEY);
+  });
 });
 
 describe('#1276A — a bare first name asks for the last name instead of guessing', () => {
@@ -252,5 +291,111 @@ describe('#1276F — chat "invoice from the accepted estimate" bills the estimat
       ['Water heater install', 100000],
       ['Haul-away and permit', 17000],
     ]);
+  });
+});
+
+describe('#1276B — a literal job UUID in a draft request names that job\'s customer', () => {
+  const JOB = '9b2c4d6e-1f3a-4b5c-8d7e-0a1b2c3d4e5f';
+  const CUSTOMER = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+
+  /** Classifier and drafting model answered by task, not by call order. */
+  function gatewayByTask(replies: Record<string, string>): LLMGateway {
+    return {
+      complete: vi.fn(
+        async (req: { taskType?: string }) =>
+          ({
+            content: replies[req.taskType ?? ''] ?? '{}',
+            model: 'mock',
+            provider: 'mock',
+            tokenUsage: { input: 1, output: 1, total: 2 },
+            latencyMs: 1,
+          }) satisfies LLMResponse,
+      ),
+    } as unknown as LLMGateway;
+  }
+
+  /** No customer or job is named "job 9b2c…" — free text finds nothing. */
+  const nothingByName = {
+    resolve: vi.fn(async () => ({ kind: 'not_found' })),
+  } as unknown as EntityResolver;
+
+  async function jobRepoWithTheJob() {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
+    return jobRepo;
+  }
+
+  it('"Draft an estimate for job <uuid>: …" drafts for the job\'s customer, ungated', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      gatewayByTask({
+        classify_intent: classifierReply('draft_estimate', { customerName: `job ${JOB}` }),
+        draft_estimate: JSON.stringify({
+          lineItems: [{ description: 'Water heater install', quantity: 1, unitPrice: 100000 }],
+        }),
+      }),
+      proposalRepo,
+      nothingByName,
+      { jobRepo: await jobRepoWithTheJob() },
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: `Draft an estimate for job ${JOB}: water heater install $1,000` }] });
+
+    expect(res.status).toBe(200);
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    expect(persisted.proposalType).toBe('draft_estimate');
+    expect(persisted.payload.customerId).toBe(CUSTOMER);
+    expect(persisted.payload.jobId).toBe(JOB);
+    expect(missingFieldsFor(persisted)).not.toContain('customerId');
+  });
+
+  it('"Create an invoice for job <uuid> …" drafts the invoice for the job\'s customer', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      gatewayByTask({
+        classify_intent: classifierReply('create_invoice', { jobReference: JOB, amount: 25000 }),
+        draft_invoice: JSON.stringify({
+          lineItems: [{ description: 'Service call', quantity: 1, unitPrice: 25000 }],
+        }),
+      }),
+      proposalRepo,
+      nothingByName,
+      { jobRepo: await jobRepoWithTheJob() },
+    );
+
+    await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: `Create an invoice for job ${JOB} totaling $250` }] });
+
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    expect(persisted.proposalType).toBe('draft_invoice');
+    expect(persisted.payload.customerId).toBe(CUSTOMER);
+    expect(persisted.payload.jobId).toBe(JOB);
+  });
+
+  it('a UUID that is no job of this tenant names no one', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const OTHER = '3f1e2d4c-5b6a-4978-8a9b-0c1d2e3f4a5b';
+    const app = buildApp(
+      gatewayByTask({
+        classify_intent: classifierReply('draft_estimate', { customerName: `job ${OTHER}` }),
+        draft_estimate: JSON.stringify({
+          lineItems: [{ description: 'Water heater install', quantity: 1, unitPrice: 100000 }],
+        }),
+      }),
+      proposalRepo,
+      nothingByName,
+      { jobRepo: await jobRepoWithTheJob() },
+    );
+
+    await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: `Draft an estimate for job ${OTHER}: water heater install $1,000` }] });
+
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    expect(persisted.payload.customerId).toBeUndefined();
+    expect(missingFieldsFor(persisted)).toContain('customerId');
   });
 });

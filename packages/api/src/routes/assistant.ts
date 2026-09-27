@@ -1256,6 +1256,70 @@ interface PreDraftResolution {
 
 const NO_PRE_DRAFT_RESOLUTION: PreDraftResolution = { ids: {}, ambiguousRefKeys: [] };
 
+/** A v1–v5 UUID anywhere in the operator's words. */
+const LITERAL_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+
+/** The drafts a literal job id is read for: they bill a job's customer. */
+const LITERAL_JOB_DRAFT_TYPES: ReadonlySet<string> = new Set(['draft_estimate', 'draft_invoice']);
+
+/**
+ * #1276B — "Draft an estimate for job <uuid>: …" names the job by its id, and
+ * the job names the customer. The free-text resolver matches names, not ids,
+ * so the reference ("job 9b2c…") came back not_found and the draft gated on a
+ * customer the operator had in fact identified. A UUID that is a job THIS
+ * tenant owns is a repo lookup, so its id and customerId are verified by
+ * construction. Exactly one such job, or nothing: two job ids in one request
+ * is not a pick. Failure-soft, like the resolver pass it joins.
+ */
+async function resolveLiteralJobReference(
+  jobRepo: JobRepository | undefined,
+  tenantId: string,
+  text: string,
+): Promise<Record<string, string>> {
+  if (!jobRepo) return {};
+  const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
+  const jobs = [];
+  for (const id of ids) {
+    try {
+      const job = await jobRepo.findById(tenantId, id);
+      if (job) jobs.push(job);
+    } catch {
+      return {};
+    }
+  }
+  if (jobs.length !== 1) return {};
+  const [job] = jobs;
+  return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
+}
+
+/**
+ * The pre-draft pass for one request: the resolver's ids, joined by a literal
+ * job id's job and customer (#1276B) for the drafts that bill a job. A name
+ * the resolver verified wins; a job whose customer contradicts it is dropped
+ * rather than drafting a job for one customer onto another's estimate.
+ */
+async function resolvePreDraftIds(
+  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo'>,
+  tenantId: string,
+  intent: string,
+  registryKey: string | undefined,
+  entities: Record<string, unknown> | undefined,
+  operatorText: string,
+): Promise<PreDraftResolution> {
+  const byName = await resolveVerifiedIdsForDraft(deps.entityResolver, tenantId, intent, entities);
+  if (!registryKey || !LITERAL_JOB_DRAFT_TYPES.has(registryKey)) return byName;
+  const byJobId = await resolveLiteralJobReference(deps.jobRepo, tenantId, operatorText);
+  if (Object.keys(byJobId).length === 0) return byName;
+  if (byName.ids.customerId && byJobId.customerId && byName.ids.customerId !== byJobId.customerId) {
+    return byName;
+  }
+  const ids = { ...byJobId, ...byName.ids };
+  return {
+    ids,
+    ambiguousRefKeys: byName.ambiguousRefKeys.filter((key) => !(key in ids)),
+  };
+}
+
 async function resolveVerifiedIdsForDraft(
   resolver: EntityResolver | undefined,
   tenantId: string,
@@ -3425,11 +3489,13 @@ async function generateAssistantReply(
         };
         // U1 — voice-worker parity: resolve free-text references to verified
         // tenant ids BEFORE drafting (see resolveVerifiedIdsForDraft).
-        const preDraft = await resolveVerifiedIdsForDraft(
-          deps.entityResolver,
+        const preDraft = await resolvePreDraftIds(
+          deps,
           tenantId,
           classification.intentType,
+          registryKey,
           extractedEntities,
+          lastUserText,
         );
         const verifiedIds = preDraft.ids;
         // I3 — resolved once (memoized).
