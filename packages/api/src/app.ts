@@ -137,7 +137,7 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
-import { invoiceReferenceCheck } from './proposals/approval-reference-checks';
+import { invoiceReferenceCheck, serviceLocationReferenceCheck } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -170,6 +170,7 @@ import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
 import { captureServerError, redactedRoute } from './monitoring/capture-server-error';
+import { reportHandlerWrittenServerErrors } from './monitoring/report-server-responses';
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
@@ -777,6 +778,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     environment: process.env.NODE_ENV || 'development',
   });
   app.use(createRequestLoggingMiddleware(requestLogger));
+  // #1205 item 3 — a 5xx a route handler answers itself (`catch { res.status(500) }`)
+  // never reaches captureServerError; this hook reports any 5xx response that
+  // nothing already captured, with the same redacted tags. Mounted after request
+  // logging so the correlation id / redacted route exist on the request.
+  app.use(reportHandlerWrittenServerErrors({ capture: captureServerError, routeOf: redactedRoute }));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
@@ -1008,7 +1014,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // QA 2026-09-16 (AST-04) — approval-time reference checks, applied on every
   // approval channel (dashboard single + batch, voice): an id in a payload must
   // name a record this tenant owns (proposals/approval-reference-checks.ts).
-  const approvalReferenceChecks = [invoiceReferenceCheck(invoiceRepo)];
+  const approvalReferenceChecks = [
+    invoiceReferenceCheck(invoiceRepo),
+    // #1271 — a resolved estimate/invoice with no job cannot approve without
+    // a service location to open the job at.
+    serviceLocationReferenceCheck(locationRepo),
+  ];
 
   const webhookSettingsRepo = settingsRepo;
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
@@ -7201,6 +7212,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // truncating the response the caller was already receiving. End it
     // cleanly instead; the first response is the one that counts.
     if (res.headersSent) {
+      // #1205 item 3 — the response is committed, so whatever status it went
+      // out with, this error is a server failure the caller cannot see.
+      // Report it (it previously skipped Sentry entirely).
+      captureServerError(err, req);
       if (!res.writableEnded) res.end();
       return;
     }

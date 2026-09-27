@@ -16,7 +16,7 @@ import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
 import { clearSatisfiedMissingFields } from './missing-fields';
-import type { ApprovalOptions } from './approval-reference-checks';
+import { describeDanglingReferences, type ApprovalOptions } from './approval-reference-checks';
 import {
   clearPendingReferencesForEdit,
   type EntityAliasCandidateCapture,
@@ -326,7 +326,7 @@ export async function approveProposal(
     ).flat();
     if (dangling.length > 0) {
       throw new ValidationError(
-        `Cannot approve proposal: ${dangling.join(', ')} does not name an existing record`,
+        describeDanglingReferences(dangling),
         { missingFields: dangling },
       );
     }

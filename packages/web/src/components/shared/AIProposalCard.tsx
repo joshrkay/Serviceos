@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { parseMoneyToCents } from '@ai-service-os/shared';
+import { AmbiguityPicker } from '../inbox/AmbiguityPicker';
 import {
   ServiceAddressCompletion,
   addressEditsFrom,
@@ -141,9 +142,49 @@ interface Props {
    * shows an error toast instead of silently faking the dismissal.
    */
   onReject?: () => void | Promise<void>;
+  /**
+   * #1277 — resolve a gated catalog line to the candidate the operator
+   * tapped (the parent owns `POST /api/proposals/:id/resolve-line`). Resolves
+   * to the proposal's remaining `missingFields`, which replace the card's; a
+   * rejection keeps the picker up so the operator can retry.
+   */
+  onResolveLine?: (lineIndex: number, catalogItemId: string) => Promise<string[] | void>;
+  /**
+   * #1277 — save edits WITHOUT approving (the parent owns
+   * `PUT /api/proposals/:id`). Resolves to the remaining `missingFields`; a
+   * rejection carries the server's reason, which the card shows.
+   */
+  onSaveEdits?: (edits: Record<string, unknown>) => Promise<string[] | void>;
 }
 
-export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
+export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, onSaveEdits }: Props) {
+  // #1277 — the gates this card still shows; a resolved pick lifts its own.
+  const [missing, setMissing] = useState<string[]>(proposal.missingFields ?? []);
+  /** #1277 — why the last save/approve/pick was refused, in the server's words. */
+  const [actionError, setActionError] = useState<string | null>(null);
+  useEffect(() => setMissing(proposal.missingFields ?? []), [proposal.missingFields]);
+  const openLinePicks = (proposal.linePicks ?? []).filter((pick) =>
+    missing.includes(`lineItems[${pick.lineIndex}].catalogItemId`),
+  );
+  /** Run a pick; show a refusal's reason and rethrow so the picker re-enables. */
+  const runPick = async (pick: () => Promise<string[] | void> | undefined): Promise<void> => {
+    setActionError(null);
+    try {
+      const remaining = await pick();
+      if (Array.isArray(remaining)) setMissing(remaining);
+    } catch (err) {
+      setActionError(err instanceof Error && err.message ? err.message : 'That pick was not saved.');
+      throw err;
+    }
+  };
+  const resolveLine = (lineIndex: number, catalogItemId: string): Promise<void> =>
+    runPick(() => onResolveLine?.(lineIndex, catalogItemId));
+  const openReferencePick =
+    proposal.referencePick && missing.includes(proposal.referencePick.field)
+      ? proposal.referencePick
+      : undefined;
+  const saveEdits = (edits: Record<string, unknown>): Promise<void> =>
+    runPick(() => onSaveEdits?.(edits));
   const navigate = useNavigate();
   const [status,       setStatus]       = useState<AIProposal['status']>(proposal.status);
   /**
@@ -276,15 +317,18 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
     const prevStatus = status;
     setStatus('Approved');
     setIsApproving(true);
+    setActionError(null);
     onDone?.();
     try {
       // Forward the operator's edits so "Save & apply" actually applies them
       // — previously fieldValues was read only by the inputs and never sent,
       // so every edit was silently discarded and the original payload approved.
       await onApprove?.(edits);
-    } catch {
+    } catch (err) {
       setStatus(prevStatus);
       toast.error('Couldn’t apply this suggestion. Please try again.');
+      // #1277 — the server's reason, on the card (a PUT 400 used to vanish).
+      setActionError(err instanceof Error && err.message ? err.message : null);
     } finally {
       setIsApproving(false);
     }
@@ -558,13 +602,41 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
                 operator fills each listed field via Edit. The task
                 handler populates this when it couldn't extract a
                 required field from the transcript. */}
-            {proposal.missingFields && proposal.missingFields.length > 0 && (
+            {missing.length > 0 && (
               <div className="mt-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
                 <p className="text-xs text-warning">
-                  Needs: {proposal.missingFields.join(', ')}
+                  Needs: {missing.join(', ')}
                 </p>
-                <p className="text-xs text-warning mt-0.5">Tap Edit to fill before approval.</p>
+                <p className="text-xs text-warning mt-0.5">
+                  {/* #1277 — name the control that is actually on the card. */}
+                  {proposal.editFields && proposal.editFields.length > 0
+                    ? 'Tap Edit to fill before approval.'
+                    : openLinePicks.length > 0 || proposal.referencePick
+                      ? 'Pick below to fill before approval.'
+                      : 'Open it in the approval inbox to fill before approval.'}
+                </p>
               </div>
+            )}
+
+            {/* #1277 — the inbox's one-tap catalog picker, here in the chat,
+                for every line still gated on a pick. */}
+            {openLinePicks.map((pick) => (
+              <AmbiguityPicker
+                key={`line-pick-${pick.lineIndex}`}
+                lineDescription={pick.description}
+                candidates={pick.candidates}
+                onPick={(catalogItemId) => resolveLine(pick.lineIndex, catalogItemId)}
+              />
+            ))}
+
+            {/* #1277 — a gated id waiting on a question: the question's own
+                candidates, so the saved value is a real id, never a typed name. */}
+            {openReferencePick && (
+              <AmbiguityPicker
+                lineDescription={openReferencePick.reference || openReferencePick.field}
+                candidates={openReferencePick.candidates}
+                onPick={(id) => saveEdits({ [openReferencePick.field]: id })}
+              />
             )}
 
             {/* Service-address completion.
@@ -638,13 +710,18 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
           execution handler behind them. For real proposals,
           Approve is disabled when there are unfilled missingFields
           so the operator is forced through the Edit flow. */}
+      {actionError && (
+        <p role="alert" className="border-t border-border bg-destructive/10 px-4 py-2 text-xs text-destructive break-words">
+          Not saved: {actionError}
+        </p>
+      )}
       <div className="flex items-center gap-2 border-t border-border bg-secondary/80 px-4 py-2.5">
         {proposal.type !== 'Clarification' && (
           <button
             // Address completion rides along with the approval — it is
             // NEVER a precondition for it. See the address block above.
             onClick={() => { void runApprove(undefined, mergedEdits()); }}
-            disabled={isApproving || Boolean(proposal.missingFields && proposal.missingFields.length > 0)}
+            disabled={isApproving || missing.length > 0}
             className="flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs text-primary-foreground hover:bg-primary/90 active:bg-primary/80 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
           >
             <Check size={12} /> {isApproving ? 'Applying…' : 'Approve'}

@@ -17,7 +17,11 @@ import {
 } from '../../src/proposals/proposal';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { buildInvoice } from '../factories/invoice.factory';
-import { invoiceReferenceCheck } from '../../src/proposals/approval-reference-checks';
+import {
+  invoiceReferenceCheck,
+  serviceLocationReferenceCheck,
+} from '../../src/proposals/approval-reference-checks';
+import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
 import { buildChainRefToken } from '../../src/proposals/chain';
 import { ValidationError } from '../../src/shared/errors';
 
@@ -93,5 +97,88 @@ describe('approveProposal — approval-time reference check (AST-04 belt and bra
     });
     await expect(attempt).rejects.toMatchObject({ details: { missingFields: ['invoiceId'] } });
     expect((await repo.findById(tenantId, proposal.id))!.status).toBe('draft');
+  });
+});
+
+// #1271 — a resolved draft_estimate / draft_invoice with no jobId makes the
+// executor open a job at the customer's service location, and fails
+// "Customer has no service location — add one before approving this
+// estimate" when there is none. That is a precondition the executor itself
+// calls a pre-approval check, so approval refuses it up front (D-029).
+describe('approveProposal — service-location reference check (#1271)', () => {
+  const CUSTOMER_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+
+  function estimateInput(payload: Record<string, unknown>): CreateProposalInput {
+    return {
+      tenantId,
+      proposalType: 'draft_estimate',
+      payload: {
+        customerId: CUSTOMER_ID,
+        lineItems: [{ description: 'Water heater install', quantity: 1, unitPriceCents: 117000 }],
+        ...payload,
+      },
+      summary: 'Estimate for the water heater',
+      createdBy: actorId,
+    };
+  }
+
+  async function approveWith(proposalInput: CreateProposalInput, locationRepo: InMemoryLocationRepository) {
+    const repo = new InMemoryProposalRepository();
+    const proposal = createProposal(proposalInput);
+    await repo.create(proposal);
+    const attempt = approveProposal(repo, tenantId, proposal.id, actorId, 'owner', undefined, 'ui', {
+      referenceChecks: [serviceLocationReferenceCheck(locationRepo)],
+    });
+    return { repo, proposal, attempt };
+  }
+
+  it('refuses a resolved draft_estimate whose customer has no service location, as a locationId gate', async () => {
+    const { repo, proposal, attempt } = await approveWith(estimateInput({}), new InMemoryLocationRepository());
+    await expect(attempt).rejects.toThrow(ValidationError);
+    await expect(attempt).rejects.toMatchObject({ details: { missingFields: ['locationId'] } });
+    await expect(attempt).rejects.toThrow(/service location/i);
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('draft');
+  });
+
+  it('refuses a draft_invoice in the same shape (the invoice executor has the same precondition)', async () => {
+    const { attempt } = await approveWith(
+      { ...estimateInput({}), proposalType: 'draft_invoice' },
+      new InMemoryLocationRepository(),
+    );
+    await expect(attempt).rejects.toMatchObject({ details: { missingFields: ['locationId'] } });
+  });
+
+  it('ignores an archived location — the executor does too', async () => {
+    const locationRepo = new InMemoryLocationRepository();
+    const loc = await createLocation(
+      { tenantId, customerId: CUSTOMER_ID, street1: '456 Oak Ave', city: 'Phoenix', state: 'AZ', postalCode: '85002' },
+      locationRepo,
+    );
+    await locationRepo.update(tenantId, loc.id, { isArchived: true });
+    const { attempt } = await approveWith(estimateInput({}), locationRepo);
+    await expect(attempt).rejects.toMatchObject({ details: { missingFields: ['locationId'] } });
+  });
+
+  it('does not apply when the draft already names a job (no job is opened, no location needed)', async () => {
+    const { attempt } = await approveWith(estimateInput({ jobId: JOB_ID }), new InMemoryLocationRepository());
+    await expect(attempt).resolves.toMatchObject({ status: 'approved' });
+  });
+
+  it('leaves a chained customer to execution (a create_customer head writes its location first)', async () => {
+    const { attempt } = await approveWith(
+      estimateInput({ customerId: buildChainRefToken(0, 'customerId') }),
+      new InMemoryLocationRepository(),
+    );
+    await expect(attempt).resolves.toMatchObject({ status: 'approved' });
+  });
+
+  it('approves when the customer has a live service location', async () => {
+    const locationRepo = new InMemoryLocationRepository();
+    await createLocation(
+      { tenantId, customerId: CUSTOMER_ID, street1: '456 Oak Ave', city: 'Phoenix', state: 'AZ', postalCode: '85002' },
+      locationRepo,
+    );
+    const { attempt } = await approveWith(estimateInput({}), locationRepo);
+    await expect(attempt).resolves.toMatchObject({ status: 'approved' });
   });
 });
