@@ -366,15 +366,18 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 088  authenticated use    /api/calls    [router: router]
          └─ POST /
 089  authenticated use    /api/settings    [router: router]
+         └─ DELETE /e1-script
          └─ DELETE /voice-approval-pin
          └─ GET /
          └─ GET /capabilities
          └─ GET /dunning
+         └─ GET /e1-script
          └─ GET /language
          └─ PATCH /language
          └─ PUT /
          └─ PUT /capabilities/:key
          └─ PUT /dunning
+         └─ PUT /e1-script
          └─ PUT /voice-approval-pin
 090  authenticated use    /api/settings/brand-voice    [router: router]
          └─ GET /
