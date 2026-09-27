@@ -1,5 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
-import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+import { startVoiceSession, voiceInput, approveAndAwaitExecution, type ProposalOutcome } from './helpers/voice-flow';
 // QA-2026-07-26 — VOX-11 asserts against the SHIPPED inbox response type, not a
 // hand-written structural cast. GET /api/proposals/inbox returns
 // `data: PrioritizedProposal[]`, i.e. the proposal is NESTED at `.proposal`.
@@ -31,6 +31,9 @@ async function voiceProposal(
   // have no other way to reach a resolved customerId. Same mechanism SCH-02
   // (scheduling.spec.ts) and SMS-01 (sms.spec.ts) already rely on.
   callerPhone?: string,
+  // QA-2026-09-26 — the record this row means, so a "which one?" turn is
+  // answered by name instead of failing the row (see voiceInput).
+  pickCandidateId?: string,
 ): Promise<{ sessionId: string; proposalId: string } | null> {
   const { token } = h.tenantA;
   const sessionId = await startVoiceSession(h, token, label, callerPhone);
@@ -38,12 +41,17 @@ async function voiceProposal(
     h.evidence.fail('Voice session could not be started.');
     return null;
   }
-  const proposalIds = await voiceInput(h, token, sessionId, utterance, label);
+  const proposalIds = await voiceInput(h, token, sessionId, utterance, label, { pickCandidateId });
   if (proposalIds.length === 0) {
     h.evidence.fail('Voice utterance produced no proposal (Real-LLM-only).');
     return null;
   }
   return { sessionId, proposalId: proposalIds[0] };
+}
+
+/** The approve refusal, when there was one — the actionable half of the verdict. */
+function rejectionSuffix(outcome: ProposalOutcome): string {
+  return outcome.rejection ? ` — approve refused: ${outcome.rejection.message}` : '';
 }
 
 matrixTest('VOX-05', 'Voice-triggered estimate draft creation', async (h) => {
@@ -59,12 +67,17 @@ matrixTest('VOX-05', 'Voice-triggered estimate draft creation', async (h) => {
     h,
     `Draft an estimate for the QA Matrix job with one diagnostic labor line for $150.`,
     '05',
+    undefined,
+    // "the QA Matrix job" matches the fixture customer AND the VOX-13
+    // ambiguous pair (qa-matrix-A-*) at score 1.0, so the product asks
+    // which one (D-029). Answer it with the fixture customer.
+    h.tenantA.customerId,
   );
   if (!flow) return;
 
   const outcome = await approveAndAwaitExecution(h, token, flow.proposalId, '05');
   if (outcome.status !== 'executed') {
-    h.evidence.fail(`Estimate proposal did not execute (status=${outcome.status}).`);
+    h.evidence.fail(`Estimate proposal did not execute (status=${outcome.status})${rejectionSuffix(outcome)}.`);
     return;
   }
   if (!outcome.resultEntityId) {
@@ -153,12 +166,15 @@ matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h
     // customerId CreateInvoiceExecutionHandler needs. Same argument SCH-02
     // and SMS-01 already make.
     '555-0100',
+    // The classifier still extracts customerName "QA Matrix", which matches
+    // the fixture customer and the VOX-13 ambiguous pair — see VOX-05.
+    h.tenantA.customerId,
   );
   if (!flow) return;
 
   const outcome = await approveAndAwaitExecution(h, token, flow.proposalId, '07');
   if (outcome.status !== 'executed') {
-    h.evidence.fail(`Invoice create proposal did not execute (status=${outcome.status}).`);
+    h.evidence.fail(`Invoice create proposal did not execute (status=${outcome.status})${rejectionSuffix(outcome)}.`);
     return;
   }
   const entityId = outcome.resultEntityId;
