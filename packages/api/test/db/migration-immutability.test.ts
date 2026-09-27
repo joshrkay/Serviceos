@@ -558,7 +558,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['292_voice_approval_pin_lock_alerts_sent_at', 'b2682e45bffbc26193870e0da80e7f2a2bcde3b8bb52abe4a54ee1bfad8c617a'],
   // #1386 / O-2 — E1 reviewer attestation columns (NEW migration).
   ['293_tenant_settings_e1_script_attestation', '4db0f349da1c004770878534c24f4d07fc84d8c48470b8650ff8254ebcafda70'],
-  ['294_material_items_job_parts', '7dc74c1ad7030bd0e003b33762e1c0a0b3ff7083b7d4dab643038431f6cf91c5'],
+  ['296_material_items_job_parts', '7dc74c1ad7030bd0e003b33762e1c0a0b3ff7083b7d4dab643038431f6cf91c5'],
 ];
 
 function hashMigration(value: string): string {

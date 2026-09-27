@@ -7186,7 +7186,7 @@ export const MIGRATIONS = {
   // sheet shows: a part number, an integer-cents unit cost and a category.
   // All nullable — voice-captured shopping-list rows (add_material) have
   // none of them. Plus the (tenant_id, job_id) index the per-job read uses.
-  '294_material_items_job_parts': `
+  '296_material_items_job_parts': `
     ALTER TABLE material_items
       ADD COLUMN IF NOT EXISTS part_number TEXT,
       ADD COLUMN IF NOT EXISTS unit_cost_cents INTEGER
