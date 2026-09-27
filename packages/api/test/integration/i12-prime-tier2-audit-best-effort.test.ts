@@ -5,7 +5,8 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-execution';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
-import type { AuditEvent, AuditRepository } from '../../src/audit/audit';
+import type { AuditRepository } from '../../src/audit/audit';
+import { Tier2FailingAuditRepository } from './tier2-failing-audit';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { PgIdempotencyLockProvider } from '../../src/proposals/execution/idempotency-lock';
@@ -52,49 +53,10 @@ import { transitionProposal } from '../../src/proposals/lifecycle';
  * (add-catalog-item, add-material, callback, create-change-order,
  * create-service-agreement, log-expense, record-refund, send-customer-message);
  * 9 files under `src/proposals/execution/` contain an audit-swallow-shaped
- * catch; 11 such catches exist across `src/`. Seven of the eight named handlers
- * remain untested at a real DB, and the money handler the parent ticket also
- * asks for is NOT covered here — see the lane report.
+ * catch; 11 such catches exist across `src/`. The other seven named handlers,
+ * including the money handler `record_refund`, are covered at a real DB by
+ * `i12-prime-tier2-swallow-sites.test.ts` (#1052).
  */
-
-/**
- * A real `PgAuditRepository` with ONE event type knocked out. `create` throws
- * for `callback.acknowledged` (the tier-2 domain event) and delegates
- * everything else, so the executor's tier-1 write is genuinely a real-Postgres
- * write on the real code path.
- */
-class Tier2FailingAuditRepository implements AuditRepository {
-  public attemptedTier2 = 0;
-
-  /**
-   * `failForTenantId` scopes the outage to one tenant. The T1 test runs BOTH
-   * tenants through a single failure-injected executor — one wired handler
-   * instance serving many tenants, which is the production shape — so that a
-   * process-wide outage could not pass as tenant isolation.
-   */
-  constructor(
-    private readonly inner: PgAuditRepository,
-    private readonly failForTenantId?: string,
-  ) {}
-
-  async create(event: AuditEvent): Promise<AuditEvent> {
-    const inScope =
-      this.failForTenantId === undefined || event.tenantId === this.failForTenantId;
-    if (event.eventType === 'callback.acknowledged' && inScope) {
-      this.attemptedTier2 += 1;
-      throw new Error('audit store unavailable (I12′ simulated tier-2 outage)');
-    }
-    return this.inner.create(event);
-  }
-
-  findByEntity(tenantId: string, entityType: string, entityId: string): Promise<AuditEvent[]> {
-    return this.inner.findByEntity(tenantId, entityType, entityId);
-  }
-
-  findByCorrelation(tenantId: string, correlationId: string): Promise<AuditEvent[]> {
-    return this.inner.findByCorrelation(tenantId, correlationId);
-  }
-}
 
 async function makeApprovedCallback(
   proposalRepo: PgProposalRepository,
@@ -175,7 +137,7 @@ describe('I12′ — §5.0b tier-2 handler audit is best-effort, proven at real 
   });
 
   it('tier-2 outage: the domain audit row is LOST but the execution commits and the tier-1 outcome row survives', async () => {
-    const failing = new Tier2FailingAuditRepository(realAuditRepo);
+    const failing = new Tier2FailingAuditRepository(realAuditRepo, 'callback.acknowledged');
     const executor = makeExecutor(failing);
     const proposal = await makeApprovedCallback(proposalRepo, tenantA.tenantId, tenantA.userId);
     const ctx: ExecutionContext = { tenantId: tenantA.tenantId, executedBy: tenantA.userId };
@@ -224,7 +186,7 @@ describe('I12′ — §5.0b tier-2 handler audit is best-effort, proven at real 
     // instance, as in production — with the outage scoped to tenant A. Running
     // tenant B through a SEPARATE healthy executor would also pass if the
     // outage were process-wide, which would prove nothing about isolation.
-    const failing = new Tier2FailingAuditRepository(realAuditRepo, tenantA.tenantId);
+    const failing = new Tier2FailingAuditRepository(realAuditRepo, 'callback.acknowledged', tenantA.tenantId);
     const executor = makeExecutor(failing);
 
     const outageProposal = await makeApprovedCallback(
