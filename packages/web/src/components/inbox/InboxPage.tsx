@@ -1133,17 +1133,20 @@ export function InboxPage() {
                     {/* #1291 — optional typed reject reason, reaching the
                         API's existing `rejectionReason` via the reject
                         endpoint's `reason` field. Left blank, Reject keeps
-                        sending the prior constant default. */}
+                        sending the prior constant default. Fixed w-20 below
+                        sm: — the action column is shrink-0, so a w-full
+                        input sized it by its placeholder and squeezed the
+                        content column to ~51px at 320px (w-24 still left it at 146px). */}
                     <input
                       type="text"
                       id={`reject-reason-${row.proposal.id}`}
                       aria-label={`Reason for reject — ${row.proposal.summary}`}
-                      placeholder="Reason for reject (optional)"
+                      placeholder="Why? (optional)"
                       value={rejectReasonDrafts[row.proposal.id] ?? ''}
                       onChange={(e) =>
                         setRejectReasonDrafts((prev) => ({ ...prev, [row.proposal.id]: e.target.value }))
                       }
-                      className="min-h-11 w-full min-w-0 rounded-lg border border-border bg-card px-2 text-sm text-foreground sm:w-32"
+                      className="min-h-11 w-20 min-w-0 rounded-lg border border-border bg-card px-2 text-sm text-foreground sm:w-32"
                     />
                     <button
                       type="button"

@@ -108,8 +108,13 @@ export const PLAN_REFUSED_JOB_COMPLETED_REASON =
   "This job is already completed, so this plan's completion milestones can't be billed. " +
   'Invoice the balance by hand. No invoice schedule was created.';
 
-/** The plan's positive `on_completion` milestones that have no invoice yet. */
-export function unmintedCompletionMilestones(
+/**
+ * The plan's positive later milestones — `on_completion` and `manual`, i.e.
+ * everything approval does not mint up front — that have no invoice yet.
+ * Completion acts on all of them (#1215): it mints the on_completion ones and
+ * raises the manual ones to the owner as a held draft.
+ */
+export function unmintedLaterMilestones(
   plan: InvoiceSchedule,
   invoices: ReadonlyArray<Invoice>,
 ): MilestoneAllocation[] {
@@ -119,21 +124,30 @@ export function unmintedCompletionMilestones(
       .map((inv) => inv.milestoneIndex),
   );
   return splitMilestones(plan.totalAmountCents, plan.milestones).filter(
-    (a) => a.trigger === 'on_completion' && a.amountCents > 0 && !minted.has(a.index),
+    (a) => a.trigger !== 'on_accept' && a.amountCents > 0 && !minted.has(a.index),
   );
+}
+
+/** The plan's positive `on_completion` milestones that have no invoice yet. */
+export function unmintedCompletionMilestones(
+  plan: InvoiceSchedule,
+  invoices: ReadonlyArray<Invoice>,
+): MilestoneAllocation[] {
+  return unmintedLaterMilestones(plan, invoices).filter((a) => a.trigger === 'on_completion');
 }
 
 /**
  * The job's completion effects will bill this plan: milestone billing is on
- * and the plan still has `on_completion` milestones to mint. The only
- * condition under which auto-invoice-on-completion yields to a plan (C4).
+ * and the plan still has later milestones — `on_completion` ones to mint, or
+ * `manual` ones to raise for the owner (#1215). The only condition under
+ * which auto-invoice-on-completion yields to a plan (C4).
  */
 export function completionWillMintPlan(
   plan: InvoiceSchedule,
   invoices: ReadonlyArray<Invoice>,
   milestoneBillingEnabled: boolean,
 ): boolean {
-  return milestoneBillingEnabled && unmintedCompletionMilestones(plan, invoices).length > 0;
+  return milestoneBillingEnabled && unmintedLaterMilestones(plan, invoices).length > 0;
 }
 
 export interface MilestonePlanBilling {
@@ -142,6 +156,8 @@ export interface MilestonePlanBilling {
   mintedInvoices: Invoice[];
   /** Σ of the plan's on_completion milestones not minted yet. */
   unmintedCompletionCents: number;
+  /** Σ of the plan's manual milestones not minted yet (#1215). */
+  unmintedManualCents: number;
   /** Completion will still mint those milestones. */
   completionWillMint: boolean;
 }
@@ -173,14 +189,17 @@ export function milestonePlanBillingEstimate(input: WholeInvoiceCheck): Mileston
   const mintedInvoices = input.invoices.filter(
     (inv) => inv.scheduleId === plan.id && invoiceStillBills(inv),
   );
-  const unminted = unmintedCompletionMilestones(plan, input.invoices);
+  const unminted = unmintedLaterMilestones(plan, input.invoices);
   const completionWillMint =
     input.milestoneBillingEnabled && input.completionStillAhead && unminted.length > 0;
   if (mintedInvoices.length === 0 && !completionWillMint) return null;
+  const sumOf = (trigger: MilestoneAllocation['trigger']) =>
+    unminted.filter((a) => a.trigger === trigger).reduce((sum, a) => sum + a.amountCents, 0);
   return {
     plan,
     mintedInvoices,
-    unmintedCompletionCents: unminted.reduce((sum, a) => sum + a.amountCents, 0),
+    unmintedCompletionCents: sumOf('on_completion'),
+    unmintedManualCents: sumOf('manual'),
     completionWillMint,
   };
 }
@@ -194,11 +213,23 @@ export function wholeInvoiceRefusedByPlanReason(billing: MilestonePlanBilling): 
     'This estimate is billed by a milestone plan' +
     (minted ? `: ${minted} so far` : '') +
     '. A whole-estimate invoice would bill it twice, so none was created.';
-  if (billing.unmintedCompletionCents > 0) {
-    reason += billing.completionWillMint
-      ? ` The plan invoices the remaining ${formatCentsUsd(billing.unmintedCompletionCents)} when the job is completed.`
-      : ` The plan's remaining ${formatCentsUsd(billing.unmintedCompletionCents)} is not invoiced automatically ` +
-        '(the job is already complete, or milestone billing is off). Invoice it by hand if it is still owed.';
+  const completionCents = billing.unmintedCompletionCents;
+  const manualCents = billing.unmintedManualCents;
+  if (billing.completionWillMint) {
+    // #1215 — the manual milestones are named too: completion raises them.
+    if (completionCents > 0 && manualCents > 0) {
+      reason +=
+        ` The plan invoices the remaining ${formatCentsUsd(completionCents)} when the job is completed, ` +
+        `and raises its manual milestones (${formatCentsUsd(manualCents)}) for your approval then.`;
+    } else if (completionCents > 0) {
+      reason += ` The plan invoices the remaining ${formatCentsUsd(completionCents)} when the job is completed.`;
+    } else if (manualCents > 0) {
+      reason += ` The plan raises its manual milestones (${formatCentsUsd(manualCents)}) for your approval when the job is completed.`;
+    }
+  } else if (completionCents + manualCents > 0) {
+    reason +=
+      ` The plan's remaining ${formatCentsUsd(completionCents + manualCents)} is not invoiced automatically ` +
+      '(the job is already complete, or milestone billing is off). Invoice it by hand if it is still owed.';
   }
   return reason;
 }
@@ -215,6 +246,18 @@ export function estimateLinkHeldByMilestoneReason(holder: Invoice): string {
     `This estimate is linked to ${holder.invoiceNumber}, a ${holder.status} invoice from its milestone plan, ` +
     'so no new invoice can be linked to it and none was created. Invoice the remaining balance by hand ' +
     '(without choosing the estimate).'
+  );
+}
+
+/**
+ * Why a conversion was refused when the estimate's single link is held by an
+ * earlier conversion (not a milestone) that no longer bills — canceled, or
+ * void with no payment (#1215).
+ */
+export function estimateLinkHeldByDeadConversionReason(holder: Invoice): string {
+  return (
+    `This estimate is linked to ${holder.invoiceNumber}, which is ${holder.status}, so no new invoice ` +
+    'can be linked to it and none was created. Invoice it by hand (without choosing the estimate).'
   );
 }
 
@@ -306,6 +349,51 @@ export function heldMilestonesReason(
     `Completing the job would have invoiced ${what} from the milestone plan, but ${inv.invoiceNumber} ` +
     `(${formatCentsUsd(inv.totals.totalCents)}) already bills that estimate. No milestone invoice was created. ` +
     `Reject this if ${inv.invoiceNumber} covers the work; approve it to invoice the milestones anyway.`
+  );
+}
+
+/** Why completion held a plan's milestones for the owner (#1203, #1215). */
+export type MilestoneHoldReason = 'estimate_already_billed' | 'manual_milestone' | 'milestone_billing_off';
+
+function listWithAmounts(allocations: ReadonlyArray<MilestoneAllocation>): string {
+  return allocations.map((a) => `${a.label} (${formatCentsUsd(a.amountCents)})`).join(', ');
+}
+
+/** #1215 — summary of the owner draft raised for a plan's manual milestones at completion. */
+export function heldManualMilestonesSummary(allocations: ReadonlyArray<MilestoneAllocation>): string {
+  const plural = allocations.length > 1;
+  return `Manual milestone${plural ? 's' : ''} ready to invoice: ${allocations.map((a) => a.label).join(', ')}`;
+}
+
+/** #1215 — nothing mints manual milestones, so completion raises them to the owner. */
+export function heldManualMilestonesReason(allocations: ReadonlyArray<MilestoneAllocation>): string {
+  if (allocations.length > 1) {
+    return (
+      `${listWithAmounts(allocations)} are manual milestones in the plan, so completing the job did not invoice them. ` +
+      'Approve this to invoice them now, or reject it if they are not owed yet and invoice them by hand when they are.'
+    );
+  }
+  return (
+    `${listWithAmounts(allocations)} is a manual milestone in the plan, so completing the job did not invoice it. ` +
+    'Approve this to invoice it now, or reject it if it is not owed yet and invoice it by hand when it is.'
+  );
+}
+
+/** #1215 — summary of the owner draft raised when milestone billing was off at completion. */
+export function heldBillingOffSummary(allocations: ReadonlyArray<MilestoneAllocation>): string {
+  return `Milestone invoice held: milestone billing is off (${allocations.map((a) => a.label).join(', ')})`;
+}
+
+/**
+ * #1215 — milestone billing was turned off after the plan was approved and
+ * started billing: completion mints nothing, so the rest reaches the owner.
+ */
+export function heldBillingOffReason(allocations: ReadonlyArray<MilestoneAllocation>): string {
+  const it = allocations.length > 1 ? 'them' : 'it';
+  return (
+    `Completing the job would have invoiced ${listWithAmounts(allocations)} from the milestone plan, but milestone ` +
+    `billing is off, so no milestone invoice was created. Approve this to invoice ${it} anyway, or reject it and ` +
+    'invoice the remaining balance by hand.'
   );
 }
 

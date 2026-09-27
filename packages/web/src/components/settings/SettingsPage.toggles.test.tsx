@@ -162,11 +162,11 @@ describe('SettingsPage Quick toggles persistence', () => {
     renderPage();
     const toggle = await screen.findByRole('switch', { name: 'Text technicians about assignments' });
     await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
-    // ≥44px tap target: the 20px (h-5) track plus a 12px ::before overlay on
-    // every side (before:-inset-3) = a 44px-tall, 60px-wide hit area.
-    expect(toggle.className).toContain('h-5');
-    expect(toggle.className).toContain('before:absolute');
-    expect(toggle.className).toContain('before:-inset-3');
+    // ≥44px tap target on the switch element ITSELF (min-h-11 / min-w-11):
+    // e2e/settings-mobile.spec.ts measures each role="switch" box, and a
+    // ::before overlay does not count toward it. The 20px track is inside.
+    expect(toggle.className).toContain('min-h-11');
+    expect(toggle.className).toContain('min-w-11');
     fireEvent.click(toggle);
 
     await waitFor(() => {
