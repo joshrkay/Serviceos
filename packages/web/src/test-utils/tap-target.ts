@@ -27,21 +27,39 @@ const CONTROLS =
   'button, a[href], select, textarea, input:not([type="hidden"]):not([type="file"]), [role="switch"], [role="radio"], [role="checkbox"]';
 
 /**
- * Every rendered control under `root` meets the tap-target contract. Controls
- * that are visually hidden (`sr-only` / `hidden`) are skipped — their visible
- * label or wrapper is the target. Fails with the full list of offenders.
+ * The visible target of a visually hidden control: its wrapping `<label>`,
+ * or the `<label for=…>` naming it. #1412 — a hidden checkbox is only as
+ * tappable as that label, so the label is what the contract checks.
+ */
+function labelOf(el: Element): Element | null {
+  const wrapping = el.closest('label');
+  if (wrapping) return wrapping;
+  const id = el.getAttribute('id');
+  return id ? el.ownerDocument.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+}
+
+/**
+ * Every rendered control under `root` meets the tap-target contract. A
+ * control that is visually hidden (`sr-only` / `hidden`) is judged by its
+ * visible label instead (a hidden control with no label is skipped — its
+ * visible wrapper is the target). Fails with the full list of offenders.
  */
 export function expectAllTapTargets(root: ParentNode, what: string): void {
   const offenders: string[] = [];
-  for (const el of Array.from(root.querySelectorAll(CONTROLS))) {
+  for (const control of Array.from(root.querySelectorAll(CONTROLS))) {
+    let el: Element = control;
     const cls = el.getAttribute('class') ?? '';
-    if (/(^|\s)(sr-only|hidden)(\s|$)/.test(cls)) continue;
+    if (/(^|\s)(sr-only|hidden)(\s|$)/.test(cls)) {
+      const label = labelOf(el);
+      if (!label) continue;
+      el = label;
+    }
     if (meetsTapTarget(el)) continue;
     const name =
       el.getAttribute('aria-label') ??
       el.getAttribute('placeholder') ??
       (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
-    offenders.push(`${el.tagName.toLowerCase()} "${name}" class="${cls}"`);
+    offenders.push(`${el.tagName.toLowerCase()} "${name}" class="${el.getAttribute('class') ?? ''}"`);
   }
   expect(offenders, `${what}: controls under 44×44`).toEqual([]);
 }
