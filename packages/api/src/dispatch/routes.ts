@@ -9,6 +9,8 @@ import { ProposalRepository } from '../proposals/proposal';
 import { UserRepository } from '../users/user';
 import { SettingsRepository } from '../settings/settings';
 import { resolvePendingChangeRequests } from './pending-changes';
+import { createAppointmentLatenessResolver } from './lateness-resolver';
+import type { TechnicianLocationPingRepository } from '../telemetry/technician-location-ping';
 import { requireAuth, requireRole, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
@@ -36,6 +38,11 @@ interface DispatchRouteDeps {
   userRepo?: UserRepository;
   settingsRepo?: SettingsRepository;
   auditRepo?: AuditRepository;
+  /**
+   * #1079 / PRD 4.7 — truck-location pings. With jobRepo + locationRepo also
+   * wired, the board evaluates each appointment's lateness from them.
+   */
+  locationPingRepo?: TechnicianLocationPingRepository;
 }
 
 /**
@@ -147,6 +154,7 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
 
       const proposalRepo = deps.proposalRepo;
       const userRepo = deps.userRepo;
+      const { locationPingRepo, jobRepo, locationRepo } = deps;
       const boardDeps: BoardQueryDependencies = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
@@ -164,6 +172,16 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
           ? {
               getTechnicianName: (technicianId: string) =>
                 resolveTechnicianName(userRepo, tenantId, technicianId),
+            }
+          : {}),
+        // #1079 — lateness from truck location (read-only; never notifies).
+        ...(locationPingRepo && jobRepo && locationRepo
+          ? {
+              getAppointmentLateness: createAppointmentLatenessResolver(tenantId, {
+                pingRepo: locationPingRepo,
+                jobRepo,
+                locationRepo,
+              }),
             }
           : {}),
       };

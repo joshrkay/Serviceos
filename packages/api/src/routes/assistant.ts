@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -590,6 +591,8 @@ export interface AssistantRouterDeps {
    * auto-approving into a guaranteed failure. Optional; absent → no gate.
    */
   locationRepo?: LocationRepository;
+  /** #1045 — see HandlerRegistryDeps.feasibilityDeps. */
+  feasibilityDeps?: FeasibilityDependencies;
   /**
    * #1173 — the files repo + object storage a chat photo was uploaded through
    * (POST /api/files/upload-url). When a turn carries `attachments`, each
@@ -3996,6 +3999,8 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
     // Draft-time bookability gate for create_appointment (no service
     // location ⇒ missingFields, never an auto-approved doomed execution).
     ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
+    // #1045 / PRD 3.12 — back-to-back travel warning on the held slot.
+    ...(deps.feasibilityDeps ? { feasibilityDeps: deps.feasibilityDeps } : {}),
   });
 
   router.post(

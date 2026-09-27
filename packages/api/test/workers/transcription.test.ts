@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   createTranscriptionWorker,
   voicemailRouterEnqueueAllowed,
+  voicemailJobContextFromPersisted,
 } from '../../src/workers/transcription';
 import type { VoiceRepository, TranscriptionProvider } from '../../src/voice/voice-service';
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
@@ -375,6 +376,15 @@ describe('createTranscriptionWorker — U9 voicemail context threading', () => {
   });
 });
 
+describe('#1223 — voicemailJobContextFromPersisted', () => {
+  it('carries caller-ID and STIR/SHAKEN verdict from the voicemail webhook into the job', () => {
+    expect(
+      voicemailJobContextFromPersisted({ callerPhone: '+15125550100', stirVerstat: 'TN-Validation-Passed-A' }),
+    ).toEqual({ callerPhone: '+15125550100', stirVerstat: 'TN-Validation-Passed-A' });
+    expect(voicemailJobContextFromPersisted({})).toEqual({});
+  });
+});
+
 describe('voicemailRouterEnqueueAllowed — U9 owner gate (router enqueue test)', () => {
   const gateLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never;
 
@@ -392,13 +402,34 @@ describe('voicemailRouterEnqueueAllowed — U9 owner gate (router enqueue test)'
   it('allows a voicemail whose caller-ID is in the approver set', async () => {
     const isApproverPhone = vi.fn().mockResolvedValue(true);
     const allowed = await voicemailRouterEnqueueAllowed(
-      { tenantId: 't-1', recordingId: 'rec-1', voicemail: { callerPhone: '+15125550100' } },
+      {
+        tenantId: 't-1',
+        recordingId: 'rec-1',
+        voicemail: { callerPhone: '+15125550100', stirVerstat: 'TN-Validation-Passed-A' },
+      },
       { isApproverPhone },
       gateLogger,
     );
     expect(allowed).toBe(true);
     expect(isApproverPhone).toHaveBeenCalledWith('t-1', '+15125550100');
   });
+
+  it.each(['TN-Validation-Passed-B', 'TN-Validation-Passed-C', 'No-TN-Validation', undefined])(
+    '#1223 — blocks an approver caller-ID without A-attestation (StirVerstat=%s)',
+    async (stirVerstat) => {
+      const isApproverPhone = vi.fn().mockResolvedValue(true);
+      const allowed = await voicemailRouterEnqueueAllowed(
+        {
+          tenantId: 't-1',
+          recordingId: 'rec-1',
+          voicemail: { callerPhone: '+15125550100', ...(stirVerstat ? { stirVerstat } : {}) },
+        },
+        { isApproverPhone },
+        gateLogger,
+      );
+      expect(allowed).toBe(false);
+    },
+  );
 
   it('blocks an unknown caller (notify-only unchanged)', async () => {
     const isApproverPhone = vi.fn().mockResolvedValue(false);
@@ -413,7 +444,7 @@ describe('voicemailRouterEnqueueAllowed — U9 owner gate (router enqueue test)'
   it('forwards a MISSING caller phone (the approver check itself refuses undefined)', async () => {
     const isApproverPhone = vi.fn().mockResolvedValue(false);
     const allowed = await voicemailRouterEnqueueAllowed(
-      { tenantId: 't-1', recordingId: 'rec-1', voicemail: {} },
+      { tenantId: 't-1', recordingId: 'rec-1', voicemail: { stirVerstat: 'TN-Validation-Passed-A' } },
       { isApproverPhone },
       gateLogger,
     );
@@ -424,7 +455,11 @@ describe('voicemailRouterEnqueueAllowed — U9 owner gate (router enqueue test)'
   it('FAILS CLOSED when the approver lookup throws (degraded settings can never mint routing)', async () => {
     const isApproverPhone = vi.fn().mockRejectedValue(new Error('settings db down'));
     const allowed = await voicemailRouterEnqueueAllowed(
-      { tenantId: 't-1', recordingId: 'rec-1', voicemail: { callerPhone: '+15125550100' } },
+      {
+        tenantId: 't-1',
+        recordingId: 'rec-1',
+        voicemail: { callerPhone: '+15125550100', stirVerstat: 'TN-Validation-Passed-A' },
+      },
       { isApproverPhone },
       gateLogger,
     );

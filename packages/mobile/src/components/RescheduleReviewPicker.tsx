@@ -33,6 +33,8 @@ export function RescheduleReviewPicker({ payload, timezone, onPick, saving }: Re
   const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #1243 — owner-facing "these times use defaults" lines.
+  const [configNotes, setConfigNotes] = useState<string[]>([]);
 
   const proposedStart = asString(payload?.newScheduledStart);
   const proposedEnd = asString(payload?.newScheduledEnd);
@@ -48,9 +50,11 @@ export function RescheduleReviewPicker({ payload, timezone, onPick, saving }: Re
       const from = proposedDay < today ? proposedDay : today;
       const res = await fetchAvailability(api, { from, to: addDaysYmd(from, BOOKING_HORIZON_DAYS) });
       setSlots(res.slots);
+      setConfigNotes(res.config?.notes ?? []);
     } catch (e) {
       setError(copyForError(e).body);
       setSlots([]);
+      setConfigNotes([]);
     } finally {
       setLoading(false);
     }
@@ -85,6 +89,7 @@ export function RescheduleReviewPicker({ payload, timezone, onPick, saving }: Re
         isLoading={loading}
         error={error}
         onRetry={() => void loadSlots()}
+        configNotes={configNotes}
       />
     </View>
   );

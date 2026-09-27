@@ -9,6 +9,7 @@ import {
   UNTRUSTED_FENCE_MARKERS_DESCRIPTION,
 } from '../ai/untrusted-content';
 import { encrypt } from '../integrations/crypto';
+import { isOwnerLineAttested } from '../telephony/stir-attestation';
 
 /**
  * U9 (voicemail → action) — marks a transcription job as voicemail-sourced.
@@ -23,6 +24,26 @@ import { encrypt } from '../integrations/crypto';
  */
 export interface VoicemailJobContext {
   callerPhone?: string;
+  /**
+   * #1223 — Twilio's STIR/SHAKEN verdict for the call that left the
+   * voicemail, threaded the same way as `callerPhone` (signed callback URL).
+   * The router gate requires full A-attestation; absent ⇒ fail closed.
+   */
+  stirVerstat?: string;
+}
+
+/**
+ * #1223 — the voicemail marker a voicemail-webhook job carries: caller-ID plus
+ * the call's STIR/SHAKEN verdict, both minted onto the signed callback URL.
+ */
+export function voicemailJobContextFromPersisted(event: {
+  callerPhone?: string;
+  stirVerstat?: string;
+}): VoicemailJobContext {
+  return {
+    ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
+    ...(event.stirVerstat ? { stirVerstat: event.stirVerstat } : {}),
+  };
 }
 
 export interface TranscriptionJobPayload {
@@ -95,6 +116,9 @@ export async function voicemailRouterEnqueueAllowed(
   logger: Logger,
 ): Promise<boolean> {
   if (!event.voicemail) return true;
+  // #1223 — caller-ID is spoofable: without full STIR/SHAKEN A-attestation
+  // the voicemail stays notify-only whatever number it claims.
+  if (!isOwnerLineAttested(event.voicemail.stirVerstat)) return false;
   try {
     return await deps.isApproverPhone(event.tenantId, event.voicemail.callerPhone);
   } catch (err) {

@@ -103,7 +103,14 @@ async function startCall(
   from: string,
   callSid: string,
 ): Promise<string> {
-  await h.adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: TENANT });
+  // #1223 — the owner line is only trusted when fully (A) attested.
+  await h.adapter.handleInbound({
+    callSid,
+    from,
+    to: '+15125550000',
+    tenantId: TENANT,
+    stirVerstat: 'TN-Validation-Passed-A',
+  });
   const session = h.store.findByCallSid(callSid)!;
   // Without a DB pool the caller lands in ask_caller; emulate the
   // identified-caller transition so handleGather classifies (same pattern

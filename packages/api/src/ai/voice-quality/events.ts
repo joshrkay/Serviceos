@@ -104,7 +104,7 @@ export function costIncurredEvent(
 }
 
 export function sessionTerminatedEvent(
-  cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed',
+  cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed' | 'life_safety_e1',
   ts: number = Date.now(),
 ): Extract<VoiceSessionEvent, { type: 'session_terminated' }> {
   return { type: 'session_terminated', cause, ts };

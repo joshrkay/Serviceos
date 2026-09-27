@@ -22,7 +22,7 @@
  * the ONLY module that touches the SDK.
  */
 import { redactByTier } from '../../logging/redact';
-import { redactPii } from '../../reputation/pii-redact';
+import { redactPiiRepeatedly } from '../../reputation/pii-redact';
 import type { AppConfig } from '../../shared/config';
 import { redactMessagesForSnapshot } from './gateway';
 import type { LLMGatewayLogger, LLMMessage } from './gateway';
@@ -146,7 +146,9 @@ const INLINE_SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
 export function redactTextForExport(text: string): string {
   return INLINE_SECRET_PATTERNS.reduce(
     (acc, [pattern, replacement]) => acc.replace(pattern, replacement),
-    redactPii(text),
+    // #1205 — to a fixed point: one pass leaves the second of two abutting
+    // addresses raw (see redactPiiRepeatedly).
+    redactPiiRepeatedly(text),
   );
 }
 

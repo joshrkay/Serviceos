@@ -36,7 +36,7 @@ const VOICE_QUALITY_VERDICTS_DIR = path.resolve(
  * wrong claim.
  *
  * Accumulated across the per-script tests and asserted once at the end; the
- * corpus lane is a single sequential fork (see vitest.voice-quality.config.ts),
+ * corpus lane is a single sequential fork (see vitest.voice-quality.config.mts),
  * so declaration order is run order. Filtering the run to one script with `-t`
  * naturally narrows what this sees — it is a full-corpus gate, as CI runs it.
  */

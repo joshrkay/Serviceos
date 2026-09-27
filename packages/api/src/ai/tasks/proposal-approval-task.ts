@@ -85,6 +85,8 @@ import {
   VOICE_APPROVAL_PIN_ATTEMPT_EVENT,
 } from '../../audit/audit';
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
+import { pinLockAlertBody, type PinLockAlertRetryScheduler } from './voice-approval-pin-lock-alert';
+import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import {
@@ -298,6 +300,12 @@ export interface VoiceApprovalDeps {
    * that cannot be deduplicated could be re-sent on every refusal.
    */
   pinLockAlertRepo?: VoiceApprovalPinLockAlertRepository;
+  /**
+   * #1238 — durable retry for the claimed alert: the claim winner schedules
+   * one retry BEFORE sending; the worker re-sends while the claim is unsent.
+   * Absent → a failed send is logged and lost (the pre-#1238 behaviour).
+   */
+  pinLockAlertRetry?: PinLockAlertRetryScheduler;
 }
 
 export interface VoiceApprovalSessionRef {
@@ -648,8 +656,8 @@ async function tenantPinLockWithholdsLinks(
  * write → `failed`: the caller refuses and never compares the code.
  *
  * Correctness relies on the reservation being COMMITTED before the count that
- * follows it; voice approval runs on the Twilio webhook path, outside any
- * request-scoped transaction, so each audit write commits on its own.
+ * follows it, so the write always runs outside any request-scoped transaction
+ * (#1238 item 3 — enforced, not assumed).
  */
 async function reservePinAttempt(
   deps: VoiceApprovalDeps,
@@ -661,8 +669,13 @@ async function reservePinAttempt(
     logger.error('voice approval PIN attempt cannot be reserved (no audit repository) — refusing without comparing', context);
     return { status: 'failed' };
   }
+  const auditRepo = deps.auditRepo;
   try {
-    const saved = await deps.auditRepo.create(
+    // #1238 item 3 — ALWAYS its own committed transaction. Inside an /api
+    // request transaction the write would otherwise join it and stay invisible
+    // to parallel attempts' re-count until the response commits (the in-app
+    // voice path runs there), reopening the race #1233 closed.
+    const saved = await runOutsideRequestTransaction(() => auditRepo.create(
       createAuditEvent({
         tenantId: ref.tenantId,
         actorId: VOICE_APPROVAL_ACTOR_ID,
@@ -673,7 +686,7 @@ async function reservePinAttempt(
         correlationId: ref.sessionId,
         metadata: { channel: 'voice', sessionId: ref.sessionId },
       }),
-    );
+    ));
     return { status: 'reserved', attemptId: saved.id };
   } catch (err) {
     logger.error('voice approval PIN attempt reservation failed — refusing without comparing (fail closed)', {
@@ -723,8 +736,12 @@ async function clearPinAttempt(
  * #1233 review — the alert is CLAIMED before it is sent: insert-if-absent keyed
  * by (tenant, the attempt that engaged this episode). Only the claim winner
  * sends. A lost claim, a claim that errors, or no claim store → nothing is
- * sent; a send that fails after winning is logged and never retried, so
- * nobody can make the owner's phone buzz by calling again.
+ * sent. Later calls never re-send, so nobody can make the owner's phone buzz
+ * by calling again.
+ *
+ * #1238 — the winner schedules one durable retry before sending and stamps the
+ * claim sent on success; the queue-driven retry worker
+ * (workers/pin-lock-alert-retry.ts) re-sends while the claim is still unsent.
  */
 async function alertOwnerOfTenantPinLock(
   deps: VoiceApprovalDeps,
@@ -756,6 +773,22 @@ async function alertOwnerOfTenantPinLock(
   }
   if (!won) return;
 
+  if (deps.pinLockAlertRetry) {
+    try {
+      await deps.pinLockAlertRetry.schedule({
+        tenantId: ref.tenantId,
+        episodeKey: engagingAttemptId,
+        strikeCount,
+        attempt: 1,
+      });
+    } catch (err) {
+      logger.error('voice approval tenant PIN lock alert retry could not be scheduled', {
+        ...context,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   let smsSent = false;
   try {
     const sendSms = deps.oneTapFallback?.sendSms;
@@ -763,14 +796,18 @@ async function alertOwnerOfTenantPinLock(
     if (!sendSms || !ownerPhone) {
       logger.warn('voice approval tenant PIN lock engaged — no owner SMS route for the alert', context);
     } else {
-      await sendSms(
-        ownerPhone,
-        `Security alert: voice approval of money items is locked on your account after ${strikeCount} incorrect approval codes in 24 hours. Nothing was approved. Approve pending items in the app, and if those calls were not you, change your voice approval PIN.`,
-      );
+      await sendSms(ownerPhone, pinLockAlertBody(strikeCount));
       smsSent = true;
+      // A lost stamp only costs one duplicate alert from the retry worker.
+      await deps.pinLockAlertRepo.markSent(ref.tenantId, engagingAttemptId).catch((err: unknown) => {
+        logger.warn('voice approval tenant PIN lock alert sent but not stamped — the retry may re-send once', {
+          ...context,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     }
   } catch (err) {
-    logger.error('voice approval tenant PIN lock alert failed to send — claimed, so it is not retried', {
+    logger.error('voice approval tenant PIN lock alert failed to send — left unsent for the retry worker', {
       ...context,
       error: err instanceof Error ? err.message : String(err),
     });

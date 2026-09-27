@@ -56,6 +56,8 @@ export function createTranscriptionRouterHandoff(
             metadata: {
               callerVerified: routerAllowed,
               enqueued: routerAllowed,
+              // #1223 — the STIR/SHAKEN verdict the gate decided on.
+              ...(event.voicemail.stirVerstat ? { stirVerstat: event.voicemail.stirVerstat } : {}),
               ...(retryTriggered && event.retryRequestedBy
                 ? { retryRequestedBy: event.retryRequestedBy }
                 : {}),

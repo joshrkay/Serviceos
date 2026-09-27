@@ -162,10 +162,36 @@ interface InboxProposalRow {
       catalogResolution?: Record<string, AmbiguityCandidate[]>;
       missingFields?: string[];
       entityCandidates?: EntityCandidateView[];
+      // #1252 — business-account context the voice turn stamped on a
+      // property-manager / B2B caller's proposal
+      // (api b2b-account-context.ts `proposalAccountContext`).
+      accountContext?: unknown;
     } & Record<string, unknown>;
   };
   urgency: Urgency;
   reason?: string;
+}
+
+const ACCOUNT_TYPE_LABEL: Record<string, string> = {
+  property_manager: 'Property manager',
+  b2b: 'Business account',
+};
+
+/**
+ * #1252 — the owner-visible priority flag for a business caller's proposal,
+ * or null for a residential caller (no `accountContext`, or not priority).
+ * Defensive on shape: `sourceContext` is loosely typed JSON.
+ */
+function accountPriorityLabel(row: InboxProposalRow): string | null {
+  const ctx = row.proposal.sourceContext?.accountContext;
+  if (!ctx || typeof ctx !== 'object') return null;
+  const { priority, accountType, managedPropertyCount } = ctx as Record<string, unknown>;
+  if (priority !== true) return null;
+  const parts = ['Priority', ACCOUNT_TYPE_LABEL[String(accountType)] ?? 'Business account'];
+  if (typeof managedPropertyCount === 'number' && managedPropertyCount > 0) {
+    parts.push(`${managedPropertyCount} ${managedPropertyCount === 1 ? 'property' : 'properties'}`);
+  }
+  return parts.join(' · ');
 }
 
 const CONFIDENCE_CONFIG: Record<
@@ -1058,6 +1084,14 @@ export function InboxPage() {
                         {badge.label}
                       </span>
                       <span className="text-xs text-muted-foreground">{humanizeProposalType(row.proposal.proposalType)}</span>
+                      {accountPriorityLabel(row) && (
+                        <span
+                          data-testid="proposal-account-priority"
+                          className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-primary/10 text-primary border-primary/30"
+                        >
+                          {accountPriorityLabel(row)}
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm text-foreground font-medium truncate">{row.proposal.summary}</p>
                     {holdExpiryLine(row, tz) && (

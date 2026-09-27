@@ -96,6 +96,16 @@ describe('EstimatesPage', () => {
     expect(screen.getAllByText('Carol White').length).toBeGreaterThan(0);
   });
 
+  it('#1283 — status filter tabs meet the 44px tap target (min-h-11)', () => {
+    renderPage();
+    const all = screen.getAllByRole('button', { name: /^All\b/ })[0];
+    const tabs = Array.from(all.parentElement!.querySelectorAll('button'));
+    expect(tabs.length).toBeGreaterThan(1);
+    for (const tab of tabs) {
+      expect(tab.className, tab.textContent ?? '').toMatch(/(^|\s)min-h-11(\s|$)/);
+    }
+  });
+
   it('renders estimate numbers', () => {
     renderPage();
     expect(screen.getByText('EST-001')).toBeInTheDocument();

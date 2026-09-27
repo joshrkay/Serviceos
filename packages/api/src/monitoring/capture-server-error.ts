@@ -11,22 +11,40 @@ import { getSentryClient } from './sentry';
  * tag, which `beforeSend` never inspects.
  */
 export function redactedRoute(req: Request): string {
+  // #1205 — the query string is never part of the label: `?search=Jane Doe
+  // 602-555-0199` on a 500 would otherwise land in an indexed Sentry tag
+  // (redactUrlValue only scrubs token-like params, not free-text search).
+  // (The matched route pattern is not usable here: by the time the global
+  // error handler runs, Express has already reset req.baseUrl, so
+  // req.route.path alone would collapse every router's `/` into one label.)
   const anyReq = req as unknown as { safeRequestLog?: { route?: string } };
   const logged = anyReq.safeRequestLog?.route;
-  if (typeof logged === 'string' && logged.length > 0) return logged;
-  return redactUrlValue(req.originalUrl || req.path);
+  const raw =
+    typeof logged === 'string' && logged.length > 0
+      ? logged
+      : redactUrlValue(req.originalUrl || req.path);
+  return stripQuery(raw);
+}
+
+function stripQuery(url: string): string {
+  const q = url.indexOf('?');
+  return q === -1 ? url : url.slice(0, q);
 }
 
 /**
- * R1 — every unhandled 5xx reaches Sentry. Shared by the global error
- * handler (app.ts) and asyncRoute (middleware/async-route.ts), which maps
- * handler rejections inline and so never reaches the global handler.
+ * R1 — reports a 5xx to Sentry. Shared by the global error handler (app.ts)
+ * and asyncRoute (middleware/async-route.ts), which maps handler rejections
+ * inline and so never reaches the global handler. NOT every 5xx: route
+ * handlers that catch and answer 500 themselves (the `toErrorResponse`
+ * pattern) and errors after headers were sent do not pass through here
+ * (#1205 item 3 — tracked as follow-up, not swept in one change).
  *
  * Tags are set per event via withScope (no leakage between concurrent
- * requests) from already-redacted sources, because scope tags bypass the
- * beforeSend redaction: the route is redactedRoute() (safeRequestLog.route
- * as redactUrlValue'd by request logging, or the same scrub applied here
- * when that middleware never ran); the request id is the
+ * requests) from already-redacted sources. Tags DO pass through beforeSend,
+ * but redactSentryEvent (logging/redact.ts) deliberately leaves them
+ * unmasked so tenant_id stays filterable (#1205) — which is exactly why they
+ * must be built from redacted sources here: the route is redactedRoute()
+ * (the token-scrubbed path with the query string dropped); the request id is the
  * correlation_id request logging minted; the tenant comes from req.auth
  * (webhook/telephony paths have no tenant store — the tag is simply
  * omitted). Callers gate on the mapped status so 4xx never captures. The

@@ -12,15 +12,13 @@
  * from the voice/AI hold-placement path that actually creates the
  * back-to-back appointments the story is about.
  *
- * This is an HONEST test, not a passing one: it proves (a) the warning
- * mechanism genuinely exists and fires for this exact back-to-back shape at
- * real Postgres (a real control, not a mock), then (b) that NOTHING about
- * the production hold-creation path surfaces it — `PlaceHoldResult` itself
- * has no field for it. Test (b) is written `test.fails`, because the
- * honest, correct expectation of the STORY currently fails against the
- * CODE. Per ticket §1015 instructions: do NOT change product code to make
- * this pass — report it as story-not-met for the Opus lane (#1015's
- * 3.11/3.8 sibling decisions) to fix or formally decide against.
+ * #1045 (option a) closed the gap: `placeAppointmentHold` now takes the
+ * shared `FeasibilityDependencies` and runs `checkFeasibility` against every
+ * technician whose calendar neighbours the held slot, surfacing the
+ * warning-severity issues (travel_time included) on
+ * `PlaceHoldResult.feasibility`. The CONTROL still proves the mechanism at
+ * real Postgres; the former `it.fails` STORY-NOT-MET pin is now a passing
+ * assertion.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
@@ -223,38 +221,71 @@ describe('Postgres integration — back-to-back travel warning vs. the productio
     expect(result.travelTime?.fromPrevSeconds).toBe(1200);
   });
 
-  it.fails(
-    'STORY-NOT-MET (3.12): placeAppointmentHold (ai/scheduling/place-hold.ts:111) never calls checkFeasibility, so the SAME back-to-back pair produces no warning on the production hold-creation path',
-    async () => {
-      // No jobRepo wired — matches place-hold.ts's own documented "legacy
-      // held path (unchanged): the write proceeds" behavior when ownership
-      // can't be verified. Ownership verification is orthogonal to this
-      // story; passing it would only add an unrelated way for this test to
-      // fail for the wrong reason.
-      const result = await placeAppointmentHold(
-        { appointmentRepo },
-        {
-          tenantId: tenant.tenantId,
-          jobId: jobNewId,
-          scheduledStart: new Date('2099-08-10T10:00:00Z'),
-          scheduledEnd: new Date('2099-08-10T11:00:00Z'),
-          timezone: 'UTC',
-          createdBy: tenant.userId,
-        },
-      );
-      expect(result.ok).toBe(true);
+  it('3.12 (#1045): placeAppointmentHold runs checkFeasibility and surfaces the SAME travel_time warning on the hold result', async () => {
+    // No jobRepo wired — ownership verification is orthogonal to this story.
+    // No technicianId either: a voice hold is placed before anyone is
+    // dispatched, so the hold path checks every technician whose calendar
+    // neighbours the slot (here: Carlos, booked in Oakland until 09:55).
+    const result = await placeAppointmentHold(
+      { appointmentRepo, feasibility: feasibilityDeps() },
+      {
+        tenantId: tenant.tenantId,
+        jobId: jobNewId,
+        scheduledStart: new Date('2099-08-10T10:00:00Z'),
+        scheduledEnd: new Date('2099-08-10T11:00:00Z'),
+        timezone: 'UTC',
+        createdBy: tenant.userId,
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.feasibility.checked).toBe(true);
+    expect(result.feasibility.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          check: 'travel_time',
+          conflictingEntityId: prevApptId,
+          metadata: expect.objectContaining({ technicianId, travelSeconds: 1200 }),
+        }),
+      ]),
+    );
+    // A warning, never a block: the hold row was still written.
+    const row = await appointmentRepo.findById(tenant.tenantId, result.appointmentId);
+    expect(row?.holdPendingApproval).toBe(true);
+  });
 
-      // The honest expectation for this story: placing a hold back-to-back
-      // with an infeasible drive should surface the SAME travel_time warning
-      // the control above proves the platform can compute. It does not —
-      // `PlaceHoldResult` (place-hold.ts) has no field for it at all, because
-      // `placeAppointmentHold` never calls `checkFeasibility` or the
-      // technician-assignment/travel-time machinery in any form.
-      const warnings = (result as unknown as { warnings?: unknown }).warnings;
-      expect(warnings).toBeDefined();
-      expect(Array.isArray(warnings) ? warnings : []).toEqual(
-        expect.arrayContaining([expect.objectContaining({ check: 'travel_time' })]),
-      );
-    },
-  );
+  it('3.12 (#1045): a drivable slot carries no travel warning', async () => {
+    const result = await placeAppointmentHold(
+      { appointmentRepo, feasibility: feasibilityDeps() },
+      {
+        tenantId: tenant.tenantId,
+        jobId: jobNewId,
+        scheduledStart: new Date('2099-08-10T12:00:00Z'),
+        scheduledEnd: new Date('2099-08-10T13:00:00Z'),
+        timezone: 'UTC',
+        createdBy: tenant.userId,
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.feasibility.checked).toBe(true);
+    expect(result.feasibility.warnings.filter((w) => w.check === 'travel_time')).toEqual([]);
+  });
+
+  it('3.12 (#1045): no feasibility deps wired → the result says the check did not run (never a silent all-clear)', async () => {
+    const result = await placeAppointmentHold(
+      { appointmentRepo },
+      {
+        tenantId: tenant.tenantId,
+        jobId: jobNewId,
+        scheduledStart: new Date('2099-08-11T10:00:00Z'),
+        scheduledEnd: new Date('2099-08-11T11:00:00Z'),
+        timezone: 'UTC',
+        createdBy: tenant.userId,
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.feasibility).toEqual({ checked: false, warnings: [] });
+  });
 });

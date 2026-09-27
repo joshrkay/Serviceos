@@ -127,7 +127,7 @@ describe('Postgres integration — voicemail → router: the transcript is fence
   /** The U9 gate + enqueue, with the fields app.ts's onTranscribed hook sends. */
   async function transcribedVoicemail(tenant: TestTenant, callerPhone: string, transcript: string) {
     const recordingId = crypto.randomUUID();
-    const event = { tenantId: tenant.tenantId, recordingId, voicemail: { callerPhone } };
+    const event = { tenantId: tenant.tenantId, recordingId, voicemail: { callerPhone, stirVerstat: 'TN-Validation-Passed-A' } };
     const allowed = await voicemailRouterEnqueueAllowed(
       event,
       { isApproverPhone: (tenantId, phone) => isApproverPhone({ settingsRepo }, tenantId, phone ?? null) },

@@ -39,6 +39,18 @@ describe('buildVoicemailTwiml', () => {
     );
   });
 
+  // #1223 — the STIR/SHAKEN verdict rides the signed callback URL too, so the
+  // voicemail → action-router gate can require A-attestation.
+  it('threads the StirVerstat verdict onto the callback URL', () => {
+    const xml = buildVoicemailTwiml({
+      shopName: 'Ortega HVAC',
+      recordingStatusCallback: 'https://api.example.com/api/telephony/voicemail-status',
+      callerPhone: '+15125550100',
+      stirVerstat: 'TN-Validation-Passed-A',
+    });
+    expect(xml).toContain('?From=%2B15125550100&amp;StirVerstat=TN-Validation-Passed-A"');
+  });
+
   it('appends with & when the callback URL already carries a query string', () => {
     const xml = buildVoicemailTwiml({
       shopName: 'Ortega HVAC',

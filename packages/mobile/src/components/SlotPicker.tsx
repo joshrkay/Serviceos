@@ -13,6 +13,13 @@ export interface SlotPickerProps {
   error?: string | null;
   onRetry?: () => void;
   emptyText?: string;
+  /**
+   * #1243 / PRD 3.3 — `config.notes` from GET /api/dispatch/availability: one
+   * line per setting (hours, buffer, timezone) the offered times fell back to a
+   * default for. Shown so the owner learns the hours are wrong BEFORE a
+   * customer books, not after.
+   */
+  configNotes?: string[];
 }
 
 /**
@@ -31,7 +38,25 @@ export function SlotPicker({
   error,
   onRetry,
   emptyText = 'No open times in this range. Try another day.',
+  configNotes,
 }: SlotPickerProps) {
+  const notice =
+    configNotes && configNotes.length > 0 ? (
+      <View
+        accessibilityRole="alert"
+        className="mb-4 rounded-md border border-border bg-muted px-4 py-3"
+      >
+        <Text className="mb-1 text-sm font-semibold text-foreground">
+          These times use default settings
+        </Text>
+        {configNotes.map((note) => (
+          <Text key={note} className="text-sm text-mutedForeground">
+            {note}
+          </Text>
+        ))}
+      </View>
+    ) : null;
+
   if (isLoading) {
     return (
       <View className="py-6">
@@ -43,13 +68,19 @@ export function SlotPicker({
     return <ErrorState error={error} showRetry={Boolean(onRetry)} onRetry={onRetry} className="my-2" />;
   }
   if (slots.length === 0) {
-    return <Text className="py-4 text-base text-mutedForeground">{emptyText}</Text>;
+    return (
+      <View>
+        {notice}
+        <Text className="py-4 text-base text-mutedForeground">{emptyText}</Text>
+      </View>
+    );
   }
 
   const groups = groupSlotsByDay(slots, timezone);
 
   return (
     <View>
+      {notice}
       {groups.map((group) => (
         <View key={group.dayKey} className="mb-4">
           <Text className="mb-2 text-sm font-medium text-mutedForeground">{group.dayLabel}</Text>

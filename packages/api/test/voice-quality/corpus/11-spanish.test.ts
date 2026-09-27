@@ -15,8 +15,8 @@
  *                                   switches the session to 'es'.
  *   - es-explicit-switch-back-en  — Spanish call, explicit mid-call
  *                                   "switch to english" request.
- *   - es-emergency-escalation     — "fuga de gas" escalates with the
- *                                   Spanish 911 safety line.
+ *   - es-emergency-escalation     — "fuga de gas" is E1 (#1222): the
+ *                                   Spanish 911 line, then the call closes.
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'fs';
@@ -125,11 +125,18 @@ describe('UB-C4 — Bucket 11 Spanish', () => {
     expect(switchTurn).toBeDefined();
   });
 
-  it('UB-C4 — the emergency script escalates with the Spanish safety line', () => {
+  // #1222 — a gas leak is E1 life safety: the call closes on the Spanish 911
+  // line + the evacuation script and is NOT bridged to the dispatcher (it was
+  // graded as an E2 escalation before, which is why the E1 gap was invisible).
+  it('UB-C4 — the emergency script is E1: Spanish 911 line, closed call, no dispatcher', () => {
     const script = loadScript(
       path.join(CORPUS_ROOT, 'scripts', '11-spanish', 'es-emergency-escalation.json'),
     );
-    expect(script.turns[0].expected.escalates).toBe(true);
-    expect(script.turns[0].expected.spokenAnswerMatches).toContain('911');
+    expect(script.turns[0].expected.safetyTier).toBe('E1');
+    expect(script.turns[0].expected.callClosed).toBe(true);
+    expect(script.turns[0].expected.escalates).toBe(false);
+    expect(script.turns[0].expected.spokenIncludes).toContain(
+      'Si alguien está en peligro inmediato, cuelgue y llame al 911.',
+    );
   });
 });
