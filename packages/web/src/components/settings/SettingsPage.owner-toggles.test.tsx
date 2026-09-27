@@ -136,9 +136,9 @@ describe('#1011 — SettingsPage owner toggles', () => {
     // A hydrated-OFF switch must not render in the ON style, or the page lies
     // about live state (the failure mode #877 called out on the voice row).
     const thankYouToggle = toggleFor(screen.getByText(LABELS.thankYou));
-    expect(thankYouToggle.className).toContain('bg-slate-200');
+    expect(thankYouToggle).toHaveAttribute('aria-checked', 'false');
     const closeToggle = toggleFor(screen.getByText(LABELS.close));
-    expect(closeToggle.className).toContain('bg-blue-600');
+    expect(closeToggle).toHaveAttribute('aria-checked', 'true');
   });
 
   it('PUTs sendThankYouSms:false when the thank-you toggle is switched off', async () => {
@@ -215,7 +215,7 @@ describe('#1011 — SettingsPage owner toggles', () => {
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Could not save preference'));
     // Reverted to its hydrated ON state rather than being left showing OFF.
-    await waitFor(() => expect(toggleFor(label).className).toContain('bg-blue-600'));
+    await waitFor(() => expect(toggleFor(label)).toHaveAttribute('aria-checked', 'true'));
   });
 
   it('D-019: the autonomous-close copy never claims the AI closes or books on its own', async () => {
