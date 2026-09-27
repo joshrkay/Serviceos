@@ -35,6 +35,12 @@
  *   O  milestone billing off → a plan with completion milestones is refused at approval
  *   P  two concurrent converts of one estimate: both answer the one real conversion (the
  *      uq_invoices_estimate collision is recovered inside the request, not a 500)
+ *   Q  (#1215) voice 30/30/40 split: completion mints the balance AND holds the manual
+ *      middle milestone for the owner; approving it bills the full $1,000
+ *   R  (#1215) deposit minted, milestone billing turned OFF, auto-invoice on: completion
+ *      holds the balance for the owner instead of dropping it; approving it bills $1,000
+ *   S  (#1215) convert, cancel that invoice, convert again: readable 409, not the
+ *      canceled invoice returned as "Invoice created"
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
@@ -1038,5 +1044,68 @@ describe('#1203 — a milestone plan bills one estimate (voice plan, real routes
     expect(rows.map((r) => [r.invoice_number, r.estimate_id, r.total_cents])).toEqual([['INV-0001', s.estimateId, 100000]]);
     expect([first.status, second.status]).toEqual([201, 201]);
     expect(second.body.id).toBe(first.body.id);
+  });
+
+  it('Q — #1215: a voice 30/30/40 split mints the balance at completion AND holds the manual middle milestone; approving it bills $1,000', async () => {
+    const s = await seed('Q');
+    const approved = await approveAndExecute(s, await voicePlan(s, '30/30/40 split', 100000));
+    expect(approved.success).toBe(true);
+    await completeJob(s);
+
+    const drafts = await waitingInvoiceDrafts(s);
+    expect(drafts).toHaveLength(1);
+    const [held] = drafts;
+    say('Q held draft', `${held.status} | ${held.summary} | ${held.explanation}`);
+    expect(held.status).toBe('ready_for_review');
+    expect(held.sourceContext).toMatchObject({ source: 'milestone_mint_held', holdReason: 'manual_milestone' });
+    expect((held.payload.lineItems as Array<{ totalCents: number }>).map((l) => l.totalCents)).toEqual([30000]);
+
+    const result = await approveAndExecute(s, held);
+    expect(result.success).toBe(true);
+    await dump(s, 'Q 30/30/40 split, manual held then approved');
+    const rows = await invoiceRows(s);
+    expect(rows.map((r) => [r.invoice_number, r.schedule_id, r.milestone_index, r.total_cents])).toEqual([
+      ['INV-0001', approved.resultEntityId, 0, 30000],
+      ['INV-0002', approved.resultEntityId, 2, 40000],
+      ['INV-0003', null, null, 30000],
+    ]);
+    expect(billed(rows)).toBe(100000);
+  });
+
+  it('R — #1215: deposit minted, milestone billing then turned OFF, auto-invoice on: the balance is held for the owner, not dropped', async () => {
+    const s = await seed('R', { autoInvoiceOnCompletion: true });
+    const approved = await approveAndExecute(s, await voicePlan(s, DEPOSIT_THEN_BALANCE, 100000));
+    expect(approved.success).toBe(true);
+    await setMilestoneBilling(s, false);
+    await completeJob(s);
+
+    const drafts = await waitingInvoiceDrafts(s);
+    // Auto-invoice stood aside (the deposit is a live invoice); the balance reached the owner.
+    expect(drafts.map((d) => d.idempotencyKey)).toEqual([`milestone_mint_held:${approved.resultEntityId}`]);
+    say('R held draft', `${drafts[0].summary} | ${drafts[0].explanation}`);
+    expect(drafts[0].sourceContext).toMatchObject({ holdReason: 'milestone_billing_off' });
+    expect((await invoiceRows(s)).map((r) => r.total_cents)).toEqual([50000]);
+
+    const result = await approveAndExecute(s, drafts[0]);
+    expect(result.success).toBe(true);
+    await dump(s, 'R billing turned off after the deposit, balance held then approved');
+    const rows = await invoiceRows(s);
+    expect(billed(rows)).toBe(100000);
+  });
+
+  it('S — #1215: convert, cancel it, convert again: a readable 409, never the canceled invoice as "Invoice created"', async () => {
+    const s = await seed('S');
+    const first = await convert(s);
+    expect(first.status).toBe(201);
+    await transitionInvoice(s, first.body.invoiceNumber, 'canceled');
+    const again = await convert(s);
+    await dump(s, 'S convert, cancel, convert again');
+    say('S second convert', `${again.status} ${again.body.message}`);
+    expect(again.status).toBe(409);
+    expect(again.body.message).toBe(
+      `This estimate is linked to ${first.body.invoiceNumber}, which is canceled, so no new invoice can be linked to it ` +
+        'and none was created. Invoice it by hand (without choosing the estimate).',
+    );
+    expect((await invoiceRows(s)).map((r) => [r.invoice_number, r.status])).toEqual([[first.body.invoiceNumber, 'canceled']]);
   });
 });

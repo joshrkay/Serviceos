@@ -14,7 +14,8 @@
  *
  * #1203 — it also no-ops when a milestone plan bills the accepted estimate AND
  * completion is about to mint that plan (milestone billing on, on_completion
- * milestones still unminted). A plan that recorded no estimate bills the job's
+ * or manual milestones still unminted — completion mints the former and raises
+ * the latter to the owner, #1215). A plan that recorded no estimate bills the job's
  * single accepted estimate. It never yields to a plan while milestone billing
  * is off: that plan would bill nothing.
  */

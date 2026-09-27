@@ -12,8 +12,9 @@
  * themselves, so recurring revenue is actually recurring" that the code does
  * not deliver.
  *
- * The ports below are copied from the PRODUCTION wiring (app.ts:5658-5713) so
- * what is asserted is what ships, including its invoice-numbering choice.
+ * The invoices port is the PRODUCTION factory (`createAgreementInvoicesService`,
+ * the same one app.ts wires) — not a copy — so what is asserted is what ships.
+ * The jobs port is still a thin copy of app.ts's (it only calls createJob).
  *
  * MET, and proven here on real rows:
  *   - renewal: an active auto-renew membership whose term lapsed has `ends_on`
@@ -31,18 +32,14 @@
  *     leaves an open, dunnable invoice that the collections cadence really
  *     does chase. Proven end to end with only the Stripe HTTP call injected.
  *
- * NOT MET — and scoped to the DEFAULT path, which is what `createAgreement`
- * produces unless the owner opts in (`autoCollectDues` defaults to false), and
- * also to an opted-in member who never saved a card (`no_card` returns before
- * issuance, dues-collector.ts:85):
- *   - the dues invoice is left as a DRAFT with no due date, so it is invisible
- *     to the collections cadence — nothing chases it, and nothing sends it;
- *   - it is numbered `AGREEMENT-<epoch ms>` instead of off the tenant's
- *     invoice sequence (this one holds on BOTH paths).
- *
- * An earlier revision of this file stated the draft/no-due-date gap as
- * universal. It is not — caught by a review finding on PR #1053 (Codex P2),
- * and the auto-collect block below is the correction.
+ *   - DEFAULT PATH (#1058, closed): with `autoCollectDues` false — what
+ *     `createAgreement` produces unless the owner opts in — and for an
+ *     opted-in member with no saved card, the dues invoice is numbered off
+ *     the tenant sequence, ISSUED at creation with a due date on the tenant's
+ *     payment terms, audited `invoice.issued`, and chased by the real overdue
+ *     sweep. (Before #1058 it was a draft with no due date numbered
+ *     `AGREEMENT-<epoch ms>`; the tests that pinned those wrong values were
+ *     replaced by the desired-behaviour block at the bottom of this file.)
  *
  * Runs only under the integration harness (globalSetup starts the Postgres
  * testcontainer and sets TEST_DB_URL).
@@ -72,9 +69,10 @@ import { runOverdueInvoiceSweep } from '../../src/workers/overdue-invoice-worker
 import { StripeDuesCollector, DuesInvoiceOps } from '../../src/agreements/dues-collector';
 import type { StripeFetch } from '../../src/payments/stripe-payment-intent';
 import { createJob } from '../../src/jobs/job';
-import { createInvoice, issueInvoice } from '../../src/invoices/invoice';
+import { issueInvoice } from '../../src/invoices/invoice';
 import { recordPayment } from '../../src/invoices/payment';
-import { createAgreement } from '../../src/agreements/agreement-service';
+import { createAgreement, InvoicesServicePort } from '../../src/agreements/agreement-service';
+import { createAgreementInvoicesService } from '../../src/agreements/agreement-invoices-port';
 import { getCustomerMemberDiscountBps } from '../../src/agreements/member-pricing';
 import { runRecurringAgreementsSweep } from '../../src/workers/recurring-agreements-worker';
 import { Agreement } from '../../src/agreements/agreement';
@@ -127,39 +125,9 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       return { id: job.id };
     },
   };
-  const invoicesService = {
-    async createDraftInvoice(input: {
-      tenantId: string;
-      jobId: string;
-      priceCents: number;
-      description: string;
-      createdBy: string;
-    }) {
-      const invoice = await createInvoice(
-        {
-          tenantId: input.tenantId,
-          jobId: input.jobId,
-          invoiceNumber: `AGREEMENT-${Date.now()}`,
-          lineItems: [
-            {
-              id: `agreement-${Date.now()}`,
-              description: input.description,
-              quantity: 1,
-              unitPriceCents: input.priceCents,
-              totalCents: input.priceCents,
-              sortOrder: 0,
-              taxable: false,
-            },
-          ],
-          customerMessage: undefined,
-          createdBy: input.createdBy,
-        },
-        invoiceRepo,
-        auditRepo,
-      );
-      return { id: invoice.id };
-    },
-  };
+  // The PRODUCTION port itself (app.ts wires the same factory) — assigned in
+  // beforeAll once the repos exist.
+  let invoicesService: InvoicesServicePort;
 
   async function seedTenant(): Promise<SeededTenant> {
     const { tenantId, userId } = await createTestTenant(pool);
@@ -291,6 +259,7 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
     settingsRepo = new PgSettingsRepository(pool);
     auditRepo = new PgAuditRepository(pool);
     paymentRepo = new PgPaymentRepository(pool);
+    invoicesService = createAgreementInvoicesService({ invoiceRepo, settingsRepo, auditRepo });
   });
 
   afterAll(async () => {
@@ -710,10 +679,11 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
       ).toEqual(['3:sms']);
     });
 
-    it('leaves the invoice an undunnable draft when auto-collect is on but no card is saved', async () => {
+    it('still issues the invoice with a due date when auto-collect is on but no card is saved (#1058)', async () => {
       // The collector returns `no_card` BEFORE ensureIssuedAmountDue
-      // (dues-collector.ts:85), so the issuance never happens — the default
-      // path's gap reappears for a member who never completed card setup.
+      // (dues-collector.ts:85) — but the port already issued the invoice at
+      // creation, so a member who never completed card setup is still billed
+      // and chased.
       const t = await seedTenant();
       const membership = await seedMembership(t, {
         nextRunAt: new Date(Date.now() - 3600_000),
@@ -738,93 +708,118 @@ describe('Postgres integration — membership renewal + dues sweep (§8.12)', ()
 
       const run = (await runRepo.findByAgreement(t.tenantId, membership.id))[0];
       const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
-      expect(invoice!.status).toBe('draft');
-      expect(invoice!.dueDate).toBeUndefined();
+      expect(invoice!.status).toBe('open');
+      expect(invoice!.dueDate).toBeInstanceOf(Date);
       const audits = await auditRepo.findByEntity(t.tenantId, 'service_agreement', membership.id);
       expect(audits.map((a) => a.eventType)).toContain('service_agreement.auto_collect_skipped');
     });
   });
 
   /**
-   * The story-not-met half — scoped to the DEFAULT path.
+   * #1058 — the DEFAULT path (`autoCollectDues` false, which is what
+   * `createAgreement` produces unless the owner opts in) must bill ITSELF: the
+   * dues invoice is issued on the tenant's payment terms, numbered off the
+   * tenant sequence, audited, and reachable by the collections cadence.
    *
-   * Each test pins the CURRENT (wrong) value positively rather than using
-   * `it.fails`. Two reviewers flagged the same hazard on PR #1053: `it.fails`
-   * passes when the body throws for ANY reason, so a regression in the sweep
-   * — no run generated, `run.generatedInvoiceId` undefined, a TypeError before
-   * the intended assertion — reads as "expected fail" and the gap silently
-   * stops being tested. Asserting the wrong value directly keeps the property
-   * that matters (these go RED the moment the gap is closed, which is the
-   * signal to update the row) while failing honestly on a setup regression.
-   * Each begins with a setup assertion so a broken seed is unmistakable.
-   *
-   * IMPORTANT: this is the `autoCollectDues: false` default, which is what a
-   * membership created through `createAgreement` gets unless the owner opts
-   * in. The auto-collect branch above DOES issue with a due date — do not read
-   * these as universal.
-   *
-   * Do not "fix" one by weakening it; close the gap in the worker (an owner
-   * decision — parked on #1023 for the orchestrator, not taken by this lane).
+   * These replaced three tests that pinned the old wrong values (draft, no due
+   * date, `AGREEMENT-<epoch ms>`). Each begins with setup assertions so a
+   * broken seed can never read as the behaviour under test.
    */
-  describe('story-not-met: what "bills itself" does not do on the DEFAULT (no auto-collect) path', () => {
-    /** Run one default-path cycle and return its invoice. Throws loudly if the
-     *  sweep did not actually bill, so a setup regression can never read as
-     *  the gap under test. */
-    async function billedDefaultPathInvoice() {
+  describe('the DEFAULT (no auto-collect) path bills itself (#1058)', () => {
+    /** Run one default-path cycle and return its invoice. */
+    async function billedDefaultPathInvoice(termDays?: number) {
       const t = await seedTenant();
+      if (termDays !== undefined) {
+        await settingsRepo.update(t.tenantId, { defaultPaymentTermDays: termDays });
+      }
       const membership = await seedMembership(t, {
         nextRunAt: new Date(Date.now() - 3600_000),
       });
       await sweep([t.tenantId]);
       const runs = await runRepo.findByAgreement(t.tenantId, membership.id);
-      // Setup assertions — these must HOLD for the gap assertions to mean
-      // anything.
       expect(runs).toHaveLength(1);
       expect(runs[0].status).toBe('generated');
       expect(runs[0].generatedInvoiceId).toBeDefined();
       const invoice = await invoiceRepo.findById(t.tenantId, runs[0].generatedInvoiceId!);
       expect(invoice).not.toBeNull();
-      return { t, invoice: invoice! };
+      return { t, membership, invoice: invoice! };
     }
 
-    it('leaves the dues invoice a DRAFT — nothing issues or sends it, so a human must open it', async () => {
+    it('issues the dues invoice (open, issuedAt stamped) — no human has to open a draft', async () => {
       const { invoice } = await billedDefaultPathInvoice();
-      // agreement-service.ts:402 calls createDraftInvoice; createInvoice
-      // (invoices/invoice.ts:336) hardcodes status 'draft'. GAP: this should
-      // be 'open' for the story to be met — when it is, this line goes RED.
-      expect(invoice.status).toBe('draft');
+      expect(invoice.status).toBe('open');
+      expect(invoice.issuedAt).toBeInstanceOf(Date);
+      expect(invoice.amountDueCents).toBe(19_900);
     });
 
-    it('leaves the dues invoice with NO due date, so the collections cadence can never select it', async () => {
-      const { invoice } = await billedDefaultPathInvoice();
-      // The production port (app.ts:5689-5710) passes no dueDate, so the
-      // overdue sweep's prefilter (status open/partially_paid AND
-      // due_date <= now) can never match. GAP: this should be defined.
-      expect(invoice.dueDate).toBeUndefined();
+    it("stamps a due date on the TENANT's payment terms, not a hardcoded 30", async () => {
+      const { invoice } = await billedDefaultPathInvoice(14);
+      expect(invoice.dueDate).toBeInstanceOf(Date);
+      const days = Math.round(
+        (invoice.dueDate!.getTime() - invoice.issuedAt!.getTime()) / 86_400_000,
+      );
+      expect(days).toBe(14);
     });
 
-    it('numbers the dues invoice AGREEMENT-<epoch ms>, outside the tenant sequence', async () => {
-      const { invoice } = await billedDefaultPathInvoice();
-      // app.ts:5693 mints `AGREEMENT-${Date.now()}` instead of
-      // createInvoiceWithNextNumber, so the tenant's books have a gap and two
-      // agreements billed in the same millisecond would collide on
-      // idx_invoices_number. GAP: this should match /^INV\d{4}$/.
-      expect(invoice.invoiceNumber).toMatch(/^AGREEMENT-\d+$/);
-      expect(invoice.invoiceNumber).not.toMatch(/^INV\d{4}$/);
-    });
-
-    it('the tenant invoice sequence is NOT advanced by a membership cycle (the numbering gap, asserted positively)', async () => {
-      const t = await seedTenant();
-      const membership = await seedMembership(t, {
-        nextRunAt: new Date(Date.now() - 3600_000),
-      });
-      await sweep([t.tenantId]);
-      const run = (await runRepo.findByAgreement(t.tenantId, membership.id))[0];
-      const invoice = await invoiceRepo.findById(t.tenantId, run.generatedInvoiceId!);
-
-      expect(invoice!.invoiceNumber.startsWith('AGREEMENT-')).toBe(true);
+    it('numbers the dues invoice off the tenant sequence and advances it', async () => {
+      const { t, invoice } = await billedDefaultPathInvoice();
+      expect(invoice.invoiceNumber).toBe('INV0001');
       const settings = await settingsRepo.findByTenant(t.tenantId);
-      expect(settings!.nextInvoiceNumber).toBe(1);
+      expect(settings!.nextInvoiceNumber).toBe(2);
+    });
+
+    it('two memberships billed in one pass get distinct, consecutive numbers (no same-millisecond collision)', async () => {
+      const t = await seedTenant();
+      const a = await seedMembership(t, { nextRunAt: new Date(Date.now() - 3600_000) });
+      const b = await seedMembership(t, { nextRunAt: new Date(Date.now() - 3600_000) });
+      await sweep([t.tenantId]);
+      const numbers: string[] = [];
+      for (const m of [a, b]) {
+        const runs = await runRepo.findByAgreement(t.tenantId, m.id);
+        expect(runs).toHaveLength(1);
+        expect(runs[0].status).toBe('generated');
+        numbers.push((await invoiceRepo.findById(t.tenantId, runs[0].generatedInvoiceId!))!.invoiceNumber);
+      }
+      expect(numbers.sort()).toEqual(['INV0001', 'INV0002']);
+    });
+
+    it('audits the issuance (invoice.issued, system actor, with the due date)', async () => {
+      const { t, invoice } = await billedDefaultPathInvoice();
+      const audits = await auditRepo.findByEntity(t.tenantId, 'invoice', invoice.id);
+      const issued = audits.find((a) => a.eventType === 'invoice.issued');
+      expect(issued).toBeDefined();
+      expect(issued!.actorRole).toBe('system');
+      expect(issued!.metadata).toMatchObject({
+        invoiceNumber: 'INV0001',
+        dueDate: invoice.dueDate!.toISOString(),
+        source: 'service_agreement',
+      });
+    });
+
+    it('the collections cadence really chases an unpaid default-path dues invoice', async () => {
+      const { t, invoice } = await billedDefaultPathInvoice();
+      const asOf = new Date(invoice.dueDate!.getTime() + 10 * 86_400_000);
+      const dunningEventRepo = new PgDunningEventRepository(pool);
+      const dunningConfigRepo = new PgDunningConfigRepository(pool);
+      await dunningConfigRepo.upsert({
+        ...defaultDunningConfig(t.tenantId),
+        reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+      });
+      await runOverdueInvoiceSweep({
+        jobRepo,
+        estimateRepo: new PgEstimateRepository(pool),
+        invoiceRepo,
+        auditRepo,
+        proposalRepo: new PgProposalRepository(pool),
+        dunningEventRepo,
+        dunningConfigRepo,
+        listTenantIds: async () => [t.tenantId],
+        now: () => asOf,
+        logger,
+      });
+      expect(
+        (await dunningEventRepo.findByInvoice(t.tenantId, invoice.id)).map((e) => e.stepKey),
+      ).toEqual(['3:sms']);
     });
   });
 });
