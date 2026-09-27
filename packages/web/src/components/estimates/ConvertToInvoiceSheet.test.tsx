@@ -15,6 +15,14 @@ const baseInput: ConvertToInvoiceInput = {
     { description: 'Labor', qty: 2, rate: 100 },
     { description: 'Parts', qty: 1, rate: 50 },
   ],
+  totals: {
+    subtotalCents: 25_000,
+    taxableSubtotalCents: 0,
+    discountCents: 0,
+    taxRateBps: 0,
+    taxCents: 0,
+    totalCents: 25_000,
+  },
 };
 
 function renderSheet(over: Partial<ConvertToInvoiceInput> = {}) {
