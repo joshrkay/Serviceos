@@ -1973,8 +1973,9 @@ export function e1ScriptReadiness(): E1ScriptReadiness {
     message:
       'E1 life-safety script is an UNREVIEWED PLACEHOLDER (LIFE_SAFETY_E1_SCRIPT). ' +
       'It leads with a fail-safe 911 direction but has not been signed off by anyone with ' +
-      'trade + legal standing. Configure a reviewed script per tenant via ' +
-      'tenant_settings.e1_reviewed_script before go-live — every E1 call speaks the ' +
-      'placeholder until then.',
+      'trade + legal standing. Per O-2 it may run only HARD-FLAGGED: every E1 call ' +
+      'speaks the placeholder and stamps e1ScriptPlaceholder=true on its audit row until ' +
+      'the owner saves a reviewed script (tenant_settings.e1_reviewed_script) via ' +
+      'PUT /api/settings/e1-script with the reviewer attestation.',
   };
 }

@@ -212,6 +212,13 @@ export type CallingAgentEvent =
       utterance: string;
       tier?: 'E1' | 'E2';
       responseScript?: string;
+      /**
+       * #1386 / O-2 — where the E1 script came from. 'reviewed' only when the
+       * caller spoke the tenant's signed-off `e1ReviewedScript`; anything
+       * else (absent included) is the UNREVIEWED placeholder, and the E1
+       * audit row is hard-flagged `e1ScriptPlaceholder: true`.
+       */
+      scriptSource?: 'reviewed' | 'placeholder';
       language?: 'en' | 'es';
       sessionLanguage?: 'en' | 'es';
     };

@@ -1789,11 +1789,15 @@ export class TwilioGatherAdapter {
     // own responseScript). This settings round trip must never happen for
     // E2/E3 turns — it is gated on tier === 'E1' before the lookup even runs.
     let responseScript = safety.responseScript;
+    // #1386 / O-2 — anything but the tenant's reviewed script is the
+    // placeholder, and the E1 audit row is hard-flagged accordingly.
+    let scriptSource: 'reviewed' | 'placeholder' = 'placeholder';
     if (safety.tier === 'E1' && this.deps.settingsRepo) {
       try {
         const settings = await this.deps.settingsRepo.findByTenant(tenantId);
         if (settings?.e1ReviewedScript) {
           responseScript = settings.e1ReviewedScript;
+          scriptSource = 'reviewed';
         }
       } catch (err) {
         logger.warn('E1 reviewed-script lookup failed, using placeholder', {
@@ -1810,6 +1814,7 @@ export class TwilioGatherAdapter {
       utterance: speechResult,
       tier: safety.tier,
       ...(responseScript ? { responseScript } : {}),
+      ...(safety.tier === 'E1' ? { scriptSource } : {}),
       ...(safety.language ? { language: safety.language } : {}),
       // #1220 review — a Spanish session hears the Spanish 911 line on E1 even
       // when the hazard was reported in English.

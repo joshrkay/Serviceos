@@ -587,6 +587,9 @@ function checkGlobalGuards(
             reason: 'life_safety_e1',
             keyword: event.keyword,
             ...(event.language ? { language: event.language } : {}),
+            // #1386 / O-2 — the placeholder may run only HARD-FLAGGED: every
+            // E1 invocation records whether the unreviewed script was spoken.
+            e1ScriptPlaceholder: event.scriptSource !== 'reviewed',
           }),
           // Life-safety lines spoken FIRST, before anything else.
           ...(spanishCaller

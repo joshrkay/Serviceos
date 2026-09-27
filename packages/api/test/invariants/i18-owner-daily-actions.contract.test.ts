@@ -108,7 +108,8 @@ const INVENTORY_PATH = path.resolve(REPO_ROOT, 'docs/reference/owner-daily-actio
 /** PRD §5.0c (b) — the budget. A PR that moves one of these is self-documenting. */
 const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 6;
-const OWNER_ONLY_ROUTES = 57;
+// #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
+const OWNER_ONLY_ROUTES = 59;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

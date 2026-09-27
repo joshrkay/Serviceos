@@ -13,7 +13,6 @@ export type SubscriptionStatus =
 export type GateReason =
   | 'no_billing'
   | 'not_live'
-  | 'e1_script_unreviewed'
   | 'trial_cap_total'
   | 'trial_cap_concurrent'
   | 'overage_cap';
