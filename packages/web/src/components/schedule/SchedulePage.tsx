@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { delayOutcomeMessage, type RunningLateOutcome } from '../../lib/delayOutcome';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { JobPicker, type JobOption } from '../forms/JobPicker';
@@ -87,27 +88,30 @@ function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
   return aStart < bEnd && bStart < aEnd;
 }
 
-/** Delay notification form */
+/**
+ * Delay notification form. #1416 — sends the running_late status (the path
+ * #1406 D10 fixed; `/delay-ack` rejected owners and never reported whether a
+ * notice was queued) and keeps the API's honest outcome on screen until the
+ * user closes the sheet.
+ */
 function DelaySheet({ appointmentId, onClose }: { appointmentId: string; onClose: () => void }) {
   const [minutes, setMinutes] = useState<10 | 15 | 20 | 60>(20);
   const [sending, setSending] = useState(false);
-  const [sent,    setSent]    = useState(false);
+  const [outcome, setOutcome] = useState<RunningLateOutcome | null>(null);
   const [error,   setError]   = useState<string | null>(null);
 
   async function send() {
     setSending(true);
     setError(null);
     try {
-      const res = await apiFetch(`/api/appointments/${appointmentId}/delay-ack`, {
-        method: 'POST',
-        body: JSON.stringify({ appointmentId, isRunningBehind: true, delayMinutes: minutes }),
+      const res = await apiFetch(`/api/appointments/${appointmentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'running_late', delayMinutes: minutes }),
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j?.message ?? `HTTP ${res.status}`);
-      }
-      setSent(true);
-      setTimeout(onClose, 1500);
+      const body = (await res.json().catch(() => ({}))) as RunningLateOutcome & { message?: string };
+      if (!res.ok) throw new Error(body.message ?? `HTTP ${res.status}`);
+      setOutcome(body);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send delay notice');
     } finally {
@@ -120,12 +124,20 @@ function DelaySheet({ appointmentId, onClose }: { appointmentId: string; onClose
       <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl p-5" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <p className="text-sm text-slate-800">Notify next customer of delay</p>
-          <button onClick={onClose}><X size={15} className="text-slate-400" /></button>
+          <button onClick={onClose} aria-label="Close"><X size={15} className="text-slate-400" /></button>
         </div>
-        {sent ? (
-          <div className="flex flex-col items-center gap-2 py-4">
-            <CheckCircle size={32} className="text-green-500" />
-            <p className="text-sm text-slate-700">Delay notice sent</p>
+        {outcome ? (
+          <div role="status" className="flex flex-col items-center gap-2 py-4 text-center">
+            {outcome.queued
+              ? <CheckCircle size={32} className="text-green-500" />
+              : <AlertTriangle size={32} className="text-amber-500" />}
+            <p className="text-sm text-slate-700">{delayOutcomeMessage(outcome)}</p>
+            <button
+              onClick={onClose}
+              className="mt-2 min-h-11 rounded-xl border border-slate-200 px-4 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              Done
+            </button>
           </div>
         ) : (
           <>

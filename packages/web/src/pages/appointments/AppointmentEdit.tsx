@@ -5,21 +5,10 @@ import { CancelDialog } from '../../components/appointments/CancelDialog';
 import { ReassignDialog } from '../../components/appointments/ReassignDialog';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { delayOutcomeMessage } from '../../lib/delayOutcome';
 
 const DELAY_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
 type DelayMinutes = typeof DELAY_OPTIONS[number];
-
-/**
- * #1406 D10 — what the API says happened, in words. The old dialog showed a
- * 1.2s "queued" flash (then the page reloaded) even when nothing was queued.
- */
-function delayOutcomeMessage(body: { queued?: boolean; reason?: string }): string {
-  if (body.queued) return 'Delay notice queued — the next customer will receive an SMS.';
-  if (body.reason === 'NO_CUSTOMER_TO_NOTIFY') {
-    return 'No customer was notified — there is no later visit for this technician today (or that customer opted out of texts).';
-  }
-  return 'No customer was notified — the delay notice could not be queued.';
-}
 
 function NotifyDelayDialog({
   appointmentId,
