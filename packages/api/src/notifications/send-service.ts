@@ -665,6 +665,23 @@ export class SendService {
      */
     customerSmsConsent?: boolean;
   }): Promise<SendResult['channelsSent'][number]> {
+    // #1400 — a same-occasion retry (same entity, channel, recipient and
+    // context inside the idempotency minute, e.g. a double-tapped Resend)
+    // already went out: replay that dispatch instead of messaging the
+    // customer twice and tripping idx_dispatches_idempotency (which surfaced
+    // to the owner as a raw "duplicate key" 400). Only a SENT prior replays;
+    // a failed prior attempt is retried as before.
+    const prior = await this.deps.dispatchRepo.findByIdempotencyKey?.(args.tenantId, args.idempotencyKey);
+    if (prior && prior.status !== 'failed') {
+      return {
+        channel: args.target.channel,
+        recipient: args.target.recipient,
+        provider: prior.provider,
+        providerMessageId: prior.providerMessageId ?? '',
+        dispatchId: prior.id,
+      };
+    }
+
     // §7 / WS1: the consent + DNC gate now lives in the single
     // GatedMessageDelivery wrapper (notifications/gated-message-delivery.ts).
     // SMS sends here just declare the audience (customer) and forward the

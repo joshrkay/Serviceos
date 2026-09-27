@@ -241,8 +241,8 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
 
         <div className="px-5 py-5 space-y-3">
           <p className="text-xs text-slate-500">
-            Everyone with access to this tenant. Role and invite editing arrive in
-            a follow-up release.
+            Everyone with access to this tenant. Owners can change roles and
+            invite new members.
           </p>
 
           {loading ? (

@@ -61,6 +61,18 @@ export const LIFE_SAFETY_E1_SCRIPT =
   "I'm flagging this for immediate follow-up.";
 
 /**
+ * #1399 — the ADVICE half of the E1 script: what to do, without the closing
+ * claim about what the system did. The chat surface (`ai/orchestration/
+ * chat-safety-guards.ts`) answers a typed gas/CO/fire report with exactly
+ * this; the chat escalates to no one, so "I'm flagging this" would be untrue
+ * there. Derived from the script so the two can never drift.
+ */
+export const LIFE_SAFETY_E1_ADVICE = LIFE_SAFETY_E1_SCRIPT.replace(
+  / I'm flagging this for immediate follow-up\.$/,
+  '',
+);
+
+/**
  * TRUE until a qualified-review E1 script is sourced and wired per tenant.
  * A production readiness gate should assert this is handled (reviewed script
  * configured) before go-live — the routing is built; the words are not signed off.
@@ -85,6 +97,8 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
   // #1253 round 3
   'stinks of gas', 'stinks like gas', 'smells bad like gas', 'reeks of gas',
   'gas leak', 'leaking gas',
+  // #1399 — the noun form: "a strong smell of gas in the house" was E3.
+  'smell of gas', 'smells gas', 'smelling gas', 'smelled gas', 'odor of gas', 'gas odor',
   // Carbon monoxide
   'carbon monoxide', 'co detector', 'co alarm',
   // Fire / smoke (phrase-level — bare "fire"/"smoke"/"flames" too ambiguous:

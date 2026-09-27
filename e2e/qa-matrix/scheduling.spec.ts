@@ -4,10 +4,11 @@ import { startVoiceSession, voiceInput, approveAndAwaitExecution, ensureTenantTi
 /**
  * SCH-01 — create + reschedule an appointment via the REST API (deterministic).
  * SCH-02 — schedule an appointment by voice (inbound) → create_appointment proposal.
- * SCH-03 — cancel an appointment by voice → cancel_appointment proposal (no REST cancel).
- *          Runs against tenant B so the tenant has exactly one upcoming
- *          appointment and the resolution is genuinely unambiguous — see the
- *          comment on the row itself.
+ * SCH-03 — cancel an appointment by voice → cancel_appointment proposal (no REST cancel
+ *          of the measured appointment). Runs against tenant B so the tenant has
+ *          exactly one upcoming appointment and the resolution is genuinely
+ *          unambiguous — see the comment on the row itself. Self-cleans tenant-B
+ *          leftovers from a crashed earlier run first (#1401).
  *
  * SCH-02/03 are Real-LLM-only and depend on the dev API's classifier + entity
  * resolution; they fail loudly if the voice pipeline isn't ready.
@@ -147,6 +148,14 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
   // asserting around it.
   const { token, tenantId } = h.tenantB;
 
+  // #1401 — self-clean. A previous run that crashed between seeding its
+  // appointment and the voice cancel leaves an upcoming tenant-B appointment
+  // behind, which broke the exactly-one precondition below until someone ran
+  // qa:reset by hand. Cancel any leftover upcoming tenant-B appointments over
+  // REST first (fixture hygiene only — the row still measures the VOICE
+  // cancel of the appointment it seeds next).
+  await cancelLeftoverUpcoming(h, h.tenantB, '03-self-clean');
+
   // Something to cancel — the only upcoming appointment this tenant has.
   const appt = await createAppointment(h, '03-seed-appt', h.tenantB);
 
@@ -201,6 +210,38 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
 });
 
 // ---------------- helpers ----------------
+
+/**
+ * #1401 — cancel every upcoming, not-yet-canceled appointment on `tenant`
+ * (left behind by an earlier run that crashed mid-row) so a row that needs a
+ * known appointment count starts clean. Recorded as evidence notes.
+ */
+async function cancelLeftoverUpcoming(
+  h: RowHarness,
+  tenant: RowHarness['tenantA'],
+  label: string,
+): Promise<void> {
+  const leftovers = await h.db.query({
+    label: `${label}-leftovers`,
+    tenantId: tenant.tenantId,
+    sql: `SELECT id FROM appointments
+           WHERE tenant_id = $1 AND status <> 'canceled' AND scheduled_start >= now()`,
+    params: [tenant.tenantId],
+  });
+  for (const row of leftovers.rows as Array<{ id: string }>) {
+    await h.api.call({
+      method: 'PUT',
+      path: `/api/appointments/${row.id}`,
+      body: { status: 'canceled', notes: 'QA matrix self-clean (leftover from a crashed run)' },
+      token: tenant.token,
+      label: `${label}-cancel-${row.id.slice(0, 8)}`,
+      expectStatus: 200,
+    });
+  }
+  if (leftovers.rowCount) {
+    h.evidence.note(`self-clean: canceled ${leftovers.rowCount} leftover upcoming appointment(s)`);
+  }
+}
 
 async function gotoUi(h: RowHarness, path: string, label: string): Promise<void> {
   const baseUrl = process.env.E2E_BASE_URL!;

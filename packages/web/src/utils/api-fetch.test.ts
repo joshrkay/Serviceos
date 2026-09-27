@@ -322,3 +322,142 @@ describe('setTokenGetter — backwards-compatible call shape', () => {
     expect(legacy.mock.calls[1]).toEqual([]);
   });
 });
+
+// #1397 — a hung request used to spin forever (no error even at 60s). The
+// request is now aborted after API_REQUEST_TIMEOUT_MS and surfaces as a
+// user-facing timeout error (NOT an AbortError — callers swallow those as
+// deliberate cancellations), so the caller's existing error UI + Retry shows.
+describe('apiFetch — request timeout (#1397)', () => {
+  function hangUntilAborted() {
+    fetchMock.mockImplementation(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          // Mirror real fetch: an already-aborted signal rejects at once.
+          if (init?.signal?.aborted) {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+            return;
+          }
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted.', 'AbortError')),
+          );
+        }),
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('rejects a hung request with a user-facing timeout error after 30s', async () => {
+    vi.useFakeTimers();
+    hangUntilAborted();
+    setTokenGetter(async () => TOKEN);
+
+    const pending = apiFetch('/api/jobs');
+    const outcome = pending.then(
+      () => 'resolved',
+      (err: unknown) => err,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await outcome;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe('ApiTimeoutError');
+    expect((err as Error).message).toMatch(/took too long/i);
+  });
+
+  it('does not time out a request that answers before the deadline', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+    setTokenGetter(async () => TOKEN);
+
+    const res = await apiFetch('/api/jobs');
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(res.status).toBe(200);
+  });
+
+  it('does not cut off a file upload (FormData body) on a slow connection', async () => {
+    vi.useFakeTimers();
+    let resolveUpload: (r: Response) => void = () => {};
+    let uploadSignal: AbortSignal | null | undefined;
+    fetchMock.mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
+      uploadSignal = init?.signal;
+      return new Promise<Response>((resolve) => {
+        resolveUpload = resolve;
+      });
+    });
+    setTokenGetter(async () => TOKEN);
+    const body = new FormData();
+    body.append('file', new Blob(['x']), 'photo.jpg');
+
+    const pending = apiFetch('/api/jobs/j1/photos', { method: 'POST', body });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(uploadSignal?.aborted ?? false).toBe(false);
+    resolveUpload(new Response(null, { status: 201 }));
+
+    expect((await pending).status).toBe(201);
+  });
+
+  it("a caller's own abort still rejects as AbortError, not a timeout", async () => {
+    hangUntilAborted();
+    setTokenGetter(async () => TOKEN);
+    const controller = new AbortController();
+
+    const pending = apiFetch('/api/jobs', { signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+// #1416 (from #1408) — the #1397 deadline only covered the wait for HEADERS.
+// A response whose body stalls after the headers arrive left `res.json()`
+// hanging forever. Reading the body is now bounded too, with the same
+// user-facing ApiTimeoutError.
+describe('apiFetch — body-stall timeout (#1416)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Headers arrive at once; the body never sends a byte. */
+  function stalledBody(): Response {
+    return new Response(new ReadableStream({ start() { /* never enqueues */ } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  it('a body that stalls after the headers rejects the read with the timeout error after 30s', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(stalledBody());
+    setTokenGetter(async () => TOKEN);
+
+    const res = await apiFetch('/api/jobs');
+    const outcome = res.json().then(
+      () => 'resolved',
+      (err: unknown) => err,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await outcome;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe('ApiTimeoutError');
+    expect((err as Error).message).toMatch(/took too long/i);
+  });
+
+  it('a body that arrives in time is read normally', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: [1, 2] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    setTokenGetter(async () => TOKEN);
+
+    const res = await apiFetch('/api/jobs');
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(await res.json()).toEqual({ data: [1, 2] });
+  });
+});

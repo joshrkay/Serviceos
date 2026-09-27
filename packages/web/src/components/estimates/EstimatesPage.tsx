@@ -5,7 +5,8 @@ import {
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
   Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
-import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue } from '@ai-service-os/shared';
+import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue, EstimateListStage } from '@ai-service-os/shared';
+import { estimateListStage } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -621,11 +622,15 @@ function LineItemsEditor({ items, editable, onChange, onAddRow, totals }: {
 }
 
 // ─── Document Preview Modal ───────────────────────────────────────────────
-function EstimateDocPreview({ est, lineItems, onClose }: {
-  est: EstCompat; lineItems: LineItem[]; onClose: () => void;
+function EstimateDocPreview({ est, lineItems, totals, onClose }: {
+  est: EstCompat; lineItems: LineItem[];
+  /** #1400 — the document totals the detail view renders (the API's
+   * `est.totals`); the preview and PDF must show the same taxed/discounted
+   * total, never a re-sum of qty × rate. */
+  totals: EstimatePreviewTotals;
+  onClose: () => void;
 }) {
   const estimateTerm = useEstimateTerm();
-  const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   // Real tenant identity for the preview + printed document. This modal
   // previously rendered a fabricated business ('Rivet Pro Services',
   // 'Austin, TX · (512) 555-0000') into the customer-facing PDF, and a
@@ -659,6 +664,9 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Customer preview"
         className="bg-card rounded-2xl w-full max-w-md max-h-[92vh] overflow-y-auto shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
@@ -682,6 +690,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
                 // document so the owner-side preview matches what the
                 // customer downloads from the approval page.
                 lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate })),
+                totals,
               })}
               className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary transition-colors"
             >
@@ -754,10 +763,28 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             </div>
           </div>
 
-          {/* Total */}
+          {/* Totals — #1400: the API's subtotal/discount/tax/total. */}
+          <div className="flex flex-col gap-1 px-3 mb-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">Subtotal</p>
+              <p className="text-xs text-foreground">{centsToDisplay(totals.subtotalCents)}</p>
+            </div>
+            {totals.discountCents > 0 && (
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">Discount</p>
+                <p className="text-xs text-foreground">-{centsToDisplay(totals.discountCents)}</p>
+              </div>
+            )}
+            {totals.taxRateBps > 0 && (
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">Tax ({(totals.taxRateBps / 100).toFixed(2)}%)</p>
+                <p className="text-xs text-foreground">{centsToDisplay(totals.taxCents)}</p>
+              </div>
+            )}
+          </div>
           <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-primary text-primary-foreground mb-5">
             <p className="text-sm">Total</p>
-            <p className="text-sm">${total.toLocaleString()}</p>
+            <p className="text-sm">{centsToDisplay(totals.totalCents)}</p>
           </div>
 
           {/* CTA */}
@@ -1269,9 +1296,11 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     status,
     lineItems: uiLineItems,
     createdDate: est.createdAt ? formatDateInTenantTz(est.createdAt, tz) : '',
-    sentDate: undefined as string | undefined,
-    viewedDate: undefined as string | undefined,
-    approvedDate: undefined as string | undefined,
+    // #1400 — the tracker's dates come from the estimate (they were
+    // hard-coded undefined, so every step rendered undated).
+    sentDate: est.sentAt ? formatDateInTenantTz(est.sentAt, tz) : undefined,
+    viewedDate: est.firstViewedAt ? formatDateInTenantTz(est.firstViewedAt, tz) : undefined,
+    approvedDate: est.acceptedAt ? formatDateInTenantTz(est.acceptedAt, tz) : undefined,
     validUntil: est.validUntil,
   };
 
@@ -1620,6 +1649,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
         <EstimateDocPreview
           est={estCompat}
           lineItems={uiLineItems}
+          totals={totals}
           onClose={() => setPreviewOpen(false)}
         />
       )}
@@ -1679,18 +1709,29 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   );
 }
 
-// ─── API status → UI tab value mapping ───────────────────────────────────
-const API_STATUS_FOR_TAB: Record<EstimateStatus | 'All', string[]> = {
-  All:      [],
-  Draft:    ['draft'],
-  Sent:     ['ready_for_review', 'sent'],
-  Viewed:   [],
-  Approved: ['accepted'],
-  Declined: ['rejected'],
-  Expired:  ['expired'],
+// ─── UI tab → list query filter ──────────────────────────────────────────
+// #1400 — Sent / Viewed / Expired are DERIVED buckets (opened? past
+// validUntil?), not stored statuses, so they query the API's `stage` filter.
+// Sent used to query only `ready_for_review`; Viewed never queried at all.
+const TAB_FILTERS: Record<EstimateStatus | 'All', Record<string, string>> = {
+  All:      {},
+  Draft:    { status: 'draft' },
+  Sent:     { stage: 'sent' },
+  Viewed:   { stage: 'viewed' },
+  Approved: { status: 'accepted' },
+  Declined: { status: 'rejected' },
+  Expired:  { stage: 'expired' },
 };
 
-// ─── Estimates List ───────────────────────────────────────────────────────
+const STAGE_LABEL: Record<EstimateListStage, EstimateStatus> = {
+  draft: 'Draft',
+  sent: 'Sent',
+  viewed: 'Viewed',
+  accepted: 'Approved',
+  rejected: 'Declined',
+  expired: 'Expired',
+};
+
 const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
   { label: 'All',      value: 'All'      },
   { label: 'Draft',    value: 'Draft'    },
@@ -1727,9 +1768,10 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     }} />;
   }
 
+  const now = Date.now();
   const normalizedData = data.map(e => ({
     ...e,
-    uiStatus: normalizeEstimateStatus(e.status) as EstimateStatus,
+    uiStatus: STAGE_LABEL[estimateListStage(e, now)],
   }));
 
   // Customer filter (7.10). Options are the distinct customers present in the
@@ -1761,7 +1803,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
           <h1 className="text-foreground">{estimateTermPlural}</h1>
           <button
             onClick={() => setNewEstimate(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Plus size={14} /> New {estimateTerm.toLowerCase()}
           </button>
@@ -1788,7 +1830,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               aria-label="Filter by customer"
               value={customerFilter}
               onChange={e => setCustomerFilter(e.target.value)}
-              className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
+              className="w-full min-h-11 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
             >
               <option value="all">All customers</option>
               {customerOptions.map(c => (
@@ -1805,14 +1847,9 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               key={t.value}
               onClick={() => {
                 setTab(t.value);
-                if (t.value !== 'All') {
-                  const apiStatuses = API_STATUS_FOR_TAB[t.value];
-                  if (apiStatuses.length > 0) setFilters({ status: apiStatuses[0] });
-                } else {
-                  setFilters({});
-                }
+                setFilters(TAB_FILTERS[t.value]);
               }}
-              className={`shrink-0 min-h-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 min-h-11 min-w-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >{t.label}</button>
@@ -1841,7 +1878,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                 <button
                   key={est.id}
                   onClick={() => setSelected(est.id)}
-                  className="flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
+                  className="min-h-11 min-w-11 flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
                 >
                   <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
                     status === 'Approved' ? 'bg-success/10' :

@@ -191,7 +191,7 @@ async function seedCustomerLocation(
   const customer = await postJson(request, `${API_URL}/api/customers`, authHeaders, {
     firstName: label,
     lastName: `Race Customer ${stamp}`,
-    primaryPhone: '555-0177',
+    primaryPhone: '602-555-0177',
     email: `${label}.race.${stamp}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

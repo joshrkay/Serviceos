@@ -19,7 +19,7 @@ import {
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '../audit/audit';
 import { resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
@@ -436,7 +436,10 @@ export function createInvoiceRouter(
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const input = updateInvoiceSchema.parse(req.body);
-      const result = await updateInvoice(req.auth!.tenantId, req.params.id, input, invoiceRepo);
+      const result = await updateInvoice(req.auth!.tenantId, req.params.id, input, invoiceRepo, {
+        auditRepo,
+        actor: { actorId: req.auth!.userId, actorRole: req.auth!.role ?? 'unknown' },
+      });
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
         return;
@@ -508,13 +511,16 @@ export function createInvoiceRouter(
         // Guarded: a non-numeric value flows into calculateDueDate's
         // setDate(NaN) and persists an Invalid Date due_date, which then
         // breaks the overdue/late-fee sweeps.
+        // #1400 — omitted terms keep a due date chosen on the draft
+        // (issueInvoice falls back to 30 days when there is none).
         const rawTermDays = req.body?.paymentTermDays;
         const paymentTermDays =
-          rawTermDays === undefined || rawTermDays === null ? 30 : Number(rawTermDays);
+          rawTermDays === undefined || rawTermDays === null ? undefined : Number(rawTermDays);
         if (
+          paymentTermDays !== undefined && (
           !Number.isInteger(paymentTermDays) ||
           paymentTermDays < 0 ||
-          paymentTermDays > 365
+          paymentTermDays > 365)
         ) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
@@ -528,6 +534,7 @@ export function createInvoiceRouter(
           paymentTermDays,
           invoiceRepo,
           refreshDeps,
+          { auditRepo, actor: { actorId: req.auth!.userId, actorRole: req.auth!.role ?? 'unknown' } },
         );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
@@ -665,6 +672,21 @@ export function createInvoiceRouter(
           // landing in the same wall-clock minute, so the two don't collide
           // on idx_dispatches_idempotency.
           idempotencyContext: 'owner',
+        });
+        // #1400 — the send stamps sentAt / view token / lastDispatchId and
+        // must leave an audit row. I12′ tier 2: best-effort after the
+        // customer-visible send has happened.
+        await createAuditEventBestEffort(auditRepo, {
+          tenantId: req.auth!.tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role ?? 'unknown',
+          eventType: 'invoice.sent',
+          entityType: 'invoice',
+          entityId: req.params.id,
+          metadata: {
+            channels: result.channelsSent.map((c) => c.channel),
+            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+          },
         });
         // §6 Time-to-Cash. `sendInvoice` only stamps `sentAt`/`lastDispatchId`;
         // it does NOT transition the invoice's status. The job's money-state

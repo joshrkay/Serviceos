@@ -190,7 +190,12 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // #1276F — estimateRepo so an invoice drafted from an estimate bills it.
   handlers.set(
     'draft_invoice',
-    new InvoiceTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, estimateRepo: deps.estimateRepo }),
+    // #1399 N4 — jobRepo so it also bills that estimate's customer.
+    new InvoiceTaskHandler(deps.gateway, {
+      catalogRepo: deps.catalogRepo,
+      estimateRepo: deps.estimateRepo,
+      jobRepo: deps.jobRepo,
+    }),
   );
   handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   handlers.set(

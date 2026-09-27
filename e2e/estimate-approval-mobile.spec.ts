@@ -113,6 +113,22 @@ test.describe('estimate approval — mobile layout', () => {
         expect(box!.height).toBeGreaterThanOrEqual(44);
       }
     });
+
+    // #1400 — the decline form's Cancel / Confirm decline measured 34px.
+    test('glove targets: decline form Cancel and Confirm decline are ≥44px tall', async ({ page }) => {
+      await openPage(page);
+      await page.getByRole('button', { name: 'Decline this estimate' }).click();
+      for (const locator of [
+        page.getByRole('button', { name: 'Cancel' }),
+        page.getByRole('button', { name: 'Confirm decline' }),
+      ]) {
+        await expect(locator).toBeVisible();
+        const box = await locator.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.height).toBeGreaterThanOrEqual(44);
+      }
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
   });
 
   test.describe('390px (typical phone)', () => {

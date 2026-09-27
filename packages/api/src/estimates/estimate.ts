@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { estimateListStage } from '@ai-service-os/shared';
 import {
   LineItem,
   DocumentTotals,
@@ -96,6 +97,8 @@ export interface CreateEstimateInput {
   customerMessage?: string;
   internalNotes?: string;
   createdBy: string;
+  /** #1397 — the creating request's resolved role, recorded as the audit actor_role. */
+  actorRole?: string;
   /**
    * Tradesperson wave 1, Task 6 — mint this estimate flagged as a change
    * order (see `Estimate.isChangeOrder`). Defaults to false so every
@@ -164,6 +167,13 @@ export interface EstimateListOptions {
   jobIds?: string[];
   /** ILIKE search on estimate_number / customer_message. */
   search?: string;
+  /**
+   * #1400 — derived list bucket behind the Sent / Viewed / Expired tabs
+   * (see the shared `estimateListStage`): `sent` = ready_for_review/sent,
+   * not yet opened, still valid; `viewed` = sent and opened, still valid;
+   * `expired` = status expired OR sent past its validUntil.
+   */
+  stage?: EstimateListStageFilter;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
   /** Pagination offset. Default 0. */
@@ -178,6 +188,8 @@ export interface EstimateListOptions {
   /** N-005 — upper bound (exclusive) on `sentAt`; digest "quotes sent today". */
   sentTo?: Date;
 }
+
+export type EstimateListStageFilter = 'sent' | 'viewed' | 'expired';
 
 export interface EstimateListResult {
   data: Estimate[];
@@ -313,7 +325,7 @@ export async function createEstimate(
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
-      actorRole: 'unknown',
+      actorRole: input.actorRole ?? 'unknown',
       eventType: 'estimate.created',
       entityType: 'estimate',
       entityId: created.id,
@@ -801,6 +813,8 @@ export async function cloneEstimate(
   actorId: string,
   repository: EstimateRepository,
   auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string,
 ): Promise<Estimate | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -844,7 +858,7 @@ export async function cloneEstimate(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'estimate.cloned',
         entityType: 'estimate',
         entityId: created.id,
@@ -890,6 +904,10 @@ export class InMemoryEstimateRepository implements EstimateRepository {
   async findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]> {
     let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId && !e.deletedAt);
     if (options?.status) results = results.filter((e) => e.status === options.status);
+    if (options?.stage) {
+      const now = Date.now();
+      results = results.filter((e) => estimateListStage(e, now) === options.stage);
+    }
     if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
     if (options?.jobIds) {
       const wanted = new Set(options.jobIds);

@@ -58,3 +58,28 @@ export const estimateResponseSchema = estimateSchema.extend({
   customer: customerSummarySchema.optional(),
 });
 export type EstimateResponse = z.infer<typeof estimateResponseSchema>;
+
+/**
+ * #1400 — the derived list bucket an estimate falls in on the operator's
+ * status tabs. The stored status alone cannot drive them: "Viewed" is a
+ * sent estimate the customer opened (first_viewed_at), and a sent estimate
+ * past its validUntil already reads as expired on the customer's page even
+ * though it is only transitioned to `expired` when someone acts on it.
+ * PgEstimateRepository's `stage` list filter mirrors this rule in SQL.
+ */
+export const estimateListStageSchema = z.enum(['draft', 'sent', 'viewed', 'accepted', 'rejected', 'expired']);
+export type EstimateListStage = z.infer<typeof estimateListStageSchema>;
+
+export function estimateListStage(
+  estimate: { status: string; firstViewedAt?: string | Date | null; validUntil?: string | Date | null },
+  now: number = Date.now(),
+): EstimateListStage {
+  const { status } = estimate;
+  if (status === 'sent' && estimate.validUntil && new Date(estimate.validUntil).getTime() < now) {
+    return 'expired';
+  }
+  if (status === 'sent' && estimate.firstViewedAt) return 'viewed';
+  if (status === 'ready_for_review' || status === 'sent') return 'sent';
+  if (status === 'accepted' || status === 'rejected' || status === 'expired') return status;
+  return 'draft';
+}

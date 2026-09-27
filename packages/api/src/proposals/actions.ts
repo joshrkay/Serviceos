@@ -22,6 +22,8 @@ import {
   type EntityAliasCandidateCapture,
 } from '../learning/entity-aliases/candidate-service';
 import { clearPendingAmbiguity, pendingAmbiguityOf } from '../ai/resolution/gated-reference-resolution';
+import { redraftInvoiceOnEstimatePick } from '../ai/tasks/invoice-task';
+import type { EstimateRepository } from '../estimates/estimate';
 
 const logger = createLogger({
   service: 'proposals.actions',
@@ -765,6 +767,9 @@ export async function editProposal(
   // routing improvement. Capture is failure-soft (see below).
   correctionRepo?: CorrectionRepository,
   entityAliasCandidateCapture?: EntityAliasCandidateCapture,
+  // #1405 — when supplied, the card's pick of "which accepted estimate?"
+  // re-drafts a draft_invoice's lines, discount and tax from that estimate.
+  estimateRepo?: Pick<EstimateRepository, 'findById'>,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -832,6 +837,20 @@ export async function editProposal(
     const answered = { sourceContext: nextSourceContext };
     clearPendingAmbiguity(answered);
     nextSourceContext = answered.sourceContext;
+    // #1405 — the same re-draft a typed chat answer gets (routes/assistant.ts).
+    const picked = {
+      proposalType: proposal.proposalType,
+      payload: updatedPayload,
+      sourceContext: nextSourceContext,
+    };
+    await redraftInvoiceOnEstimatePick(
+      estimateRepo,
+      tenantId,
+      picked,
+      pendingQuestion.refKey,
+      updatedPayload[pendingQuestion.refKey] as string,
+    );
+    nextSourceContext = picked.sourceContext as Record<string, unknown>;
   }
 
   const sourceContextUpdate =

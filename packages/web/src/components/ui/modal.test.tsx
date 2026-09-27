@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { Modal } from './modal';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 describe('Modal', () => {
   it('renders nothing when closed', () => {
@@ -68,5 +69,16 @@ describe('Modal', () => {
     expect(desc).toBeInTheDocument();
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveAttribute('aria-describedby', desc.id);
+  });
+});
+
+describe('Modal — #1398 mobile bar', () => {
+  it('the Close button is a ≥44×44 tap target', () => {
+    render(
+      <Modal open onClose={() => {}} title="Hi">
+        body
+      </Modal>,
+    );
+    expectTapTarget(screen.getByLabelText('Close'), 'Modal Close');
   });
 });

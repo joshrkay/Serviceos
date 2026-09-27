@@ -304,6 +304,8 @@ export const router = createBrowserRouter([
         { path: 'settings/price-book', lazy: async () => ({ Component: (await import('./components/settings/PriceBookPage')).PriceBookPage }) },
         { path: 'settings/feedback', lazy: async () => ({ Component: (await import('./components/settings/FeedbackDashboard')).FeedbackDashboard }) },
         { path: 'settings/language', lazy: async () => ({ Component: (await import('./pages/settings/LanguageSettings')).LanguageSettingsPage }) },
+        // #1389 — owner form for the reviewed E1 script + its two sign-offs (linked from E1ScriptPlaceholderBanner).
+        { path: 'settings/e1-script', lazy: async () => ({ Component: (await import('./components/settings/E1ScriptSettingsPage')).E1ScriptSettingsPage }) },
         ],
       },
       // RV-062 — end-of-day digest web view (SMS deep link `/digest/<date>`;

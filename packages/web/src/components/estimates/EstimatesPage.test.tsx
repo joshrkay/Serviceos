@@ -18,6 +18,7 @@ import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { useEstimateTerm } from '../../hooks/useEstimateTerm';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 // Money lives under nested `totals` to match the API's serialized Estimate
 // entity (GET /api/estimates returns estimate.totals.totalCents, not a flat
@@ -152,10 +153,10 @@ describe('EstimatesPage', () => {
     expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'accepted' });
   });
 
-  it('Expired tab filters by the expired API status', () => {
+  it('Expired tab filters by the derived expired stage (#1400: includes sent-but-lapsed)', () => {
     renderPage();
     fireEvent.click(screen.getByRole('button', { name: 'Expired' }));
-    expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'expired' });
+    expect(defaultListResult.setFilters).toHaveBeenCalledWith({ stage: 'expired' });
   });
 
   it('surfaces an expired estimate with the Expired label (not Draft)', () => {
@@ -467,5 +468,12 @@ describe('EstimatesPage retract controls (D-020)', () => {
         expect.objectContaining({ method: 'DELETE' }),
       );
     });
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('every list-page control (New, customer filter, status tabs, rows) is a ≥44×44 tap target', () => {
+    const { container } = renderPage();
+    expectAllTapTargets(container, 'list page');
   });
 });

@@ -86,6 +86,7 @@ import {
   buildClassifierErrorReply,
   NO_ACTION_TAKEN_DIRECTIVE,
 } from '../ai/orchestration/assistant-honesty-guard';
+import { chatBulkMoneyRefusal, chatLifeSafetyReply } from '../ai/orchestration/chat-safety-guards';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
@@ -162,6 +163,7 @@ import { holdIfUnsupervised } from '../workers/voice-action-router';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
+import { redraftInvoiceOnEstimatePick } from '../ai/tasks/invoice-task';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { JobRepository } from '../jobs/job';
 import type { DunningEventRepository } from '../invoices/dunning-config';
@@ -2071,6 +2073,14 @@ async function applyDisambiguationAnswer(
   if (match.status === 'resolved') {
     clearPendingAmbiguity(proposal);
     applyGatedReferences(proposal, { [pending.refKey]: match.candidateId });
+    // #1405 — a picked accepted estimate re-drafts the invoice's lines from it.
+    await redraftInvoiceOnEstimatePick(
+      deps.estimateRepo,
+      tenantId,
+      proposal,
+      pending.refKey,
+      match.candidateId,
+    );
 
     // The answered reference may unblock a SECOND lookup that could not run
     // before it — an appointment reachable only once its customer is known,
@@ -2754,6 +2764,37 @@ async function generateAssistantReply(
       ? PHOTO_ONLY_TURN_TEXT
       : rawUserText;
 
+  // #1399 — life safety first: a typed gas / CO / fire report answers with
+  // the phone path's E1 advice before anything can classify, draft or book.
+  const lifeSafetyReply = chatLifeSafetyReply(lastUserText);
+  if (lifeSafetyReply) {
+    return {
+      taskType: 'assistant.life_safety',
+      model: 'policy-guard',
+      usage: { input: 0, output: 0, total: 0 },
+      message: {
+        role: 'assistant' as const,
+        content: lifeSafetyReply,
+        reasoning: 'Life-safety (E1) report — safety advice only, nothing drafted.',
+      },
+    };
+  }
+  // #1399 — a bulk money mutation ("mark every invoice paid") is refused
+  // outright; it must never become a proposal of any kind.
+  const bulkMoneyRefusal = chatBulkMoneyRefusal(lastUserText);
+  if (bulkMoneyRefusal) {
+    return {
+      taskType: 'assistant.bulk_money_refused',
+      model: 'policy-guard',
+      usage: { input: 0, output: 0, total: 0 },
+      message: {
+        role: 'assistant' as const,
+        content: bulkMoneyRefusal,
+        reasoning: 'Bulk money mutation — refused; money changes one record at a time.',
+      },
+    };
+  }
+
   // ── Intent path: AST-01b ──────────────────────────────────────────
   // Run the same classifier the voice pipeline uses. If the message is
   // a recognized action (today: create_customer), build a real proposal
@@ -3323,12 +3364,18 @@ async function generateAssistantReply(
           // segment on a reference nobody is going to be asked about would
           // leave an unclosable card — the exact shape `applyAmbiguityGate`
           // refuses to create.
+          // #1384 — the same pre-draft pass as the single-request path, so a
+          // literal job UUID in THIS segment names that job and its customer
+          // (#1276B). Keyed on the segment's own text, not the whole turn: a
+          // UUID in the other half of "X, then Y" is not this step's job.
           const segVerifiedIds = (
-            await resolveVerifiedIdsForDraft(
-              deps.entityResolver,
+            await resolvePreDraftIds(
+              deps,
               tenantId,
               segClass.intentType,
+              registryKey,
               segEntities,
+              segment,
             )
           ).ids;
           // I3 — resolved once (memoized) and reused across every segment.

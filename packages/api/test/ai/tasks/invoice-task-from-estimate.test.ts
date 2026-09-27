@@ -14,7 +14,10 @@ import { createRedraftHandlerFactory } from '../../../src/proposals/redraft-hand
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
 import { buildEstimate } from '../../factories/estimate.factory';
+import { buildJob } from '../../factories/job.factory';
+import { InMemoryJobRepository } from '../../../src/jobs/job';
 import { buildLineItem, calculateDocumentTotals } from '../../../src/shared/billing-engine';
+import type { JobRepository } from '../../../src/jobs/job';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const CUSTOMER = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
@@ -99,6 +102,33 @@ describe('#1276F — an invoice drafted from an estimate bills the estimate, not
   });
 });
 
+describe('#1399 N4 — an invoice drafted from an estimate takes the customer from it', () => {
+  // Live: "Create an invoice from the accepted estimate EST-0003." resolved
+  // the estimate and copied its lines, but the draft 400'd on approve with
+  // "unfilled required fields: customerId" — the estimate names its customer
+  // (through its job), so asking the operator for one is a dead end.
+  it('stamps the estimate job\'s customer and does not gate on customerId', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
+    const handler = new InvoiceTaskHandler(gateway(), {
+      estimateRepo: await acceptedEstimateRepo(),
+      jobRepo,
+    });
+
+    const { proposal } = await handler.handle({
+      tenantId: TENANT,
+      userId: 'user-1',
+      message: 'Create an invoice from the accepted estimate EST-0003.',
+      existingEntities: { estimateId: ESTIMATE },
+    });
+
+    expect(proposal.payload.customerId).toBe(CUSTOMER);
+    expect(proposal.payload.customerReference).toBeUndefined();
+    const ctx = (proposal.sourceContext ?? {}) as Record<string, unknown>;
+    expect(ctx.missingFields ?? []).not.toContain('customerId');
+  });
+});
+
 describe('#1276F — the entity-resolution re-draft also bills the estimate', () => {
   it("createRedraftHandlerFactory's draft_invoice handler copies the accepted estimate's lines", async () => {
     const factory = createRedraftHandlerFactory({
@@ -120,5 +150,79 @@ describe('#1276F — the entity-resolution re-draft also bills the estimate', ()
       ['Haul-away and permit', 17000],
     ]);
     expect(proposal.payload.estimateId).toBe(ESTIMATE);
+  });
+});
+
+describe('#1405 — several accepted estimates: ask which, never guess', () => {
+  it("gates the draft on estimateId and asks with each of the customer's accepted estimates as a candidate", async () => {
+    // One accepted estimate per job (uq_estimates_accepted_per_job), so
+    // "several" means several of the customer's jobs.
+    const JOB_2 = 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f';
+    const OTHER_CUSTOMERS_JOB = 'd4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f7a';
+    const repo = new InMemoryEstimateRepository();
+    const firstLines = [buildLineItem('li-a', 'Water heater install', 1, 100000, 0, true)];
+    const secondLines = [buildLineItem('li-b', 'Repipe kitchen', 1, 120000, 0, true)];
+    await repo.create(
+      buildEstimate({
+        id: ESTIMATE,
+        tenantId: TENANT,
+        jobId: JOB,
+        estimateNumber: 'EST-0001',
+        status: 'accepted',
+        lineItems: firstLines,
+        totals: calculateDocumentTotals(firstLines, 0, 0),
+      }),
+    );
+    const SECOND = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
+    await repo.create(
+      buildEstimate({
+        id: SECOND,
+        tenantId: TENANT,
+        jobId: JOB_2,
+        estimateNumber: 'EST-0002',
+        status: 'accepted',
+        lineItems: secondLines,
+        // $1,200 − $200 discount, 8.25% on $1,000 = $82.50 → $1,082.50.
+        totals: calculateDocumentTotals(secondLines, 20000, 825),
+      }),
+    );
+    // Another customer's accepted estimate is never offered.
+    await repo.create(
+      buildEstimate({ tenantId: TENANT, jobId: OTHER_CUSTOMERS_JOB, estimateNumber: 'EST-0003', status: 'accepted' }),
+    );
+    const jobRepo = {
+      findById: vi.fn(async () => null),
+      findByCustomer: vi.fn(async (_t: string, customerId: string) =>
+        customerId === CUSTOMER ? [{ id: JOB }, { id: JOB_2 }] : [],
+      ),
+    } as unknown as Pick<JobRepository, 'findById' | 'findByCustomer'>;
+    const handler = new InvoiceTaskHandler(gateway(), { estimateRepo: repo, jobRepo });
+
+    const { proposal } = await handler.handle({
+      tenantId: TENANT,
+      userId: 'user-1',
+      message: 'Invoice the accepted estimate',
+      existingEntities: { customerId: CUSTOMER },
+      conversationId: 'conv-1405',
+    });
+
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toContain('estimateId');
+    expect(proposal.payload.estimateId).toBeUndefined();
+    const pending = ctx.pendingEntityAmbiguity as {
+      entityKind: string;
+      refKey: string;
+      candidates: Array<{ id: string; name: string; hint?: string }>;
+    };
+    expect(pending.entityKind).toBe('estimate');
+    expect(pending.refKey).toBe('estimateId');
+    expect(pending.candidates.map((c) => [c.id, c.name, c.hint]).sort()).toEqual(
+      [
+        [ESTIMATE, 'EST-0001', 'accepted · $1,000.00'],
+        [SECOND, 'EST-0002', 'accepted · $1,082.50'],
+      ].sort(),
+    );
+    // Never a silent guess: the draft waits for the pick.
+    expect(proposal.status).toBe('draft');
   });
 });

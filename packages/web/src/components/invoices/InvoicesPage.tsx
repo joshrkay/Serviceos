@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
@@ -21,6 +21,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
+import { printInvoiceReceipt } from '../../lib/invoiceReceipt';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { AttachmentSection } from '../attachments/AttachmentSection';
@@ -104,7 +105,8 @@ function buildInvCompat(inv: InvoiceResponse, uiStatus: InvoiceStatus, timezone:
     description: '',
     status: uiStatus,
     lineItems: (inv.lineItems ?? []).map(apiLineToUi),
-    dueDate: inv.dueDate,
+    // #1400 — a tenant-local date, never the raw ISO instant.
+    dueDate: inv.dueDate ? formatDateInTenantTz(inv.dueDate, timezone) : undefined,
     sentDate: inv.issuedAt ? formatDateInTenantTz(inv.issuedAt, timezone) : undefined,
     paidDate: undefined as string | undefined,
   };
@@ -239,18 +241,22 @@ function PaymentMethodsCard({ paymentLink }: { paymentLink?: string }) {
 }
 
 // ─── Line Items Editor (inline) ───────────────────────────────────────────
-function InvoiceLineItems({ items, editable, onChange }: {
+function InvoiceLineItems({ items, editable, onChange, totals, amountPaidCents, amountDueCents }: {
   items: LineItem[]; editable: boolean;
   /** Called with the edited rows on save. May return a promise (the PUT);
    *  a rejection keeps the editor open with the draft intact. */
   onChange?: (items: LineItem[]) => void | Promise<void>;
+  /** #1400 — the API's document totals + balance (integer cents). The footer
+   *  renders these verbatim; it never re-sums qty × rate (that ignored
+   *  discount and tax and showed $91.30 "Total due" on a $93.42 invoice). */
+  totals: InvoiceResponse['totals'];
+  amountPaidCents: number;
+  amountDueCents: number;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState<LineItem[]>(items);
   const [saving,    setSaving]    = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const total      = items.reduce((s, i) => s + i.qty * i.rate, 0);
-  const draftTotal = draft.reduce((s, i) => s + i.qty * i.rate, 0);
 
   function update(idx: number, field: keyof LineItem, val: string) {
     setDraft(prev => prev.map((item, i) =>
@@ -364,10 +370,46 @@ function InvoiceLineItems({ items, editable, onChange }: {
         </button>
       )}
 
-      <div className="px-4 py-3.5 border-t border-border bg-secondary flex items-center justify-between">
-        <p className="text-sm text-foreground">Total due</p>
-        <p className="text-sm text-foreground">${formatDollars(editing ? draftTotal : total)}</p>
-      </div>
+      {editing ? (
+        <div className="px-4 py-3.5 border-t border-border bg-secondary">
+          <p className="text-xs text-muted-foreground">Totals (with discount and tax) update when you save.</p>
+        </div>
+      ) : (
+        <div className="px-4 py-3.5 border-t border-border bg-secondary flex flex-col gap-1">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">Subtotal</p>
+            <p className="text-sm text-foreground">{centsToDisplay(totals.subtotalCents)}</p>
+          </div>
+          {totals.discountCents > 0 && (
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-muted-foreground">Discount</p>
+              <p className="text-sm text-foreground">-{centsToDisplay(totals.discountCents)}</p>
+            </div>
+          )}
+          {totals.taxRateBps > 0 && (
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-muted-foreground">Tax ({(totals.taxRateBps / 100).toFixed(2)}%)</p>
+              <p className="text-sm text-foreground">{centsToDisplay(totals.taxCents)}</p>
+            </div>
+          )}
+          {amountPaidCents > 0 && (
+            <>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">Total</p>
+                <p className="text-sm text-foreground">{centsToDisplay(totals.totalCents)}</p>
+              </div>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">Paid</p>
+                <p className="text-sm text-foreground">-{centsToDisplay(amountPaidCents)}</p>
+              </div>
+            </>
+          )}
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-foreground">Total due</p>
+            <p className="text-sm text-foreground">{centsToDisplay(amountDueCents)}</p>
+          </div>
+        </div>
+      )}
 
       {editing && (
         <div className="flex flex-col gap-2 px-4 py-3 border-t border-border">
@@ -739,6 +781,50 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
   );
 }
 
+// ─── Payment history ─────────────────────────────────────────────────────
+/** #1400 — one row of GET /api/payments?invoiceId= (routes/payments.ts). */
+interface ApiPayment {
+  id: string;
+  amountCents: number;
+  method: string;
+  status: string;
+  receivedAt: string;
+  refundedAmountCents?: number;
+}
+
+const PAYMENT_METHOD_LABEL: Record<string, string> = {
+  cash: 'Cash',
+  check: 'Check',
+  credit_card: 'Card',
+  card_present: 'Card (in person)',
+  bank_transfer: 'Bank transfer',
+  other: 'Other',
+};
+
+function PaymentHistory({ payments, tz }: { payments: ApiPayment[]; tz: string }) {
+  if (payments.length === 0) return null;
+  return (
+    <section aria-label="Payment history" className="rounded-xl bg-card border border-border overflow-hidden">
+      <p className="px-4 py-3 border-b border-border text-sm text-foreground">Payment history</p>
+      <ul className="divide-y divide-border">
+        {payments.map((p) => (
+          <li key={p.id} className="flex items-center justify-between gap-3 px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-sm text-foreground">{PAYMENT_METHOD_LABEL[p.method] ?? p.method}</p>
+              <p className="text-xs text-muted-foreground">
+                {formatDateInTenantTz(p.receivedAt, tz)}
+                {p.status !== 'completed' ? ` · ${p.status}` : ''}
+                {p.refundedAmountCents ? ` · refunded ${centsToDisplay(p.refundedAmountCents)}` : ''}
+              </p>
+            </div>
+            <p className="text-sm text-foreground shrink-0">{centsToDisplay(p.amountCents)}</p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // ─── Invoice Detail ───────────────────────────────────────────────────────
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
@@ -755,6 +841,18 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const [notesLoaded, setNotesLoaded] = useState(false);
   const [noteText,    setNoteText]    = useState('');
   const [savingNote,  setSavingNote]  = useState(false);
+
+  // #1400 — each payment, not just the aggregate "Paid X of Y".
+  const [payments, setPayments] = useState<ApiPayment[]>([]);
+  const loadPayments = useCallback(() => {
+    apiFetch(`/api/payments?invoiceId=${encodeURIComponent(invoiceId)}`)
+      .then(r => (r.ok ? r.json() : []))
+      .then((rows: ApiPayment[]) => {
+        setPayments([...(Array.isArray(rows) ? rows : [])].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)));
+      })
+      .catch(() => setPayments([]));
+  }, [invoiceId]);
+  useEffect(() => { loadPayments(); }, [loadPayments]);
 
   useEffect(() => {
     apiFetch(`/api/notes?entityType=invoice&entityId=${invoiceId}`)
@@ -831,6 +929,38 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   // and may surface 'Overdue'), all of which map back to a payable invoice.
   const canMarkPaid = status === 'Unpaid' || status === 'Overdue';
 
+  // #1400 — "Download receipt" had no handler. Prints the API's totals and
+  // each recorded payment; the business header comes from tenant settings.
+  async function downloadReceipt() {
+    if (!inv) return;
+    let businessName = 'Your business';
+    let businessContact: string | undefined;
+    try {
+      const res = await apiFetch('/api/settings');
+      if (res.ok) {
+        const data = (await res.json()) as { businessName?: string | null; businessPhone?: string | null };
+        businessName = data.businessName?.trim() || businessName;
+        businessContact = data.businessPhone?.trim() || undefined;
+      }
+    } catch {
+      /* non-fatal — the receipt prints with a generic header */
+    }
+    const ok = printInvoiceReceipt({
+      invoiceNumber: inv.invoiceNumber,
+      customerName: invCompat.customer,
+      businessName,
+      businessContact,
+      lineItems: inv.lineItems.map((li) => ({ description: li.description, quantity: li.quantity, totalCents: li.totalCents })),
+      totals: inv.totals,
+      amountPaidCents,
+      amountDueCents,
+      payments,
+      formatDate: (iso) => formatDateInTenantTz(iso, tz, { withYear: true }),
+      methodLabel: (m) => PAYMENT_METHOD_LABEL[m] ?? m,
+    });
+    if (!ok) toast.error('Allow pop-ups to download the receipt');
+  }
+
   return (
     <>
       <div className="h-full overflow-y-auto pb-24 md:pb-6">
@@ -847,7 +977,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               <p className="text-sm text-muted-foreground mt-0.5">{inv.invoiceNumber}</p>
               {inv.dueDate && (
                 <p className={`text-xs mt-1 flex items-center gap-1 ${status === 'Overdue' ? 'text-destructive' : 'text-muted-foreground'}`}>
-                  <Clock size={10} /> Due {inv.dueDate}
+                  <Clock size={10} /> Due {invCompat.dueDate}
                 </p>
               )}
               {inv.originatingLeadId && (
@@ -877,7 +1007,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               <AlertCircle size={18} className="text-destructive shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p className="text-sm text-destructive">Payment overdue</p>
-                <p className="text-xs text-destructive mt-0.5">Due {inv.dueDate} · {centsToDisplay(amountDueCents)} outstanding</p>
+                <p className="text-xs text-destructive mt-0.5">Due {invCompat.dueDate} · {centsToDisplay(amountDueCents)} outstanding</p>
               </div>
               <button
                 onClick={() => setSendOpen(true)}
@@ -901,6 +1031,9 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               <InvoiceLineItems
                 items={uiLineItems}
                 editable={editable}
+                totals={inv.totals}
+                amountPaidCents={amountPaidCents}
+                amountDueCents={amountDueCents}
                 onChange={async (items) => {
                   // Persist the edit — nothing is committed locally until the
                   // server accepts it (a rejection keeps the editor open).
@@ -1018,13 +1151,15 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                 )}
                 {inv.dueDate && status !== 'Paid' && (
                   <p className={`text-xs ${status === 'Overdue' ? 'text-destructive' : 'text-primary-foreground/40'}`}>
-                    {status === 'Overdue' ? 'Overdue since' : 'Due'} {inv.dueDate}
+                    {status === 'Overdue' ? 'Overdue since' : 'Due'} {invCompat.dueDate}
                   </p>
                 )}
                 {status === 'Paid' && (
                   <p className="text-xs text-success">{paid ? 'Just now' : ''}</p>
                 )}
               </div>
+
+              <PaymentHistory payments={payments} tz={tz} />
 
               {/* Action buttons */}
               <div className="flex flex-col gap-2">
@@ -1049,7 +1184,10 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                   </button>
                 )}
                 {status === 'Paid' && (
-                  <button className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors">
+                  <button
+                    onClick={() => void downloadReceipt()}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
+                  >
                     <FileText size={14} /> Download receipt
                   </button>
                 )}
@@ -1081,6 +1219,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           onPaid={async () => {
             setPaid(true);
             await refetch();
+            loadPayments();
           }}
         />
       )}
@@ -1178,7 +1317,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
           <h1 className="text-foreground">Invoices</h1>
           <button
             onClick={() => navigate('/invoices/new')}
-            className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Plus size={14} /> New invoice
           </button>
@@ -1226,7 +1365,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                   setFilters({});
                 }
               }}
-              className={`shrink-0 flex min-h-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >
@@ -1259,7 +1398,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                 <button
                   key={inv.id}
                   onClick={() => setSelected(inv.id)}
-                  className="flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
+                  className="min-h-11 min-w-11 flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
                 >
                   <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
                     status === 'Paid'    ? 'bg-success/10' :
@@ -1286,7 +1425,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                     <div className="flex items-center gap-3 mt-2">
                       {inv.dueDate && (
                         <span className={`flex items-center gap-1 text-xs ${status === 'Overdue' ? 'text-destructive' : 'text-muted-foreground'}`}>
-                          <Clock size={10} /> Due {inv.dueDate}
+                          <Clock size={10} /> Due {formatDateInTenantTz(inv.dueDate, tz)}
                         </span>
                       )}
                       {inv.issuedAt && (

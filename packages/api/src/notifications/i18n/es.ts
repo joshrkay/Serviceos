@@ -36,6 +36,11 @@ export const es: Record<keyof EnglishNotifications, string> = {
     'Hola {{name}}, hemos recibido su pago a {{business}}.',
   'sms.payment_receipt.line2': 'Factura {{number}}: {{amount}}. ¡Gracias!',
 
+  // ── Estimate approved confirmation SMS (#1400) ───────────────────────
+  'sms.estimate_approved.line1':
+    'Hola {{name}}, gracias por aprobar su presupuesto con {{business}}.',
+  'sms.estimate_approved.line2': 'Presupuesto {{number}}: {{total}}. Nos comunicaremos para programar el trabajo.',
+
   // ── Invoice overdue SMS ──────────────────────────────────────────────
   'sms.invoice_overdue.line1':
     'Hola {{name}}, su factura de {{business}} está vencida.',
@@ -76,6 +81,7 @@ export const es: Record<keyof EnglishNotifications, string> = {
 
   // ── Transactional email subjects ─────────────────────────────────────
   'email.payment_receipt.subject': 'Pago recibido — {{business}}',
+  'email.estimate_approved.subject': 'Presupuesto aprobado — {{business}}',
   'email.invoice_overdue.subject': 'Factura vencida — {{business}}',
   'email.appointment.subject': '{{business}} — actualización de cita',
 

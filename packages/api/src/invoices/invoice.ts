@@ -5,7 +5,7 @@ import {
   calculateDocumentTotals,
   normalizeLineItemTotals,
 } from '../shared/billing-engine';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
@@ -67,6 +67,8 @@ export interface CreateInvoiceInput {
   taxRateBps?: number;
   /** Processing-fee surcharge in basis points (Jobber parity). 0/omitted ⇒ none. */
   processingFeeBps?: number;
+  /** #1400 — owner-chosen due date; issuing keeps it unless new terms are given. */
+  dueDate?: Date;
   customerMessage?: string;
   /** Optional override; routes auto-populate from job when omitted. */
   originatingLeadId?: string;
@@ -338,6 +340,7 @@ export async function createInvoice(
     totals,
     amountPaidCents: 0,
     amountDueCents: totals.totalCents,
+    dueDate: input.dueDate,
     customerMessage: input.customerMessage,
     originatingLeadId: input.originatingLeadId,
     scheduleId: input.scheduleId,
@@ -448,11 +451,22 @@ export async function getInvoice(
   return repository.findById(tenantId, id);
 }
 
+/**
+ * #1400 — actor + audit store for the route-level invoice mutations
+ * (update / issue). Their `invoice.updated` / `invoice.issued` rows are
+ * I12′ tier-2 domain audit: best-effort after the committed write.
+ */
+export interface InvoiceMutationAudit {
+  auditRepo: AuditRepository;
+  actor: { actorId: string; actorRole: string };
+}
+
 export async function updateInvoice(
   tenantId: string,
   id: string,
   input: UpdateInvoiceInput,
-  repository: InvoiceRepository
+  repository: InvoiceRepository,
+  audit?: InvoiceMutationAudit,
 ): Promise<Invoice | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -481,15 +495,35 @@ export async function updateInvoice(
     updatedAt: new Date(),
   });
 
+  if (updated && audit) {
+    await createAuditEventBestEffort(audit.auditRepo, {
+      tenantId,
+      ...audit.actor,
+      eventType: 'invoice.updated',
+      entityType: 'invoice',
+      entityId: id,
+      metadata: {
+        previousTotalCents: existing.totals.totalCents,
+        totalCents: updated.totals.totalCents,
+        lineItemCount: updated.lineItems.length,
+      },
+    });
+  }
+
   return updated;
 }
 
 export async function issueInvoice(
   tenantId: string,
   id: string,
-  paymentTermDays: number,
+  /**
+   * Terms in days from issue. `undefined` (#1400) keeps a due date the owner
+   * already chose on the draft; with none on file it falls back to 30 days.
+   */
+  paymentTermDays: number | undefined,
   repository: InvoiceRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
+  audit?: InvoiceMutationAudit,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -499,7 +533,10 @@ export async function issueInvoice(
   }
 
   const issuedAt = new Date();
-  const dueDate = calculateDueDate(issuedAt, paymentTermDays);
+  const dueDate =
+    paymentTermDays === undefined && invoice.dueDate
+      ? invoice.dueDate
+      : calculateDueDate(issuedAt, paymentTermDays ?? 30);
 
   const updated = await repository.update(tenantId, id, {
     status: 'open',
@@ -507,6 +544,21 @@ export async function issueInvoice(
     dueDate,
     updatedAt: new Date(),
   });
+
+  if (updated && audit) {
+    await createAuditEventBestEffort(audit.auditRepo, {
+      tenantId,
+      ...audit.actor,
+      eventType: 'invoice.issued',
+      entityType: 'invoice',
+      entityId: id,
+      metadata: {
+        paymentTermDays,
+        dueDate: dueDate.toISOString(),
+        totalCents: updated.totals.totalCents,
+      },
+    });
+  }
 
   // §6 Time-to-Cash. Best-effort job money-state rollup.
   if (updated && moneyStateDeps) {

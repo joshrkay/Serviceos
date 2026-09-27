@@ -90,7 +90,7 @@ export function TagsPanel({ customerId }: { customerId: string }) {
               type="button"
               aria-label={`Remove tag ${tag}`}
               onClick={() => handleRemove(tag)}
-              className="flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
+              className="-my-2.5 -mr-3 flex size-11 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
             >
               <X size={13} />
             </button>

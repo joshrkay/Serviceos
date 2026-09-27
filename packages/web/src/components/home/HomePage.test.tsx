@@ -4,6 +4,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
 import { todayInTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
+import { apiInvoice } from '../../test-utils/money-fixtures';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 
@@ -83,23 +85,25 @@ const mockLeads = [
   },
 ];
 
+// #1400 — contract-shaped GET /api/invoices rows (shared invoiceResponseSchema):
+// money is `amountDueCents` / `totals.totalCents`, never a top-level totalCents.
 const mockInvoices = [
-  {
-    id: 'inv1',
+  apiInvoice({
+    id: '00000000-0000-4000-8000-0000000000a1',
     invoiceNumber: 'INV-001',
-    status: 'open',
-    totalCents: 75000,
-    customer: { id: 'c2', displayName: 'Bob Jones' },
+    totals: { subtotalCents: 75000, taxableSubtotalCents: 75000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 75000 },
+    amountDueCents: 75000,
+    customer: { id: '00000000-0000-4000-8000-0000000000c2', displayName: 'Bob Jones' },
     dueDate: pastDate,
-  },
-  {
-    id: 'inv2',
+  }),
+  apiInvoice({
+    id: '00000000-0000-4000-8000-0000000000a2',
     invoiceNumber: 'INV-002',
-    status: 'open',
-    totalCents: 50000,
-    customer: { id: 'c3', displayName: 'Carol White' },
+    totals: { subtotalCents: 50000, taxableSubtotalCents: 50000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 50000 },
+    amountDueCents: 50000,
+    customer: { id: '00000000-0000-4000-8000-0000000000c3', displayName: 'Carol White' },
     dueDate: '2026-12-01',
-  },
+  }),
 ];
 
 // U10 — today's scheduled work comes from the appointments API (GET /api/jobs
@@ -213,8 +217,8 @@ describe('HomePage', () => {
 
   it('shows total outstanding amount', () => {
     renderPage();
-    // totalCents = 75000 + 50000 = 125000 = $1250 (appears in stat bar + section header)
-    expect(screen.getAllByText('$1,250').length).toBeGreaterThan(0);
+    // amountDueCents = 75000 + 50000 = 125000 = $1,250.00 (stat bar + section header)
+    expect(screen.getAllByText('$1,250.00').length).toBeGreaterThan(0);
   });
 
   it('renders money loop hub and conversational quick actions', () => {
@@ -501,5 +505,37 @@ describe('HomePage', () => {
     expect(container.innerHTML).not.toMatch(
       /(bg|text|border|border-l|border-t|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
     );
+  });
+
+  describe('#1398 — mobile bar', () => {
+    it('the 3-stat pulse stacks to one column on phones so no tile clips at 320px', () => {
+      renderPage();
+      const grid = screen.getByTestId('home-stat-outstanding').parentElement!;
+      const cls = grid.className.split(/\s+/);
+      expect(cls).toContain('grid-cols-1');
+      expect(cls).toContain('sm:grid-cols-3');
+      expect(cls).not.toContain('grid-cols-3');
+    });
+
+    it('lead-pipeline stage counts and the newest-lead row are ≥44px tap targets', () => {
+      renderPage();
+      // Newest new lead (Dave Brown) renders as a one-line row under the counts.
+      const newest = screen.getByText('Dave Brown').closest('button')!;
+      expectTapTarget(newest, 'newest lead row');
+      for (const stage of ['New', 'Contacted', 'Quoted']) {
+        const btn = screen.getAllByText(stage).map((el) => el.closest('button')).find(Boolean)!;
+        expectTapTarget(btn, `lead stage ${stage}`);
+      }
+    });
+
+    it('header, attention-row and invoice-section actions are ≥44px tap targets', () => {
+      renderPage();
+      expectTapTarget(screen.getByRole('button', { name: /ask ai/i }), 'Ask AI');
+      expectTapTarget(screen.getByRole('button', { name: /money summary/i }), 'Money summary');
+      const remind = screen.getAllByRole('button', { name: /remind/i });
+      const followUp = screen.getAllByRole('button', { name: /follow up/i });
+      expect(remind.length + followUp.length).toBeGreaterThan(0);
+      for (const b of [...remind, ...followUp]) expectTapTarget(b, `attention action "${b.textContent}"`);
+    });
   });
 });

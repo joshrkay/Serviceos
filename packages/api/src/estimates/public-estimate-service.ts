@@ -245,6 +245,16 @@ export interface PublicEstimateServiceDeps {
    */
   fileRepo?: FileRepository;
   storage?: StorageProvider;
+  /**
+   * #1400 — confirms the approval to the customer (SMS/email through the
+   * transactional comms layer). Optional so legacy harnesses build; called
+   * once per acceptance (not on an idempotent re-approve), best-effort.
+   */
+  approvalNotifier?: EstimateApprovalNotifier;
+}
+
+export interface EstimateApprovalNotifier {
+  notifyEstimateApproved(tenantId: string, estimateId: string): Promise<void>;
 }
 
 const TERMINAL_STATUSES = new Set(['accepted', 'rejected', 'expired']);
@@ -473,6 +483,18 @@ export class PublicEstimateService {
           },
         }),
       );
+    }
+
+    // #1400 — confirm the approval to the customer. Best-effort: the
+    // acceptance is committed; a delivery failure must not turn it into an
+    // error on the customer's screen.
+    if (this.deps.approvalNotifier) {
+      try {
+        await this.deps.approvalNotifier.notifyEstimateApproved(updated.tenantId, updated.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`Failed to send approval confirmation for estimate ${updated.id}: ${msg}`);
+      }
     }
 
     return this.toView(updated);

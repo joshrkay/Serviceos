@@ -72,6 +72,46 @@ describe('POST /api/appointments', () => {
   });
 });
 
+describe('#1397 — appointment time validation is a 400, not a 500', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('POST with scheduledEnd before scheduledStart returns 400 VALIDATION_ERROR', async () => {
+    const { start, end } = tomorrowIso(26, 24);
+
+    const res = await request(app).post('/api/appointments').send({
+      jobId: 'job-1',
+      scheduledStart: start,
+      scheduledEnd: end,
+      timezone: 'UTC',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('PUT moving scheduledEnd before scheduledStart returns 400 VALIDATION_ERROR', async () => {
+    const { start, end } = tomorrowIso(24, 26);
+    const created = await request(app).post('/api/appointments').send({
+      jobId: 'job-1',
+      scheduledStart: start,
+      scheduledEnd: end,
+      timezone: 'UTC',
+    });
+    expect(created.status).toBe(201);
+
+    const res = await request(app)
+      .put(`/api/appointments/${created.body.id}`)
+      .send({ scheduledEnd: tomorrowIso(20, 20).start });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+});
+
 describe('P1-018 — listAppointments date range + pagination', () => {
   let app: Express;
   let assignmentRepo: Awaited<ReturnType<typeof buildTestApp>>['assignmentRepo'];

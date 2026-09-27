@@ -168,4 +168,32 @@ describe('BusinessProfileSheet', () => {
     expect(body.ownerPhone).toBeNull();
     expect(body.timezone).toBeNull();
   });
+
+  // #1408 — the API stores phones as E.164 (#1397); what the sheet reports
+  // back must be what was STORED, not what was typed, or the caller shows
+  // the typed form until a reload.
+  it('reports the stored E.164 phones from the PUT response to onSaved', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ businessName: 'Ortega HVAC' }));
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        businessName: 'Ortega HVAC',
+        businessPhone: '+15125550100',
+        ownerPhone: '+15125551234',
+        timezone: 'America/Chicago',
+      }),
+    );
+    const onSaved = vi.fn();
+    render(<BusinessProfileSheet onClose={vi.fn()} onSaved={onSaved} />);
+
+    await screen.findByLabelText(/Business name/i);
+    fireEvent.change(screen.getByLabelText(/Business phone/i), { target: { value: '(512) 555-0100' } });
+    fireEvent.change(screen.getByLabelText(/Your cell phone/i), { target: { value: '512.555.1234' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(onSaved.mock.calls[0][0]).toMatchObject({
+      businessPhone: '+15125550100',
+      ownerPhone: '+15125551234',
+    });
+  });
 });

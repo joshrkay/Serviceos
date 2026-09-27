@@ -8,7 +8,7 @@
  * (Playwright, 320px/390px viewports).
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router';
 
@@ -119,6 +119,13 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
     expect(toggle.className).toContain('min-h-11');
     const pdf = screen.getByRole('button', { name: /download pdf/i });
     expect(pdf.className).toContain('min-h-11');
+  });
+
+  it('#1400 — the decline form\'s Cancel / Confirm decline buttons meet the 44px glove target', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this estimate' }));
+    expect(screen.getByRole('button', { name: 'Cancel' }).className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: 'Confirm decline' }).className).toContain('min-h-11');
   });
 
   it('EE-4 — renders a fixed-size thumbnail for a line with an imageUrl', async () => {

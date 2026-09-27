@@ -200,7 +200,9 @@ export async function addCustomerToGroup(
   customerId: string,
   repository: CustomerGroupRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<boolean> {
   const group = await repository.findGroupById(tenantId, groupId);
   if (!group) throw new NotFoundError('Customer group', groupId);
@@ -212,7 +214,7 @@ export async function addCustomerToGroup(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer_group.member_added',
         entityType: 'customer',
         entityId: customerId,
@@ -229,7 +231,9 @@ export async function removeCustomerFromGroup(
   customerId: string,
   repository: CustomerGroupRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<void> {
   await repository.removeMember(tenantId, groupId, customerId);
   if (auditRepo && actorId) {
@@ -237,7 +241,7 @@ export async function removeCustomerFromGroup(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer_group.member_removed',
         entityType: 'customer',
         entityId: customerId,

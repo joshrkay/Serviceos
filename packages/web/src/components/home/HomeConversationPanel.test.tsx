@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 const navigateMock = vi.fn();
 vi.mock('react-router', async () => {
@@ -105,6 +106,12 @@ describe('Story 3.1 — HomeConversationPanel', () => {
     // Header "Open" and the empty-state CTA carry min-h-11 (44px).
     expect(screen.getByText('Open').closest('button')!.className).toContain('min-h-11');
     expect(screen.getByTestId('home-conversation-empty').className).toContain('min-h-11');
+  });
+
+  it('#1398 — the composer input and the Voice mic are themselves ≥44px tap targets', () => {
+    renderPanel();
+    expectTapTarget(screen.getByLabelText('Message the assistant'), 'composer input');
+    expectTapTarget(screen.getByRole('button', { name: 'Voice' }), 'Voice mic');
   });
 
   it('starts live dictation when the mic is tapped', () => {

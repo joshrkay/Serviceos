@@ -69,7 +69,7 @@ export function JobPhotoGallery({
               aria-selected={active}
               data-testid={`job-photo-chip-${cat}`}
               onClick={() => onCategoryChange?.(cat)}
-              className={`px-3 py-1 rounded-full text-sm border ${
+              className={`min-h-11 min-w-11 px-3 py-1 rounded-full text-sm border ${
                 active ? 'bg-primary text-primary-foreground border-primary' : 'bg-card text-foreground'
               }`}
             >

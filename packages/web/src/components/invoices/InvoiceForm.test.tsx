@@ -88,4 +88,18 @@ describe('InvoiceForm (characterization, pre-kit-migration)', () => {
     expect(screen.getByRole('button', { name: /create invoice/i }).className).toContain('min-h-11');
     expect(screen.getByRole('button', { name: /cancel/i }).className).toContain('min-h-11');
   });
+
+  it('#1400 — sends the chosen due date in the create body (it was silently dropped)', async () => {
+    const onCreated = vi.fn();
+    render(<InvoiceForm onCreated={onCreated} />);
+    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'job-1' } });
+    fireEvent.change(screen.getByLabelText('description-0'), { target: { value: 'Labor' } });
+    fireEvent.change(screen.getByLabelText('unit-price-0'), { target: { value: '100' } });
+    fireEvent.change(screen.getByLabelText(/Due date/), { target: { value: '2026-10-15' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /create invoice/i }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('inv-1'));
+    expect(postBody().dueDate).toBe('2026-10-15');
+  });
 });

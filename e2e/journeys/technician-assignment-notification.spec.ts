@@ -287,7 +287,7 @@ async function seedUnassignedFixture(request: APIRequestContext, label: string):
   const customer = await postJson(request, `${API_URL}/api/customers`, owner.authHeaders, {
     firstName: 'Assign',
     lastName: `${label.toUpperCase()} Customer ${Date.now()}`,
-    primaryPhone: '555-0188',
+    primaryPhone: '602-555-0188',
     email: `assign-${label}+${Date.now()}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

@@ -9,8 +9,10 @@ export interface InputProps
   leftIcon?: React.ReactNode;
 }
 
+// min-h-11 / min-w-11: every field is a ≥44×44 tap target (mobile bar, #1398),
+// even when a caller narrows or tightens it via className.
 const BASE_FIELD =
-  'w-full rounded-xl border bg-card text-sm text-foreground placeholder-muted-foreground ' +
+  'w-full min-h-11 min-w-11 rounded-xl border bg-card text-sm text-foreground placeholder-muted-foreground ' +
   'transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 ' +
   'disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground';
 

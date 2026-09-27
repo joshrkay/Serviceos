@@ -28,7 +28,12 @@ for (const [header, value] of requiredHeaders) {
 assert.match(snippet, /frame-ancestors 'none'/, 'CSP must prevent framing in modern browsers');
 assert.match(snippet, /object-src 'none'/, 'CSP must block plugin content');
 
-const inlineScript = sourceHtml.match(/<script>\n([\s\S]*?)\n    <\/script>/)?.[1];
+// Browsers hash the EXACT text between <script> and </script>, surrounding
+// whitespace included. Stripping the leading/trailing newlines here (#1397)
+// let a wrong pin pass CI while production blocked the Pendo loader. The
+// vitest guard packages/web/src/csp-inline-script-hash.test.ts pins the full
+// set of inline-script hashes.
+const inlineScript = sourceHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 assert.ok(inlineScript, 'index.html must contain the expected inline Pendo bootstrap');
 const inlineHash = `sha256-${createHash('sha256').update(inlineScript).digest('base64')}`;
 assert.ok(

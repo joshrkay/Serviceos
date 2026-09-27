@@ -182,7 +182,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |
 | `PUT /api/settings/capabilities/:key` | occasional | Per-tenant capability flags (#1011). Configuration. | false | none | |
 | `PUT /api/settings/dunning` | occasional | The tenant's late-fee and dunning policy (#1143). Configuration set once and revisited rarely; the overdue sweep applies it with no owner action on a normal day. | false | none | |
-| `PUT /api/settings/e1-script` | occasional | Records the reviewed E1 life-safety script with its reviewer attestation (#1386, O-2: a licensed trade pro + counsel sign it). Done once per sign-off; until then calls run the hard-flagged placeholder with no owner action. | false | none | |
+| `PUT /api/settings/e1-script` | occasional | Records the reviewed E1 life-safety script with its two reviewer sign-offs (#1386/#1389, O-2: one licensed trade professional AND one counsel, both required; web form at `/settings/e1-script`). Done once per sign-off; until then calls run the hard-flagged placeholder with no owner action. | false | none | |
 | `PUT /api/settings/packs/:packId/activate` | occasional | Vertical-pack activation. | false | none | |
 | `PUT /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken challenge. | false | none | |
 
