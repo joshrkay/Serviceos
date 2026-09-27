@@ -410,6 +410,18 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
 }
 
 // ─── Line Items Editor ────────────────────────────────────────────────────
+/** #1274 — the first reason a draft of line items cannot be saved, if any. */
+function draftLineProblem(draft: LineItem[]): string | null {
+  for (let i = 0; i < draft.length; i++) {
+    const row = draft[i];
+    const label = `Line ${i + 1}`;
+    if (!row.description || row.description.trim().length === 0) return `${label} needs a description.`;
+    if (!(row.qty > 0)) return `${label}: quantity must be more than 0 — remove the line to drop it.`;
+    if (row.rate < 0) return `${label}: rate can't be negative.`;
+  }
+  return null;
+}
+
 function LineItemsEditor({ items, editable, onChange, onAddRow, totals }: {
   items: LineItem[]; editable: boolean;
   onChange?: (items: LineItem[]) => void;
@@ -449,8 +461,17 @@ function LineItemsEditor({ items, editable, onChange, onAddRow, totals }: {
   function addRow()          { setDraft(prev => [...prev, { description: '', qty: 1, rate: 0 }]); }
   function removeRow(i: number) { setDraft(prev => prev.filter((_, j) => j !== i)); }
 
-  function save()   { onChange?.(draft); setEditing(false); }
-  function cancel() { setDraft(items); setEditing(false); }
+  // #1274 — refuse what the server would refuse (and a $0 line, which it
+  // would not but the customer should never see) before sending it.
+  const [draftError, setDraftError] = useState<string | null>(null);
+  function save() {
+    const problem = draftLineProblem(draft);
+    if (problem) { setDraftError(problem); return; }
+    setDraftError(null);
+    onChange?.(draft);
+    setEditing(false);
+  }
+  function cancel() { setDraft(items); setDraftError(null); setEditing(false); }
 
   return (
     <div className="rounded-xl bg-card border border-border overflow-hidden">
@@ -536,6 +557,12 @@ function LineItemsEditor({ items, editable, onChange, onAddRow, totals }: {
           </div>
         ))}
       </div>
+
+      {editing && draftError && (
+        <p role="alert" className="px-4 py-2 text-sm text-destructive break-words border-t border-border">
+          {draftError}
+        </p>
+      )}
 
       {/* Add row (edit mode) */}
       {editing && (
@@ -1024,6 +1051,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [templateOpen, setTemplateOpen] = useState(false);
   const [actionBusy,   setActionBusy]   = useState(false);
   const [actionError,  setActionError]  = useState<string | null>(null);
+  const [lineItemsError, setLineItemsError] = useState<string | null>(null);
   // #907 — window.confirm replaced with ConfirmDialog for the destructive delete/withdraw act.
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
@@ -1283,7 +1311,11 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 editable={editable}
                 totals={totals}
                 onChange={async (items) => {
+                  // #1274 — the last SAVED lines, restored if the server
+                  // refuses this edit, so a rejected line never renders as saved.
+                  const lastSaved = lineItems;
                   setLineItems(items);
+                  setLineItemsError(null);
                   try {
                     await updateEstimate(
                       { lineItems: items.map((item, i) => uiLineToApi(item, i)) },
@@ -1296,11 +1328,19 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                       toast.error('This estimate was changed elsewhere — reloading the latest version.');
                       refetch();
                     } else {
-                      throw err;
+                      setLineItems(lastSaved);
+                      setLineItemsError(
+                        err instanceof Error && err.message ? err.message : 'Could not save the line items.',
+                      );
                     }
                   }
                 }}
               />
+              {lineItemsError && (
+                <p role="alert" className="text-sm text-destructive break-words">
+                  Not saved: {lineItemsError}
+                </p>
+              )}
               <AIPricingSuggestions
                 estimateId={est.id}
                 items={uiLineItems}

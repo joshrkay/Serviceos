@@ -4,14 +4,14 @@ exports[`createApp route manifest > matches the committed layer counts 1`] = `
 {
   "byExposure": {
     "authenticated": 80,
-    "open": 22,
+    "open": 23,
     "public-token": 12,
     "webhook": 9,
   },
-  "middleware": 30,
+  "middleware": 31,
   "routers": 85,
   "routes": 8,
-  "total": 123,
+  "total": 124,
 }
 `;
 
@@ -34,12 +34,13 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 015  webhook       use    /webhooks    [middleware: <anonymous>]
 016  public-token  use    /public    [middleware: <anonymous>]
 017  open          use    /    [middleware: <anonymous>]
-018  open          use    /    [router: router]
+018  open          use    /    [middleware: reportHandlerWrittenServerErrorsHook]
+019  open          use    /    [router: router]
          └─ GET /health
          └─ GET /ready
-019  authenticated use    /api/health    [middleware: <anonymous>]
-020  open          GET    /metrics    [route: bound dispatch]
-021  webhook       use    /webhooks    [router: router]
+020  authenticated use    /api/health    [middleware: <anonymous>]
+021  open          GET    /metrics    [route: bound dispatch]
+022  webhook       use    /webhooks    [router: router]
          └─ POST /clerk
          └─ POST /sendgrid/:tenantId
          └─ POST /stripe
@@ -47,33 +48,33 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /twilio/status/:tenantId
          └─ POST /twilio/voice/:tenantId
          └─ POST /vapi/:tenantId
-022  open          use    /storage-dev    [router: router]
+023  open          use    /storage-dev    [router: router]
          └─ GET /*
          └─ PUT /*
-023  public-token  use    /public/feedback    [router: router]
+024  public-token  use    /public/feedback    [router: router]
          └─ GET /:token
          └─ POST /:token
-024  public-token  use    /public/intake    [middleware: <anonymous>]
-025  public-token  use    /public/intake    [router: router]
+025  public-token  use    /public/intake    [middleware: <anonymous>]
+026  public-token  use    /public/intake    [router: router]
          └─ GET /:tenantId
          └─ POST /:tenantId/leads
-026  public-token  use    /public/estimates    [router: router]
+027  public-token  use    /public/estimates    [router: router]
          └─ GET /:token
          └─ POST /:token/approve
          └─ POST /:token/decline
          └─ POST /:token/deposit-checkout
          └─ POST /:token/view
-027  public-token  use    /public/proposals    [router: router]
+028  public-token  use    /public/proposals    [router: router]
          └─ GET /one-tap-approve
          └─ POST /one-tap-approve
-028  public-token  use    /public/proposals    [router: router]
+029  public-token  use    /public/proposals    [router: router]
          └─ GET /one-tap-undo
          └─ POST /one-tap-undo
-029  public-token  use    /public/invoices    [router: router]
+030  public-token  use    /public/invoices    [router: router]
          └─ GET /:token
          └─ POST /:token/checkout
          └─ POST /:token/view
-030  public-token  use    /api/public/portal    [router: router]
+031  public-token  use    /api/public/portal    [router: router]
          └─ GET /:token/agreements
          └─ GET /:token/appointments
          └─ GET /:token/availability
@@ -87,37 +88,37 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:token/book
          └─ POST /:token/payment-methods/setup
          └─ POST /:token/request-service
-031  public-token  use    /api/public/booking    [middleware: <anonymous>]
-032  public-token  use    /api/public/booking    [router: router]
+032  public-token  use    /api/public/booking    [middleware: <anonymous>]
+033  public-token  use    /api/public/booking    [router: router]
          └─ GET /:tenantId/availability
          └─ POST /:tenantId
-033  public-token  use    /api/public-payments    [router: router]
+034  public-token  use    /api/public-payments    [router: router]
          └─ GET /status/:invoiceId
          └─ POST /create-payment-intent
-034  authenticated use    /api/calendar-integrations    [router: router]
+035  authenticated use    /api/calendar-integrations    [router: router]
          └─ GET /google/callback
-035  authenticated use    /api/googlebusiness-integrations    [router: router]
+036  authenticated use    /api/googlebusiness-integrations    [router: router]
          └─ GET /google/callback
-036  authenticated use    /api/integrations    [router: router]
+037  authenticated use    /api/integrations    [router: router]
          └─ GET /quickbooks/callback
-037  authenticated use    /api/telephony/whisper    [middleware: <anonymous>]
-038  authenticated use    /api/telephony    [router: router]
-         └─ GET /whisper/:escalationId
+038  authenticated use    /api/telephony/whisper    [middleware: <anonymous>]
 039  authenticated use    /api/telephony    [router: router]
+         └─ GET /whisper/:escalationId
+040  authenticated use    /api/telephony    [router: router]
          └─ GET /health
          └─ POST /callback-message
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice
          └─ POST /voice/gather-fallback
-040  authenticated use    /api/calls    [router: router]
+041  authenticated use    /api/calls    [router: router]
          └─ POST /bridge
-041  authenticated use    /api    [middleware: <anonymous>]
 042  authenticated use    /api    [middleware: <anonymous>]
-043  authenticated use    /api    [middleware: requireAuth]
-044  authenticated use    /api    [middleware: resolveAuthorization]
-045  authenticated use    /api    [middleware: <anonymous>]
-046  authenticated use    /api/customers    [router: router]
+043  authenticated use    /api    [middleware: <anonymous>]
+044  authenticated use    /api    [middleware: requireAuth]
+045  authenticated use    /api    [middleware: resolveAuthorization]
+046  authenticated use    /api    [middleware: <anonymous>]
+047  authenticated use    /api/customers    [router: router]
          └─ DELETE /:id/tags/:tag
          └─ GET /
          └─ GET /:id
@@ -135,11 +136,11 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ PUT /:id
          └─ PUT /:id/contacts/:contactId
          └─ PUT /:id/custom-fields/:fieldDefId
-047  authenticated use    /api/customer-custom-fields    [router: router]
+048  authenticated use    /api/customer-custom-fields    [router: router]
          └─ GET /
          └─ POST /
          └─ POST /:fieldDefId/archive
-048  authenticated use    /api/job-forms    [router: router]
+049  authenticated use    /api/job-forms    [router: router]
          └─ GET /jobs/:jobId/submissions
          └─ GET /submissions/:id
          └─ GET /templates
@@ -149,13 +150,13 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /jobs/:jobId/submissions
          └─ POST /templates
          └─ POST /templates/:id/archive
-049  authenticated use    /api/job-custom-fields    [router: router]
+050  authenticated use    /api/job-custom-fields    [router: router]
          └─ GET /defs
          └─ GET /jobs/:jobId
          └─ POST /defs
          └─ POST /defs/:fieldDefId/archive
          └─ PUT /jobs/:jobId/values/:fieldDefId
-050  authenticated use    /api/customer-groups    [router: router]
+051  authenticated use    /api/customer-groups    [router: router]
          └─ DELETE /:id/members/:customerId
          └─ GET /
          └─ GET /:id/members
@@ -164,21 +165,21 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /
          └─ POST /:id/archive
          └─ PUT /:id/members/:customerId
-051  authenticated use    /api/standing-instructions    [router: router]
+052  authenticated use    /api/standing-instructions    [router: router]
          └─ GET /
          └─ PATCH /:id/deactivate
          └─ POST /
-052  authenticated use    /api/marketing    [router: router]
+053  authenticated use    /api/marketing    [router: router]
          └─ GET /campaigns
          └─ POST /campaigns
          └─ POST /campaigns/:id/send
-053  authenticated use    /api/financing    [router: router]
+054  authenticated use    /api/financing    [router: router]
          └─ GET /:id
          └─ GET /invoices/:invoiceId
          └─ POST /invoices/:invoiceId/offer
-054  webhook       use    /webhooks/wisetack    [router: router]
+055  webhook       use    /webhooks/wisetack    [router: router]
          └─ POST /
-055  authenticated use    /api/recurring-jobs    [router: router]
+056  authenticated use    /api/recurring-jobs    [router: router]
          └─ GET /
          └─ GET /:id
          └─ GET /:id/occurrences
@@ -186,30 +187,30 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /
          └─ POST /:id/archive
          └─ POST /:id/generate
-056  authenticated use    /api/time-entries    [router: router]
+057  authenticated use    /api/time-entries    [router: router]
          └─ GET /
          └─ GET /active
          └─ POST /clock-in
          └─ POST /clock-out
-057  authenticated use    /api/portal-sessions    [router: router]
+058  authenticated use    /api/portal-sessions    [router: router]
          └─ DELETE /:id
          └─ POST /
          └─ POST /send
-058  authenticated use    /api/leads    [router: router]
+059  authenticated use    /api/leads    [router: router]
          └─ GET /
          └─ GET /:id
          └─ PATCH /:id
          └─ POST /
          └─ POST /:id/convert
          └─ POST /:id/lose
-059  authenticated use    /api/locations    [router: router]
+060  authenticated use    /api/locations    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
          └─ POST /:id/archive
          └─ POST /:id/set-primary
          └─ PUT /:id
-060  authenticated use    /api/jobs    [router: router]
+061  authenticated use    /api/jobs    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
@@ -219,24 +220,24 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/unschedule
          └─ POST /from-estimate/:estimateId
          └─ PUT /:id
-061  authenticated use    /api/jobs    [router: router]
+062  authenticated use    /api/jobs    [router: router]
          └─ DELETE /:id/files/:fileId
          └─ GET /:id/files
          └─ POST /:id/files/upload
          └─ POST /:id/files/upload-url
-062  authenticated use    /api/jobs    [router: router]
+063  authenticated use    /api/jobs    [router: router]
          └─ DELETE /:id/photos/:photoId
          └─ GET /:id/photos
          └─ POST /:id/photos
          └─ POST /:id/photos/presign-upload
-063  authenticated use    /api/attachments    [router: router]
+064  authenticated use    /api/attachments    [router: router]
          └─ GET /
          └─ POST /
          └─ POST /:id/archive
          └─ POST /:id/pair
          └─ POST /:id/visibility
          └─ POST /presign
-064  authenticated use    /api/appointments    [router: router]
+065  authenticated use    /api/appointments    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
@@ -244,13 +245,13 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/delay-ack
          └─ POST /:id/running-late
          └─ PUT /:id
-065  authenticated use    /api/dispatch    [router: router]
+066  authenticated use    /api/dispatch    [router: router]
          └─ GET /board
          └─ GET /technician/:id/appointments
          └─ POST /appointments/:id/en-route
          └─ POST /delay-escalations
          └─ POST /delay-prompt-audits
-066  authenticated use    /api/estimates    [router: router]
+067  authenticated use    /api/estimates    [router: router]
          └─ DELETE /:id
          └─ GET /
          └─ GET /:id
@@ -266,7 +267,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/transition
          └─ POST /suggest
          └─ PUT /:id
-067  authenticated use    /api/invoices    [router: router]
+068  authenticated use    /api/invoices    [router: router]
          └─ GET /
          └─ GET /:id
          └─ PATCH /:id
@@ -277,7 +278,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/send
          └─ POST /:id/transition
          └─ PUT /:id
-068  authenticated use    /api/users    [router: router]
+069  authenticated use    /api/users    [router: router]
          └─ DELETE /me
          └─ GET /
          └─ GET /:id/phone
@@ -285,22 +286,22 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ PATCH /:id
          └─ POST /invitations
          └─ PUT /:id/phone
-069  authenticated use    /api/calendar-integrations    [router: router]
+070  authenticated use    /api/calendar-integrations    [router: router]
          └─ DELETE /google
          └─ GET /
          └─ POST /google/connect
          └─ POST /google/test-push
-070  authenticated use    /api/googlebusiness-integrations    [router: router]
+071  authenticated use    /api/googlebusiness-integrations    [router: router]
          └─ DELETE /google
          └─ GET /
          └─ POST /google/connect
-071  authenticated use    /api/integrations    [router: router]
+072  authenticated use    /api/integrations    [router: router]
          └─ GET /
          └─ GET /quickbooks/status
          └─ POST /quickbooks/connect
          └─ POST /quickbooks/disconnect
          └─ POST /quickbooks/sync
-072  authenticated use    /api/billing    [router: router]
+073  authenticated use    /api/billing    [router: router]
          └─ DELETE /connect
          └─ GET /ai-usage
          └─ GET /connect
@@ -309,7 +310,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /end-trial-now
          └─ POST /portal-session
          └─ PUT /ai-overage-cap
-073  authenticated use    /api/reports    [router: router]
+074  authenticated use    /api/reports    [router: router]
          └─ GET /customer-profit/:customerId
          └─ GET /hfcr
          └─ GET /job-profit/:jobId
@@ -318,37 +319,37 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /tax-export
          └─ GET /technician-profit/:technicianId
          └─ GET /time-given-back
-074  authenticated use    /api/analytics/voice-roi    [router: router]
+075  authenticated use    /api/analytics/voice-roi    [router: router]
          └─ GET /
-075  authenticated use    /api/analytics/jobs-booked    [router: router]
+076  authenticated use    /api/analytics/jobs-booked    [router: router]
          └─ GET /
-076  authenticated use    /api/analytics/activity    [router: router]
+077  authenticated use    /api/analytics/activity    [router: router]
          └─ GET /
-077  authenticated use    /api/digests    [router: router]
+078  authenticated use    /api/digests    [router: router]
          └─ GET /:date
-078  authenticated use    /api/payments    [router: router]
+079  authenticated use    /api/payments    [router: router]
          └─ GET /
          └─ POST /
-079  authenticated use    /api/terminal    [router: router]
+080  authenticated use    /api/terminal    [router: router]
          └─ POST /connection-token
          └─ POST /payment-intents
-080  authenticated use    /api/notes    [router: router]
+081  authenticated use    /api/notes    [router: router]
          └─ DELETE /:id
          └─ GET /
          └─ POST /
          └─ PUT /:id
-081  authenticated use    /api/me    [router: router]
+082  authenticated use    /api/me    [router: router]
          └─ GET /
          └─ POST /mode
-082  authenticated use    /api/devices    [router: router]
+083  authenticated use    /api/devices    [router: router]
          └─ DELETE /
          └─ POST /
-083  authenticated use    /api/notification-preferences    [router: router]
+084  authenticated use    /api/notification-preferences    [router: router]
          └─ GET /
          └─ PUT /
-084  authenticated use    /api/feedback/responses    [router: router]
+085  authenticated use    /api/feedback/responses    [router: router]
          └─ GET /
-085  authenticated use    /api/conversations    [router: router]
+086  authenticated use    /api/conversations    [router: router]
          └─ GET /
          └─ GET /:id
          └─ GET /:id/messages
@@ -358,13 +359,13 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/reply
          └─ POST /:id/suggest-reply
          └─ POST /customer/:customerId
-086  authenticated use    /api/dnc    [router: router]
+087  authenticated use    /api/dnc    [router: router]
          └─ DELETE /:phone
          └─ GET /
          └─ POST /
-087  authenticated use    /api/calls    [router: router]
+088  authenticated use    /api/calls    [router: router]
          └─ POST /
-088  authenticated use    /api/settings    [router: router]
+089  authenticated use    /api/settings    [router: router]
          └─ DELETE /voice-approval-pin
          └─ GET /
          └─ GET /capabilities
@@ -375,54 +376,54 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ PUT /capabilities/:key
          └─ PUT /dunning
          └─ PUT /voice-approval-pin
-089  authenticated use    /api/settings/brand-voice    [router: router]
+090  authenticated use    /api/settings/brand-voice    [router: router]
          └─ GET /
          └─ GET /versions
          └─ POST /rollback
          └─ PUT /
-090  authenticated use    /api/settings/packs    [router: router]
+091  authenticated use    /api/settings/packs    [router: router]
          └─ DELETE /:packId
          └─ GET /
          └─ PUT /:packId/activate
-091  authenticated use    /api/verticals    [router: router]
+092  authenticated use    /api/verticals    [router: router]
          └─ GET /
          └─ GET /:type
          └─ GET /:type/categories
          └─ GET /:type/terminology/:term
-092  authenticated use    /api/vertical-training-assets    [router: router]
+093  authenticated use    /api/vertical-training-assets    [router: router]
          └─ GET /
          └─ POST /
          └─ POST /:id/activate
          └─ POST /:id/approve
          └─ POST /:id/archive
-093  authenticated use    /api/templates    [router: router]
+094  authenticated use    /api/templates    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
          └─ POST /:id/instantiate
          └─ PUT /:id
-094  authenticated use    /api/message-templates    [router: router]
+095  authenticated use    /api/message-templates    [router: router]
          └─ DELETE /:id
          └─ GET /
          └─ GET /:id
          └─ POST /
          └─ POST /:id/render
          └─ PUT /:id
-095  authenticated use    /api/bundles    [router: router]
+096  authenticated use    /api/bundles    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
          └─ POST /match
          └─ PUT /:id
-096  authenticated use    /api/quality    [router: router]
+097  authenticated use    /api/quality    [router: router]
          └─ GET /beta-readiness
          └─ GET /metrics
          └─ GET /metrics/:metricName
          └─ GET /vertical/:verticalType/benchmark
          └─ GET /vertical/:verticalType/metrics
-097  authenticated use    /api/evaluation    [router: router]
+098  authenticated use    /api/evaluation    [router: router]
          └─ GET /shadow-comparisons
-098  authenticated use    /api/voice    [router: router]
+099  authenticated use    /api/voice    [router: router]
          └─ GET /recordings/:id
          └─ GET /recordings/:id/audio
          └─ POST /go-live
@@ -431,7 +432,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /recordings/:id/retry
          └─ POST /stream-token
          └─ POST /transcribe
-099  authenticated use    /api/onboarding    [router: router]
+100  authenticated use    /api/onboarding    [router: router]
          └─ GET /billing/plans
          └─ GET /operator-hours
          └─ GET /status
@@ -448,26 +449,26 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ PUT /identity
          └─ PUT /operator-hours
          └─ PUT /voice
-100  authenticated use    /api/onboarding/conversation    [router: router]
+101  authenticated use    /api/onboarding/conversation    [router: router]
          └─ POST /turn
-101  authenticated use    /api/technician-location    [router: router]
+102  authenticated use    /api/technician-location    [router: router]
          └─ POST /
-102  authenticated use    /api/catalog/items    [router: router]
+103  authenticated use    /api/catalog/items    [router: router]
          └─ DELETE /:id
          └─ GET /
          └─ POST /
          └─ PUT /:id
-103  authenticated use    /api/files    [router: router]
+104  authenticated use    /api/files    [router: router]
          └─ GET /:id
          └─ POST /:id/verify
          └─ POST /upload
          └─ POST /upload-url
-104  authenticated use    /api/assistant    [router: router]
+105  authenticated use    /api/assistant    [router: router]
          └─ POST /chat
-105  authenticated use    /api/dispatch    [router: router]
+106  authenticated use    /api/dispatch    [router: router]
          └─ GET /availability
          └─ POST /check-feasibility
-106  authenticated use    /api/proposals    [router: router]
+107  authenticated use    /api/proposals    [router: router]
          └─ GET /
          └─ GET /:id
          └─ GET /inbox
@@ -480,7 +481,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/undo
          └─ POST /approve-batch
          └─ PUT /:id
-107  authenticated use    /api/agreements    [router: router]
+108  authenticated use    /api/agreements    [router: router]
          └─ GET /
          └─ GET /:id
          └─ PATCH /:id
@@ -489,33 +490,33 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/pause
          └─ POST /:id/resume
          └─ POST /:id/run-now
-108  authenticated use    /api/maintenance-contracts    [router: router]
+109  authenticated use    /api/maintenance-contracts    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
-109  authenticated use    /api/voice/sessions    [router: router]
+110  authenticated use    /api/voice/sessions    [router: router]
          └─ DELETE /:id
          └─ GET /:id/events
          └─ GET /active
          └─ POST /
          └─ POST /:id/input
-110  authenticated use    /api/escalations    [router: router]
-         └─ POST /:escalationId/outcome
 111  authenticated use    /api/escalations    [router: router]
+         └─ POST /:escalationId/outcome
+112  authenticated use    /api/escalations    [router: router]
          └─ GET /events
-112  authenticated use    /api/admin/feature-flags    [router: router]
+113  authenticated use    /api/admin/feature-flags    [router: router]
          └─ DELETE /:name
          └─ GET /
          └─ GET /:name
          └─ PUT /:name
-113  open          use    /    [middleware: <anonymous>]
 114  open          use    /    [middleware: <anonymous>]
-115  open          GET    /features    [route: bound dispatch]
-116  open          GET    /pricing    [route: bound dispatch]
-117  open          GET    /about    [route: bound dispatch]
-118  open          GET    /download    [route: bound dispatch]
-119  open          GET    /privacy    [route: bound dispatch]
-120  open          GET    /terms    [route: bound dispatch]
-121  open          use    (dynamic: ^\\/api\\/?(?=\\/|$)|^\\/public\\/?(?=\\/|$)|^\\/webhooks\\/?(?=\\/|$))    [middleware: <anonymous>]
-122  open          GET    *    [route: bound dispatch]"
+115  open          use    /    [middleware: <anonymous>]
+116  open          GET    /features    [route: bound dispatch]
+117  open          GET    /pricing    [route: bound dispatch]
+118  open          GET    /about    [route: bound dispatch]
+119  open          GET    /download    [route: bound dispatch]
+120  open          GET    /privacy    [route: bound dispatch]
+121  open          GET    /terms    [route: bound dispatch]
+122  open          use    (dynamic: ^\\/api\\/?(?=\\/|$)|^\\/public\\/?(?=\\/|$)|^\\/webhooks\\/?(?=\\/|$))    [middleware: <anonymous>]
+123  open          GET    *    [route: bound dispatch]"
 `;

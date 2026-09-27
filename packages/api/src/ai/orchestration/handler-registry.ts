@@ -187,7 +187,11 @@ export interface HandlerRegistryDeps {
  */
 export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, TaskHandler> {
   const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
+  // #1276F — estimateRepo so an invoice drafted from an estimate bills it.
+  handlers.set(
+    'draft_invoice',
+    new InvoiceTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, estimateRepo: deps.estimateRepo }),
+  );
   handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   handlers.set(
     'create_appointment',
