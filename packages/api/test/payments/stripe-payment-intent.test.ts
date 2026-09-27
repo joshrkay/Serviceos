@@ -136,6 +136,16 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
 describe('P0-1 completion — searchPaymentIntentsByInvoice', () => {
   const input = { tenantId: 'tenant-1', invoiceId: 'inv-1' };
 
+  it('#1400 — sends a GET the platform fetch accepts (no body): a void logged "GET/HEAD cannot have body"', async () => {
+    // The real fetch refuses a GET/HEAD init that carries a body; building a
+    // Request applies exactly that check without touching the network.
+    const platformFetch: StripeFetch = async (url, init) => {
+      new Request(url, init as RequestInit);
+      return { ok: true, status: 200, text: async () => '', json: async () => ({ data: [], has_more: false }) };
+    };
+    await expect(searchPaymentIntentsByInvoice({ apiKey: 'sk_test' }, input, platformFetch)).resolves.toEqual([]);
+  });
+
   it('queries the search endpoint on invoice_id + tenant_id metadata and returns id/status', async () => {
     const spy = vi.fn() as MockedFunction<StripeFetch>;
     spy.mockResolvedValue({

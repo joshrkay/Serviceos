@@ -20,6 +20,14 @@ export interface EstimatePrintLineItem {
   imageUrl?: string;
 }
 
+export interface EstimatePrintTotals {
+  subtotalCents: number;
+  discountCents: number;
+  taxRateBps: number;
+  taxCents: number;
+  totalCents: number;
+}
+
 export interface EstimatePrintData {
   estimateNumber: string;
   customerName: string;
@@ -28,8 +36,13 @@ export interface EstimatePrintData {
   description?: string;
   validUntil?: string;
   lineItems: EstimatePrintLineItem[];
-  /** Optional override total in dollars; defaults to sum of line items. */
-  totalDollars?: number;
+  /**
+   * #1400 — the document's money, integer cents, exactly as the API (or the
+   * billing-engine-mirroring accept preview) states it. The printed document
+   * never re-sums qty × rate: that re-sum ignored tax and discount and
+   * printed $300.99 for a $325.82 estimate.
+   */
+  totals: EstimatePrintTotals;
   /**
    * Tenant-facing document label (e.g. 'Quote', 'Bid'). Defaults to
    * 'Estimate'. The canonical entity is unchanged — this only relabels the
@@ -51,13 +64,17 @@ function usd(amount: number): string {
   return `$${amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function usdCents(cents: number): string {
+  return usd(cents / 100);
+}
+
 /**
  * Open a print-ready estimate document and invoke the browser print
  * dialog. Returns false when the popup was blocked so callers can surface
  * a hint. All interpolated strings are HTML-escaped.
  */
 export function printEstimateDocument(data: EstimatePrintData): boolean {
-  const total = data.totalDollars ?? data.lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  const { totals } = data;
   const documentLabel = data.documentLabel?.trim() || 'Estimate';
 
   const rows = data.lineItems
@@ -99,6 +116,8 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
     .thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
     /* B7.5 — descriptive unit beside the quantity; muted so the number reads first. */
     .unit { color: #64748b; font-size: 11px; }
+    .breakdown { margin-bottom: 12px; }
+    .breakdown .row { display: flex; justify-content: space-between; font-size: 13px; color: #475569; padding: 4px 6px; }
     .total { display: flex; justify-content: space-between; align-items: center; background: #0f172a; color: #fff; padding: 14px 16px; border-radius: 10px; font-size: 15px; }
     @media print { body { padding: 24px; } @page { margin: 16mm; } }
   </style>
@@ -135,9 +154,15 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
     <tbody>${rows}</tbody>
   </table>
 
+  <div class="breakdown">
+    <div class="row"><span>Subtotal</span><span>${usdCents(totals.subtotalCents)}</span></div>
+    ${totals.discountCents > 0 ? `<div class="row"><span>Discount</span><span>-${usdCents(totals.discountCents)}</span></div>` : ''}
+    ${totals.taxRateBps > 0 ? `<div class="row"><span>Tax (${(totals.taxRateBps / 100).toFixed(2)}%)</span><span>${usdCents(totals.taxCents)}</span></div>` : ''}
+  </div>
+
   <div class="total">
     <span>Total</span>
-    <span>${usd(total)}</span>
+    <span>${usdCents(totals.totalCents)}</span>
   </div>
 
   <script>

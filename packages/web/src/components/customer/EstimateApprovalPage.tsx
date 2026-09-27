@@ -1154,7 +1154,11 @@ export function EstimateApprovalPage() {
               description,
               validUntil: validUntilText,
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate, imageUrl: i.imageUrl })),
-              totalDollars: total,
+              // #1400 — print the same money the page shows: the API's
+              // totals, or the billing-engine-mirroring tier preview.
+              totals: hasSelectable
+                ? { subtotalCents: selectedSubtotalCents, discountCents, taxRateBps, taxCents: previewTaxCents, totalCents: previewTotalCents }
+                : { subtotalCents: apiView.subtotalCents, discountCents: apiView.discountCents, taxRateBps: apiView.taxRateBps ?? 0, taxCents: apiView.taxCents, totalCents: apiView.totalCents },
             })}
             className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
           >
@@ -1415,14 +1419,14 @@ function DeclineButton({ token, onDeclined }: {
         <button
           onClick={() => setConfirming(false)}
           disabled={submitting}
-          className="flex-1 rounded-lg border border-slate-200 bg-white py-2 text-xs text-slate-700 hover:bg-slate-50"
+          className="flex-1 min-h-11 rounded-lg border border-slate-200 bg-white py-2 text-xs text-slate-700 hover:bg-slate-50"
         >
           Cancel
         </button>
         <button
           onClick={submit}
           disabled={submitting}
-          className="flex-1 rounded-lg bg-slate-700 text-white py-2 text-xs hover:bg-slate-800 disabled:opacity-60"
+          className="flex-1 min-h-11 rounded-lg bg-slate-700 text-white py-2 text-xs hover:bg-slate-800 disabled:opacity-60"
         >
           {submitting ? 'Declining…' : 'Confirm decline'}
         </button>

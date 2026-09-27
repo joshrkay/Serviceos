@@ -44,9 +44,15 @@ async function buildApp() {
   // Capture what the route forwards to SendService — the fallback to the
   // customer's number on file happens inside SendService, so the route's
   // contract is: never forward '' (it must arrive as undefined).
+  // Real SendService.sendInvoice result shape (SendResult) — the route now
+  // audits `invoice.sent` from channelsSent (#1400).
   const sendInvoice = vi.fn().mockResolvedValue({
-    dispatchId: 'dispatch-1',
-    status: 'queued',
+    invoiceId: 'invoice-1',
+    viewUrl: 'https://example.test/i/tok',
+    viewToken: 'tok',
+    channelsSent: [
+      { channel: 'sms', recipient: '+15555550100', provider: 'mock', providerMessageId: 'pm-1', dispatchId: 'dispatch-1' },
+    ],
   });
   const sendService = { sendInvoice } as unknown as SendService;
 

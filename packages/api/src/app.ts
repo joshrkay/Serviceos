@@ -1830,6 +1830,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         customerRepo,
         settingsRepo,
         invoiceRepo,
+        // #1400 — estimate-approved customer confirmation.
+        estimateRepo,
         dispatchRepo,
         // T4-F01 — claim-before-send pool for sendCustomerMessage's gate.
         pool: pool ?? null,
@@ -3001,6 +3003,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // D2-1d: emit public_estimate.{approved,declined} with the
     // synthetic public:<tokenHash> actor on every public approve/decline.
     auditRepo,
+    // #1400 — confirm a public approval to the customer (absent when
+    // message delivery is not configured).
+    approvalNotifier: transactionalComms,
     // Roll up job money state when a lapsed estimate is auto-expired on the
     // public path, so the job doesn't stay stuck in 'estimate_sent'.
     moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },

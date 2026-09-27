@@ -193,6 +193,9 @@ describe('Postgres integration — #1145 dispatch idempotency key collision', ()
 
     // Identical retry: same owner-send context, same estimate, same channel,
     // same minute — this SHOULD dedupe (it's the same occasion, not a new one).
+    // #1400: the dedupe is now an idempotent replay of the first dispatch
+    // (it used to surface as a raw "duplicate key" error to the owner).
+    const smsBefore = delivery.sentSms.length;
     await expect(
       sendService.sendEstimate({
         tenantId: tenant.tenantId,
@@ -200,7 +203,8 @@ describe('Postgres integration — #1145 dispatch idempotency key collision', ()
         channel: 'sms',
         idempotencyContext: 'owner',
       }),
-    ).rejects.toThrow();
+    ).resolves.toBeDefined();
+    expect(delivery.sentSms.length).toBe(smsBefore);
 
     const dispatches = await dispatchRepo.findByEntity(tenant.tenantId, 'estimate', estimate.id);
     const smsDispatches = dispatches.filter((d) => d.channel === 'sms' && d.status === 'sent');
