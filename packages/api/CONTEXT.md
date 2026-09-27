@@ -62,3 +62,39 @@ terms float.
   reachable, or refuse with the honest copy
   (`ai/voice-turn/coverage-table.ts`). A structural test forbids undeclared
   cells, so refusals happen on purpose and silence is impossible.
+
+## The evidence ladder (D-031, D-032)
+
+Terms for how the product states what it can prove about itself. The PRD's
+§8.0 and §16 apply them row by row; these are the definitions only.
+
+- **Rung** — a 0–6 verdict on the *evidence* for one user story or
+  invariant, never on its value or on a reading of the source (D-031). 4
+  means a real database proved the write and its audit event; 5 adds
+  reachability; 6 means observed serving real tenants. A rung is published
+  only with the command that earns it.
+- **Evidence class** — the kind of proof behind a rung, which fixes its
+  ceiling: no evidence or code only, proven with mocked or in-memory
+  dependencies, a structural guard with a negative control, a real-database
+  write without its audit event (4−), a real-database write with its audit
+  event, plus reachability. A mocked dependency caps a claim at the mock.
+- **Tenant grade (T0–T4)** — the second dimension of done (D-032): how many
+  tenants the proof met and how. T0 one tenant; T1 a neighbour cannot see or
+  touch the first's rows; T2 a neighbour's data does not change the first's
+  answer; T3 two differently configured tenants each get their own correct
+  result in one run; T4 the production tenant selector runs, every eligible
+  tenant is processed, and one tenant's failure does not stop the rest. The
+  grade caps the rung: 4 needs T1, 5 needs T2 (T3 where per-tenant
+  configuration is read), a tenant-iterating capability stays at 4 until T4.
+- **Sweep** — a background pass that serves many tenants in one run (digest,
+  reminders, dunning, sync). Its tenant grade is judged on the pass, not on a
+  single tenant's outcome.
+- **Enumerator** — the production selector that decides which tenants a
+  sweep visits. A test that substitutes a hand-picked list for it has replaced
+  the thing under test, and cannot earn T4.
+- **Reachability** — a persona can get to a capability on the surface the
+  story names, as that persona, with no database edit, no platform-admin
+  action and no environment switch. What separates rung 5 from rung 4.
+- **Unlit-able** — a capability no surface can switch on at all, as opposed
+  to one that is merely off by default or lacks an owner-facing control. It
+  caps at 4 regardless of how well it is tested.
