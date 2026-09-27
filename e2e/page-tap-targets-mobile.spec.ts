@@ -144,6 +144,55 @@ test.describe('page-level tap targets — mobile bar (#1398)', () => {
           expect(await horizontalOverflow(page), `${path} horizontal overflow`).toBeLessThanOrEqual(0);
         });
       }
+
+      // #1412 — controls the route sweep above cannot see at rest: the
+      // assistant's scroll-to-latest button only appears once the thread is
+      // scrolled up, and the add-customer sheet's SMS-consent row (its native
+      // checkbox is visually hidden, so the ROW is the tap target) sits on the
+      // sheet's second step. (The reply reaction/copy actions are always
+      // rendered now, so the /assistant sweep measures them on the welcome
+      // reply.)
+      test('/assistant — scroll-to-latest is ≥44×44', async ({ page }) => {
+        await page.goto('/assistant');
+        if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+        await dismissWhatsNewModal(page);
+        // The thread is the scroll container around the welcome reply.
+        await page.getByText(/I'm your AI assistant/).first().waitFor();
+        await page.evaluate(() => {
+          const welcome = Array.from(document.querySelectorAll<HTMLElement>('p, div, span')).find((el) =>
+            /I'm your AI assistant/.test(el.textContent ?? '') && el.children.length === 0,
+          );
+          let thread = welcome?.parentElement ?? null;
+          while (thread && getComputedStyle(thread).overflowY !== 'auto') thread = thread.parentElement;
+          if (!thread) return;
+          const spacer = document.createElement('div');
+          spacer.style.height = '3000px';
+          thread.prepend(spacer);
+          thread.scrollTop = 0;
+          thread.dispatchEvent(new Event('scroll'));
+        });
+        const button = page.getByRole('button', { name: 'Scroll to latest' });
+        await expect(button).toBeVisible();
+        const box = await button.boundingBox();
+        expect(Math.round(box!.width)).toBeGreaterThanOrEqual(MIN);
+        expect(Math.round(box!.height)).toBeGreaterThanOrEqual(MIN);
+      });
+
+      test('/customers add-customer sheet — the SMS-consent row is ≥44 tall and full width', async ({ page }) => {
+        await page.goto('/customers');
+        if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+        await dismissWhatsNewModal(page);
+        await page.getByRole('button', { name: 'Add customer' }).first().click();
+        await page.getByPlaceholder('Full name *').fill('Tap Target');
+        await page.getByText('Next: Add location →').click();
+        const row = page.locator('label[for="smsConsentCreate"]');
+        await expect(row).toBeVisible();
+        const box = await row.boundingBox();
+        expect(Math.round(box!.height)).toBeGreaterThanOrEqual(MIN);
+        expect(Math.round(box!.width)).toBeGreaterThanOrEqual(MIN);
+        await row.click();
+        await expect(page.getByRole('checkbox', { name: /SMS consent/i })).toBeChecked();
+      });
     });
   }
 });

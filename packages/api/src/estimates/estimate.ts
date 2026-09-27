@@ -813,6 +813,8 @@ export async function cloneEstimate(
   actorId: string,
   repository: EstimateRepository,
   auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string,
 ): Promise<Estimate | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -856,7 +858,7 @@ export async function cloneEstimate(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'estimate.cloned',
         entityType: 'estimate',
         entityId: created.id,

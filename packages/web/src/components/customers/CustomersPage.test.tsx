@@ -358,4 +358,17 @@ describe('#1398 — mobile bar', () => {
     const { container } = renderPage();
     expectAllTapTargets(container, 'CustomersPage');
   });
+
+  // #1412 — the add-customer sheet's SMS-consent checkbox was a bare 16px box.
+  it('the add-customer sheet’s SMS-consent checkbox is a ≥44px labelled row', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer'));
+    fireEvent.change(screen.getByPlaceholderText('Full name *'), { target: { value: 'Charlie Brown' } });
+    fireEvent.click(screen.getByText('Next: Add location →'));
+    const checkbox = screen.getByRole('checkbox', { name: /SMS consent/i });
+    const row = checkbox.closest('label') ?? checkbox.parentElement!;
+    expectAllTapTargets(row, 'add-customer SMS consent');
+    fireEvent.click(row);
+    expect(checkbox).toBeChecked();
+  });
 });

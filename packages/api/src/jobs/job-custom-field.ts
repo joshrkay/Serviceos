@@ -122,7 +122,9 @@ export async function setJobCustomFieldValue(
   value: string | null,
   repository: JobCustomFieldRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<void> {
   const def = await repository.findDefById(tenantId, fieldDefId);
   if (!def) throw new NotFoundError('Job custom field', fieldDefId);
@@ -139,7 +141,7 @@ export async function setJobCustomFieldValue(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'job_custom_field.value_set',
         entityType: 'job',
         entityId: jobId,

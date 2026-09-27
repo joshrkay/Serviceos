@@ -33,6 +33,8 @@ export interface ConvertEstimateDeps {
   /** When wired, the job's money state is rolled up after conversion. */
   moneyStateDeps?: RefreshJobMoneyStateDeps;
   actorId: string;
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string;
   logger?: Logger;
   /**
    * #1203 — when wired, an estimate billed by a milestone plan is not
@@ -192,7 +194,7 @@ export async function convertEstimateToInvoice(
     createAuditEvent({
       tenantId,
       actorId: deps.actorId,
-      actorRole: 'unknown',
+      actorRole: deps.actorRole ?? 'unknown',
       eventType: 'estimate.converted',
       entityType: 'estimate',
       entityId: estimate.id,
