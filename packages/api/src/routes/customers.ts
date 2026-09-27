@@ -435,7 +435,8 @@ export function createCustomerRouter(
           parsed,
           contactRepo,
           req.auth!.userId,
-          auditRepo
+          auditRepo,
+          req.auth!.role
         );
         res.json(updated);
       })
@@ -459,7 +460,8 @@ export function createCustomerRouter(
           req.params.contactId,
           contactRepo,
           req.auth!.userId,
-          auditRepo
+          auditRepo,
+          req.auth!.role
         );
         res.json(archived);
       })
@@ -496,7 +498,8 @@ export function createCustomerRouter(
           tag,
           tagRepo,
           req.auth!.userId,
-          auditRepo
+          auditRepo,
+          req.auth!.role
         );
         const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
         res.status(201).json(tags);
@@ -517,7 +520,8 @@ export function createCustomerRouter(
           decodeURIComponent(req.params.tag),
           tagRepo,
           req.auth!.userId,
-          auditRepo
+          auditRepo,
+          req.auth!.role
         );
         const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
         res.json(tags);
@@ -561,7 +565,8 @@ export function createCustomerRouter(
           value,
           customFieldRepo,
           req.auth!.userId,
-          auditRepo
+          auditRepo,
+          req.auth!.role
         );
         const fields = await listResolvedCustomFields(
           req.auth!.tenantId,

@@ -122,13 +122,19 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
         }
         throw new Error(detail || `Save failed (${res.status})`);
       }
+      // #1408 — report what the API STORED (phones are normalised to E.164
+      // server-side), falling back to the typed value only when the response
+      // carries no such field.
+      const stored = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      const storedOr = (key: string, typed: string): string =>
+        typeof stored[key] === 'string' ? (stored[key] as string) : typed;
       toast.success('Business profile saved');
       onSaved?.({
-        businessName: fields.businessName.trim(),
-        businessPhone: fields.businessPhone.trim(),
-        businessEmail: fields.businessEmail.trim(),
-        ownerPhone: fields.ownerPhone.trim(),
-        timezone: fields.timezone,
+        businessName: storedOr('businessName', fields.businessName.trim()),
+        businessPhone: storedOr('businessPhone', fields.businessPhone.trim()),
+        businessEmail: storedOr('businessEmail', fields.businessEmail.trim()),
+        ownerPhone: storedOr('ownerPhone', fields.ownerPhone.trim()),
+        timezone: storedOr('timezone', fields.timezone),
       });
       onClose();
     } catch (err) {

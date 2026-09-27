@@ -91,7 +91,8 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
           groupMemberIds: deps.groupMemberIds,
           auditRepo: deps.auditRepo,
         },
-        req.auth!.userId
+        req.auth!.userId,
+        req.auth!.role
       );
       res.json(sent);
     })
