@@ -51,6 +51,17 @@ describe('HomePage money display (#1400)', () => {
     expect(screen.getAllByText('$1,593.42').length).toBeGreaterThan(0);
   });
 
+  it('the Outstanding invoices section header shows the same API amount due', () => {
+    renderPage();
+    const heading = screen.getByText('Outstanding invoices');
+    const section = heading.closest('section');
+    expect(section).not.toBeNull();
+    // Regression: a merge re-introduced a dollars-float `totalOut` here; the
+    // header must render the integer-cents total via centsToDisplay.
+    expect(section!.textContent).toContain('$1,593.42');
+    expect(section!.textContent).not.toContain('NaN');
+  });
+
   it('Needs-attention shows the overdue invoice amount due and a human due date (no $NaN, no raw ISO)', () => {
     const { container } = renderPage();
     expect(screen.getByText('INV-0026 · $93.42 · Was due Jan 15')).toBeInTheDocument();

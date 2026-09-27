@@ -715,7 +715,7 @@ export function HomePage() {
                     <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-secondary text-xs text-muted-foreground px-1.5">{unpaidInvs.length}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-sm text-warning">${totalOut.toLocaleString()}</span>
+                    <span className="text-sm text-warning">{centsToDisplay(totalOutCents)}</span>
                     <button onClick={() => navigate('/reports/money')} className="-mr-2 flex min-h-11 min-w-11 items-center gap-0.5 px-2 text-xs text-primary hover:text-primary">
                       Money summary <ArrowRight size={11} />
                     </button>
