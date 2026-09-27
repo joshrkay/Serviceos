@@ -3,7 +3,7 @@ import { Plus } from 'lucide-react';
 import { LeadStageColumn } from '../../components/leads/LeadStageColumn';
 import { LeadCardData } from '../../components/leads/LeadCard';
 import { apiFetch } from '../../utils/api-fetch';
-import { Button, Input, Spinner } from '../../components/ui';
+import { Button, Select, Spinner } from '../../components/ui';
 
 const STAGES: { key: string; label: string }[] = [
   { key: 'new', label: 'New' },
@@ -25,6 +25,46 @@ const SOURCES = [
   'customer_portal',
   'sms',
 ];
+
+interface TeamMember {
+  id: string;
+  name: string;
+}
+
+/**
+ * #1416 — the team members a lead can be assigned to, by NAME, for the
+ * assignee filter (it used to be a raw "user id" text box). Best-effort: a
+ * caller who cannot list users just gets the "Anyone" option.
+ */
+function useTeamMembers(): TeamMember[] {
+  const [members, setMembers] = useState<TeamMember[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch('/api/users');
+        if (!res?.ok) return;
+        const json = (await res.json()) as
+          | { data?: Array<{ id: string; firstName?: string; lastName?: string; email?: string }> }
+          | Array<{ id: string; firstName?: string; lastName?: string; email?: string }>;
+        const users = Array.isArray(json) ? json : json?.data ?? [];
+        const mapped = users
+          .map((u) => ({
+            id: u.id,
+            name: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.email || 'Team member',
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (!cancelled) setMembers(mapped);
+      } catch {
+        /* best-effort — the filter still offers "Anyone" */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return members;
+}
 
 interface LeadResponse extends LeadCardData {
   stage: string;
@@ -49,6 +89,7 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [assigneeFilter, setAssigneeFilter] = useState<string | null>(null);
+  const teamMembers = useTeamMembers();
   const [draggingLeadId, setDraggingLeadId] = useState<string | null>(null);
   const hasLoadedRef = useRef(false);
 
@@ -162,14 +203,22 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
             {src}
           </button>
         ))}
-        <span className="text-xs text-slate-500 ml-3">Assignee:</span>
-        <Input
-          type="text"
+        <label htmlFor="lead-assignee-filter" className="text-xs text-slate-500 ml-3">
+          Assignee:
+        </label>
+        <Select
+          id="lead-assignee-filter"
           value={assigneeFilter ?? ''}
           onChange={(e) => setAssigneeFilter(e.target.value || null)}
-          placeholder="user id"
-          className="w-40 px-2.5 py-1.5 text-xs"
-        />
+          className="min-h-11 w-44 px-2.5 py-1.5 text-xs"
+        >
+          <option value="">Anyone</option>
+          {teamMembers.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </Select>
       </div>
 
       {error && (
