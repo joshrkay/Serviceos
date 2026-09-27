@@ -262,6 +262,7 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
         // context established by the executor / request middleware).
         this.auditRepo,
         this.consentLedger,
+        context.executedByRole,
       );
       if (!updated) {
         return { success: false, error: 'Customer not found' };
@@ -1031,6 +1032,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
               ? payload.internalNotes
               : undefined,
         createdBy: context.executedBy,
+        actorRole: context.executedByRole,
       };
       const estimate = await createEstimate(input, this.estimateRepo, this.auditRepo);
       return { success: true, resultEntityId: estimate.id };

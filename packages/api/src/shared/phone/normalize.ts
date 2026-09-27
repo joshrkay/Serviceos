@@ -105,3 +105,26 @@ export function normalizeMobileE164(input: string): string {
 
   return `+1${national}`;
 }
+
+/**
+ * #1397 — normalise a tenant's business phone to E.164, or `null` when it
+ * can't be. Unlike `normalizeMobileE164` (NANP-only), a business may list an
+ * international line, so a number typed with a leading '+' and a non-US
+ * country code is accepted as '+' + its 8–15 digits (the E.164 length
+ * bounds). Extensions, letters and wrong-length numbers return `null` —
+ * business_phone is dialed by the escalation fallback, so a value that
+ * can't be dialed must never be stored.
+ */
+export function normalizeBusinessPhoneE164(input: string): string | null {
+  try {
+    return normalizeMobileE164(input);
+  } catch {
+    // fall through to the international form
+  }
+  const raw = typeof input === 'string' ? input.trim() : '';
+  if (!raw.startsWith('+') || !/^\+[()\-.\s\d]+$/.test(raw)) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('1') || digits.startsWith('0')) return null;
+  if (digits.length < 8 || digits.length > 15) return null;
+  return `+${digits}`;
+}
