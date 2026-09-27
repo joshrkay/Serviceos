@@ -44,6 +44,9 @@ describe('classifyCallerSafety — E1 (life safety, never book)', () => {
     ['the furnace is on fire', 'fire'],
     ['my husband collapsed and is not breathing', 'injury'],
     ['someone just got electrocuted by the outlet', 'injury/electrical'],
+    // #1399 — the noun form was E3 on the phone AND in chat.
+    ['There is a strong smell of gas in the customer house right now', 'gas (noun form)'],
+    ['the customer smells gas in the house', 'gas (third person)'],
   ])('classifies %j as E1 (%s)', (utterance) => {
     const r = classifyCallerSafety(utterance, {}, rules);
     expect(r.tier).toBe('E1');

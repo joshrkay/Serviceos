@@ -2112,6 +2112,78 @@ describe('Postgres integration — entity resolution (P8)', () => {
     // guess. Not a #951 regression: #951 only made the resulting
     // not_found honest instead of silent; this pins why it WAS a
     // not_found underneath that honest reply.
+    // -- #1399 N3 (QA 2026-09-26 §17) ------------------------------------
+    //
+    // Live: "Cancel qa-sweep-ai-Priya Whitfield's furnace tune-up appointment
+    // on Tuesday" answered "I couldn't find a matching appointment" while the
+    // bare "Cancel the appointment for qa-sweep-ai-Priya Whitfield" resolved
+    // the same visit. The equipment noun ("furnace") and the day word
+    // ("tuesday") rode into the customer-name needle; measured on pg16:
+    //   strict_word_similarity("qa sweep ai priya whitfield's furnace tuesday", name) = 0.622
+    //   strict_word_similarity("qa sweep ai priya whitfield's", name)                  = 0.966
+    describe('descriptive appointment reference — day + equipment words (#1399 N3)', () => {
+      const ZONE = 'America/Chicago';
+      /** Noon tenant-local on the next `weekday` (1=Mon..7=Sun), ≥1 day out. */
+      function nextLocalWeekdayNoon(weekday: number, weeksLater = 0): Date {
+        let d = DateTime.now().setZone(ZONE).plus({ days: 1 }).set({ hour: 12, minute: 0, second: 0, millisecond: 0 });
+        while (d.weekday !== weekday) d = d.plus({ days: 1 });
+        return d.plus({ weeks: weeksLater }).toJSDate();
+      }
+      const PRIYA = 'qa-sweep-ai-Priya Whitfield';
+      const DETAILED = "qa-sweep-ai-Priya Whitfield's furnace tune-up appointment on Tuesday";
+
+      it('the detailed spoken form resolves the same appointment the bare form does', async () => {
+        const seed = await seedRealisticTenant({ displayName: PRIYA, jobSummary: 'furnace tune-up', timezone: ZONE });
+        const appointmentId = await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(2));
+
+        const result = await resolver.resolve({ tenantId: seed.tenantId, reference: DETAILED, kind: 'appointment' });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
+      });
+
+      it('the stated weekday picks the Tuesday visit over the same customer\'s Thursday one', async () => {
+        const seed = await seedRealisticTenant({ displayName: PRIYA, jobSummary: 'furnace tune-up', timezone: ZONE });
+        const tuesday = await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(2));
+        await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(4));
+
+        const result = await resolver.resolve({ tenantId: seed.tenantId, reference: DETAILED, kind: 'appointment' });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(tuesday);
+      });
+
+      it('two visits on the stated day stay a clarification — never a silent guess', async () => {
+        const seed = await seedRealisticTenant({ displayName: PRIYA, jobSummary: 'furnace tune-up', timezone: ZONE });
+        const first = await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(2));
+        const second = await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(2, 1));
+        await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(4));
+
+        const result = await resolver.resolve({ tenantId: seed.tenantId, reference: DETAILED, kind: 'appointment' });
+
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+          expect(result.candidates.map((c) => c.id).sort()).toEqual([first, second].sort());
+        }
+      });
+
+      it('"my Tuesday 2pm furnace appointment" resolves the visit at that time', async () => {
+        const seed = await seedRealisticTenant({ displayName: PRIYA, jobSummary: 'furnace tune-up', timezone: ZONE });
+        const twoPm = DateTime.fromJSDate(nextLocalWeekdayNoon(2)).setZone(ZONE).set({ hour: 14 }).toJSDate();
+        const target = await seedAppointmentAt(seed, seed.jobId, twoPm);
+        await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(4));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'my Tuesday 2pm furnace appointment',
+          kind: 'appointment',
+        });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(target);
+      });
+    });
+
     describe('qualified appointment reference — work-type descriptor stripped from the customer needle (A11)', () => {
       it('"<customer>\'s tune-up appointment" resolves — the qualified form matches the bare form', async () => {
         const seed = await seedRealisticTenant({

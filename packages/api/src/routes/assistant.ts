@@ -86,6 +86,7 @@ import {
   buildClassifierErrorReply,
   NO_ACTION_TAKEN_DIRECTIVE,
 } from '../ai/orchestration/assistant-honesty-guard';
+import { chatBulkMoneyRefusal, chatLifeSafetyReply } from '../ai/orchestration/chat-safety-guards';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
@@ -2753,6 +2754,37 @@ async function generateAssistantReply(
     rawUserText.trim().length === 0 && attachments && attachments.length > 0
       ? PHOTO_ONLY_TURN_TEXT
       : rawUserText;
+
+  // #1399 — life safety first: a typed gas / CO / fire report answers with
+  // the phone path's E1 advice before anything can classify, draft or book.
+  const lifeSafetyReply = chatLifeSafetyReply(lastUserText);
+  if (lifeSafetyReply) {
+    return {
+      taskType: 'assistant.life_safety',
+      model: 'policy-guard',
+      usage: { input: 0, output: 0, total: 0 },
+      message: {
+        role: 'assistant' as const,
+        content: lifeSafetyReply,
+        reasoning: 'Life-safety (E1) report — safety advice only, nothing drafted.',
+      },
+    };
+  }
+  // #1399 — a bulk money mutation ("mark every invoice paid") is refused
+  // outright; it must never become a proposal of any kind.
+  const bulkMoneyRefusal = chatBulkMoneyRefusal(lastUserText);
+  if (bulkMoneyRefusal) {
+    return {
+      taskType: 'assistant.bulk_money_refused',
+      model: 'policy-guard',
+      usage: { input: 0, output: 0, total: 0 },
+      message: {
+        role: 'assistant' as const,
+        content: bulkMoneyRefusal,
+        reasoning: 'Bulk money mutation — refused; money changes one record at a time.',
+      },
+    };
+  }
 
   // ── Intent path: AST-01b ──────────────────────────────────────────
   // Run the same classifier the voice pipeline uses. If the message is
