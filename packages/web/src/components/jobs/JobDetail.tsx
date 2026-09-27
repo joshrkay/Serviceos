@@ -532,6 +532,38 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
   );
 }
 
+// ─── Materials API mapping (#1406 D3) ─────────────────────────────────────
+interface ApiMaterial {
+  id: string;
+  name: string;
+  partNumber?: string;
+  quantity: number;
+  unitCostCents?: number;
+  category?: MaterialItem['category'];
+}
+
+function fromApiMaterial(m: ApiMaterial): MaterialItem {
+  return {
+    id: m.id,
+    name: m.name,
+    ...(m.partNumber ? { partNumber: m.partNumber } : {}),
+    qty: m.quantity,
+    unitCost: (m.unitCostCents ?? 0) / 100,
+    category: m.category ?? 'Material',
+  };
+}
+
+function toApiMaterial(m: MaterialItem): ApiMaterial {
+  return {
+    id: m.id,
+    name: m.name,
+    ...(m.partNumber ? { partNumber: m.partNumber } : {}),
+    quantity: m.qty,
+    unitCostCents: Math.round(m.unitCost * 100),
+    category: m.category,
+  };
+}
+
 // ─── Materials Table ──────────────────────────────────────────────────────
 const CAT_CONFIG: Record<MaterialItem['category'], { label: string; dot: string; text: string; bg: string }> = {
   Part:      { label: 'Parts',     dot: 'bg-primary',   text: 'text-primary',   bg: 'bg-primary/10'   },
@@ -901,6 +933,40 @@ export function JobDetailView({
 
   useEffect(() => { loadTimeEntries(); }, [loadTimeEntries]);
 
+  // #1406 D3 — the Parts sheet persists through /api/jobs/:id/materials
+  // (material_items). It used to only set local state, so every part logged
+  // vanished on reload. Money crosses the API as integer cents.
+  const [materialsError, setMaterialsError] = useState<string | null>(null);
+  const loadMaterials = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await apiFetch(`/api/jobs/${id}/materials`);
+      if (!res.ok) return;
+      const body = await res.json();
+      setMaterials(Array.isArray(body?.data) ? body.data.map(fromApiMaterial) : []);
+    } catch { /* non-fatal */ }
+  }, [id]);
+
+  useEffect(() => { void loadMaterials(); }, [loadMaterials]);
+
+  const saveMaterials = useCallback(async (updated: MaterialItem[]) => {
+    if (!id) return;
+    setMaterials(updated);
+    setMaterialsError(null);
+    try {
+      const res = await apiFetch(`/api/jobs/${id}/materials`, {
+        method: 'PUT',
+        body: JSON.stringify({ items: updated.map(toApiMaterial) }),
+      });
+      if (!res.ok) throw new Error(`Could not save parts (HTTP ${res.status})`);
+      const body = await res.json();
+      setMaterials(Array.isArray(body?.data) ? body.data.map(fromApiMaterial) : updated);
+    } catch (err) {
+      setMaterialsError(err instanceof Error ? err.message : 'Could not save parts');
+      void loadMaterials();
+    }
+  }, [id, loadMaterials]);
+
   // U9 (E7): load persisted job photos; refetch after each capture so the
   // gallery reflects the server, not transient local state.
   const loadPhotos = useCallback(async () => {
@@ -1194,6 +1260,9 @@ export function JobDetailView({
           estimateId={job.estimateId}
           onOpen={() => setModal('estimate')}
         />
+      )}
+      {materialsError && (
+        <p role="alert" data-testid="materials-error" className="text-sm text-destructive">{materialsError}</p>
       )}
       <MaterialsTable materials={materials} onEdit={() => setModal('materials')} onSuppliers={() => setModal('suppliers')} />
 
@@ -1576,7 +1645,7 @@ export function JobDetailView({
         <MaterialsSheet
           serviceType={job.serviceType}
           existing={materials}
-          onClose={updated => { setMaterials(updated); setModal(null); }}
+          onClose={updated => { setModal(null); void saveMaterials(updated); }}
         />
       )}
       {modal === 'cancel' && customer && (

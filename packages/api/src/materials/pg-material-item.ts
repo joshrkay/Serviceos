@@ -65,11 +65,13 @@ import {
   buildMaterialItem,
   CreateMaterialItemInput,
   dateBoundsAreValid,
+  MaterialCategory,
   MaterialItem,
   MaterialItemListOptions,
   MaterialItemRepository,
   MaterialItemStatus,
   requireActorId,
+  validateQuantity,
 } from './material-item';
 
 // Mirrors the per-file isUuid idiom used elsewhere for execution-side id
@@ -101,6 +103,9 @@ interface MaterialItemRow {
   created_by: string;
   purchased_by: string | null;
   purchased_at: Date | null;
+  part_number: string | null;
+  unit_cost_cents: number | null;
+  category: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -118,6 +123,9 @@ function mapRow(row: MaterialItemRow): MaterialItem {
     createdBy: row.created_by,
     ...(row.purchased_by != null ? { purchasedBy: row.purchased_by } : {}),
     ...(row.purchased_at != null ? { purchasedAt: new Date(row.purchased_at) } : {}),
+    ...(row.part_number != null ? { partNumber: row.part_number } : {}),
+    ...(row.unit_cost_cents != null ? { unitCostCents: Number(row.unit_cost_cents) } : {}),
+    ...(row.category != null ? { category: row.category as MaterialCategory } : {}),
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -143,8 +151,9 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
       const { rows } = await client.query<MaterialItemRow>(
         `INSERT INTO material_items
            (id, tenant_id, job_id, description, quantity, vendor, status,
-            needed_by, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+            needed_by, created_by, part_number, unit_cost_cents, category,
+            created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
          RETURNING *`,
         [
           item.id,
@@ -156,6 +165,9 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
           item.status,
           item.neededBy ?? null,
           item.createdBy,
+          item.partNumber ?? null,
+          item.unitCostCents ?? null,
+          item.category ?? null,
         ],
       );
       return mapRow(rows[0]);
@@ -284,6 +296,46 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
           WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
           RETURNING *`,
         [tenantId, id, actorId],
+      );
+      return rows.length > 0 ? mapRow(rows[0]) : null;
+    });
+  }
+
+  async listForJob(tenantId: string, jobId: string): Promise<MaterialItem[]> {
+    if (!isValidTenantId(tenantId) || !isUuid(jobId)) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query<MaterialItemRow>(
+        `SELECT * FROM material_items
+          WHERE tenant_id = $1 AND job_id = $2 AND status <> 'cancelled'
+          ORDER BY created_at ASC, id ASC`,
+        [tenantId, jobId],
+      );
+      return rows.map(mapRow);
+    });
+  }
+
+  async updateQuantity(tenantId: string, id: string, quantity: number): Promise<MaterialItem | null> {
+    validateQuantity(quantity);
+    if (!isValidTenantId(tenantId) || !isUuid(id)) return null;
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query<MaterialItemRow>(
+        `UPDATE material_items SET quantity = $3, updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2 AND status <> 'cancelled'
+          RETURNING *`,
+        [tenantId, id, quantity],
+      );
+      return rows.length > 0 ? mapRow(rows[0]) : null;
+    });
+  }
+
+  async cancel(tenantId: string, id: string): Promise<MaterialItem | null> {
+    if (!isValidTenantId(tenantId) || !isUuid(id)) return null;
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query<MaterialItemRow>(
+        `UPDATE material_items SET status = 'cancelled', updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2 AND status <> 'cancelled'
+          RETURNING *`,
+        [tenantId, id],
       );
       return rows.length > 0 ? mapRow(rows[0]) : null;
     });
