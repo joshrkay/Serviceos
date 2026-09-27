@@ -21,6 +21,7 @@ const base = {
     { description: 'Labor', qty: 2, rate: 95 },
     { description: 'Part', qty: 1, rate: 150 },
   ],
+  totals: { subtotalCents: 34_000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 34_000 },
 };
 
 afterEach(() => {
@@ -63,11 +64,18 @@ describe('printEstimateDocument', () => {
     expect(printEstimateDocument(base)).toBe(false);
   });
 
-  it('uses an explicit total override when provided', () => {
+  it('prints the supplied document totals verbatim (discount + tax), never a line re-sum (#1400)', () => {
     const { win, writes } = makeFakeWindow();
     vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
-    printEstimateDocument({ ...base, totalDollars: 999 });
-    expect(writes.join('')).toContain('$999.00');
+    printEstimateDocument({
+      ...base,
+      totals: { subtotalCents: 34_000, discountCents: 500, taxRateBps: 825, taxCents: 2_764, totalCents: 36_264 },
+    });
+    const html = writes.join('');
+    expect(html).toContain('-$5.00');
+    expect(html).toContain('Tax (8.25%)');
+    expect(html).toContain('$27.64');
+    expect(html).toMatch(/<span>Total<\/span>\s*<span>\$362\.64<\/span>/);
   });
 
   it('defaults the document label to "Estimate"', () => {

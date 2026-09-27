@@ -621,11 +621,15 @@ function LineItemsEditor({ items, editable, onChange, onAddRow, totals }: {
 }
 
 // ─── Document Preview Modal ───────────────────────────────────────────────
-function EstimateDocPreview({ est, lineItems, onClose }: {
-  est: EstCompat; lineItems: LineItem[]; onClose: () => void;
+function EstimateDocPreview({ est, lineItems, totals, onClose }: {
+  est: EstCompat; lineItems: LineItem[];
+  /** #1400 — the document totals the detail view renders (the API's
+   * `est.totals`); the preview and PDF must show the same taxed/discounted
+   * total, never a re-sum of qty × rate. */
+  totals: EstimatePreviewTotals;
+  onClose: () => void;
 }) {
   const estimateTerm = useEstimateTerm();
-  const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   // Real tenant identity for the preview + printed document. This modal
   // previously rendered a fabricated business ('Rivet Pro Services',
   // 'Austin, TX · (512) 555-0000') into the customer-facing PDF, and a
@@ -659,6 +663,9 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Customer preview"
         className="bg-card rounded-2xl w-full max-w-md max-h-[92vh] overflow-y-auto shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
@@ -682,6 +689,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
                 // document so the owner-side preview matches what the
                 // customer downloads from the approval page.
                 lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate })),
+                totals,
               })}
               className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary transition-colors"
             >
@@ -754,10 +762,28 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             </div>
           </div>
 
-          {/* Total */}
+          {/* Totals — #1400: the API's subtotal/discount/tax/total. */}
+          <div className="flex flex-col gap-1 px-3 mb-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">Subtotal</p>
+              <p className="text-xs text-foreground">{centsToDisplay(totals.subtotalCents)}</p>
+            </div>
+            {totals.discountCents > 0 && (
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">Discount</p>
+                <p className="text-xs text-foreground">-{centsToDisplay(totals.discountCents)}</p>
+              </div>
+            )}
+            {totals.taxRateBps > 0 && (
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">Tax ({(totals.taxRateBps / 100).toFixed(2)}%)</p>
+                <p className="text-xs text-foreground">{centsToDisplay(totals.taxCents)}</p>
+              </div>
+            )}
+          </div>
           <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-primary text-primary-foreground mb-5">
             <p className="text-sm">Total</p>
-            <p className="text-sm">${total.toLocaleString()}</p>
+            <p className="text-sm">{centsToDisplay(totals.totalCents)}</p>
           </div>
 
           {/* CTA */}
@@ -1620,6 +1646,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
         <EstimateDocPreview
           est={estCompat}
           lineItems={uiLineItems}
+          totals={totals}
           onClose={() => setPreviewOpen(false)}
         />
       )}

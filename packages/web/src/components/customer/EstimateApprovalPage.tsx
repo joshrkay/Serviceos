@@ -1154,7 +1154,11 @@ export function EstimateApprovalPage() {
               description,
               validUntil: validUntilText,
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate, imageUrl: i.imageUrl })),
-              totalDollars: total,
+              // #1400 — print the same money the page shows: the API's
+              // totals, or the billing-engine-mirroring tier preview.
+              totals: hasSelectable
+                ? { subtotalCents: selectedSubtotalCents, discountCents, taxRateBps, taxCents: previewTaxCents, totalCents: previewTotalCents }
+                : { subtotalCents: apiView.subtotalCents, discountCents: apiView.discountCents, taxRateBps: apiView.taxRateBps ?? 0, taxCents: apiView.taxCents, totalCents: apiView.totalCents },
             })}
             className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
           >
