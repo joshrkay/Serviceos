@@ -101,6 +101,7 @@ import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
+import { buildHarnessPhoneLookups } from '../../src/ai/voice-quality/harness-lookups';
 import type { SpeechTurnHandler } from '../../src/telephony/media-streams/mediastream-adapter';
 import { normalizePhone } from '../../src/compliance/dnc';
 
@@ -355,9 +356,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
               customerRepo: factoryCtx.repos.customerRepo,
               appointmentRepo: factoryCtx.repos.appointmentRepo,
               jobRepo: factoryCtx.repos.jobRepo,
-              invoiceRepo: factoryCtx.repos.invoiceRepo,
-              estimateRepo: factoryCtx.repos.estimateRepo,
-              leadRepo: factoryCtx.repos.leadRepo,
+              // #1395 — media_streams answers lookup_* through the shared
+              // dispatch; invoice / estimate / lead reads reach it only via
+              // this bundle (the same builder Layer 1 uses).
+              lookups: buildHarnessPhoneLookups(factoryCtx.repos),
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
               onSessionTerminated: async (session) => {
