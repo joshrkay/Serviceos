@@ -45,7 +45,10 @@ interface StripePaymentIntentResponse {
 }
 
 export interface StripeFetch {
-  (input: string, init: { method: string; headers: Record<string, string>; body: string }): Promise<{
+  // `body` is optional: a GET (payment_intents/search) must carry none —
+  // the platform fetch throws "Request with GET/HEAD method cannot have
+  // body", which failed every void's PaymentIntent sweep (#1400).
+  (input: string, init: { method: string; headers: Record<string, string>; body?: string }): Promise<{
     ok: boolean;
     status: number;
     text(): Promise<string>;
@@ -187,7 +190,7 @@ export async function searchPaymentIntentsByInvoice(
     if (page) params.set('page', page);
     const res = await fetcher(
       `https://api.stripe.com/v1/payment_intents/search?${params.toString()}`,
-      { method: 'GET', headers, body: '' },
+      { method: 'GET', headers },
     );
     if (!res.ok) {
       const text = await res.text().catch(() => '');

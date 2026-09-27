@@ -188,6 +188,8 @@ export function InvoiceForm({ onCreated, onCancel, initialJobId }: InvoiceFormPr
         lineItems,
         discountCents,
         taxRateBps,
+        // #1400 — the chosen due date (YYYY-MM-DD) was collected but never sent.
+        dueDate: form.dueDate || undefined,
         customerMessage: form.customerMessage.trim() || undefined,
       };
 

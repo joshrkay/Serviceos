@@ -96,6 +96,13 @@ export interface DispatchRepository {
     errorMessage?: string
   ): Promise<MessageDispatch | null>;
   listByTenant(tenantId: string, options?: DispatchListOptions): Promise<DispatchListResult>;
+  /**
+   * #1400 — the dispatch already recorded under this idempotency key
+   * (`idx_dispatches_idempotency` is UNIQUE (tenant_id, idempotency_key)),
+   * so a same-occasion retry replays it instead of tripping the index.
+   * Optional so partial test doubles stay valid.
+   */
+  findByIdempotencyKey?(tenantId: string, idempotencyKey: string): Promise<MessageDispatch | null>;
 }
 
 export class InMemoryDispatchRepository implements DispatchRepository {
@@ -159,6 +166,13 @@ export class InMemoryDispatchRepository implements DispatchRepository {
     };
     this.rows.set(id, updated);
     return { ...updated };
+  }
+
+  async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<MessageDispatch | null> {
+    const row = Array.from(this.rows.values()).find(
+      (r) => r.tenantId === tenantId && r.idempotencyKey === idempotencyKey,
+    );
+    return row ? { ...row } : null;
   }
 
   async listByTenant(tenantId: string, options?: DispatchListOptions): Promise<DispatchListResult> {
@@ -250,6 +264,16 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
          WHERE id = $1 AND tenant_id = $2
          RETURNING *`,
         [id, tenantId, status, deliveredAt ?? null, errorMessage ?? null]
+      );
+      return rows.length ? mapRow(rows[0]) : null;
+    });
+  }
+
+  async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<MessageDispatch | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM message_dispatches WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [tenantId, idempotencyKey]
       );
       return rows.length ? mapRow(rows[0]) : null;
     });

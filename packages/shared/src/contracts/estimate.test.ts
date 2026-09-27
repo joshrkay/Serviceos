@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateSchema, estimateResponseSchema } from './estimate.js';
+import { estimateSchema, estimateResponseSchema, estimateListStage } from './estimate.js';
 
 const baseEstimate = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -63,5 +63,19 @@ describe('estimateResponseSchema', () => {
       customer: { id: 'cust-1', firstName: 'Dana', lastName: 'Lee' },
     });
     expect(parsed.customer?.firstName).toBe('Dana');
+  });
+});
+
+describe('estimateListStage (#1400 list tabs)', () => {
+  const now = Date.parse('2026-09-26T12:00:00Z');
+  it('buckets by opened / validity, not just stored status', () => {
+    expect(estimateListStage({ status: 'draft' }, now)).toBe('draft');
+    expect(estimateListStage({ status: 'ready_for_review' }, now)).toBe('sent');
+    expect(estimateListStage({ status: 'sent', validUntil: '2026-10-01T00:00:00Z' }, now)).toBe('sent');
+    expect(estimateListStage({ status: 'sent', firstViewedAt: '2026-09-25T00:00:00Z' }, now)).toBe('viewed');
+    expect(estimateListStage({ status: 'sent', firstViewedAt: '2026-09-25T00:00:00Z', validUntil: '2026-09-20T00:00:00Z' }, now)).toBe('expired');
+    expect(estimateListStage({ status: 'expired' }, now)).toBe('expired');
+    expect(estimateListStage({ status: 'accepted' }, now)).toBe('accepted');
+    expect(estimateListStage({ status: 'rejected' }, now)).toBe('rejected');
   });
 });

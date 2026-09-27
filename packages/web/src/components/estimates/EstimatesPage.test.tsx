@@ -153,10 +153,10 @@ describe('EstimatesPage', () => {
     expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'accepted' });
   });
 
-  it('Expired tab filters by the expired API status', () => {
+  it('Expired tab filters by the derived expired stage (#1400: includes sent-but-lapsed)', () => {
     renderPage();
     fireEvent.click(screen.getByRole('button', { name: 'Expired' }));
-    expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'expired' });
+    expect(defaultListResult.setFilters).toHaveBeenCalledWith({ stage: 'expired' });
   });
 
   it('surfaces an expired estimate with the Expired label (not Draft)', () => {

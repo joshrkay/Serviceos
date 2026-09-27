@@ -148,6 +148,20 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       paramIndex++;
     }
 
+    if (options?.stage) {
+      // #1400 — mirrors the shared estimateListStage(). "Lapsed" = a sent
+      // estimate past its validUntil (the public page already treats it as
+      // expired; it is only transitioned when someone acts on it).
+      const lapsed = `(status = 'sent' AND valid_until IS NOT NULL AND valid_until < now())`;
+      if (options.stage === 'sent') {
+        conditions.push(`status IN ('ready_for_review', 'sent') AND first_viewed_at IS NULL AND NOT ${lapsed}`);
+      } else if (options.stage === 'viewed') {
+        conditions.push(`status = 'sent' AND first_viewed_at IS NOT NULL AND NOT ${lapsed}`);
+      } else {
+        conditions.push(`(status = 'expired' OR ${lapsed})`);
+      }
+    }
+
     if (options?.jobId) {
       conditions.push(`job_id = $${paramIndex}`);
       params.push(options.jobId);
@@ -164,8 +178,19 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
 
     if (options?.search) {
       const searchParam = `%${options.search}%`;
+      // #1400 — also match the customer's name. Estimates carry only
+      // job_id, so resolve through jobs → customers (tenant-scoped on both
+      // hops, alongside RLS).
       conditions.push(
-        `(estimate_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex})`
+        `(estimate_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex}
+          OR job_id IN (
+            SELECT j.id FROM jobs j
+            JOIN customers c ON c.id = j.customer_id AND c.tenant_id = j.tenant_id
+            WHERE j.tenant_id = $1
+              AND (c.display_name ILIKE $${paramIndex}
+                OR c.company_name ILIKE $${paramIndex}
+                OR (c.first_name || ' ' || c.last_name) ILIKE $${paramIndex})
+          ))`
       );
       params.push(searchParam);
       paramIndex++;
