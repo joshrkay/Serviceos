@@ -191,8 +191,20 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
 
     if (options?.search) {
       const searchParam = `%${options.search}%`;
+      // #1406 D4 — the jobs list promises "customer, address, job #": match
+      // the job's customer name and service address as well (tenant-scoped
+      // subqueries; RLS on customers / service_locations applies too).
       conditions.push(
-        `(summary ILIKE $${paramIndex} OR job_number ILIKE $${paramIndex})`
+        `(summary ILIKE $${paramIndex} OR job_number ILIKE $${paramIndex}
+          OR EXISTS (SELECT 1 FROM customers c
+                      WHERE c.tenant_id = jobs.tenant_id AND c.id = jobs.customer_id
+                        AND (c.display_name ILIKE $${paramIndex}
+                             OR c.company_name ILIKE $${paramIndex}))
+          OR EXISTS (SELECT 1 FROM service_locations l
+                      WHERE l.tenant_id = jobs.tenant_id AND l.id = jobs.location_id
+                        AND (l.street1 ILIKE $${paramIndex}
+                             OR l.city ILIKE $${paramIndex}
+                             OR l.postal_code ILIKE $${paramIndex})))`
       );
       params.push(searchParam);
       paramIndex++;
