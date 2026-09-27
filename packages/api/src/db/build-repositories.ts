@@ -319,7 +319,11 @@ export function buildRepositories(
   // and the rest of the app share a single instance — InMemory repos
   // are stateful, so two separate `new InMemoryJobRepository()` calls
   // would diverge in tests.
-  const jobRepo = pool ? new PgJobRepository(pool) : new InMemoryJobRepository();
+  // #1416 — the in-memory repo searches the job's customer + address through
+  // the shared customer/location repos below (getters: they are built later).
+  const jobRepo = pool
+    ? new PgJobRepository(pool)
+    : new InMemoryJobRepository({ customers: () => customerRepo, locations: () => locationRepo });
 
   // Tier 4 (Team members — PR 3). Same hoist for pending invitations
   // — the Clerk webhook reads them on user.created and the /api/users
