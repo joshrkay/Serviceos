@@ -11,9 +11,9 @@
  *
  *  - a surface whose cell declares the ported Gather branch (today: the
  *    `gather` column) runs the family inside the pipeline;
- *  - a refuse-cell surface (media_streams lookup, D-026) takes EXACTLY the
- *    fall-through it takes today — the drafting funnel, not a new spoken
- *    refusal;
+ *  - media_streams lookup (the D-026 hole) was a refuse cell until #1395
+ *    flipped it: speechTurn now answers it through the same shared
+ *    dispatch;
  *  - a cell served by a DIFFERENT module (media_streams language_switch =
  *    adapter pre-scan; media_streams create_customer = generic FSM path;
  *    media_streams silence ladder = adapter-side A3/T2-F05) leaves the turn
@@ -195,9 +195,19 @@ describe('PR-B lookup — gated by the (lookup, surface) cell', () => {
     expect(h.session.machine.currentState).toBe('intent_capture');
   });
 
-  it('refuse-cell surface (media_streams): the SAME turn takes today\'s exact fall-through into the drafting funnel', async () => {
-    expect(COVERAGE_TABLE.lookup.media_streams.status).toBe('refuse');
-    const listPending = vi.fn(async () => []);
+  it('media_streams (#1395 — the default speechTurn surface): the SAME turn is answered out-of-FSM via the shared dispatch', async () => {
+    const listPending = vi.fn(async () => [
+      {
+        id: 'm1',
+        tenantId: TENANT,
+        description: '3/4 inch copper elbows',
+        quantity: 6,
+        status: 'pending',
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
     const h = makeTurnHarness({
       gateway: gatewayAlways(classifyJson('lookup_materials')),
       actorUserId: 'clerk-tech',
@@ -206,12 +216,46 @@ describe('PR-B lookup — gated by the (lookup, surface) cell', () => {
 
     const fx = await h.turn('what materials do I need');
 
-    // No new refusal line, no lookup dispatch — the declared degradation:
-    // the FSM advanced out of intent_capture into the drafting funnel.
+    expect(listPending).toHaveBeenCalled();
+    const answers = ttsWithSource(fx, 'lookup_skill');
+    expect(answers).toHaveLength(1);
+    expect(String((answers[0]!.payload as { text?: string }).text)).toContain('copper elbows');
+    expect(ttsTexts(fx)).toContain('Anything else I can help you with?');
+    expect(h.events.some((e) => e.type === 'lookup_executed')).toBe(true);
+    // Out-of-FSM: no drafting funnel, no proposal / clarification card — the
+    // caller can ask the next question.
+    expect(h.session.machine.currentState).toBe('intent_capture');
+    expect(h.proposalRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('media_streams: an actor-less caller (no D-026 phone actor) asking an operator lookup is refused, never answered', async () => {
+    const listPending = vi.fn(async () => [
+      {
+        id: 'm1',
+        tenantId: TENANT,
+        description: '3/4 inch copper elbows',
+        quantity: 6,
+        status: 'pending',
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    const h = makeTurnHarness({
+      gateway: gatewayAlways(classifyJson('lookup_materials')),
+      // No actorUserId: caller-ID matched a customer, not a team member.
+      deps: { lookups: materialsLookups(listPending) },
+    });
+
+    const fx = await h.turn('what materials are on the list');
+
     expect(listPending).not.toHaveBeenCalled();
-    expect(ttsWithSource(fx, 'lookup_skill')).toHaveLength(0);
-    expect(h.events.some((e) => e.type === 'lookup_executed')).toBe(false);
-    expect(h.session.machine.currentState).not.toBe('intent_capture');
+    const answers = ttsWithSource(fx, 'lookup_skill');
+    expect(answers).toHaveLength(1);
+    const line = String((answers[0]!.payload as { text?: string }).text);
+    expect(line).not.toContain('copper elbows');
+    expect(line).toContain('owner-level report');
+    expect(h.session.machine.currentState).toBe('intent_capture');
   });
 });
 

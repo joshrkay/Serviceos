@@ -976,3 +976,37 @@ describe('#1277 — chat card gated picks', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /approve/i })).toBeEnabled());
   });
 });
+
+describe('#1384 — /assistant header class contract at 320px (measured in e2e/assistant-header-mobile.spec.ts)', () => {
+  it('the header row and its tool group wrap instead of clipping, and the title block may shrink', () => {
+    renderPage();
+    expect(screen.getByTestId('assistant-header-row').className).toMatch(/\bflex-wrap\b/);
+    expect(screen.getByTestId('assistant-header-tools').className).toMatch(/\bflex-wrap\b/);
+    expect(screen.getByTestId('assistant-avatar').className).toMatch(/\bshrink-0\b/);
+  });
+
+  it('the Conversation toggle keeps its ≥44px glove target', () => {
+    renderPage();
+    expect(screen.getByRole('button', { name: /conversation/i }).className).toMatch(/\bmin-h-11\b/);
+  });
+});
+
+describe('#1384 — ?q= auto-submit under React StrictMode', () => {
+  it('sends the ?q= message exactly once when StrictMode double-invokes the mount effect', async () => {
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    render(
+      <React.StrictMode>
+        <MemoryRouter initialEntries={['/assistant?q=whats+on+today']}>
+          <AssistantPage />
+        </MemoryRouter>
+      </React.StrictMode>,
+    );
+
+    const chatPosts = () =>
+      mockedApiFetch.mock.calls.filter(([url]) => String(url).includes('/api/assistant/chat'));
+    await waitFor(() => expect(chatPosts().length).toBeGreaterThan(0));
+    // Past the 300ms auto-submit delay, so a second scheduled send would have fired.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(chatPosts()).toHaveLength(1);
+  });
+});
