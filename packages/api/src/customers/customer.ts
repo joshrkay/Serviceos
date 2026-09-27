@@ -99,9 +99,25 @@ export interface Customer {
    * rejected at the repository write boundary.
    */
   parentAccountId?: string;
+  /**
+   * #1401 — list-view enrichment: the customer's live (non-archived) service
+   * locations, summarised (shared contract `customerLocationSummarySchema`).
+   * Populated by list reads only (`findByTenant` / `listWithMeta`); drives
+   * the directory's location count and service-type chips.
+   */
+  locations?: CustomerLocationSummary[];
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** #1401 — per-location summary embedded in a customer list row. */
+export interface CustomerLocationSummary {
+  id: string;
+  street1?: string;
+  city?: string;
+  state?: string;
+  serviceTypes: string[];
 }
 
 export interface CreateCustomerInput {
@@ -153,6 +169,13 @@ export interface CustomerListOptions {
    * the behavior is proven by the customer-tags integration test.
    */
   tag?: string;
+  /**
+   * #1401 — only customers with at least one live service location tagged
+   * with this service type (exact match). Server-side so paginated data and
+   * total agree. The in-memory store holds no locations and ignores it —
+   * proven by the customer-list-service-types-1401 integration test.
+   */
+  serviceType?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
   /** Pagination offset. Default 0. */

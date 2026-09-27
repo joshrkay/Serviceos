@@ -69,14 +69,15 @@ function toTimeLabel(iso: string, timezone: string) {
 
 // #1289 — confirmed-vs-pending colour. `confirmed` is written by the
 // confirm_appointment handler (packages/api/src/appointments/appointment.ts);
-// every other status (scheduled, in_progress, completed, canceled, no_show)
-// renders as "pending" amber so a supervisor can scan the day for what still
-// needs a confirmation call. Week/month grid + SMS-confirmation preview are
-// deferred — see PR description.
+// every other status (scheduled, in_progress, canceled, no_show) renders "pending"
+// amber so a supervisor can scan the day for what still needs a confirmation
+// call. #1401 — a completed visit needs no call: it gets its own neutral
+// "done" slate so it never reads as pending. Week/month grid +
+// SMS-confirmation preview are deferred — see PR description.
 function statusPillClass(status: string): string {
-  return status === 'confirmed'
-    ? 'bg-green-100 text-green-700 border-green-200'
-    : 'bg-amber-100 text-amber-700 border-amber-200';
+  if (status === 'confirmed') return 'bg-green-100 text-green-700 border-green-200';
+  if (status === 'completed') return 'bg-slate-100 text-slate-600 border-slate-200';
+  return 'bg-amber-100 text-amber-700 border-amber-200';
 }
 
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
@@ -622,6 +623,13 @@ export function SchedulePage() {
                         )}
                         <span className={`text-xs rounded-full border px-2 py-0.5 ${statusPillClass(appt.status)}`}>{appt.status}</span>
                       </div>
+
+                      {/* #1401 — CancelDialog stores the reason in `notes`. */}
+                      {(appt.status === 'canceled' || appt.status === 'cancelled') && appt.notes && (
+                        <p className="text-xs text-slate-500 mt-1.5" data-testid="schedule-cancel-reason">
+                          Cancellation reason: {appt.notes}
+                        </p>
+                      )}
 
                       {/* Actions */}
                       <div className="flex gap-2 mt-3">
