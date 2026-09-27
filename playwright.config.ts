@@ -302,6 +302,8 @@ export default defineConfig<DevAuthFixtures>({
               'settings-mobile.spec.ts',
               'technician-day-mobile.spec.ts',
               'customer-archive-mobile.spec.ts',
+              'shell-mobile.spec.ts',
+              'chat-proposal-card-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

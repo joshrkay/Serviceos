@@ -137,7 +137,7 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
-import { invoiceReferenceCheck } from './proposals/approval-reference-checks';
+import { invoiceReferenceCheck, serviceLocationReferenceCheck } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -170,6 +170,7 @@ import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
 import { captureServerError, redactedRoute } from './monitoring/capture-server-error';
+import { reportHandlerWrittenServerErrors } from './monitoring/report-server-responses';
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
@@ -327,11 +328,12 @@ import {
   InMemoryTransactionRunner,
 } from './db/tenant-transaction';
 import { createJob as createJobDomain } from './jobs/job';
-import { createInvoice as createInvoiceDomain } from './invoices/invoice';
+import { createAgreementInvoicesService } from './agreements/agreement-invoices-port';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
-import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
+import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
@@ -776,6 +778,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     environment: process.env.NODE_ENV || 'development',
   });
   app.use(createRequestLoggingMiddleware(requestLogger));
+  // #1205 item 3 — a 5xx a route handler answers itself (`catch { res.status(500) }`)
+  // never reaches captureServerError; this hook reports any 5xx response that
+  // nothing already captured, with the same redacted tags. Mounted after request
+  // logging so the correlation id / redacted route exist on the request.
+  app.use(reportHandlerWrittenServerErrors({ capture: captureServerError, routeOf: redactedRoute }));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
@@ -1007,7 +1014,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // QA 2026-09-16 (AST-04) — approval-time reference checks, applied on every
   // approval channel (dashboard single + batch, voice): an id in a payload must
   // name a record this tenant owns (proposals/approval-reference-checks.ts).
-  const approvalReferenceChecks = [invoiceReferenceCheck(invoiceRepo)];
+  const approvalReferenceChecks = [
+    invoiceReferenceCheck(invoiceRepo),
+    // #1271 — a resolved estimate/invoice with no job cannot approve without
+    // a service location to open the job at.
+    serviceLocationReferenceCheck(locationRepo),
+  ];
 
   const webhookSettingsRepo = settingsRepo;
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
@@ -1075,7 +1087,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
-  // time is layered on top in send-service / appointment-confirmation-notifier.
+  // time is layered on top in send-service / transactional-comms-service.
   // STOP/START handler registration is deferred until the consent ledger and
   // customer repos exist (Story 10.6 unifies DNC + consent_events + the
   // customers.consent_status rollup) — see registration below.
@@ -2684,6 +2696,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // `detectServiceLocationGap` no-ops and an unbookable customer's booking
     // auto-approves at confidence 1 and fails in a log.
     locationRepo,
+    // #1045 — back-to-back travel warning on held slots.
+    feasibilityDeps,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -3605,6 +3619,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // #1051 / #1233 review — the tenant PIN-lock owner alert is claimed
     // (insert-if-absent per tenant + lock episode) before it is sent.
     voiceApprovalPinLockAlertRepo,
+    // #1238 — the claim winner schedules one durable retry before sending;
+    // the worker below re-sends while the claim is still unsent.
+    ...(oneTapSmsSender && voiceApprovalPinLockAlertRepo
+      ? { voiceApprovalPinLockAlertRetry: createPinLockAlertRetryScheduler(queue) }
+      : {}),
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {
@@ -3638,6 +3657,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // here. agreementRepo lives a few hundred lines down.
     jobRepo,
     appointmentRepo,
+    // #1045 — live-call holds run the back-to-back drivability check.
+    feasibilityDeps,
     invoiceRepo,
     estimateRepo,
     customerRepo,
@@ -3917,6 +3938,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     );
   }
 
+  // #1238 — consumer of the PIN-lock owner-alert retry. Registered under the
+  // same condition the scheduler is wired above, so no job lacks a consumer.
+  if (oneTapSmsSender && voiceApprovalPinLockAlertRepo) {
+    const pinLockAlertRetryWorker = createPinLockAlertRetryWorker({
+      queue,
+      alertRepo: voiceApprovalPinLockAlertRepo,
+      auditRepo,
+      sendSms: oneTapSmsSender,
+      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+    });
+    workerRegistry.set(
+      pinLockAlertRetryWorker.type,
+      pinLockAlertRetryWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // P8-012 / WS7: feature flag the Media Streams (live audio) path. `'false'`
   // (kill switch) → the existing Gather adapter is the only telephony surface.
   // `'true'` → forced on (validated stack). Unset/`'auto'` → on iff the full
@@ -4099,9 +4136,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 // onTranscribed hook gates the router enqueue on this
                 // phone matching the tenant's approver set. Absent
                 // caller-ID fails closed (notify-only).
-                voicemail: {
-                  ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
-                },
+                // #1223 — plus the STIR/SHAKEN verdict (A-attestation required).
+                voicemail: voicemailJobContextFromPersisted(event),
               },
               `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
             );
@@ -5107,6 +5143,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       userRepo,
       settingsRepo,
       auditRepo,
+      // #1079 / PRD 4.7 — board lateness from truck-location pings.
+      locationPingRepo: technicianLocationPingRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -5741,6 +5779,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1045 — back-to-back travel warning on held slots.
+      feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was
       // uploaded through (POST /api/files/upload-url), so a photo turn's
       // fileIds resolve tenant-scoped into image parts on the estimate draft.
@@ -5831,7 +5871,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // invoice/estimate) with the chosen id and replaces the voice_clarification
       // with the drafted, executable proposal. Same gateway + catalog the voice
       // router uses, so grounding/summary/confidence stay identical.
-      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
+      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo, estimateRepo }),
       entityAliasCandidateCapture,
       // QA 2026-09-16 (AST-04) — an approvable proposal must be an executable
       // one: a payload invoiceId must name an invoice this tenant owns.
@@ -5874,39 +5914,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       return { id: job.id };
     },
   };
-  const agreementsInvoicesService = {
-    async createDraftInvoice(input: {
-      tenantId: string;
-      jobId: string;
-      priceCents: number;
-      description: string;
-      createdBy: string;
-    }) {
-      const invoice = await createInvoiceDomain(
-        {
-          tenantId: input.tenantId,
-          jobId: input.jobId,
-          invoiceNumber: `AGREEMENT-${Date.now()}`,
-          lineItems: [
-            {
-              id: `agreement-${Date.now()}`,
-              description: input.description,
-              quantity: 1,
-              unitPriceCents: input.priceCents,
-              totalCents: input.priceCents,
-              sortOrder: 0,
-              taxable: false,
-            },
-          ],
-          customerMessage: undefined,
-          createdBy: input.createdBy,
-        },
-        invoiceRepo,
-        auditRepo,
-      );
-      return { id: invoice.id };
-    },
-  };
+  // #1058 — the production port lives in agreements/agreement-invoices-port
+  // so the integration suite drives what ships, not a hand-copied replica.
+  const agreementsInvoicesService = createAgreementInvoicesService({
+    invoiceRepo,
+    settingsRepo,
+    auditRepo,
+  });
   app.use(
     '/api/agreements',
     createAgreementsRouter({
@@ -7198,6 +7212,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // truncating the response the caller was already receiving. End it
     // cleanly instead; the first response is the one that counts.
     if (res.headersSent) {
+      // #1205 item 3 — the response is committed, so whatever status it went
+      // out with, this error is a server failure the caller cannot see.
+      // Report it (it previously skipped Sentry entirely).
+      captureServerError(err, req);
       if (!res.writableEnded) res.end();
       return;
     }

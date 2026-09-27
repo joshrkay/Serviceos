@@ -59,6 +59,21 @@ const ZERO_LLM_CALL_SCRIPT_IDS = new Set<string>([
   // call is made (src/ai/voice-quality/corpus/scripts/11-spanish/
   // es-emergency-escalation.json — a single turn, expecting the 911 line).
   'es-emergency-escalation',
+  // #1222 — single-turn life-safety scripts (12-life-safety): the tier
+  // classifier consumes the hazard turn before any classify call — E1 closes
+  // the call on the evacuation script, E2 hands off to the dispatcher. The
+  // two booking-then-hazard scripts DO classify their booking turn and keep
+  // a cassette.
+  'e1-carbon-monoxide-alarm',
+  'e1-house-fire',
+  'e1-electrical-burning',
+  'e1-injury-fall',
+  'e2-burst-pipe-dispatch',
+  'es-e1-monoxido-de-carbono',
+  'es-e1-incendio',
+  'es-e1-cables-quemandose',
+  'es-e1-lesion-caida',
+  'es-e2-tuberia-rota',
 ]);
 
 interface CassetteFile {

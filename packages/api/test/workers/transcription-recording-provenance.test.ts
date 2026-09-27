@@ -216,17 +216,31 @@ describe('#1231 — worker + real handoff hook: a retried caller voicemail never
     const { hook, create, send } = handoff();
     const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, source: 'inbound_call' }));
     await createTranscriptionWorker(voiceRepo, provider, { onTranscribed: hook }).handle(
-      job({ voicemail: { callerPhone: OWNER_PHONE } }),
+      job({ voicemail: { callerPhone: OWNER_PHONE, stirVerstat: 'TN-Validation-Passed-A' } }),
       silentLogger(),
     );
     expect(create.mock.calls[0][0]).toMatchObject({
       actorId: 'voicemail_webhook',
-      metadata: { callerVerified: true, enqueued: true },
+      metadata: { callerVerified: true, enqueued: true, stirVerstat: 'TN-Validation-Passed-A' },
     });
     expect((create.mock.calls[0][0] as { metadata: Record<string, unknown> }).metadata).not.toHaveProperty(
       'retryRequestedBy',
     );
     expect(send.mock.calls[0][1]).toMatchObject({ sourceChannel: 'voicemail' });
+  });
+
+  it('#1223 — an owner caller-ID voicemail without A-attestation stays notify-only; the verdict is audited', async () => {
+    const { hook, create, send } = handoff();
+    const voiceRepo = repo(async () => ({ id: REC, tenantId: TENANT, source: 'inbound_call' }));
+    await createTranscriptionWorker(voiceRepo, provider, { onTranscribed: hook }).handle(
+      job({ voicemail: { callerPhone: OWNER_PHONE, stirVerstat: 'TN-Validation-Passed-B' } }),
+      silentLogger(),
+    );
+    expect(send).not.toHaveBeenCalled();
+    expect(create.mock.calls[0][0]).toMatchObject({
+      eventType: 'voicemail.router_gate',
+      metadata: { callerVerified: false, enqueued: false, stirVerstat: 'TN-Validation-Passed-B' },
+    });
   });
 
   it('CONTROL — retry of an in-app memo: one router job, no sourceChannel, no gate audit', async () => {

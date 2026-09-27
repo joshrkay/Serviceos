@@ -19,9 +19,15 @@
  * pin the shared behavior.
  */
 import {
+  Appointment,
   AppointmentRepository,
   createAppointment,
 } from '../../appointments/appointment';
+import { checkFeasibility } from '../../scheduling/feasibility';
+import type {
+  FeasibilityDependencies,
+  FeasibilityIssue,
+} from '../../scheduling/feasibility-types';
 import { JobRepository } from '../../jobs/job';
 import {
   resolveDateTime,
@@ -46,8 +52,20 @@ export type PlaceHoldFailure =
   | 'job_not_owned'
   | 'hold_write_failed';
 
+/**
+ * #1045 / PRD 3.12 — the back-to-back drivability check on the hold path.
+ * `checked: false` means the check did NOT run (no feasibility deps wired, or
+ * it threw) — never read that as an all-clear. Warnings are advisory: a hold
+ * is still placed; the operator sees them on the booking proposal.
+ */
+export interface HoldFeasibility {
+  checked: boolean;
+  /** Warning-severity issues, each stamped with `metadata.technicianId`. */
+  warnings: FeasibilityIssue[];
+}
+
 export type PlaceHoldResult =
-  | { ok: true; appointmentId: string; holdExpiryAt: Date }
+  | { ok: true; appointmentId: string; holdExpiryAt: Date; feasibility: HoldFeasibility }
   | { ok: false; failed: PlaceHoldFailure };
 
 export interface PlaceHoldDeps {
@@ -59,6 +77,13 @@ export interface PlaceHoldDeps {
    * (unchanged): the write proceeds.
    */
   jobRepo?: JobRepository;
+  /**
+   * #1045 — when wired, the placed hold is run through `checkFeasibility`
+   * (the same composer POST /check-feasibility and the reschedule/reassign
+   * handlers use) so a back-to-back slot that is not drivable surfaces a
+   * `travel_time` warning on the hold instead of being promised blind.
+   */
+  feasibility?: FeasibilityDependencies;
 }
 
 export interface PlaceHoldArgs {
@@ -130,9 +155,62 @@ export async function placeAppointmentHold(
       },
       deps.appointmentRepo,
     );
-    return { ok: true, appointmentId: held.id, holdExpiryAt };
+    const feasibility = await checkHoldFeasibility(deps.feasibility, args.tenantId, held);
+    return { ok: true, appointmentId: held.id, holdExpiryAt, feasibility };
   } catch {
     return { ok: false, failed: 'hold_write_failed' };
+  }
+}
+
+/** Mirrors feasibility.ts's neighbour window: a day either side of the slot. */
+const NEIGHBOUR_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A voice hold is placed before anyone is dispatched, so there is no single
+ * technician to check. The candidates are the technicians whose calendars
+ * neighbour the slot (assigned to a live appointment within a day of it) —
+ * the only calendars a back-to-back drive can be infeasible on. Each one is
+ * run through `checkFeasibility`; their warning-severity issues are returned
+ * stamped with the technician so the operator knows whose day it breaks.
+ * Never throws: a failure degrades to `checked: false`.
+ */
+async function checkHoldFeasibility(
+  deps: FeasibilityDependencies | undefined,
+  tenantId: string,
+  held: Appointment,
+): Promise<HoldFeasibility> {
+  if (!deps) return { checked: false, warnings: [] };
+  try {
+    const neighbours = await deps.appointmentRepo.findByDateRange(
+      tenantId,
+      new Date(held.scheduledStart.getTime() - NEIGHBOUR_WINDOW_MS),
+      new Date(held.scheduledEnd.getTime() + NEIGHBOUR_WINDOW_MS),
+    );
+    const technicianIds = new Set<string>();
+    for (const appt of neighbours) {
+      if (appt.id === held.id || appt.status === 'canceled') continue;
+      const assignments = await deps.assignmentRepo.findByAppointment(tenantId, appt.id);
+      for (const a of assignments) technicianIds.add(a.technicianId);
+    }
+    const warnings: FeasibilityIssue[] = [];
+    for (const technicianId of technicianIds) {
+      const result = await checkFeasibility(
+        {
+          tenantId,
+          appointment: held,
+          proposedTechnicianId: technicianId,
+          proposedScheduledStart: held.scheduledStart,
+          proposedScheduledEnd: held.scheduledEnd,
+        },
+        deps,
+      );
+      for (const w of result.warnings) {
+        warnings.push({ ...w, metadata: { ...(w.metadata ?? {}), technicianId } });
+      }
+    }
+    return { checked: true, warnings };
+  } catch {
+    return { checked: false, warnings: [] };
   }
 }
 
@@ -162,7 +240,7 @@ export async function resolveAndPlaceAppointmentHold(
   deps: PlaceHoldDeps,
   args: ResolveAndPlaceHoldArgs,
 ): Promise<
-  | { ok: true; appointmentId: string; holdExpiryAt: Date; scheduledStart: string; scheduledEnd: string; timezone: string; arrival?: { startUtc: string; endUtc: string } }
+  | { ok: true; appointmentId: string; holdExpiryAt: Date; feasibility: HoldFeasibility; scheduledStart: string; scheduledEnd: string; timezone: string; arrival?: { startUtc: string; endUtc: string } }
   | { ok: false; failed: PlaceHoldFailure }
 > {
   // NO DEFAULT ZONE. This is the autonomous live-call close: it writes a real
@@ -209,6 +287,7 @@ export async function resolveAndPlaceAppointmentHold(
     ok: true,
     appointmentId: held.appointmentId,
     holdExpiryAt: held.holdExpiryAt,
+    feasibility: held.feasibility,
     scheduledStart: resolved.startUtc,
     scheduledEnd: resolved.endUtc,
     timezone: resolved.timezone,

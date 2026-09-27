@@ -95,16 +95,22 @@ interface AlertClaim {
 
 interface ClaimStore {
   claim(input: AlertClaim): Promise<boolean>;
+  markSent(tenantId: string, episodeKey: string): Promise<void>;
+  isSent(tenantId: string, episodeKey: string): Promise<boolean>;
 }
 
-/** Insert-if-absent on (tenant, episode), like the Pg table's primary key. */
-function claimStore(rows: AlertClaim[]): ClaimStore {
+/** Insert-if-absent on (tenant, episode), like the Pg table's primary key; tracks sent_at. */
+function claimStore(rows: AlertClaim[], sentKeys: string[] = []): ClaimStore {
   return {
     claim: async (input) => {
       if (rows.some((r) => r.tenantId === input.tenantId && r.episodeKey === input.episodeKey)) return false;
       rows.push(input);
       return true;
     },
+    markSent: async (tenantId, episodeKey) => {
+      sentKeys.push(`${tenantId}:${episodeKey}`);
+    },
+    isSent: async (tenantId, episodeKey) => sentKeys.includes(`${tenantId}:${episodeKey}`),
   };
 }
 
@@ -114,6 +120,10 @@ interface Harness {
   auditRepo: InMemoryAuditRepository;
   sent: { to: string; body: string }[];
   claims: AlertClaim[];
+  /** #1238 — claims stamped sent_at. */
+  sentKeys: string[];
+  /** #1238 — durable alert retries scheduled. */
+  retries: unknown[];
 }
 
 function makeHarness(
@@ -128,12 +138,15 @@ function makeHarness(
   const auditRepo = opts.auditRepo === null ? undefined : (opts.auditRepo ?? new InMemoryAuditRepository());
   const sent: { to: string; body: string }[] = [];
   const claims: AlertClaim[] = [];
+  const sentKeys: string[] = [];
+  const retries: unknown[] = [];
   const deps = {
     proposalRepo,
     auditRepo,
     settingsRepo: settingsRepo(opts.pinChangedAt),
     smsEventRepo: { hasUnappliedEditRequest: async () => false },
-    pinLockAlertRepo: opts.alertRepo ?? claimStore(claims),
+    pinLockAlertRepo: opts.alertRepo ?? claimStore(claims, sentKeys),
+    pinLockAlertRetry: { schedule: async (job: unknown) => void retries.push(job) },
     oneTapFallback: {
       sendSms: async (to: string, body: string) => {
         if (opts.sendSms) await opts.sendSms(to, body);
@@ -144,7 +157,7 @@ function makeHarness(
       resolveOwnerPhone: async () => OWNER_PHONE,
     },
   } as VoiceApprovalDeps;
-  return { deps, proposalRepo, auditRepo: auditRepo as InMemoryAuditRepository, sent, claims };
+  return { deps, proposalRepo, auditRepo: auditRepo as InMemoryAuditRepository, sent, claims, sentKeys, retries };
 }
 
 async function seed(
@@ -627,6 +640,27 @@ describe('#1233 review — the owner alert is CLAIMED before it is sent', () => 
     const { start } = await toConfirmOutcome(h, 'call-after', 'the Beta payment');
     expect(start.outcome).toBe('readback');
     expect(h.sent).toHaveLength(0);
+  });
+
+  it('#1238 — a send that fails after winning the claim leaves the claim UNSENT and schedules ONE durable retry', async () => {
+    const h = makeHarness({
+      sendSms: async () => {
+        throw new Error('sms provider down');
+      },
+    });
+    await quietly(() => engageTheLock(h));
+    expect(h.claims).toHaveLength(1);
+    expect(h.sentKeys).toEqual([]);
+    expect(h.retries).toEqual([
+      { tenantId: TENANT, episodeKey: h.claims[0]!.episodeKey, strikeCount: 5, attempt: 1 },
+    ]);
+  });
+
+  it('#1238 — a delivered alert stamps the claim sent, so the scheduled retry has nothing to do', async () => {
+    const h = makeHarness();
+    await engageTheLock(h);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sentKeys).toEqual([`${TENANT}:${h.claims[0]!.episodeKey}`]);
   });
 
   it('a claim another call already holds → nothing is sent', async () => {

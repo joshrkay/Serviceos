@@ -21,6 +21,7 @@ import { InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import type { CustomerRepository } from '../../customers/customer';
 import type { LocationRepository } from '../../locations/location';
+import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import {
   RescheduleAppointmentTaskHandler,
@@ -167,6 +168,13 @@ export interface HandlerRegistryDeps {
    * the review card. Optional; absent → no gate (pre-existing behavior).
    */
   locationRepo?: LocationRepository;
+  /**
+   * #1045 / PRD 3.12 — the shared feasibility composer's deps. Wired, the
+   * create_appointment held-slot path runs `checkFeasibility` on the hold and
+   * surfaces any back-to-back `travel_time` warning on the booking card.
+   * Optional; absent → `holdFeasibility: { checked: false }`.
+   */
+  feasibilityDeps?: FeasibilityDependencies;
 }
 
 /**
@@ -179,7 +187,11 @@ export interface HandlerRegistryDeps {
  */
 export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, TaskHandler> {
   const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
+  // #1276F — estimateRepo so an invoice drafted from an estimate bills it.
+  handlers.set(
+    'draft_invoice',
+    new InvoiceTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, estimateRepo: deps.estimateRepo }),
+  );
   handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   handlers.set(
     'create_appointment',
@@ -193,6 +205,8 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
       // auto-approve into a guaranteed execution failure.
       { ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
         ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}) },
+      // #1045 — back-to-back travel warning on the held slot.
+      deps.feasibilityDeps,
     ),
   );
   handlers.set(

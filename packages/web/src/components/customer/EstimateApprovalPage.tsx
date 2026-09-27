@@ -1393,7 +1393,7 @@ function DeclineButton({ token, onDeclined }: {
     return (
       <button
         onClick={() => setConfirming(true)}
-        className="block mx-auto mt-2 text-xs text-slate-500 hover:text-slate-700 underline underline-offset-2"
+        className="mx-auto mt-1 flex min-h-11 items-center px-3 text-xs text-slate-500 hover:text-slate-700 underline underline-offset-2"
       >
         Decline this estimate
       </button>

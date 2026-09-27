@@ -84,7 +84,7 @@ jobs:
       # `npm ci` in this job, so tsx is invoked from there.
       - name: Open or close gate-red issue
         if: always()
-        run: npx tsx ../../.github/scripts/report-gate-failure.ts
+        run: npx --no-install tsx ../../.github/scripts/report-gate-failure.ts
         working-directory: packages/api
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -92,3 +92,6 @@ jobs:
           GATE_NAME: ${{ github.workflow }}
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # #1205 — only a default-branch run may open/close the gate-red issue.
+          GATE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

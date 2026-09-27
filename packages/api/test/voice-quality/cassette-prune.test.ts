@@ -5,7 +5,7 @@
  * The shipped version of that script could delete every entry in every
  * cassette and report success:
  *
- *   - `vitest.voice-quality.config.ts` sets `passWithNoTests: true`, so a
+ *   - `vitest.voice-quality.config.mts` sets `passWithNoTests: true`, so a
  *     run whose include-glob matches nothing EXITS 0. `execFileSync` only
  *     throws on a non-zero exit, so include-glob drift (an entry file
  *     renamed, moved, or re-globbed) meant "refresh succeeded" while no

@@ -124,6 +124,8 @@ export interface VoicemailPersistedEvent {
   recordingSid: string;
   /** Carrier caller-ID minted onto the callback URL at TwiML time. */
   callerPhone?: string;
+  /** #1223 — the call's STIR/SHAKEN verdict, minted onto the callback URL at TwiML time. */
+  stirVerstat?: string;
   durationSeconds: number;
   /** Presigned S3 GET URL for the uploaded voicemail audio. */
   audioUrl: string;
@@ -227,6 +229,8 @@ export function createVoicemailStatusRouter(
     // query params are the ones we minted onto the callback URL ourselves.
     const from = body.From ?? queryString(req.query.From) ?? '';
     const to = body.Called ?? body.To ?? queryString(req.query.To) ?? '';
+    // #1223 — only from the URL we minted (signed); never defaulted.
+    const stirVerstat = queryString(req.query.StirVerstat);
 
     if (!callSid || !recordingSid) {
       res.status(200).send('OK');
@@ -537,6 +541,7 @@ export function createVoicemailStatusRouter(
           callSid,
           recordingSid,
           ...(from ? { callerPhone: from } : {}),
+          ...(stirVerstat ? { stirVerstat } : {}),
           durationSeconds,
           audioUrl,
           inserted: result.inserted,

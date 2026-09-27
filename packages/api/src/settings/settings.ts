@@ -793,7 +793,18 @@ export interface TenantIdentityUpsertFields {
 export interface SettingsRepository {
   create(settings: TenantSettings): Promise<TenantSettings>;
   findByTenant(tenantId: string): Promise<TenantSettings | null>;
-  update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null>;
+  /**
+   * #1238 item 4 — `options.preserveVoiceApprovalPin`: an `escalationSettings`
+   * write keeps the PIN credential keys exactly as they are in the row AT
+   * WRITE TIME (atomically, in the same statement), whatever the update
+   * carries. The generic settings PUT uses it so a save racing a PIN rotation
+   * cannot write back a stale hash.
+   */
+  update(
+    tenantId: string,
+    updates: Partial<TenantSettings>,
+    options?: SettingsUpdateOptions,
+  ): Promise<TenantSettings | null>;
   incrementEstimateNumber(tenantId: string): Promise<number>;
   incrementInvoiceNumber(tenantId: string): Promise<number>;
   /**
@@ -839,6 +850,21 @@ export interface SettingsRepository {
     packId: string,
     bootstrapAiModel: string,
   ): Promise<TenantSettings>;
+}
+
+/**
+ * #1233 review / #1238 — the escalation keys only
+ * `PUT /api/settings/voice-approval-pin` may write.
+ */
+export const VOICE_APPROVAL_PIN_CREDENTIAL_KEYS = [
+  'voice_approval_pin_hash',
+  'voice_approval_pin_changed_at',
+  'voice_approval_challenge',
+] as const;
+
+export interface SettingsUpdateOptions {
+  /** See SettingsRepository.update. */
+  preserveVoiceApprovalPin?: boolean;
 }
 
 export interface ActiveVerticalPackValidationOptions {
@@ -1132,7 +1158,7 @@ export async function updateSettings(
   tenantId: string,
   input: UpdateSettingsInput,
   repository: SettingsRepository,
-  options?: ActiveVerticalPackValidationOptions
+  options?: ActiveVerticalPackValidationOptions & SettingsUpdateOptions
 ): Promise<TenantSettings | null> {
   // Sweep-2 S1: only touch `activeVerticalPacks` when the caller actually
   // provided a value. Unconditionally spreading a normalized `undefined`
@@ -1163,6 +1189,7 @@ export async function updateSettings(
   return repository.update(
     tenantId,
     { ...normalizedInput, updatedAt: new Date() } as Partial<TenantSettings>,
+    ...(options?.preserveVoiceApprovalPin ? [{ preserveVoiceApprovalPin: true }] : []),
   );
 }
 
@@ -1344,10 +1371,23 @@ export class InMemorySettingsRepository implements SettingsRepository {
     return s ? { ...s } : null;
   }
 
-  async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
+  async update(
+    tenantId: string,
+    updates: Partial<TenantSettings>,
+    options?: SettingsUpdateOptions,
+  ): Promise<TenantSettings | null> {
     const s = this.settings.get(tenantId);
     if (!s) return null;
     const { id: _id, tenantId: _tid, createdAt: _ca, ...safeUpdates } = updates;
+    if (options?.preserveVoiceApprovalPin && safeUpdates.escalationSettings) {
+      const next: Partial<EscalationSettings> = { ...safeUpdates.escalationSettings };
+      for (const key of VOICE_APPROVAL_PIN_CREDENTIAL_KEYS) {
+        delete next[key];
+        const current = s.escalationSettings?.[key];
+        if (typeof current === 'string' && current.length > 0) next[key] = current;
+      }
+      safeUpdates.escalationSettings = next as TenantSettings['escalationSettings'];
+    }
     // Sweep-2 S1 parity with PgSettingsRepository: an undefined VALUE means
     // "untouched" — never let it clobber a stored value via spread.
     for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {

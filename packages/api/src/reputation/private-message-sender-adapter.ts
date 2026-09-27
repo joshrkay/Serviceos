@@ -110,8 +110,7 @@ export class MessageDeliveryReviewPrivateMessageSender
   }
 }
 
-/** Minimal HTML escaper for the email body. Mirrors the helper used by
- *  `appointment-confirmation-notifier.ts`. */
+/** Minimal HTML escaper for the email body. */
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

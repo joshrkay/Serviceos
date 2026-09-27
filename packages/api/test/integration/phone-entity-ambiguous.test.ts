@@ -253,7 +253,7 @@ describe('#1118 — the phone asks when two customers share a name (real Postgre
   ): Promise<{ sid: string; bookingTwiml: string }> {
     const voice = await signedPost(
       '/api/telephony/voice',
-      { CallSid: callSid, AccountSid: t.subaccountSid, From: t.ownerPhone, To: t.did },
+      { CallSid: callSid, AccountSid: t.subaccountSid, From: t.ownerPhone, To: t.did, StirVerstat: 'TN-Validation-Passed-A' },
       t.authToken,
     );
     expect(voice.status).toBe(200);
@@ -449,7 +449,7 @@ describe('#1118 — the phone asks when two customers share a name (real Postgre
       utterances: string[],
     ): Promise<{ sessionId: string; twimls: string[] }> {
       const callSid = `CA-1118-b-${crypto.randomUUID().slice(0, 8)}`;
-      await adapter.handleInbound({ callSid, from: t.ownerPhone, to: t.did, tenantId: t.tenantId });
+      await adapter.handleInbound({ callSid, from: t.ownerPhone, to: t.did, tenantId: t.tenantId, stirVerstat: 'TN-Validation-Passed-A' });
       const session = store.findByCallSid(callSid)!;
       const twimls: string[] = [];
       for (const speechResult of utterances) {

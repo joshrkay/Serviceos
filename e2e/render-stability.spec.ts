@@ -1,5 +1,6 @@
 import { test, expect, Page, Route } from '@playwright/test';
 import { installClerkStub } from './helpers/clerk-stub';
+import { buildMeResponse } from './helpers/api-mocks/shell';
 
 /**
  * Render-stability E2E — hermetic proof that live list surfaces do NOT
@@ -61,6 +62,9 @@ const ME = {
   firstName: 'E2E',
   lastName: 'Stub',
   email: 'e2e-stub@example.com',
+  // #1280 — money/settings pages sit behind RequirePermission, which reads
+  // /api/me's permissions (the real route derives them from the role).
+  permissions: buildMeResponse().permissions,
 };
 
 async function dismissWhatsNew(page: Page): Promise<void> {

@@ -169,10 +169,18 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       // never bill is refused, so nothing it plans to bill is dropped silently.
       // A retry of a half-written plan skips this: its schedule already existed
       // when the job completed, so completion handled it.
+      // #1215 — on a job already past completion, manual milestones count
+      // too: completion is what raises them for the owner, and it never runs
+      // again. (With billing off, a manual milestone is still raised at
+      // completion — see mintCompletionMilestones — so only on_completion
+      // milestones are refused there, as in #1214.)
       const hasCompletionMilestones = allocations.some(
         (a) => a.trigger === 'on_completion' && a.amountCents > 0,
       );
-      if (!schedule && hasCompletionMilestones) {
+      const hasLaterMilestones = allocations.some(
+        (a) => a.trigger !== 'on_accept' && a.amountCents > 0,
+      );
+      if (!schedule && hasLaterMilestones) {
         if (this.jobRepo) {
           const job = await this.jobRepo.findById(context.tenantId, payload.jobId);
           if (!job) {
@@ -182,6 +190,8 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
             return { success: false, error: PLAN_REFUSED_JOB_COMPLETED_REASON };
           }
         }
+      }
+      if (!schedule && hasCompletionMilestones) {
         const settings = await this.settingsRepo.findByTenant(context.tenantId);
         if (!settings?.milestoneBillingEnabled) {
           return { success: false, error: PLAN_REFUSED_BILLING_OFF_REASON };

@@ -856,7 +856,7 @@ describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card',
       JSON.stringify({
         intentType: 'create_customer',
         confidence: 0.93,
-        extractedEntities: { displayName: 'Alex', email: 'alex@example.com', phone: '555-0100' },
+        extractedEntities: { displayName: 'Alex Rivera', email: 'alex@example.com', phone: '555-0100' },
       }),
     ]);
     const repo = new InMemoryProposalRepository();
@@ -864,13 +864,13 @@ describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card',
 
     const res = await request(app)
       .post('/api/assistant/chat')
-      .send({ messages: [{ role: 'user', content: 'add customer Alex 555-0100 alex@example.com' }] });
+      .send({ messages: [{ role: 'user', content: 'add customer Alex Rivera 555-0100 alex@example.com' }] });
 
     expect(res.status).toBe(200);
     const proposal = res.body?.message?.proposal;
     expect(proposal.type).toBe('Customer');
     expect(proposal.status).toBe('Pending');
-    expect(proposal.title).toBe('New customer: Alex');
+    expect(proposal.title).toBe('New customer: Alex Rivera');
     // No fabricated warning signals on a complete proposal.
     expect(proposal.missingFields ?? null).toBeNull();
     expect(proposal.meta ?? null).toBeNull();

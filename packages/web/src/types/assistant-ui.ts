@@ -118,6 +118,25 @@ export interface AIProposal {
    */
   missingFields?: string[];
   /**
+   * #1277 — one-tap catalog picks for each gated `lineItems[n].catalogItemId`
+   * (the candidates the inbox renders). Picking resolves the line through
+   * `POST /api/proposals/:id/resolve-line`.
+   */
+  linePicks?: {
+    lineIndex: number;
+    description: string;
+    candidates: { id: string; name?: string; unitPriceCents?: number; score: number }[];
+  }[];
+  /**
+   * #1277 — the candidates behind a gated id (`customerId`, …) a pending
+   * clarification is waiting on. A pick sends that id as the field's edit.
+   */
+  referencePick?: {
+    field: string;
+    reference: string;
+    candidates: { id: string; label: string; hint?: string; score: number }[];
+  };
+  /**
    * The backend's internal proposal type (`create_customer`, `draft_estimate`,
    * …). Lets the card special-case a family without pattern-matching on the
    * humanized `type` label.

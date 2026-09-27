@@ -70,4 +70,29 @@ describe('SlotPicker', () => {
     // react-native-web renders ActivityIndicator without slot text.
     expect(container.textContent).not.toMatch(/No open times/i);
   });
+
+  it('#1243: tells the owner when the offered times rest on defaults — the config notes render with the slots, and still show when no slot is open', () => {
+    const notes = [
+      'Business hours not configured — using the 08:00–17:00 default. Set them in Settings → Business profile.',
+      'Travel buffer not configured — using the 30-minute default.',
+    ];
+    const withSlots = render(
+      createElement(SlotPicker, { slots: SLOTS, timezone: 'UTC', onSelect: vi.fn(), configNotes: notes }),
+    );
+    expect(withSlots.getByText(notes[0])).toBeTruthy();
+    expect(withSlots.getByText(notes[1])).toBeTruthy();
+    cleanup();
+    const empty = render(
+      createElement(SlotPicker, { slots: [], timezone: 'UTC', onSelect: vi.fn(), configNotes: notes }),
+    );
+    expect(empty.getByText(notes[1])).toBeTruthy();
+    expect(empty.getByText(/No open times/i)).toBeTruthy();
+  });
+
+  it('#1243: renders no defaults notice when the tenant configured everything', () => {
+    const { container } = render(
+      createElement(SlotPicker, { slots: SLOTS, timezone: 'UTC', onSelect: vi.fn(), configNotes: [] }),
+    );
+    expect(container.textContent).not.toMatch(/not configured/i);
+  });
 });

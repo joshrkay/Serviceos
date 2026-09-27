@@ -356,11 +356,12 @@ jobs:
       # assertion circular and unable to fail.
       #
       # ADDING OR REMOVING A LAYER 1 CORPUS SCRIPT? Update EXPECTED_SEEDED
-      # here in the same commit. That is the intended cost.
+      # here in the same commit. That is the intended cost. (73 → 85: #1377
+      # added the 12-script 12-life-safety bucket.)
       - name: Cassette seed script executes end to end (blocking)
         run: |
           set -o pipefail
-          EXPECTED_SEEDED=73
+          EXPECTED_SEEDED=85
           npm run voice-quality:seed-cassettes --workspace=packages/api 2>&1 | tee /tmp/seed.log
           if ! grep -qx "Seeded ${EXPECTED_SEEDED}/${EXPECTED_SEEDED} cassettes." /tmp/seed.log; then
             echo "::error title=Cassette seed did not seed the whole corpus::Expected the script to print 'Seeded ${EXPECTED_SEEDED}/${EXPECTED_SEEDED} cassettes.'"
@@ -471,7 +472,7 @@ jobs:
       - name: Replay voice-quality corpus (drift detection only)
         run: |
           set -o pipefail
-          npx vitest run -c vitest.voice-quality.config.ts 2>&1 \
+          npx vitest run -c vitest.voice-quality.config.mts 2>&1 \
             | tee /tmp/vq-replay.log || true
         working-directory: packages/api
       - name: Fail on cassette drift

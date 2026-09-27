@@ -114,7 +114,27 @@ export interface RealLayerTwoGatewayDeps {
   model?: string;
   /** Override base URL for testing (e.g., a mock server). */
   baseUrl?: string;
+  /**
+   * Per-attempt request timeout. Defaults to
+   * {@link LAYER_TWO_REQUEST_TIMEOUT_MS}; overridable for tests.
+   */
+  requestTimeoutMs?: number;
+  /** SDK retry count (timeouts + retryable statuses). Defaults to {@link LAYER_TWO_MAX_RETRIES}. */
+  maxRetries?: number;
 }
+
+/**
+ * #1331 — this harness gateway does NOT get the production resilience stack
+ * (`composeResilienceStack`: retry + per-tier deadline), so without an
+ * explicit bound every call inherited the OpenAI SDK's 10-minute default. One
+ * slow response in the weekly run held `update-customer-address-known-customer`
+ * for ~70 s (report `durationMs: 94334`, corpus norm 14–34 s) and vitest's 60 s
+ * per-script budget killed it. A healthy call here returns in a few seconds; a
+ * stalled attempt is abandoned at 20 s and retried, so one slow response costs
+ * one bounded retry instead of the script.
+ */
+export const LAYER_TWO_REQUEST_TIMEOUT_MS = 20_000;
+export const LAYER_TWO_MAX_RETRIES = 2;
 
 /**
  * Creates a real-mode `LLMGateway` for Layer 2 use:
@@ -143,6 +163,8 @@ export function createRealLayerTwoGateway(
     apiKey: deps.apiKey,
     baseURL,
     defaultModel: model,
+    timeoutMs: deps.requestTimeoutMs ?? LAYER_TWO_REQUEST_TIMEOUT_MS,
+    maxRetries: deps.maxRetries ?? LAYER_TWO_MAX_RETRIES,
   });
 
   const providers = new Map<string, LLMProvider>([[provider.name, provider]]);
@@ -282,6 +304,8 @@ interface AnthropicCompatibleProviderConfig {
   apiKey: string;
   baseURL: string;
   defaultModel: string;
+  timeoutMs: number;
+  maxRetries: number;
 }
 
 class AnthropicCompatibleProvider implements LLMProvider {
@@ -293,6 +317,8 @@ class AnthropicCompatibleProvider implements LLMProvider {
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
+      timeout: config.timeoutMs,
+      maxRetries: config.maxRetries,
     });
     this.defaultModel = config.defaultModel;
   }

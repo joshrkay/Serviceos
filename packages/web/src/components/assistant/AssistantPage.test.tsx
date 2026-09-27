@@ -907,3 +907,72 @@ describe('#1153 — voice-command nav shortcut does not hijack the Assistant com
     expect(screen.getByText("Sure — what's their name?")).toBeInTheDocument();
   });
 });
+
+// ─── #1277: gated picks and refused edits in the chat card ──────────────────
+
+describe('#1277 — chat card gated picks', () => {
+  async function sendAndGetCard(proposal: Record<string, unknown>) {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: 'Here is a draft estimate.', proposal } }),
+    );
+    renderPage();
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Draft an estimate for Priya' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument());
+  }
+
+  const base = {
+    id: 'prop-9',
+    title: 'Estimate: water heater for Priya',
+    summary: 'Needs a customer.',
+    explanation: 'Drafted from chat.',
+    confidence: 'Medium',
+    type: 'Estimate',
+    status: 'Pending',
+  };
+
+  it('a customer edit the server refuses shows the server\'s reason', async () => {
+    await sendAndGetCard({
+      ...base,
+      missingFields: ['customerId'],
+      editFields: [{ label: 'Customer name or ID', key: 'customerId', value: 'Priya' }],
+    });
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse(
+        { error: 'VALIDATION_ERROR', message: 'Invalid payload after edit' },
+        { status: 400 },
+      ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /save & apply/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid payload after edit');
+  });
+
+  it('a catalog pick POSTs resolve-line and lifts the gate the server cleared', async () => {
+    await sendAndGetCard({
+      ...base,
+      missingFields: ['lineItems[0].catalogItemId'],
+      linePicks: [
+        {
+          lineIndex: 0,
+          description: 'Water heater',
+          candidates: [{ id: 'cat-50', name: 'Water heater 50 gal', unitPriceCents: 130000, score: 0.8 }],
+        },
+      ],
+    });
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ id: 'prop-9', sourceContext: { missingFields: [] } }));
+
+    fireEvent.click(screen.getByRole('button', { name: /Water heater 50 gal/ }));
+
+    await waitFor(() =>
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-9/resolve-line',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ lineIndex: 0, catalogItemId: 'cat-50' }) }),
+      ),
+    );
+    await waitFor(() => expect(screen.getByRole('button', { name: /approve/i })).toBeEnabled());
+  });
+});

@@ -149,7 +149,7 @@ function SectionHead({
         )}
       </div>
       {onAll && (
-        <button onClick={onAll} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary transition-colors">
+        <button onClick={onAll} className="-mr-2 flex min-h-11 items-center gap-0.5 px-2 text-xs text-primary hover:text-primary transition-colors">
           View all <ArrowRight size={11} />
         </button>
       )}
@@ -572,7 +572,7 @@ export function HomePage() {
                   <TrendingUp size={14} className="text-primary" />
                   <p className="text-sm text-foreground">Lead pipeline</p>
                 </div>
-                <button onClick={() => navigate('/leads')} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary transition-colors">
+                <button onClick={() => navigate('/leads')} className="-mr-2 flex min-h-11 items-center gap-0.5 px-2 text-xs text-primary hover:text-primary transition-colors">
                   View all <ArrowRight size={11} />
                 </button>
               </div>

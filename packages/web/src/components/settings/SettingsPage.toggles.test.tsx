@@ -83,6 +83,21 @@ describe('SettingsPage Quick toggles persistence', () => {
     );
   });
 
+  it('#1283 — the business-profile "Edit" button meets the 44px tap target', async () => {
+    apiFetchMock.mockResolvedValue(jsonResponse({}));
+    fetchLanguageMock.mockResolvedValue({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+    renderPage();
+    const edit = await screen.findByRole('button', { name: 'Edit' });
+    expect(edit.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+    expect(edit.className).toMatch(/(^|\s)min-w-11(\s|$)/);
+  });
+
   it('hydrates spanishMode from /api/settings/language on mount', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
@@ -147,11 +162,11 @@ describe('SettingsPage Quick toggles persistence', () => {
     renderPage();
     const toggle = await screen.findByRole('switch', { name: 'Text technicians about assignments' });
     await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
-    // ≥44px tap target: the 20px (h-5) track plus a 12px ::before overlay on
-    // every side (before:-inset-3) = a 44px-tall, 60px-wide hit area.
-    expect(toggle.className).toContain('h-5');
-    expect(toggle.className).toContain('before:absolute');
-    expect(toggle.className).toContain('before:-inset-3');
+    // ≥44px tap target on the switch element ITSELF (min-h-11 / min-w-11):
+    // e2e/settings-mobile.spec.ts measures each role="switch" box, and a
+    // ::before overlay does not count toward it. The 20px track is inside.
+    expect(toggle.className).toContain('min-h-11');
+    expect(toggle.className).toContain('min-w-11');
     fireEvent.click(toggle);
 
     await waitFor(() => {

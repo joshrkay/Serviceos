@@ -12,6 +12,55 @@ waiting* names the §5/§8 rows and the rung they cannot reach until the answer 
 
 ---
 
+## Reconciliation 2026-09-26 (#1024 close-out, `origin/main` @ 284ff29d2)
+
+Every parked entry below, checked against its ticket and its row. The entries
+themselves are kept as written (history); this table is the current state.
+
+| Entry | Ticket | State now | Row(s) now |
+|---|---|---|---|
+| O-2 E1 script sign-off | #1000 (closed) | **Answered 2026-09-26** (trade professional + counsel; placeholder hard-flagged until then; engineering adds a write path). **Not yet reconciled with the code — see the new entry below:** since 52157b6f0 the voice gate refuses AI answering on any tenant without a reviewed script, and the promised write path does not exist | 2.5 4 (T1), I8 4; phone rows 3.1 / 3.7 / 3.10 held at 4 by it |
+| O-4 static PIN | #1000 | Answered 2026-09-26 (accept for now) | I3 4 (T1) |
+| O-6 approval transport | #1000 | Answered 2026-09-26 (`speechTurn`, Gather degrade, #838) | I3; §8.6 voice-approval rows |
+| O-9 second classifier | #1000 | Answered 2026-09-26 (amend the commitment to name the covered surfaces) — the PRD text amendment is not yet made | C5 2, 7.11 3 |
+| Q12 discount/tax | #1000 | Answered 2026-09-26 (fail closed; implemented with #1288) | no story row |
+| Intuit consent click | #1000 | Answered 2026-09-26 (Josh clicks through on a sandbox company) — **not yet done**. The fan-out half this entry also named is **done** (lane Z: accounting-sync entry in `sweep-tenant-fanout.test.ts`) | 9.11 3 → **4− (T1·T4)**; 5 waits on the click |
+| Google Business Profile | #1000 | Answered 2026-09-26 (Josh connects one tenant) — not yet done | 9.4 sweep 4 (T4) / approval half 5 |
+| Railway census | #999 / #1000 | Resolved (rung 5 is the map's ceiling) | — |
+| §8.12 memberships minimum | #1058 (closed) | Lane T built all three of (a)/(b)/(c) on every path; **Josh's "intended minimum" answer is still not recorded** — if it is "auto-collect is the path", the port reverts | 8.12 3 → **4 (T1·T4)** |
+| Stripe test key (dues, off-session, Terminal) | #1000 | Open — no key issued | 8.5b/c 3; 5.5 live-charge half |
+| Spanish E1 (#1056) | #1056 (closed) | **Fixed** — "fuga de gas" reaches E1 at the real handler (`e1-life-safety-handler.test.ts`, 31/31) | 2.5 4 (T1), Spanish clause met |
+| §8.5 card-on-file audit | — | Open (money-class emission not landed) | 8.5 card-on-file 4− |
+| #1011 §E (E1–E7) | #995 | E1: superseded by the O-2 answer (a write path is promised) · E2–E5: no answer recorded · E6: runner adopted by practice (`chromium` + CLI testcontainer; `chromium-noauthbypass` for technician sessions), not formally ratified · E7: no answer | 2.6, 2.7 |
+| 3.8 no-provider silence | #1077 (closed) | **Fixed** by PR #1375 — `UndeliveredConfirmationRecorder` writes one `failed` / `provider: none` row per reachable channel; dead class deleted | 3.8 **4 (T1·T3)** |
+| 4.7 wire or retire | #1079 (closed) | **Wired** by PR #1375 — the board API serves `lateness`; no board renders it | 4.7 2 → **4 (T1)** |
+| 9.5 execute-time cap | #1080 (closed) | Closed | 9.5 5 (T2) |
+| 1.6 live Twilio subaccount | #1016 | Open — no credential | 1.6 3 |
+| 1.10 brand-voice flag | #1016 | Open — no answer | 1.10 4 |
+| 5.5 simulated reader | #1018 | Open — needs the Stripe test key above | 5.5 live-charge half |
+| #1102 refuse vs skip | #1102 (closed) | Fixed by PR #1107 (refuse); #1109 closed too | 5.5 4 (T1) both halves |
+
+**Count still parked on Josh:** 9 — the O-2/voice-gate conflict (new, below),
+the Intuit click, the GBP connect, the Stripe test key (covers 8.5b/c and
+5.5), the 8.12 minimum, 1.6's Twilio subaccount, 1.10's flag, the §E questions
+E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
+
+### NEW 2026-09-26 — the O-2 answer and the shipped voice gate disagree (from lane Z's re-grade of #1015)
+- **What:** O-2's answer says E1 may launch publicly *with the placeholder hard-flagged* until a trade
+  professional and counsel sign off, and that engineering adds a write path for `e1_reviewed_script`.
+  The code does the opposite: since `52157b6f0` (2026-09-15, "fail closed on safety and billing
+  gaps") `createVoiceGate` (`packages/api/src/voice/voice-gate.ts`) sends **every** call on a tenant
+  with no `tenant_settings.e1_reviewed_script` to voicemail ("We're completing this line's safety
+  setup"), and nothing but SQL writes that column. So no tenant's phone line can be answered by the
+  AI in production today, and every phone-lane Playwright spec was red at `origin/main` until its
+  fixture wrote the column by SQL.
+- **Josh's call:** (a) keep the fail-closed gate and ship the promised write path (then a reviewed
+  script is a precondition of go-live, which O-2's answer did not say), or (b) let the gate pass on
+  the hard-flagged placeholder, as the O-2 answer reads.
+- **Until decided:** phone-surface rows that reach 5 only with the SQL-provisioned script are held at
+  4 (3.1, 3.7 phone, 3.10), and 2.5 stays at 4.
+- **Parked:** 2026-09-26 · **Answer:**
+
 ## Decisions (product, not engineering)
 
 | Decision | What blocks | Rows waiting | Parked | Answer |
@@ -54,6 +103,7 @@ O-1 is resolved: Basic is $50/month and Enterprise is $150/month; both include 3
 - **What:** the recurring-agreements sweep renews and bills on real rows (proven, `membership-renewal-sweep.test.ts`). **Corrected on review (PR #1053) — an earlier version of this entry said *every* dues invoice is an undunnable draft, which is wrong.** On the CONFIGURED path (`autoCollectDues` + a saved default card + a Stripe key) `app.ts:5760-5766` issues the invoice with a 30-day due date *before* charging, so a decline leaves an open, dunnable invoice — proven at real Postgres, and the real overdue sweep then chases it. The gap is the **DEFAULT** path (`autoCollectDues` defaults to false in `createAgreement`) and the **no-saved-card** case (`no_card` returns before issuance, `dues-collector.ts:85`): there the invoice is `draft` with no `due_date`, so dues are not collectable without a human and the 8.9 cadence cannot reach them. Numbering as `AGREEMENT-<epoch ms>` outside the tenant sequence holds on both paths. The gaps are pinned by ordinary tests asserting the current wrong value.
 - **Josh's call:** does "recurring revenue is actually recurring" require (a) issuing the dues invoice, (b) a due date so the cadence chases it, (c) numbering off the tenant sequence — all three, or a different minimum? The correction above sharpens this into a concrete choice: the configured path already does (a) and (b), so is the answer *"auto-collect IS the intended path, and the default should flip / onboarding must drive owners to it"*, or *"the default path must stand on its own and issue dues regardless"*? The severity turns on how many real memberships sit on the default path or have no saved card — which only you can see.
 - **Until decided:** row 8.12 stays at 3 STORY NOT MET; #1058 holds the analysis with file:line.
+- **2026-09-26 (lane T, #1058):** built the issue's own stated desired behaviour — all three of (a) issue, (b) due date on tenant terms, (c) tenant-sequence numbering — on EVERY path (`agreements/agreement-invoices-port.ts`). If Josh's answer is instead *"auto-collect is the intended path"*, revert that port to draft-only; the tests in `membership-renewal-sweep.test.ts` say exactly what to flip.
 
 ### Stripe test-mode key for `StripeDuesCollector` (from #1023) — Credentials
 - **What:** **narrowed on review (PR #1053).** The orchestration is now proven at real Postgres by injecting `stripeFetch` — the HTTPS boundary only, as the deposit-checkout path already does — leaving the real collector, invoice ops, `issueInvoice`, `recordPayment` and repositories in the path; success, 402 decline (with decline metadata surviving to the audit row) and no-card are all covered. The earlier claim that "any injected collector is *mocked is not proven*" conflated injecting a fake `DuesCollector` (which would be) with injecting the HTTP boundary (which is not). What a test-mode credential would still add is narrower: that Stripe's API accepts our PaymentIntent request shape and that real decline codes come back in the shape we parse. Same credential unblocks §8.5's off-session-charge half (see the #1022 entry above).

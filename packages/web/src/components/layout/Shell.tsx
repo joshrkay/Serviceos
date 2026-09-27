@@ -241,12 +241,12 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
     }
   };
 
-  // Touch targets: the topbar (mobile) variant must be >= 40px tall;
-  // the sidebar variant matches the desktop nav density but keeps a
-  // 40px minimum hit area too.
+  // Touch targets (#1283, CLAUDE.md mobile bar): the topbar (mobile)
+  // variant's segments are ≥44×44 (min-h-11 min-w-11); the sidebar variant
+  // matches the desktop nav density but keeps a 40px minimum hit area.
   const sizeClass = variant === 'sidebar'
     ? 'text-xs px-2 py-1 min-h-[40px]'
-    : 'text-xs px-1.5 min-h-[40px]';
+    : 'text-xs px-0.5 min-h-11 min-w-11';
 
   return (
     <div
@@ -305,6 +305,10 @@ function ShellInner() {
   const isNavigating = dataRouterState?.navigation?.state === 'loading';
   const [cameraOpen, setCameraOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  // #1280 — account sheet for viewers without settings:view (technicians):
+  // the mobile avatar can't deep-link into the route-guarded /settings, but
+  // it must still offer Sign out.
+  const [accountOpen, setAccountOpen] = useState(false);
   const isOnline = useOnlineStatus();
   const voiceBarRef = useRef<VoiceBarHandle>(null);
   const isExact = (to: string) =>
@@ -418,6 +422,7 @@ function ShellInner() {
   const bottomNav = visibleItems(getBottomNav(currentMode));
   // #1292 — "More" tab, supervisor bottom bar only (see MOBILE_MORE_ITEMS).
   const moreNavItems = currentMode === 'supervisor' ? visibleItems(MOBILE_MORE_ITEMS) : [];
+  const canViewSettings = grantedPermissions.has('settings:view');
 
   // The mode toggle calls this; if the destination crosses out of
   // supervisor coverage, we surface the confirmation modal instead of
@@ -585,16 +590,22 @@ function ShellInner() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
 
         {/* Mobile top bar */}
-        <div className="md:hidden flex items-center justify-between px-4 py-3 bg-card border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-lg bg-primary">
+        {/* #1283 — every control here is ≥44×44 and the row fits 320px:
+            px-3 (24) + logo (24) + mode toggle (132) + 3 icons (3×44) = 312px.
+            The "Rivet" wordmark only shows from 360px up. */}
+        <div
+          data-testid="mobile-topbar"
+          className="md:hidden flex items-center justify-between gap-1 px-3 py-1 bg-card border-b border-border shrink-0"
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-primary">
               <Zap size={12} className="text-primary-foreground" />
             </span>
-            <span className="text-sm text-foreground">Rivet</span>
+            <span className="hidden min-[360px]:inline text-sm text-foreground">Rivet</span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center">
             {showModeToggle && (
-              <div className="w-36 sm:w-44">
+              <div className="w-[132px] sm:w-44">
                 <ModeToggle
                   current={currentMode}
                   canFieldServe={canFieldServe}
@@ -616,31 +627,50 @@ function ShellInner() {
                   : 'Open approval inbox'
               }
               data-testid="mobile-inbox-bell"
-              className="relative flex items-center justify-center text-muted-foreground"
+              className="relative flex size-11 items-center justify-center text-muted-foreground"
             >
               <Bell size={18} />
               {pendingProposalCount > 0 && (
                 <span
                   data-testid="mobile-inbox-badge"
-                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-primary-foreground"
+                  className="absolute top-1.5 right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-primary-foreground"
                   style={{ fontSize: 9 }}
                 >
                   {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
                 </span>
               )}
             </NavLink>
-            <NavLink to="/settings" className="relative flex items-center justify-center">
-              <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
-                location.pathname.startsWith('/settings')
-                  ? 'bg-primary text-primary-foreground ring-2 ring-primary/30'
-                  : 'bg-secondary text-secondary-foreground'
-              }`}>{initials}</span>
-              <span className={`absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border border-card ${
-                location.pathname.startsWith('/settings') ? 'bg-primary' : 'bg-muted-foreground'
-              }`}>
-                <Settings size={8} className="text-primary-foreground" />
-              </span>
-            </NavLink>
+            {canViewSettings ? (
+              <NavLink
+                to="/settings"
+                aria-label="Settings"
+                data-testid="mobile-account-button"
+                className="relative flex size-11 items-center justify-center"
+              >
+                <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
+                  location.pathname.startsWith('/settings')
+                    ? 'bg-primary text-primary-foreground ring-2 ring-primary/30'
+                    : 'bg-secondary text-secondary-foreground'
+                }`}>{initials}</span>
+                <span className={`absolute bottom-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full border border-card ${
+                  location.pathname.startsWith('/settings') ? 'bg-primary' : 'bg-muted-foreground'
+                }`}>
+                  <Settings size={8} className="text-primary-foreground" />
+                </span>
+              </NavLink>
+            ) : (
+              <button
+                type="button"
+                aria-label="Account"
+                data-testid="mobile-account-button"
+                onClick={() => setAccountOpen(true)}
+                className="relative flex size-11 items-center justify-center"
+              >
+                <span className="flex size-7 items-center justify-center rounded-full bg-secondary text-secondary-foreground text-xs">
+                  {initials}
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -671,7 +701,7 @@ function ShellInner() {
 
         {/* ── Mobile bottom tab bar (in flow, not fixed) ── */}
         <div className="md:hidden shrink-0 bg-card border-t border-border">
-          <div className="flex">
+          <div className="flex" data-testid="mobile-bottom-nav">
             {bottomNav.map(({ to, label, icon: Icon }) => {
               const active = isExact(to);
               const showInboxBadge = to === '/inbox' && pendingProposalCount > 0;
@@ -679,7 +709,7 @@ function ShellInner() {
                 <NavLink
                   key={to}
                   to={to}
-                  className={`relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
+                  className={`relative flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
                     active ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
@@ -752,6 +782,43 @@ function ShellInner() {
                 </NavLink>
               ))}
             </nav>
+          </div>
+        </div>
+      )}
+
+      {/* #1280 — account sheet (viewers without settings:view). */}
+      {accountOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-end md:hidden"
+          data-testid="mobile-account-sheet"
+          onClick={() => setAccountOpen(false)}
+        >
+          <div
+            className="w-full rounded-t-2xl bg-card p-4 pb-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="min-w-0">
+                <p className="text-sm text-foreground truncate">{displayName}</p>
+                <p className="text-xs text-muted-foreground truncate">{roleLabel}</p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setAccountOpen(false)}
+                className="flex size-11 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
+              >
+                <CloseIcon size={16} />
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => signOut({ redirectUrl: '/login' })}
+              className="flex w-full items-center gap-3 rounded-lg px-3 min-h-11 text-sm text-foreground hover:bg-secondary"
+            >
+              <LogOut size={16} className="text-muted-foreground" />
+              Sign out
+            </button>
           </div>
         </div>
       )}

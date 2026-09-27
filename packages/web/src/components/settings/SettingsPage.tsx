@@ -1138,7 +1138,7 @@ export function SettingsPage() {
           </div>
           <button
             onClick={() => setBusinessProfileOpen(true)}
-            className="text-xs text-slate-400 hover:text-white transition-colors shrink-0"
+            className="-mr-2 flex min-h-11 min-w-11 shrink-0 items-center justify-center px-2 text-xs text-slate-400 hover:text-white transition-colors"
           >
             Edit
           </button>
@@ -1297,11 +1297,14 @@ export function SettingsPage() {
                 aria-checked={value}
                 aria-label={label}
                 onClick={() => onChange(!value)}
-                // The 20px track keeps its look; the ::before overlay grows the
-                // hit area by 12px each side to a 44px-tall tap target.
-                className={`relative shrink-0 mt-0.5 inline-flex h-5 w-9 items-center rounded-full transition-colors before:absolute before:-inset-3 before:content-[''] ${value ? 'bg-blue-600' : 'bg-slate-200'}`}
+                // The switch element itself is the 44px tap target (a ::before
+                // overlay doesn't count toward its box); the 20px track is drawn
+                // inside it and keeps its look.
+                className="-my-3 flex min-h-11 min-w-11 shrink-0 items-center justify-center"
               >
-                <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${value ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                <span className={`inline-flex h-5 w-9 items-center rounded-full transition-colors ${value ? 'bg-blue-600' : 'bg-slate-200'}`}>
+                  <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${value ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </span>
               </button>
             </div>
           ))}

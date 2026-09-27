@@ -36,6 +36,7 @@ import { convertEstimateToInvoice } from '../../src/invoices/convert-estimate';
 import { maybeAutoInvoiceOnCompletion } from '../../src/invoices/auto-invoice-on-completion';
 import { mintCompletionMilestones, heldMilestonesIdempotencyKey } from '../../src/invoices/schedule-completion';
 import { CreateInvoiceExecutionHandler } from '../../src/proposals/execution/invoice-execution-handler';
+import { CreateInvoiceScheduleExecutionHandler } from '../../src/proposals/execution/invoice-schedule-handler';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -452,6 +453,171 @@ describe('#1203 milestone-billing guard', () => {
       await plan(j, undefined, BOTH_ON_COMPLETION);
       await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id });
       expect((await mintCompletionMilestones(mintDeps(), j)).map((i) => i.totals.totalCents)).toEqual([50000, 50000]);
+    });
+  });
+
+  /**
+   * #1215 — the gaps left after #1213/#1214: manual milestones were never
+   * billed, turning milestone billing off after approval dropped the balance,
+   * and re-converting after a canceled conversion returned the canceled
+   * invoice as "Invoice created".
+   */
+  describe('#1215 — manual milestones, billing turned off, canceled conversions', () => {
+    const DEPOSIT_MANUAL_FINAL: InvoiceMilestone[] = [
+      { label: 'Deposit', type: 'percent', value: 3000, trigger: 'on_accept' },
+      { label: 'Rough-in', type: 'percent', value: 3000, trigger: 'manual' },
+      { label: 'Final', type: 'remainder', value: 0, trigger: 'on_completion' },
+    ];
+    const mintDeps = () => ({ scheduleRepo, invoiceRepo, settingsRepo, auditRepo, proposalRepo, estimateRepo });
+    const convertDeps = () => ({ estimateRepo, invoiceRepo, jobRepo, settingsRepo, auditRepo, scheduleRepo, actorId: 'u1' });
+    const lines = (p: Proposal) =>
+      (p.payload.lineItems as Array<{ description: string; totalCents: number }>).map((l) => [l.description, l.totalCents]);
+
+    it('completion mints the on_completion milestone AND holds the manual one for the owner — the $10k job no longer leaves $3k unbilled', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' });
+      const p = await plan(j, estimate.id, DEPOSIT_MANUAL_FINAL);
+      await invoice(j, 'INV-0001', 30000, { estimateId: estimate.id, scheduleId: p.id, milestoneIndex: 0 });
+
+      const minted = await mintCompletionMilestones(mintDeps(), j);
+      expect(minted.map((i) => [i.milestoneIndex, i.totals.totalCents])).toEqual([[2, 40000]]);
+
+      const held = await proposalRepo.findByStatus(TENANT, 'ready_for_review');
+      expect(held).toHaveLength(1);
+      expect(held[0].proposalType).toBe('draft_invoice');
+      expect(held[0].idempotencyKey).toBe(heldMilestonesIdempotencyKey(p.id));
+      expect(lines(held[0])).toEqual([['Rough-in', 30000]]);
+      expect(held[0].sourceContext).toMatchObject({ source: 'milestone_mint_held', holdReason: 'manual_milestone', milestoneIndexes: [1] });
+      expect(held[0].summary).toBe('Manual milestone ready to invoice: Rough-in');
+      expect(held[0].explanation).toBe(
+        'Rough-in ($300.00) is a manual milestone in the plan, so completing the job did not invoice it. ' +
+          'Approve this to invoice it now, or reject it if it is not owed yet and invoice it by hand when it is.',
+      );
+      const audit = (await auditRepo.findByEntity(TENANT, 'job', j.id)).filter((e) => e.eventType === 'invoice.milestone_mint_held');
+      expect(audit).toHaveLength(1);
+      expect(audit[0].metadata).toMatchObject({ scheduleId: p.id, amountCents: 30000, holdReason: 'manual_milestone' });
+
+      // Idempotent.
+      expect(await mintCompletionMilestones(mintDeps(), j)).toEqual([]);
+      expect(await proposalRepo.findByStatus(TENANT, 'ready_for_review')).toHaveLength(1);
+    });
+
+    it('a blocked plan holds its manual milestones together with the completion ones', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' });
+      await plan(j, estimate.id, [
+        { label: 'Rough-in', type: 'percent', value: 3000, trigger: 'manual' },
+        { label: 'Final', type: 'remainder', value: 0, trigger: 'on_completion' },
+      ]);
+      await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id });
+      await mintCompletionMilestones(mintDeps(), j);
+      const [held] = await proposalRepo.findByStatus(TENANT, 'ready_for_review');
+      expect(lines(held)).toEqual([['Rough-in', 30000], ['Final', 70000]]);
+      expect(held.sourceContext).toMatchObject({ holdReason: 'estimate_already_billed' });
+    });
+
+    it("convert's refusal names the manual amount too, not just the completion balance", async () => {
+      const { job: j, estimate } = await seedJob();
+      const p = await plan(j, estimate.id, DEPOSIT_MANUAL_FINAL);
+      await invoice(j, 'INV-0001', 30000, { estimateId: estimate.id, scheduleId: p.id, milestoneIndex: 0 });
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, convertDeps())).rejects.toThrow(
+        'This estimate is billed by a milestone plan: INV-0001 ($300.00) so far. A whole-estimate invoice would bill it twice, so none was created. ' +
+          'The plan invoices the remaining $400.00 when the job is completed, and raises its manual milestones ($300.00) for your approval then.',
+      );
+    });
+
+    it('once completion is behind, the "not invoiced automatically" amount includes the manual milestones', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' });
+      const p = await plan(j, estimate.id, DEPOSIT_MANUAL_FINAL);
+      await invoice(j, 'INV-0001', 30000, { estimateId: estimate.id, scheduleId: p.id, milestoneIndex: 0 });
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, convertDeps())).rejects.toThrow(
+        /The plan's remaining \$700\.00 is not invoiced automatically/,
+      );
+    });
+
+    it('a plan whose only later milestone is manual blocks the whole-estimate draft and auto-invoice yields to it', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' }, { autoInvoiceOnCompletion: true });
+      await plan(j, estimate.id, [
+        { label: 'Whenever', type: 'remainder', value: 0, trigger: 'manual' },
+      ]);
+      expect(
+        await maybeAutoInvoiceOnCompletion({ estimateRepo, invoiceRepo, proposalRepo, settingsRepo, auditRepo, scheduleRepo }, j),
+      ).toBeNull();
+    });
+
+    it('plan approval on a completed job is refused when the plan has manual milestones (nothing would ever bill them)', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' });
+      const handler = new CreateInvoiceScheduleExecutionHandler(scheduleRepo, invoiceRepo, settingsRepo, estimateRepo, proposalRepo, jobRepo);
+      const result = await handler.execute(
+        {
+          id: uuidv4(),
+          tenantId: TENANT,
+          proposalType: 'create_invoice_schedule',
+          status: 'approved',
+          payload: {
+            jobId: j.id,
+            estimateId: estimate.id,
+            totalAmountCents: 100000,
+            milestones: [
+              { label: 'Deposit', type: 'percent', value: 5000, trigger: 'on_accept' },
+              { label: 'Rest', type: 'remainder', value: 0, trigger: 'manual' },
+            ],
+          },
+          summary: 'Plan',
+          createdBy: 'u1',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        } as Proposal,
+        { tenantId: TENANT, executedBy: 'owner-1' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^This job is already completed/);
+      expect(await scheduleRepo.findByJob(TENANT, j.id)).toEqual([]);
+    });
+
+    it('milestone billing turned off after approval: the unminted balance is held for the owner, not dropped', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' }, { autoInvoiceOnCompletion: true });
+      const p = await plan(j, estimate.id, DEPOSIT_BALANCE);
+      await invoice(j, 'INV-0001', 50000, { estimateId: estimate.id, scheduleId: p.id, milestoneIndex: 0 });
+      await settingsRepo.update(TENANT, { milestoneBillingEnabled: false });
+
+      // Auto-invoice stands aside (the deposit is a live invoice on the job)...
+      expect(
+        await maybeAutoInvoiceOnCompletion({ estimateRepo, invoiceRepo, proposalRepo, settingsRepo, auditRepo, scheduleRepo }, j),
+      ).toBeNull();
+      // ...and completion mints nothing (the kill switch holds) but raises the balance to the owner.
+      expect(await mintCompletionMilestones(mintDeps(), j)).toEqual([]);
+      expect(await invoiceRepo.findByJob(TENANT, j.id)).toHaveLength(1);
+      const held = await proposalRepo.findByStatus(TENANT, 'ready_for_review');
+      expect(held).toHaveLength(1);
+      expect(lines(held[0])).toEqual([['Balance', 50000]]);
+      expect(held[0].sourceContext).toMatchObject({ holdReason: 'milestone_billing_off' });
+      expect(held[0].summary).toBe('Milestone invoice held: milestone billing is off (Balance)');
+      expect(held[0].explanation).toBe(
+        'Completing the job would have invoiced Balance ($500.00) from the milestone plan, but milestone billing is off, ' +
+          'so no milestone invoice was created. Approve this to invoice it anyway, or reject it and invoice the remaining balance by hand.',
+      );
+    });
+
+    it('billing off and nothing minted: no hold — the plan bills nothing and a whole invoice is the bill (unchanged)', async () => {
+      const { job: j, estimate } = await seedJob({ status: 'completed' }, { milestoneBillingEnabled: false });
+      await plan(j, estimate.id, BOTH_ON_COMPLETION);
+      expect(await mintCompletionMilestones(mintDeps(), j)).toEqual([]);
+      expect(await proposalRepo.findByStatus(TENANT, 'ready_for_review')).toEqual([]);
+    });
+
+    it('re-converting after the conversion was canceled refuses with a reason instead of returning the canceled invoice', async () => {
+      const { job: j, estimate } = await seedJob();
+      await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id, status: 'canceled' });
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, convertDeps())).rejects.toThrow(
+        'This estimate is linked to INV-0001, which is canceled, so no new invoice can be linked to it and none was created. ' +
+          'Invoice it by hand (without choosing the estimate).',
+      );
+      await expect(convertEstimateToInvoice(TENANT, estimate.id, convertDeps())).rejects.toBeInstanceOf(ConflictError);
+    });
+
+    it('a void conversion that still holds a payment is still returned as the conversion (it bills)', async () => {
+      const { job: j, estimate } = await seedJob();
+      const inv = await invoice(j, 'INV-0001', 100000, { estimateId: estimate.id, status: 'void', amountPaidCents: 20000 });
+      expect((await convertEstimateToInvoice(TENANT, estimate.id, convertDeps()))?.id).toBe(inv.id);
     });
   });
 });
