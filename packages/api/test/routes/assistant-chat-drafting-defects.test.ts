@@ -399,3 +399,61 @@ describe('#1276B — a literal job UUID in a draft request names that job\'s cus
     expect(missingFieldsFor(persisted)).toContain('customerId');
   });
 });
+
+describe('#1384 — a chained "X, then Y" segment naming a literal job UUID names that job\'s customer', () => {
+  const JOB = '9b2c4d6e-1f3a-4b5c-8d7e-0a1b2c3d4e5f';
+  const CUSTOMER = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+
+  it('the estimate segment of "Draft an estimate for job <uuid> …, then create an invoice for job <uuid> …" drafts for the job\'s customer', async () => {
+    // The classifier answers by what it is shown: the estimate half (and the
+    // whole turn, which leads with it) is draft_estimate; the invoice half
+    // alone is create_invoice.
+    const gateway = {
+      complete: vi.fn(async (req: { taskType?: string; messages?: Array<{ content: string }> }) => {
+        const shown = req.messages?.at(-1)?.content ?? '';
+        const content =
+          req.taskType === 'classify_intent'
+            ? /draft an estimate/i.test(shown)
+              ? classifierReply('draft_estimate', { customerName: `job ${JOB}` })
+              : classifierReply('create_invoice', { jobReference: JOB })
+            : req.taskType === 'draft_estimate'
+              ? JSON.stringify({ lineItems: [{ description: 'Water heater install', quantity: 1, unitPrice: 100000 }] })
+              : req.taskType === 'draft_invoice'
+                ? JSON.stringify({ lineItems: [{ description: 'Service call', quantity: 1, unitPrice: 25000 }] })
+                : '{}';
+        return { content, model: 'mock', provider: 'mock', tokenUsage: { input: 1, output: 1, total: 2 }, latencyMs: 1 } satisfies LLMResponse;
+      }),
+    } as unknown as LLMGateway;
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      gateway,
+      proposalRepo,
+      { resolve: vi.fn(async () => ({ kind: 'not_found' })) } as unknown as EntityResolver,
+      { jobRepo },
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          {
+            role: 'user',
+            content: `Draft an estimate for job ${JOB}: water heater install $1,000, then create an invoice for job ${JOB} totaling $250`,
+          },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TENANT);
+    const estimate = persisted.find((p) => p.proposalType === 'draft_estimate');
+    const invoice = persisted.find((p) => p.proposalType === 'draft_invoice');
+    expect(estimate?.chainId).toBeTruthy();
+    expect(estimate?.payload.customerId).toBe(CUSTOMER);
+    expect(estimate?.payload.jobId).toBe(JOB);
+    expect(missingFieldsFor(estimate!)).not.toContain('customerId');
+    expect(invoice?.payload.customerId).toBe(CUSTOMER);
+    expect(invoice?.payload.jobId).toBe(JOB);
+  });
+});

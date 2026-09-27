@@ -2777,6 +2777,11 @@ describe('FIX 10(i) (ANS-001) — per-tenant e1ReviewedScript overrides the plac
       tenantId: 'tenant-fix10i',
       businessName: 'Acme Plumbing',
       e1ReviewedScript: REVIEWED_SCRIPT,
+      // #1389 / O-2 — live only with both sign-offs.
+      e1Reviewers: [
+        { kind: 'trade_professional', name: 'Pat Reviewer', credential: 'M-00000', reviewedAt: '2026-09-20T15:00:00.000Z' },
+        { kind: 'counsel', name: 'Robin Counsel', credential: 'Bar 00000000', reviewedAt: '2026-09-21T16:30:00.000Z' },
+      ],
       timezone: 'America/Chicago',
       estimatePrefix: 'EST-',
       invoicePrefix: 'INV-',
