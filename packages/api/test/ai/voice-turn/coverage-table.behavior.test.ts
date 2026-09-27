@@ -235,7 +235,7 @@ afterEach(() => {
 
 // ── lookup ──────────────────────────────────────────────────────────────────
 
-describe('lookup — answered on Gather, silently degraded on media-streams (D-026)', () => {
+describe('lookup — answered on every live surface through the shared dispatch', () => {
   const materialsLookups = (listPending: ReturnType<typeof vi.fn>): PhoneLookupDeps =>
     ({
       answers: {
@@ -275,26 +275,37 @@ describe('lookup — answered on Gather, silently degraded on media-streams (D-0
     expect(h.session.machine.currentState).toBe('intent_capture');
   });
 
-  it('media_streams: the SAME turn gets no answer — speechTurn has no lookup branch (cell: refuse + hole)', async () => {
-    expectRefuseHole(COVERAGE_TABLE.lookup.media_streams);
-    const listPending = vi.fn(async () => []);
+  it('media_streams: the SAME turn is answered out-of-FSM through the shared dispatch (cell: reachable — #1395 closed the D-026 hole)', async () => {
+    const cell = COVERAGE_TABLE.lookup.media_streams;
+    expect(cell.status).toBe('reachable');
+    expect(cell.status === 'reachable' && cell.hole).toBeUndefined();
+    const listPending = vi.fn(async () => [
+      {
+        id: 'm1',
+        tenantId: TENANT,
+        description: '3/4 inch copper elbows',
+        quantity: 6,
+        status: 'pending',
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
     const h = makeProcessorHarness({
       gateway: gatewayAlways(classifyJson('lookup_materials')),
       actorUserId: 'clerk-tech',
-      // Even with the SAME lookup deps shape available at composition time,
-      // speechTurn never consults them — there is no branch to receive them.
       deps: { lookups: materialsLookups(listPending) },
     });
 
     const fx = await h.turn('what materials do I need');
 
-    // No lookup answer was spoken and the shared dispatch never ran.
-    expect(listPending).not.toHaveBeenCalled();
-    expect(ttsWithSource(fx, 'lookup_skill')).toHaveLength(0);
-    expect(h.events.some((e) => e.type === 'lookup_executed')).toBe(false);
-    // Instead the turn fell into the drafting funnel (the degradation the
-    // cell declares): the FSM advanced out of intent_capture.
-    expect(h.session.machine.currentState).not.toBe('intent_capture');
+    expect(listPending).toHaveBeenCalled();
+    const answers = ttsWithSource(fx, 'lookup_skill');
+    expect(answers).toHaveLength(1);
+    expect(String((answers[0]!.payload as { text?: string }).text)).toContain('copper elbows');
+    expect(h.events.some((e) => e.type === 'lookup_executed')).toBe(true);
+    // Out-of-FSM, exactly like Gather: the state is untouched.
+    expect(h.session.machine.currentState).toBe('intent_capture');
   });
 
   it('inapp: the SAME turn is answered out-of-FSM through the shared dispatch (cell: reachable)', async () => {

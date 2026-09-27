@@ -42,10 +42,29 @@ type Actor = { tenantId: string; userId: string; role: 'owner' | 'dispatcher' | 
 
 const REVIEWED_SCRIPT =
   'If anyone is in danger, hang up and dial 911 now. Get everyone out of the house and wait outside for the gas company.';
-const ATTESTATION = {
-  reviewedByName: 'Pat Reviewer',
-  reviewedByRole: 'Licensed master plumber; reviewed with counsel',
+// #1389 / O-2 — two structured sign-offs: a licensed trade professional AND counsel.
+const TRADE_PRO = {
+  kind: 'trade_professional',
+  name: 'Pat Reviewer',
+  credential: 'Master Plumber License M-00000 (TX)',
   reviewedAt: '2026-09-20T15:00:00.000Z',
+};
+const COUNSEL = {
+  kind: 'counsel',
+  name: 'Robin Counsel',
+  credential: 'State Bar No. 00000000 (TX)',
+  reviewedAt: '2026-09-21T16:30:00.000Z',
+};
+const ATTESTATION = { reviewers: [TRADE_PRO, COUNSEL] };
+/** What GET reports while the placeholder runs and nothing is saved. */
+const NOTHING_SAVED = {
+  status: 'placeholder',
+  reviewedScript: null,
+  reviewedByName: null,
+  reviewedByRole: null,
+  reviewedAt: null,
+  reviewers: [],
+  missingReviewerKinds: ['trade_professional', 'counsel'],
 };
 
 describe('Postgres integration — #1386 owner writes the reviewed E1 script', () => {
@@ -92,13 +111,7 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
     as(owner(tenantA));
     const before = await request(app).get('/api/settings/e1-script');
     expect(before.status).toBe(200);
-    expect(before.body).toEqual({
-      status: 'placeholder',
-      reviewedScript: null,
-      reviewedByName: null,
-      reviewedByRole: null,
-      reviewedAt: null,
-    });
+    expect(before.body).toEqual(NOTHING_SAVED);
 
     const put = await request(app)
       .put('/api/settings/e1-script')
@@ -107,7 +120,12 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
     const live = {
       status: 'reviewed',
       reviewedScript: REVIEWED_SCRIPT,
-      ...ATTESTATION,
+      // The pre-#1389 single-reviewer fields carry a summary of both.
+      reviewedByName: 'Pat Reviewer; Robin Counsel',
+      reviewedByRole: 'licensed trade professional; counsel',
+      reviewedAt: COUNSEL.reviewedAt,
+      reviewers: [TRADE_PRO, COUNSEL],
+      missingReviewerKinds: [],
     };
     expect(put.body).toEqual(live);
 
@@ -119,12 +137,29 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
     expect(row).toBeDefined();
     expect(row?.actorId).toBe(tenantA.userId);
     expect(row?.actorRole).toBe('owner');
-    expect(row?.metadata).toMatchObject({ ...ATTESTATION, previousStatus: 'placeholder' });
+    expect(row?.metadata).toMatchObject({ reviewers: [TRADE_PRO, COUNSEL], previousStatus: 'placeholder' });
 
     // T1 — tenant B still runs the placeholder.
     as(owner(tenantB));
     const b = await request(app).get('/api/settings/e1-script');
     expect(b.body.status).toBe('placeholder');
+  });
+
+  it('#1389: the script saved with a licensed trade professional AND counsel clears the placeholder, and GET lists both reviewers', async () => {
+    const t = await createTestTenant(pool);
+    as(owner(t));
+    const put = await request(app)
+      .put('/api/settings/e1-script')
+      .send({ script: REVIEWED_SCRIPT, reviewers: [TRADE_PRO, COUNSEL] });
+    expect(put.status).toBe(200);
+
+    const after = await request(app).get('/api/settings/e1-script');
+    expect(after.body).toMatchObject({
+      status: 'reviewed',
+      reviewedScript: REVIEWED_SCRIPT,
+      reviewers: [TRADE_PRO, COUNSEL],
+      missingReviewerKinds: [],
+    });
   });
 
   it('refuses a dispatcher and a technician (403), and a script with no attestation (400) — nothing is saved', async () => {
@@ -144,13 +179,34 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
     expect(noAttestation.status).toBe(400);
     const future = await request(app)
       .put('/api/settings/e1-script')
-      .send({ script: REVIEWED_SCRIPT, ...ATTESTATION, reviewedAt: '2999-01-01T00:00:00.000Z' });
+      .send({ script: REVIEWED_SCRIPT, reviewers: [TRADE_PRO, { ...COUNSEL, reviewedAt: '2999-01-01T00:00:00.000Z' }] });
     expect(future.status).toBe(400);
 
     const after = await request(app).get('/api/settings/e1-script');
     expect(after.body.status).toBe('placeholder');
     const rows = await auditRepo.findRecentByTenant(t.tenantId);
     expect(rows.filter((e) => e.eventType.startsWith('settings.e1_script'))).toHaveLength(0);
+  });
+
+  it('#1389: one sign-off is not enough — a pre-#1389 single-reviewer body, a lone trade professional, or two of one kind are refused (400)', async () => {
+    const t = await createTestTenant(pool);
+    as(owner(t));
+    const bodies = [
+      {
+        script: REVIEWED_SCRIPT,
+        reviewedByName: 'Pat Reviewer',
+        reviewedByRole: 'Licensed master plumber; reviewed with counsel',
+        reviewedAt: '2026-09-20T15:00:00.000Z',
+      },
+      { script: REVIEWED_SCRIPT, reviewers: [TRADE_PRO] },
+      { script: REVIEWED_SCRIPT, reviewers: [TRADE_PRO, { ...TRADE_PRO, name: 'Sam Second' }] },
+      { script: REVIEWED_SCRIPT, reviewers: [TRADE_PRO, { ...COUNSEL, credential: '' }] },
+    ];
+    for (const body of bodies) {
+      const res = await request(app).put('/api/settings/e1-script').send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await request(app).get('/api/settings/e1-script')).body).toEqual(NOTHING_SAVED);
   });
 
   it('the owner can revert to the placeholder; the revert is audited', async () => {
@@ -160,13 +216,7 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
 
     const del = await request(app).delete('/api/settings/e1-script');
     expect(del.status).toBe(200);
-    expect(del.body).toEqual({
-      status: 'placeholder',
-      reviewedScript: null,
-      reviewedByName: null,
-      reviewedByRole: null,
-      reviewedAt: null,
-    });
+    expect(del.body).toEqual(NOTHING_SAVED);
     const rows = await auditRepo.findRecentByTenant(t.tenantId);
     const cleared = rows.find((e) => e.eventType === 'settings.e1_script.cleared');
     expect(cleared?.metadata).toMatchObject({ previousStatus: 'reviewed' });
@@ -291,6 +341,32 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
       reason: 'life_safety_e1',
       e1ScriptPlaceholder: false,
     });
+  });
+
+  it('#1389: a script on file with only the pre-#1389 single attestation is NOT spoken — the call runs the hard-flagged placeholder and GET says placeholder', async () => {
+    const t = await answeringTenant();
+    // The row #1388 could write: script + one free-text reviewer, no
+    // structured sign-offs (set directly — that write path no longer exists).
+    await pool.query(
+      `UPDATE tenant_settings
+          SET e1_reviewed_script = $2, e1_reviewed_by_name = 'Pat Reviewer',
+              e1_reviewed_by_role = 'Licensed master plumber', e1_reviewed_at = NOW()
+        WHERE tenant_id = $1`,
+      [t.tenantId, REVIEWED_SCRIPT],
+    );
+    as(owner(t));
+    expect((await request(app).get('/api/settings/e1-script')).body).toMatchObject({
+      status: 'placeholder',
+      reviewedScript: REVIEWED_SCRIPT,
+      missingReviewerKinds: ['trade_professional', 'counsel'],
+    });
+
+    const c = await inboundCall(t.tenantId);
+    const twiml = await turn(c, EN_GAS);
+
+    expect(twiml).not.toContain('wait outside for the gas company');
+    expect(twiml).toContain('please leave the building immediately without using light switches');
+    expect((await e1Row(c))?.metadata).toMatchObject({ tier: 'E1', e1ScriptPlaceholder: true });
   });
 
   // ─── Life-safety proof on the placeholder (O-2: hard-flagged, not voicemail) ─

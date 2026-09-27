@@ -7181,6 +7181,21 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS e1_reviewed_by_role TEXT,
       ADD COLUMN IF NOT EXISTS e1_reviewed_at TIMESTAMPTZ;
   `,
+  // #1389 / O-2 — the reviewed E1 script needs TWO sign-offs, a licensed
+  // trade professional AND counsel. Each is a structured entry
+  // ({kind, name, credential, reviewedAt}) in this JSONB array, written only
+  // by the owner-only PUT /api/settings/e1-script. NULL = no structured
+  // sign-off; the script is live only when both kinds are present. The
+  // single-reviewer columns from 293 stay (additive; drops nothing).
+  // tenant_settings already carries FORCE RLS + tenant_isolation.
+  '294_tenant_settings_e1_reviewers': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS e1_reviewers JSONB;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewers_array,
+      ADD CONSTRAINT tenant_settings_e1_reviewers_array
+        CHECK (e1_reviewers IS NULL OR jsonb_typeof(e1_reviewers) = 'array') NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

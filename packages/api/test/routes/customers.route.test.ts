@@ -94,6 +94,14 @@ describe('POST /api/customers', () => {
     });
     expect(res.body.details.fields.firstName).toEqual(expect.arrayContaining([expect.stringMatching(/100/)]));
   });
+
+  it('#1397: an invalid primaryPhone is a 400 VALIDATION_ERROR naming primaryPhone, not a 500', async () => {
+    const res = await createCustomer(app, { primaryPhone: 'not-a-phone' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.message).toMatch(/primaryPhone/);
+  });
 });
 
 describe('GET /api/customers', () => {
@@ -541,5 +549,38 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison', () => 
       .send({ losingId: '11111111-1111-1111-1111-111111111111' });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
+describe('#1397 — customer audit rows carry the request actor role, not "unknown"', () => {
+  let app: Express;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(async () => {
+    ({ app, auditRepo } = await buildTestApp());
+  });
+
+  it('customer.updated is attributed to the resolved role (owner)', async () => {
+    const created = await createCustomer(app);
+    const id = created.body.id as string;
+
+    const res = await request(app).put(`/api/customers/${id}`).send({ lastName: 'Jones' });
+    expect(res.status).toBe(200);
+
+    const events = await auditRepo.findByEntity(TEST_TENANT_ID, 'customer', id);
+    const updated = events.find((e) => e.eventType === 'customer.updated');
+    expect(updated?.actorRole).toBe('owner');
+  });
+
+  it('customer.archived and customer.restored are attributed to the resolved role (owner)', async () => {
+    const created = await createCustomer(app);
+    const id = created.body.id as string;
+
+    expect((await request(app).post(`/api/customers/${id}/archive`)).status).toBe(200);
+    expect((await request(app).post(`/api/customers/${id}/restore`)).status).toBe(200);
+
+    const events = await auditRepo.findByEntity(TEST_TENANT_ID, 'customer', id);
+    expect(events.find((e) => e.eventType === 'customer.archived')?.actorRole).toBe('owner');
+    expect(events.find((e) => e.eventType === 'customer.restored')?.actorRole).toBe('owner');
   });
 });

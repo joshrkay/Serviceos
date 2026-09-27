@@ -137,6 +137,27 @@ describe('DraftEstimateExecutionHandler — tenant-scoped customer existence che
     expect(jobs[0].customerId).toBe(realCustomerId);
   });
 
+  it('#1397: estimate.created is attributed to the executing role, not "unknown"', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const auditedHandler = new DraftEstimateExecutionHandler(
+      new InMemoryEstimateRepository(),
+      new InMemorySettingsRepository(),
+      jobRepo,
+      locationRepo,
+      auditRepo,
+      customerRepo,
+    );
+
+    const result = await auditedHandler.execute(
+      makeProposal({ customerId: realCustomerId, lineItems: LINE_ITEMS }),
+      { ...CONTEXT, executedByRole: 'owner' },
+    );
+
+    expect(result.success).toBe(true);
+    const created = auditRepo.getAll().find((e) => e.eventType === 'estimate.created');
+    expect(created?.actorRole).toBe('owner');
+  });
+
   it('an unresolved draft carrying only customerReference is refused, not guessed at', async () => {
     const result = await handler.execute(
       makeProposal({ customerReference: 'the Henderson place', lineItems: LINE_ITEMS }),

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditEventInput, AuditRepository, createAuditEvent } from '../audit/audit';
+import { ValidationError } from '../shared/errors';
 import type { ConsentEventRepository } from '../compliance/consent-events';
 import {
   checkCustomerDuplicatesPg,
@@ -343,7 +344,7 @@ export async function createCustomer(
   auditRepo?: AuditRepository
 ): Promise<CustomerWithWarnings> {
   const errors = validateCustomerInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
 
   // P1-019: Advisory dedup BEFORE writing — never blocks creation.
   // The build prompt is explicit: warnings only, frontend handles the
@@ -426,13 +427,15 @@ export async function updateCustomer(
   // toggle also appends to the consent_events ledger so the change is
   // visible to BOTH outbound gates (a portal/dashboard opt-out suppresses
   // voice too, not just SMS).
-  consentLedger?: ConsentEventRepository
+  consentLedger?: ConsentEventRepository,
+  // #1397 — the request's resolved role, recorded as the audit actor_role.
+  actorRole?: string
 ): Promise<Customer | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 
   const validationErrors = validateCustomerUpdateInput(existing, input);
-  if (validationErrors.length > 0) throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
+  if (validationErrors.length > 0) throw new ValidationError(`Validation failed: ${validationErrors.join(', ')}`, { errors: validationErrors });
 
   const updates: Partial<Customer> = { ...input, updatedAt: new Date() };
   // An explicit '' means "clear this optional field" (the web edit form
@@ -499,7 +502,7 @@ export async function updateCustomer(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'unknown',
+      actorRole: actorRole ?? 'unknown',
       eventType: 'customer.updated',
       entityType: 'customer',
       entityId: id,
@@ -516,7 +519,8 @@ export async function archiveCustomer(
   id: string,
   repository: CustomerRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  actorRole?: string
 ): Promise<Customer | null> {
   const updated = await repository.update(tenantId, id, {
     isArchived: true,
@@ -528,7 +532,7 @@ export async function archiveCustomer(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'unknown',
+      actorRole: actorRole ?? 'unknown',
       eventType: 'customer.archived',
       entityType: 'customer',
       entityId: id,
@@ -544,7 +548,8 @@ export async function restoreCustomer(
   id: string,
   repository: CustomerRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  actorRole?: string
 ): Promise<Customer | null> {
   const updated = await repository.update(tenantId, id, {
     isArchived: false,
@@ -556,7 +561,7 @@ export async function restoreCustomer(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'unknown',
+      actorRole: actorRole ?? 'unknown',
       eventType: 'customer.restored',
       entityType: 'customer',
       entityId: id,

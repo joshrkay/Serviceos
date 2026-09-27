@@ -563,6 +563,12 @@ export interface TenantSettings {
   e1ReviewedByRole?: string | null;
   e1ReviewedAt?: Date | null;
   /**
+   * #1389 / O-2 — the two structured sign-offs the reviewed E1 script needs
+   * (migration 294): one licensed trade professional AND one counsel. The
+   * script is live only when both are present — see `liveE1Script`.
+   */
+  e1Reviewers?: E1Reviewer[] | null;
+  /**
    * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
    * migration 204), so pilots receive it unless they turn it off. Optional
    * on the type so pre-migration rows / legacy fixtures read as "on" via
@@ -740,6 +746,8 @@ export interface UpdateSettingsInput {
   e1ReviewedByName?: string | null;
   e1ReviewedByRole?: string | null;
   e1ReviewedAt?: Date | null;
+  /** #1389 / O-2 — the two structured sign-offs; null clears (with the script). */
+  e1Reviewers?: E1Reviewer[] | null;
   /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
@@ -1165,6 +1173,46 @@ export function createSettingsOwnerPhoneResolver(
     const settings = await repository.findByTenant(tenantId);
     return settings?.ownerPhone ?? null;
   };
+}
+
+/**
+ * #1389 / O-2 — who must sign the E1 life-safety script before it replaces
+ * the placeholder: a licensed trade professional AND counsel (owner decision
+ * O-2, docs/audit/blocked-on-josh.md). One entry of each kind.
+ */
+export const E1_REVIEWER_KINDS = ['trade_professional', 'counsel'] as const;
+export type E1ReviewerKind = (typeof E1_REVIEWER_KINDS)[number];
+
+export interface E1Reviewer {
+  kind: E1ReviewerKind;
+  name: string;
+  /** Trade license / bar number and jurisdiction, as the reviewer gave it. */
+  credential: string;
+  /** ISO-8601 instant the reviewer signed off. */
+  reviewedAt: string;
+}
+
+/** The O-2 sign-offs a saved script is still missing, in E1_REVIEWER_KINDS order. */
+export function missingE1ReviewerKinds(
+  settings: Pick<TenantSettings, 'e1Reviewers'> | null | undefined,
+): E1ReviewerKind[] {
+  const present = new Set((settings?.e1Reviewers ?? []).map((r) => r.kind));
+  return E1_REVIEWER_KINDS.filter((kind) => !present.has(kind));
+}
+
+/**
+ * The tenant's reviewed E1 script IF it is live, else null (= the embedded
+ * placeholder runs, hard-flagged). Live means a non-blank script AND both O-2
+ * sign-offs. The one predicate every E1 consumer shares — the settings GET,
+ * the Twilio Gather adapter and the text-mode driver — so the banner can
+ * never say "placeholder" while a call speaks the saved script, or back.
+ */
+export function liveE1Script(
+  settings: Pick<TenantSettings, 'e1ReviewedScript' | 'e1Reviewers'> | null | undefined,
+): string | null {
+  const script = settings?.e1ReviewedScript?.trim();
+  if (!script) return null;
+  return missingE1ReviewerKinds(settings).length === 0 ? script : null;
 }
 
 export async function updateSettings(
