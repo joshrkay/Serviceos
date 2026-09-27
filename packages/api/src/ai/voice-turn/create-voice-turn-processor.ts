@@ -238,6 +238,7 @@ import type { LocationRepository } from '../../locations/location';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
   refKeyForEntityKind,
+  pickFollowUpNotFoundIsTerminal,
   resolveDisambiguationFollowUp,
   resolveSchedulingEntities,
   type PendingEntityAmbiguity,
@@ -1549,6 +1550,7 @@ export function createVoiceTurnProcessor(
     tenantId: string,
     intent: string,
     entities: Record<string, unknown>,
+    pinnedRefs?: Record<string, string>,
   ): Promise<SchedulingEntityResolution> {
     try {
       // U4 — tenant zone (resolved once per session) so "Thursday at 2pm"
@@ -1563,7 +1565,9 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
-        timezone ? { timezone } : undefined,
+        timezone || pinnedRefs
+          ? { ...(timezone ? { timezone } : {}), ...(pinnedRefs ? { pinnedRefs } : {}) }
+          : undefined,
       );
     } catch (err) {
       // A resolver hiccup must never strand a live caller. The classifier's
@@ -1619,8 +1623,9 @@ export function createVoiceTurnProcessor(
     tenantId: string,
     intent: string,
     entities: Record<string, unknown>,
+    pinnedRefs?: Record<string, string>,
   ): Promise<CallingAgentEvent> {
-    const resolution = await runTurnResolution(session, tenantId, intent, entities);
+    const resolution = await runTurnResolution(session, tenantId, intent, entities, pinnedRefs);
     const pending = pendingAmbiguityFrom(resolution);
     if (pending) {
       return {
@@ -1630,6 +1635,22 @@ export function createVoiceTurnProcessor(
         reference: pending.reference,
         refKey: pending.refKey,
         partialRefs: pending.partialRefs,
+      };
+    }
+    // #1416 — after a disambiguation pick (pinnedRefs), a later reference
+    // that matches nothing is said honestly (the in-app adapter's
+    // `toResolutionEvent` rule, plus a named job on an invoice/estimate)
+    // instead of reading back a request that would draft against a
+    // placeholder job.
+    if (
+      pinnedRefs &&
+      resolution.status === 'not_found' &&
+      pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
+    ) {
+      return {
+        type: 'entity_not_found',
+        ...(resolution.notFound?.entityKind ? { entityKind: resolution.notFound.entityKind } : {}),
+        ...(resolution.notFound?.reference ? { reference: resolution.notFound.reference } : {}),
       };
     }
     return { type: 'entity_resolved', refs: resolution.refs };
@@ -1672,10 +1693,21 @@ export function createVoiceTurnProcessor(
         match = { status: 'unmatched' };
       }
       if (match.status === 'resolved') {
-        event = {
-          type: 'entity_resolved',
-          refs: { ...pending.partialRefs, [pending.refKey]: match.candidateId },
-        };
+        // #1416 — the in-app #1406 D6 fix, ported: the pick settles ONE
+        // reference; the lookups planned after it (the job in "invoice the
+        // QA Matrix job") must still run. Re-resolve with the picked id
+        // pinned — already-resolved refs are skipped, the rest resolve.
+        const pickedRefs = { ...pending.partialRefs, [pending.refKey]: match.candidateId };
+        const intent = ctx.currentIntent;
+        event = intent
+          ? await resolveTurnEntityEvent(
+              session,
+              tenantId,
+              intent,
+              { ...(ctx.extractedEntities ?? {}), ...pickedRefs },
+              pickedRefs,
+            )
+          : { type: 'entity_resolved', refs: pickedRefs };
       } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
         event = { type: 'entity_resolved', refs: pending.partialRefs };
       } else {
