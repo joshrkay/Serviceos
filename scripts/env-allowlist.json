@@ -17,6 +17,7 @@
     "Do not move an entry to `optional` without reading the call site."
   ],
   "optional": [
+    { "name": "ANTHROPIC_API_KEY", "reason": "Local-dev fallback key for the real-LLM path-smoke CLI only (ai/voice-quality/path-smoke/provider.ts:90, reached from scripts/agent-path-smoke.ts). Never read on a boot or request path; unset = the smoke uses the production AI_PROVIDER_API_KEY. Production does not use Anthropic." },
     { "name": "AI_CACHE_ENABLED", "reason": "Opt-in response cache. gateway/factory.ts:209 requires the literal 'true'; unset = caching off, the current production behaviour." },
     { "name": "AI_COMPLETION_PROBE_TIMEOUT_MS", "reason": "Readiness-probe timeout. gateway/readiness.ts:76 derives max(classify-intent deadline, 10s) when unset." },
     { "name": "AI_LIGHTWEIGHT_DEADLINE_MS", "reason": "Tuning constant. config/ai-routing.ts:100 defaults to 1500ms." },

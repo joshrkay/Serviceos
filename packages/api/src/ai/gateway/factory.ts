@@ -50,6 +50,9 @@ import {
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
+/** Primary provider base URL when AI_PROVIDER_BASE_URL is unset (Profile A). */
+export const DEFAULT_AI_PROVIDER_BASE_URL = 'https://api.openai.com/v1';
+
 export interface CreateLLMGatewayOptions {
   /**
    * Optional P2-030 shadow-comparison store. When supplied together with
@@ -124,7 +127,7 @@ export function createLLMGateway(
       ? (loggerOrOpts as CreateLLMGatewayOptions)
       : { logger: loggerOrOpts as LLMGatewayLogger };
 
-  const baseURL = config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1';
+  const baseURL = config.AI_PROVIDER_BASE_URL ?? DEFAULT_AI_PROVIDER_BASE_URL;
 
   // Static mismatch check (no network). Surfaces the 2026-07-20 failure mode
   // where Claude model ids were sent to api.openai.com while health stayed green.
@@ -517,6 +520,6 @@ export function createEmbeddingProvider(
   if (!config.AI_PROVIDER_API_KEY) return null;
   return new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
-    baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
+    baseURL: config.AI_PROVIDER_BASE_URL ?? DEFAULT_AI_PROVIDER_BASE_URL,
   });
 }
