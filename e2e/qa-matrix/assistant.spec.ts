@@ -111,12 +111,18 @@ matrixTest('AST-03', 'Revise estimate via assistant', async (h) => {
     label: '03-seed',
     expectStatus: 201,
   });
-  const estimateId = (seed.response.body as { id: string }).id;
+  const seedBody = seed.response.body as { id: string; estimateNumber: string };
+  const estimateId = seedBody.id;
 
+  // QA-2026-09-26 — reference the estimate by its document number, the way an
+  // operator reads it off the estimate. update_estimate "requires an explicit
+  // estimate reference (number or customer name)" (intent-taxonomy-blocks.ts);
+  // the internal UUID is neither, so the classifier routed the old prompt to
+  // the generic LLM, which declined. Same fix VOX-06 already made.
   const reviseResp = await h.api.call({
     method: 'POST',
     path: '/api/assistant/chat',
-    body: buildChat(`Please revise estimate ${estimateId} by adding a $75 parts charge.`),
+    body: buildChat(`Please revise estimate ${seedBody.estimateNumber} by adding a $75 parts charge.`),
     token: h.tenantA.token,
     label: '03-chat',
     expectStatus: 200,
@@ -184,8 +190,10 @@ matrixTest('AST-04', 'Create/send invoice via assistant', async (h) => {
       return;
     }
   }
+  const why = outcome.rejection ? ` Approve refused: ${outcome.rejection.message}.` : '';
+  const draftedType = (reply.proposal as { proposalType?: string }).proposalType ?? reply.proposal!.type;
   h.evidence.partial(
-    `Invoice proposal surfaced (HITL preserved) but execution incomplete: status=${outcome.status}, resultEntityId=${outcome.resultEntityId ?? 'none'}. ` +
+    `Invoice proposal (${draftedType}) surfaced (HITL preserved) but execution incomplete: status=${outcome.status}, resultEntityId=${outcome.resultEntityId ?? 'none'}.${why} ` +
       `Recent invoices in DB: ${db.rowCount}.`
   );
 });
