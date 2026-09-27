@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
 import { todayInTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
+import { apiInvoice } from '../../test-utils/money-fixtures';
 import { expectTapTarget } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
@@ -84,23 +85,25 @@ const mockLeads = [
   },
 ];
 
+// #1400 — contract-shaped GET /api/invoices rows (shared invoiceResponseSchema):
+// money is `amountDueCents` / `totals.totalCents`, never a top-level totalCents.
 const mockInvoices = [
-  {
-    id: 'inv1',
+  apiInvoice({
+    id: '00000000-0000-4000-8000-0000000000a1',
     invoiceNumber: 'INV-001',
-    status: 'open',
-    totalCents: 75000,
-    customer: { id: 'c2', displayName: 'Bob Jones' },
+    totals: { subtotalCents: 75000, taxableSubtotalCents: 75000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 75000 },
+    amountDueCents: 75000,
+    customer: { id: '00000000-0000-4000-8000-0000000000c2', displayName: 'Bob Jones' },
     dueDate: pastDate,
-  },
-  {
-    id: 'inv2',
+  }),
+  apiInvoice({
+    id: '00000000-0000-4000-8000-0000000000a2',
     invoiceNumber: 'INV-002',
-    status: 'open',
-    totalCents: 50000,
-    customer: { id: 'c3', displayName: 'Carol White' },
+    totals: { subtotalCents: 50000, taxableSubtotalCents: 50000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 50000 },
+    amountDueCents: 50000,
+    customer: { id: '00000000-0000-4000-8000-0000000000c3', displayName: 'Carol White' },
     dueDate: '2026-12-01',
-  },
+  }),
 ];
 
 // U10 — today's scheduled work comes from the appointments API (GET /api/jobs
@@ -214,8 +217,8 @@ describe('HomePage', () => {
 
   it('shows total outstanding amount', () => {
     renderPage();
-    // totalCents = 75000 + 50000 = 125000 = $1250 (appears in stat bar + section header)
-    expect(screen.getAllByText('$1,250').length).toBeGreaterThan(0);
+    // amountDueCents = 75000 + 50000 = 125000 = $1,250.00 (stat bar + section header)
+    expect(screen.getAllByText('$1,250.00').length).toBeGreaterThan(0);
   });
 
   it('renders money loop hub and conversational quick actions', () => {

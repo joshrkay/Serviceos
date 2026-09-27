@@ -110,7 +110,9 @@ const lineItemSchema = z.object({
   id: z.string().min(1),
   description: z.string().min(1),
   category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
-  quantity: z.number().nonnegative(),
+  // #1400 — a zero-quantity line is refused on create exactly as the web
+  // editor refuses it on edit (it was accepted on create, refused on edit).
+  quantity: z.number().positive('quantity must be more than 0 — remove the line to drop it'),
   // B7.5 — descriptive unit of measure. Must be declared here or Zod strips it
   // on create/update/revise, exactly like pricingSource and imageFileId below:
   // both repositories DELETE and re-INSERT every line-item row on a lineItems
@@ -297,6 +299,17 @@ export const createEstimateSchema = z.object({
   internalNotes: z.string().optional(),
 });
 
+/**
+ * #1400 — an owner-chosen invoice due date. The web date picker sends a
+ * calendar date (YYYY-MM-DD); a full ISO instant is also accepted. A bare
+ * date is pinned to 12:00 UTC so it renders as the same calendar day in
+ * every tenant timezone from UTC−11 to UTC+11.
+ */
+const invoiceDueDateSchema = z
+  .union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.string().datetime({ offset: true })])
+  .transform((v) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T12:00:00.000Z` : v))
+  .refine((d) => !Number.isNaN(d.getTime()), 'dueDate must be a valid date');
+
 export const createInvoiceSchema = z.object({
   jobId: z.string().min(1),
   estimateId: z.string().optional(),
@@ -304,6 +317,7 @@ export const createInvoiceSchema = z.object({
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
   processingFeeBps: z.number().int().min(0).max(10000).optional(),
+  dueDate: invoiceDueDateSchema.optional(),
   customerMessage: z.string().optional(),
 });
 

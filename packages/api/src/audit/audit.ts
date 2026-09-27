@@ -86,6 +86,24 @@ export function createAuditEvent(input: AuditEventInput): AuditEvent {
   };
 }
 
+/**
+ * I12′ tier 2 — a domain audit row emitted AFTER its mutation has committed.
+ * Best-effort: an audit-store failure must not unwind (or 500) a successful
+ * customer-visible action, but it must stay diagnosable, so it is logged.
+ * Mirrors the swallow sites in proposals/execution (e.g. callback-handler).
+ */
+export async function createAuditEventBestEffort(
+  repo: AuditRepository,
+  input: AuditEventInput,
+): Promise<void> {
+  try {
+    await repo.create(createAuditEvent(input));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`Failed to emit ${input.eventType} audit event for ${input.entityType} ${input.entityId}: ${msg}`);
+  }
+}
+
 export class InMemoryAuditRepository implements AuditRepository {
   private events: AuditEvent[] = [];
 

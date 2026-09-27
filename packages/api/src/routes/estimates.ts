@@ -30,10 +30,11 @@ import {
   EstimateMutationDeps,
   DEFAULT_ESTIMATE_LIMIT,
   MAX_ESTIMATE_LIMIT,
+  type EstimateListStageFilter,
 } from '../estimates/estimate';
 import { DocumentRevisionRepository } from '../ai/document-revision';
 import { EditDeltaRepository } from '../estimates/edit-delta';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '../audit/audit';
 import { getNextEstimateNumber, resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
@@ -322,6 +323,16 @@ export function createEstimateRouter(
         const status = typeof req.query.status === 'string' ? req.query.status as EstimateStatus : undefined;
         const search = typeof req.query.search === 'string' ? req.query.search : undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+        // #1400 — derived tab bucket (Sent / Viewed / Expired).
+        const stageRaw = req.query.stage;
+        let stage: EstimateListStageFilter | undefined;
+        if (stageRaw !== undefined) {
+          if (stageRaw !== 'sent' && stageRaw !== 'viewed' && stageRaw !== 'expired') {
+            res.status(400).json({ error: 'VALIDATION_ERROR', message: 'stage must be one of sent, viewed, expired' });
+            return;
+          }
+          stage = stageRaw;
+        }
 
         // Legacy single-job lookup: bare-array shape, no extra filters.
         // Preserves the existing UI contract for `?jobId=...` consumers.
@@ -329,6 +340,7 @@ export function createEstimateRouter(
           jobId &&
           customerId === undefined &&
           status === undefined &&
+          stage === undefined &&
           search === undefined &&
           req.query.paginated !== 'true' &&
           req.query.limit === undefined &&
@@ -385,7 +397,7 @@ export function createEstimateRouter(
           }
         }
 
-        const baseOptions = { status, jobId, jobIds, search, sort };
+        const baseOptions = { status, stage, jobId, jobIds, search, sort };
 
         if (wantsPaginated) {
           const result = await listEstimatesWithMeta(req.auth!.tenantId, estimateRepo, {
@@ -961,6 +973,21 @@ export function createEstimateRouter(
           // same wall-clock minute, so the two don't collide on
           // idx_dispatches_idempotency.
           idempotencyContext: 'owner',
+        });
+        // #1400 — the send is a mutation (status → sent, view token, sentAt)
+        // and must leave an audit row. I12′ tier 2: best-effort after the
+        // customer-visible send has happened.
+        await createAuditEventBestEffort(auditRepo, {
+          tenantId: req.auth!.tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role ?? 'unknown',
+          eventType: 'estimate.sent',
+          entityType: 'estimate',
+          entityId: req.params.id,
+          metadata: {
+            channels: result.channelsSent.map((c) => c.channel),
+            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+          },
         });
         // §6 Time-to-Cash. sendEstimate transitions the estimate to
         // 'sent' inside SendService (not via transitionEstimateStatus),
