@@ -23,9 +23,11 @@
  *           the emulator simulates that signal as soon as the caller's audio
  *           is fully delivered. Pairs with `audio_frame_emitted` (VQ2-004
  *           wiring) to compute TTFA.
- *        d. Collects inbound `media` frames (the agent's TTS) until
- *           `silenceWindowMs` of inbound silence elapses (default 1500 ms),
- *           then decodes them via {@link decodeAgentOutbound}.
+ *        d. Waits (up to `firstAudioTimeoutMs`, default 10 s) for the
+ *           agent's first reply frame, then collects inbound `media` frames
+ *           (the agent's TTS) until `silenceWindowMs` of inbound silence
+ *           elapses after the latest frame (default 1500 ms), then decodes
+ *           them via {@link decodeAgentOutbound}.
  *   3. `hangup()` sends a `stop` and closes the socket cleanly.
  *
  * Test-mode only. The emulator's WS upgrade hits the production server
@@ -47,6 +49,13 @@ import { transcriptReceivedEvent } from '../events';
 const FRAME_PACING_MS = 20;
 /** Default silence window — 1.5 s matches the plan's tolerance for end-of-agent-turn. */
 const DEFAULT_SILENCE_WINDOW_MS = 1500;
+/**
+ * Default bound on how long the emulator waits for the agent's FIRST reply
+ * frame after the caller's transcript is delivered. A live agent turn is an
+ * LLM call plus TTS synthesis — seconds, not milliseconds — so this must be
+ * far larger than the silence window (#1387).
+ */
+const DEFAULT_FIRST_AUDIO_TIMEOUT_MS = 10_000;
 /** Polling cadence inside the silence-window wait loop. */
 const SILENCE_POLL_MS = 50;
 
@@ -70,6 +79,12 @@ export interface TwilioStreamEmulatorDeps {
    * speed.
    */
   silenceWindowMs?: number;
+  /**
+   * How long to wait for the agent's first reply frame before declaring the
+   * agent silent for this turn. The silence window only starts once the
+   * reply has begun (#1387). Defaults to 10 s; tests pass a short value.
+   */
+  firstAudioTimeoutMs?: number;
 }
 
 export interface TurnResult {
@@ -99,6 +114,14 @@ export class TwilioStreamEmulator {
   private receivedFrames: OutboundFrame[] = [];
   /** Auto-incrementing turn index for `eot-<n>` mark names. */
   private turnIndex = 0;
+  /**
+   * Simulated playback clock (performance.now() ms): when the agent audio
+   * received so far finishes "playing" at 20 ms per frame. Server marks are
+   * acknowledged at this time, as Twilio does (#1387).
+   */
+  private playbackEndsAt = 0;
+  /** Scheduled mark acknowledgements, cancelled on hangup. */
+  private readonly pendingMarkAcks = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: TwilioStreamEmulatorDeps) {}
 
@@ -167,23 +190,48 @@ export class TwilioStreamEmulator {
   /**
    * Receive handler. Captures inbound `media` frames (the agent's TTS)
    * along with their wall-clock arrival timestamp via `performance.now()`
-   * for honest TTFA accounting. Other events (`mark`, `clear`, `stop`)
-   * are observed but not acted on — the emulator is a passive collector
-   * of agent audio.
+   * for honest TTFA accounting.
+   *
+   * Server `mark`s are acknowledged the way Twilio does: echoed back once
+   * the audio queued before them has finished playing (20 ms per frame on
+   * a simulated playback clock). The production adapter pauses outbound
+   * TTS after 3 unacknowledged marks, so without this every agent reply
+   * stalled after ~1.5 s of audio (#1387). Layer 2 scripts never barge
+   * in, so `clear` / `stop` are observed but not acted on.
    */
   private onMessage(raw: string): void {
-    let msg: { event?: string; media?: { payload?: string } };
+    let msg: { event?: string; media?: { payload?: string }; mark?: { name?: string } };
     try {
-      msg = JSON.parse(raw) as { event?: string; media?: { payload?: string } };
+      msg = JSON.parse(raw) as typeof msg;
     } catch {
       // The production server only sends JSON; ignore non-JSON debug frames.
       return;
     }
     if (msg.event === 'media' && typeof msg.media?.payload === 'string') {
+      const now = performance.now();
       this.receivedFrames.push({
         payload: msg.media.payload,
-        ts: performance.now(),
+        ts: now,
       });
+      this.playbackEndsAt = Math.max(this.playbackEndsAt, now) + FRAME_PACING_MS;
+    } else if (msg.event === 'mark' && typeof msg.mark?.name === 'string') {
+      const name = msg.mark.name;
+      const delayMs = Math.max(0, this.playbackEndsAt - performance.now());
+      const timer = setTimeout(() => {
+        this.pendingMarkAcks.delete(timer);
+        this.ackMark(name);
+      }, delayMs);
+      this.pendingMarkAcks.add(timer);
+    }
+  }
+
+  private ackMark(name: string): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ event: 'mark', streamSid: this.streamSid, mark: { name } }));
+    } catch {
+      /* socket closing — the ack no longer matters */
     }
   }
 
@@ -252,23 +300,40 @@ export class TwilioStreamEmulator {
       this.deps.bus.record(transcriptReceivedEvent({ ts: transcriptReceivedTs }));
     }
 
-    // Collect agent frames until `silenceWindowMs` elapses without a new
-    // arrival. We start the clock from `transcriptReceivedTs` so a fully
-    // silent agent still terminates after the silence window — `lastFrameTs`
-    // is bumped each time a new frame lands.
+    // Phase 1: wait (bounded) for the agent's first reply frame. The reply
+    // is an LLM call + TTS synthesis, so it routinely starts more than a
+    // silence window after the transcript. Starting the silence clock at
+    // transcript delivery (the pre-#1387 behaviour) closed every live turn
+    // before the agent spoke: agentAudio came back empty, TTFA read 0, and
+    // the late reply leaked into the next turn's buffer.
     const silenceWindowMs = this.deps.silenceWindowMs ?? DEFAULT_SILENCE_WINDOW_MS;
-    let lastFrameTs = transcriptReceivedTs;
-    while (performance.now() - lastFrameTs < silenceWindowMs) {
+    const firstAudioTimeoutMs =
+      this.deps.firstAudioTimeoutMs ?? DEFAULT_FIRST_AUDIO_TIMEOUT_MS;
+    const firstReplyFrame = (): OutboundFrame | undefined =>
+      this.receivedFrames.find((f) => f.ts >= transcriptReceivedTs);
+    while (
+      !firstReplyFrame() &&
+      performance.now() - transcriptReceivedTs < firstAudioTimeoutMs
+    ) {
       await new Promise((r) => setTimeout(r, SILENCE_POLL_MS));
-      const newest = this.receivedFrames[this.receivedFrames.length - 1];
-      if (newest && newest.ts > lastFrameTs) {
-        lastFrameTs = newest.ts;
+    }
+
+    // Phase 2: once the reply has begun, collect frames until
+    // `silenceWindowMs` elapses without a new arrival (end of agent turn).
+    const firstReply = firstReplyFrame();
+    if (firstReply) {
+      let lastFrameTs = this.receivedFrames[this.receivedFrames.length - 1]!.ts;
+      while (performance.now() - lastFrameTs < silenceWindowMs) {
+        await new Promise((r) => setTimeout(r, SILENCE_POLL_MS));
+        const newest = this.receivedFrames[this.receivedFrames.length - 1];
+        if (newest && newest.ts > lastFrameTs) {
+          lastFrameTs = newest.ts;
+        }
       }
     }
 
-    const { pcm16, firstFrameTs } = decodeAgentOutbound(this.receivedFrames);
-    const ttfaMs =
-      firstFrameTs !== null ? Math.max(0, firstFrameTs - transcriptReceivedTs) : 0;
+    const { pcm16 } = decodeAgentOutbound(this.receivedFrames);
+    const ttfaMs = firstReply ? firstReply.ts - transcriptReceivedTs : 0;
     return {
       agentAudio: pcm16,
       ttfaMs,
@@ -282,6 +347,8 @@ export class TwilioStreamEmulator {
    * the socket has already closed are no-ops.
    */
   async hangup(): Promise<void> {
+    for (const timer of this.pendingMarkAcks) clearTimeout(timer);
+    this.pendingMarkAcks.clear();
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try {
