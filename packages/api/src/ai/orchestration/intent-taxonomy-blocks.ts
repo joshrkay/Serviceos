@@ -66,11 +66,13 @@ export const INTENT_BLOCKS = {
                                       furnace repair, $350 total" →
                                       lineItemDescriptions ["completed furnace repair"]
 `,
-  draft_estimate: `- "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
+  draft_estimate: `- "draft_estimate"      — user wants a new estimate/quote before work starts,
+                           incl. a customer asking what new work would cost.
                            Extract lineItemDescriptions (one per piece of work quoted).
                            Never invent prices; set amount only if explicitly stated.
-                           Example: "Quote Johnson diagnostic labor, $150" →
-                                    lineItemDescriptions ["diagnostic labor"]
+                           Examples: "Quote Johnson diagnostic labor, $150" →
+                                     lineItemDescriptions ["diagnostic labor"]
+                                     "What would a new AC unit run? Send me a quote"
 `,
   create_appointment: `- "create_appointment"  — user wants to schedule a new appointment or follow-up.
                            Extract jobTitle (a short name for the new work
@@ -642,8 +644,7 @@ export const INTENT_BLOCKS = {
                                      "Remind me when my appointment is"
 `,
   lookup_invoices: `- "lookup_invoices"     — caller is ASKING about invoices on their
-                           account. Read-only. The skill returns count
-                           + totals + per-invoice info.
+                           account. Read-only.
                            Examples: "Do I have any invoices outstanding?"
                                      "What invoices do I owe?"
                                      "Can you read me my open invoices?"
@@ -714,9 +715,7 @@ export const INTENT_BLOCKS = {
                                      "How much was that estimate?"
 `,
   lookup_availability: `- "lookup_availability" — caller/operator is ASKING what appointment
-                           slots are open. Read-only — routed to the
-                           lookup_availability skill, which speaks the
-                           next open windows.
+                           slots are open. Read-only.
                            Examples: "What slots do you have open this week?"
                                      "When's your next availability?"
                                      "Do you have anything open Thursday?"
