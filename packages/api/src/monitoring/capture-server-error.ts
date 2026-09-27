@@ -1,6 +1,7 @@
 import type { Request } from 'express';
 import { redactUrlValue } from '../logging/redact';
 import { getSentryClient } from './sentry';
+import { markServerErrorReported } from './report-server-responses';
 
 /**
  * The route label for error telemetry (Sentry tags, PostHog api_error).
@@ -35,6 +36,9 @@ export function redactedRoute(req: Request): string {
  */
 export function captureServerError(err: unknown, req: Request): void {
   try {
+    // #1205 — tells the response hook (report-server-responses.ts) this
+    // request's 5xx is already reported, so it never double-reports.
+    markServerErrorReported(req);
     const anyReq = req as unknown as {
       safeRequestLog?: { correlation_id?: string };
       auth?: { tenantId?: string };
