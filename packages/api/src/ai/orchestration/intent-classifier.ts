@@ -598,8 +598,18 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           audible rather than silent. See `lookup-materials.ts`'s module
  *           doc comment and `resolveSpokenDay`'s "NOT A DEADLINE RESOLVER"
  *           section.
+ *   1.19.0 — #1392 (QA matrix VOX-05, 2026-09-26), extraction guidance
+ *           only: the `draft_estimate` block now asks for
+ *           `lineItemDescriptions` with a worked example, as
+ *           `create_invoice` always has. The slot already existed (and was
+ *           already tagged for draft_estimate in ENTITY_FIELDS), but the
+ *           block never asked for it, so the live model parked the quoted
+ *           work in `jobTitle` and the voice draft had no lines — approve
+ *           refused on `lineItems`. Paid for in prompt budget by dropping
+ *           the skill-routing notes from the lookup_appointments /
+ *           lookup_account_summary blocks. No intent or slot changes.
  */
-export const INTENT_TAXONOMY_VERSION = '1.18.0';
+export const INTENT_TAXONOMY_VERSION = '1.19.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route

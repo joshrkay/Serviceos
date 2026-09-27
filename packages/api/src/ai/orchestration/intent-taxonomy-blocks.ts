@@ -67,8 +67,10 @@ export const INTENT_BLOCKS = {
                                       lineItemDescriptions ["completed furnace repair"]
 `,
   draft_estimate: `- "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
+                           Extract lineItemDescriptions (one per piece of work quoted).
                            Never invent prices; set amount only if explicitly stated.
-                           Example: "Draft an estimate for the Johnson water heater"
+                           Example: "Quote Johnson diagnostic labor, $150" →
+                                    lineItemDescriptions ["diagnostic labor"]
 `,
   create_appointment: `- "create_appointment"  — user wants to schedule a new appointment or follow-up.
                            Extract jobTitle (a short name for the new work
@@ -632,9 +634,7 @@ export const INTENT_BLOCKS = {
 `,
   lookup_appointments: `- "lookup_appointments" — caller is ASKING about their upcoming
                            appointment(s). Read-only — never moves money
-                           or creates records. Routed to the
-                           lookup_appointments skill, which speaks the
-                           next visit + technician.
+                           or creates records.
                            Examples: "When is my next appointment?"
                                      "What time are you coming on Tuesday?"
                                      "Do I have a service call scheduled?"
@@ -688,9 +688,7 @@ export const INTENT_BLOCKS = {
 `,
   lookup_account_summary: `- "lookup_account_summary" — caller asks an open-ended "what's on my
                            account" / "give me an update" question.
-                           Read-only. The skill stitches the appointment,
-                           balance, and agreement summaries into a
-                           two-sentence digest.
+                           Read-only.
                            Examples: "What's on my account?"
                                      "Give me a quick summary"
                                      "Catch me up on my account"
