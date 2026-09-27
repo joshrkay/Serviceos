@@ -546,22 +546,17 @@ describe(provesExecution('send_estimate_nudge') + 'Postgres integration — voic
     await closeSharedTestDb();
   });
 
-  it('the ILIKE display-text search CANNOT reach this estimate from the spoken name — only the customer→jobs→estimates traversal can', async () => {
-    // The fixture is arranged against the weak query, not for it: neither
-    // estimate_number nor customer_message contains the customer's name, so
-    // `findByTenant({ search })` — the pre-fix resolution path — returns
-    // nothing. This is the assertion that makes the drafting proof above
-    // non-vacuous.
+  it('both paths now reach this estimate from the spoken name: #1400 name search and the customer→jobs→estimates traversal', async () => {
+    // #1400 (PR #1413) made estimate search also match the customer's name
+    // (the estimates search box promises it), so the ILIKE text search is no
+    // longer a dead end here. The drafting proof above does not depend on it:
+    // it pins that the handler's resolved id comes from the customer
+    // traversal (the spoken surname alone never names an estimate number).
     const byText = await estimateRepo.findByTenant(tenant.tenantId, {
       search: CUSTOMER_DISPLAY_NAME,
       limit: 5,
     });
-    expect(byText).toHaveLength(0);
-    const bySpokenSurname = await estimateRepo.findByTenant(tenant.tenantId, {
-      search: SPOKEN_CUSTOMER_NAME,
-      limit: 5,
-    });
-    expect(bySpokenSurname).toHaveLength(0);
+    expect(byText.map((e) => e.id)).toEqual([estimate.id]);
 
     // ...while the relationship the handler now uses does reach it.
     const jobs = await new PgJobRepository(pool).findByCustomer(tenant.tenantId, customerId);
