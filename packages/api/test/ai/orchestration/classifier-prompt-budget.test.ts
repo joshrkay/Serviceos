@@ -225,6 +225,10 @@ describe('classifier prompt budget — per-profile first turn', () => {
       // so this ONE per-turn line moves 85% → 86% (7,740); the hard ceiling
       // (9,000, session-cost-tracker) is unchanged and still ≈15% away. Any
       // further growth must be paid for by trimming, not by raising this.
+      // #1392 (draft_estimate lineItemDescriptions + worked example, ≈+45
+      // tok) was paid for by dropping the skill-routing notes from the
+      // lookup_appointments / lookup_account_summary blocks (≈−75 tok):
+      // plan+account caller ≈ 7,637 — ≈103 tok under the line.
       expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * PER_TURN_FIRST_TURN_MARGIN);
     },
   );

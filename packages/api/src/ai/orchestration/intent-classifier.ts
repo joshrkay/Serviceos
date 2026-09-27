@@ -598,8 +598,18 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           audible rather than silent. See `lookup-materials.ts`'s module
  *           doc comment and `resolveSpokenDay`'s "NOT A DEADLINE RESOLVER"
  *           section.
+ *   1.19.0 — #1392 (QA matrix VOX-05, 2026-09-26), extraction guidance
+ *           only: the `draft_estimate` block now asks for
+ *           `lineItemDescriptions` with a worked example, as
+ *           `create_invoice` always has. The slot already existed (and was
+ *           already tagged for draft_estimate in ENTITY_FIELDS), but the
+ *           block never asked for it, so the live model parked the quoted
+ *           work in `jobTitle` and the voice draft had no lines — approve
+ *           refused on `lineItems`. Paid for in prompt budget by dropping
+ *           the skill-routing notes from the lookup_appointments /
+ *           lookup_account_summary blocks. No intent or slot changes.
  */
-export const INTENT_TAXONOMY_VERSION = '1.18.0';
+export const INTENT_TAXONOMY_VERSION = '1.19.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -2392,6 +2402,28 @@ function clamp01(n: number): number {
   return n;
 }
 
+/**
+ * A value that is ENTIRELY one angle-bracketed template — `<string, optional>`,
+ * `<verbatim date/time phrase from transcript, optional>` — is the extraction
+ * schema's own placeholder (ENTITY_FIELDS in intent-taxonomy-blocks.ts) echoed
+ * back by the model, never something the caller said. QA matrix 2026-09-26
+ * SCH-03: a live `appointmentReference: "<string, optional>"` was resolved as
+ * a real reference and spoken back ("I couldn't find a matching appointment
+ * for <string, optional>").
+ */
+const SCHEMA_PLACEHOLDER_RE = /^\s*<[^<>]+>\s*$/;
+
+function dropSchemaPlaceholderEchoes(extracted: ExtractedEntities): void {
+  const bag = extracted as Record<string, unknown>;
+  for (const [key, value] of Object.entries(bag)) {
+    if (typeof value === 'string' && SCHEMA_PLACEHOLDER_RE.test(value)) {
+      delete bag[key];
+    } else if (Array.isArray(value)) {
+      bag[key] = value.filter((v) => !(typeof v === 'string' && SCHEMA_PLACEHOLDER_RE.test(v)));
+    }
+  }
+}
+
 export function parseClassifierJson(content: string): IntentClassification | null {
   let parsed: unknown;
   try {
@@ -2619,6 +2651,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.mileageMiles === 'number' && Number.isFinite(ee.mileageMiles)) {
       extracted.mileageMiles = ee.mileageMiles;
     }
+    dropSchemaPlaceholderEchoes(extracted);
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

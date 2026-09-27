@@ -1,5 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
-import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+import { startVoiceSession, voiceInput, approveAndAwaitExecution, ensureTenantTimezone } from './helpers/voice-flow';
 
 /**
  * SCH-01 — create + reschedule an appointment via the REST API (deterministic).
@@ -83,6 +83,8 @@ matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
   // resolves the caller identity up front via findByPhoneNormalized. Without
   // this, the generic "our customer" phrase below has no name to fall back
   // on and never resolves (GENERIC_CUSTOMER_REFS skips name-based lookup).
+  // Spoken times resolve only in the tenant's own zone — see ensureTenantTimezone.
+  await ensureTenantTimezone(h, token, '02');
   const sessionId = await startVoiceSession(h, token, '02', '555-0100');
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
 
@@ -99,7 +101,8 @@ matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
 
   const outcome = await approveAndAwaitExecution(h, token, proposalIds[0], '02');
   if (outcome.status !== 'executed') {
-    return void h.evidence.fail(`Scheduling proposal did not execute (status=${outcome.status}); worker/entity-resolution may be incomplete.`);
+    const why = outcome.rejection ? ` — approve refused: ${outcome.rejection.message}` : '';
+    return void h.evidence.fail(`Scheduling proposal did not execute (status=${outcome.status})${why}.`);
   }
 
   if (!outcome.resultEntityId) {
