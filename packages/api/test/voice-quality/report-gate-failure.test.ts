@@ -227,6 +227,19 @@ describe('U2 — report-gate-failure', () => {
     expect(writes[1].body).toMatchObject({ state: 'closed' });
   });
 
+  it('#1205 — a green run on a NON-default branch does not close the gate-red issue', async () => {
+    const calls = stubFetch([
+      { method: 'GET', urlIncludes: '/issues?', respond: () => jsonResponse(200, [OPEN_ISSUE]) },
+    ]);
+
+    const code = await run({
+      env: { ...baseEnv('success'), GATE_REF: 'refs/heads/some-feature', DEFAULT_BRANCH: 'main' },
+    });
+
+    expect(code).toBe(0);
+    expect(calls.filter((c) => c.method !== 'GET')).toHaveLength(0);
+  });
+
   it('success with no open issue → no API write', async () => {
     const calls = stubFetch([
       { method: 'GET', urlIncludes: '/issues?', respond: () => jsonResponse(200, []) },

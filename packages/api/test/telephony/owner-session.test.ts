@@ -26,6 +26,9 @@ const OWNER_PHONE = '+15125550100';
 const CUSTOMER_PHONE = '+15125559999';
 const BACKUP_USER_ID = 'user-backup';
 const BACKUP_MOBILE = '+15125550111';
+// #1223 — these calls model a verified line (full STIR/SHAKEN attestation);
+// the unattested cases live in owner-line-attestation.test.ts.
+const A_ATTESTED = 'TN-Validation-Passed-A';
 
 function stubSettingsRepo(
   overrides: Partial<TenantSettings> = {},
@@ -82,6 +85,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: OWNER_PHONE,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-owner-1')!;
@@ -100,6 +104,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: variant,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid(`CA-${variant.replace(/\D/g, '')}`)!;
@@ -114,6 +119,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: CUSTOMER_PHONE,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-cust-1')!;
@@ -131,6 +137,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: BACKUP_MOBILE,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-backup-1')!;
@@ -147,6 +154,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: BACKUP_MOBILE,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-backup-2')!;
@@ -166,6 +174,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: OWNER_PHONE,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-err-1')!;
@@ -180,6 +189,7 @@ describe('RV-070 — owner-line recognition (Gather inbound)', () => {
       from: OWNER_PHONE,
       to: '+15125550000',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-nosettings-1')!;
@@ -195,6 +205,7 @@ describe('RV-070 — owner-line recognition (Media Streams inbound)', () => {
       callSid: 'CA-stream-owner',
       from: '1 (512) 555-0100',
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-stream-owner')!;
@@ -208,6 +219,7 @@ describe('RV-070 — owner-line recognition (Media Streams inbound)', () => {
       callSid: 'CA-stream-cust',
       from: CUSTOMER_PHONE,
       tenantId: TENANT,
+      stirVerstat: A_ATTESTED,
     });
 
     const session = store.findByCallSid('CA-stream-cust')!;
@@ -265,7 +277,7 @@ describe('#866 — actor stamped at session establishment (both transports share
       userRepo: usersRepo([{ id: 'u-tech', role: 'technician', clerkUserId: 'clerk-tech', mobileNumber: TECH_MOBILE }]),
     });
 
-    await adapter.handleInbound({ callSid: 'CA-actor-tech', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-tech', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     const session = store.findByCallSid('CA-actor-tech')!;
     expect(session.actorUserId).toBe('clerk-tech');
@@ -278,7 +290,7 @@ describe('#866 — actor stamped at session establishment (both transports share
       userRepo: usersRepo([{ id: 'u-owner', role: 'owner', clerkUserId: 'clerk-owner' }]),
     });
 
-    await adapter.handleInbound({ callSid: 'CA-actor-owner', from: OWNER_PHONE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-owner', from: OWNER_PHONE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     const session = store.findByCallSid('CA-actor-owner')!;
     expect(session.machine.currentContext.ownerSession).toBe(true);
@@ -294,7 +306,7 @@ describe('#866 — actor stamped at session establishment (both transports share
       ]),
     });
 
-    await adapter.handleInbound({ callSid: 'CA-actor-backup', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-backup', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     const session = store.findByCallSid('CA-actor-backup')!;
     expect(session.machine.currentContext.ownerSession).toBe(true);
@@ -316,7 +328,7 @@ describe('#866 — actor stamped at session establishment (both transports share
       ]),
     });
 
-    await adapter.handleInbound({ callSid: 'CA-actor-backup-suspended', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-backup-suspended', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     const session = store.findByCallSid('CA-actor-backup-suspended')!;
     expect(session.machine.currentContext.ownerSession).toBe(true);
@@ -329,7 +341,7 @@ describe('#866 — actor stamped at session establishment (both transports share
       userRepo: usersRepo([{ id: 'u-owner', role: 'owner' }]),
     });
 
-    await adapter.handleInbound({ callSid: 'CA-actor-cust', from: CUSTOMER_PHONE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-cust', from: CUSTOMER_PHONE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     expect(store.findByCallSid('CA-actor-cust')!.actorUserId).toBeUndefined();
   });
@@ -341,8 +353,8 @@ describe('#866 — actor stamped at session establishment (both transports share
       settingsRepo: stubSettingsRepo(),
       userRepo,
     });
-    await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
-    await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
+    await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     expect(store.findByCallSid('CA-actor-replay')!.actorUserId).toBe('u-tech');
     // Proves the replay took the early-return path in establishInboundSession
@@ -357,7 +369,7 @@ describe('#866 — actor stamped at session establishment (both transports share
       userRepo: usersRepo([{ id: 'u-tech', role: 'technician', clerkUserId: 'clerk-tech', mobileNumber: TECH_MOBILE }]),
     });
 
-    await adapter.handleInboundForStream({ callSid: 'CA-actor-stream-tech', from: TECH_MOBILE, tenantId: TENANT });
+    await adapter.handleInboundForStream({ callSid: 'CA-actor-stream-tech', from: TECH_MOBILE, tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     expect(store.findByCallSid('CA-actor-stream-tech')!.actorUserId).toBe('clerk-tech');
   });

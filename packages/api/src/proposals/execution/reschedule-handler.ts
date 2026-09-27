@@ -209,6 +209,10 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         trailingWarnings = feasibility.warnings;
       }
 
+      const draftSms = proposal.sourceContext?.draftSms;
+      const reviewedDraft =
+        typeof draftSms === 'string' && draftSms.trim().length > 0 ? draftSms : undefined;
+
       const updates: Record<string, unknown> = {
         scheduledStart: startDate,
         scheduledEnd: endDate,
@@ -262,6 +266,14 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
               oldScheduledEnd: appointment.scheduledEnd.toISOString(),
               newScheduledStart,
               newScheduledEnd,
+              // #432 — which customer notification this reschedule sends:
+              // the owner-reviewed draftSms, the generic template, or none
+              // (comms not wired).
+              customerMessage: !this.transactionalComms
+                ? 'none'
+                : reviewedDraft
+                  ? 'reviewed_draft'
+                  : 'template',
             },
           }),
         );
@@ -276,11 +288,23 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         // notification would be dropped as a duplicate. Each approved
         // reschedule is a distinct proposal, so proposal.id is unique per
         // occurrence (Codex P2, PR #705).
-        await this.transactionalComms.notifyRescheduled(
-          context.tenantId,
-          appointmentId,
-          proposal.id,
-        );
+        // #432 — a tech-out reschedule carries the owner-REVIEWED brand-voice
+        // SMS on sourceContext.draftSms; that is the message the customer
+        // gets (new time appended at send). No draft → generic template.
+        if (reviewedDraft) {
+          await this.transactionalComms.notifyRescheduled(
+            context.tenantId,
+            appointmentId,
+            proposal.id,
+            { reviewedBody: reviewedDraft },
+          );
+        } else {
+          await this.transactionalComms.notifyRescheduled(
+            context.tenantId,
+            appointmentId,
+            proposal.id,
+          );
+        }
       }
 
       // Spatial board sync. When a reschedule crosses calendar days, BOTH

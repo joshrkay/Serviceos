@@ -42,6 +42,12 @@ export interface VoicemailTwimlOptions {
    * session is created, and callbacks can land on a different instance).
    */
   dialedNumber?: string;
+  /**
+   * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the live call,
+   * threaded the same signed way so the voicemail → action-router gate can
+   * require full A-attestation (absent ⇒ fail closed, notify-only).
+   */
+  stirVerstat?: string;
 }
 
 /**
@@ -54,6 +60,7 @@ export function buildVoicemailTwiml(opts: VoicemailTwimlOptions): string {
   const callbackUrl = appendQueryParams(opts.recordingStatusCallback, {
     From: opts.callerPhone,
     To: opts.dialedNumber,
+    StirVerstat: opts.stirVerstat,
   });
   const callback = xmlEscape(callbackUrl);
   return (

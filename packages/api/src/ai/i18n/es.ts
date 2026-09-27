@@ -64,6 +64,8 @@ export const es: Record<keyof EnglishCatalog, string> = {
   'greeting.opener_named': 'Gracias por llamar a {{business}}. Le atiende {{agent}}.',
   'greeting.cta': '¿En qué puedo ayudarle hoy?',
   'greeting.one_moment': 'Un momento, por favor.',
+  'owner_line.unverified':
+    'No pude verificar esta línea como el teléfono del propietario, así que por favor use la aplicación para las acciones del propietario.',
 
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hola {{name}}, bienvenido de nuevo.',

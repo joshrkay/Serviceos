@@ -117,17 +117,32 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
    * same `appt-reschedule:{id}:B` claim and drop the final notification as a
    * duplicate (Codex P2, PR #705).
    */
+  /**
+   * #432 — `reviewedBody` is the owner-reviewed customer message (a tech-out
+   * reschedule's `sourceContext.draftSms`). When present it REPLACES the
+   * generic reschedule opener; the new date/time line is still appended at
+   * send, because the draft was composed before a slot was chosen.
+   */
   async notifyRescheduled(
     tenantId: string,
     appointmentId: string,
     occurrenceToken: string,
+    opts: { reviewedBody?: string } = {},
   ): Promise<void> {
+    const reviewedBody = opts.reviewedBody?.trim();
     await this.sendAppointmentNotice(
       tenantId,
       appointmentId,
       'appointment_reschedule',
       `appt-reschedule:${appointmentId}:${occurrenceToken}`,
-      renderAppointmentRescheduleSms,
+      reviewedBody
+        ? (ctx) => ({
+            body: [
+              reviewedBody,
+              tn('sms.appointment.reschedule.line2', ctx.language ?? 'en', { when: ctx.dateTimeStr }),
+            ].join('\n'),
+          })
+        : renderAppointmentRescheduleSms,
     );
   }
 

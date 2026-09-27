@@ -64,6 +64,23 @@ describe('P18-001 create_customer execution handler', () => {
     expect(created!.smsConsent).toBe(false);
   });
 
+  // #1276A — the chat card gates a one-word name on `lastName`; the value the
+  // approver types there is the customer's last name, not a lost edit.
+  it('writes the approver-supplied lastName when the spoken name was a bare first name', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const handler = new CreateCustomerVoiceExecutionHandler(customerRepo, new InMemoryAuditRepository());
+
+    const result = await handler.execute(makeProposal({ name: 'Taylor', lastName: 'Brooks' }), {
+      tenantId: TENANT,
+      executedBy: EXECUTOR,
+    });
+
+    expect(result.success).toBe(true);
+    const created = await customerRepo.findById(TENANT, result.resultEntityId!);
+    expect(created!.firstName).toBe('Taylor');
+    expect(created!.lastName).toBe('Brooks');
+  });
+
   it('emits an audit event with correlationId = sessionId for AC-4', async () => {
     const customerRepo = new InMemoryCustomerRepository();
     const auditRepo = new InMemoryAuditRepository();

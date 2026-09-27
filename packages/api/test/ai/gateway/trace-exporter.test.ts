@@ -12,6 +12,7 @@ import {
   NoopTraceExporter,
   createTraceExporterFromConfig,
   microCentsToUsd,
+  redactTextForExport,
   type LLMTraceCompletionEvent,
   type LangfuseClientLike,
   type LangfuseGenerationBody,
@@ -300,5 +301,11 @@ describe('microCentsToUsd', () => {
     expect(microCentsToUsd(100_000_000)).toBe(1);
     expect(microCentsToUsd(0)).toBe(0);
     expect(microCentsToUsd(2_700_000)).toBeCloseTo(0.027, 10);
+  });
+});
+
+describe('redactTextForExport (#1205)', () => {
+  it('redacts to a fixed point — the abutting-email shape one pass leaves raw is fully redacted', () => {
+    expect(redactTextForExport('Email x@y.io4155552671foo@bar.com')).toBe('Email [email][email]');
   });
 });

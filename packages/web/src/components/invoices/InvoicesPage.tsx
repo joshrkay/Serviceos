@@ -1226,7 +1226,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                   setFilters({});
                 }
               }}
-              className={`shrink-0 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 flex min-h-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >

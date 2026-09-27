@@ -62,6 +62,9 @@ export const en = {
   'greeting.opener_named': 'Thank you for calling {{business}}. This is {{agent}}.',
   'greeting.cta': 'How can I help you today?',
   'greeting.one_moment': 'One moment, please.',
+  // #1223 — approver caller-ID without full STIR/SHAKEN attestation.
+  'owner_line.unverified':
+    "I couldn't verify this line as the owner's phone, so please use the app for owner actions.",
 
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hi {{name}}, welcome back.',

@@ -1798,6 +1798,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       callSid: 'CA-flag-on-owner',
       from: '+15125550100',
       to: '+15125550000',
+      stirVerstat: 'TN-Validation-Passed-A', // #1223
       tenantId: 'tenant-extended',
     });
     const ownerSession = store.findByCallSid('CA-flag-on-owner')!;

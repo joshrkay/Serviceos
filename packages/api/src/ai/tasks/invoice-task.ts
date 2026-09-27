@@ -18,7 +18,8 @@ import {
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
 import { contractErrorsFrom, contractGapFields } from './task-input';
-import { calculateLineItemTotal } from '../../shared/billing-engine';
+import { calculateLineItemTotal, resolveSelectedLineItems } from '../../shared/billing-engine';
+import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
@@ -61,6 +62,9 @@ function tryParseInvoiceJson(content: string): Record<string, unknown> | null {
  * CLARIFICATION_REVIEW_CONFIDENCE_CAP.
  */
 const CONTRACT_VIOLATION_CONFIDENCE_CAP = 0.5;
+
+/** #1276F — "invoice … from/for the accepted (approved, signed) estimate". */
+const REFERS_TO_ACCEPTED_ESTIMATE = /\b(?:accepted|approved|signed)\s+estimate\b/i;
 
 /**
  * Zod's `z.string().uuid()` regex, mirrored so a value this module accepts is
@@ -153,6 +157,8 @@ function buildPartialInvoicePayload(parsed: Record<string, unknown> | null): Rec
  */
 export interface InvoiceTaskDeps {
   catalogRepo?: CatalogItemRepository;
+  /** #1276F — reads the estimate an invoice is drafted from. */
+  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
 }
 
 export class InvoiceTaskHandler implements TaskHandler {
@@ -166,10 +172,12 @@ export class InvoiceTaskHandler implements TaskHandler {
    * pre-catalog behavior unchanged.
    */
   private readonly catalogRepo?: CatalogItemRepository;
+  private readonly estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
 
   constructor(gateway: LLMGateway, deps?: CatalogItemRepository | InvoiceTaskDeps) {
     this.gateway = gateway;
     this.catalogRepo = deps && 'listByTenant' in deps ? deps : deps?.catalogRepo;
+    this.estimateRepo = deps && !('listByTenant' in deps) ? deps.estimateRepo : undefined;
   }
 
   /**
@@ -183,6 +191,28 @@ export class InvoiceTaskHandler implements TaskHandler {
       return items.filter((i) => i.archivedAt === null);
     } catch {
       return [];
+    }
+  }
+
+  private async findSourceEstimate(
+    tenantId: string,
+    estimateId: string | undefined,
+    jobId: string | undefined,
+    message: string,
+  ): Promise<Estimate | undefined> {
+    if (!this.estimateRepo) return undefined;
+    try {
+      if (estimateId) return (await this.estimateRepo.findById(tenantId, estimateId)) ?? undefined;
+      if (!REFERS_TO_ACCEPTED_ESTIMATE.test(message)) return undefined;
+      // "The accepted estimate" names one only when there is exactly one —
+      // on the resolved job when there is one. Several is not a pick.
+      const accepted = await this.estimateRepo.findByTenant(tenantId, {
+        status: 'accepted',
+        ...(jobId ? { jobId } : {}),
+      });
+      return accepted.length === 1 ? accepted[0] : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -251,6 +281,29 @@ export class InvoiceTaskHandler implements TaskHandler {
     const resolvedEstimateId = authorResolvedId(context, 'estimateId');
     if (resolvedEstimateId) payload.estimateId = resolvedEstimateId;
 
+    // #1276F — an invoice drafted FROM an estimate bills that estimate. The
+    // model cannot see it, so its lines for "the accepted estimate" are
+    // invented (live: one "Service as per accepted estimate" line at $10.00
+    // against a $1,170 estimate). The estimate's billed lines, discount and
+    // tax replace them verbatim — the same selection REST convert-to-invoice
+    // bills — and skip catalog re-pricing, which would move agreed money.
+    const sourceEstimate = await this.findSourceEstimate(
+      context.tenantId,
+      resolvedEstimateId,
+      resolvedJobId,
+      context.message,
+    );
+    if (sourceEstimate) {
+      payload.lineItems = resolveSelectedLineItems(
+        sourceEstimate.lineItems,
+        sourceEstimate.acceptedSelection,
+      ).map((li) => ({ ...li }));
+      payload.estimateId = sourceEstimate.id;
+      if (!payload.jobId) payload.jobId = sourceEstimate.jobId;
+      payload.discountCents = sourceEstimate.totals.discountCents;
+      payload.taxRateBps = sourceEstimate.totals.taxRateBps;
+    }
+
     // QA-2026-06-05: normalize line items to the execution contract — the
     // LLM emits `unitPrice` (cents per the system prompt) while the executor
     // reads `unitPriceCents`; the mismatch produced NaN money casts in live
@@ -278,7 +331,7 @@ export class InvoiceTaskHandler implements TaskHandler {
     // "small price -> multiply" floor). Computed once per draft, outside
     // the per-line map below.
     const spokenDollarAmounts = extractSpokenWholeDollarAmounts(context.message);
-    if (Array.isArray(payload.lineItems)) {
+    if (!sourceEstimate && Array.isArray(payload.lineItems)) {
       payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>).map((li, idx) => {
         const qty = Number(li.quantity ?? 1) || 1;
         const rawCents = Number(li.unitPriceCents ?? li.unitPrice);
@@ -321,7 +374,7 @@ export class InvoiceTaskHandler implements TaskHandler {
     // (which the proposal gate still reviews).
     let catalogOutcome: CatalogPricingOutcome | undefined;
     const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (Array.isArray(lineItems) && lineItems.length > 0) {
+    if (!sourceEstimate && Array.isArray(lineItems) && lineItems.length > 0) {
       // Always resolve to an outcome — even with no catalog wired, an empty
       // catalog, or a read error, every LLM price is treated as uncatalogued
       // so the confidence cap below still fires (previously an undefined

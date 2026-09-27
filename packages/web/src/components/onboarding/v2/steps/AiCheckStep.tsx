@@ -4,12 +4,21 @@ import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
 import { VoiceConfigPanel } from '../VoiceConfigPanel';
 import { VoiceApprovalPinPanel } from '../VoiceApprovalPinPanel';
-import type { OnboardingStatusResponse } from '../../../../types/onboarding';
+import type { OnboardingStatusResponse, OnboardingStepId } from '../../../../types/onboarding';
 
 interface AiCheckStepProps {
   status: OnboardingStatusResponse;
   onRetryComplete?: () => void;
+  /** #1282 — jump the stepper to the step that is blocking the AI check. */
+  onGoToStep?: (id: OnboardingStepId) => void;
 }
+
+const BLOCKING_STEP_LABEL: Partial<Record<OnboardingStepId, string>> = {
+  identity: 'Business identity',
+  pack: 'Pick your trade',
+  phone: 'Phone number',
+  billing: 'Start trial',
+};
 
 const BLOCKER_COPY: Record<string, string> = {
   ai_config_missing:
@@ -18,7 +27,7 @@ const BLOCKER_COPY: Record<string, string> = {
     "Your AI didn't respond as expected. Hit Retry and we'll send the test prompt again.",
 };
 
-export function AiCheckStep({ status, onRetryComplete }: AiCheckStepProps) {
+export function AiCheckStep({ status, onRetryComplete, onGoToStep }: AiCheckStepProps) {
   const apiFetch = useApiClient();
   const step = status.steps.find((s) => s.id === 'ai_check');
   const [retrying, setRetrying] = useState(false);
@@ -87,7 +96,31 @@ export function AiCheckStep({ status, onRetryComplete }: AiCheckStepProps) {
     );
   }
 
-  // pending / current — the 3s poll auto-advances when the worker finishes.
+  // #1282 — 'pending' means an EARLIER step isn't done yet (the verify worker
+  // only runs once a plan exists), so nothing is running and polling would
+  // spin forever. Fail fast and point at the step that's actually blocking.
+  if (step.status === 'pending') {
+    const blocking = status.currentStep;
+    const blockingLabel = blocking ? BLOCKING_STEP_LABEL[blocking] : undefined;
+    return (
+      <div className="space-y-5 max-w-md">
+        <header>
+          <h1 className="text-2xl font-medium tracking-tight text-slate-900">Verify your AI</h1>
+          <p className="text-sm text-slate-500 mt-2">
+            We check your AI right after your trial starts. Finish the earlier steps first — nothing
+            is running yet.
+          </p>
+        </header>
+        {blocking && blockingLabel && onGoToStep && (
+          <Button variant="primary" size="lg" onClick={() => onGoToStep(blocking)}>
+            {`Go to ${blockingLabel}`}
+          </Button>
+        )}
+      </div>
+    );
+  }
+
+  // current — the 3s poll auto-advances when the worker finishes.
   return (
     <div className="space-y-5 max-w-md">
       <header>

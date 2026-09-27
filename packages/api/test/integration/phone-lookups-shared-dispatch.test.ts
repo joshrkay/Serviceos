@@ -264,7 +264,7 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
       lookups,
     });
     const callSid = `CA-${intent}-${crypto.randomUUID().slice(0, 8)}`;
-    await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: s.tenantId });
+    await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId: s.tenantId, stirVerstat: 'TN-Validation-Passed-A' });
     const session = store.findByCallSid(callSid)!;
     if (session.machine.currentState === 'greeting') {
       session.machine.dispatch({ type: 'greeted_ok' });

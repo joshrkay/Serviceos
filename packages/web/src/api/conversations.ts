@@ -87,6 +87,30 @@ export async function searchConversations(
   return data.results ?? [];
 }
 
+/**
+ * #680 — open (or lazily create) a customer's comms thread so the owner can
+ * start an OUTBOUND message to a customer who has never texted in. Idempotent
+ * server-side: repeat calls return the same conversation.
+ */
+export async function openCustomerConversation(customerId: string): Promise<{ id: string }> {
+  const res = await apiFetch(
+    `/api/conversations/customer/${encodeURIComponent(customerId)}`,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+  );
+  if (!res.ok) {
+    let message = `Could not open a conversation with this customer (${res.status})`;
+    try {
+      const err = (await res.json()) as { message?: string };
+      if (err.message) message = err.message;
+    } catch {
+      /* keep the default */
+    }
+    throw new Error(message);
+  }
+  const data = (await res.json()) as { conversation: { id: string } };
+  return { id: data.conversation.id };
+}
+
 /** Fetch the full message history of one conversation. */
 export async function getConversationMessages(
   conversationId: string,

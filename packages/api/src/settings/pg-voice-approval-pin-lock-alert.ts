@@ -31,4 +31,25 @@ export class PgVoiceApprovalPinLockAlertRepository
       return (result.rowCount ?? 0) > 0;
     });
   }
+
+  async markSent(tenantId: string, episodeKey: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE voice_approval_pin_lock_alerts SET sent_at = NOW()
+          WHERE tenant_id = $1 AND episode_key = $2 AND sent_at IS NULL`,
+        [tenantId, episodeKey],
+      );
+    });
+  }
+
+  async isSent(tenantId: string, episodeKey: string): Promise<boolean> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT 1 FROM voice_approval_pin_lock_alerts
+          WHERE tenant_id = $1 AND episode_key = $2 AND sent_at IS NOT NULL`,
+        [tenantId, episodeKey],
+      );
+      return (result.rowCount ?? 0) > 0;
+    });
+  }
 }

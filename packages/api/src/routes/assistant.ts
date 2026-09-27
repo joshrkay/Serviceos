@@ -278,6 +278,44 @@ const assistantProposalSchema = z.object({
     .transform((v) => v ?? undefined),
   missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined),
   /**
+   * #1277 — the one-tap catalog picks that lift a path-shaped
+   * `lineItems[n].catalogItemId` gate: the same `sourceContext.catalogResolution`
+   * candidates the inbox renders, so the chat card is not left promising an
+   * Edit it does not have. Picking POSTs `/api/proposals/:id/resolve-line`.
+   */
+  linePicks: z
+    .array(
+      z.object({
+        lineIndex: z.number().int(),
+        description: z.string(),
+        candidates: z.array(
+          z.object({
+            id: z.string(),
+            name: z.string().optional(),
+            unitPriceCents: z.number().optional(),
+            score: z.number(),
+          }),
+        ),
+      }),
+    )
+    .nullish()
+    .transform((v) => v ?? undefined),
+  /**
+   * #1277 — the candidates behind a gated id (`customerId`, `jobId`, …) that a
+   * pending one-question clarification is waiting on. Picking one sends that
+   * id through `PUT /api/proposals/:id { edits: { [field]: id } }`.
+   */
+  referencePick: z
+    .object({
+      field: z.string(),
+      reference: z.string(),
+      candidates: z.array(
+        z.object({ id: z.string(), label: z.string(), hint: z.string().optional(), score: z.number() }),
+      ),
+    })
+    .nullish()
+    .transform((v) => v ?? undefined),
+  /**
    * The address a `missingFields: ['locationId']` gate needs in order to be
    * closable by a human. Without it the card shows a bare "locationId"
    * prompt and the operator has no way to know WHICH address was spoken —
@@ -643,6 +681,49 @@ export interface AssistantRouterDeps {
 
 export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 
+const GATED_CATALOG_LINE = /^lineItems\[(\d+)\]\.catalogItemId$/;
+
+/**
+ * #1277 — one pick per `lineItems[n].catalogItemId` gate that has recorded
+ * candidates (`sourceContext.catalogResolution[n]`, written by the catalog
+ * resolver). A gate with no candidates is left out: there is nothing to pick.
+ */
+function gatedLinePicks(
+  payload: Record<string, unknown> | undefined,
+  sourceContext: Record<string, unknown> | undefined,
+): NonNullable<AssistantProposal['linePicks']> {
+  const missing = Array.isArray(sourceContext?.missingFields) ? sourceContext.missingFields : [];
+  const resolution = sourceContext?.catalogResolution;
+  if (resolution === null || typeof resolution !== 'object') return [];
+  const lines = Array.isArray(payload?.lineItems) ? (payload.lineItems as unknown[]) : [];
+
+  const picks: NonNullable<AssistantProposal['linePicks']> = [];
+  for (const entry of missing) {
+    const match = typeof entry === 'string' ? GATED_CATALOG_LINE.exec(entry) : null;
+    if (!match) continue;
+    const lineIndex = Number(match[1]);
+    const raw = (resolution as Record<string, unknown>)[String(lineIndex)];
+    if (!Array.isArray(raw)) continue;
+    const candidates = raw
+      .filter((c): c is Record<string, unknown> => c !== null && typeof c === 'object')
+      .filter((c) => typeof c.id === 'string' && typeof c.score === 'number')
+      .map((c) => ({
+        id: c.id as string,
+        ...(typeof c.name === 'string' ? { name: c.name } : {}),
+        ...(typeof c.unitPriceCents === 'number' ? { unitPriceCents: c.unitPriceCents } : {}),
+        score: c.score as number,
+      }));
+    if (candidates.length === 0) continue;
+    const line = lines[lineIndex] as Record<string, unknown> | undefined;
+    const description =
+      typeof line?.description === 'string' && line.description.length > 0
+        ? line.description
+        : `Line ${lineIndex + 1}`;
+    picks.push({ lineIndex, description, candidates });
+  }
+  return picks;
+}
+
 /**
  * E10 (U7) — lift the trust signals AIProposalCard renders out of a persisted
  * proposal's `payload._meta` / `payload.lineItems` / `sourceContext.missingFields`
@@ -659,10 +740,10 @@ export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 export function proposalSignals(
   payload: Record<string, unknown> | undefined,
   sourceContext: Record<string, unknown> | undefined,
-): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields' | 'serviceLocationGap'> {
+): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields' | 'linePicks' | 'referencePick' | 'serviceLocationGap'> {
   const out: Pick<
     AssistantProposal,
-    'meta' | 'lineItems' | 'missingFields' | 'serviceLocationGap'
+    'meta' | 'lineItems' | 'missingFields' | 'linePicks' | 'referencePick' | 'serviceLocationGap'
   > = {};
 
   const rawMeta = payload?._meta;
@@ -735,6 +816,28 @@ export function proposalSignals(
   if (Array.isArray(rawMissing)) {
     const missingFields = rawMissing.filter((f): f is string => typeof f === 'string');
     if (missingFields.length > 0) out.missingFields = missingFields;
+  }
+
+  // #1277 — the candidates behind each gated catalog pick, so the chat card
+  // can offer the inbox's one-tap picker instead of a dead "Tap Edit".
+  const linePicks = gatedLinePicks(payload, sourceContext);
+  if (linePicks.length > 0) out.linePicks = linePicks;
+
+  // #1277 — a gated id with a pending question behind it: offer the same
+  // candidates the question listed, so the card's pick sends a real id
+  // (a typed name in a free-text box is not one, and PUT answers 400).
+  const pending = pendingAmbiguityOf({ sourceContext });
+  if (pending && out.missingFields?.includes(pending.refKey)) {
+    out.referencePick = {
+      field: pending.refKey,
+      reference: pending.reference,
+      candidates: pending.candidates.map((c) => ({
+        id: c.id,
+        label: c.name,
+        ...(c.hint ? { hint: c.hint } : {}),
+        score: c.score,
+      })),
+    };
   }
 
   // The companion context for a `missingFields: ['locationId']` gate. This
@@ -883,6 +986,13 @@ function customerProposalToUI({
   // has to be visible on the card that authorises the write.
   const spokenAddress = typeof payload.address === 'string' ? payload.address.trim() : '';
 
+  // #1276A — the draft is gated on a last name (see `gateOnLastName`); the
+  // card must offer the field that lifts the gate, and a gated draft is not
+  // a High-confidence one.
+  const needsLastName = Array.isArray(sourceContext?.missingFields)
+    && (sourceContext.missingFields as unknown[]).includes('lastName');
+  const lastName = typeof payload.lastName === 'string' ? payload.lastName : '';
+
   const title = name ? `New customer: ${name}` : 'New customer (needs details)';
   const summary = [
     name ? `Name: ${name}` : 'Name not provided',
@@ -900,13 +1010,14 @@ function customerProposalToUI({
     explanation: cardExplanation(explanation, sourceMessage),
     editFields: [
       { label: 'Name', key: 'name', value: name ?? '' },
+      ...(needsLastName ? [{ label: 'Last name', key: 'lastName', value: lastName }] : []),
       { label: 'Email', key: 'email', value: email ?? '' },
       { label: 'Phone', key: 'phone', value: phone ?? '' },
       // The verbatim spoken address is editable here too. It is the payload's
       // `address` key, unrenamed, so an edit lands where the executor reads.
       { label: 'Address (as spoken)', key: 'address', value: spokenAddress },
     ],
-    confidence: confidenceScore >= 0.85 ? 'High' : 'Medium',
+    confidence: confidenceScore >= 0.85 && !needsLastName ? 'High' : 'Medium',
     type: 'Customer',
     status: 'Pending',
     proposalType: 'create_customer',
@@ -917,6 +1028,18 @@ function customerProposalToUI({
     // create_customer with only a name carries missingFields).
     ...proposalSignals(payload, sourceContext),
   };
+}
+
+/** #1276A — a one-word name ("Taylor") is a first name with the rest unsaid. */
+function isBareFirstName(name: unknown): boolean {
+  return typeof name === 'string' && name.trim().length > 0 && !/\s/.test(name.trim());
+}
+
+function gateOnLastName(proposal: Proposal): void {
+  const ctx = { ...((proposal.sourceContext ?? {}) as Record<string, unknown>) };
+  const existing = Array.isArray(ctx.missingFields) ? (ctx.missingFields as string[]) : [];
+  ctx.missingFields = [...new Set([...existing, 'lastName'])];
+  proposal.sourceContext = ctx;
 }
 
 
@@ -1643,6 +1766,61 @@ async function findReviewableInConversation(
   } catch {
     return undefined;
   }
+}
+
+/** How far back an unpinned turn may look for the question it answers. */
+const PENDING_QUESTION_RECOVERY_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * #1276C — the conversation a history-replaying client is still in, when it
+ * did not send the id.
+ *
+ * The web UI pins `conversationId` from every reply envelope, so a typed "1"
+ * reaches `findPendingClarification`. An API client that replays `messages`
+ * but never echoes the id got a freshly minted conversation on every turn —
+ * the answer found no pending question and fell to general chat.
+ *
+ * Recovery is deliberately narrow: the request must carry a previous
+ * assistant turn, and that turn must contain the EXACT question text a
+ * still-reviewable proposal drafted by THIS user in THIS tenant, within the
+ * last half hour, is waiting on. Anything less is a new conversation, as
+ * before. Best-effort: a lookup failure mints a fresh id.
+ */
+async function recoverPendingConversationId(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  userId: string,
+  messages: ReadonlyArray<{ role: string; content: string }>,
+): Promise<string | undefined> {
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')?.content;
+  if (!lastAssistant) return undefined;
+
+  const since = new Date(Date.now() - PENDING_QUESTION_RECOVERY_WINDOW_MS);
+  let candidates: Proposal[];
+  try {
+    const statuses = ['ready_for_review', 'draft'] as const;
+    const byStatus = await Promise.all(
+      statuses.map((status) =>
+        deps.proposalRepo.findByStatusSince
+          ? deps.proposalRepo.findByStatusSince(tenantId, status, since, 50)
+          : deps.proposalRepo.findByStatus(tenantId, status),
+      ),
+    );
+    candidates = byStatus.flat();
+  } catch {
+    return undefined;
+  }
+
+  const newestFirst = candidates
+    .filter((p) => p.createdBy === userId && new Date(p.createdAt).getTime() >= since.getTime())
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  for (const proposal of newestFirst) {
+    const conversationId = (proposal.sourceContext as Record<string, unknown> | undefined)?.conversationId;
+    if (typeof conversationId !== 'string') continue;
+    const pending = pendingAmbiguityOf(proposal);
+    if (pending && lastAssistant.includes(buildDisambiguationQuestion(pending))) return conversationId;
+  }
+  return undefined;
 }
 
 /**
@@ -3464,6 +3642,15 @@ async function generateAssistantReply(
         if (entities?.displayName) customerPayload.name = entities.displayName;
         if (entities?.email) customerPayload.email = entities.email;
         if (entities?.phone) customerPayload.phone = entities.phone;
+        // #1271 — the FIFTH place a spoken address had to survive. This
+        // translation used to rebuild the handler's entities from name /
+        // email / phone only, so the address the classifier extracted never
+        // reached `readEntities` (create-customer-task.ts), the card's
+        // addressCapture slice, or the executor's service_location write:
+        // every chat-created customer landed with zero locations. Forward
+        // both keys the handler reads; it owns the precedence.
+        if (entities?.address) customerPayload.address = entities.address;
+        if (entities?.serviceAddress) customerPayload.serviceAddress = entities.serviceAddress;
 
         // A create_customer intent classified from an under-specified command
         // ("Add a new customer" — e.g. the one-tap assistant suggestion chip)
@@ -3509,6 +3696,13 @@ async function generateAssistantReply(
             ? { tenantThresholdOverride: await getTenantThresholdOverride() }
             : {}),
         });
+        // #1276A — "Add a new customer named Taylor." used to execute with
+        // lastName '' at High confidence: splitName keeps a single token as a
+        // first name and nothing asked for the rest. Ask, don't guess (D-029):
+        // gate the draft on `lastName`, which the card's Edit fills
+        // (editProposal clears the gate on fill) and the executor reads.
+        const needsLastName = isBareFirstName(customerPayload.name);
+        if (needsLastName) gateOnLastName(proposal);
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
         // inapp-adapter.handleCreateProposal). create-customer-task builds
@@ -3536,7 +3730,9 @@ async function generateAssistantReply(
           usage: classifierUsage,
           message: {
             role: 'assistant' as const,
-            content: uiProposal.title + '. Review and approve to add them to your CRM.',
+            content: needsLastName
+              ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
+              : uiProposal.title + '. Review and approve to add them to your CRM.',
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -3846,7 +4042,13 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
         // its own doc comment, conversations/conversation-service.ts) —
         // this fix is strictly about the one case that was never resolved
         // AT ALL before drafting: absent.
-        let conversationId = parsed.conversationId ?? uuidv4();
+        // #1276C — an API client that replays `messages` but never echoes the
+        // conversation id used to lose a pending question (see
+        // `recoverPendingConversationId`).
+        let conversationId =
+          parsed.conversationId ??
+          (await recoverPendingConversationId(deps, req.auth!.tenantId, req.auth!.userId, parsed.messages)) ??
+          uuidv4();
 
         const result = await generateAssistantReply(
           parsed.messages,

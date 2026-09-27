@@ -3,6 +3,8 @@ import { Pool } from 'pg';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import request from 'supertest';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
+import { applyTenantContext } from '../../src/db/rls-runtime-role';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL } from '../../src/audit/pg-audit';
 import { createAuditEvent } from '../../src/audit/audit';
@@ -550,5 +552,90 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     expect(await claim(a.tenantId, 'ep-2')).toBe(true);
     expect(await alertClaims(a.tenantId)).toHaveLength(2);
     expect(await alertClaims(b.tenantId)).toHaveLength(1);
+  });
+
+  it('#1238 — a claim starts UNSENT; markSent stamps sent_at once; tenant-isolated', async () => {
+    const a = await freshTenant();
+    const b = await freshTenant();
+    const repo = new PgVoiceApprovalPinLockAlertRepository(pool);
+    await repo.claim({ tenantId: a.tenantId, episodeKey: 'ep-sent', sessionId: 'i3t-sent', strikeCount: 5 });
+    expect(await repo.isSent(a.tenantId, 'ep-sent')).toBe(false);
+    // Another tenant cannot mark (or see) tenant A's claim.
+    await repo.markSent(b.tenantId, 'ep-sent');
+    expect(await repo.isSent(a.tenantId, 'ep-sent')).toBe(false);
+    await repo.markSent(a.tenantId, 'ep-sent');
+    expect(await repo.isSent(a.tenantId, 'ep-sent')).toBe(true);
+    const { rows } = await pool.query(
+      `SELECT sent_at FROM voice_approval_pin_lock_alerts WHERE tenant_id = $1 AND episode_key = 'ep-sent'`,
+      [a.tenantId],
+    );
+    expect(rows[0].sent_at).toBeInstanceOf(Date);
+  });
+
+  it('#1238 item 4 — a settings save racing a PIN rotation cannot bring the old PIN hash back', async () => {
+    const tenant = await freshTenant();
+    await enrollAt(tenant.tenantId, PIN, new Date(Date.now() - HOUR));
+    const newHash = hashVoiceApprovalPin(NEW_PIN, tenant.tenantId, PIN_SECRET);
+
+    // The "other tab": the owner rotates the leaked PIN AFTER the generic
+    // PUT read the settings and BEFORE its write lands.
+    let raced = false;
+    const racingRepo = Object.create(settingsRepo) as PgSettingsRepository;
+    racingRepo.update = async (tenantId, updates, options) => {
+      if (!raced && updates.escalationSettings) {
+        raced = true;
+        await enrollAt(tenant.tenantId, NEW_PIN, new Date());
+      }
+      return settingsRepo.update(tenantId, updates, options);
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: tenant.userId, sessionId: 'i3-race', tenantId: tenant.tenantId, role: 'owner' };
+      next();
+    });
+    app.use('/api/settings', createSettingsRouter(racingRepo, undefined, auditRepo));
+
+    const res = await request(app)
+      .put('/api/settings')
+      .send({ escalationSettings: { ...DEFAULT_ESCALATION_SETTINGS, after_hours_voice_mode: 'ai_answering' } });
+    expect(res.status).toBe(200);
+    expect(raced).toBe(true);
+
+    const stored = await settingsRepo.findByTenant(tenant.tenantId);
+    expect(stored!.escalationSettings!.voice_approval_pin_hash).toBe(newHash);
+    expect(stored!.escalationSettings!.after_hours_voice_mode).toBe('ai_answering');
+  });
+
+  it('#1238 item 3 — a PIN attempt reached inside an /api request transaction is reserved in its OWN committed transaction', async () => {
+    const tenant = await freshTenant();
+    await enrollAt(tenant.tenantId, PIN, new Date(Date.now() - HOUR));
+    const { deps } = makeDeps('+15125550209');
+    await seedMoney(tenant.tenantId, 'Hazel Supply', 12000);
+    const ref = { tenantId: tenant.tenantId, sessionId: 'i3t-in-request', ownerSession: true } as const;
+    const start = await startVoiceApproval(deps, { ...ref, action: 'approve', reference: 'the Hazel payment' });
+    const confirm = await continueVoiceApproval(deps, { ...ref, utterance: 'yes', pending: start.pending! });
+    expect(confirm.outcome).toBe('challenge_prompt');
+
+    // The request-scoped transaction the /api middleware opens (tenant-context.ts).
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await applyTenantContext(client, tenant.tenantId, { transactional: true });
+      await tenantContextStore.run({ client, tenantId: tenant.tenantId }, async () => {
+        const r = await continueVoiceApproval(deps, { ...ref, utterance: '0 0 0 0', pending: confirm.pending! });
+        expect(r.outcome).toBe('challenge_failed');
+        // Seen from ANOTHER connection while the request transaction is still
+        // open: the reservation already counts against the tenant.
+        const attempts = await tenantContextStore.exit(() => rowsOfType(tenant.tenantId, PIN_ATTEMPT));
+        expect(attempts.filter((e) => e.correlationId === 'i3t-in-request')).toHaveLength(1);
+      });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+    // …and it survives the request rolling back.
+    const after = await rowsOfType(tenant.tenantId, PIN_ATTEMPT);
+    expect(after.filter((e) => e.correlationId === 'i3t-in-request')).toHaveLength(1);
   });
 });

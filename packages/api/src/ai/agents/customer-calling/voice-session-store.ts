@@ -117,7 +117,7 @@ export type VoiceSessionEvent =
   /** VQ-003: session ended for one of the canonical reasons. */
   | {
       type: 'session_terminated';
-      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed';
+      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed' | 'life_safety_e1';
       ts: number;
     }
   /**
@@ -189,6 +189,18 @@ export interface VoiceSession {
    * (the ask_caller → caller_known wire in the voice-turn processor).
    */
   callerPhone?: string;
+  /**
+   * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound
+   * webhook, verbatim; absent when Twilio sent none. Owner-line authority
+   * requires full A-attestation (`telephony/stir-attestation.ts`).
+   */
+  stirVerstat?: string;
+  /**
+   * #1223 — the caller-ID matched an approver (owner / backup supervisor) but
+   * the call was NOT A-attested, so it runs as an untrusted caller. Drives
+   * the spoken "use the app for owner actions" notice at establishment.
+   */
+  ownerLineUnverified?: boolean;
   /** Linked conversation row for persisting transcript / proposals. */
   conversationId?: string;
   machine: CallingAgentStateMachine;
