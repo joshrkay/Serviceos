@@ -187,7 +187,9 @@ export async function updateContact(
   input: UpdateContactInput,
   repository: ContactRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<CustomerContact | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -210,7 +212,7 @@ export async function updateContact(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer_contact.updated',
         entityType: 'customer_contact',
         entityId: id,
@@ -227,7 +229,9 @@ export async function archiveContact(
   id: string,
   repository: ContactRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<CustomerContact | null> {
   const updated = await repository.update(tenantId, id, {
     isArchived: true,
@@ -242,7 +246,7 @@ export async function archiveContact(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer_contact.archived',
         entityType: 'customer_contact',
         entityId: id,

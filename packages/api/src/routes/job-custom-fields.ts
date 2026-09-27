@@ -110,7 +110,8 @@ export function createJobCustomFieldRouter(
         parsed.value,
         repo,
         req.auth!.userId,
-        auditRepo
+        auditRepo,
+        req.auth!.role
       );
       res.json(await listResolvedJobCustomFields(req.auth!.tenantId, req.params.jobId, repo));
     })

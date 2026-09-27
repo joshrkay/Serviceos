@@ -161,7 +161,9 @@ export async function setCustomFieldValue(
   value: string | null,
   repository: CustomFieldRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<void> {
   const def = await repository.findDefById(tenantId, fieldDefId);
   if (!def) throw new Error('Custom field definition not found');
@@ -178,7 +180,7 @@ export async function setCustomFieldValue(
       createAuditEvent({
         tenantId,
         actorId,
-        actorRole: 'unknown',
+        actorRole: actorRole ?? 'unknown',
         eventType: 'customer_custom_field.value_set',
         entityType: 'customer',
         entityId: customerId,

@@ -369,7 +369,9 @@ export async function updateJob(
   input: UpdateJobInput,
   repository: JobRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /** #1408 — the acting request's role, recorded as the audit actor_role. */
+  actorRole?: string
 ): Promise<Job | null> {
   const updated = await repository.update(tenantId, id, { ...input, updatedAt: new Date() });
 
@@ -377,7 +379,7 @@ export async function updateJob(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'unknown',
+      actorRole: actorRole ?? 'unknown',
       eventType: 'job.updated',
       entityType: 'job',
       entityId: id,
