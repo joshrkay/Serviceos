@@ -685,6 +685,27 @@ export function isAffirmation(text: string): boolean {
  * THIS predicate, so a repeated bare "yes" is answered without an LLM call
  * while a request that merely opens with "yes" still reaches the classifier.
  */
+/**
+ * #1406 D10 — a closing farewell with no request in it: "goodbye", "bye",
+ * "that's all", "never mind, that is all for now. Goodbye.", "thanks, bye".
+ * Deliberately narrow: an utterance that still asks for something ("bye,
+ * and book Garcia Tuesday") is NOT a farewell and reaches the classifier.
+ */
+const FAREWELL_WORDS = new Set([
+  'goodbye', 'bye', 'byebye', 'bye-bye', 'adios', 'adiós', 'ciao', 'later',
+  'that', 'thats', "that's", 'is', 'all', 'it', 'for', 'now', 'never', 'mind',
+  'nevermind', 'thanks', 'thank', 'you', 'ok', 'okay', 'no', 'nothing', 'else',
+  'im', "i'm", 'done', 'good', 'great', 'see', 'ya', 'talk', 'soon', 'have',
+  'a', 'nice', 'day', 'gracias', 'eso', 'es', 'todo', 'hasta', 'luego',
+]);
+const FAREWELL_ANCHORS = /\b(good-?bye|bye(-?bye)?|adi[oó]s|that'?s all|that is all|nothing else|i'?m done|hasta luego|eso es todo)\b/;
+
+export function isFarewell(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/[.,!?;:—–-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!normalized || !FAREWELL_ANCHORS.test(normalized)) return false;
+  return normalized.split(' ').every((word) => FAREWELL_WORDS.has(word));
+}
+
 export function isPlainAffirmation(text: string): boolean {
   const normalized = normalizeConfirmText(text);
   if (!normalized) return false;
@@ -1948,6 +1969,13 @@ export class InAppVoiceAdapter {
           fsmEvent = this.buildDisambiguationRetryEvent(pending);
         }
       }
+    } else if (
+      (stateBeforeTurn === 'intent_capture' || stateBeforeTurn === 'closing') &&
+      isFarewell(text)
+    ) {
+      // #1406 D10 — a goodbye is not a request to classify (it came back
+      // `unknown` and escalated to a human on the second miss).
+      fsmEvent = { type: 'caller_farewell' };
     } else {
       // §3B + §3D: vertical + intake-question prompt section.
       // §3C: caller-plan prompt section (only when caller is identified).
@@ -2378,6 +2406,18 @@ export class InAppVoiceAdapter {
       stateAfter: session.machine.currentState,
       ...(lastSpoken ? { lastSpoken } : {}),
     };
+    // #1406 D10 — persist the running transcript every turn. It used to be
+    // written only by the terminal markEnded, so a session the client never
+    // ended (the common in-app case) showed zero transcript turns. Ended
+    // sessions are finalized by markEnded; fire-and-forget like create().
+    const repo = this.deps.voiceSessionRepo;
+    if (repo?.updateTranscript && !session.ended) {
+      void repo
+        .updateTranscript(session.tenantId, session.id, [...session.transcript])
+        .catch(() => {
+          /* best-effort — markEnded still writes the final transcript */
+        });
+    }
   }
 
   /**

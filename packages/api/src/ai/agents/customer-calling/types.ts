@@ -179,6 +179,11 @@ export type CallingAgentEvent =
    */
   | { type: 'intent_details_supplied'; entities: Record<string, unknown> }
   | { type: 'closed' }
+  /**
+   * #1406 D10 — the caller/operator said goodbye ("that's all, bye"). Ends
+   * the session politely from any state; never an escalation.
+   */
+  | { type: 'caller_farewell' }
   | { type: 'second_intent' }
   | {
       type: 'frustration_detected';
