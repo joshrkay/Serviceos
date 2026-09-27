@@ -1002,17 +1002,23 @@ export class InAppVoiceAdapter {
     // U4 — memo key for the once-per-session tenant-zone read above (the
     // live session OBJECT, so the WeakMap entry dies with the session).
     session?: VoiceSession,
+    // #1406 D6 — resolver-produced ids from an earlier turn of this dialogue.
+    pinnedRefs?: Record<string, string>,
   ): Promise<SchedulingEntityResolution> {
     const resolver = this.getEntityResolver();
     try {
       const timezone = await this.resolveSessionTimezone(tenantId, session);
+      const opts = {
+        ...(timezone ? { timezone } : {}),
+        ...(pinnedRefs ? { pinnedRefs } : {}),
+      };
       return await resolveSchedulingEntities(
         resolver,
         tenantId,
         intent,
         entities,
         stickyJobId,
-        timezone ? { timezone } : undefined,
+        Object.keys(opts).length > 0 ? opts : undefined,
       );
     } catch {
       return { status: 'resolved', refs: {} };
@@ -1086,6 +1092,17 @@ export class InAppVoiceAdapter {
     // policy), and create_appointment auto-opens a job from jobTitle at
     // execution time (95a260cd).
     return { type: 'entity_resolved', refs: resolution.refs };
+  }
+
+  /**
+   * #1406 D6 — who a proposal minted by this session is created BY: the
+   * authenticated operator driving it. Never `payload.customerId` — that is
+   * context.customerId, a CRM CUSTOMER whenever the session started with a
+   * phone number that matched one, and the executor attributes the work it
+   * does (e.g. a job it auto-opens) to proposal.createdBy.
+   */
+  private proposalActorId(session: VoiceSession): string {
+    return session.actorUserId ?? this.deps.systemActorId ?? 'calling-agent';
   }
 
   private buildDisambiguationRetryEvent(
@@ -1903,13 +1920,28 @@ export class InAppVoiceAdapter {
           pending,
         );
         if (match.status === 'resolved') {
-          fsmEvent = {
-            type: 'entity_resolved',
-            refs: {
-              ...pending.partialRefs,
-              [pending.refKey]: match.candidateId,
-            },
-          };
+          // #1406 D6 — the pick settles ONE reference; the lookups planned
+          // after it (e.g. the job in "invoice QA Matrix for the QA Matrix
+          // job") must still run. Re-resolve with the picked id pinned: the
+          // already-resolved refs are skipped, the rest resolve — and a
+          // further ambiguity is asked, never guessed.
+          const context = session.machine.currentContext;
+          const intent = context.currentIntent;
+          const pickedRefs = { ...pending.partialRefs, [pending.refKey]: match.candidateId };
+          fsmEvent = intent
+            ? await this.toResolutionEvent(
+                session.tenantId,
+                intent,
+                await this.resolveEntities(
+                  session.tenantId,
+                  intent,
+                  { ...context.extractedEntities, ...pickedRefs },
+                  context.jobId,
+                  session,
+                  pickedRefs,
+                ),
+              )
+            : { type: 'entity_resolved', refs: pickedRefs };
         } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
           fsmEvent = { type: 'entity_resolved', refs: pending.partialRefs };
         } else {
@@ -2743,10 +2775,7 @@ export class InAppVoiceAdapter {
         conversationId:
           typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
         aiRunId: typeof payload.aiRunId === 'string' && payload.aiRunId ? payload.aiRunId : undefined,
-        createdBy:
-          typeof payload.customerId === 'string'
-            ? payload.customerId
-            : this.deps.systemActorId ?? 'calling-agent',
+        createdBy: this.proposalActorId(session),
         tenantThresholdOverride,
       };
       const protectionDeps = {
@@ -2815,10 +2844,7 @@ export class InAppVoiceAdapter {
               surface: 'S2' as ProposalSurface,
               sessionId: session.id,
             },
-            createdBy:
-              typeof payload.customerId === 'string'
-                ? payload.customerId
-                : this.deps.systemActorId ?? 'calling-agent',
+            createdBy: this.proposalActorId(session),
           });
           const storedClarification = await this.deps.proposalRepo.create(clarification);
           session.proposalIds.push(storedClarification.id);
@@ -2831,10 +2857,7 @@ export class InAppVoiceAdapter {
             ? { conversationId: payload.conversationId }
             : {}),
           existingEntities: entities,
-          userId:
-            typeof payload.customerId === 'string'
-              ? payload.customerId
-              : this.deps.systemActorId ?? 'calling-agent',
+          userId: this.proposalActorId(session),
           intent: 'respond_to_review',
           ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
         });
@@ -3105,9 +3128,7 @@ export class InAppVoiceAdapter {
         // (in-memory repos don't enforce the FK, which is why tests passed).
         // Use a real run id when the engine provides one, else leave it null.
         ...(typeof payload.aiRunId === 'string' && payload.aiRunId ? { aiRunId: payload.aiRunId } : {}),
-        createdBy: typeof payload.customerId === 'string'
-          ? payload.customerId
-          : this.deps.systemActorId ?? 'calling-agent',
+        createdBy: this.proposalActorId(session),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
       let stored = await this.deps.proposalRepo.create(proposal);

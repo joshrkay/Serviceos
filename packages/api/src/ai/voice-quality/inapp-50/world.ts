@@ -52,6 +52,10 @@ import {
 import { buildOperatorVoiceFixturePlan } from '../../../seed/operator-voice-fixture-plan';
 import type { OperatorVoiceFixtureCatalog } from '../../../seed/operator-voice-fixture-plan';
 import { FIXTURE_CATALOG_PATH, type Register } from './register';
+import {
+  ANCHORED_ESTIMATE_OPEN_STATUSES,
+  ANCHORED_INVOICE_OPEN_STATUSES,
+} from '../../resolution/pg-entity-resolver';
 
 /** Stable per-run tenant/actor identities (real UUIDs — see the module note). */
 export interface WorldIdentity {
@@ -264,9 +268,9 @@ export class FixtureEntityResolver implements EntityResolver {
       case 'job':
         return this.resolveJob(w, reference);
       case 'invoice':
-        return this.resolveInvoice(w, reference);
+        return this.resolveInvoice(w, reference, input.customerId);
       case 'estimate':
-        return this.resolveEstimate(w, reference);
+        return this.resolveEstimate(w, reference, input.customerId);
       case 'appointment':
         return this.resolveAppointment(w, reference, input.jobId, input.customerId);
       case 'technician':
@@ -341,7 +345,11 @@ export class FixtureEntityResolver implements EntityResolver {
     return foldWithBestMatch(candidates, reference);
   }
 
-  private async resolveInvoice(w: World, reference: string): Promise<EntityResolverResult> {
+  private async resolveInvoice(
+    w: World,
+    reference: string,
+    customerId?: string,
+  ): Promise<EntityResolverResult> {
     const invoices = await w.invoiceRepo.findByTenant(w.tenantId);
     const docMatch = reference.match(INV_NUMBER_RE);
     if (docMatch) {
@@ -351,9 +359,17 @@ export class FixtureEntityResolver implements EntityResolver {
         ? resolvedResult({ id: hit.id, kind: 'invoice', label: hit.invoiceNumber, hint: hit.status, score: 1 })
         : { kind: 'not_found', reference };
     }
-    const byCustomer = await this.docsForCustomerReference(w, reference);
+    // Mirrors PgEntityResolver.resolveInvoiceByCustomer: a verified customer
+    // anchor IS the scope (its open invoices), not the spoken name again.
+    const byCustomer = customerId
+      ? await this.docsForCustomerId(w, customerId)
+      : await this.docsForCustomerReference(w, reference);
     if (!byCustomer) return { kind: 'not_found', reference };
-    const owned = invoices.filter((i) => byCustomer.jobIds.has(i.jobId));
+    const owned = invoices.filter(
+      (i) =>
+        byCustomer.jobIds.has(i.jobId) &&
+        (!customerId || (ANCHORED_INVOICE_OPEN_STATUSES as readonly string[]).includes(i.status)),
+    );
     const candidates = owned.map((i) => ({
       id: i.id,
       kind: 'invoice' as const,
@@ -364,7 +380,11 @@ export class FixtureEntityResolver implements EntityResolver {
     return foldCandidates(candidates, reference);
   }
 
-  private async resolveEstimate(w: World, reference: string): Promise<EntityResolverResult> {
+  private async resolveEstimate(
+    w: World,
+    reference: string,
+    customerId?: string,
+  ): Promise<EntityResolverResult> {
     const estimates = await w.estimateRepo.findByTenant(w.tenantId);
     const docMatch = reference.match(EST_NUMBER_RE);
     if (docMatch) {
@@ -374,9 +394,15 @@ export class FixtureEntityResolver implements EntityResolver {
         ? resolvedResult({ id: hit.id, kind: 'estimate', label: hit.estimateNumber, hint: hit.status, score: 1 })
         : { kind: 'not_found', reference };
     }
-    const byCustomer = await this.docsForCustomerReference(w, reference);
+    const byCustomer = customerId
+      ? await this.docsForCustomerId(w, customerId)
+      : await this.docsForCustomerReference(w, reference);
     if (!byCustomer) return { kind: 'not_found', reference };
-    const owned = estimates.filter((e) => byCustomer.jobIds.has(e.jobId));
+    const owned = estimates.filter(
+      (e) =>
+        byCustomer.jobIds.has(e.jobId) &&
+        (!customerId || (ANCHORED_ESTIMATE_OPEN_STATUSES as readonly string[]).includes(e.status)),
+    );
     const candidates = owned.map((e) => ({
       id: e.id,
       kind: 'estimate' as const,
@@ -392,6 +418,14 @@ export class FixtureEntityResolver implements EntityResolver {
    * named by its CUSTOMER. Returns that customer's job ids, or undefined when
    * the reference names no seeded customer.
    */
+  private async docsForCustomerId(
+    w: World,
+    customerId: string,
+  ): Promise<{ customerId: string; jobIds: Set<string> }> {
+    const jobs = await w.jobRepo.findByCustomer(w.tenantId, customerId, { includeArchived: true });
+    return { customerId, jobIds: new Set(jobs.map((j) => j.id)) };
+  }
+
   private async docsForCustomerReference(
     w: World,
     reference: string,
