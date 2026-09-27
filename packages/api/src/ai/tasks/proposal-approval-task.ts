@@ -599,6 +599,12 @@ async function readPinChangedAt(deps: VoiceApprovalDeps, tenantId: string): Prom
 async function resolveTenantPinLock(
   deps: VoiceApprovalDeps,
   tenantId: string,
+  /**
+   * #1238 item 2 — an attempt THIS call compared and found wrong. Its outcome
+   * is known in-process even when its strike and marker writes were both
+   * lost, so it settles here instead of waiting out PIN_ATTEMPT_SETTLE_MS.
+   */
+  knownWrongAttemptId?: string,
 ): Promise<TenantPinLockState> {
   const auditRepo = deps.auditRepo;
   if (!auditRepo) return { status: 'unrecorded' };
@@ -632,6 +638,7 @@ async function resolveTenantPinLock(
       if (attemptId) settledIds.add(attemptId);
     }
   }
+  if (knownWrongAttemptId) settledIds.add(knownWrongAttemptId);
   const pinChangedAt = await readPinChangedAt(deps, tenantId);
   return {
     status: 'resolved',
@@ -747,8 +754,9 @@ async function alertOwnerOfTenantPinLock(
   deps: VoiceApprovalDeps,
   ref: VoiceApprovalSessionRef,
   proposalId: string,
+  knownWrongAttemptId?: string,
 ): Promise<void> {
-  const tenant = await resolveTenantPinLock(deps, ref.tenantId);
+  const tenant = await resolveTenantPinLock(deps, ref.tenantId, knownWrongAttemptId);
   if (tenant.status !== 'resolved' || !tenant.decision.engagingAttemptId) return;
   const { strikeCount, engagingAttemptId } = tenant.decision;
   const context = { tenantId: ref.tenantId, sessionId: ref.sessionId, proposalId, strikeCount, episodeKey: engagingAttemptId };
@@ -2015,7 +2023,10 @@ export async function continueVoiceApproval(
           ...(sessionLocks ? { oneTapSmsSent: false } : {}),
         },
       );
-      await alertOwnerOfTenantPinLock(deps, input, proposal.id);
+      // #1238 item 2 — this call KNOWS its attempt was wrong, recorded or not:
+      // the episode key forms now, so the one alert goes out even if both the
+      // strike and its marker were lost and the caller never rings again.
+      await alertOwnerOfTenantPinLock(deps, input, proposal.id, attemptId);
       return {
         speak:
           'Too many incorrect codes — money approvals by voice are now locked on your account. Approve it in the app instead.',
