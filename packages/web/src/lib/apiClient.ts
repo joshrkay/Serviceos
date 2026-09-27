@@ -25,6 +25,7 @@
  * directly with their view-token-gated endpoints.
  */
 import { useAuth } from '@clerk/clerk-react'
+import { fetchWithTimeout } from './fetchWithTimeout';
 import { useCallback } from 'react';
 
 /**
@@ -229,7 +230,7 @@ export function useApiClient(): ApiFetch {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const response = await fetch(path, { ...init, headers });
+      const response = await fetchWithTimeout(path, { ...init, headers });
 
       if (response.status === 401 && needsAuth) {
         // Try once with a forcibly refreshed token before giving up. This
@@ -240,7 +241,7 @@ export function useApiClient(): ApiFetch {
             ...headers,
             Authorization: `Bearer ${fresh}`,
           };
-          const retry = await fetch(path, { ...init, headers: retryHeaders });
+          const retry = await fetchWithTimeout(path, { ...init, headers: retryHeaders });
           if (retry.status !== 401) return retry;
         }
         // Still unauthorized after a refresh attempt — the server rejects a

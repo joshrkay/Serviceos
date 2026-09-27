@@ -121,13 +121,11 @@ export const COVERAGE_TABLE: Readonly<Record<IntentFamilyId, CoverageRow>> = {
         'P11-001/#866: answered out-of-FSM; the state stays in intent_capture and the caller hears the answer plus "Anything else I can help you with?".',
     },
     media_streams: {
-      status: 'refuse',
-      hole: true,
-      module: 'ai/voice-turn/create-voice-turn-processor.ts#speechTurn (no lookup branch)',
-      copy:
-        'No answer is spoken. A classified lookup_* falls into the drafting FSM (entity_resolution → intent_confirm readback) and typically ends as a voice_clarification card — the live hole D-026 flagged.',
+      status: 'reachable',
+      module:
+        'ai/voice-turn/create-voice-turn-processor.ts#speechTurn → ai/voice-turn/phone-lookup-surface.ts#answerPhoneLookup (shared dispatch: workers/voice-lookup-answer.ts)',
       notes:
-        'The Gather branch and the memo branch both route to the shared dispatch; speechTurn never gained the branch.',
+        '#1395 (closes the D-026 hole, #852 phase 1): the SAME phone surface adapter and bundle the Gather branch uses (app.ts wires ONE `lookups` bundle onto the TwilioAdapter whose processor serves both transports). Answered out-of-FSM at confidence >= TAU_INT; the state stays in intent_capture and the caller hears the answer plus "Anything else I can help you with?". Authorisation is answerPhoneLookup\'s: caller-scoped intents read session.customerId (caller-ID), everything beyond them + tenant-public needs the D-026 resolved actor (session.actorUserId) and the shared RBAC gate.',
     },
     inapp: {
       status: 'reachable',

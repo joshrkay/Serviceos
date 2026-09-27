@@ -4,6 +4,7 @@ import { assertValidAppointmentTransition } from './appointment-lifecycle';
 import { isValidIanaTimezone } from '../settings/settings';
 import { toUtcDate } from './time';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ValidationError } from '../shared/errors';
 import { AppointmentTypeValue } from '@ai-service-os/shared';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
@@ -214,7 +215,7 @@ export async function createAppointment(
   const errors = validateAppointmentInput(input);
   const timeValidation = validateAppointmentTimes(input);
   errors.push(...timeValidation.errors);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   if (timeValidation.warnings.length > 0) {
     options?.onValidationWarnings?.(timeValidation.warnings);
@@ -288,7 +289,7 @@ export async function updateAppointment(
   actorRole?: string,
 ): Promise<Appointment | null> {
   if (input.timezone && !isValidIanaTimezone(input.timezone)) {
-    throw new Error('Validation failed: Invalid timezone');
+    throw new ValidationError('Validation failed: Invalid timezone');
   }
 
   const existing = await repository.findById(tenantId, id);
@@ -296,10 +297,10 @@ export async function updateAppointment(
 
   const errors: string[] = [];
   if (input.timezone && !isValidIanaTimezone(input.timezone)) errors.push('Invalid timezone');
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const validation = validateAppointmentUpdateInput(existing, input);
-  if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+  if (validation.errors.length > 0) throw new ValidationError(`Validation failed: ${validation.errors.join(', ')}`);
 
   // Status lifecycle enforcement. When a status is supplied AND differs
   // from the persisted value, ensure the transition is in the allowed set

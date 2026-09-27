@@ -3364,12 +3364,18 @@ async function generateAssistantReply(
           // segment on a reference nobody is going to be asked about would
           // leave an unclosable card — the exact shape `applyAmbiguityGate`
           // refuses to create.
+          // #1384 — the same pre-draft pass as the single-request path, so a
+          // literal job UUID in THIS segment names that job and its customer
+          // (#1276B). Keyed on the segment's own text, not the whole turn: a
+          // UUID in the other half of "X, then Y" is not this step's job.
           const segVerifiedIds = (
-            await resolveVerifiedIdsForDraft(
-              deps.entityResolver,
+            await resolvePreDraftIds(
+              deps,
               tenantId,
               segClass.intentType,
+              registryKey,
               segEntities,
+              segment,
             )
           ).ids;
           // I3 — resolved once (memoized) and reused across every segment.
