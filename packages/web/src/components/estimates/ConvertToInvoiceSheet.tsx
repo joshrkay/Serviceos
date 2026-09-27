@@ -3,6 +3,8 @@ import { X, Check, Receipt } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { type UiLineItem } from '../../lib/lineItems';
 import { Button } from '../ui';
+import type { EstimatePreviewTotals } from '../../utils/estimateMoney';
+import { centsToDisplay } from '../../utils/statusNormalize';
 
 export interface ConvertToInvoiceInput {
   estimateId: string;
@@ -11,8 +13,12 @@ export interface ConvertToInvoiceInput {
   customerName: string;
   description?: string;
   lineItems: UiLineItem[];
-  discountCents?: number;
-  taxRateBps?: number;
+  /**
+   * #1414 — the estimate's own document totals (discount + tax from the
+   * shared engine). The convert route bills exactly these, so the sheet
+   * quotes them instead of re-summing `qty × rate` without tax/discount.
+   */
+  totals: EstimatePreviewTotals;
   approvedLabel?: string;
 }
 
@@ -29,7 +35,8 @@ export function ConvertToInvoiceSheet({
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const total = input.lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  const { totals } = input;
+  const totalLabel = centsToDisplay(totals.totalCents);
 
   async function convert() {
     if (!input.jobId) {
@@ -69,7 +76,11 @@ export function ConvertToInvoiceSheet({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40" onClick={onClose}>
+    <div
+      data-testid="convert-to-invoice-sheet"
+      className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40"
+      onClick={onClose}
+    >
       <div
         className="bg-card rounded-t-2xl shadow-2xl overflow-y-auto max-h-[85vh]"
         style={{ animation: 'slideUp 0.25s ease' }}
@@ -117,7 +128,7 @@ export function ConvertToInvoiceSheet({
                       <p className="text-xs text-muted-foreground mt-0.5 truncate">{input.description}</p>
                     )}
                   </div>
-                  <p className="text-sm text-foreground shrink-0">${total.toLocaleString()}</p>
+                  <p className="text-sm text-foreground shrink-0">{totalLabel}</p>
                 </div>
                 {input.approvedLabel && (
                   <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-success/10 border border-success/20 px-3 py-2">
@@ -148,9 +159,29 @@ export function ConvertToInvoiceSheet({
                     </div>
                   ))}
                 </div>
-                <div className="flex items-center justify-between px-4 py-3 bg-secondary border-t border-border">
-                  <p className="text-sm text-foreground">Total</p>
-                  <p className="text-sm text-foreground">${total.toLocaleString()}</p>
+                <div className="flex flex-col gap-1 px-4 py-3 bg-secondary border-t border-border">
+                  {(totals.discountCents > 0 || totals.taxRateBps > 0) && (
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-muted-foreground">Subtotal</p>
+                      <p className="text-sm text-foreground">{centsToDisplay(totals.subtotalCents)}</p>
+                    </div>
+                  )}
+                  {totals.discountCents > 0 && (
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-muted-foreground">Discount</p>
+                      <p className="text-sm text-foreground">-{centsToDisplay(totals.discountCents)}</p>
+                    </div>
+                  )}
+                  {totals.taxRateBps > 0 && (
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-muted-foreground">Tax ({(totals.taxRateBps / 100).toFixed(2)}%)</p>
+                      <p className="text-sm text-foreground">{centsToDisplay(totals.taxCents)}</p>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-foreground">Total</p>
+                    <p className="text-sm text-foreground">{totalLabel}</p>
+                  </div>
                 </div>
               </div>
 
@@ -166,7 +197,7 @@ export function ConvertToInvoiceSheet({
               >
                 {loading
                   ? 'Creating…'
-                  : `Create invoice for $${total.toLocaleString()}`}
+                  : `Create invoice for ${totalLabel}`}
               </Button>
             </>
           )}

@@ -7212,6 +7212,22 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_service_locations_service_types
       ON service_locations USING GIN (service_types);
   `,
+
+  // #1406 D3 — the job-detail Parts sheet persists through material_items
+  // (it only ever set React state). A job's parts list carries what the
+  // sheet shows: a part number, an integer-cents unit cost and a category.
+  // All nullable — voice-captured shopping-list rows (add_material) have
+  // none of them. Plus the (tenant_id, job_id) index the per-job read uses.
+  '296_material_items_job_parts': `
+    ALTER TABLE material_items
+      ADD COLUMN IF NOT EXISTS part_number TEXT,
+      ADD COLUMN IF NOT EXISTS unit_cost_cents INTEGER
+        CHECK (unit_cost_cents IS NULL OR unit_cost_cents >= 0),
+      ADD COLUMN IF NOT EXISTS category TEXT
+        CHECK (category IS NULL OR category IN ('Part', 'Material', 'Labor', 'Equipment'));
+    CREATE INDEX IF NOT EXISTS idx_material_items_job
+      ON material_items (tenant_id, job_id, created_at) WHERE job_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

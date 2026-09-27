@@ -143,6 +143,7 @@ import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createJobPhotosRouter } from './routes/job-photos';
+import { createJobMaterialsRouter } from './routes/job-materials';
 import { JobPhotoService } from './jobs/job-photo-service';
 import { createAttachmentsRouter } from './routes/attachments';
 import { AttachmentService } from './attachments/attachment-service';
@@ -4985,6 +4986,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       jobRepo,
     })
   );
+  // #1406 D3 — the job-detail Parts sheet persists through material_items.
+  app.use('/api/jobs', createJobMaterialsRouter({ materialItemRepo, auditRepo, jobRepo }));
   app.use(
     '/api/attachments',
     createAttachmentsRouter({

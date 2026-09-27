@@ -481,6 +481,14 @@ export interface SchedulingResolutionOptions {
   timezone?: string;
   /** Test seam for "now"; defaults to the wall clock inside resolveDateTime. */
   now?: Date;
+  /**
+   * #1406 D6 — ids the RESOLVER already produced this dialogue (a
+   * disambiguation pick, plus whatever resolved before the question). Unlike
+   * an entity-supplied identity key they are trusted without the uuid
+   * check, and their lookups are skipped, so re-running resolution after a
+   * pick resolves only the references still outstanding.
+   */
+  pinnedRefs?: Record<string, string>;
 }
 
 /**
@@ -899,6 +907,7 @@ export async function resolveSchedulingEntities(
       refs[key] = value;
     }
   }
+  Object.assign(refs, opts?.pinnedRefs);
 
   const planned = planVoiceEntityLookups(intent, entities, stickyJobId).filter((lookup) => {
     if (lookup.refKey === 'customerId' && refs.customerId) return false;

@@ -7,7 +7,12 @@ vi.mock('../../../utils/api-fetch', () => ({
   apiFetch: vi.fn(),
 }));
 
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}));
+
 import { apiFetch } from '../../../utils/api-fetch';
+import { toast } from 'sonner';
 
 describe('Leads — LeadCreate', () => {
   beforeEach(() => {
@@ -67,5 +72,31 @@ describe('Leads — LeadCreate', () => {
       expect(body.state).toBe('TX');
       expect(body.postalCode).toBe('78701');
     });
+  });
+
+  it('tells the user when the phone matched an existing lead or customer (#1406 D1)', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'lead-3',
+        dedupe: { outcome: 'attached' },
+        warnings: [{ code: 'MATCHES_EXISTING_CUSTOMER', customerId: 'cust-1' }],
+      }),
+    } as unknown as Response);
+    const onCreated = vi.fn();
+
+    render(<LeadCreate onCreated={onCreated} />);
+
+    fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Rita' } });
+    fireEvent.click(screen.getByRole('button', { name: /create lead/i }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('lead-3'));
+    expect(vi.mocked(toast.success)).toHaveBeenCalledWith(
+      'Added to the existing lead with this phone number',
+    );
+    expect(vi.mocked(toast.warning)).toHaveBeenCalledWith(
+      'This phone number already belongs to a customer',
+    );
   });
 });

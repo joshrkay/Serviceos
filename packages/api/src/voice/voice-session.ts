@@ -100,6 +100,13 @@ export interface VoiceSessionRepository {
   ): Promise<VoiceSessionRow | null>;
   findById(tenantId: string, id: string): Promise<VoiceSessionRow | null>;
   /**
+   * #1406 D10 — overwrite the running transcript of a still-open session
+   * (no-op once `endedAt` is set, or when no row exists). Lets a session
+   * that is never explicitly ended still show what was said. Optional so
+   * narrow test fakes keep compiling.
+   */
+  updateTranscript?(tenantId: string, id: string, transcript: string[]): Promise<void>;
+  /**
    * List voice sessions for a tenant, newest first. Used by
    * /api/interactions to surface the call log.
    */
@@ -154,6 +161,12 @@ export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
     const row = this.rows.get(id);
     if (!row || row.tenantId !== tenantId) return null;
     return { ...row };
+  }
+
+  async updateTranscript(tenantId: string, id: string, transcript: string[]): Promise<void> {
+    const row = this.rows.get(id);
+    if (!row || row.tenantId !== tenantId || row.endedAt) return;
+    row.transcript = [...transcript];
   }
 
   async findByTenant(tenantId: string, opts: ListVoiceSessionsOptions = {}): Promise<VoiceSessionRow[]> {

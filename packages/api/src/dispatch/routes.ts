@@ -131,6 +131,45 @@ export async function resolveTechnicianName(
   return fullName || user.email || technicianId;
 }
 
+export interface AppointmentDisplayContext {
+  customerName?: string;
+  locationAddress?: string;
+  locationLatitude?: number;
+  locationLongitude?: number;
+  jobSummary?: string;
+}
+
+/**
+ * The customer / address / job-summary context a dispatch card or a
+ * technician's day list shows for one appointment, resolved through its job.
+ * Shared by the board (#1406 D7 — the board never wired it, so cards showed
+ * only time and status) and the technician day route. Missing repos or
+ * records simply leave fields absent.
+ */
+export async function resolveAppointmentDisplayContext(
+  deps: Pick<DispatchRouteDeps, 'jobRepo' | 'customerRepo' | 'locationRepo'>,
+  tenantId: string,
+  appointment: { jobId: string },
+): Promise<AppointmentDisplayContext> {
+  if (!deps.jobRepo) return {};
+  const job = await deps.jobRepo.findById(tenantId, appointment.jobId);
+  if (!job) return {};
+  const ctx: AppointmentDisplayContext = { jobSummary: job.summary };
+  if (deps.customerRepo) {
+    const customer = await deps.customerRepo.findById(tenantId, job.customerId);
+    if (customer) ctx.customerName = customer.displayName;
+  }
+  if (deps.locationRepo && job.locationId) {
+    const loc = await deps.locationRepo.findById(tenantId, job.locationId);
+    if (loc) {
+      ctx.locationAddress = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
+      ctx.locationLatitude = loc.latitude ?? undefined;
+      ctx.locationLongitude = loc.longitude ?? undefined;
+    }
+  }
+  return ctx;
+}
+
 export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
   const router = Router();
 
@@ -159,6 +198,19 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
         viewingUserId: authReq.auth?.userId,
+        // #1406 D7 — customer / address / job summary on every card.
+        ...(jobRepo
+          ? {
+              getAppointmentDisplayContext: async (appointment) => {
+                const ctx = await resolveAppointmentDisplayContext(deps, tenantId, appointment);
+                return {
+                  customerName: ctx.customerName,
+                  locationAddress: ctx.locationAddress,
+                  jobSummary: ctx.jobSummary,
+                };
+              },
+            }
+          : {}),
         ...(proposalRepo
           ? {
               getPendingChangeRequests: (appointmentIds: string[]) =>
@@ -270,42 +322,18 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
 
         const enriched = await Promise.all(
           result.data.map(async (appt) => {
-            let customerName = '';
-            let locationAddress = '';
-            let locationLatitude: number | undefined;
-            let locationLongitude: number | undefined;
-            let jobSummary: string | undefined;
-
-            if (deps.jobRepo) {
-              const job = await deps.jobRepo.findById(tenantId, appt.jobId);
-              if (job) {
-                jobSummary = job.summary;
-                if (deps.customerRepo) {
-                  const customer = await deps.customerRepo.findById(tenantId, job.customerId);
-                  if (customer) customerName = customer.displayName;
-                }
-                if (deps.locationRepo && job.locationId) {
-                  const loc = await deps.locationRepo.findById(tenantId, job.locationId);
-                  if (loc) {
-                    locationAddress = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
-                    locationLatitude = loc.latitude ?? undefined;
-                    locationLongitude = loc.longitude ?? undefined;
-                  }
-                }
-              }
-            }
-
+            const ctx = await resolveAppointmentDisplayContext(deps, tenantId, appt);
             return {
               id: appt.id,
               jobId: appt.jobId,
-              customerName,
-              locationAddress,
-              locationLatitude,
-              locationLongitude,
+              customerName: ctx.customerName ?? '',
+              locationAddress: ctx.locationAddress ?? '',
+              locationLatitude: ctx.locationLatitude,
+              locationLongitude: ctx.locationLongitude,
               scheduledStart: appt.scheduledStart.toISOString(),
               scheduledEnd: appt.scheduledEnd.toISOString(),
               status: appt.status,
-              jobSummary,
+              jobSummary: ctx.jobSummary,
               updatedAt: appt.updatedAt.toISOString(),
             };
           }),

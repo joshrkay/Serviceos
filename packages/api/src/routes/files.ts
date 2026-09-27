@@ -258,6 +258,12 @@ export function createDevStorageRouter(secret: string): Router {
     }
     res.setHeader('Content-Type', entry.contentType);
     res.setHeader('Content-Length', String(entry.bytes.length));
+    // #1406 D2 — helmet (mounted app-wide) defaults CORP to same-origin,
+    // which blocks the SPA (a different origin) from rendering these bytes
+    // in <img>/<audio>. A presigned object URL is authorized by its token,
+    // exactly like S3/R2, which serve without a CORP header — so relax it
+    // for this route only.
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.status(200).end(entry.bytes);
   });
 

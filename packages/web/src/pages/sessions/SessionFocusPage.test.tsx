@@ -8,8 +8,12 @@ import type { WsServerFrame } from '../../hooks/useResilientStream';
 vi.mock('../../hooks/useActiveSessions', () => ({
   useActiveSessions: vi.fn(),
 }));
+vi.mock('../../utils/api-fetch', () => ({
+  apiFetch: vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })),
+}));
 
 import { useActiveSessions } from '../../hooks/useActiveSessions';
+import { apiFetch } from '../../utils/api-fetch';
 
 /**
  * The page reuses the supervisor wall's single client-gateway WS (the
@@ -176,5 +180,23 @@ describe('SessionFocusPage — focused live-session view (/sessions/:id)', () =>
     setup([liveSession]);
     const back = screen.getByTestId('session-back-link');
     expect(back.getAttribute('href')).toBe('/');
+  });
+
+  it('#1406 D10 — shows what was already said before the page was opened (persisted transcript)', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'sess-1',
+        transcript: ['agent: Hi, how can I help?', "caller: what's on today", 'agent: Two jobs today.'],
+      }),
+    } as unknown as Response);
+
+    setup([liveSession]);
+
+    expect(await screen.findByText('Two jobs today.')).toBeInTheDocument();
+    expect(screen.getByText("what's on today")).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for the agent to speak…')).not.toBeInTheDocument();
+    expect(apiFetch).toHaveBeenCalledWith('/api/interactions/sess-1');
   });
 });

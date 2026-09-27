@@ -14,6 +14,8 @@ import { Field, Input, Select, Textarea, Button } from '../ui';
 export interface InvoiceFormProps {
   onCreated?: (invoiceId: string) => void;
   onCancel?: () => void;
+  /** #1406 D9 — preselect this job (e.g. `/invoices/new?jobId=…` from a job). */
+  initialJobId?: string;
 }
 
 interface ApiJob {
@@ -68,9 +70,9 @@ function makeId() {
   return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
-export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
+export function InvoiceForm({ onCreated, onCancel, initialJobId }: InvoiceFormProps) {
   const [form, setForm] = useState<State>(() => ({
-    jobId: '',
+    jobId: initialJobId ?? '',
     estimateId: '',
     dueDate: '',
     customerMessage: '',
@@ -216,7 +218,10 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   const totalDisplay = formatCurrency(total);
 
   return (
-    <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
+    // #1406 D9 — noValidate: the browser's native `required` check blocked
+    // the submit before handleSubmit could render its "Job is required."
+    // alert, so Create looked like it silently did nothing.
+    <form onSubmit={handleSubmit} noValidate className="p-4 md:p-6 max-w-3xl mx-auto">
       <h1 className="text-lg text-foreground mb-4">New Invoice</h1>
       {error && (
         <div
@@ -256,6 +261,12 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
             required
           >
             <option value="">— select a job —</option>
+            {/* #1406 D9 — a preselected job beyond the list's first page. */}
+            {selectedJob && !jobs.some(j => j.id === selectedJob.id) && (
+              <option value={selectedJob.id}>
+                {selectedJob.jobNumber} — {selectedJob.summary}
+              </option>
+            )}
             {jobs.map(j => (
               <option key={j.id} value={j.id}>
                 {j.jobNumber} — {j.summary}

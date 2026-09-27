@@ -15,7 +15,9 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, it, expect } from 'vitest';
+import helmet from 'helmet';
 import { createDevStorageRouter } from '../../src/routes/files';
+import { buildHelmetOptions } from '../../src/bootstrap/helmet-options';
 import { DevStorageProvider, signDevStorageToken } from '../../src/files/storage-provider';
 
 const SECRET = 'test-dev-storage-secret';
@@ -128,5 +130,31 @@ describe('createDevStorageRouter (#1273)', () => {
     const getToken = signDevStorageToken(SECRET, 'GET', key);
     const res = await request(app).get(`/storage-dev/${key}?token=${getToken}`);
     expect(res.status).toBe(404);
+  });
+
+  it('#1406 D2 — behind helmet (as mounted in app.ts), a GET lets the web origin embed the bytes in <img>', async () => {
+    // app.ts mounts helmet() before /storage-dev; helmet's default
+    // Cross-Origin-Resource-Policy: same-origin made the browser block every
+    // job photo (ERR_BLOCKED_BY_RESPONSE.NotSameOrigin) because the SPA and
+    // the API are on different origins.
+    const app = express();
+    app.use(helmet(buildHelmetOptions(false)));
+    app.use('/storage-dev', createDevStorageRouter(SECRET));
+    app.get('/api/ping', (_req, res) => res.json({ ok: true }));
+    const key = 'tenant-1/job-1/photo.jpg';
+    await request(app)
+      .put(`/storage-dev/${key}?token=${signDevStorageToken(SECRET, 'PUT', key)}`)
+      .set('content-type', 'image/jpeg')
+      .send(Buffer.from([0xff, 0xd8, 0xff]));
+
+    const getRes = await request(app).get(
+      `/storage-dev/${key}?token=${signDevStorageToken(SECRET, 'GET', key)}`,
+    );
+    expect(getRes.status).toBe(200);
+    expect(getRes.headers['cross-origin-resource-policy']).toBe('cross-origin');
+
+    // The override is scoped: the rest of the API keeps helmet's default.
+    const apiRes = await request(app).get('/api/ping');
+    expect(apiRes.headers['cross-origin-resource-policy']).toBe('same-origin');
   });
 });

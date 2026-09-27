@@ -685,6 +685,27 @@ export function isAffirmation(text: string): boolean {
  * THIS predicate, so a repeated bare "yes" is answered without an LLM call
  * while a request that merely opens with "yes" still reaches the classifier.
  */
+/**
+ * #1406 D10 — a closing farewell with no request in it: "goodbye", "bye",
+ * "that's all", "never mind, that is all for now. Goodbye.", "thanks, bye".
+ * Deliberately narrow: an utterance that still asks for something ("bye,
+ * and book Garcia Tuesday") is NOT a farewell and reaches the classifier.
+ */
+const FAREWELL_WORDS = new Set([
+  'goodbye', 'bye', 'byebye', 'bye-bye', 'adios', 'adiós', 'ciao', 'later',
+  'that', 'thats', "that's", 'is', 'all', 'it', 'for', 'now', 'never', 'mind',
+  'nevermind', 'thanks', 'thank', 'you', 'ok', 'okay', 'no', 'nothing', 'else',
+  'im', "i'm", 'done', 'good', 'great', 'see', 'ya', 'talk', 'soon', 'have',
+  'a', 'nice', 'day', 'gracias', 'eso', 'es', 'todo', 'hasta', 'luego',
+]);
+const FAREWELL_ANCHORS = /\b(good-?bye|bye(-?bye)?|adi[oó]s|that'?s all|that is all|nothing else|i'?m done|hasta luego|eso es todo)\b/;
+
+export function isFarewell(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/[.,!?;:—–-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!normalized || !FAREWELL_ANCHORS.test(normalized)) return false;
+  return normalized.split(' ').every((word) => FAREWELL_WORDS.has(word));
+}
+
 export function isPlainAffirmation(text: string): boolean {
   const normalized = normalizeConfirmText(text);
   if (!normalized) return false;
@@ -1002,17 +1023,23 @@ export class InAppVoiceAdapter {
     // U4 — memo key for the once-per-session tenant-zone read above (the
     // live session OBJECT, so the WeakMap entry dies with the session).
     session?: VoiceSession,
+    // #1406 D6 — resolver-produced ids from an earlier turn of this dialogue.
+    pinnedRefs?: Record<string, string>,
   ): Promise<SchedulingEntityResolution> {
     const resolver = this.getEntityResolver();
     try {
       const timezone = await this.resolveSessionTimezone(tenantId, session);
+      const opts = {
+        ...(timezone ? { timezone } : {}),
+        ...(pinnedRefs ? { pinnedRefs } : {}),
+      };
       return await resolveSchedulingEntities(
         resolver,
         tenantId,
         intent,
         entities,
         stickyJobId,
-        timezone ? { timezone } : undefined,
+        Object.keys(opts).length > 0 ? opts : undefined,
       );
     } catch {
       return { status: 'resolved', refs: {} };
@@ -1086,6 +1113,17 @@ export class InAppVoiceAdapter {
     // policy), and create_appointment auto-opens a job from jobTitle at
     // execution time (95a260cd).
     return { type: 'entity_resolved', refs: resolution.refs };
+  }
+
+  /**
+   * #1406 D6 — who a proposal minted by this session is created BY: the
+   * authenticated operator driving it. Never `payload.customerId` — that is
+   * context.customerId, a CRM CUSTOMER whenever the session started with a
+   * phone number that matched one, and the executor attributes the work it
+   * does (e.g. a job it auto-opens) to proposal.createdBy.
+   */
+  private proposalActorId(session: VoiceSession): string {
+    return session.actorUserId ?? this.deps.systemActorId ?? 'calling-agent';
   }
 
   private buildDisambiguationRetryEvent(
@@ -1903,19 +1941,41 @@ export class InAppVoiceAdapter {
           pending,
         );
         if (match.status === 'resolved') {
-          fsmEvent = {
-            type: 'entity_resolved',
-            refs: {
-              ...pending.partialRefs,
-              [pending.refKey]: match.candidateId,
-            },
-          };
+          // #1406 D6 — the pick settles ONE reference; the lookups planned
+          // after it (e.g. the job in "invoice QA Matrix for the QA Matrix
+          // job") must still run. Re-resolve with the picked id pinned: the
+          // already-resolved refs are skipped, the rest resolve — and a
+          // further ambiguity is asked, never guessed.
+          const context = session.machine.currentContext;
+          const intent = context.currentIntent;
+          const pickedRefs = { ...pending.partialRefs, [pending.refKey]: match.candidateId };
+          fsmEvent = intent
+            ? await this.toResolutionEvent(
+                session.tenantId,
+                intent,
+                await this.resolveEntities(
+                  session.tenantId,
+                  intent,
+                  { ...context.extractedEntities, ...pickedRefs },
+                  context.jobId,
+                  session,
+                  pickedRefs,
+                ),
+              )
+            : { type: 'entity_resolved', refs: pickedRefs };
         } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
           fsmEvent = { type: 'entity_resolved', refs: pending.partialRefs };
         } else {
           fsmEvent = this.buildDisambiguationRetryEvent(pending);
         }
       }
+    } else if (
+      (stateBeforeTurn === 'intent_capture' || stateBeforeTurn === 'closing') &&
+      isFarewell(text)
+    ) {
+      // #1406 D10 — a goodbye is not a request to classify (it came back
+      // `unknown` and escalated to a human on the second miss).
+      fsmEvent = { type: 'caller_farewell' };
     } else {
       // §3B + §3D: vertical + intake-question prompt section.
       // §3C: caller-plan prompt section (only when caller is identified).
@@ -2346,6 +2406,18 @@ export class InAppVoiceAdapter {
       stateAfter: session.machine.currentState,
       ...(lastSpoken ? { lastSpoken } : {}),
     };
+    // #1406 D10 — persist the running transcript every turn. It used to be
+    // written only by the terminal markEnded, so a session the client never
+    // ended (the common in-app case) showed zero transcript turns. Ended
+    // sessions are finalized by markEnded; fire-and-forget like create().
+    const repo = this.deps.voiceSessionRepo;
+    if (repo?.updateTranscript && !session.ended) {
+      void repo
+        .updateTranscript(session.tenantId, session.id, [...session.transcript])
+        .catch(() => {
+          /* best-effort — markEnded still writes the final transcript */
+        });
+    }
   }
 
   /**
@@ -2743,10 +2815,7 @@ export class InAppVoiceAdapter {
         conversationId:
           typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
         aiRunId: typeof payload.aiRunId === 'string' && payload.aiRunId ? payload.aiRunId : undefined,
-        createdBy:
-          typeof payload.customerId === 'string'
-            ? payload.customerId
-            : this.deps.systemActorId ?? 'calling-agent',
+        createdBy: this.proposalActorId(session),
         tenantThresholdOverride,
       };
       const protectionDeps = {
@@ -2815,10 +2884,7 @@ export class InAppVoiceAdapter {
               surface: 'S2' as ProposalSurface,
               sessionId: session.id,
             },
-            createdBy:
-              typeof payload.customerId === 'string'
-                ? payload.customerId
-                : this.deps.systemActorId ?? 'calling-agent',
+            createdBy: this.proposalActorId(session),
           });
           const storedClarification = await this.deps.proposalRepo.create(clarification);
           session.proposalIds.push(storedClarification.id);
@@ -2831,10 +2897,7 @@ export class InAppVoiceAdapter {
             ? { conversationId: payload.conversationId }
             : {}),
           existingEntities: entities,
-          userId:
-            typeof payload.customerId === 'string'
-              ? payload.customerId
-              : this.deps.systemActorId ?? 'calling-agent',
+          userId: this.proposalActorId(session),
           intent: 'respond_to_review',
           ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
         });
@@ -3105,9 +3168,7 @@ export class InAppVoiceAdapter {
         // (in-memory repos don't enforce the FK, which is why tests passed).
         // Use a real run id when the engine provides one, else leave it null.
         ...(typeof payload.aiRunId === 'string' && payload.aiRunId ? { aiRunId: payload.aiRunId } : {}),
-        createdBy: typeof payload.customerId === 'string'
-          ? payload.customerId
-          : this.deps.systemActorId ?? 'calling-agent',
+        createdBy: this.proposalActorId(session),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
       let stored = await this.deps.proposalRepo.create(proposal);

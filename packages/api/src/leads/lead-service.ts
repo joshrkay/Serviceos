@@ -22,6 +22,7 @@ import { CreateLeadInput, Lead, LeadRepository, UpdateLeadInput } from './lead';
 import { ConvertLeadAddressInput, LeadSource, LeadStage } from './enums';
 import { buildAttributionMetadata } from './attribution-metadata';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import { normalizePhone } from '../shared/phone';
 
 /**
  * U6 dedupe — lead sources that originate on the inbound PHONE/CALL channel.
@@ -75,11 +76,127 @@ function isTransactional(repo: LeadRepository): repo is TransactionalLeadRepo {
   return typeof (repo as Partial<TransactionalLeadRepo>).withTransaction === 'function';
 }
 
+/**
+ * #1406 D1 — what `captureLead` did with a submission:
+ *  - `created`:  a brand-new lead row.
+ *  - `attached`: the phone already belonged to an open (unconverted) lead;
+ *                the submission was merged into it.
+ *  - `reopened`: the phone belonged to a LOST lead; the submission revived
+ *                it (stage back to 'new') so a lost lead never blocks a new
+ *                inquiry from the same number.
+ */
+export type LeadCaptureOutcome = 'created' | 'attached' | 'reopened';
+
+export interface LeadCaptureResult {
+  lead: Lead;
+  outcome: LeadCaptureOutcome;
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: string }).code === '23505'
+  );
+}
+
+/**
+ * The lead that `idx_leads_phone_unique_open` (migration 058) says blocks a
+ * new row for this phone: the one with converted_customer_id IS NULL. The
+ * index allows at most one, and it is always the newest row for the phone,
+ * so `findByPhoneNormalized` (newest first) finds it.
+ */
+async function findUnconvertedLeadByPhone(
+  leadRepo: LeadRepository,
+  tenantId: string,
+  phoneKey: string
+): Promise<Lead | null> {
+  if (!phoneKey) return null;
+  const existing = await leadRepo.findByPhoneNormalized(tenantId, phoneKey);
+  return existing && !existing.convertedCustomerId ? existing : null;
+}
+
+function appendSubmissionNote(existing: Lead, input: CreateLeadInput, at: Date): string | undefined {
+  if (!input.notes?.trim()) return existing.notes;
+  const header = `Repeat submission (${input.source}, ${at.toISOString().slice(0, 10)}):`;
+  const entry = `${header} ${input.notes.trim()}`;
+  return existing.notes?.trim() ? `${existing.notes}\n\n${entry}` : entry;
+}
+
+async function attachSubmissionToLead(
+  existing: Lead,
+  input: CreateLeadInput,
+  leadRepo: LeadRepository,
+  auditRepo?: AuditRepository
+): Promise<LeadCaptureResult> {
+  const now = new Date();
+  const reopening = existing.stage === 'lost';
+  // Fill blanks only — never overwrite what the office already curated.
+  const fill = <K extends keyof CreateLeadInput & keyof Lead>(k: K) =>
+    existing[k] === undefined || existing[k] === '' ? input[k] : undefined;
+  const updates: Partial<Lead> = { updatedAt: now };
+  for (const k of [
+    'firstName', 'lastName', 'companyName', 'email', 'sourceDetail',
+    'utmSource', 'utmMedium', 'utmCampaign', 'street1', 'street2', 'city',
+    'state', 'postalCode', 'country', 'accessNotes',
+  ] as const) {
+    const v = fill(k);
+    if (v !== undefined && v !== '') (updates as Record<string, unknown>)[k] = v;
+  }
+  const notes = appendSubmissionNote(existing, input, now);
+  if (notes !== existing.notes) updates.notes = notes;
+  if (reopening) {
+    updates.stage = 'new';
+    updates.lostReason = undefined;
+  }
+
+  const updated = (await leadRepo.update(existing.tenantId, existing.id, updates)) ?? existing;
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: existing.tenantId,
+        actorId: input.createdBy,
+        actorRole: input.actorRole ?? 'unknown',
+        eventType: reopening ? 'lead.reopened' : 'lead.resubmitted',
+        entityType: 'lead',
+        entityId: existing.id,
+        metadata: {
+          source: input.source,
+          ...(reopening ? { fromStage: 'lost' } : {}),
+        },
+      })
+    );
+  }
+
+  // A revived lead is new work for the owner; a repeat on an open lead is not.
+  if (reopening) await notifyOwnerLeadCaptured(existing.tenantId, updated);
+
+  return { lead: updated, outcome: reopening ? 'reopened' : 'attached' };
+}
+
+/**
+ * Backwards-compatible wrapper: returns just the lead (new or the existing
+ * one the submission was attached to). See `captureLead`.
+ */
 export async function createLead(
   input: CreateLeadInput,
   leadRepo: LeadRepository,
   auditRepo?: AuditRepository
 ): Promise<Lead> {
+  return (await captureLead(input, leadRepo, auditRepo)).lead;
+}
+
+/**
+ * Create a lead, deduplicating on phone (#1406 D1): a submission whose phone
+ * already belongs to an unconverted lead is attached to (or, when lost,
+ * revives) that lead instead of tripping `idx_leads_phone_unique_open`.
+ */
+export async function captureLead(
+  input: CreateLeadInput,
+  leadRepo: LeadRepository,
+  auditRepo?: AuditRepository
+): Promise<LeadCaptureResult> {
   if (!input.tenantId) throw new ValidationError('tenantId is required');
   if (!input.firstName && !input.companyName) {
     throw new ValidationError('firstName or companyName is required');
@@ -119,7 +236,21 @@ export async function createLead(
     updatedAt: now,
   };
 
-  const created = await leadRepo.create(lead);
+  const phoneKey = input.primaryPhone ? normalizePhone(input.primaryPhone) : '';
+  const blocking = await findUnconvertedLeadByPhone(leadRepo, input.tenantId, phoneKey);
+  if (blocking) return attachSubmissionToLead(blocking, input, leadRepo, auditRepo);
+
+  let created: Lead;
+  try {
+    created = await leadRepo.create(lead);
+  } catch (err) {
+    // Lost the race to a concurrent submission with the same phone.
+    if (isUniqueViolation(err) && phoneKey) {
+      const winner = await findUnconvertedLeadByPhone(leadRepo, input.tenantId, phoneKey);
+      if (winner) return attachSubmissionToLead(winner, input, leadRepo, auditRepo);
+    }
+    throw err;
+  }
 
   if (auditRepo) {
     await auditRepo.create(
@@ -139,7 +270,7 @@ export async function createLead(
   // phone-originated leads, which fire `incoming_call` instead).
   await notifyOwnerLeadCaptured(input.tenantId, created);
 
-  return created;
+  return { lead: created, outcome: 'created' };
 }
 
 export async function updateLead(

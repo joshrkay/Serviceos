@@ -478,6 +478,24 @@ describe('C3 channel selection', () => {
     expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
   });
 
+  it('#1406 D10 — Auto on an owner-started thread reuses the channel the owner already texted on', async () => {
+    // No inbound yet, no usable preference, both channels deliverable — but
+    // the owner already texted this customer in this thread, so the thread
+    // HAS a channel. QA saw a 409 "no prior channel" here.
+    const h = harness({ customer: customer({ preferredChannel: 'none' }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await sendConversationReply(h.deps, input(convId, 'sms'));
+
+    const result = await sendConversationReply(h.deps, { ...input(convId), body: 'Running 10 late' });
+
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(2);
+    expect(h.delivery.sendEmail).not.toHaveBeenCalled();
+  });
+
   it('both channels deliverable with no thread channel and no usable preference asks', async () => {
     const h = harness({ customer: customer({ preferredChannel: 'none' }) });
     const convId = await customerThread(h.conversationRepo, {

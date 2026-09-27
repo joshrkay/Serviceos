@@ -11,7 +11,7 @@ import { MessageInput } from '../../components/conversations/MessageInput';
 export interface ConversationThreadProps {
   messages: Message[];
   currentUserRole?: Role;
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string) => void | Promise<unknown>;
   renderTranscript?: (message: Message) => React.ReactNode;
   renderClarification?: (message: Message) => React.ReactNode;
   renderProposal?: (message: Message) => React.ReactNode;

@@ -17,6 +17,12 @@
  * reads from the SAME instance to answer the `lookup_materials` voice
  * intent — mirroring how `expenseRepo` / `agreementRepo` are threaded into
  * the execution-handler deps bag.
+ *
+ * #1406 D3 — a third caller: the job-detail Parts sheet
+ * (`routes/job-materials.ts` → `materials/job-materials.ts`) reads a job's
+ * list with `listForJob` and reconciles it with create / `updateQuantity` /
+ * `cancel`. It never calls `markPurchased`, so the "no production caller"
+ * notes on that method still hold.
  */
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
@@ -26,6 +32,10 @@ import { ValidationError } from '../shared/errors';
 // it from the TS union or the DB CHECK later would each cost their own
 // change.
 export type MaterialItemStatus = 'pending' | 'purchased' | 'cancelled';
+
+/** #1406 D3 — the job-detail Parts sheet's categories (DB CHECK, migration 294). */
+export const MATERIAL_CATEGORIES = ['Part', 'Material', 'Labor', 'Equipment'] as const;
+export type MaterialCategory = (typeof MATERIAL_CATEGORIES)[number];
 
 export interface MaterialItem {
   id: string;
@@ -44,6 +54,11 @@ export interface MaterialItem {
   /** Set once markPurchased succeeds. */
   purchasedBy?: string;
   purchasedAt?: Date;
+  /** #1406 D3 — Parts-sheet fields; absent on voice-captured rows. */
+  partNumber?: string;
+  /** Integer cents — never float. */
+  unitCostCents?: number;
+  category?: MaterialCategory;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -57,6 +72,10 @@ export interface CreateMaterialItemInput {
   vendor?: string;
   neededBy?: Date;
   createdBy: string;
+  partNumber?: string;
+  /** Integer cents — never float. */
+  unitCostCents?: number;
+  category?: MaterialCategory;
 }
 
 export interface MaterialItemListOptions {
@@ -281,6 +300,18 @@ export interface MaterialItemRepository {
    * without the surrounding permission/audit/undo design.
    */
   markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null>;
+  /**
+   * #1406 D3 — a job's parts list as the job-detail sheet shows it: every
+   * non-cancelled row linked to the job (pending AND purchased), oldest first.
+   */
+  listForJob(tenantId: string, jobId: string): Promise<MaterialItem[]>;
+  /** #1406 D3 — change a non-cancelled row's quantity. Null if not found. */
+  updateQuantity(tenantId: string, id: string, quantity: number): Promise<MaterialItem | null>;
+  /**
+   * #1406 D3 — remove a row from its job's list (status → 'cancelled'; the
+   * row stays for the audit trail). Null if not found or already cancelled.
+   */
+  cancel(tenantId: string, id: string): Promise<MaterialItem | null>;
 }
 
 // A spoken/transcribed quantity ("two billion nails") can overflow Postgres
@@ -351,7 +382,31 @@ function validateCreateMaterialItemInput(input: CreateMaterialItemInput): string
   if (input.neededBy !== undefined && !isUsableDateBound(input.neededBy)) {
     errors.push('neededBy must be a valid Date');
   }
+  if (
+    input.unitCostCents !== undefined &&
+    (!Number.isInteger(input.unitCostCents) || input.unitCostCents < 0)
+  ) {
+    errors.push('unitCostCents must be a non-negative integer (cents)');
+  }
+  if (
+    input.category !== undefined &&
+    !(MATERIAL_CATEGORIES as readonly string[]).includes(input.category)
+  ) {
+    errors.push('Invalid category');
+  }
   return errors;
+}
+
+/** Shared quantity rule (create + updateQuantity) — positive integer, capped. */
+export function validateQuantity(quantity: unknown): void {
+  if (
+    typeof quantity !== 'number' ||
+    !Number.isInteger(quantity) ||
+    quantity <= 0 ||
+    quantity > MAX_QUANTITY
+  ) {
+    throw new ValidationError(`quantity must be a positive integer up to ${MAX_QUANTITY}`);
+  }
 }
 
 /** Shared row builder so the in-memory + pg repos stay in shape-sync. */
@@ -370,6 +425,9 @@ export function buildMaterialItem(input: CreateMaterialItemInput): MaterialItem 
     ...(input.vendor !== undefined ? { vendor: input.vendor } : {}),
     status: 'pending',
     ...(input.neededBy !== undefined ? { neededBy: input.neededBy } : {}),
+    ...(input.partNumber !== undefined ? { partNumber: input.partNumber } : {}),
+    ...(input.unitCostCents !== undefined ? { unitCostCents: input.unitCostCents } : {}),
+    ...(input.category !== undefined ? { category: input.category } : {}),
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -451,6 +509,30 @@ export class InMemoryMaterialItemRepository implements MaterialItemRepository {
       purchasedAt: new Date(),
       updatedAt: new Date(),
     };
+    this.items.set(id, updated);
+    return { ...updated };
+  }
+
+  async listForJob(tenantId: string, jobId: string): Promise<MaterialItem[]> {
+    return Array.from(this.items.values())
+      .filter((i) => i.tenantId === tenantId && i.jobId === jobId && i.status !== 'cancelled')
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((i) => ({ ...i }));
+  }
+
+  async updateQuantity(tenantId: string, id: string, quantity: number): Promise<MaterialItem | null> {
+    validateQuantity(quantity);
+    const item = this.items.get(id);
+    if (!item || item.tenantId !== tenantId || item.status === 'cancelled') return null;
+    const updated: MaterialItem = { ...item, quantity, updatedAt: new Date() };
+    this.items.set(id, updated);
+    return { ...updated };
+  }
+
+  async cancel(tenantId: string, id: string): Promise<MaterialItem | null> {
+    const item = this.items.get(id);
+    if (!item || item.tenantId !== tenantId || item.status === 'cancelled') return null;
+    const updated: MaterialItem = { ...item, status: 'cancelled', updatedAt: new Date() };
     this.items.set(id, updated);
     return { ...updated };
   }

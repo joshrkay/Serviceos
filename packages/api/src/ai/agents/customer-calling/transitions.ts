@@ -299,6 +299,21 @@ function checkGlobalGuards(
     };
   }
 
+  // #1406 D10 — caller_farewell → terminated (any state). "Goodbye" used to
+  // reach the classifier as `unknown` and, after a prior miss, escalate to a
+  // human. A farewell is a clean close.
+  if (event.type === 'caller_farewell') {
+    return {
+      nextState: 'terminated',
+      sideEffects: [
+        auditLog(context, state, 'terminated', 'caller_farewell'),
+        ttsPlay('Okay — talk soon. Goodbye!'),
+        endSession(context, 'closed'),
+      ],
+      updatedContext: context,
+    };
+  }
+
   // abuse_detected → terminated (any state)
   if (event.type === 'abuse_detected') {
     return {
