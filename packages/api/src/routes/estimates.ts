@@ -34,7 +34,7 @@ import {
 } from '../estimates/estimate';
 import { DocumentRevisionRepository } from '../ai/document-revision';
 import { EditDeltaRepository } from '../estimates/edit-delta';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '../audit/audit';
 import { getNextEstimateNumber, resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
@@ -970,6 +970,21 @@ export function createEstimateRouter(
           // same wall-clock minute, so the two don't collide on
           // idx_dispatches_idempotency.
           idempotencyContext: 'owner',
+        });
+        // #1400 — the send is a mutation (status → sent, view token, sentAt)
+        // and must leave an audit row. I12′ tier 2: best-effort after the
+        // customer-visible send has happened.
+        await createAuditEventBestEffort(auditRepo, {
+          tenantId: req.auth!.tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role ?? 'unknown',
+          eventType: 'estimate.sent',
+          entityType: 'estimate',
+          entityId: req.params.id,
+          metadata: {
+            channels: result.channelsSent.map((c) => c.channel),
+            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+          },
         });
         // §6 Time-to-Cash. sendEstimate transitions the estimate to
         // 'sent' inside SendService (not via transitionEstimateStatus),
