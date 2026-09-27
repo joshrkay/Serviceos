@@ -3,6 +3,8 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createCustomerSchema, updateCustomerAccountTypeSchema } from '../shared/contracts';
 import { asyncRoute } from '../middleware/async-route';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { ValidationError } from '../shared/errors';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createCustomer,
@@ -55,6 +57,35 @@ import {
  * mount point quietly 404 so existing callers and tests are unaffected).
  */
 export type CustomerRouterTimelineDeps = CustomerTimelineDeps;
+
+const CUSTOMER_PHONE_FIELDS = ['primaryPhone', 'secondaryPhone'] as const;
+
+/**
+ * #1401 — customer phones are stored in E.164 (`+16025550144`) so caller-ID
+ * matching, SMS dispatch and dedup all see one canonical form. Uses the one
+ * shared NANP normaliser (`normalizeMobileE164`, also behind users/settings
+ * phones). A blank value is left alone (clears / omits the field); anything
+ * that cannot be normalised is a 400 VALIDATION_ERROR naming the field, and
+ * nothing is written.
+ */
+function normalizeCustomerPhones<T extends Record<string, unknown>>(body: T): T {
+  const out: Record<string, unknown> = { ...body };
+  for (const field of CUSTOMER_PHONE_FIELDS) {
+    const value = out[field];
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    try {
+      out[field] = normalizeMobileE164(value);
+    } catch (err) {
+      throw new ValidationError(
+        // Name the field in the message too (#1397): clients surface the
+        // message, and "which phone?" matters when both are sent.
+        `${field}: ${err instanceof Error ? err.message : 'invalid phone number'}`,
+        { field },
+      );
+    }
+  }
+  return out as T;
+}
 
 export function createCustomerRouter(
   customerRepo: CustomerRepository,
@@ -119,7 +150,7 @@ export function createCustomerRouter(
     requireTenant,
     requirePermission('customers:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const parsed = createCustomerSchema.parse(req.body);
+      const parsed = normalizeCustomerPhones(createCustomerSchema.parse(req.body));
       const result = await createCustomer(
         {
           ...parsed,
@@ -145,6 +176,11 @@ export function createCustomerRouter(
       const archivedOnly = req.query.archived === 'only';
       const search = req.query.search as string | undefined;
       const tag = req.query.tag as string | undefined;
+      // #1401 — service-type chip filter (HVAC / Plumbing / ...), server-side.
+      const serviceType =
+        typeof req.query.serviceType === 'string' && req.query.serviceType.trim() !== ''
+          ? req.query.serviceType.trim()
+          : undefined;
       const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
       // P1-018: when `paginated=true` (or limit/offset are present) we
@@ -181,6 +217,7 @@ export function createCustomerRouter(
           archivedOnly,
           search,
           tag,
+          serviceType,
           limit,
           offset,
           sort,
@@ -194,6 +231,7 @@ export function createCustomerRouter(
         archivedOnly,
         search,
         tag,
+        serviceType,
         sort,
       });
       res.json(result);
@@ -230,7 +268,7 @@ export function createCustomerRouter(
       const result = await updateCustomer(
         req.auth!.tenantId,
         req.params.id,
-        req.body,
+        normalizeCustomerPhones(req.body ?? {}),
         customerRepo,
         req.auth!.userId,
         auditRepo,

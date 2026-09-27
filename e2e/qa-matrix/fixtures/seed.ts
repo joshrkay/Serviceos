@@ -8,13 +8,15 @@
  * so you can paste them into your shell before running the matrix.
  *
  * Seeds two tenants (A and B) with one customer + one service location +
- * one open job each. Idempotent on QA_MATRIX_SEED_PREFIX — re-runnable.
+ * one open job + one technician user each. Idempotent on
+ * QA_MATRIX_SEED_PREFIX — re-runnable.
  * Uses the service-role connection via E2E_DB_URL_READWRITE (distinct from
  * the read-only one Agent C uses).
  */
 
-import { Client } from 'pg';
+import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
+import { PgSeatUsageReader, assertSeatAvailable } from '../../../packages/api/src/users/seat-limit';
 
 /**
  * Shared phone for the ambiguous-match pair seeded per tenant below (VOX-13).
@@ -31,8 +33,7 @@ async function main() {
   }
 
   const prefix = process.env.QA_MATRIX_SEED_PREFIX ?? 'qa-matrix';
-  const client = new Client({ connectionString });
-  await client.connect();
+  const client = new Pool({ connectionString, max: 2 });
 
   try {
     const result = {
@@ -47,19 +48,34 @@ async function main() {
     console.log(`export E2E_TENANT_B_ID=${result.tenantB.tenantId}`);
     console.log(`export E2E_TENANT_B_CUSTOMER_ID=${result.tenantB.customerId}`);
     console.log(`export E2E_TENANT_B_JOB_ID=${result.tenantB.jobId}`);
+    console.log(`export E2E_TENANT_A_TECHNICIAN_USER_ID=${result.tenantA.technicianUserId}`);
+    console.log(`export E2E_TENANT_B_TECHNICIAN_USER_ID=${result.tenantB.technicianUserId}`);
     console.log('\n# Clerk test tokens must be exported separately (see qa/README.md).');
   } finally {
     await client.end();
   }
 }
 
-interface Fixture {
+export interface Fixture {
   tenantId: string;
   customerId: string;
   jobId: string;
+  /** #1401 — the tenant's seeded technician (users.id), for §3 conflict/reassign rows. */
+  technicianUserId: string;
 }
 
-async function ensureTenantFixture(client: Client, slug: string): Promise<Fixture> {
+/**
+ * The plan the matrix tenants are seeded on. Seats are granted by plan
+ * (packages/api/src/users/seat-limit.ts — Starter 2 users, Growth 5, every
+ * non-deleted user and open invitation counts). The matrix tenants carry
+ * ~4 QA logins (seed owner + scripts/ensure-qa-hmac-users.ts runbook /
+ * doctor-probe subjects) plus the technician below, which only Growth
+ * covers. We grant the seats the product way — by plan — never by skipping
+ * the limit.
+ */
+const MATRIX_PLAN_ID = 'growth';
+
+export async function ensureTenantFixture(client: Pool, slug: string): Promise<Fixture> {
   // Tenants are identified by owner_id (UNIQUE, TEXT). We use a synthetic
   // owner_id derived from the slug so re-runs are idempotent.
   const ownerId = `qa:${slug}`;
@@ -212,10 +228,60 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
       )
       .then((r) => r.rows[0].id));
 
-  return { tenantId, customerId, jobId };
+  const technicianUserId = await ensureTechnicianUser(client, tenantId, slug);
+
+  return { tenantId, customerId, jobId, technicianUserId };
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+/**
+ * #1401 — one technician login per matrix tenant, so §3 conflict detection
+ * and reassign have someone to assign to. Idempotent on clerk_user_id. The
+ * tenant is moved onto MATRIX_PLAN_ID first (only ever upgrading a Starter /
+ * unset plan); the insert then goes through the product's own seat check
+ * (PgSeatUsageReader + assertSeatAvailable), so a tenant whose seats are
+ * genuinely full makes the seed fail with SEAT_LIMIT_REACHED instead of
+ * quietly seating a user past the limit.
+ */
+async function ensureTechnicianUser(client: Pool, tenantId: string, slug: string): Promise<string> {
+  const label = slug.slice(-1);
+  const clerkUserId = `qa-matrix-tech-${label}`;
+
+  const existing = await client.query(
+    `SELECT id FROM users WHERE tenant_id = $1 AND clerk_user_id = $2 LIMIT 1`,
+    [tenantId, clerkUserId]
+  );
+  if (existing.rows[0]) return existing.rows[0].id as string;
+
+  await client.query(
+    `UPDATE tenants SET plan_id = $2, updated_at = now()
+      WHERE id = $1 AND (plan_id IS NULL OR plan_id = 'starter')`,
+    [tenantId, MATRIX_PLAN_ID]
+  );
+  assertSeatAvailable(await new PgSeatUsageReader(client).getSeatUsage(tenantId));
+
+  const inserted = await client.query(
+    `INSERT INTO users
+       (id, tenant_id, clerk_user_id, email, role, first_name, last_name, status,
+        can_field_serve, current_mode, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'technician', 'QA', $5, 'active', true, 'tech', now(), now())
+     ON CONFLICT (tenant_id, clerk_user_id) DO NOTHING
+     RETURNING id`,
+    [randomUUID(), tenantId, clerkUserId, `${slug}-technician@qa.serviceos.local`, `Tech ${label}`]
+  );
+  if (inserted.rows[0]) return inserted.rows[0].id as string;
+  // Lost a race with a concurrent seeder — read the winner's row.
+  const winner = await client.query(
+    `SELECT id FROM users WHERE tenant_id = $1 AND clerk_user_id = $2 LIMIT 1`,
+    [tenantId, clerkUserId]
+  );
+  return winner.rows[0].id as string;
+}
+
+// Run only when executed directly (`npx tsx e2e/qa-matrix/fixtures/seed.ts`),
+// not when imported (the #1401 integration test imports ensureTenantFixture).
+if (typeof require !== 'undefined' && require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

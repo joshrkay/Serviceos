@@ -33,6 +33,7 @@ vi.mock('./JobProfitCard', () => ({ JobProfitCard: () => null }));
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { apiFetch } from '../../utils/api-fetch';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 const mockApiJob = {
   id: 'j1',
@@ -107,5 +108,21 @@ describe('JobDetail estimate "Agreed total" (BUG B)', () => {
 
     // The pre-tax sum must NOT be presented as the agreed total.
     expect(screen.queryByText('$353.00')).not.toBeInTheDocument();
+  });
+});
+
+describe('#1398 — estimate scope card mobile bar', () => {
+  it('the Full view and collapse controls are ≥44×44 tap targets', async () => {
+    render(
+      <MemoryRouter>
+        <JobDetailView id="j1" />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText('$381.24');
+    const fullViews = screen.getAllByText(/full view/i).map((el) => el.closest('button')!);
+    for (const b of fullViews) expectTapTarget(b, 'Full view');
+    const toggles = screen.getAllByLabelText(/collapse estimate scope|expand estimate scope/i);
+    expect(toggles.length).toBe(fullViews.length);
+    for (const t of toggles) expectTapTarget(t, 'estimate scope toggle');
   });
 });

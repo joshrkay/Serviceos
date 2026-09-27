@@ -21,6 +21,7 @@ import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { toast } from 'sonner';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 // Money lives under nested `totals` to match the API's serialized Invoice entity
 // (the authenticated GET /api/invoices returns invoice.totals.totalCents, not a
@@ -843,5 +844,12 @@ describe('U5 InvoicesPage — line-item save PUTs + stripePaymentLinkUrl', () =>
     // send was never attempted once issue failed — no message went out for
     // an invoice that still isn't payable.
     expect(sendMutate).not.toHaveBeenCalled();
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('every list-page control (New, customer filter, status tabs, rows) is a ≥44×44 tap target', () => {
+    const { container } = renderPage();
+    expectAllTapTargets(container, 'list page');
   });
 });

@@ -250,7 +250,7 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
         <div className="flex-1 min-w-0">
           <button
             onClick={onViewCustomer}
-            className="flex items-center gap-1.5 group text-left"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 group text-left"
           >
             <p className="text-sm text-foreground truncate group-hover:text-primary transition-colors">
               {customer.name}
@@ -283,7 +283,7 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
       <div className="grid grid-cols-2 border-t border-border divide-x divide-border">
         <button
           onClick={onCall}
-          className="flex items-center gap-2 px-3 py-3 hover:bg-success/10 transition-colors group text-left"
+          className="min-h-11 min-w-11 flex items-center gap-2 px-3 py-3 hover:bg-success/10 transition-colors group text-left"
         >
           <span className="flex size-7 items-center justify-center rounded-full bg-success/15 shrink-0 group-hover:bg-success/15 transition-colors">
             <Phone size={13} className="text-success" />
@@ -296,7 +296,7 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
 
         <button
           onClick={onText}
-          className="flex items-center gap-2 px-3 py-3 hover:bg-primary/10 transition-colors group text-left"
+          className="min-h-11 min-w-11 flex items-center gap-2 px-3 py-3 hover:bg-primary/10 transition-colors group text-left"
         >
           <span className="flex size-7 items-center justify-center rounded-full bg-primary/15 shrink-0 group-hover:bg-primary/15 transition-colors">
             <MessageSquare size={13} className="text-primary" />
@@ -311,7 +311,7 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
           href={mapsUrl}
           target="_blank"
           rel="noreferrer"
-          className="col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-primary/10 transition-colors group"
+          className="min-h-11 min-w-11 col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-primary/10 transition-colors group"
         >
           <span className="flex size-7 items-center justify-center rounded-full bg-primary/15 shrink-0 group-hover:bg-primary/15 transition-colors">
             <MapPin size={13} className="text-primary" />
@@ -326,7 +326,7 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
         {customer.email && (
           <a
             href={`mailto:${customer.email}`}
-            className="col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-secondary transition-colors border-t border-border"
+            className="min-h-11 min-w-11 col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-secondary transition-colors border-t border-border"
           >
             <span className="flex size-7 items-center justify-center rounded-full bg-secondary shrink-0">
               <Mail size={13} className="text-muted-foreground" />
@@ -371,7 +371,7 @@ function ScheduleTechCard({ job, tech, onCallTech, onSchedule, workerTerm, durat
           ) : (
             <div>
               <p className="text-sm text-muted-foreground italic">Not scheduled</p>
-              <button onClick={onSchedule} className="text-xs text-primary hover:underline mt-1">Schedule now →</button>
+              <button onClick={onSchedule} className="min-h-11 min-w-11 text-xs text-primary hover:underline mt-1">Schedule now →</button>
             </div>
           )}
         </div>
@@ -397,13 +397,13 @@ function ScheduleTechCard({ job, tech, onCallTech, onSchedule, workerTerm, durat
               </div>
               <button
                 onClick={onCallTech}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-success transition-colors"
+                className="min-h-11 min-w-11 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-success transition-colors"
               >
                 <Phone size={11} /> {tech.phone}
               </button>
             </>
           ) : (
-            <button onClick={onSchedule} className="flex items-center gap-1.5 text-sm text-primary hover:text-primary transition-colors">
+            <button onClick={onSchedule} className="min-h-11 min-w-11 flex items-center gap-1.5 text-sm text-primary hover:text-primary transition-colors">
               <Plus size={13} /> Assign {workerTerm.toLowerCase()}
             </button>
           )}
@@ -492,10 +492,15 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
           <StatusBadge status={estimate.status as 'Draft'} size="sm" />
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <button onClick={onOpen} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
+          <button onClick={onOpen} className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
             <Eye size={11} /> Full view
           </button>
-          <button onClick={() => setOpen(v => !v)} className="text-muted-foreground hover:text-foreground transition-colors">
+          <button
+            onClick={() => setOpen(v => !v)}
+            aria-label={open ? 'Collapse estimate scope' : 'Expand estimate scope'}
+            aria-expanded={open}
+            className="-my-3 -mr-3 flex size-11 items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+          >
             <ChevronDown size={14} className={`transition-transform ${open ? '' : '-rotate-90'}`} />
           </button>
         </div>
@@ -557,17 +562,17 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
             <h4 className="text-foreground">Materials & Parts</h4>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={onSuppliers} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
+            <button onClick={onSuppliers} className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
               <MapPin size={12} /> Find parts
             </button>
-            <button onClick={onEdit} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
+            <button onClick={onEdit} className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
               <Plus size={12} /> Add parts
             </button>
           </div>
         </div>
         <button
           onClick={onEdit}
-          className="flex flex-col items-center gap-2 py-8 w-full rounded-xl border-2 border-dashed border-border hover:border-warning/30 hover:bg-warning/10 transition-colors"
+          className="min-h-11 min-w-11 flex flex-col items-center gap-2 py-8 w-full rounded-xl border-2 border-dashed border-border hover:border-warning/30 hover:bg-warning/10 transition-colors"
         >
           <Package size={24} className="text-muted-foreground" />
           <p className="text-sm text-muted-foreground">No materials logged yet</p>
@@ -586,10 +591,10 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
           <span className="text-xs bg-secondary text-muted-foreground rounded-full px-2 py-0.5">{materials.length}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={onSuppliers} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
+          <button onClick={onSuppliers} className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
             <MapPin size={12} /> Find parts
           </button>
-          <button onClick={onEdit} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
+          <button onClick={onEdit} className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
             <Plus size={12} /> Edit
           </button>
         </div>
@@ -730,7 +735,7 @@ function AIHintsPanel({ hints, onAction }: { hints: AIHint[]; onAction: (a: Moda
               {hint.action && (
                 <button
                   onClick={() => onAction(hint.action)}
-                  className={`shrink-0 rounded-lg px-2.5 py-1.5 text-xs text-primary-foreground transition-colors ${cfg.btn}`}
+                  className={`min-h-11 min-w-11 shrink-0 rounded-lg px-2.5 py-1.5 text-xs text-primary-foreground transition-colors ${cfg.btn}`}
                 >
                   Go
                 </button>
@@ -1217,7 +1222,7 @@ export function JobDetailView({
             )}
             <button
               onClick={() => setShowTimeForm(p => !p)}
-              className="flex items-center gap-1 text-xs text-primary hover:text-primary"
+              className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-primary hover:text-primary"
             >
               <Plus size={12} /> Add entry
             </button>
@@ -1294,7 +1299,7 @@ export function JobDetailView({
             data-testid="site-media-add"
             onClick={() => setCameraOpen(true)}
             disabled={photoSaving}
-            className="flex items-center gap-1 min-h-11 px-2 text-xs text-primary hover:text-primary transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 min-h-11 min-w-11 px-2 text-xs text-primary hover:text-primary transition-colors disabled:opacity-50"
           >
             <Camera size={12} /> {photoSaving ? 'Saving…' : 'Add'}
           </button>
@@ -1326,7 +1331,7 @@ export function JobDetailView({
           <h4 className="text-foreground">Activity Log</h4>
           <button
             onClick={() => setModal('addEntry')}
-            className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors"
           >
             <Plus size={12} /> Add entry
           </button>
@@ -1348,14 +1353,14 @@ export function JobDetailView({
           <div className="flex items-center justify-between mb-5">
             <button
               onClick={() => navigate('/jobs')}
-              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+              className="min-h-11 min-w-11 flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
               <ArrowLeft size={14} /> Back to Jobs
             </button>
             {tech && (
               <button
                 onClick={() => navigate(`/jobs/${job.id}?view=tech`)}
-                className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-primary transition-colors"
+                className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-primary transition-colors"
               >
                 <Cpu size={12} /> Tech View
               </button>
@@ -1396,7 +1401,7 @@ export function JobDetailView({
               {/* Status transition control */}
               {job.status !== 'Completed' && job.status !== 'Canceled' && (
                 <select
-                  className="text-xs rounded-lg border border-border px-2 py-1 text-foreground bg-card cursor-pointer hover:border-border"
+                  className="min-h-11 min-w-11 text-xs rounded-lg border border-border px-2 py-1 text-foreground bg-card cursor-pointer hover:border-border"
                   value=""
                   onChange={async (e) => {
                     const newStatus = e.target.value;
@@ -1444,7 +1449,7 @@ export function JobDetailView({
               <button
                 key={label}
                 onClick={onClick}
-                className={`flex flex-col items-center gap-2 rounded-xl py-4 text-primary-foreground transition-colors active:scale-95 ${bg}`}
+                className={`min-h-11 min-w-11 flex flex-col items-center gap-2 rounded-xl py-4 text-primary-foreground transition-colors active:scale-95 ${bg}`}
               >
                 <Icon size={20} />
                 <div className="text-center">
@@ -1462,7 +1467,7 @@ export function JobDetailView({
                 key={key}
                 onClick={() => onSecondaryAction(key)}
                 disabled={disabled}
-                className={`relative flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground hover:border-border hover:bg-secondary transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                className={`min-h-11 min-w-11 relative flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground hover:border-border hover:bg-secondary transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
               >
                 <Icon size={14} className="text-muted-foreground" />
                 {label}
@@ -1495,7 +1500,7 @@ export function JobDetailView({
                     {h.action && (
                       <button
                         onClick={() => setModal(h.action)}
-                        className={`shrink-0 rounded-lg px-3 py-1.5 text-xs text-primary-foreground transition-colors ${cfg.btn}`}
+                        className={`min-h-11 min-w-11 shrink-0 rounded-lg px-3 py-1.5 text-xs text-primary-foreground transition-colors ${cfg.btn}`}
                       >
                         Go
                       </button>
@@ -1522,7 +1527,7 @@ export function JobDetailView({
                 <h4 className="text-foreground">Activity Log</h4>
                 <button
                   onClick={() => setModal('addEntry')}
-                  className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors"
+                  className="min-h-11 min-w-11 flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors"
                 >
                   <Plus size={12} /> Add
                 </button>

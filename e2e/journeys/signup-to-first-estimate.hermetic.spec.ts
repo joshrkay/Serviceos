@@ -242,7 +242,7 @@ test.describe('Journey 1 (hermetic) — signup webhook → tenant → first esti
     const customer = await postJson(page, `${API_URL}/api/customers`, authHeaders, {
       firstName: 'Journey',
       lastName: `Owner ${stamp}`,
-      primaryPhone: '555-0142',
+      primaryPhone: '602-555-0142',
       email: `journey.owner+${stamp}@example.com`,
       preferredChannel: 'sms',
       smsConsent: true,

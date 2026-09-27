@@ -136,7 +136,7 @@ async function main() {
   const customer = await req('POST', '/api/customers', {
     firstName: 'Dana',
     lastName: `Rivera ${stamp}`,
-    primaryPhone: '555-0142',
+    primaryPhone: '602-555-0142',
     email: `dana.rivera+${stamp}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

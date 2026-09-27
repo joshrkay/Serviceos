@@ -3,6 +3,7 @@ import { PgBaseRepository } from '../db/pg-base';
 import {
   Customer,
   CustomerListOptions,
+  CustomerLocationSummary,
   CustomerListResult,
   CustomerRepository,
   DEFAULT_LIST_LIMIT,
@@ -195,6 +196,18 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
       paramIndex++;
     }
 
+    // #1401 — service-type chip filter: a live location tagged with the type.
+    if (options?.serviceType) {
+      conditions.push(
+        `EXISTS (SELECT 1 FROM service_locations sl
+                 WHERE sl.tenant_id = $1 AND sl.customer_id = customers.id
+                   AND sl.is_archived = false
+                   AND sl.service_types @> ARRAY[$${paramIndex}]::text[])`
+      );
+      params.push(options.serviceType);
+      paramIndex++;
+    }
+
     return { where: `WHERE ${conditions.join(' AND ')}`, params };
   }
 
@@ -222,7 +235,41 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
       queryParams = [...params, limit, offset];
     }
     const result = await client.query(sql, queryParams);
-    return result.rows.map(mapRow);
+    const customers = result.rows.map(mapRow);
+    return this.attachLocationSummaries(client, tenantId, customers);
+  }
+
+  /**
+   * #1401 — embed each listed customer's live service locations (summary
+   * shape) so the directory can count locations and render service-type
+   * chips. One tenant-scoped query for the whole page.
+   */
+  private async attachLocationSummaries(
+    client: PoolClient,
+    tenantId: string,
+    customers: Customer[]
+  ): Promise<Customer[]> {
+    if (customers.length === 0) return customers;
+    const { rows } = await client.query(
+      `SELECT id, customer_id, street1, city, state, service_types
+         FROM service_locations
+        WHERE tenant_id = $1 AND customer_id = ANY($2::uuid[]) AND is_archived = false
+        ORDER BY is_primary DESC, created_at ASC`,
+      [tenantId, customers.map((c) => c.id)]
+    );
+    const byCustomer = new Map<string, CustomerLocationSummary[]>();
+    for (const r of rows) {
+      const list = byCustomer.get(r.customer_id as string) ?? [];
+      list.push({
+        id: r.id as string,
+        street1: (r.street1 as string) ?? undefined,
+        city: (r.city as string) ?? undefined,
+        state: (r.state as string) ?? undefined,
+        serviceTypes: (r.service_types as string[] | null) ?? [],
+      });
+      byCustomer.set(r.customer_id as string, list);
+    }
+    return customers.map((c) => ({ ...c, locations: byCustomer.get(c.id) ?? [] }));
   }
 
   async listWithMeta(

@@ -10,6 +10,7 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { CommunicationTimeline } from '../CommunicationTimeline';
+import { expectAllTapTargets } from '../../../test-utils/tap-target';
 import type {
   CustomerTimelineResponse,
   TimelineEvent,
@@ -54,6 +55,26 @@ describe('P9-002 — CommunicationTimeline', () => {
     await waitFor(() =>
       expect(screen.getByTestId('timeline-empty')).toBeInTheDocument()
     );
+  });
+
+  it('#1398 — filter chips, "View source" links and Load older are ≥44×44 tap targets', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      events: [
+        ev('job_created', '2026-04-02T10:00:00Z', {
+          summary: 'Job JOB-0001 created: Replace heater',
+          sourceEntityId: 'job-1',
+        }),
+        ev('note', '2026-04-01T10:00:00Z', { summary: 'Customer prefers texts' }),
+      ],
+      nextCursor: '2026-04-02T10:00:00Z',
+    } as CustomerTimelineResponse);
+    const { container } = render(<CommunicationTimeline customerId="c1" fetcher={fetcher} />);
+    await waitFor(() =>
+      expect(screen.getByText('Job JOB-0001 created: Replace heater')).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/view source/i)).toBeInTheDocument();
+    expect(screen.getByTestId('timeline-filters')).toBeInTheDocument();
+    expectAllTapTargets(container, 'CommunicationTimeline');
   });
 
   it('renders icons + summaries + "view source" links for events', async () => {
