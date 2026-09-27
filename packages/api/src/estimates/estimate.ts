@@ -165,8 +165,21 @@ export interface EstimateListOptions {
    * them here. An empty array matches nothing.
    */
   jobIds?: string[];
-  /** ILIKE search on estimate_number / customer_message. */
+  /**
+   * Free-text LIST search (the estimates search box): ILIKE on
+   * estimate_number / customer_message and, since #1400, the customer's name.
+   * Not for AI entity resolution — see `documentSearch`.
+   */
   search?: string;
+  /**
+   * ILIKE on estimate_number / customer_message ONLY — never the customer's
+   * name. This is the search the AI resolution paths use for a spoken
+   * document reference ("nudge EST-0042"). A spoken PERSON's name must reach
+   * estimates only through the resolved customer (customer → jobs →
+   * estimates), so an ambiguous customer is asked about first instead of
+   * being stepped over by a name match that could belong to either of them.
+   */
+  documentSearch?: string;
   /**
    * #1400 — derived list bucket behind the Sent / Viewed / Expired tabs
    * (see the shared `estimateListStage`): `sent` = ready_for_review/sent,
@@ -927,6 +940,14 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     }
     if (options?.search) {
       const q = options.search.toLowerCase();
+      results = results.filter(
+        (e) =>
+          e.estimateNumber.toLowerCase().includes(q) ||
+          (e.customerMessage && e.customerMessage.toLowerCase().includes(q))
+      );
+    }
+    if (options?.documentSearch) {
+      const q = options.documentSearch.toLowerCase();
       results = results.filter(
         (e) =>
           e.estimateNumber.toLowerCase().includes(q) ||

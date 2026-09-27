@@ -1256,7 +1256,10 @@ async function safeFindEstimatesByTenant(
   search: string,
 ): Promise<Estimate[]> {
   try {
-    return await repo.findByTenant(tenantId, { search, limit: 5 });
+    // documentSearch, not the list `search`: since #1400 the latter also
+    // matches the customer's name, which would resolve a spoken name straight
+    // to estimates and step over an ambiguous customer (live sweep A19).
+    return await repo.findByTenant(tenantId, { documentSearch: search, limit: 5 });
   } catch {
     return [];
   }
