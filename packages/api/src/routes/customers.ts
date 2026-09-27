@@ -77,7 +77,9 @@ function normalizeCustomerPhones<T extends Record<string, unknown>>(body: T): T 
       out[field] = normalizeMobileE164(value);
     } catch (err) {
       throw new ValidationError(
-        err instanceof Error ? err.message : `Invalid ${field}`,
+        // Name the field in the message too (#1397): clients surface the
+        // message, and "which phone?" matters when both are sent.
+        `${field}: ${err instanceof Error ? err.message : 'invalid phone number'}`,
         { field },
       );
     }

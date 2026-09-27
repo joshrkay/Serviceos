@@ -7182,19 +7182,6 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS e1_reviewed_at TIMESTAMPTZ;
   `,
 
-  '295_service_location_service_types': `
-    -- #1401 — the trades a service location is serviced for (HVAC / Plumbing /
-    -- Painting chips in the customers directory). The shared contract
-    -- (customerLocationSummarySchema) and the web ServiceLocation model both
-    -- put serviceTypes on the location; until now the add-customer sheet
-    -- collected them and dropped them. Free strings (the authoritative set is
-    -- client-side for now); defaults to empty so existing rows are unaffected.
-    -- Read/written by src/locations/pg-location.ts; filtered by
-    -- PgCustomerRepository.buildListWhere (?serviceType=).
-    ALTER TABLE service_locations
-      ADD COLUMN IF NOT EXISTS service_types TEXT[] NOT NULL DEFAULT '{}';
-    CREATE INDEX IF NOT EXISTS idx_service_locations_service_types
-      ON service_locations USING GIN (service_types);
   // #1389 / O-2 — the reviewed E1 script needs TWO sign-offs, a licensed
   // trade professional AND counsel. Each is a structured entry
   // ({kind, name, credential, reviewedAt}) in this JSONB array, written only
@@ -7209,6 +7196,21 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewers_array,
       ADD CONSTRAINT tenant_settings_e1_reviewers_array
         CHECK (e1_reviewers IS NULL OR jsonb_typeof(e1_reviewers) = 'array') NOT VALID;
+  `,
+
+  '295_service_location_service_types': `
+    -- #1401 — the trades a service location is serviced for (HVAC / Plumbing /
+    -- Painting chips in the customers directory). The shared contract
+    -- (customerLocationSummarySchema) and the web ServiceLocation model both
+    -- put serviceTypes on the location; until now the add-customer sheet
+    -- collected them and dropped them. Free strings (the authoritative set is
+    -- client-side for now); defaults to empty so existing rows are unaffected.
+    -- Read/written by src/locations/pg-location.ts; filtered by
+    -- PgCustomerRepository.buildListWhere (?serviceType=).
+    ALTER TABLE service_locations
+      ADD COLUMN IF NOT EXISTS service_types TEXT[] NOT NULL DEFAULT '{}';
+    CREATE INDEX IF NOT EXISTS idx_service_locations_service_types
+      ON service_locations USING GIN (service_types);
   `,
 };
 
