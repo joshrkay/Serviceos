@@ -11,10 +11,10 @@ import {
  * owner approves, the customer notification is the message they reviewed.
  *
  * The draft is a SUGGESTION at proposal-creation time. It rides in
- * `sourceContext` (Tier-2-safe — no schema change). Whether the execution
- * handler sends this exact text on approval is verified separately (see the
- * final report): the existing reschedule handler sends via
- * `TransactionalCommsService.notifyRescheduled`, not from `sourceContext`.
+ * `sourceContext` (Tier-2-safe — no schema change). On approval the reschedule
+ * handler sends THIS text (#432) via `TransactionalCommsService.notifyRescheduled`
+ * `reviewedBody`, appending the chosen new date/time at send — the draft is
+ * composed before a slot exists, so it must not state the new time itself.
  */
 
 export interface CustomerMessageDraftInput {

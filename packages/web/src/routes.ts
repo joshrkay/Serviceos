@@ -11,6 +11,11 @@ import { RouteErrorElement } from './components/layout/RouteErrorElement';
 import { RouteFallback } from './components/layout/RouteFallback';
 import { RoleHome } from './components/home/RoleHome';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
+import {
+  RequireEstimatesView,
+  RequireInvoicesView,
+  RequireSettingsView,
+} from './components/auth/RequirePermission';
 import { LoginPage } from './components/auth/LoginPage';
 
 // The param-wrapper routes (`:id` → typed props) are defined *inside* their
@@ -221,39 +226,55 @@ export const router = createBrowserRouter([
           return { Component: LeadDetailRoute };
         },
       },
-      { path: 'estimates',      lazy: async () => ({ Component: (await import('./components/estimates/EstimatesPage')).EstimatesPage }) },
-      { path: 'estimates/new',  lazy: async () => ({ Component: (await import('./pages/estimates/EstimateCreate')).EstimateCreate }) },
+      // #1280 — client route guard keyed on the Shell nav permission (see RequirePermission).
       {
-        path: 'estimates/:id',
-        lazy: async () => {
-          const { EstimatesPage } = await import('./components/estimates/EstimatesPage');
-          function EstimateDetailRoute() {
-            const params = useParams<{ id: string }>();
-            if (!params.id) return null;
-            return React.createElement(
-              EstimatesPage as React.ComponentType<{ defaultSelectedId?: string }>,
-              { defaultSelectedId: params.id },
-            );
-          }
-          return { Component: EstimateDetailRoute };
+        Component: RequireEstimatesView,
+        handle: { requires: 'estimates:view' },
+        children: [
+        { path: 'estimates',      lazy: async () => ({ Component: (await import('./components/estimates/EstimatesPage')).EstimatesPage }) },
+        { path: 'estimates/new',  lazy: async () => ({ Component: (await import('./pages/estimates/EstimateCreate')).EstimateCreate }) },
+        {
+          path: 'estimates/:id',
+          lazy: async () => {
+            const { EstimatesPage } = await import('./components/estimates/EstimatesPage');
+            function EstimateDetailRoute() {
+              const params = useParams<{ id: string }>();
+              if (!params.id) return null;
+              return React.createElement(
+                EstimatesPage as React.ComponentType<{ defaultSelectedId?: string }>,
+                { defaultSelectedId: params.id },
+              );
+            }
+            return { Component: EstimateDetailRoute };
+          },
         },
+        ],
       },
-      { path: 'invoices',       lazy: async () => ({ Component: (await import('./components/invoices/InvoicesPage')).InvoicesPage }) },
-      { path: 'invoices/new',   lazy: async () => ({ Component: (await import('./pages/invoices/InvoiceCreate')).InvoiceCreate }) },
+      // #1280 — client route guard keyed on the Shell nav permission (see RequirePermission). reports/* read invoices:view-gated APIs.
       {
-        path: 'invoices/:id',
-        lazy: async () => {
-          const { InvoicesPage } = await import('./components/invoices/InvoicesPage');
-          function InvoiceDetailRoute() {
-            const params = useParams<{ id: string }>();
-            if (!params.id) return null;
-            return React.createElement(
-              InvoicesPage as React.ComponentType<{ defaultSelectedId?: string }>,
-              { defaultSelectedId: params.id },
-            );
-          }
-          return { Component: InvoiceDetailRoute };
+        Component: RequireInvoicesView,
+        handle: { requires: 'invoices:view' },
+        children: [
+        { path: 'invoices',       lazy: async () => ({ Component: (await import('./components/invoices/InvoicesPage')).InvoicesPage }) },
+        { path: 'invoices/new',   lazy: async () => ({ Component: (await import('./pages/invoices/InvoiceCreate')).InvoiceCreate }) },
+        {
+          path: 'invoices/:id',
+          lazy: async () => {
+            const { InvoicesPage } = await import('./components/invoices/InvoicesPage');
+            function InvoiceDetailRoute() {
+              const params = useParams<{ id: string }>();
+              if (!params.id) return null;
+              return React.createElement(
+                InvoicesPage as React.ComponentType<{ defaultSelectedId?: string }>,
+                { defaultSelectedId: params.id },
+              );
+            }
+            return { Component: InvoiceDetailRoute };
+          },
         },
+        { path: 'reports/money', lazy: async () => ({ Component: (await import('./components/reports/MoneyDashboardPage')).MoneyDashboardPage }) },
+        { path: 'reports/revenue-by-source', lazy: async () => ({ Component: (await import('./components/reports/RevenueBySourcePage')).RevenueBySourcePage }) },
+        ],
       },
       { path: 'contracts',      lazy: async () => ({ Component: (await import('./components/contracts/MaintenanceContractsPage')).MaintenanceContractsPage }) },
       { path: 'contracts/:id',  lazy: async () => ({ Component: (await import('./components/contracts/ContractDetailPage')).ContractDetailPage }) },
@@ -273,17 +294,22 @@ export const router = createBrowserRouter([
       { path: 'comms-inbox',    lazy: async () => ({ Component: (await import('./pages/conversations/CommsInboxPage')).CommsInboxPage }) },
       { path: 'interactions',   lazy: async () => ({ Component: (await import('./components/interactions/InteractionsPage')).InteractionsPage }) },
       { path: 'interactions/dispatch', lazy: async () => ({ Component: (await import('./components/interactions/DispatchLogPage')).DispatchLogPage }) },
-      { path: 'settings',       lazy: async () => ({ Component: (await import('./components/settings/SettingsPage')).SettingsPage }) },
-      { path: 'settings/templates', lazy: async () => ({ Component: (await import('./components/settings/TemplatesPage')).TemplatesPage }) },
-      { path: 'settings/price-book', lazy: async () => ({ Component: (await import('./components/settings/PriceBookPage')).PriceBookPage }) },
-      { path: 'settings/feedback', lazy: async () => ({ Component: (await import('./components/settings/FeedbackDashboard')).FeedbackDashboard }) },
-      { path: 'settings/language', lazy: async () => ({ Component: (await import('./pages/settings/LanguageSettings')).LanguageSettingsPage }) },
-      { path: 'reports/money', lazy: async () => ({ Component: (await import('./components/reports/MoneyDashboardPage')).MoneyDashboardPage }) },
+      // #1280 — client route guard keyed on the Shell nav permission (see RequirePermission).
+      {
+        Component: RequireSettingsView,
+        handle: { requires: 'settings:view' },
+        children: [
+        { path: 'settings',       lazy: async () => ({ Component: (await import('./components/settings/SettingsPage')).SettingsPage }) },
+        { path: 'settings/templates', lazy: async () => ({ Component: (await import('./components/settings/TemplatesPage')).TemplatesPage }) },
+        { path: 'settings/price-book', lazy: async () => ({ Component: (await import('./components/settings/PriceBookPage')).PriceBookPage }) },
+        { path: 'settings/feedback', lazy: async () => ({ Component: (await import('./components/settings/FeedbackDashboard')).FeedbackDashboard }) },
+        { path: 'settings/language', lazy: async () => ({ Component: (await import('./pages/settings/LanguageSettings')).LanguageSettingsPage }) },
+        ],
+      },
       // RV-062 — end-of-day digest web view (SMS deep link `/digest/<date>`;
       // no param / `latest` resolve to the most recent digest).
       { path: 'digest',         lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
       { path: 'digest/:date',   lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
-      { path: 'reports/revenue-by-source', lazy: async () => ({ Component: (await import('./components/reports/RevenueBySourcePage')).RevenueBySourcePage }) },
       { path: 'technician/day', lazy: async () => ({ Component: (await import('./components/technician/TechnicianDayPage')).TechnicianDayPage }) },
       // 1.11 — invited teammate's landing page (inviteTeamMember redirects
       // here after Clerk's invitation sign-up completes). Auth-wrapped: a

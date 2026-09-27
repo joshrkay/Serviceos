@@ -459,10 +459,13 @@ export function CameraButton({ onOpen, variant = 'topbar' }: CamButtonProps) {
     return (
       <button
         onClick={onOpen}
-        className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors"
+        className="flex size-11 items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
         aria-label="Open camera"
       >
-        <Camera size={16} className="text-slate-600" />
+        {/* #1283 — 44×44 hit area; the visible 32px disc is unchanged. */}
+        <span className="flex size-8 items-center justify-center rounded-full bg-slate-100">
+          <Camera size={16} className="text-slate-600" />
+        </span>
       </button>
     );
   }

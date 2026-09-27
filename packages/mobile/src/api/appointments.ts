@@ -21,10 +21,25 @@ export interface AvailabilitySlot {
   end: string;
 }
 
+/**
+ * #1243 / PRD 3.3 — where each scheduling input came from. `'default'` means
+ * the tenant never configured it and the offered times rest on a fallback;
+ * `notes` carries the owner-facing line for each such default.
+ */
+export interface AvailabilityConfig {
+  timezoneSource: 'tenant' | 'default';
+  businessHoursSource: 'tenant' | 'default';
+  bufferSource: 'tenant' | 'default';
+  bufferMinutes: number;
+  notes: string[];
+}
+
 export interface AvailabilityResponse {
   timezone: string;
   durationMin: number;
   slots: AvailabilitySlot[];
+  /** Absent only from an older server that predates the provenance block. */
+  config?: AvailabilityConfig;
 }
 
 export interface FetchAvailabilityParams {
