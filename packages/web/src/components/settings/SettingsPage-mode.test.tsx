@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { expectAllTapTargets, expectTapTarget } from '../../test-utils/tap-target';
 import { MemoryRouter } from 'react-router';
 import type { MeResponse } from '../../hooks/useMe';
 
@@ -138,6 +139,20 @@ describe('P12-005-fe — SettingsPage Supervisor backup section', () => {
         'radio',
       ),
     ).toBeChecked();
+  });
+
+  it('#1398 — routing options tap on their full ≥44px row; every other control is ≥44×44', () => {
+    mockMe({ role: 'owner' });
+    renderPage();
+    const section = screen.getByTestId('supervisor-backup-section');
+    for (const value of ['queue_and_sms', 'queue_only', 'escalate_to_oncall']) {
+      const row = screen.getByTestId(`routing-option-${value}`);
+      // The whole labelled row is the radio's tap target…
+      expectTapTarget(row, `routing row ${value}`);
+      // …and the bare 13px native radio is not a separate, tiny target.
+      expect(within(row).getByRole('radio').className).toMatch(/(^|\s)sr-only(\s|$)/);
+    }
+    expectAllTapTargets(section, 'Supervisor backup section');
   });
 
   it('hides the section for a dispatcher', () => {

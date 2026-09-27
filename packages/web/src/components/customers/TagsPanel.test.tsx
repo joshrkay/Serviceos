@@ -10,12 +10,20 @@ vi.mock('../../api/customers', () => ({
 }));
 
 import { listTags, addTag, removeTag } from '../../api/customers';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 describe('TagsPanel (U2)', () => {
   beforeEach(() => {
     vi.mocked(listTags).mockReset().mockResolvedValue([]);
     vi.mocked(addTag).mockReset().mockResolvedValue([]);
     vi.mocked(removeTag).mockReset().mockResolvedValue([]);
+  });
+
+  it('#1398 — tag chips and the add-tag form are ≥44×44 tap targets', async () => {
+    vi.mocked(listTags).mockResolvedValue(['vip']);
+    render(<TagsPanel customerId="1" />);
+    await screen.findByText('vip');
+    expectAllTapTargets(document.body, 'TagsPanel');
   });
 
   it('renders tag chips', async () => {

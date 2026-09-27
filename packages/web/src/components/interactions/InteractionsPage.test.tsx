@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { InteractionsPage } from './InteractionsPage';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 // InteractionsPage loads via the api/interactions client, not apiFetch.
 vi.mock('../../api/interactions', () => ({
@@ -64,5 +65,33 @@ describe('InteractionsPage', () => {
     expect(mockList).toHaveBeenCalledWith(
       expect.objectContaining({ limit: expect.any(Number), offset: 0 }),
     );
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('Refresh, rows and the Previous/Next pager are ≥44×44 tap targets', async () => {
+    mockList.mockResolvedValue({
+      data: [
+        {
+          id: 'i1',
+          channel: 'voice_inbound',
+          outcome: 'completed',
+          callSid: null,
+          startedAt: '2026-05-01T10:00:00Z',
+          endedAt: '2026-05-01T10:02:05Z',
+          durationSeconds: 125,
+          customer: { id: 'c1', displayName: 'Alice Smith', address: null },
+          excerpt: 'Customer asked about a quote',
+          transcriptTurnCount: 4,
+        },
+      ],
+      total: 45,
+      limit: 20,
+      offset: 0,
+    });
+    const { container } = render(<InteractionsPage />);
+    await screen.findByText('Alice Smith');
+    expect(screen.getByRole('button', { name: /next/i })).toBeInTheDocument();
+    expectAllTapTargets(container, 'InteractionsPage');
   });
 });

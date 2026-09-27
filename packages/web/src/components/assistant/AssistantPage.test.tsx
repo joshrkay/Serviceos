@@ -3,6 +3,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { AssistantPage } from './AssistantPage';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 // Mock the authenticated fetch wrapper so tests can assert the page uses it
@@ -171,6 +172,16 @@ describe('AssistantPage', () => {
 });
 
 // ─── Journey QA 2026-07-02 (bug 11): thread must survive the post-turn refetch ─
+
+describe('#1398 — mobile bar', () => {
+  it('every control on the welcome screen (header, chips, composer) is a ≥44×44 tap target', async () => {
+    const { container } = renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    expectAllTapTargets(container, 'AssistantPage');
+  });
+});
 
 describe('journey QA bug 11 — reply survives the post-turn refetch', () => {
   async function sendFirstTurn() {

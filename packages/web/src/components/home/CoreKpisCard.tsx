@@ -109,7 +109,7 @@ export function CoreKpisCard() {
         <p className="text-sm text-foreground">Your numbers this month</p>
         <button
           onClick={() => navigate('/reports/money')}
-          className="flex items-center gap-0.5 text-xs text-primary transition-colors hover:text-primary"
+          className="-mr-2 flex min-h-11 min-w-11 items-center gap-0.5 px-2 text-xs text-primary transition-colors hover:text-primary"
         >
           Money dashboard <ArrowRight size={11} />
         </button>

@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
 import { todayInTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 
@@ -501,5 +502,37 @@ describe('HomePage', () => {
     expect(container.innerHTML).not.toMatch(
       /(bg|text|border|border-l|border-t|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
     );
+  });
+
+  describe('#1398 — mobile bar', () => {
+    it('the 3-stat pulse stacks to one column on phones so no tile clips at 320px', () => {
+      renderPage();
+      const grid = screen.getByTestId('home-stat-outstanding').parentElement!;
+      const cls = grid.className.split(/\s+/);
+      expect(cls).toContain('grid-cols-1');
+      expect(cls).toContain('sm:grid-cols-3');
+      expect(cls).not.toContain('grid-cols-3');
+    });
+
+    it('lead-pipeline stage counts and the newest-lead row are ≥44px tap targets', () => {
+      renderPage();
+      // Newest new lead (Dave Brown) renders as a one-line row under the counts.
+      const newest = screen.getByText('Dave Brown').closest('button')!;
+      expectTapTarget(newest, 'newest lead row');
+      for (const stage of ['New', 'Contacted', 'Quoted']) {
+        const btn = screen.getAllByText(stage).map((el) => el.closest('button')).find(Boolean)!;
+        expectTapTarget(btn, `lead stage ${stage}`);
+      }
+    });
+
+    it('header, attention-row and invoice-section actions are ≥44px tap targets', () => {
+      renderPage();
+      expectTapTarget(screen.getByRole('button', { name: /ask ai/i }), 'Ask AI');
+      expectTapTarget(screen.getByRole('button', { name: /money summary/i }), 'Money summary');
+      const remind = screen.getAllByRole('button', { name: /remind/i });
+      const followUp = screen.getAllByRole('button', { name: /follow up/i });
+      expect(remind.length + followUp.length).toBeGreaterThan(0);
+      for (const b of [...remind, ...followUp]) expectTapTarget(b, `attention action "${b.textContent}"`);
+    });
   });
 });

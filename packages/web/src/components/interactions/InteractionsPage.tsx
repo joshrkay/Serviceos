@@ -247,7 +247,7 @@ export function InteractionsPage() {
         </div>
         <button
           onClick={() => void fetchPage(offset)}
-          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+          className="min-h-11 min-w-11 flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
           disabled={loading}
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
@@ -278,7 +278,7 @@ export function InteractionsPage() {
             <button
               key={interaction.id}
               onClick={() => setSelectedId(interaction.id)}
-              className="w-full text-left px-5 py-4 hover:bg-slate-50 transition-colors flex items-center gap-4"
+              className="w-full min-h-11 text-left px-5 py-4 hover:bg-slate-50 transition-colors flex items-center gap-4"
             >
               <div className="shrink-0 size-9 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-600">
                 <Phone size={16} />
@@ -326,14 +326,14 @@ export function InteractionsPage() {
             <button
               onClick={() => void fetchPage(Math.max(0, offset - PAGE_SIZE))}
               disabled={offset === 0 || loading}
-              className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 text-slate-600 disabled:opacity-40 hover:bg-slate-50 transition-colors"
+              className="min-h-11 min-w-11 px-3 py-1.5 text-xs rounded-lg border border-slate-200 text-slate-600 disabled:opacity-40 hover:bg-slate-50 transition-colors"
             >
               Previous
             </button>
             <button
               onClick={() => void fetchPage(offset + PAGE_SIZE)}
               disabled={offset + PAGE_SIZE >= total || loading}
-              className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 text-slate-600 disabled:opacity-40 hover:bg-slate-50 transition-colors"
+              className="min-h-11 min-w-11 px-3 py-1.5 text-xs rounded-lg border border-slate-200 text-slate-600 disabled:opacity-40 hover:bg-slate-50 transition-colors"
             >
               Next
             </button>

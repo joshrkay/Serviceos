@@ -431,13 +431,13 @@ export function SchedulePage() {
               Schedule header is its primary in-app entry point. */}
           <Link
             to="/dispatch"
-            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
             <LayoutGrid size={14} /> Dispatch board
           </Link>
           <button
             onClick={() => setShowNew(v => !v)}
-            className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
           >
             <Plus size={14} /> New appointment
           </button>
@@ -448,7 +448,8 @@ export function SchedulePage() {
       <div className="flex items-center gap-2 mb-4">
         <button
           onClick={() => pickDay(shiftDateKey(selectedIso, -1))}
-          className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
+          aria-label="Previous day"
+          className="flex size-11 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronLeft size={15} />
         </button>
@@ -457,7 +458,7 @@ export function SchedulePage() {
             const isSelected = day.isoDate === selectedIso;
             return (
               <button key={day.isoDate} onClick={() => pickDay(day.isoDate)}
-                className={`flex-1 min-w-[64px] flex flex-col items-center rounded-xl py-2.5 transition-all border ${
+                className={`flex-1 min-w-[64px] min-h-11 flex flex-col items-center rounded-xl py-2.5 transition-all border ${
                   isSelected ? 'bg-slate-900 border-slate-900 text-white' :
                   day.isToday ? 'bg-blue-50 border-blue-100 text-blue-700' :
                   'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
@@ -471,7 +472,8 @@ export function SchedulePage() {
         </div>
         <button
           onClick={() => pickDay(shiftDateKey(selectedIso, 1))}
-          className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
+          aria-label="Next day"
+          className="flex size-11 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronRight size={15} />
         </button>
@@ -483,7 +485,7 @@ export function SchedulePage() {
           const t = technicians.find(x => x.name === name);
           return (
             <button key={name} onClick={() => setTechFilter(name)}
-              className={`shrink-0 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs border transition-colors ${
+              className={`min-h-11 min-w-11 shrink-0 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs border transition-colors ${
                 techFilter === name ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
               }`}
             >
@@ -627,19 +629,19 @@ export function SchedulePage() {
                       <div className="flex gap-2 mt-3">
                         <button
                           onClick={() => navigate(`/appointments/${appt.id}/edit`)}
-                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-1"
+                          className="min-h-11 min-w-11 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-1"
                         >
                           <Briefcase size={11} /> Edit
                         </button>
                         <button
                           onClick={() => setDelayApptId(appt.id)}
-                          className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-100 transition-colors flex items-center gap-1"
+                          className="min-h-11 min-w-11 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-100 transition-colors flex items-center gap-1"
                         >
                           <Bell size={11} /> Notify delay
                         </button>
                         <button
                           onClick={() => setDetailAppt(appt)}
-                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
+                          className="min-h-11 min-w-11 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
                         >
                           Details
                         </button>

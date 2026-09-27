@@ -25,7 +25,7 @@ function PartsExpand({ parts }: { parts: MaterialItem[] }) {
     <div className="mt-2 rounded-lg border border-warning/30 bg-warning/10 overflow-hidden">
       <button
         onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center justify-between px-3 py-2 text-xs text-warning"
+        className="flex w-full min-h-11 items-center justify-between px-3 py-2 text-xs text-warning"
       >
         <span>{parts.length} item{parts.length > 1 ? 's' : ''} · ${total.toFixed(2)}</span>
         {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
@@ -67,7 +67,7 @@ export function ActivityTimeline({ activities, onAddEntry, compact = false }: Pr
         {onAddEntry && (
           <button
             onClick={onAddEntry}
-            className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Plus size={13} /> Add first entry
           </button>
@@ -83,7 +83,7 @@ export function ActivityTimeline({ activities, onAddEntry, compact = false }: Pr
         <div className="flex justify-end mb-3">
           <button
             onClick={onAddEntry}
-            className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-primary transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-primary transition-colors"
           >
             <Plus size={12} /> Add entry
           </button>

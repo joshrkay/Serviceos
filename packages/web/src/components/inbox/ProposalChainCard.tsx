@@ -96,14 +96,14 @@ export function ProposalChainCard({ rows, onApproveChain, onRejectChain }: Propo
           <button
             type="button"
             onClick={() => onRejectChain(ids)}
-            className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
+            className="min-h-11 min-w-11 rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
           >
             Reject all
           </button>
           <button
             type="button"
             onClick={() => onApproveChain(ids)}
-            className="rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
+            className="min-h-11 min-w-11 rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
           >
             Approve all
           </button>

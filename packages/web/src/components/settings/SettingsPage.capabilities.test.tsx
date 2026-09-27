@@ -36,6 +36,7 @@ vi.mock('sonner', () => ({
 }));
 
 import { SettingsPage } from './SettingsPage';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {
   const ok = init.ok ?? true;
@@ -146,8 +147,16 @@ describe('#1011 — SettingsPage capabilities', () => {
     renderPage();
 
     const dropped = await screen.findByText(LABELS.dropped);
-    await waitFor(() => expect(toggleFor(dropped).className).toContain('bg-blue-600'));
-    expect(toggleFor(screen.getByText(LABELS.triage)).className).toContain('bg-slate-200');
+    await waitFor(() => expect(toggleFor(dropped)).toHaveAttribute('aria-checked', 'true'));
+    expect(toggleFor(screen.getByText(LABELS.triage))).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('#1398 — each capability switch element is itself a ≥44×44 tap target', async () => {
+    primeMount();
+    renderPage();
+    for (const label of [LABELS.dropped, LABELS.triage]) {
+      expectTapTarget(await screen.findByRole('switch', { name: label }), label);
+    }
   });
 
   it('PUTs to /api/settings/capabilities/dropped_call_recovery when switched on', async () => {
@@ -201,7 +210,7 @@ describe('#1011 — SettingsPage capabilities', () => {
     fireEvent.click(toggleFor(dropped));
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
-    await waitFor(() => expect(toggleFor(dropped).className).toContain('bg-slate-200'));
+    await waitFor(() => expect(toggleFor(dropped)).toHaveAttribute('aria-checked', 'false'));
   });
 
   it('a platform flag that is ON is still the owner\'s to turn OFF', async () => {
