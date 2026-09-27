@@ -27,17 +27,30 @@ const sampleLeads = [
   },
 ];
 
+/**
+ * Responses for the lead-list / PATCH calls, in call order. The #1416
+ * assignee picker's GET /api/users is answered separately (empty team), so
+ * it never consumes a response queued for the kanban.
+ */
+const queued: Response[] = [];
+
+function enqueue(body: unknown) {
+  queued.push({ ok: true, status: 200, json: async () => body } as unknown as Response);
+}
+
 function mockListOnce(leads = sampleLeads) {
-  vi.mocked(apiFetch).mockResolvedValueOnce({
-    ok: true,
-    status: 200,
-    json: async () => ({ data: leads, total: leads.length }),
-  } as unknown as Response);
+  enqueue({ data: leads, total: leads.length });
 }
 
 describe('Leads — LeadList kanban (P9-001)', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
+    queued.length = 0;
+    vi.mocked(apiFetch).mockImplementation(async (input) =>
+      String(input).startsWith('/api/users')
+        ? ({ ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response)
+        : (queued.shift() as Response),
+    );
   });
 
   it('#1283 — source filter chips meet the 44px tap target (min-h-11)', async () => {
@@ -73,11 +86,7 @@ describe('Leads — LeadList kanban (P9-001)', () => {
   it('drag-drop between columns triggers PATCH /api/leads/:id with new stage', async () => {
     mockListOnce();
     // The PATCH call
-    vi.mocked(apiFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
-    } as unknown as Response);
+    enqueue({});
 
     render(<LeadList />);
     const card = await screen.findByTestId('lead-card-lead-1');
@@ -148,11 +157,7 @@ describe('Leads — LeadList kanban (P9-001)', () => {
   it('does not navigate when a card is clicked after a drag', async () => {
     mockListOnce();
     // PATCH for the drop
-    vi.mocked(apiFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
-    } as unknown as Response);
+    enqueue({});
 
     const onSelectLead = vi.fn();
     render(<LeadList onSelectLead={onSelectLead} />);
@@ -209,5 +214,41 @@ describe('Leads — LeadList kanban (P9-001)', () => {
       expect(urls.some((u) => u.includes('source=sms'))).toBe(true);
     });
     expect(screen.getByRole('button', { name: 'customer_portal' })).toBeInTheDocument();
+  });
+
+  it('#1416 — the assignee filter is a picker of team members by NAME that filters by their id', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith('/api/users')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              { id: 'user-carlos', firstName: 'Carlos', lastName: 'Reyes' },
+              { id: 'user-dana', firstName: 'Dana', lastName: 'Ortiz' },
+            ],
+          }),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: sampleLeads, total: sampleLeads.length }),
+      } as unknown as Response;
+    });
+    render(<LeadList />);
+    await screen.findByText('Alice Wong');
+
+    expect(screen.queryByPlaceholderText(/user id/i)).not.toBeInTheDocument();
+    const picker = screen.getByRole('combobox', { name: /assignee/i });
+    await screen.findByRole('option', { name: 'Dana Ortiz' });
+    expect(screen.getByRole('option', { name: 'Carlos Reyes' })).toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: 'user-dana' } });
+    await waitFor(() => {
+      const urls = vi.mocked(apiFetch).mock.calls.map((c) => String(c[0]));
+      expect(urls.some((u) => u.startsWith('/api/leads?') && u.includes('assignedUserId=user-dana'))).toBe(true);
+    });
   });
 });

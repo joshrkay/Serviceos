@@ -291,6 +291,53 @@ describe('SchedulePage', () => {
     expect(screen.getByText('Notify next customer of delay')).toBeInTheDocument();
   });
 
+  // #1416 — the sheet used /delay-ack (which rejects owners and never said
+  // whether anything was queued) and flashed "Delay notice sent" for 1.5s
+  // whatever happened. It now uses the running_late path (#1406 D10) and
+  // keeps the API's honest outcome on screen until the user closes it.
+  it('delay sheet: a notice that queued nothing says so, and the outcome stays visible', async () => {
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input) === '/api/appointments/appt-1' && init?.method === 'PUT') {
+        return mockResponse({
+          appointmentId: 'appt-1',
+          delayMinutes: 20,
+          queued: false,
+          reason: 'NO_CUSTOMER_TO_NOTIFY',
+        });
+      }
+      return baseImpl(input, init);
+    });
+    renderPage();
+    await screen.findByText('Alice Smith');
+    fireEvent.click(screen.getAllByRole('button', { name: /Notify delay/i })[0]);
+    fireEvent.click(screen.getByRole('button', { name: /Send 20-min delay notice/i }));
+
+    expect(await screen.findByText(/No customer was notified/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Delay notice sent/i)).not.toBeInTheDocument();
+    const put = vi.mocked(apiFetch).mock.calls.find(([, init]) => init?.method === 'PUT');
+    expect(JSON.parse(String(put?.[1]?.body))).toEqual({ status: 'running_late', delayMinutes: 20 });
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(screen.getByText(/No customer was notified/i)).toBeInTheDocument();
+  });
+
+  it('delay sheet: a queued notice says the next customer will be texted', async () => {
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input) === '/api/appointments/appt-1' && init?.method === 'PUT') {
+        return mockResponse({ appointmentId: 'appt-1', delayMinutes: 20, queued: true });
+      }
+      return baseImpl(input, init);
+    });
+    renderPage();
+    await screen.findByText('Alice Smith');
+    fireEvent.click(screen.getAllByRole('button', { name: /Notify delay/i })[0]);
+    fireEvent.click(screen.getByRole('button', { name: /Send 20-min delay notice/i }));
+
+    expect(await screen.findByText(/Delay notice queued/i)).toBeInTheDocument();
+  });
+
   it('Details button opens the detail modal', async () => {
     renderPage();
     await screen.findByText('Alice Smith');
