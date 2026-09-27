@@ -374,7 +374,12 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     );
     const handler = new InvoiceTaskHandler(gateway, repo);
 
-    const { proposal } = await handler.handle(baseContext);
+    // #1399 — the conflict carve-out is for a price the operator quoted; an
+    // unspoken (model-invented) price snaps to the catalog instead.
+    const { proposal } = await handler.handle({
+      ...baseContext,
+      message: 'Invoice the water heater install at $999',
+    });
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
     // Spoken price kept verbatim — never silently overwritten.

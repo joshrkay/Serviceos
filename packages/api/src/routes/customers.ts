@@ -270,7 +270,8 @@ export function createCustomerRouter(
         customerRepo,
         req.auth!.userId,
         auditRepo,
-        consentLedger
+        consentLedger,
+        req.auth!.role
       );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
@@ -292,7 +293,8 @@ export function createCustomerRouter(
         req.params.id,
         customerRepo,
         req.auth!.userId,
-        auditRepo
+        auditRepo,
+        req.auth!.role
       );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
@@ -317,7 +319,8 @@ export function createCustomerRouter(
         req.params.id,
         customerRepo,
         req.auth!.userId,
-        auditRepo
+        auditRepo,
+        req.auth!.role
       );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });

@@ -22,6 +22,21 @@ describe('router', () => {
     expect(allRoutes.some(route => route.path === 'settings/price-book')).toBe(true);
   });
 
+  // #1389 — the owner's E1 reviewed-script form, linked from the placeholder
+  // banner; behind the same settings:view guard as the rest of /settings and
+  // code-split like its siblings.
+  it('includes the settings/e1-script form route, lazy and behind the settings guard', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const route = allRoutes.find(r => r.path === 'settings/e1-script');
+    expect(route, 'expected a settings/e1-script route').toBeDefined();
+    expect(typeof (route as { lazy?: unknown }).lazy).toBe('function');
+    const guard = allRoutes.find(r =>
+      (r.handle as { requires?: string } | undefined)?.requires === 'settings:view' &&
+      (r.children ?? []).includes(route!),
+    );
+    expect(guard, 'settings/e1-script sits under the settings:view guard').toBeDefined();
+  });
+
   // Code-splitting contract: non-critical pages must load via `lazy` (their own
   // chunk), while the hottest entry paths (`/` home index, `/login`) stay eager
   // so first paint doesn't pay an extra round-trip. A regression that re-adds an

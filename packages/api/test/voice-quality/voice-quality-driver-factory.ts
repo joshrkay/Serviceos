@@ -17,10 +17,9 @@ import {
 } from '../../src/ai/voice-quality/cassette-gateway';
 import {
   TextModeDriver,
-  vqResolveMemberRole,
   type AgentDriver,
 } from '../../src/ai/voice-quality/text-mode-driver';
-import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
+import { buildHarnessPhoneLookups } from '../../src/ai/voice-quality/harness-lookups';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryCatalogItemRepository } from '../../src/catalog/catalog-item';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
@@ -666,41 +665,16 @@ export function makeVoiceQualityDriverFactory(
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
       catalogRepo,
-      // #869 — the shared lookup bundle, same shape the live phone's Gather
-      // adapter takes. Built from the repos the runner already seeded for this
-      // script's fixtures, plus the two the bundle needs and the RepoBundle
-      // does not own (agreements, money dashboard). Nothing here is a lookup
-      // switch: `answerPhoneLookup` → `executeLookupAnswer` owns dispatch.
-      lookups: {
-        answers: {
-          invoiceRepo: fctx.repos.invoiceRepo,
-          estimateRepo: fctx.repos.estimateRepo,
-          leadRepo: fctx.repos.leadRepo,
-          agreementRepo,
-          moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
-          catalogRepo,
-          settingsRepo,
-          // Harness-owned actor → role seam (decision 3). No `users` fixtures
-          // exist (or are needed) — the owner-line flag is the corpus's
-          // identity vocabulary.
-          resolveMemberRole: vqResolveMemberRole,
-        },
-        shared: {
-          jobRepo: fctx.repos.jobRepo,
-          appointmentRepo: fctx.repos.appointmentRepo,
-          customerRepo: fctx.repos.customerRepo,
-          proposalRepo: fctx.repos.proposalRepo,
-          // No `availabilityFinder`: with an appointmentRepo wired the shared
-          // dispatch takes the business-hours-aware `lookupBookableAvailability`
-          // path (F2), exactly as the live phone does, and the finder would be
-          // dead wiring.
-        },
-        // Spoken dates render in the script's tenant zone, as they do on the
-        // phone. Failure-soft by contract in the adapter.
-        tenantTimezoneResolver: async (t: string) =>
-          (await settingsRepo.findByTenant(t))?.timezone,
+      // #869 — the shared lookup bundle, same shape the live phone takes,
+      // built from the repos the runner already seeded for this script's
+      // fixtures. #1395 — the SAME builder Layer 2 wires, so the two lanes
+      // cannot drift on which repos a skill gets.
+      lookups: buildHarnessPhoneLookups(fctx.repos, {
+        agreementRepo,
+        catalogRepo,
+        settingsRepo,
         ...(now ? { now } : {}),
-      },
+      }),
       // #888/#897 — production surface profile unless the script declares
       // it asks operator-only actions from a customer's line (D-028 follow-up).
       ...(tenant.harnessOperatorTaxonomy === true ? { operatorTaxonomyOverride: true } : {}),
