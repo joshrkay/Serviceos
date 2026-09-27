@@ -200,7 +200,7 @@ type Classification = 'harness' | 'cross-document-aggregate' | 'violation';
 
 const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }> = [
   {
-    at: 'src/ai/voice-quality/inapp-50/world.ts:566',
+    at: 'src/ai/voice-quality/inapp-50/world.ts:600',
     as: 'harness',
     why: 'inapp-50 eval world seeding a fixture line item; not a caller-facing path (same exemption as I1′).',
   },

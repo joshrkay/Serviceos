@@ -135,7 +135,21 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
           throw new Error(json?.message ?? `HTTP ${res.status}`);
         }
         const created = await res.json();
-        toast.success('Lead created');
+        // #1406 D1 — a repeat phone attaches to / revives the existing lead.
+        const outcome = created?.dedupe?.outcome;
+        toast.success(
+          outcome === 'attached'
+            ? 'Added to the existing lead with this phone number'
+            : outcome === 'reopened'
+              ? 'Reopened the lost lead with this phone number'
+              : 'Lead created',
+        );
+        if (
+          Array.isArray(created?.warnings) &&
+          created.warnings.some((w: { code?: string }) => w?.code === 'MATCHES_EXISTING_CUSTOMER')
+        ) {
+          toast.warning('This phone number already belongs to a customer');
+        }
         onCreated?.(created.id);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to create lead';

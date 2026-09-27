@@ -21,6 +21,9 @@ const SOURCES = [
   'walk_in',
   'marketplace',
   'other',
+  // #1406 D10 — every LEAD_SOURCES value the API accepts (leads/enums.ts).
+  'customer_portal',
+  'sms',
 ];
 
 interface LeadResponse extends LeadCardData {

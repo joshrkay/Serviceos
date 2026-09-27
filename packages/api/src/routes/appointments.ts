@@ -124,6 +124,8 @@ export function createAppointmentRouter(
 ): Router {
   const router = Router();
 
+  type RunningLateNotQueuedReason = 'NO_CUSTOMER_TO_NOTIFY' | 'ENQUEUE_FAILED' | 'NOT_CONFIGURED';
+
   async function mayTriggerRunningLate(
     req: AuthenticatedRequest,
     jobId: string,
@@ -139,21 +141,29 @@ export function createAppointmentRouter(
     appointmentId: string,
     delayVersion: number,
     delayMinutes: number,
-  ): Promise<string | null> {
+  ): Promise<{ idempotencyKey: string | null; notQueuedReason?: RunningLateNotQueuedReason }> {
+    const coordinator = options?.delayNotificationCoordinator;
+    if (!coordinator) return { idempotencyKey: null, notQueuedReason: 'NOT_CONFIGURED' };
     try {
-      return await options?.delayNotificationCoordinator?.enqueueDelayNotice({
+      const idempotencyKey = await coordinator.enqueueDelayNotice({
         tenantId: req.auth!.tenantId,
         currentAppointmentId: appointmentId,
         delayVersion,
         delayMinutes,
-      }) ?? null;
+      });
+      // null = the coordinator found no later appointment / reachable
+      // customer to notify (e.g. no technician assigned, last visit of the
+      // day, or the customer opted out).
+      return idempotencyKey
+        ? { idempotencyKey }
+        : { idempotencyKey: null, notQueuedReason: 'NO_CUSTOMER_TO_NOTIFY' };
     } catch (notificationErr) {
       // eslint-disable-next-line no-console
       console.warn('Failed to enqueue delay notification for running-late notice', {
         appointmentId,
         error: notificationErr instanceof Error ? notificationErr.message : String(notificationErr),
       });
-      return null;
+      return { idempotencyKey: null, notQueuedReason: 'ENQUEUE_FAILED' };
     }
   }
 
@@ -209,7 +219,7 @@ export function createAppointmentRouter(
     const delayVersion = history.filter(
       (e) => e.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED && e.metadata?.isRunningBehind === true,
     ).length;
-    const idempotencyKey = await enqueueRunningLate(
+    const { idempotencyKey, notQueuedReason } = await enqueueRunningLate(
       req,
       appointment.id,
       delayVersion,
@@ -223,7 +233,15 @@ export function createAppointmentRouter(
       delayMinutes,
       idempotencyKey,
     );
-    res.json({ appointmentId: appointment.id, delayMinutes, queued: true });
+    // #1406 D10 — report what actually happened: `queued: true` was sent
+    // even when nothing was enqueued, so the UI claimed a notice that never
+    // produced a dispatch row.
+    res.json({
+      appointmentId: appointment.id,
+      delayMinutes,
+      queued: idempotencyKey !== null,
+      ...(notQueuedReason ? { reason: notQueuedReason } : {}),
+    });
   }
 
   router.post(

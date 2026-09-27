@@ -504,7 +504,7 @@ const CUSTOMER_ANCHORABLE_KINDS: ReadonlySet<EntityKind> = new Set<EntityKind>([
  * match. Widening this set would silently change which estimate an unnamed
  * "nudge Khan" attaches to.
  */
-const ANCHORED_ESTIMATE_OPEN_STATUSES = ['draft', 'ready_for_review', 'sent'] as const;
+export const ANCHORED_ESTIMATE_OPEN_STATUSES = ['draft', 'ready_for_review', 'sent'] as const;
 
 /**
  * Statuses a customer-anchored invoice lookup may offer: ISSUED and not fully
@@ -515,7 +515,7 @@ const ANCHORED_ESTIMATE_OPEN_STATUSES = ['draft', 'ready_for_review', 'sent'] as
  * reaches drafts, because `send_invoice` / `issue_invoice` legitimately
  * target one the operator asked for by name.
  */
-const ANCHORED_INVOICE_OPEN_STATUSES = ['open', 'partially_paid'] as const;
+export const ANCHORED_INVOICE_OPEN_STATUSES = ['open', 'partially_paid'] as const;
 
 /**
  * The one-tap picker hint for an anchored document candidate: two of a

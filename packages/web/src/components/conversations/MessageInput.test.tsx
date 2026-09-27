@@ -38,4 +38,15 @@ describe('MessageInput — suggest reply', () => {
     expect(await screen.findByTestId('message-input-error')).toHaveTextContent(/could not draft/i);
     expect((screen.getByTestId('message-input-field') as HTMLTextAreaElement).value).toBe('');
   });
+
+  it('#1406 D10 — a failed send gives the draft back instead of clearing it', async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error('409'));
+    render(<MessageInput onSend={onSend} />);
+    const field = screen.getByTestId('message-input-field') as HTMLTextAreaElement;
+
+    fireEvent.change(field, { target: { value: 'Tech is 10 minutes out' } });
+    fireEvent.click(screen.getByTestId('message-send-button'));
+
+    await waitFor(() => expect(field.value).toBe('Tech is 10 minutes out'));
+  });
 });

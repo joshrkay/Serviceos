@@ -197,4 +197,25 @@ describe('IntakeFormPage', () => {
     expect(screen.getAllByText('Ortega HVAC & Services').length).toBeGreaterThan(0);
     expect(screen.queryByText(/4\.9 on Google/i)).not.toBeInTheDocument();
   });
+
+  it('#1406 D10 — a bare /intake link (no ?t=) says so instead of hanging on "Loading services…"', () => {
+    setTenantQueryParam(null);
+    vi.mocked(fetchIntakeTenantInfo).mockReset();
+
+    render(<IntakeFormPage />);
+
+    expect(screen.queryByText('Loading services…')).not.toBeInTheDocument();
+    expect(screen.getByText(/this booking link is incomplete/i)).toBeInTheDocument();
+    expect(fetchIntakeTenantInfo).not.toHaveBeenCalled();
+  });
+
+  it('#1406 D10 — a failed tenant lookup stops loading and says so', async () => {
+    setTenantQueryParam(TENANT_ID);
+    vi.mocked(fetchIntakeTenantInfo).mockRejectedValue(new Error('HTTP 404'));
+
+    render(<IntakeFormPage />);
+
+    expect(await screen.findByText(/couldn't load this business's services/i)).toBeInTheDocument();
+    expect(screen.queryByText('Loading services…')).not.toBeInTheDocument();
+  });
 });

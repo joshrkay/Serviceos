@@ -30,6 +30,7 @@ import {
   type SessionChannel,
 } from '../../hooks/useActiveSessions';
 import type { WsServerFrame } from '../../hooks/useResilientStream';
+import { apiFetch } from '../../utils/api-fetch';
 
 const CHANNEL_LABEL: Record<SessionChannel, string> = {
   voice_inbound: 'Inbound call',
@@ -49,8 +50,24 @@ const CHANNEL_ICON: Record<SessionChannel, typeof Mic> = {
 const TERMINAL_EVENTS = new Set(['ended', 'session_terminated']);
 
 interface TranscriptTurn {
-  speaker: 'agent';
+  speaker: 'agent' | 'caller';
   text: string;
+}
+
+/**
+ * #1406 D10 — the session's persisted transcript (voice_sessions.transcript,
+ * written every turn) as `speaker: text` lines. Without it, opening a card
+ * after the conversation started showed only "Waiting for the agent to
+ * speak…" because the live feed carries only frames that arrive later.
+ */
+function turnsFromPersisted(lines: unknown): TranscriptTurn[] {
+  if (!Array.isArray(lines)) return [];
+  return lines.flatMap((line): TranscriptTurn[] => {
+    if (typeof line !== 'string') return [];
+    const match = /^(agent|caller):\s?(.*)$/s.exec(line);
+    if (!match || !match[2].trim()) return [];
+    return [{ speaker: match[1] as TranscriptTurn['speaker'], text: match[2] }];
+  });
 }
 
 /**
@@ -97,6 +114,24 @@ export function SessionFocusPage({ sessionId }: SessionFocusPageProps): JSX.Elem
   const session = sessions.find((s) => s.id === sessionId);
 
   const [turns, setTurns] = useState<TranscriptTurn[]>([]);
+  const [history, setHistory] = useState<TranscriptTurn[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch(`/api/interactions/${sessionId}`);
+        if (!res.ok) return;
+        const body = (await res.json()) as { transcript?: unknown };
+        if (!cancelled) setHistory(turnsFromPersisted(body.transcript));
+      } catch {
+        /* best-effort — the live feed still works */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
   const [fsmState, setFsmState] = useState<string | null>(null);
   const [endedByFrame, setEndedByFrame] = useState(false);
   // Once we've seen the session live, its later disappearance from the
@@ -191,19 +226,19 @@ export function SessionFocusPage({ sessionId }: SessionFocusPageProps): JSX.Elem
 
       {/* Live transcript (agent side — see header comment for scope) */}
       <div data-testid="session-transcript" className="space-y-2">
-        {turns.length === 0 ? (
+        {history.length + turns.length === 0 ? (
           <p className="text-sm text-slate-400">
             {ended ? 'No transcript was captured while this view was open.' : 'Waiting for the agent to speak…'}
           </p>
         ) : (
-          turns.map((turn, i) => (
+          [...history, ...turns].map((turn, i) => (
             <div
               key={i}
               data-testid="transcript-turn"
               className="rounded-md bg-white border border-slate-200 px-3 py-2"
             >
               <span className="block text-[10px] uppercase tracking-wide text-slate-400">
-                Agent
+                {turn.speaker === 'caller' ? 'Caller' : 'Agent'}
               </span>
               <p className="text-sm text-slate-800">{turn.text}</p>
             </div>

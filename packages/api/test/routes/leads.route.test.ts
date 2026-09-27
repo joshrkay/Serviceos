@@ -18,7 +18,7 @@ import type { Express, NextFunction, Request, Response } from 'express';
 import { createLeadsRouter } from '../../src/routes/leads';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import type { Lead } from '../../src/leads/lead';
-import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryCustomerRepository, createCustomer } from '../../src/customers/customer';
 import { InMemoryLocationRepository } from '../../src/locations/location';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -106,5 +106,69 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     const res = await request(app).get('/api/leads/11111111-1111-1111-1111-111111111111');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
+describe('POST /api/leads with a phone already on file (#1406 D1)', () => {
+  let app: Express;
+  let customers: InMemoryCustomerRepository;
+
+  beforeEach(() => {
+    customers = new InMemoryCustomerRepository();
+    app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: USER_ID,
+        sessionId: 'session-leads-1',
+        tenantId: TENANT_ID,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/leads',
+      createLeadsRouter(
+        new InMemoryLeadRepository(),
+        customers,
+        new InMemoryAuditRepository(),
+        new InMemoryLocationRepository(),
+      ),
+    );
+  });
+
+  it('a repeat phone attaches to the open lead: 200, same id, outcome attached', async () => {
+    const first = await request(app)
+      .post('/api/leads')
+      .send({ firstName: 'Rita', primaryPhone: '602-555-0141', source: 'web_form' });
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post('/api/leads')
+      .send({ firstName: 'Rita', primaryPhone: '(602) 555-0141', source: 'referral' });
+    expect(second.status).toBe(200);
+    expect(second.body.id).toBe(first.body.id);
+    expect(second.body.dedupe).toEqual({ outcome: 'attached' });
+  });
+
+  it('warns when the phone already belongs to a customer', async () => {
+    const customer = await createCustomer(
+      {
+        tenantId: TENANT_ID,
+        firstName: 'Cal',
+        lastName: 'Jones',
+        primaryPhone: '480-555-0199',
+        createdBy: USER_ID,
+      },
+      customers,
+    );
+
+    const res = await request(app)
+      .post('/api/leads')
+      .send({ firstName: 'Cal', primaryPhone: '4805550199', source: 'web_form' });
+    expect(res.status).toBe(201);
+    expect(res.body.warnings).toEqual([
+      { code: 'MATCHES_EXISTING_CUSTOMER', customerId: customer.id },
+    ]);
   });
 });

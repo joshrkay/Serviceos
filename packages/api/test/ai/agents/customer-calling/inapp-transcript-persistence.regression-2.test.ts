@@ -48,4 +48,37 @@ describe('in-app transcript persistence', () => {
       expect.arrayContaining([expect.stringContaining('show me today’s schedule')]),
     );
   });
+
+  it('#1406 D10 — persists the transcript after each turn, before the session ends', async () => {
+    const gateway = {
+      complete: vi.fn(async () => ({
+        content: JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 1, output: 1, total: 2 },
+        latencyMs: 1,
+      })),
+    } as unknown as LLMGateway;
+    const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo: new InMemoryProposalRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      onCallRepo: new InMemoryOnCallRepository(),
+      voiceSessionRepo,
+    });
+
+    const { sessionId } = await adapter.startSession('tenant-x', 'user-x');
+    await adapter.handleInput(sessionId, 'what does my afternoon look like');
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The operator never ended the session (QA: endedAt stayed null and
+    // the interaction showed 0 transcript turns).
+    const row = await voiceSessionRepo.findById('tenant-x', sessionId);
+    expect(row?.endedAt).toBeUndefined();
+    expect(row?.transcript).toEqual(
+      expect.arrayContaining([expect.stringContaining('what does my afternoon look like')]),
+    );
+  });
 });

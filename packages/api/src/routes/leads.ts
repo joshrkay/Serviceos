@@ -5,6 +5,7 @@ import { asyncRoute } from '../middleware/async-route';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AuditRepository } from '../audit/audit';
 import { CustomerRepository } from '../customers/customer';
+import { normalizePhone } from '../shared/phone';
 import {
   DEFAULT_LIST_LIMIT,
   LeadListOptions,
@@ -12,7 +13,7 @@ import {
   MAX_LIST_LIMIT,
 } from '../leads/lead';
 import {
-  createLead,
+  captureLead,
   updateLead,
   convertToCustomer,
   loseLead,
@@ -46,7 +47,7 @@ export function createLeadsRouter(
     requirePermission('customers:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createLeadSchema.parse(req.body);
-      const lead = await createLead(
+      const { lead, outcome } = await captureLead(
         {
           ...parsed,
           tenantId: req.auth!.tenantId,
@@ -56,7 +57,21 @@ export function createLeadsRouter(
         leadRepo,
         auditRepo
       );
-      res.status(201).json(lead);
+      // #1406 D1 — advisory only: the phone already belongs to a customer.
+      const phoneKey = lead.primaryPhone ? normalizePhone(lead.primaryPhone) : '';
+      const matches =
+        phoneKey && customerRepo.findByPhoneNormalized
+          ? await customerRepo.findByPhoneNormalized(req.auth!.tenantId, phoneKey)
+          : [];
+      const warnings = matches.map((c) => ({
+        code: 'MATCHES_EXISTING_CUSTOMER' as const,
+        customerId: c.id,
+      }));
+      res.status(outcome === 'created' ? 201 : 200).json({
+        ...lead,
+        ...(outcome !== 'created' ? { dedupe: { outcome } } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+      });
     })
   );
 

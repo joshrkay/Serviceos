@@ -58,6 +58,17 @@ export class PgVoiceSessionRepository
     });
   }
 
+  async updateTranscript(tenantId: string, id: string, transcript: string[]): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE voice_sessions
+            SET transcript = $3::jsonb, updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2 AND ended_at IS NULL`,
+        [tenantId, id, JSON.stringify(transcript)],
+      );
+    });
+  }
+
   async markEnded(
     tenantId: string,
     id: string,

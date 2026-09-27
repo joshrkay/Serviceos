@@ -169,22 +169,22 @@ export function CommsInboxPage(): React.ReactElement {
   }, [selectedId, loadMessages]);
 
   const handleSend = useCallback(
-    (content: string) => {
+    async (content: string) => {
       if (!selectedId) return;
       setSendError(null);
-      void (async () => {
-        try {
-          const result = await sendConversationReply(
-            selectedId,
-            content,
-            channel === 'auto' ? undefined : channel,
-          );
-          setMessages((prev) => [...prev, result.message]);
-          void loadThreads();
-        } catch (err) {
-          setSendError(err instanceof Error ? err.message : 'Could not send the reply');
-        }
-      })();
+      try {
+        const result = await sendConversationReply(
+          selectedId,
+          content,
+          channel === 'auto' ? undefined : channel,
+        );
+        setMessages((prev) => [...prev, result.message]);
+        void loadThreads();
+      } catch (err) {
+        setSendError(err instanceof Error ? err.message : 'Could not send the reply');
+        // #1406 D10 — rethrow so the composer restores the draft.
+        throw err;
+      }
     },
     [selectedId, loadThreads, channel],
   );
