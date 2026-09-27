@@ -2417,8 +2417,11 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // the "before Thursday" example is dropped because the skill's boundary
   // INCLUDES Thursday-due items. Prompt-text-only; no intent or slot
   // changes.
-  it('taxonomy version reflects the latest coordinated bump (1.18.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.18.0');
+  // #1392 bumped it to 1.19.0: draft_estimate now asks for
+  // lineItemDescriptions (an EXISTING slot, already tagged for it in
+  // ENTITY_FIELDS) — additive extraction guidance, no intent changes.
+  it('taxonomy version reflects the latest coordinated bump (1.19.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.19.0');
   });
 
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent

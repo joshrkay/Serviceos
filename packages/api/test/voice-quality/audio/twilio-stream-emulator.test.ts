@@ -31,6 +31,8 @@ interface StubServer {
   recorded: Array<Record<string, unknown>>;
   /** Send a base64 μ-law payload back to the connected client as a `media` frame. */
   sendInboundFrame: (payload: string, streamSid?: string) => void;
+  /** Send a server `mark` (the adapter's playback checkpoint) to the client. */
+  sendMark: (name: string, streamSid?: string) => void;
   /** Wait until the client has connected (resolves once on connection). */
   waitForConnection: () => Promise<void>;
   close: () => Promise<void>;
@@ -79,6 +81,10 @@ function startStubServer(): Promise<StubServer> {
               media: { track: 'outbound', chunk: '1', timestamp: '0', payload },
             }),
           );
+        },
+        sendMark: (name, streamSid = 'MZ_STUB') => {
+          if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return;
+          activeWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name } }));
         },
         waitForConnection: () => connectionPromise,
         close: () =>
@@ -138,6 +144,8 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
       bus,
       // Keep tests fast — 100 ms is plenty since stubs reply within μs.
       silenceWindowMs: 100,
+      // Bounds the wait for a (possibly silent) agent's first reply frame.
+      firstAudioTimeoutMs: 1_000,
     });
   });
 
@@ -235,6 +243,7 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
       serverUrl: stub.url,
       bus,
       silenceWindowMs: 100,
+      firstAudioTimeoutMs: 1_000,
       deliverFinalTranscript: (transcript) => {
         delivered.push(transcript);
       },
@@ -255,6 +264,7 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
       serverUrl: stub.url,
       bus,
       silenceWindowMs: 100,
+      firstAudioTimeoutMs: 1_000,
       deliverFinalTranscript: () => {},
     });
     await emulator.start('CA_MISSING_TRANSCRIPT');
@@ -299,6 +309,28 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
     expect(result.numFrames).toBe(1);
   });
 
+  it('#1387 — waits for an agent reply slower than the silence window instead of closing the turn empty', async () => {
+    // Live agents take seconds (LLM + TTS) to answer. The 1.5 s silence
+    // window is an end-of-reply detector; it must not start ticking before
+    // the agent has said anything, or every real reply is cut off (TTFA 0,
+    // empty agent audio) and leaks into the next turn.
+    await emulator.start('CA_SLOW_AGENT');
+    await stub.waitForConnection();
+
+    const result = await (async () => {
+      setTimeout(() => stub.sendInboundFrame(inboundFramePayload()), 400);
+      setTimeout(() => stub.sendInboundFrame(inboundFramePayload()), 420);
+      return emulator.sendCallerUtterance(shortPcmSilence());
+    })();
+
+    expect(result.numFrames).toBe(2);
+    expect(result.agentAudio.length).toBe(640);
+    // Frames were scheduled ~400 ms after the call began; caller pacing
+    // (2 × 20 ms) precedes transcript delivery, so TTFA lands well above
+    // 300 ms.
+    expect(result.ttfaMs).toBeGreaterThan(300);
+  });
+
   it('VQ2-006 — sendCallerUtterance returns ttfaMs = 0 when no inbound frames (handles silent agent)', async () => {
     await emulator.start('CA_SILENT');
     await stub.waitForConnection();
@@ -307,6 +339,34 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
     expect(result.ttfaMs).toBe(0);
     expect(result.numFrames).toBe(0);
     expect(result.agentAudio.length).toBe(0);
+  });
+
+  it('#1387 — acknowledges each server mark once the audio before it has played, as Twilio does', async () => {
+    // The production adapter stops streaming TTS after 3 unacknowledged
+    // marks (one per 25 frames). Real Twilio echoes each mark back when
+    // playback reaches it; an emulator that never does truncates every
+    // agent reply to ~1.5 s of audio.
+    await emulator.start('CA_MARK_ACK');
+    await stub.waitForConnection();
+
+    const sentAt = Date.now();
+    for (let i = 0; i < 5; i++) stub.sendInboundFrame(inboundFramePayload());
+    stub.sendMark('turn-1-25');
+
+    const deadline = Date.now() + 1_000;
+    let echo: Record<string, unknown> | undefined;
+    while (!echo && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+      echo = stub.recorded.find(
+        (m) => m.event === 'mark' && (m.mark as { name?: string }).name === 'turn-1-25',
+      );
+    }
+    const ackedAfterMs = Date.now() - sentAt;
+
+    expect(echo).toBeDefined();
+    expect((echo as { streamSid?: string }).streamSid).toMatch(/^MZ_TEST_CA_MARK_ACK_/);
+    // Five 20 ms frames precede the mark: the ack waits out their playback.
+    expect(ackedAfterMs).toBeGreaterThanOrEqual(90);
   });
 
   it('VQ2-006 — hangup() sends stop event and closes the socket', async () => {

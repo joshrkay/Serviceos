@@ -249,6 +249,15 @@ export function buildLayer2Report(
       ).toFixed(0)}%`,
     );
   }
+  // #1387 — zero TTFA samples means the observations carried no
+  // transcript→first-audio timing at all (e.g. the audio path recorded onto
+  // a bus the runner never graded). P95 of nothing is 0 ms, which would
+  // otherwise "pass" the latency threshold.
+  if (totalScripts > 0 && allTtfas.length === 0) {
+    blockers.push(
+      'TTFA not measured on any script (no transcript→first-audio timing in the observations)',
+    );
+  }
   if (totalScripts > 0 && ttfaMedians.p95 > thresholds.ttfaP95MaxMs) {
     blockers.push(
       `TTFA P95 ${ttfaMedians.p95.toFixed(0)}ms above threshold ${thresholds.ttfaP95MaxMs}ms`,

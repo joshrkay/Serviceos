@@ -203,6 +203,18 @@ describe('VQ2-015 — Layer 2 report aggregator', () => {
     expect(exactReport.launchGate.pass).toBe(true);
   });
 
+  it('#1387 — no TTFA measured on any script is a blocker, not a 0 ms pass', () => {
+    // Weekly run 35600368305: every script's TTFA median was 0 because the
+    // graded observation never saw a transcript→audio pair. The gate read
+    // that as "TTFA P95 0 ms ≤ 800 ms" and passed the latency threshold.
+    const silent = fixtureSuite(14, () => ({ ttfaMedianMs: 0 }));
+    const r = buildLayer2Report(silent);
+    expect(r.launchGate.pass).toBe(false);
+    expect(r.launchGate.blockers).toContain(
+      'TTFA not measured on any script (no transcript→first-audio timing in the observations)',
+    );
+  });
+
   it('VQ2-015 — perceived completion 13/14 (~93%): pass; 12/14 (~85.7%): fail', () => {
     // 13/14 pass, 1 fail = ~93% > 90%
     const ok = fixtureSuite(14, (i) => (i === 0 ? { perceivedPassed: false, dispositionPassed: false } : {}));

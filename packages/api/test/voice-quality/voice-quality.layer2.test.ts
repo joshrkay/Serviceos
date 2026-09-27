@@ -76,12 +76,8 @@ import {
   type RunScriptLayer2Result,
   type SuiteCostTracker,
 } from '../../src/ai/voice-quality/runner-layer2';
-import { AudioModeDriver } from '../../src/ai/voice-quality/audio/audio-mode-driver';
-import { TwilioStreamEmulator } from '../../src/ai/voice-quality/audio/twilio-stream-emulator';
-import {
-  WhisperRealProvider,
-  type WhisperBufferTranscriber,
-} from '../../src/ai/voice-quality/audio/whisper-real-provider';
+import { createLayer2AudioDriver } from '../../src/ai/voice-quality/audio/layer2-audio-driver';
+import type { WhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/whisper-real-provider';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import { createRealLayerTwoGateway } from '../../src/ai/gateway/real-layer-two-factory';
 import { OpenAiTtsProvider } from '../../src/ai/tts/tts-provider';
@@ -355,9 +351,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
               customerRepo: factoryCtx.repos.customerRepo,
               appointmentRepo: factoryCtx.repos.appointmentRepo,
               jobRepo: factoryCtx.repos.jobRepo,
-              invoiceRepo: factoryCtx.repos.invoiceRepo,
-              estimateRepo: factoryCtx.repos.estimateRepo,
-              leadRepo: factoryCtx.repos.leadRepo,
+              // Invoice / estimate / lead reads reach the phone only through
+              // the `lookups` bundle, and the media_streams surface has no
+              // lookup branch yet (coverage-table `lookup.media_streams`,
+              // #1395) — wire the bundle when that branch lands.
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
               onSessionTerminated: async (session) => {
@@ -366,8 +363,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
             });
             processorRef.current = processor;
 
-            return new AudioModeDriver({
-              ...driverDeps.deps,
+            // #1387 — build this run's audio stack on the runner's bus
+            // (`factoryCtx.bus`); `runScript` grades the observation from it.
+            const audio = createLayer2AudioDriver(factoryCtx.bus, {
+              ...driverDeps.audioDeps,
               onSessionCreated: async (session, opts) => {
                 suiteState.speechTurns.set(session.id, processor.speechTurn);
                 session.machine.dispatch({
@@ -400,6 +399,8 @@ describe('Voice Quality Layer 2 — corpus', () => {
                 suiteState.speechTurns.delete(sessionId);
               },
             });
+            driverDeps.trackRun(audio.dispose);
+            return audio.driver;
           },
           repoMode: 'memory',
           gateway: driverDeps.gateway,
@@ -585,17 +586,23 @@ function makeWhisperBufferTranscriber(apiKey: string): WhisperBufferTranscriber 
 }
 
 interface BuiltDriverDeps {
-  deps: ConstructorParameters<typeof AudioModeDriver>[0];
+  /** Shared per-script inputs to `createLayer2AudioDriver` (one stack per run). */
+  audioDeps: Omit<
+    Parameters<typeof createLayer2AudioDriver>[1],
+    'onSessionCreated' | 'onSessionEnded'
+  >;
   gateway: ReturnType<typeof createRealLayerTwoGateway>;
-  /** Free per-script disposables (emulator hangup, etc.). */
+  /** Register a per-run audio stack for disposal at script end. */
+  trackRun: (dispose: () => Promise<void>) => void;
+  /** Free per-script disposables (every run's emulator hangup). */
   dispose: () => Promise<void>;
 }
 
 /**
  * Construct the `AudioModeDriverDeps` bundle for a single script run,
  * sharing the suite-level voice session store + media-streams server
- * across scripts but minting fresh emulator/whisper/cache instances per
- * run so per-run accounting (cost, bus events) stays isolated.
+ * across scripts. The emulator / Whisper / driver stack is minted per RUN
+ * inside the driverFactory, on the runner's bus (#1387).
  */
 async function buildAudioModeDriverDeps(
   script: VoiceQualityScript,
@@ -612,14 +619,10 @@ async function buildAudioModeDriverDeps(
     throw new Error('buildAudioModeDriverDeps: voiceSessionStore not set up');
   }
 
-  const bus = new AgentEventBus();
-
-  const whisperInner = makeWhisperBufferTranscriber(openaiKey);
-  const whisper = new WhisperRealProvider({
-    inner: whisperInner,
-    bus,
-    costTracker: suiteState.suiteCostTracker,
-  });
+  // Cost events from the shared LLM gateway land here; timing / intent /
+  // agent-speech events go to each run's runner bus via
+  // `createLayer2AudioDriver(factoryCtx.bus, …)` (#1387).
+  const gatewayBus = new AgentEventBus();
 
   const ttsCache = new TtsFixtureCache({
     ttsProvider: new OpenAiTtsProvider(openaiKey),
@@ -629,40 +632,41 @@ async function buildAudioModeDriverDeps(
     // disk cache.
   });
 
-  const emulator = new TwilioStreamEmulator({
-    serverUrl: suiteState.serverUrl,
-    bus,
-    deliverFinalTranscript: (transcript) => {
-      if (!suiteState.deliverFinalTranscript) {
-        throw new Error('Layer 2 streaming transcript bridge is unavailable');
-      }
-      suiteState.deliverFinalTranscript(transcript);
-    },
-  });
-
   const gateway = createRealLayerTwoGateway({
     apiKey: anthropicKey,
-    bus,
+    bus: gatewayBus,
     costTracker: suiteState.suiteCostTracker,
   });
 
+  const runDisposers: Array<() => Promise<void>> = [];
+
   void script;
 
+  const voiceSessionStore = suiteState.voiceSessionStore;
   return {
-    deps: {
-      emulator,
-      whisper,
+    audioDeps: {
+      serverUrl: suiteState.serverUrl,
+      voiceSessionStore,
       ttsCache,
-      bus,
-      voiceSessionStore: suiteState.voiceSessionStore,
+      whisperTranscriber: makeWhisperBufferTranscriber(openaiKey),
+      costTracker: suiteState.suiteCostTracker,
+      deliverFinalTranscript: (transcript) => {
+        if (!suiteState.deliverFinalTranscript) {
+          throw new Error('Layer 2 streaming transcript bridge is unavailable');
+        }
+        suiteState.deliverFinalTranscript(transcript);
+      },
     },
     gateway,
+    trackRun: (dispose) => {
+      // The driver factory runs once per run, after the previous run has
+      // finished; hang the previous run's socket up rather than leaving it
+      // open for the rest of the script.
+      void Promise.all(runDisposers.splice(0).map((d) => d()));
+      runDisposers.push(dispose);
+    },
     dispose: async () => {
-      try {
-        await emulator.hangup();
-      } catch {
-        /* best-effort */
-      }
+      for (const d of runDisposers.splice(0)) await d();
     },
   };
 }
