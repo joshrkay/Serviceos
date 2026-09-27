@@ -130,7 +130,7 @@ function makeHarness(
   opts: {
     pinChangedAt?: Date;
     auditRepo?: InMemoryAuditRepository | null;
-    alertRepo?: ClaimStore;
+    alertRepo?: Pick<ClaimStore, 'claim'> & Partial<ClaimStore>;
     sendSms?: (to: string, body: string) => Promise<void>;
   } = {},
 ): Harness {
@@ -661,6 +661,34 @@ describe('#1233 review — the owner alert is CLAIMED before it is sent', () => 
     await engageTheLock(h);
     expect(h.sent).toHaveLength(1);
     expect(h.sentKeys).toEqual([`${TENANT}:${h.claims[0]!.episodeKey}`]);
+  });
+
+  it('#1238 item 2 — the engaging attempt whose strike AND marker writes are both lost still alerts the owner exactly once, in that call; later calls after it settles do not re-alert', async () => {
+    const h = makeHarness({ auditRepo: new LosesWritesAuditRepository([STRIKE_FAILED, STRIKE_LOCKOUT]) });
+    await quietly(() => engageTheLock(h));
+    // The lock holds (the reservation counts) and the owner hears about it now,
+    // not only if the attacker happens to call again.
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.body.toLowerCase()).toContain('locked');
+    expect(h.claims).toHaveLength(1);
+    const engaging = eventsOf(h, PIN_ATTEMPT).find((e) => e.correlationId === 'call-engage')!;
+    expect(h.claims[0]!.episodeKey).toBe(engaging.id);
+
+    // Well after the unrecorded attempt settles by age, more calls are refused
+    // and resolve the SAME episode — the claim dedupes, no second text.
+    vi.useFakeTimers({ now: Date.now() + 10 * 60 * 1000, toFake: ['Date'] });
+    try {
+      for (const sessionId of ['call-later-1', 'call-later-2']) {
+        const r = await quietly(() =>
+          startVoiceApproval(h.deps, { ...call(sessionId), action: 'approve', reference: 'the Acme payment' }),
+        );
+        expect(r.outcome).toBe('challenge_lockout');
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(h.sent).toHaveLength(1);
+    expect(h.claims).toHaveLength(1);
   });
 
   it('a claim another call already holds → nothing is sent', async () => {
