@@ -177,8 +177,12 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
       throw err;
     }
   };
-  const resolveLine = (lineIndex: number, catalogItemId: string): Promise<void> =>
-    runPick(() => onResolveLine?.(lineIndex, catalogItemId));
+  /** #1399 — lines the operator has picked on this card: lineIndex → picked id. */
+  const [pickedLines, setPickedLines] = useState<Record<number, string>>({});
+  const resolveLine = async (lineIndex: number, catalogItemId: string): Promise<void> => {
+    await runPick(() => onResolveLine?.(lineIndex, catalogItemId));
+    setPickedLines((prev) => ({ ...prev, [lineIndex]: catalogItemId }));
+  };
   const openReferencePick =
     proposal.referencePick && missing.includes(proposal.referencePick.field)
       ? proposal.referencePick
@@ -358,13 +362,22 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
     CONFIDENCE_CONFIG[proposal.confidence] ||
     CONFIDENCE_CONFIG.Medium;
   // Per-line catalog-grounding badges (skip 'manual' — operator-entered).
+  // #1399 — a picked line is no longer "Needs a pick": a catalog pick is
+  // catalog-priced, and the synthetic "Keep spoken price" (`spoken:`) choice
+  // is operator-set ('manual', never badged).
   const pricingBadges = (proposal.lineItems ?? [])
-    .map((li) => li.pricingSource)
+    .map((li, i) => {
+      const picked = li.pricingSource === 'ambiguous' ? pickedLines[i] : undefined;
+      if (picked === undefined) return li.pricingSource;
+      return picked.startsWith('spoken:') ? 'manual' : 'catalog';
+    })
     .filter(
       (s): s is 'catalog' | 'ambiguous' | 'uncatalogued' =>
         s === 'catalog' || s === 'ambiguous' || s === 'uncatalogued',
     );
-  const markers = proposal.meta?.markers ?? [];
+  const markers = (proposal.meta?.markers ?? []).filter(
+    (m) => !Object.keys(pickedLines).some((i) => m.path.startsWith(`lineItems[${i}].`)),
+  );
   const severity = proposal.meta?.severity;
   // UB-A3 — "Standing instruction applied" chips.
   const appliedInstructions = proposal.meta?.appliedStandingInstructions ?? [];
