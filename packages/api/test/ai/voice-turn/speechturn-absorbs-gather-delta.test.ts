@@ -227,6 +227,36 @@ describe('PR-B lookup — gated by the (lookup, surface) cell', () => {
     expect(h.session.machine.currentState).toBe('intent_capture');
     expect(h.proposalRepo.create).not.toHaveBeenCalled();
   });
+
+  it('media_streams: an actor-less caller (no D-026 phone actor) asking an operator lookup is refused, never answered', async () => {
+    const listPending = vi.fn(async () => [
+      {
+        id: 'm1',
+        tenantId: TENANT,
+        description: '3/4 inch copper elbows',
+        quantity: 6,
+        status: 'pending',
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    const h = makeTurnHarness({
+      gateway: gatewayAlways(classifyJson('lookup_materials')),
+      // No actorUserId: caller-ID matched a customer, not a team member.
+      deps: { lookups: materialsLookups(listPending) },
+    });
+
+    const fx = await h.turn('what materials are on the list');
+
+    expect(listPending).not.toHaveBeenCalled();
+    const answers = ttsWithSource(fx, 'lookup_skill');
+    expect(answers).toHaveLength(1);
+    const line = String((answers[0]!.payload as { text?: string }).text);
+    expect(line).not.toContain('copper elbows');
+    expect(line).toContain('owner-level report');
+    expect(h.session.machine.currentState).toBe('intent_capture');
+  });
 });
 
 // ── language_switch ─────────────────────────────────────────────────────────
