@@ -132,7 +132,7 @@ export function JobsList() {
             <button
               key={t.value}
               onClick={() => applyTabFilter(t.value)}
-              className={`shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 min-h-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-card border border-border text-foreground hover:bg-secondary'

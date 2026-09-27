@@ -10,6 +10,7 @@ import {
   sendConversationReply,
   suggestReply,
   searchConversations,
+  openCustomerConversation,
   type InboxThread,
 } from '../../api/conversations';
 import type { Message } from '../../types/conversation';
@@ -45,6 +46,10 @@ export function CommsInboxPage(): React.ReactElement {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // #680 — outbound channel. 'auto' lets the server keep the thread's own
+  // channel (Comms C3); a fresh thread with both a phone and an email on file
+  // needs an explicit pick (the API answers channel_selection_required).
+  const [channel, setChannel] = useState<'auto' | 'sms' | 'email'>('auto');
 
   // Story 3.11 — history search. `query` filters the thread list by customer
   // name / preview instantly (client-side) AND by message content (server
@@ -95,6 +100,41 @@ export function CommsInboxPage(): React.ReactElement {
     if (conversationFromUrl) setSelectedId(conversationFromUrl);
   }, [conversationFromUrl]);
 
+  // #680 — Customer detail's "Message" links here with `?customerId=<id>`.
+  // Open (or create) that customer's thread and land on its composer, so an
+  // owner can start an outbound SMS/email with a customer who never texted in.
+  // The param is swapped for `?conversation=` so a reload doesn't re-open.
+  const customerIdFromUrl = searchParams.get('customerId');
+  const [openError, setOpenError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!customerIdFromUrl) return;
+    let cancelled = false;
+    setOpenError(null);
+    void (async () => {
+      try {
+        const { id } = await openCustomerConversation(customerIdFromUrl);
+        if (cancelled) return;
+        setSelectedId(id);
+        setSearchParams(
+          (prev) => {
+            const next = new URLSearchParams(prev);
+            next.delete('customerId');
+            next.set('conversation', id);
+            return next;
+          },
+          { replace: true },
+        );
+      } catch (err) {
+        if (!cancelled) {
+          setOpenError(err instanceof Error ? err.message : 'Could not open this conversation');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [customerIdFromUrl, setSearchParams]);
+
   const selectThread = useCallback(
     (id: string | null) => {
       setSelectedId(id);
@@ -134,7 +174,11 @@ export function CommsInboxPage(): React.ReactElement {
       setSendError(null);
       void (async () => {
         try {
-          const result = await sendConversationReply(selectedId, content);
+          const result = await sendConversationReply(
+            selectedId,
+            content,
+            channel === 'auto' ? undefined : channel,
+          );
           setMessages((prev) => [...prev, result.message]);
           void loadThreads();
         } catch (err) {
@@ -142,7 +186,7 @@ export function CommsInboxPage(): React.ReactElement {
         }
       })();
     },
-    [selectedId, loadThreads],
+    [selectedId, loadThreads, channel],
   );
 
   const handleSuggest = useCallback(async (): Promise<string> => {
@@ -192,6 +236,15 @@ export function CommsInboxPage(): React.ReactElement {
           )}
           {loadingThreads && (
             <p className="py-8 text-center text-sm text-gray-500">Loading…</p>
+          )}
+          {openError && (
+            <div
+              role="alert"
+              data-testid="comms-open-error"
+              className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+            >
+              {openError}
+            </div>
           )}
           {threadsError && (
             <div
@@ -287,11 +340,44 @@ export function CommsInboxPage(): React.ReactElement {
               {loadingMessages ? (
                 <p className="py-8 text-center text-sm text-gray-500">Loading…</p>
               ) : (
-                <ConversationThread
-                  messages={messages}
-                  onSendMessage={handleSend}
-                  onSuggestReply={handleSuggest}
-                />
+                <>
+                  <div
+                    role="radiogroup"
+                    aria-label="Send as"
+                    className="mb-2 flex items-center gap-1"
+                    data-testid="comms-channel-picker"
+                  >
+                    <span className="mr-1 text-xs text-gray-500">Send as</span>
+                    {(
+                      [
+                        ['auto', 'Auto'],
+                        ['sms', 'Text'],
+                        ['email', 'Email'],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={channel === value}
+                        aria-label={label}
+                        onClick={() => setChannel(value)}
+                        className={`min-h-11 min-w-11 rounded-full border px-3 text-xs ${
+                          channel === value
+                            ? 'border-gray-900 bg-gray-900 text-white'
+                            : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <ConversationThread
+                    messages={messages}
+                    onSendMessage={handleSend}
+                    onSuggestReply={handleSuggest}
+                  />
+                </>
               )}
             </div>
           )}

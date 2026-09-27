@@ -85,9 +85,10 @@ export function LanguageSettingsPage() {
         </select>
       </label>
 
-      <label className="flex items-center gap-2">
+      <label className="flex min-h-11 cursor-pointer items-center gap-3">
         <input
           type="checkbox"
+          className="size-5 shrink-0"
           aria-label="Enable Spanish"
           checked={settings.supportedLanguages?.includes('es') ?? false}
           disabled={saving}
@@ -106,9 +107,10 @@ export function LanguageSettingsPage() {
         </span>
       </label>
 
-      <label className="flex items-center gap-2">
+      <label className="flex min-h-11 cursor-pointer items-center gap-3">
         <input
           type="checkbox"
+          className="size-5 shrink-0"
           aria-label="Auto-detect caller language"
           checked={settings.autoDetectLanguage}
           disabled={saving}

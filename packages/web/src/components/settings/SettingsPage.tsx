@@ -1138,7 +1138,7 @@ export function SettingsPage() {
           </div>
           <button
             onClick={() => setBusinessProfileOpen(true)}
-            className="text-xs text-slate-400 hover:text-white transition-colors shrink-0"
+            className="-mr-2 flex min-h-11 min-w-11 shrink-0 items-center justify-center px-2 text-xs text-slate-400 hover:text-white transition-colors"
           >
             Edit
           </button>

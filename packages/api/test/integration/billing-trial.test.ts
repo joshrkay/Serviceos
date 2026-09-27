@@ -76,6 +76,45 @@ describe('BillingService — trial flows', () => {
       delete process.env.STRIPE_PRICE_ID;
     });
 
+    it('#1282 — a retry inside the pending window resumes the stamped, still-open session (real columns)', async () => {
+      process.env.STRIPE_PRICE_ID = 'price_test_1';
+      const tenant = await createTestTenant(pool);
+      const firstFetch = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'cus_resume' }) } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 'cs_resume_1', url: 'https://checkout.stripe.com/cs_resume_1' }),
+        } as Response);
+      const input = {
+        tenantId: tenant.tenantId,
+        ownerEmail: 'owner@example.com',
+        successUrl: 'https://app.test/onboarding?billing=ok',
+        cancelUrl: 'https://app.test/onboarding?billing=cancel',
+      };
+      await new BillingService({
+        pool,
+        config: { apiKey: 'sk_test_x' },
+        fetchFn: firstFetch as unknown as typeof fetch,
+      }).createTrialCheckoutSession(input);
+
+      // Second click: Stripe still reports the stamped session open.
+      const retryFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'cs_resume_1', status: 'open', url: 'https://checkout.stripe.com/cs_resume_1' }),
+      } as Response);
+      const { url } = await new BillingService({
+        pool,
+        config: { apiKey: 'sk_test_x' },
+        fetchFn: retryFetch as unknown as typeof fetch,
+      }).createTrialCheckoutSession(input);
+
+      expect(url).toBe('https://checkout.stripe.com/cs_resume_1');
+      expect(retryFetch).toHaveBeenCalledTimes(1);
+      expect(retryFetch.mock.calls[0][0]).toBe('https://api.stripe.com/v1/checkout/sessions/cs_resume_1');
+      delete process.env.STRIPE_PRICE_ID;
+    });
+
     it('throws when STRIPE_PRICE_ID is unset', async () => {
       const svc = new BillingService({ pool, config: { apiKey: 'sk_test_x' } });
       delete process.env.STRIPE_PRICE_ID;
