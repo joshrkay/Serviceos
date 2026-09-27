@@ -440,6 +440,33 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(calledUsers).toContain('u2');
   });
 
+  it("#1223 — the voicemail callback URL carries the session's STIR/SHAKEN verdict", async () => {
+    const { app, store, callControl } = buildDialHarness({
+      rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
+      phones: { u1: '+15125550101' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-exh-stir' });
+    session.stirVerstat = 'TN-Validation-Passed-B';
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-exh-stir',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    callControl.setCursorAfter(session.id, 0);
+
+    const res = await signDialResult(app, session.id, {
+      CallSid: 'CA-exh-stir',
+      DialCallStatus: 'no-answer',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('StirVerstat=TN-Validation-Passed-B');
+  });
+
   it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays voicemail', async () => {
     const { app, store, auditRepo, proposalRepo, callControl } = buildDialHarness({
       rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],

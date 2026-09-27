@@ -314,6 +314,18 @@ const FINAL_PARAMS = {
 const CALLER_QUERY = `?From=${encodeURIComponent(OWNER_PHONE)}&To=${encodeURIComponent(BUSINESS_PHONE)}`;
 
 describe('U9 voicemail-status route', () => {
+  it('#1223 — threads the signed StirVerstat query param onto the persisted event', async () => {
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1' });
+    const res = await signedVoicemailRequest(
+      h.app,
+      FINAL_PARAMS,
+      `${CALLER_QUERY}&StirVerstat=TN-Validation-Passed-B`,
+    );
+    expect(res.status).toBe(200);
+    expect(h.persistedEvents).toHaveLength(1);
+    expect(h.persistedEvents[0].stirVerstat).toBe('TN-Validation-Passed-B');
+  });
+
   it('rejects unsigned requests with 403 (no lead, no recording, no enqueue)', async () => {
     const h = buildHarness({ sessionCallSid: 'CA-vm-1' });
     const res = await request(h.app)

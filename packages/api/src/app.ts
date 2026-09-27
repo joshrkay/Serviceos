@@ -331,7 +331,8 @@ import { createAgreementInvoicesService } from './agreements/agreement-invoices-
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
-import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
+import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
@@ -3607,6 +3608,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // #1051 / #1233 review — the tenant PIN-lock owner alert is claimed
     // (insert-if-absent per tenant + lock episode) before it is sent.
     voiceApprovalPinLockAlertRepo,
+    // #1238 — the claim winner schedules one durable retry before sending;
+    // the worker below re-sends while the claim is still unsent.
+    ...(oneTapSmsSender && voiceApprovalPinLockAlertRepo
+      ? { voiceApprovalPinLockAlertRetry: createPinLockAlertRetryScheduler(queue) }
+      : {}),
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {
@@ -3921,6 +3927,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     );
   }
 
+  // #1238 — consumer of the PIN-lock owner-alert retry. Registered under the
+  // same condition the scheduler is wired above, so no job lacks a consumer.
+  if (oneTapSmsSender && voiceApprovalPinLockAlertRepo) {
+    const pinLockAlertRetryWorker = createPinLockAlertRetryWorker({
+      queue,
+      alertRepo: voiceApprovalPinLockAlertRepo,
+      auditRepo,
+      sendSms: oneTapSmsSender,
+      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+    });
+    workerRegistry.set(
+      pinLockAlertRetryWorker.type,
+      pinLockAlertRetryWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // P8-012 / WS7: feature flag the Media Streams (live audio) path. `'false'`
   // (kill switch) → the existing Gather adapter is the only telephony surface.
   // `'true'` → forced on (validated stack). Unset/`'auto'` → on iff the full
@@ -4103,9 +4125,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                 // onTranscribed hook gates the router enqueue on this
                 // phone matching the tenant's approver set. Absent
                 // caller-ID fails closed (notify-only).
-                voicemail: {
-                  ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
-                },
+                // #1223 — plus the STIR/SHAKEN verdict (A-attestation required).
+                voicemail: voicemailJobContextFromPersisted(event),
               },
               `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
             );

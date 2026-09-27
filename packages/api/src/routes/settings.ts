@@ -160,32 +160,6 @@ function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
   };
 }
 
-/**
- * #1233 review — the escalation keys only `PUT /api/settings/voice-approval-pin`
- * may write. The generic settings PUT replaces the whole `escalation_settings`
- * blob, so it carries these over from the stored row: it can never drop an
- * enrolled PIN (or a legacy plaintext challenge, or the change stamp), and —
- * because the request schema strips them — never set one.
- */
-const PIN_CREDENTIAL_KEYS = [
-  'voice_approval_pin_hash',
-  'voice_approval_pin_changed_at',
-  'voice_approval_challenge',
-] as const;
-
-function carryPinCredential(
-  next: Partial<EscalationSettings>,
-  stored: Partial<EscalationSettings> | undefined,
-): Partial<EscalationSettings> {
-  const merged: Partial<EscalationSettings> = { ...next };
-  for (const key of PIN_CREDENTIAL_KEYS) {
-    delete merged[key];
-    const value = stored?.[key];
-    if (typeof value === 'string' && value.length > 0) merged[key] = value;
-  }
-  return merged;
-}
-
 interface SettingsRouterDependencies {
   activationRepo: PackActivationRepository;
   verticalPackRegistry: VerticalPackRegistry;
@@ -518,17 +492,14 @@ export function createSettingsRouter(
           }
         }
 
-        // #1233 review — the escalation blob is replaced wholesale; keep the
-        // PIN credential exactly as stored (see carryPinCredential).
-        if (parsed.escalationSettings) {
-          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
-          parsed.escalationSettings = carryPinCredential(
-            parsed.escalationSettings,
-            stored?.escalationSettings,
-          ) as typeof parsed.escalationSettings;
-        }
-
-        const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo);
+        // #1233 review / #1238 item 4 — the escalation blob is replaced
+        // wholesale, but the PIN credential (which the request schema strips)
+        // is kept exactly as the row holds it AT WRITE TIME, atomically in the
+        // repository — so this PUT can never drop, set, or revert a PIN, even
+        // racing a rotation in another tab.
+        const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo, {
+          preserveVoiceApprovalPin: true,
+        });
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
           return;

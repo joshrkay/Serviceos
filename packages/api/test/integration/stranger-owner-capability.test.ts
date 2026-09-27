@@ -204,6 +204,8 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
     tenantId: string,
     from: string,
     intent: string,
+    // #1223 — a verified (A-attested) line unless the test says otherwise.
+    stirVerstat: string | null = 'TN-Validation-Passed-A', // null = Twilio sent none
   ): Promise<{ session: VoiceSession; adapter: TwilioGatherAdapter; callSid: string }> {
     const store = new VoiceSessionStore({ startInterval: false });
     const adapter = new TwilioGatherAdapter({
@@ -220,7 +222,7 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
       lookups,
     } as never);
     const callSid = `CA-2-4-${crypto.randomUUID().slice(0, 8)}`;
-    await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId });
+    await adapter.handleInbound({ callSid, from, to: '+15125550000', tenantId, ...(stirVerstat ? { stirVerstat } : {}) });
     const session = store.findByCallSid(callSid)!;
     return { session, adapter, callSid };
   }
@@ -289,6 +291,27 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
 
     const ownLineMobile = await call(tenantB.tenantId, B_OWNER_MOBILE, OWNER_ONLY_INTENT);
     expect(ownLineMobile.session.actorUserId).toBe(tenantB.ownerUserId);
+  });
+
+  it("#1223: tenant A's OWN owner phone without A-attestation is a caller (no owner line, no actor) and the verdict is audited in Postgres", async () => {
+    const spoofed = await call(tenantA.tenantId, A_OWNER_PHONE, OWNER_ONLY_INTENT, 'TN-Validation-Passed-B');
+    expect(spoofed.session.machine.currentContext.ownerSession).toBeUndefined();
+    expect(spoofed.session.actorUserId).toBeUndefined();
+    expect(classifierProfileForSession(spoofed.session)).toBe('caller');
+    await vi.waitFor(async () => {
+      const rows = (await auditFor(tenantA.tenantId, spoofed.session.id)).filter(
+        (e) => e.eventType === 'voice.owner_line_attestation',
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.metadata).toMatchObject({ stirVerstat: 'TN-Validation-Passed-B', ownerSession: false });
+    });
+
+    const absent = await call(tenantA.tenantId, A_OWNER_PHONE, OWNER_ONLY_INTENT, null);
+    expect(absent.session.machine.currentContext.ownerSession).toBeUndefined();
+
+    // CONTROL — the same number, A-attested, is the owner line.
+    const verified = await call(tenantA.tenantId, A_OWNER_PHONE, OWNER_ONLY_INTENT);
+    expect(classifierProfileForSession(verified.session)).toBe('owner_line');
   });
 
   it('an owner-only WRITE intent from a stranger is intercepted as intent_off_surface, AUDITED, and mints no proposal', async () => {

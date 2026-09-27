@@ -21,10 +21,17 @@ export interface VoiceApprovalPinLockAlertClaim {
 export interface VoiceApprovalPinLockAlertRepository {
   /** True when this call won the claim (and so must send the alert); false when it was already taken. */
   claim(input: VoiceApprovalPinLockAlertClaim): Promise<boolean>;
+  /**
+   * #1238 — stamp the claim as delivered (idempotent; no-op when there is no
+   * such claim for this tenant). Unsent claims are what the retry worker re-sends.
+   */
+  markSent(tenantId: string, episodeKey: string): Promise<void>;
+  /** #1238 — true once the alert for this claim was delivered. */
+  isSent(tenantId: string, episodeKey: string): Promise<boolean>;
 }
 
 export class InMemoryVoiceApprovalPinLockAlertRepository implements VoiceApprovalPinLockAlertRepository {
-  private readonly rows: Array<VoiceApprovalPinLockAlertClaim & { createdAt: Date }> = [];
+  private readonly rows: Array<VoiceApprovalPinLockAlertClaim & { createdAt: Date; sentAt?: Date }> = [];
 
   async claim(input: VoiceApprovalPinLockAlertClaim): Promise<boolean> {
     if (this.rows.some((r) => r.tenantId === input.tenantId && r.episodeKey === input.episodeKey)) {
@@ -34,7 +41,16 @@ export class InMemoryVoiceApprovalPinLockAlertRepository implements VoiceApprova
     return true;
   }
 
-  getAll(): Array<VoiceApprovalPinLockAlertClaim & { createdAt: Date }> {
+  async markSent(tenantId: string, episodeKey: string): Promise<void> {
+    const row = this.rows.find((r) => r.tenantId === tenantId && r.episodeKey === episodeKey);
+    if (row && !row.sentAt) row.sentAt = new Date();
+  }
+
+  async isSent(tenantId: string, episodeKey: string): Promise<boolean> {
+    return !!this.rows.find((r) => r.tenantId === tenantId && r.episodeKey === episodeKey)?.sentAt;
+  }
+
+  getAll(): Array<VoiceApprovalPinLockAlertClaim & { createdAt: Date; sentAt?: Date }> {
     return this.rows.map((r) => ({ ...r }));
   }
 }
