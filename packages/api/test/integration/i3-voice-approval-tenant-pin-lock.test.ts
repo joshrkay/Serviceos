@@ -7,7 +7,7 @@ import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { applyTenantContext } from '../../src/db/rls-runtime-role';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENTS_SQL } from '../../src/audit/pg-audit';
-import { createAuditEvent } from '../../src/audit/audit';
+import { createAuditEvent, type AuditEvent } from '../../src/audit/audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { ensureTenantSettings, DEFAULT_ESCALATION_SETTINGS } from '../../src/settings/settings';
@@ -233,6 +233,54 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
 
   const hasLink = (body: string) => /https?:\/\/|token=/.test(body);
 
+  /**
+   * #1238 item 6 — proof the parallel calls really overlap, in two phases:
+   *   1. every call reaches its PIN-attempt reservation (past the pre-check)
+   *      and waits there until all `parties` have arrived;
+   *   2. each then commits its reservation and waits until all `parties`
+   *      reservations are committed, before any of them re-counts.
+   * Calls that ran one after another could never all be parked at once, so a
+   * phase times out and the test fails, instead of passing on upper-bound
+   * assertions alone. Past phase 2 every call provably holds a committed
+   * reservation and none has re-counted yet.
+   */
+  function reservationBarrier(parties: number, timeoutMs = 5000) {
+    function phase(name: string) {
+      let count = 0;
+      let release!: () => void;
+      const all = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const timedOut = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`only ${count}/${parties} PIN attempts ${name} together — the calls did not overlap`)),
+          timeoutMs,
+        ).unref(),
+      );
+      timedOut.catch(() => undefined);
+      return {
+        count: () => count,
+        arrive: () => {
+          count += 1;
+          if (count === parties) release();
+          return Promise.race([all, timedOut]);
+        },
+      };
+    }
+    const arrived = phase('reached the reservation');
+    const committed = phase('held a committed reservation');
+    class BarrierAuditRepository extends PgAuditRepository {
+      async create(event: AuditEvent): Promise<AuditEvent> {
+        if (event.eventType !== PIN_ATTEMPT) return super.create(event);
+        await arrived.arrive();
+        const saved = await super.create(event);
+        await committed.arrive();
+        return saved;
+      }
+    }
+    return { auditRepo: new BarrierAuditRepository(pool), committedCount: committed.count };
+  }
+
   it('5 strikes over TWO calls lock money approval for a THIRD call — before any challenge, right code included; ONE link-free alert; capture still approves', async () => {
     const tenant = await freshTenant();
     expect((await enrollViaRoute(tenant, PIN)).status).toBe(204);
@@ -397,7 +445,7 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     expect(r.outcomes).toEqual(['challenge_failed', 'challenge_lockout']);
   });
 
-  it('#1233 review — PARALLEL wrong codes at 4 strikes: at most ONE is compared and a 6th guess never gets through', async () => {
+  it('#1233 review — PARALLEL wrong codes at 4 strikes, provably overlapping (#1238 item 6): all refused uncompared, no guess spent, no 6th guess', async () => {
     const tenant = await freshTenant();
     expect((await enrollViaRoute(tenant, PIN)).status).toBe(204);
     const { deps, sent } = makeDeps('+15125550206');
@@ -428,40 +476,41 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
       pendings.push(confirm.pending!);
     }
 
-    // All eight answer at once, on separate pooled connections.
+    // #1238 item 6 — all eight answer at once, and the barrier PROVES it: no
+    // call re-counts until all eight hold a committed reservation.
+    const barrier = reservationBarrier(calls.length);
+    const raceDeps: VoiceApprovalDeps = { ...deps, auditRepo: barrier.auditRepo };
     const results = await Promise.all(
       calls.map((sessionId, i) =>
-        continueVoiceApproval(deps, { ...warmup, sessionId, utterance: '3 3 3 3', pending: pendings[i] }),
+        continueVoiceApproval(raceDeps, { ...warmup, sessionId, utterance: '3 3 3 3', pending: pendings[i] }),
       ),
     );
+    expect(barrier.committedCount()).toBe(calls.length);
 
+    // Every re-count saw 4 + 8 = 12 attempts, so each call was refused over the
+    // budget WITHOUT comparing its code: no strike, every reservation cleared.
     const comparedRows = [
       ...(await rowsOfType(tenant.tenantId, STRIKE_FAILED)),
       ...(await rowsOfType(tenant.tenantId, STRIKE_LOCKOUT)),
     ].filter((r) => calls.includes(r.correlationId!));
-    expect(comparedRows.length).toBeLessThanOrEqual(1);
-    expect(await countedAttempts(tenant.tenantId)).toBe(4 + comparedRows.length);
-    expect(await countedAttempts(tenant.tenantId)).toBeLessThanOrEqual(5);
+    expect(comparedRows).toHaveLength(0);
     expect(results.every((r) => r.outcome === 'challenge_lockout' && r.pending === null)).toBe(true);
     const refusedOverLimit = (await rowsOfType(tenant.tenantId, PIN_ATTEMPT_CLEARED)).filter(
       (r) => calls.includes(r.correlationId!) && r.metadata?.reason === 'refused_over_limit',
     );
-    expect(refusedOverLimit.length + comparedRows.length).toBeLessThanOrEqual(calls.length);
-    // No approval link went out during the burst; at most the one alert did.
+    expect(refusedOverLimit).toHaveLength(calls.length);
+    expect(await countedAttempts(tenant.tenantId)).toBe(4);
+    // No approval link went out during the burst, and no lock engaged, so no alert.
     expect(sent.slice(1).every((m) => !hasLink(m.body))).toBe(true);
-    expect((await alertClaims(tenant.tenantId)).length).toBeLessThanOrEqual(1);
+    expect(await alertClaims(tenant.tenantId)).toHaveLength(0);
 
-    // If the burst spent the 5th guess, the tenant is locked: the right code
-    // on yet another call approves nothing.
-    if (comparedRows.length === 1) {
-      const money = await seedMoney(tenant.tenantId, 'After Race', 3000);
-      const after = await callWithCodes(deps, { ...warmup, sessionId: 'i3t-race-after' }, 'the After Race payment', ['4271']);
-      expect(after.outcomes).toEqual(['challenge_lockout']);
-      expect((await proposalRepo.findById(tenant.tenantId, money.id))?.status).toBe('ready_for_review');
-    }
+    // The burst spent no guess: the right code on another call still approves.
+    const money = await seedMoney(tenant.tenantId, 'After Race', 3000);
+    const after = await callWithCodes(deps, { ...warmup, sessionId: 'i3t-race-after' }, 'the After Race payment', ['4271']);
+    expect(after.outcomes).toEqual(['approved']);
   });
 
-  it('#1233 review — PARALLEL wrong codes from zero strikes: never more than 5 compared', async () => {
+  it('#1233 review — PARALLEL wrong codes from zero strikes, provably overlapping (#1238 item 6): none compared, none counted', async () => {
     const tenant = await freshTenant();
     expect((await enrollViaRoute(tenant, PIN)).status).toBe(204);
     const { deps } = makeDeps('+15125550207');
@@ -476,9 +525,12 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
       expect(confirm.outcome).toBe('challenge_prompt');
       pendings.push(confirm.pending!);
     }
-    await Promise.all(
+    // #1238 item 6 — the barrier proves all nine are in flight together.
+    const barrier = reservationBarrier(calls.length);
+    const raceDeps: VoiceApprovalDeps = { ...deps, auditRepo: barrier.auditRepo };
+    const results = await Promise.all(
       calls.map((sessionId, i) =>
-        continueVoiceApproval(deps, {
+        continueVoiceApproval(raceDeps, {
           tenantId: tenant.tenantId,
           sessionId,
           ownerSession: true,
@@ -487,12 +539,16 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
         }),
       ),
     );
+    expect(barrier.committedCount()).toBe(calls.length);
+    // Nine committed reservations before any re-count: every call counts 9 > 5
+    // and is refused uncompared — not one guess is spent.
     const compared = [
       ...(await rowsOfType(tenant.tenantId, STRIKE_FAILED)),
       ...(await rowsOfType(tenant.tenantId, STRIKE_LOCKOUT)),
     ].filter((r) => calls.includes(r.correlationId!));
-    expect(compared.length).toBeLessThanOrEqual(5);
-    expect(await countedAttempts(tenant.tenantId)).toBeLessThanOrEqual(5);
+    expect(compared).toHaveLength(0);
+    expect(results.every((r) => r.outcome === 'challenge_lockout')).toBe(true);
+    expect(await countedAttempts(tenant.tenantId)).toBe(0);
   });
 
   it('#1233 review — no index is built on audit_events: the strike lookup uses migration 245’s idx_audit_events_tenant_created_at, and the alert claim table is RLS-forced', async () => {
