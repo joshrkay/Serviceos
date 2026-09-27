@@ -21,6 +21,19 @@
  * billed and why, to approve or reject. A plan that recorded no estimate bills
  * the job's single accepted estimate (resolved now); with no accepted estimate
  * it mints exactly as before.
+ *
+ * #1215 — no later milestone is dropped silently either:
+ *   - `manual` milestones (nothing ever mints them; a voice "30/30/40 split"
+ *     makes the middle one manual) are raised to the owner at completion as a
+ *     held draft, next to the minted on_completion ones;
+ *   - when milestone billing was turned off after the plan started billing
+ *     (a plan milestone invoice still bills), the kill switch still mints
+ *     nothing, but the unminted milestones are raised as a held draft — auto-
+ *     invoice stands aside for the job because of that live invoice, so this
+ *     is the only thing that would ever bill the balance. A plan that has
+ *     billed nothing is left alone with billing off (the whole invoice, e.g.
+ *     auto-invoice's draft, is the bill — unchanged from #1214).
+ * One held draft per plan (idempotency key), reason recorded as `holdReason`.
  */
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
@@ -33,9 +46,15 @@ import {
   splitMilestones,
 } from './invoice-schedule';
 import {
+  MilestoneHoldReason,
   acceptedEstimateIds,
+  heldBillingOffReason,
+  heldBillingOffSummary,
+  heldManualMilestonesReason,
+  heldManualMilestonesSummary,
   heldMilestonesReason,
   heldMilestonesSummary,
+  invoiceStillBills,
   planBilledEstimateId,
   wholeInvoiceBillingEstimate,
 } from './milestone-billing-guard';
@@ -82,7 +101,10 @@ export async function mintCompletionMilestones(
   // auto_invoice_on_completion and batch_invoice_enabled. Lets an owner halt
   // all milestone billing fleet-wide without deleting schedules.
   const settings = await deps.settingsRepo.findByTenant(job.tenantId);
-  if (!settings?.milestoneBillingEnabled) return [];
+  const billingOn = Boolean(settings?.milestoneBillingEnabled);
+  // Billing off mints nothing; the only thing left to do is raise held
+  // drafts (#1215), which needs the proposal repo.
+  if (!billingOn && !deps.proposalRepo) return [];
 
   const schedules = await deps.scheduleRepo.findByJob(job.tenantId, job.id);
   if (schedules.length === 0) return [];
@@ -106,18 +128,41 @@ export async function mintCompletionMilestones(
   for (const schedule of schedules) {
     const allocations = splitMilestones(schedule.totalAmountCents, schedule.milestones);
 
+    // Everything approval did not mint up front and nobody has minted since.
+    const due = allocations.filter(
+      (a) => a.trigger !== 'on_accept' && a.amountCents > 0 && !minted.has(`${schedule.id}:${a.index}`),
+    );
+    if (due.length === 0) continue;
+
     // #1203 — an invoice outside the plan already bills the plan's estimate:
-    // hold this plan's due milestones for the owner instead of billing twice.
+    // hold this plan's due milestones (manual ones too, #1215) for the owner
+    // instead of billing twice.
     const billedEstimateId = planBilledEstimateId(schedule, jobAccepted);
-    if (billedEstimateId) {
-      const blocking = wholeInvoiceBillingEstimate(billedEstimateId, existing, schedule.id);
-      const due = allocations.filter(
-        (a) => a.trigger === 'on_completion' && a.amountCents > 0 && !minted.has(`${schedule.id}:${a.index}`),
-      );
-      if (blocking && due.length > 0) {
-        await holdMilestonesForOwner(deps, job, schedule, due, blocking);
-        continue;
+    const blocking = billedEstimateId
+      ? wholeInvoiceBillingEstimate(billedEstimateId, existing, schedule.id)
+      : undefined;
+    if (blocking) {
+      await holdMilestonesForOwner(deps, job, schedule, due, {
+        holdReason: 'estimate_already_billed',
+        summary: heldMilestonesSummary(due, blocking),
+        reason: heldMilestonesReason(due, blocking),
+        blocking,
+      });
+      continue;
+    }
+
+    // #1215 — billing turned off after the plan started billing: mint nothing,
+    // raise the rest to the owner.
+    if (!billingOn) {
+      const planIsBilling = existing.some((inv) => inv.scheduleId === schedule.id && invoiceStillBills(inv));
+      if (planIsBilling) {
+        await holdMilestonesForOwner(deps, job, schedule, due, {
+          holdReason: 'milestone_billing_off',
+          summary: heldBillingOffSummary(due),
+          reason: heldBillingOffReason(due),
+        });
       }
+      continue;
     }
 
     // Only one invoice per estimate may carry estimate_id (uq_invoices_estimate).
@@ -186,27 +231,47 @@ export async function mintCompletionMilestones(
         );
       }
     }
+
+    // #1215 — manual milestones are never minted automatically; completion
+    // raises them to the owner so the plan's full amount reaches a bill.
+    // (No proposal repo → nowhere to raise them; left as before.)
+    const manual = due.filter((a) => a.trigger === 'manual');
+    if (manual.length > 0 && deps.proposalRepo) {
+      await holdMilestonesForOwner(deps, job, schedule, manual, {
+        holdReason: 'manual_milestone',
+        summary: heldManualMilestonesSummary(manual),
+        reason: heldManualMilestonesReason(manual),
+      });
+    }
   }
 
   return created;
 }
 
+interface MilestoneHold {
+  holdReason: MilestoneHoldReason;
+  summary: string;
+  reason: string;
+  /** The invoice already billing the estimate (estimate_already_billed only). */
+  blocking?: Invoice;
+}
+
 /**
- * #1203 — completion runs once, so milestones it cannot bill must reach the
- * owner as something they can act on. Raises one ready_for_review
+ * #1203 / #1215 — completion runs once, so milestones it does not bill must
+ * reach the owner as something they can act on. Raises one ready_for_review
  * `draft_invoice` proposal with a line per held milestone (the plan's own
- * split amounts, no estimate link) whose explanation names the invoice that
- * already bills the estimate. Approving it invoices exactly those milestones;
- * rejecting it leaves the existing invoice as the bill.
+ * split amounts, no estimate link) whose explanation says why they were not
+ * billed. Approving it invoices exactly those milestones; rejecting it leaves
+ * them unbilled.
  */
 async function holdMilestonesForOwner(
   deps: ScheduleCompletionDeps,
   job: Job,
   schedule: InvoiceSchedule,
   held: MilestoneAllocation[],
-  blocking: Invoice,
+  hold: MilestoneHold,
 ): Promise<void> {
-  const reason = heldMilestonesReason(held, blocking);
+  const { reason, blocking } = hold;
   if (!deps.proposalRepo) {
     // No way to raise the owner draft: fail loudly (the completion-effects
     // caller logs it) rather than billing the estimate twice.
@@ -227,21 +292,27 @@ async function holdMilestonesForOwner(
   }
 
   const heldCents = held.reduce((sum, a) => sum + a.amountCents, 0);
+  const blockingContext = blocking
+    ? {
+        estimateId: blocking.estimateId,
+        blockingInvoiceId: blocking.id,
+        blockingInvoiceNumber: blocking.invoiceNumber,
+      }
+    : { estimateId: schedule.estimateId };
   const proposal = transitionProposal(
     createProposal({
       tenantId: job.tenantId,
       proposalType: 'draft_invoice',
       payload,
-      summary: heldMilestonesSummary(held, blocking),
+      summary: hold.summary,
       explanation: reason,
       sourceContext: {
         source: 'milestone_mint_held',
+        holdReason: hold.holdReason,
         jobId: job.id,
         scheduleId: schedule.id,
-        estimateId: blocking.estimateId,
         milestoneIndexes: held.map((a) => a.index),
-        blockingInvoiceId: blocking.id,
-        blockingInvoiceNumber: blocking.invoiceNumber,
+        ...blockingContext,
       },
       targetEntityType: 'job',
       targetEntityId: job.id,
@@ -273,10 +344,12 @@ async function holdMilestonesForOwner(
         metadata: {
           scheduleId: schedule.id,
           proposalId: persisted.id,
+          holdReason: hold.holdReason,
           milestoneIndexes: held.map((a) => a.index),
           amountCents: heldCents,
-          blockingInvoiceId: blocking.id,
-          blockingInvoiceNumber: blocking.invoiceNumber,
+          ...(blocking
+            ? { blockingInvoiceId: blocking.id, blockingInvoiceNumber: blocking.invoiceNumber }
+            : {}),
         },
       }),
     );
