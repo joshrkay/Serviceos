@@ -29,9 +29,9 @@ import {
  * live prompt — re-pin hash+length here IN THE SAME PR as the cassette
  * re-record and voice-eval sign-off.
  */
-const OPERATOR_PROMPT_LENGTH = 58114; // #1392 re-pin: draft_estimate lineItemDescriptions
+const OPERATOR_PROMPT_LENGTH = 58057; // #1427 re-pin: draft_estimate customer quote requests
 const OPERATOR_PROMPT_SHA256 =
-  '60ce577e59b373ee6bfc61e12e2147ba1e9eab7931f4c72ab3fea7f2fd0855f2';
+  '1c990260fc2a5acb976e78ed86f49aad6f10daa7a80de87f76ff89ac71b7a3c8';
 
 describe('intent-taxonomy-blocks extraction', () => {
   it("buildClassifierSystemPrompt('operator') IS the exported SYSTEM_PROMPT", () => {
