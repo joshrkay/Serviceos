@@ -1220,26 +1220,29 @@ export function AssistantPage() {
     <div className="flex flex-col h-full bg-slate-50">
 
       {/* ── Header ──────────────────────────────────────────── */}
-      <div className="shrink-0 bg-white border-b border-slate-100 px-4 md:px-6 py-3.5">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="relative">
+      <div data-testid="assistant-header" className="shrink-0 bg-white border-b border-slate-100 px-4 md:px-6 py-3.5">
+        {/* #1384 — wraps instead of clipping at 320px: the tool buttons drop
+            to a second line under the title rather than pushing the avatar
+            and the Conversation pill off-screen. */}
+        <div data-testid="assistant-header-row" className="max-w-3xl mx-auto flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <div className="flex min-w-0 items-center gap-3">
+            <div data-testid="assistant-avatar" className="relative shrink-0">
               <span className="flex size-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-md">
                 <Sparkles size={16} className="text-white" />
               </span>
               <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full bg-green-400 border-2 border-white" />
             </div>
-            <div>
+            <div className="min-w-0">
               <h2 className="text-slate-900" style={{ fontSize: '0.95rem' }}>Rivet AI</h2>
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-green-600">Online</span>
-                <span className="text-slate-300">·</span>
-                <span className="text-xs text-slate-400">Aware of all your jobs & schedule</span>
+                <span className="hidden sm:inline text-slate-300">·</span>
+                <span className="hidden sm:inline text-xs text-slate-400">Aware of all your jobs & schedule</span>
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div data-testid="assistant-header-tools" className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => {
                 const next = !ttsEnabled;
