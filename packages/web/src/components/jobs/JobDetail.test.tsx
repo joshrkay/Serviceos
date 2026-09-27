@@ -45,6 +45,7 @@ vi.mock('./SuppliersSheet', () => ({ SuppliersSheet: () => null }));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 const mockApiJob = {
   id: 'j1',
@@ -400,5 +401,24 @@ describe('JobDetailView', () => {
     expect(container.innerHTML).not.toMatch(
       /(bg|text|border|border-l|placeholder|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
     );
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('every control on the job page (back, status, action bar, customer, schedule, parts, photos) is ≥44×44', async () => {
+    const { container } = renderPage();
+    await waitFor(() => expect(AH.fetcher).toHaveBeenCalled());
+    expectAllTapTargets(container, 'JobDetail');
+  });
+
+  it('an unassigned job\'s "Assign technician" action is a ≥44×44 tap target', async () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      ...defaultDetailResult,
+      data: { ...mockApiJob, technician: null },
+    });
+    const { container } = renderPage();
+    await waitFor(() => expect(AH.fetcher).toHaveBeenCalled());
+    expect(screen.getAllByText(/assign technician/i).length).toBeGreaterThan(0);
+    expectAllTapTargets(container, 'JobDetail (unassigned)');
   });
 });

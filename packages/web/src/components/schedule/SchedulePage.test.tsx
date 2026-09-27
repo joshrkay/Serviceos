@@ -217,9 +217,7 @@ describe('SchedulePage', () => {
     vi.mocked(apiFetch).mockClear();
     setupApi();
 
-    const navButtons = screen.getAllByRole('button').filter(b =>
-      b.className.includes('size-8'),
-    );
+    const navButtons = [screen.getByRole('button', { name: 'Previous day' }), screen.getByRole('button', { name: 'Next day' })];
     fireEvent.click(navButtons[0]); // ChevronLeft
 
     await waitFor(() => {
@@ -237,9 +235,7 @@ describe('SchedulePage', () => {
     vi.mocked(apiFetch).mockClear();
     setupApi();
 
-    const navButtons = screen.getAllByRole('button').filter(b =>
-      b.className.includes('size-8'),
-    );
+    const navButtons = [screen.getByRole('button', { name: 'Previous day' }), screen.getByRole('button', { name: 'Next day' })];
     fireEvent.click(navButtons[1]); // ChevronRight
 
     await waitFor(() => {
@@ -371,12 +367,31 @@ describe('SchedulePage', () => {
         expect(pill.className).not.toContain('bg-green-100');
       }
     });
+
+    it('#1401 — renders a completed appointment in its own colour, not the amber pending pill', async () => {
+      setupApi([{ ...appt1, status: 'completed' }, appt2]);
+      renderPage();
+      await screen.findByText('Alice Smith');
+      const pill = screen.getByText('completed');
+      expect(pill.className).toContain('bg-slate-100');
+      expect(pill.className).toContain('text-slate-600');
+      expect(pill.className).not.toContain('bg-amber-100');
+      expect(pill.className).not.toContain('bg-green-100');
+    });
+
+    it('#1401 — shows the cancellation reason on a canceled appointment card', async () => {
+      setupApi([{ ...appt1, status: 'canceled', notes: 'Customer sold the house' }, appt2]);
+      renderPage();
+      await screen.findByText('Alice Smith');
+      expect(screen.getByText(/Cancellation reason: Customer sold the house/)).toBeInTheDocument();
+    });
   });
 });
 
 // ─── Journey QA 2026-07-02 (bug 4): appointment times post in TENANT tz ──────
 
 import { TenantTimezoneProvider } from '../../hooks/useTenantTimezone';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', () => {
   it('14:00 entered for a New-York tenant posts 18:00Z (EDT), not 14:00Z', async () => {
@@ -459,7 +474,7 @@ function latestQueryDayKey(tz: string): string {
 }
 
 function navButtons(): HTMLElement[] {
-  return screen.getAllByRole('button').filter((b) => b.className.includes('size-8'));
+  return [screen.getByRole('button', { name: 'Previous day' }), screen.getByRole('button', { name: 'Next day' })];
 }
 
 describe('U8 — inclusive-boundary appointments bucket to a single day', () => {
@@ -619,5 +634,13 @@ describe('#1279 — new appointment assigns through appointment_assignments', ()
     expect(screen.getByLabelText(/assign technician/i).className).toContain('min-h-11');
     expect(screen.getByRole('button', { name: /create appointment/i }).className).toContain('min-h-11');
     expect(screen.getByRole('button', { name: /close new appointment/i }).className).toContain('min-h-11');
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('every page-level control (day nav, tech filter chips, rows) is a ≥44×44 tap target', async () => {
+    const { container } = renderPage();
+    await screen.findByText('Alice Smith');
+    expectAllTapTargets(container, 'SchedulePage');
   });
 });

@@ -112,3 +112,28 @@ export function correctDollarScaleIfSpoken(
   if (!Number.isInteger(rawCents) || rawCents <= 0) return rawCents;
   return spokenDollarAmounts.has(rawCents) ? rawCents * 100 : rawCents;
 }
+
+/**
+ * #1399 N1/N2 — does the operator's own utterance say ANYTHING about price?
+ *
+ * The catalog resolver's "did you mean" price-conflict carve-out exists so a
+ * deliberately quoted custom price ("do the blower motor for $300", "half
+ * price for Mrs. Henderson") is never silently snapped back to the catalog.
+ * It must not fire when the operator never mentioned a price at all: then the
+ * drafted number is the model's own invention (live: "1 blower motor
+ * replacement" drafted at 350 — the model's DOLLARS, rendered as $3.50 on a
+ * "Keep spoken price" choice nobody spoke) and the single catalog match is
+ * the only trustworthy price.
+ *
+ * Deliberately BROAD: a false positive only keeps the pre-#1399 behaviour
+ * (the operator picks between the catalog and the drafted price — never
+ * silent), while a false negative would overwrite a real quote. So any
+ * money-shaped number or pricing word counts as a mention.
+ */
+const PRICE_MENTION_RE =
+  /\$\s*\d|\d[\d,]*(?:\.\d+)?\s*(?:dollars?|bucks|usd|cents?|k)\b|\d\s*%|\b(?:percent|half|discount(?:ed)?|off|free|no\s+charge|comp(?:ed|ing)?|waive[ds]?|price[ds]?|pricing|cost|rate|charge)\b|\b(?:at|for)\s+\d{2,}/i;
+
+export function operatorMentionsPrice(message: string | undefined): boolean {
+  if (!message) return false;
+  return PRICE_MENTION_RE.test(message);
+}

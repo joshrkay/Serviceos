@@ -1804,7 +1804,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
           <h1 className="text-foreground">{estimateTermPlural}</h1>
           <button
             onClick={() => setNewEstimate(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Plus size={14} /> New {estimateTerm.toLowerCase()}
           </button>
@@ -1831,7 +1831,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               aria-label="Filter by customer"
               value={customerFilter}
               onChange={e => setCustomerFilter(e.target.value)}
-              className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
+              className="w-full min-h-11 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
             >
               <option value="all">All customers</option>
               {customerOptions.map(c => (
@@ -1850,7 +1850,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                 setTab(t.value);
                 setFilters(TAB_FILTERS[t.value]);
               }}
-              className={`shrink-0 min-h-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 min-h-11 min-w-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >{t.label}</button>
@@ -1879,7 +1879,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                 <button
                   key={est.id}
                   onClick={() => setSelected(est.id)}
-                  className="flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
+                  className="min-h-11 min-w-11 flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
                 >
                   <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
                     status === 'Approved' ? 'bg-success/10' :

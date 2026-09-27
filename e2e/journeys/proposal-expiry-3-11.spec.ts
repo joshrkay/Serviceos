@@ -210,7 +210,7 @@ async function seedOwnerTechAndTwoAppointments(
   const customer = await postJson(request, `${API_URL}/api/customers`, owner.ownerHeaders, {
     firstName: label,
     lastName: `Expiry Customer ${stamp}`,
-    primaryPhone: '555-0166',
+    primaryPhone: '602-555-0166',
     email: `${label}.expiry.customer+${stamp}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

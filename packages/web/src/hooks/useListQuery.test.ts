@@ -381,3 +381,44 @@ describe('useListQuery — live polling (Epic 12.2)', () => {
     expect(result.current.error).toBeNull();
   });
 });
+
+// #1397 — a hung request used to leave the list spinning forever. The hook
+// client now aborts at 30s and the timeout reaches the page's existing
+// error UI (ErrorState + Retry); Retry (refetch) then loads normally.
+describe('useListQuery — request timeout (#1397)', () => {
+  it('surfaces a timeout error after 30s and recovers on refetch (Retry)', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      fetchSpy.mockImplementationOnce(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          }),
+      );
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [{ id: '1' }], total: 1 }),
+      } as Response);
+
+      const { result } = renderHook(() => useListQuery('/api/items'));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.error).toMatch(/took too long/i);
+
+      await act(async () => {
+        result.current.refetch();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.error).toBeNull();
+      expect(result.current.data).toEqual([{ id: '1' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

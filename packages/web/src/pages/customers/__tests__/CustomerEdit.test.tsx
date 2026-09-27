@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CustomerEdit } from '../CustomerEdit';
+import { expectAllTapTargets, expectTapTarget } from '../../../test-utils/tap-target';
 
 vi.mock('../../../utils/api-fetch', () => ({
   apiFetch: vi.fn(),
@@ -370,6 +371,17 @@ describe('CustomerEdit — create mode (no customerId)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'First name: Must contain at most 100 characters',
     );
+  });
+
+  it('#1398 — SMS consent taps on its full ≥44px row; every create-form control is ≥44×44', () => {
+    const { container } = render(<CustomerEdit />);
+    const consent = screen.getByRole('checkbox', { name: /sms messaging consent/i });
+    // The labelled row is the checkbox's tap target, not the bare 16px box.
+    expectTapTarget(consent.closest('label')!, 'SMS consent row');
+    expect(consent.className).toMatch(/(^|\s)sr-only(\s|$)/);
+    fireEvent.click(screen.getByText('SMS messaging consent'));
+    expect(consent).toBeChecked();
+    expectAllTapTargets(container, 'CustomerEdit create form');
   });
 
   it('Cancel and Create controls are present and full-size for the create form', () => {

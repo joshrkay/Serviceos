@@ -18,6 +18,7 @@
  */
 
 import { Pool } from 'pg';
+import { DateTime } from 'luxon';
 import { withTenantConnection } from '../../db/tenant-transaction';
 import { resolveDateTime } from '../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../shared/timezone';
@@ -345,8 +346,38 @@ function appointmentCustomerNeedle(reference: string): string {
   const kept = base
     .split(/\s+/)
     .filter((w) => w.length > 0 && !APPOINTMENT_WORK_TYPE_STOPWORDS.has(w));
-  return kept.length > 0 ? kept.join(' ') : '';
+  if (kept.length === 0) return '';
+  // #1399 N3 — day and equipment words are stripped only when a name
+  // survives them, so a customer who IS named Friday (or Furnace) still
+  // matches exactly as before (same guard as `stripClockTokens`).
+  const named = kept.filter((w) => !APPOINTMENT_DESCRIPTOR_STOPWORDS.has(w));
+  return named.length > 0 ? named.join(' ') : kept.join(' ');
 }
+
+/**
+ * #1399 N3 (QA 2026-09-26 §17) — the day and equipment words an operator
+ * hangs on a DESCRIPTIVE appointment reference: "Priya Whitfield's furnace
+ * tune-up appointment on Tuesday", "my Tuesday 2pm furnace appointment".
+ * Used ONLY to build the customer-name needle (`appointmentCustomerNeedle`),
+ * the same scope as `APPOINTMENT_WORK_TYPE_STOPWORDS`. The day itself still
+ * narrows the candidates (`narrowToReferencedDay`), so dropping it from the NAME
+ * needle loses nothing.
+ *
+ * Measured on pg16 + pg_trgm against 'qa-sweep-ai-Priya Whitfield' (τ_ent 0.80):
+ *   strict_word_similarity("qa sweep ai priya whitfield's furnace tuesday", ...) = 0.622
+ *   strict_word_similarity("qa sweep ai priya whitfield's furnace", ...)         = 0.757
+ *   strict_word_similarity("qa sweep ai priya whitfield's", ...)                 = 0.966
+ */
+const APPOINTMENT_DESCRIPTOR_STOPWORDS = new Set([
+  'today', 'tomorrow', 'tonight',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'morning', 'afternoon', 'evening',
+  'furnace', 'boiler', 'heater', 'water', 'ac', 'hvac', 'air', 'conditioner',
+  'conditioning', 'heat', 'pump', 'thermostat', 'duct', 'ducts', 'filter',
+  'unit', 'system', 'compressor', 'condenser', 'blower', 'motor', 'drain',
+  'sewer', 'toilet', 'sink', 'faucet', 'pipe', 'pipes', 'leak', 'panel',
+  'breaker', 'outlet', 'wiring', 'generator', 'plumbing', 'electrical',
+]);
 
 // Technicians are named the way customers are: an operator says "assign
 // CARLOS", not "assign Carlos Vega". Whole-string similarity cannot see that —
@@ -1144,7 +1175,11 @@ export class PgEntityResolver implements EntityResolver {
         );
         switch (jobResult.kind) {
           case 'resolved':
-            return this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id);
+            return this.narrowToReferencedDay(
+              tenantId,
+              reference,
+              await this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id),
+            );
           case 'ambiguous':
             // The NAME matches several jobs. Returning `jobResult` as-is
             // would hand back candidates of kind 'job' for an APPOINTMENT
@@ -1154,10 +1189,14 @@ export class PgEntityResolver implements EntityResolver {
             // appointment picker ever shown. So fan the matched jobs out to
             // their upcoming appointments and answer in the kind the caller
             // actually needs.
-            return this.resolveAppointmentsForJobs(
+            return this.narrowToReferencedDay(
               tenantId,
               reference,
-              jobResult.candidates.map((c) => c.id),
+              await this.resolveAppointmentsForJobs(
+                tenantId,
+                reference,
+                jobResult.candidates.map((c) => c.id),
+              ),
             );
           case 'not_found':
           case 'low_confidence':
@@ -1216,7 +1255,11 @@ export class PgEntityResolver implements EntityResolver {
               stripClockTokens(appointmentCustomerNeedle(reference)),
             );
             if (jobIds.length > 0) {
-              return this.resolveAppointmentsForJobs(tenantId, reference, jobIds);
+              return this.narrowToReferencedDay(
+                tenantId,
+                reference,
+                await this.resolveAppointmentsForJobs(tenantId, reference, jobIds),
+              );
             }
             return { kind: 'not_found', reference };
           }
@@ -1285,6 +1328,34 @@ export class PgEntityResolver implements EntityResolver {
       return { kind: 'resolved', candidate: candidates[0] };
     }
     return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * #1399 N3 — a descriptive reference names the DAY ("…furnace appointment
+   * on Tuesday"). When the named customer/job has several upcoming visits,
+   * keep only those on that tenant-local day: one left resolves, several stay
+   * a clarification. Narrowing only — it never widens a result, never turns
+   * an ambiguity into not_found (no visit on the stated day keeps the full
+   * ask, since the day may be misheard), and does nothing without a known
+   * tenant zone (a UTC weekday is a different day for evening visits).
+   */
+  private async narrowToReferencedDay(
+    tenantId: string,
+    reference: string,
+    result: EntityResolverResult,
+  ): Promise<EntityResolverResult> {
+    if (result.kind !== 'ambiguous') return result;
+    const matchesDay = referencedDayMatcher(reference);
+    if (!matchesDay) return result;
+    const timezone = await this.resolveTenantTimezone(tenantId);
+    if (!timezone) return result;
+    const onDay = result.candidates.filter((c) => {
+      const local = DateTime.fromISO(c.label, { zone: 'utc' }).setZone(timezone);
+      return local.isValid && matchesDay(local, DateTime.now().setZone(timezone));
+    });
+    if (onDay.length === 1) return { kind: 'resolved', candidate: onDay[0] };
+    if (onDay.length >= 2) return { kind: 'ambiguous', candidates: onDay };
+    return result;
   }
 
   /**
@@ -2169,6 +2240,32 @@ export class PgEntityResolver implements EntityResolver {
 // ---------------------------------------------------------------------------
 // Relative date parsing helpers
 // ---------------------------------------------------------------------------
+
+const WEEKDAY_NUMBERS: Record<string, number> = {
+  monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 7,
+};
+
+/**
+ * #1399 N3 — the day a descriptive appointment reference names, as a
+ * predicate over (candidate local start, tenant-local now). Undefined when
+ * the reference names no single day (none, or two different ones).
+ */
+function referencedDayMatcher(
+  reference: string,
+): ((local: DateTime, now: DateTime) => boolean) | undefined {
+  const words = new Set(reference.toLowerCase().split(/[^a-z]+/).filter(Boolean));
+  const matchers: Array<(local: DateTime, now: DateTime) => boolean> = [];
+  for (const [name, weekday] of Object.entries(WEEKDAY_NUMBERS)) {
+    if (words.has(name)) matchers.push((local) => local.weekday === weekday);
+  }
+  if (words.has('today') || words.has('tonight')) {
+    matchers.push((local, now) => local.hasSame(now, 'day'));
+  }
+  if (words.has('tomorrow')) {
+    matchers.push((local, now) => local.hasSame(now.plus({ days: 1 }), 'day'));
+  }
+  return matchers.length === 1 ? matchers[0] : undefined;
+}
 
 interface DateRange {
   start: Date;

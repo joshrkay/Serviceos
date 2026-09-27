@@ -204,7 +204,7 @@ async function seedOwnerTechAndTwoAppointments(
   const customer = await postJson(page, `${API_URL}/api/customers`, ownerHeaders, {
     firstName: label,
     lastName: `Drag Customer ${stamp}`,
-    primaryPhone: '555-0199',
+    primaryPhone: '602-555-0199',
     email: `${label}.drag.customer+${stamp}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

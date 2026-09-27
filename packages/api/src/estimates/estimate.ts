@@ -97,6 +97,8 @@ export interface CreateEstimateInput {
   customerMessage?: string;
   internalNotes?: string;
   createdBy: string;
+  /** #1397 — the creating request's resolved role, recorded as the audit actor_role. */
+  actorRole?: string;
   /**
    * Tradesperson wave 1, Task 6 — mint this estimate flagged as a change
    * order (see `Estimate.isChangeOrder`). Defaults to false so every
@@ -323,7 +325,7 @@ export async function createEstimate(
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
-      actorRole: 'unknown',
+      actorRole: input.actorRole ?? 'unknown',
       eventType: 'estimate.created',
       entityType: 'estimate',
       entityId: created.id,

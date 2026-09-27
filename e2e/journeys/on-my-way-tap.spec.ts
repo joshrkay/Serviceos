@@ -319,7 +319,7 @@ async function seedFixture(
   const customer = await postJson(request, `${API_URL}/api/customers`, owner.authHeaders, {
     firstName: 'OnMyWay',
     lastName: `${label.toUpperCase()} ${Date.now()}`,
-    primaryPhone: '555-0199',
+    primaryPhone: '602-555-0199',
     email: `onmyway-${label}+${Date.now()}@example.com`,
     preferredChannel: 'sms',
     smsConsent: true,

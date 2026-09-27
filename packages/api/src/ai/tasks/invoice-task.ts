@@ -20,9 +20,11 @@ import {
 import { contractErrorsFrom, contractGapFields } from './task-input';
 import { calculateLineItemTotal, resolveSelectedLineItems } from '../../shared/billing-engine';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
+import type { JobRepository } from '../../jobs/job';
 import {
   correctDollarScaleIfSpoken,
   extractSpokenWholeDollarAmounts,
+  operatorMentionsPrice,
 } from '../resolution/price-scale-guard';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
@@ -30,7 +32,7 @@ Given the job context, customer information, and completed work details, generat
 Return valid JSON with the following shape:
 {
   "lineItems": [
-    { "description": "<string>", "quantity": <number>, "unitPrice": <number>, "category": "<string, optional>" }
+    { "description": "<string>", "quantity": <number>, "unitPrice": <integer cents>, "category": "<string, optional>" }
   ],
   "discountCents": <number, optional>,
   "taxRateBps": <number, optional>,
@@ -39,6 +41,7 @@ Return valid JSON with the following shape:
   "confidence_score": <number between 0 and 1>
 }
 Always include at least one line item.
+unitPrice is integer CENTS, never dollars: $350.00 is 35000, $79 is 7900.
 Never output a "customerId", "jobId", or "estimateId" field. The customer, job
 and estimate are attached by the system from verified tenant records — any id
 you write would be invented and is discarded.`;
@@ -159,6 +162,12 @@ export interface InvoiceTaskDeps {
   catalogRepo?: CatalogItemRepository;
   /** #1276F — reads the estimate an invoice is drafted from. */
   estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  /**
+   * #1399 N4 — reads the estimate's job so an invoice drafted from an
+   * estimate bills that estimate's customer (estimates carry no customerId
+   * of their own; their job does).
+   */
+  jobRepo?: Pick<JobRepository, 'findById'>;
 }
 
 export class InvoiceTaskHandler implements TaskHandler {
@@ -173,11 +182,13 @@ export class InvoiceTaskHandler implements TaskHandler {
    */
   private readonly catalogRepo?: CatalogItemRepository;
   private readonly estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  private readonly jobRepo?: Pick<JobRepository, 'findById'>;
 
   constructor(gateway: LLMGateway, deps?: CatalogItemRepository | InvoiceTaskDeps) {
     this.gateway = gateway;
     this.catalogRepo = deps && 'listByTenant' in deps ? deps : deps?.catalogRepo;
     this.estimateRepo = deps && !('listByTenant' in deps) ? deps.estimateRepo : undefined;
+    this.jobRepo = deps && !('listByTenant' in deps) ? deps.jobRepo : undefined;
   }
 
   /**
@@ -211,6 +222,15 @@ export class InvoiceTaskHandler implements TaskHandler {
         ...(jobId ? { jobId } : {}),
       });
       return accepted.length === 1 ? accepted[0] : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async customerOfJob(tenantId: string, jobId: string): Promise<string | undefined> {
+    if (!this.jobRepo) return undefined;
+    try {
+      return (await this.jobRepo.findById(tenantId, jobId))?.customerId ?? undefined;
     } catch {
       return undefined;
     }
@@ -302,6 +322,17 @@ export class InvoiceTaskHandler implements TaskHandler {
       if (!payload.jobId) payload.jobId = sourceEstimate.jobId;
       payload.discountCents = sourceEstimate.totals.discountCents;
       payload.taxRateBps = sourceEstimate.totals.taxRateBps;
+      // #1399 N4 — the estimate names its customer through its job. With no
+      // resolved customer, take that one (a verified tenant record, never the
+      // model's) instead of gating approval on a customerId nobody can fill.
+      if (!resolvedCustomerId) {
+        const estimateCustomerId = await this.customerOfJob(context.tenantId, sourceEstimate.jobId);
+        if (estimateCustomerId) {
+          payload.customerId = estimateCustomerId;
+          delete payload.customerReference;
+          missingFields.splice(missingFields.indexOf('customerId'), 1);
+        }
+      }
     }
 
     // QA-2026-06-05: normalize line items to the execution contract — the
@@ -383,6 +414,9 @@ export class InvoiceTaskHandler implements TaskHandler {
         lineItems,
         'unitPriceCents',
         this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
+        // #1399 N1 — an unspoken (model-invented) price never outranks a
+        // strong catalog match.
+        { operatorMentionedPrice: operatorMentionsPrice(context.message) },
       );
       payload.lineItems = catalogOutcome.lineItems;
     }

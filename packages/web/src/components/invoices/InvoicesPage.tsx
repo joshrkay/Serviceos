@@ -1317,7 +1317,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
           <h1 className="text-foreground">Invoices</h1>
           <button
             onClick={() => navigate('/invoices/new')}
-            className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
+            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Plus size={14} /> New invoice
           </button>
@@ -1365,7 +1365,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                   setFilters({});
                 }
               }}
-              className={`shrink-0 flex min-h-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`shrink-0 flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >
@@ -1398,7 +1398,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                 <button
                   key={inv.id}
                   onClick={() => setSelected(inv.id)}
-                  className="flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
+                  className="min-h-11 min-w-11 flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
                 >
                   <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
                     status === 'Paid'    ? 'bg-success/10' :

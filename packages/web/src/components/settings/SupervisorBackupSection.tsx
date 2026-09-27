@@ -207,7 +207,10 @@ export function SupervisorBackupSection({
             <label
               key={opt.value}
               data-testid={`routing-option-${opt.value}`}
-              className="flex items-start gap-3 px-3 py-3 min-h-[44px] rounded-md border border-slate-200 cursor-pointer hover:border-slate-300"
+              // #1398 — the whole ≥44px row is the radio's tap target: the
+              // native radio is visually hidden (still focusable and
+              // announced) and drawn as the indicator span beside it.
+              className="flex w-full min-h-11 items-start gap-3 px-3 py-3 rounded-md border border-slate-200 cursor-pointer hover:border-slate-300"
             >
               <input
                 type="radio"
@@ -215,8 +218,14 @@ export function SupervisorBackupSection({
                 value={opt.value}
                 checked={routing === opt.value}
                 onChange={() => setRouting(opt.value)}
-                className="mt-0.5"
+                className="peer sr-only"
               />
+              <span
+                aria-hidden="true"
+                className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-slate-400 peer-checked:border-blue-600 peer-checked:[&>span]:block peer-focus-visible:ring-2 peer-focus-visible:ring-blue-300"
+              >
+                <span className="hidden size-2 rounded-full bg-blue-600" />
+              </span>
               <div className="flex-1 min-w-0">
                 <div className="text-xs text-slate-900">{opt.label}</div>
                 <div className="text-xs text-slate-500">{opt.description}</div>
@@ -231,7 +240,7 @@ export function SupervisorBackupSection({
         data-testid="supervisor-backup-save"
         onClick={handleSave}
         disabled={saving}
-        className="text-xs px-4 min-h-[44px] rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-60"
+        className="text-xs px-4 min-h-[44px] min-w-11 rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-60"
       >
         {saving ? 'Saving…' : 'Save'}
       </button>

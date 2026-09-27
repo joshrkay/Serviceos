@@ -7,6 +7,7 @@ vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { apiFetch } from '../../utils/api-fetch';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => body } as unknown as Response;
@@ -15,6 +16,11 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
 describe('MergeCustomerPanel (Story 4.6)', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
+  });
+
+  it('#1398 — the duplicate search field and button are ≥44×44 tap targets', () => {
+    render(<MergeCustomerPanel survivingId="survivor" survivingName="Keep Me" onMerged={vi.fn()} />);
+    expectAllTapTargets(document.body, 'MergeCustomerPanel');
   });
 
   it('searches for duplicates, excluding the survivor and archived rows', async () => {

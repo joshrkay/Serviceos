@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { AlertTriangle } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 
@@ -8,8 +9,9 @@ import { useApiClient } from '../../lib/apiClient';
  * The owner decided E1 may launch only with the placeholder hard-flagged until
  * a licensed trade professional plus counsel sign off; this is the visible
  * half of that flag (every E1 call's audit row carries the other half).
- * Not dismissible: it disappears only once a reviewed script is saved
- * (PUT /api/settings/e1-script). Hidden when the status can't be read.
+ * Not dismissible: it disappears only once a reviewed script is saved with
+ * both sign-offs (PUT /api/settings/e1-script, via the form it links to —
+ * #1389). Hidden when the status can't be read.
  */
 export function E1ScriptPlaceholderBanner() {
   const apiFetch = useApiClient();
@@ -41,6 +43,13 @@ export function E1ScriptPlaceholderBanner() {
       <span className="flex-1 min-w-0">
         Emergency (E1) calls use a placeholder safety script that no licensed professional or counsel has reviewed yet.
       </span>
+      {/* #1389 — where the owner enters the reviewed script + both sign-offs. */}
+      <Link
+        to="/settings/e1-script"
+        className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-red-300 bg-white px-3 text-sm font-medium text-red-800 hover:bg-red-100"
+      >
+        Add reviewed script
+      </Link>
     </div>
   );
 }

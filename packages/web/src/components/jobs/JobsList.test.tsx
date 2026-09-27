@@ -14,6 +14,7 @@ vi.mock('./NewJobFlow', () => ({
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 const mockJobs = [
   {
@@ -179,5 +180,12 @@ describe('JobsList', () => {
     expect(
       screen.getByPlaceholderText('Search by customer, description, or job #…').className,
     ).toContain('min-h-11');
+  });
+});
+
+describe('#1398 — mobile bar', () => {
+  it('every page-level control (header CTA, filters, rows) is a ≥44×44 tap target', () => {
+    const { container } = renderPage();
+    expectAllTapTargets(container, 'JobsList');
   });
 });

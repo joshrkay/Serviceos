@@ -5,6 +5,7 @@ import { CustomerRecordsPanel } from './CustomerRecordsPanel';
 
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 import { apiFetch } from '../../utils/api-fetch';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 const mock = apiFetch as unknown as ReturnType<typeof vi.fn>;
 
@@ -48,6 +49,12 @@ describe('CustomerRecordsPanel (US-069)', () => {
       }
       return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
     });
+  });
+
+  it('#1398 — the Jobs/Estimates/Invoices tabs and rows are ≥44×44 tap targets', async () => {
+    setup();
+    await screen.findByText('AC repair');
+    expectAllTapTargets(document.body, 'CustomerRecordsPanel');
   });
 
   it('renders the total-revenue badge and the customer-scoped jobs by default', async () => {

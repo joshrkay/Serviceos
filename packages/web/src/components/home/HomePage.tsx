@@ -178,7 +178,7 @@ function AttentionRow({
       {action && (
         <button
           onClick={onAction}
-          className={`text-xs shrink-0 hover:underline transition-colors ${actionClass ?? 'text-primary'}`}
+          className={`-my-2 flex min-h-11 min-w-11 shrink-0 items-center px-1 text-xs hover:underline transition-colors ${actionClass ?? 'text-primary'}`}
         >{action} →</button>
       )}
     </div>
@@ -434,7 +434,7 @@ export function HomePage() {
             </div>
             <button
               onClick={() => navigate('/assistant')}
-              className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors shrink-0"
+              className="flex min-h-11 min-w-11 items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors shrink-0"
             >
               <Mic size={13} /> Ask AI
             </button>
@@ -443,7 +443,7 @@ export function HomePage() {
           {/* 3-stat pulse — calm StatCard tiles (tone tints only the icon
               chip, per the design vision). Each tile is a button that
               drills into the matching surface. */}
-          <div className="grid grid-cols-3 gap-3 mt-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
             <button
               type="button"
               onClick={() => navigate('/jobs')}
@@ -599,7 +599,7 @@ export function HomePage() {
                         { label: 'Contacted', count: leads.filter((l) => l.stage === 'contacted').length, color: 'text-warning', dot: 'bg-warning' },
                         { label: 'Quoted', count: leads.filter((l) => l.stage === 'quoted').length, color: 'text-primary', dot: 'bg-primary' },
                       ].map(({ label, count, color, dot }) => (
-                        <button key={label} onClick={() => navigate('/leads')} className="flex-1 flex flex-col items-center py-3.5 hover:bg-secondary transition-colors">
+                        <button key={label} onClick={() => navigate('/leads')} className="flex-1 min-h-11 flex flex-col items-center py-3.5 hover:bg-secondary transition-colors">
                           <span className={`flex size-1.5 rounded-full mb-1.5 ${dot}`} />
                           <p className={`text-xs ${color}`}>{count}</p>
                           <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
@@ -608,7 +608,7 @@ export function HomePage() {
                     </div>
                     {newLeads.length > 0 && (
                       <div className="border-t border-border px-4 py-3">
-                        <button onClick={() => navigate('/leads')} className="flex items-center gap-2.5 w-full text-left hover:opacity-80 transition-opacity">
+                        <button onClick={() => navigate('/leads')} className="flex min-h-11 items-center gap-2.5 w-full text-left hover:opacity-80 transition-opacity">
                           <span className="size-1.5 rounded-full bg-primary shrink-0 animate-pulse" />
                           <p className="text-xs text-muted-foreground flex-1">
                             <span className="text-foreground">{leadDisplayName(newLeads[0]!)}</span>
@@ -715,8 +715,8 @@ export function HomePage() {
                     <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-secondary text-xs text-muted-foreground px-1.5">{unpaidInvs.length}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-sm text-warning">{centsToDisplay(totalOutCents)}</span>
-                    <button onClick={() => navigate('/reports/money')} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary">
+                    <span className="text-sm text-warning">${totalOut.toLocaleString()}</span>
+                    <button onClick={() => navigate('/reports/money')} className="-mr-2 flex min-h-11 min-w-11 items-center gap-0.5 px-2 text-xs text-primary hover:text-primary">
                       Money summary <ArrowRight size={11} />
                     </button>
                   </div>

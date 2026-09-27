@@ -274,6 +274,7 @@ export function createEstimateRouter(
             estimateNumber,
             validUntil: parsed.validUntil ? new Date(parsed.validUntil) : undefined,
             createdBy: req.auth!.userId,
+            actorRole: req.auth!.role,
           },
           estimateRepo,
           auditRepo
