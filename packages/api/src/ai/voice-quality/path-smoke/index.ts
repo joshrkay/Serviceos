@@ -15,3 +15,15 @@ export {
   type PathSmokeTurnResult,
   type RunPathSmokeOptions,
 } from './run-path-smoke';
+
+export {
+  selectPathSmokeProvider,
+  describePathSmokeProvider,
+  projectPathSmokeCents,
+  pathSmokeCallCents,
+  withPathSmokeSpendTracking,
+  type PathSmokeSpendTrackingDeps,
+  type ProjectPathSmokeCentsInput,
+  type PathSmokeEnv,
+  type PathSmokeProviderSelection,
+} from './provider';

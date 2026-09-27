@@ -2,6 +2,13 @@
 # negotiate / complaint / Spanish). Complements the mock Layer-1 voice-quality
 # gate: this actually calls the production classifier with a live model.
 #
+# Provider: the SAME gateway config production runs. Railway prod/dev set
+# AI_PROVIDER_BASE_URL=https://api.openai.com/v1 + AI_PROVIDER_API_KEY with
+# gpt-4o-mini (default/lightweight/standard) and gpt-4o (complex); the script
+# builds the gateway with the production factory (createLLMGateway) from these
+# vars. ANTHROPIC_API_KEY is deliberately NOT wired here — production does not
+# use Anthropic, so a green run on it would prove the wrong provider.
+#
 # Cost: 11 classify calls, capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default $1).
 # Missing credentials fail as an explicit unmet prerequisite; they are never
 # reported as green execution evidence.
@@ -28,8 +35,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # ~$1 default; suite is 11 Haiku classify calls.
+      AI_PROVIDER_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AI_PROVIDER_BASE_URL: https://api.openai.com/v1
+      AI_DEFAULT_MODEL: gpt-4o-mini
+      AI_LIGHTWEIGHT_MODEL: gpt-4o-mini
+      AI_STANDARD_MODEL: gpt-4o-mini
+      AI_COMPLEX_MODEL: gpt-4o
+      # Classify deadline: the production value from
+      # docs/runbooks/live-ai-restore.md (code default is 4s).
+      AI_CLASSIFY_INTENT_DEADLINE_MS: '12000'
+      # ~$1 cap; 11 gpt-4o-mini classify calls project to a few cents.
       AGENT_PATH_SMOKE_COST_CAP_CENTS: '100'
       AGENT_PATH_SMOKE_PASS_RATIO: '0.8'
       AGENT_PATH_SMOKE_OUT: agent-path-smoke-report.json
@@ -45,8 +60,8 @@ jobs:
         run: npm run agent:graph-coverage --workspace=packages/api -- --gate --markdown
       - name: Verify API key is present
         run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::error::ANTHROPIC_API_KEY is not set — real-LLM path smoke was not executed."
+          if [ -z "$AI_PROVIDER_API_KEY" ]; then
+            echo "::error::AI_PROVIDER_API_KEY is not set (secrets.OPENAI_API_KEY) — real-LLM path smoke was not executed."
             echo "A missing credential is an unmet external prerequisite, not a green gate."
             exit 1
           fi
