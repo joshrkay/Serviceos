@@ -47,6 +47,7 @@ describe('Postgres integration — jobs search (#1406 D4)', () => {
       postalCode: '85201',
       country: 'USA',
       isPrimary: true,
+      addressType: 'service',
       isArchived: false,
       createdAt: new Date(),
       updatedAt: new Date(),
