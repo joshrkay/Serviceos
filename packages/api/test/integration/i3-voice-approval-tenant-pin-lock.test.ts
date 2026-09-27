@@ -465,7 +465,7 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
 
     // Eight spoofed calls, each parked at the challenge prompt for its own item.
     const calls = Array.from({ length: 8 }, (_, i) => `i3t-race-${i + 1}`);
-    const pendings = [];
+    const pendings: NonNullable<VoiceApprovalTurnResult['pending']>[] = [];
     for (const [i, sessionId] of calls.entries()) {
       await seedMoney(tenant.tenantId, `${TREES[i]} Landscaping`, 2000 + i);
       const ref = { ...warmup, sessionId };
@@ -515,7 +515,7 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
     expect((await enrollViaRoute(tenant, PIN)).status).toBe(204);
     const { deps } = makeDeps('+15125550207');
     const calls = Array.from({ length: 9 }, (_, i) => `i3t-race0-${i + 1}`);
-    const pendings = [];
+    const pendings: NonNullable<VoiceApprovalTurnResult['pending']>[] = [];
     for (const [i, sessionId] of calls.entries()) {
       await seedMoney(tenant.tenantId, `${TREES[i]} Roofing`, 4000 + i);
       const ref = { tenantId: tenant.tenantId, sessionId, ownerSession: true } as const;

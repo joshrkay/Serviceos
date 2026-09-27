@@ -130,7 +130,7 @@ function makeHarness(
   opts: {
     pinChangedAt?: Date;
     auditRepo?: InMemoryAuditRepository | null;
-    alertRepo?: ClaimStore;
+    alertRepo?: Pick<ClaimStore, 'claim'> & Partial<ClaimStore>;
     sendSms?: (to: string, body: string) => Promise<void>;
   } = {},
 ): Harness {
