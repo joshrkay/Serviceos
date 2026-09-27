@@ -113,4 +113,35 @@ describe('InvoiceCreate (P11-006)', () => {
       expect(body.lineItems[0].totalCents).toBe(12500);
     });
   });
+
+  it('#1406 D9 — /invoices/new?jobId=… preselects that job', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'job-42', jobNumber: 'JOB-0042', summary: 'AC tune-up' }),
+    } as unknown as Response);
+
+    render(
+      <MemoryRouter initialEntries={['/invoices/new?jobId=job-42']}>
+        <InvoiceCreate />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByLabelText('Job *')).toHaveValue('job-42');
+  });
+
+  it('#1406 D9 — tapping Create with no job says why instead of silently doing nothing', async () => {
+    render(
+      <MemoryRouter>
+        <InvoiceCreate />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /create invoice/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/Job is required/);
+    });
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
 });
