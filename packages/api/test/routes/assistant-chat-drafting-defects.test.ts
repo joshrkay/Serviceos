@@ -164,6 +164,43 @@ describe('#1276C — a numeric reply answers the customer question even when the
     expect(persisted.payload.customerId).toBe(MORGAN);
     expect(missingFieldsFor(persisted)).not.toContain('customerId');
   });
+
+  // #1276 leftover — a pick on the card (PUT /api/proposals/:id → editProposal)
+  // answers the chat question too. The question used to stay stored on the
+  // proposal, so a later "1" was still read as an answer to it: the reply
+  // claimed "Morgan Ashworth — got it" over a card that says Riley.
+  it('after the card pick fills customerId, a later "1" is no longer an answer to the question', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway([
+        classifierReply('create_invoice', { customerName: 'Ashworth', amount: 40000 }),
+        JSON.stringify({ lineItems: [{ description: 'Repair', quantity: 1, unitPrice: 40000 }] }),
+      ]),
+      proposalRepo,
+      ambiguousCustomers,
+    );
+    const ask = 'Invoice Ashworth $400 for the repair';
+    const first = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: ask }] });
+    const [drafted] = await proposalRepo.findByTenant(TENANT);
+
+    await editProposal(proposalRepo, TENANT, drafted.id, USER, 'owner', { customerId: RILEY });
+
+    const later = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        conversationId: first.body.conversationId,
+        messages: [
+          { role: 'user', content: ask },
+          { role: 'assistant', content: first.body.message.content },
+          { role: 'user', content: '1' },
+        ],
+      });
+
+    expect(later.body.taskType).not.toBe('assistant.entity_resolution');
+    expect(later.body.message.content).not.toContain('Morgan Ashworth — got it');
+    const picked = await proposalRepo.findById(TENANT, drafted.id);
+    expect(picked!.payload.customerId).toBe(RILEY);
+  });
 });
 
 describe('#1276A — a bare first name asks for the last name instead of guessing', () => {
