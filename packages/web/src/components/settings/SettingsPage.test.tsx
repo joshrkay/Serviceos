@@ -31,6 +31,16 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Price book')).toBeInTheDocument();
   });
 
+  it('#1389: lists the Emergency safety script form under AI & Automation', () => {
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText('Emergency safety script')).toBeInTheDocument();
+  });
+
   it('shows tenant-scoped intake link when me is loaded', () => {
     render(
       <MemoryRouter>
