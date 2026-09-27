@@ -136,6 +136,11 @@ export function IntakeFormPage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
+  // #1406 D10 — without this, a bare /intake (no ?t=) or a failed lookup
+  // left "Loading services…" on screen forever.
+  const [tenantLoad, setTenantLoad] = useState<'loading' | 'missing' | 'failed' | 'loaded'>(
+    () => (new URLSearchParams(window.location.search).get('t') ? 'loading' : 'missing'),
+  );
 
   // Service options = tenant packs from the API + optional local emoji/copy.
   const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => {
@@ -160,9 +165,13 @@ export function IntakeFormPage() {
     const tenantId = new URLSearchParams(window.location.search).get('t');
     if (!tenantId) return;
     fetchIntakeTenantInfo(tenantId)
-      .then(setTenantInfo)
+      .then((info) => {
+        setTenantInfo(info);
+        setTenantLoad('loaded');
+      })
       .catch(() => {
-        /* branding is best-effort; submit path still reports a hard error */
+        // Branding is best-effort, but the service list is not: say so.
+        setTenantLoad('failed');
       });
   }, []);
 
@@ -299,8 +308,18 @@ export function IntakeFormPage() {
               <p className="text-muted-foreground mt-1.5">Select the type of service you need</p>
             </div>
             <div className="flex flex-col gap-3">
-              {tenantInfo === null && (
+              {tenantLoad === 'loading' && (
                 <p className="text-sm text-muted-foreground">Loading services…</p>
+              )}
+              {tenantLoad === 'missing' && (
+                <p className="text-sm text-muted-foreground">
+                  This booking link is incomplete. Please use the link from the business's website, or call them to book.
+                </p>
+              )}
+              {tenantLoad === 'failed' && (
+                <p className="text-sm text-muted-foreground">
+                  We couldn't load this business's services. Please try again, or call to book.
+                </p>
               )}
               {tenantInfo !== null && serviceOptions.length === 0 && (
                 <p className="text-sm text-muted-foreground">
