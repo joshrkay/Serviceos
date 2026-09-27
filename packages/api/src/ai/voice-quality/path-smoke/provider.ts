@@ -14,6 +14,7 @@ import {
   resolveModelForTaskType,
   type AIRoutingConfig,
 } from '../../../config/ai-routing';
+import { DEFAULT_AI_PROVIDER_BASE_URL } from '../../gateway/factory';
 import { LLMGateway, type LLMRequest, type LLMResponse } from '../../gateway/gateway';
 import {
   ANTHROPIC_OPENAI_COMPAT_BASE_URL,
@@ -41,8 +42,6 @@ export type PathSmokeProviderSelection =
       model: string;
     };
 
-/** createLLMGateway's base-URL default (factory.ts). */
-const PRODUCTION_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 /** AppConfig's AI_DEFAULT_MODEL default (shared/config.ts). */
 const PRODUCTION_DEFAULT_MODEL = 'gpt-4o-mini';
 
@@ -84,7 +83,7 @@ export function selectPathSmokeProvider(
       kind: 'production',
       keySource: 'AI_PROVIDER_API_KEY',
       apiKey: prodKey,
-      baseUrl: nonBlank(env.AI_PROVIDER_BASE_URL) ?? PRODUCTION_DEFAULT_BASE_URL,
+      baseUrl: nonBlank(env.AI_PROVIDER_BASE_URL) ?? DEFAULT_AI_PROVIDER_BASE_URL,
       model: resolveProductionClassifyModel(env),
     };
   }

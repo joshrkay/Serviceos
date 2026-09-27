@@ -217,7 +217,11 @@ export function promptBuildersNamingCallerText(roots: readonly string[]): string
  * what closes the round-3 rename hole — a new prompt sender cannot appear
  * without a human looking at where its text comes from.
  */
-const PINNED_GATEWAY_SENDER_COUNT = 48;
+// 48 → 49: ai/voice-quality/path-smoke/provider.ts (withPathSmokeSpendTracking)
+// is a pure pass-through decorator — it forwards the classifier's request to
+// the production gateway unchanged and only reads token usage off the
+// response. It assembles no prompt and adds no caller text.
+const PINNED_GATEWAY_SENDER_COUNT = 49;
 
 type Classification =
   | 'fenced'
