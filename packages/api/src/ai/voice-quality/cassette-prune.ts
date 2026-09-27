@@ -20,8 +20,8 @@
  * sufficient on its own:
  *
  *   1. It trusted the refresh subprocess's EXIT CODE.
- *      `vitest.voice-quality.config.ts` sets `passWithNoTests: true`, so
- *      `vitest run -c vitest.voice-quality.config.ts <nonexistent file>`
+ *      `vitest.voice-quality.config.mts` sets `passWithNoTests: true`, so
+ *      `vitest run -c vitest.voice-quality.config.mts <nonexistent file>`
  *      exits 0. `execFileSync` only throws on a non-zero exit. So any
  *      include-glob drift — an entry file renamed, moved, or re-globbed —
  *      reads as "refresh succeeded" while nothing ran, after which every
