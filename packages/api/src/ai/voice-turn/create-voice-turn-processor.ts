@@ -495,9 +495,9 @@ function isUntrustedS1Session(session: VoiceSession): boolean {
  * this campaign closes on purpose, not by accident (#963/#966).
  *
  * `refuse` and `n/a` cells both leave the gate closed: the pipeline then
- * takes exactly the path that surface takes today (for media-streams
- * lookup, the fall-through into the drafting funnel — never a new spoken
- * refusal line; introducing one is a phase-2 cell flip, not this port).
+ * takes exactly the path that surface takes today (the generic drafting
+ * funnel — never a new spoken refusal line; opening a family on a surface
+ * is a deliberate cell flip, as #1395 did for media-streams lookup).
  *
  * The token is matched against the cell's declared `module` string. The
  * table is TRUTH: when a later PR moves a family's serving branch (the
@@ -4720,9 +4720,10 @@ export function createVoiceTurnProcessor(
       // (phone-lookup-surface → workers/voice-lookup-answer), speaks the
       // line, and does NOT dispatch `intent_classified` — the FSM stays in
       // `intent_capture` so the next turn can be another question. Gated on
-      // the (lookup, surface) cell: a refuse-cell surface (media-streams,
-      // the live D-026 hole) takes today's exact fall-through into the
-      // drafting funnel below — never a new spoken refusal line.
+      // the (lookup, surface) cell; #1395 declared it on media_streams (the
+      // D-026 hole — lookups used to fall into the drafting funnel there).
+      // Tenant/caller scoping and the D-026 actor gate live in
+      // answerPhoneLookup, identical for both phone transports.
       if (
         classifierEvent.type === 'intent_classified' &&
         classifierEvent.confidence >= TAU_INT &&

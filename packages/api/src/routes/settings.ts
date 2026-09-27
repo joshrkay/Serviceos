@@ -20,6 +20,10 @@ import {
   TenantSettings,
   EscalationSettings,
   validateTerminologyPreferences,
+  E1_REVIEWER_KINDS,
+  liveE1Script,
+  missingE1ReviewerKinds,
+  type E1Reviewer,
 } from '../settings/settings';
 import {
   DunningConfig,
@@ -119,29 +123,57 @@ const voiceApprovalPinSchema = z.object({
 // #1386 / O-2 — the reviewed E1 life-safety script plus its reviewer
 // attestation. Strict: the tenant comes from the session, and no other
 // settings key rides along. 2000 = the column's CHECK (migration 267).
-const e1ScriptSchema = z
+//
+// #1389 / O-2 — the attestation is TWO structured sign-offs, one licensed
+// trade professional AND one counsel; a save without both is refused (the
+// pre-#1389 single free-text reviewer body no longer clears the placeholder).
+const notInTheFuture = (v: string) => Date.parse(v) <= Date.now();
+const e1ReviewerSchema = z
   .object({
-    script: z.string().trim().min(1).max(2000),
-    reviewedByName: z.string().trim().min(1).max(200),
-    reviewedByRole: z.string().trim().min(1).max(200),
+    kind: z.enum(E1_REVIEWER_KINDS),
+    name: z.string().trim().min(1).max(200),
+    credential: z.string().trim().min(1).max(200),
     reviewedAt: z
       .string()
       .datetime({ offset: true })
-      .refine((v) => Date.parse(v) <= Date.now(), {
-        message: 'reviewedAt cannot be in the future',
+      .refine(notInTheFuture, { message: 'reviewedAt cannot be in the future' }),
+  })
+  .strict();
+
+const e1ScriptSchema = z
+  .object({
+    script: z.string().trim().min(1).max(2000),
+    reviewers: z
+      .array(e1ReviewerSchema)
+      .length(E1_REVIEWER_KINDS.length)
+      .refine((list) => E1_REVIEWER_KINDS.every((kind) => list.some((r) => r.kind === kind)), {
+        message: 'O-2 needs one licensed trade professional AND one counsel sign-off',
       }),
   })
   .strict();
 
+/** Reviewers in E1_REVIEWER_KINDS order, with reviewedAt as a UTC ISO string. */
+function normalizeE1Reviewers(list: z.infer<typeof e1ScriptSchema>['reviewers']): E1Reviewer[] {
+  return E1_REVIEWER_KINDS.map((kind) => {
+    const r = list.find((entry) => entry.kind === kind)!;
+    return { kind, name: r.name, credential: r.credential, reviewedAt: new Date(r.reviewedAt).toISOString() };
+  });
+}
+
 /** What the owner (and the web banner) sees about the live E1 script. */
 function projectE1Script(settings: TenantSettings | null) {
-  const script = settings?.e1ReviewedScript?.trim() || null;
+  const stored = settings?.e1ReviewedScript?.trim() || null;
   return {
-    status: script ? ('reviewed' as const) : ('placeholder' as const),
-    reviewedScript: script,
-    reviewedByName: script ? settings?.e1ReviewedByName ?? null : null,
-    reviewedByRole: script ? settings?.e1ReviewedByRole ?? null : null,
-    reviewedAt: script && settings?.e1ReviewedAt ? settings.e1ReviewedAt.toISOString() : null,
+    // 'reviewed' only when the script is actually spoken on E1 calls —
+    // the same predicate the call paths use (liveE1Script).
+    status: liveE1Script(settings) ? ('reviewed' as const) : ('placeholder' as const),
+    reviewedScript: stored,
+    reviewedByName: stored ? settings?.e1ReviewedByName ?? null : null,
+    reviewedByRole: stored ? settings?.e1ReviewedByRole ?? null : null,
+    reviewedAt: stored && settings?.e1ReviewedAt ? settings.e1ReviewedAt.toISOString() : null,
+    // #1389 — additive: the structured sign-offs and which are still owed.
+    reviewers: stored ? settings?.e1Reviewers ?? [] : [],
+    missingReviewerKinds: missingE1ReviewerKinds(stored ? settings : null),
   };
 }
 
@@ -734,15 +766,20 @@ export function createSettingsRouter(
       try {
         const tenantId = req.auth!.tenantId;
         const input = e1ScriptSchema.parse(req.body ?? {});
+        const reviewers = normalizeE1Reviewers(input.reviewers);
         const existing = await ensureTenantSettings(tenantId, settingsRepo);
-        const reviewedAt = new Date(input.reviewedAt);
+        // The pre-#1389 single-attestation columns keep a readable summary
+        // (both names, both capacities, the date the LAST sign-off landed)
+        // so a reader of the old GET fields still sees who signed.
+        const signedOffAt = new Date(Math.max(...reviewers.map((r) => Date.parse(r.reviewedAt))));
         const updated = await updateSettings(
           tenantId,
           {
             e1ReviewedScript: input.script,
-            e1ReviewedByName: input.reviewedByName,
-            e1ReviewedByRole: input.reviewedByRole,
-            e1ReviewedAt: reviewedAt,
+            e1Reviewers: reviewers,
+            e1ReviewedByName: reviewers.map((r) => r.name).join('; '),
+            e1ReviewedByRole: 'licensed trade professional; counsel',
+            e1ReviewedAt: signedOffAt,
           },
           settingsRepo,
         );
@@ -764,9 +801,7 @@ export function createSettingsRouter(
               // itself lives on the row (and its length is enough to tell
               // two saves apart here).
               metadata: {
-                reviewedByName: input.reviewedByName,
-                reviewedByRole: input.reviewedByRole,
-                reviewedAt: reviewedAt.toISOString(),
+                reviewers,
                 scriptLength: input.script.length,
                 previousStatus: projectE1Script(existing).status,
               },
@@ -801,6 +836,7 @@ export function createSettingsRouter(
             e1ReviewedByName: null,
             e1ReviewedByRole: null,
             e1ReviewedAt: null,
+            e1Reviewers: null,
           },
           settingsRepo,
         );

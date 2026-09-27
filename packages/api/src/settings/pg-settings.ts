@@ -9,6 +9,7 @@ import {
   normalizeReminderOffsets,
   VOICE_APPROVAL_PIN_CREDENTIAL_KEYS,
   type SettingsUpdateOptions,
+  type E1Reviewer,
 } from './settings';
 
 /**
@@ -220,6 +221,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     e1ReviewedByName: (row.e1_reviewed_by_name as string | null) ?? undefined,
     e1ReviewedByRole: (row.e1_reviewed_by_role as string | null) ?? undefined,
     e1ReviewedAt: row.e1_reviewed_at ? new Date(row.e1_reviewed_at as string | Date) : undefined,
+    // #1389 / O-2 — migration 294: the two structured sign-offs (JSONB array).
+    e1Reviewers: Array.isArray(row.e1_reviewers) ? (row.e1_reviewers as E1Reviewer[]) : undefined,
     // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
     // pre-migration row reads as enabled.
     weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
@@ -521,6 +524,14 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // settings-surface hours change never reached the scheduler. A
         // cleared write ('{}' for undefined/empty/null) reads back as
         // "not configured" and the scheduler falls back to defaults.
+        // #1389 / O-2 — e1_reviewers is JSONB; null / [] clear it to NULL.
+        if (key === 'e1Reviewers') {
+          setClauses.push(`e1_reviewers = $${paramIndex}::jsonb`);
+          const v = value as E1Reviewer[] | undefined | null;
+          params.push(Array.isArray(v) && v.length > 0 ? JSON.stringify(v) : null);
+          paramIndex++;
+          continue;
+        }
         if (key === 'businessHours') {
           setClauses.push(`business_hours = $${paramIndex}::jsonb`);
           const v = value as Record<string, unknown> | undefined | null;

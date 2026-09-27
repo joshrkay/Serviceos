@@ -540,11 +540,25 @@ export function isPriceConflict(draftedCents: number, catalogCents: number): boo
  * estimate handler (priceField 'unitPrice' — that contract's integer-
  * cents field). Pure: returns new line-item objects.
  */
+export interface CatalogPricingOptions {
+  /**
+   * #1399 N1 — whether the operator's own words mention a price
+   * (price-scale-guard.ts `operatorMentionsPrice`). `false` means every
+   * drafted price is the model's invention, so an exact/high match is
+   * authoritative and the "did you mean" conflict carve-out is skipped.
+   * Omitted = unknown (the caller has no utterance), which keeps the
+   * conservative conflict behaviour.
+   */
+  operatorMentionedPrice?: boolean;
+}
+
 export function applyCatalogPricing(
   lineItems: Array<Record<string, unknown>>,
   resolutions: CatalogLineResolution[],
   priceField: 'unitPriceCents' | 'unitPrice',
+  options: CatalogPricingOptions = {},
 ): CatalogPricingOutcome {
+  const conflictEligible = options.operatorMentionedPrice !== false;
   const out: Array<Record<string, unknown>> = [];
   const missingFields: string[] = [];
   const catalogResolution: CatalogPricingOutcome['catalogResolution'] = {};
@@ -568,7 +582,11 @@ export function applyCatalogPricing(
           ? draftedRaw
           : null;
 
-      if (draftedPrice !== null && isPriceConflict(draftedPrice, item.unitPriceCents)) {
+      if (
+        conflictEligible &&
+        draftedPrice !== null &&
+        isPriceConflict(draftedPrice, item.unitPriceCents)
+      ) {
         // "Did you mean" — don't overwrite. Keep the drafted line exactly
         // as spoken and surface the conflict as a one-tap ambiguity: the
         // real catalog item vs. a synthetic "keep the spoken price"
@@ -724,6 +742,7 @@ export async function groundLineItemPricing(
   lineItems: Array<Record<string, unknown>>,
   priceField: 'unitPriceCents' | 'unitPrice',
   loadActiveCatalog: (() => Promise<CatalogItem[]>) | null,
+  options: CatalogPricingOptions = {},
 ): Promise<CatalogPricingOutcome> {
   if (lineItems.length === 0) {
     return {
@@ -750,7 +769,7 @@ export async function groundLineItemPricing(
     lineItems.map((li) => String(li.description ?? '')),
     activeItems,
   );
-  return applyCatalogPricing(lineItems, resolutions, priceField);
+  return applyCatalogPricing(lineItems, resolutions, priceField, options);
 }
 
 /**
