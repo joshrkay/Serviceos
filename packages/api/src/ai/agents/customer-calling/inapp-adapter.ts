@@ -78,7 +78,11 @@ import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
-import { resolveSchedulingEntities, requiresExistingEntity } from './entity-resolution';
+import {
+  pickFollowUpNotFoundIsTerminal,
+  requiresExistingEntity,
+  resolveSchedulingEntities,
+} from './entity-resolution';
 import type { SchedulingEntityResolution } from './entity-resolution';
 import type { SettingsRepository } from '../../../settings/settings';
 import { isRuntimeTimezone } from '../../../shared/timezone';
@@ -1055,6 +1059,8 @@ export class InAppVoiceAdapter {
     tenantId: string,
     intent: string,
     resolution: SchedulingEntityResolution,
+    /** #1416 — this resolution re-ran after a pick/confirm (pinnedRefs). */
+    afterPick = false,
   ): Promise<CallingAgentEvent> {
     if (resolution.status === 'ambiguous' && resolution.ambiguous) {
       const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
@@ -1098,7 +1104,12 @@ export class InAppVoiceAdapter {
     // surface they become the spoken "I couldn't find a matching customer
     // for Patel" instead of a page to on-call (transitions.ts
     // `escalateEntityNotFound`).
-    if (resolution.status === 'not_found' && requiresExistingEntity(intent)) {
+    // #1416 — after a pick, a job the operator NAMED on an invoice/estimate
+    // is also terminal (pickFollowUpNotFoundIsTerminal): never a placeholder.
+    const notFoundIsTerminal = afterPick
+      ? pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
+      : requiresExistingEntity(intent);
+    if (resolution.status === 'not_found' && notFoundIsTerminal) {
       return {
         type: 'entity_not_found',
         ...(resolution.notFound?.entityKind ? { entityKind: resolution.notFound.entityKind } : {}),
@@ -1922,9 +1933,33 @@ export class InAppVoiceAdapter {
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
     } else if (stateBeforeTurn === 'entity_confirm') {
-      fsmEvent = isAffirmation(text)
-        ? { type: 'entity_confirm_affirmed' }
-        : { type: 'entity_confirm_declined' };
+      const context = session.machine.currentContext;
+      const confirming = context.pendingEntityConfirmation;
+      if (!isAffirmation(text)) {
+        fsmEvent = { type: 'entity_confirm_declined' };
+      } else if (confirming && context.currentIntent) {
+        // #1416 — "yes" settles ONE reference; re-resolve the rest with the
+        // confirmed candidate pinned, exactly as a disambiguation pick does.
+        const pinned = {
+          ...confirming.partialRefs,
+          [confirming.refKey]: confirming.candidate.id,
+        };
+        fsmEvent = await this.toResolutionEvent(
+          session.tenantId,
+          context.currentIntent,
+          await this.resolveEntities(
+            session.tenantId,
+            context.currentIntent,
+            { ...context.extractedEntities, ...pinned },
+            context.jobId,
+            session,
+            pinned,
+          ),
+          true,
+        );
+      } else {
+        fsmEvent = { type: 'entity_confirm_affirmed' };
+      }
     } else if (stateBeforeTurn === 'entity_resolution') {
       const pending = await this.resolvePendingForDisambiguation(
         session.tenantId,
@@ -1961,6 +1996,7 @@ export class InAppVoiceAdapter {
                   session,
                   pickedRefs,
                 ),
+                true,
               )
             : { type: 'entity_resolved', refs: pickedRefs };
         } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {

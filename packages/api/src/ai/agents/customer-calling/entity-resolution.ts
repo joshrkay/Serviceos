@@ -422,6 +422,20 @@ export function requiresExistingEntity(intent: string): boolean {
   );
 }
 
+/**
+ * #1416 — the not-found rule for the references still outstanding AFTER a
+ * disambiguation pick. Everything `requiresExistingEntity` covers, plus the
+ * one creation-intent case where the caller named an EXISTING record: the
+ * job in "invoice / estimate the QA Matrix job". A creation intent normally
+ * proceeds without a match (a new job is auto-opened at execution), but a
+ * job the caller explicitly named that does not exist must be said honestly
+ * — never silently replaced by a placeholder job.
+ */
+export function pickFollowUpNotFoundIsTerminal(intent: string, entityKind?: string): boolean {
+  if (requiresExistingEntity(intent)) return true;
+  return entityKind === 'job' && (intent === 'create_invoice' || intent === 'draft_estimate');
+}
+
 const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
   customer: 'customerId',
   job: 'jobId',

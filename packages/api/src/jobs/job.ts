@@ -3,6 +3,8 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 import { type DepositStatus, deriveDepositStatus } from './deposit-rule';
+import type { CustomerRepository } from '../customers/customer';
+import type { LocationRepository } from '../locations/location';
 
 /**
  * Epic 5.1 — canonical job lifecycle. Stored identifiers; the product labels
@@ -417,9 +419,37 @@ export async function listJobsWithMeta(
   return { data: all.slice(offset, offset + limit), total: all.length };
 }
 
+/**
+ * #1416 — where the in-memory repo looks up a job's customer and service
+ * address for `search`, so it matches the SAME fields PgJobRepository does
+ * (customer display/company name; street, city, postal code). Getters, not
+ * instances, because build-repositories constructs the job repo before the
+ * customer/location repos it shares with the rest of the app.
+ */
+export interface InMemoryJobSearchDirectory {
+  customers?: () => Pick<CustomerRepository, 'findById'>;
+  locations?: () => Pick<LocationRepository, 'findById'>;
+}
+
 export class InMemoryJobRepository implements JobRepository {
   private jobs: Map<string, Job> = new Map();
   private counters: Map<string, number> = new Map();
+
+  constructor(private readonly searchDirectory: InMemoryJobSearchDirectory = {}) {}
+
+  /** Mirrors PgJobRepository's search predicate (#1406 D4). */
+  private async matchesSearch(job: Job, q: string): Promise<boolean> {
+    const hit = (value: string | undefined | null) => !!value && value.toLowerCase().includes(q);
+    if (hit(job.summary) || hit(job.jobNumber)) return true;
+    const customer = job.customerId
+      ? await this.searchDirectory.customers?.().findById(job.tenantId, job.customerId)
+      : null;
+    if (customer && (hit(customer.displayName) || hit(customer.companyName))) return true;
+    const location = job.locationId
+      ? await this.searchDirectory.locations?.().findById(job.tenantId, job.locationId)
+      : null;
+    return !!location && (hit(location.street1) || hit(location.city) || hit(location.postalCode));
+  }
 
   async create(job: Job): Promise<Job> {
     this.jobs.set(job.id, { ...job });
@@ -465,11 +495,8 @@ export class InMemoryJobRepository implements JobRepository {
     if (options?.technicianId) results = results.filter((j) => j.assignedTechnicianId === options.technicianId);
     if (options?.search) {
       const q = options.search.toLowerCase();
-      results = results.filter(
-        (j) =>
-          j.summary.toLowerCase().includes(q) ||
-          j.jobNumber.toLowerCase().includes(q)
-      );
+      const matches = await Promise.all(results.map((j) => this.matchesSearch(j, q)));
+      results = results.filter((_, i) => matches[i]);
     }
     // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
     const sortDir = options?.sort === 'asc' ? 1 : -1;

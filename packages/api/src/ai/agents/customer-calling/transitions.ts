@@ -1275,6 +1275,20 @@ function transitionEntityConfirm(
     };
   }
 
+  // #1416 — the adapter re-resolved the references still outstanding with
+  // the confirmed candidate pinned (the disambiguation pick's #1406 D6
+  // approach), so this turn carries a fresh resolution outcome instead of a
+  // bare affirmation: a second ambiguity asks, a named record that is not
+  // there is said honestly, a full resolution reads back.
+  if (
+    event.type === 'entity_resolved' ||
+    event.type === 'entity_ambiguous' ||
+    event.type === 'entity_not_found' ||
+    event.type === 'entity_confirm_candidate'
+  ) {
+    return transitionEntityResolution(event, { ...context, pendingEntityConfirmation: undefined });
+  }
+
   // Declined / unclear / timeout / no pending candidate → escalate, same
   // path and effects as entity_not_found. On the in-app operator surface
   // that is the honest not-found line + `intent_capture`, not a page — the
