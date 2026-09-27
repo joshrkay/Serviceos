@@ -218,7 +218,6 @@ function MessageBubble({
   onApproved?: (input: StartUndoInput) => void;
 }) {
   const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
-  const [showActions, setShowActions] = useState(false);
   const isUser = msg.role === 'user';
 
   // Format markdown-ish bold
@@ -281,8 +280,6 @@ function MessageBubble({
     <div
       className="flex gap-3 mb-4 group"
       style={{ animation: 'fadeSlideUp 0.25s ease' }}
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
     >
       <AvatarAI />
 
@@ -384,26 +381,37 @@ function MessageBubble({
         <div className="flex items-center gap-3 mt-1.5 ml-1">
           <p className="text-xs text-slate-400">{msg.time}</p>
 
-          {/* Hover actions */}
-          {showActions && !msg.proposal && (
-            <div className="flex items-center gap-1" style={{ animation: 'fadeIn 0.15s ease' }}>
+          {/* Reply actions. #1412 — always rendered so a touch user can reach
+              them (hover never fires on a phone), each a 44px target; on a
+              pointer device they stay quiet until the row is hovered or
+              focused. */}
+          {!msg.proposal && (
+            <div className="flex items-center md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100 transition-opacity">
               <button
+                type="button"
+                aria-label="Helpful"
+                aria-pressed={reaction === 'up'}
                 onClick={() => setReaction(r => r === 'up' ? null : 'up')}
-                className={`flex size-6 items-center justify-center rounded-full transition-colors ${reaction === 'up' ? 'bg-green-100 text-green-600' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
+                className={`flex size-11 items-center justify-center rounded-full transition-colors ${reaction === 'up' ? 'bg-green-100 text-green-600' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
               >
-                <ThumbsUp size={11} />
+                <ThumbsUp size={13} />
               </button>
               <button
+                type="button"
+                aria-label="Not helpful"
+                aria-pressed={reaction === 'down'}
                 onClick={() => setReaction(r => r === 'down' ? null : 'down')}
-                className={`flex size-6 items-center justify-center rounded-full transition-colors ${reaction === 'down' ? 'bg-red-100 text-red-500' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
+                className={`flex size-11 items-center justify-center rounded-full transition-colors ${reaction === 'down' ? 'bg-red-100 text-red-500' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
               >
-                <ThumbsDown size={11} />
+                <ThumbsDown size={13} />
               </button>
               <button
+                type="button"
+                aria-label="Copy message"
                 onClick={() => navigator.clipboard?.writeText(msg.content)}
-                className="flex size-6 items-center justify-center rounded-full text-slate-300 hover:text-slate-500 hover:bg-slate-100 transition-colors"
+                className="flex size-11 items-center justify-center rounded-full text-slate-300 hover:text-slate-500 hover:bg-slate-100 transition-colors"
               >
-                <Copy size={11} />
+                <Copy size={13} />
               </button>
             </div>
           )}
@@ -1316,8 +1324,10 @@ export function AssistantPage() {
         {/* Scroll to bottom btn */}
         {showScrollBtn && (
           <button
+            type="button"
+            aria-label="Scroll to latest"
             onClick={scrollToBottom}
-            className="fixed bottom-32 right-6 flex size-9 items-center justify-center rounded-full bg-white border border-slate-200 shadow-md text-slate-500 hover:bg-slate-50 transition-all z-10"
+            className="fixed bottom-32 right-6 flex size-11 items-center justify-center rounded-full bg-white border border-slate-200 shadow-md text-slate-500 hover:bg-slate-50 transition-all z-10"
             style={{ animation: 'fadeIn 0.2s ease' }}
           >
             <ChevronDown size={16} />
