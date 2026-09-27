@@ -477,13 +477,13 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
             <button
               onClick={saveAndApply}
               disabled={isApproving}
-              className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
+              className="flex min-h-11 items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
             >
               <Check size={12} /> {isApproving ? 'Applying…' : 'Save & apply'}
             </button>
             <button
               onClick={() => setEditing(false)}
-              className="px-4 py-2 rounded-lg border border-border text-xs text-muted-foreground hover:bg-secondary transition-colors"
+              className="min-h-11 px-4 py-2 rounded-lg border border-border text-xs text-muted-foreground hover:bg-secondary transition-colors"
             >
               Cancel
             </button>
@@ -519,8 +519,8 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
             <Sparkles size={11} className="text-primary" />
           </span>
           <div className="flex-1 min-w-0">
-            <p className="text-sm text-foreground">{proposal.title}</p>
-            <p className="text-sm text-muted-foreground mt-1">{proposal.summary}</p>
+            <p className="text-sm text-foreground break-words">{proposal.title}</p>
+            <p className="text-sm text-muted-foreground mt-1 break-words">{proposal.summary}</p>
 
             {/* Impact tag */}
             {proposal.impact && (
@@ -715,14 +715,14 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
           Not saved: {actionError}
         </p>
       )}
-      <div className="flex items-center gap-2 border-t border-border bg-secondary/80 px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-secondary/80 px-4 py-2.5">
         {proposal.type !== 'Clarification' && (
           <button
             // Address completion rides along with the approval — it is
             // NEVER a precondition for it. See the address block above.
             onClick={() => { void runApprove(undefined, mergedEdits()); }}
             disabled={isApproving || missing.length > 0}
-            className="flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs text-primary-foreground hover:bg-primary/90 active:bg-primary/80 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
+            className="flex min-h-11 items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs text-primary-foreground hover:bg-primary/90 active:bg-primary/80 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
           >
             <Check size={12} /> {isApproving ? 'Applying…' : 'Approve'}
           </button>
@@ -731,7 +731,7 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
         {proposal.editFields && proposal.editFields.length > 0 && (
           <button
             onClick={() => setEditing(true)}
-            className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs text-foreground hover:bg-secondary transition-colors"
+            className="flex min-h-11 items-center gap-1.5 rounded-lg border border-border bg-card px-3.5 py-2 text-xs text-foreground hover:bg-secondary transition-colors"
           >
             <Pencil size={12} /> Edit
           </button>
@@ -739,7 +739,7 @@ export function AIProposalCard({ proposal, onApprove, onReject, onResolveLine, o
 
         <button
           onClick={() => { void runReject(); }}
-          className="ml-auto flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+          className="ml-auto flex min-h-11 items-center gap-1.5 rounded-lg px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
         >
           <X size={12} /> Dismiss
         </button>
