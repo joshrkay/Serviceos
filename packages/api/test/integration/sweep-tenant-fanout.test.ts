@@ -25,7 +25,7 @@
  * carries tenants from every other integration file, so the sweep's aggregate
  * counters include strangers; only row-level checks on our own ids are sound.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
@@ -79,6 +79,13 @@ import {
 import { PgDailyDigestRepository } from '../../src/digest/pg-daily-digest';
 import type { DigestComputeDeps } from '../../src/digest/digest-service';
 import type { SettingsRepository } from '../../src/settings/settings';
+import { runAccountingSyncSweep } from '../../src/workers/accounting-sync-worker';
+import {
+  PgAccountingIntegrationRepository,
+  PgAccountingSyncLogRepository,
+} from '../../src/integrations/accounting/repository';
+import type { QuickBooksFetch } from '../../src/integrations/accounting/quickbooks-oauth';
+import { readTenantPlanId } from '../../src/billing/plan-features';
 import { createLogger } from '../../src/logging/logger';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -1416,5 +1423,221 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
       expect(enqueued).not.toContain(doomed.jobId);
       expect(enqueued).toContain(survivor.jobId);
     });
+  });
+});
+
+/**
+ * The ninth tenant-iterating sweep (PRD 9.11; research #1003): QuickBooks sync.
+ *
+ * Its enumerator is not `listAllTenantIds` but the connected-integration set —
+ * `PgAccountingIntegrationRepository.findAllActive()`, a system-level
+ * cross-tenant read — and the configuration each tenant brings is its OWN
+ * Intuit company (realm) plus its Rivet plan (QuickBooks is Growth-only, read
+ * through the production `readTenantPlanId`). T4 here reads: the real
+ * enumerator + the real plan reader, several connected tenants in one pass,
+ * each tenant's receipt posted to ITS realm, a non-Growth tenant skipped while
+ * its neighbours sync, and one tenant's failure not aborting the rest.
+ *
+ * Intuit itself is the only fake (the `fetchFn` seam): one human consent click
+ * separates this from a sandbox run, and that click is the owner's (#1000).
+ */
+describe('Postgres integration — accounting-sync (QuickBooks) sweep fan-out (T4)', () => {
+  let pool: Pool;
+  let integrationRepo: PgAccountingIntegrationRepository;
+  let syncLogRepo: PgAccountingSyncLogRepository;
+  let invoiceRepo: PgInvoiceRepository;
+  let jobRepo: PgJobRepository;
+  let customerRepo: PgCustomerRepository;
+  let locationRepo: PgLocationRepository;
+  const priorKey = process.env.TENANT_ENCRYPTION_KEY;
+
+  const QBO_CONFIG = {
+    clientId: 'qbo-client',
+    clientSecret: 'qbo-secret',
+    redirectUri: 'http://localhost/oauth/qbo/callback',
+    environment: 'sandbox' as const,
+  };
+
+  beforeAll(async () => {
+    process.env.TENANT_ENCRYPTION_KEY =
+      '0011223344556677889900112233445566778899001122334455667788990011';
+    pool = await getSharedTestDb();
+    integrationRepo = new PgAccountingIntegrationRepository(pool);
+    syncLogRepo = new PgAccountingSyncLogRepository(pool);
+    invoiceRepo = new PgInvoiceRepository(pool);
+    jobRepo = new PgJobRepository(pool);
+    customerRepo = new PgCustomerRepository(pool);
+    locationRepo = new PgLocationRepository(pool);
+  });
+
+  // Every connection this block makes is disconnected after each test. The
+  // container is shared across integration files and `findAllActive` is
+  // global: a Starter tenant (skipped here on purpose) or the doomed tenant
+  // left connected with an unsynced paid invoice would be picked up by
+  // `accounting-sync.test.ts`'s sweeps, whose happy path counts Intuit calls
+  // across the whole sweep — observed failing in a combined run before this.
+  const seeded: string[] = [];
+  afterEach(async () => {
+    for (const tenantId of seeded.splice(0)) {
+      await integrationRepo.disconnect(tenantId, 'quickbooks');
+    }
+  });
+
+  afterAll(() => {
+    if (priorKey === undefined) delete process.env.TENANT_ENCRYPTION_KEY;
+    else process.env.TENANT_ENCRYPTION_KEY = priorKey;
+  });
+
+  interface ConnectedTenant {
+    tenantId: string;
+    integrationId: string;
+    realmId: string;
+    invoiceId: string;
+    invoiceNumber: string;
+  }
+
+  /** A tenant on `plan`, connected to its own QuickBooks company, with one paid invoice. */
+  async function seedConnectedTenant(plan: 'growth' | 'starter'): Promise<ConnectedTenant> {
+    const { tenantId, userId } = await createTestTenant(pool);
+    // plan_id is written by the Stripe webhook in production; fixture only.
+    await pool.query('UPDATE tenants SET plan_id = $2 WHERE id = $1', [tenantId, plan]);
+    const realmId = `realm-${uuidv4()}`;
+    const integration = await integrationRepo.upsert({
+      tenantId,
+      provider: 'quickbooks',
+      accessToken: `access-${tenantId}`,
+      refreshToken: `refresh-${tenantId}`,
+      realmId,
+    });
+    seeded.push(tenantId);
+    const customerId = uuidv4();
+    const now = new Date();
+    await customerRepo.create({
+      id: customerId, tenantId, firstName: 'Quinn', lastName: 'Books',
+      displayName: 'Quinn Books', email: 'quinn@example.com', primaryPhone: '+15555550100',
+      preferredChannel: 'phone', smsConsent: false, isArchived: false,
+      createdBy: userId, createdAt: now, updatedAt: now,
+    });
+    const locationId = uuidv4();
+    await locationRepo.create({
+      id: locationId, tenantId, customerId, street1: '1 Ledger Ln', city: 'Austin',
+      state: 'TX', postalCode: '78701', country: 'USA', isPrimary: true, isArchived: false,
+      createdAt: now, updatedAt: now,
+    });
+    const jobId = uuidv4();
+    await jobRepo.create({
+      id: jobId, tenantId, customerId, locationId, jobNumber: `JOB-${jobId.slice(0, 8)}`,
+      summary: 'QB fan-out job', status: 'completed', priority: 'normal',
+      createdBy: userId, createdAt: now, updatedAt: now,
+    });
+    const lineItems = [buildLineItem(uuidv4(), 'Service', 1, 12500, 1, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    const invoiceId = uuidv4();
+    const invoiceNumber = `INV-${invoiceId.slice(0, 8)}`;
+    await invoiceRepo.create({
+      id: invoiceId, tenantId, jobId, invoiceNumber, status: 'paid', lineItems, totals,
+      amountPaidCents: totals.totalCents, amountDueCents: 0,
+      issuedAt: new Date('2026-06-19T15:00:00.000Z'),
+      createdBy: userId, createdAt: now, updatedAt: now,
+    });
+    return { tenantId, integrationId: integration.id, realmId, invoiceId, invoiceNumber };
+  }
+
+  type IntuitCall = { url: string; body: Record<string, unknown> | null };
+
+  /** Fake Intuit (the only fake): records every call's URL + body and answers with ids. */
+  function fakeIntuit(): { fetchFn: QuickBooksFetch; calls: IntuitCall[] } {
+    const calls: IntuitCall[] = [];
+    let n = 0;
+    const ok = (json: unknown) =>
+      ({ ok: true, status: 200, headers: { get: () => null }, json: async () => json }) as unknown as Response;
+    const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : String(input);
+      calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+      n += 1;
+      if (url.includes('/customer')) return ok({ Customer: { Id: `qb_cust_${n}` } });
+      if (url.includes('/salesreceipt')) return ok({ SalesReceipt: { Id: `qb_sr_${n}` } });
+      return { ok: false, status: 404, headers: { get: () => null }, json: async () => ({}) } as unknown as Response;
+    }) as QuickBooksFetch;
+    return { fetchFn, calls };
+  }
+
+  const receiptsInCompany = (calls: IntuitCall[], t: ConnectedTenant) =>
+    calls.filter((c) => c.url.includes('/salesreceipt') && c.url.includes(`/${t.realmId}/`));
+
+  const pushedInvoiceIds = async (t: ConnectedTenant) =>
+    (await syncLogRepo.listRecent(t.tenantId, t.integrationId, 50))
+      .filter((l) => l.entityType === 'invoice' && l.status === 'success')
+      .map((l) => l.entityId);
+
+  it("runs on the REAL integration enumerator + plan reader: each Growth tenant's receipt lands in ITS OWN QuickBooks company; a Starter tenant is skipped in the same pass", async () => {
+    const a = await seedConnectedTenant('growth');
+    const b = await seedConnectedTenant('growth');
+    const starter = await seedConnectedTenant('starter');
+    const { fetchFn, calls } = fakeIntuit();
+
+    await runAccountingSyncSweep({
+      integrationRepo,
+      syncLogRepo,
+      invoiceRepo,
+      customerRepo,
+      jobRepo,
+      qboConfig: QBO_CONFIG,
+      fetchFn,
+      logger,
+      planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId),
+    });
+
+    // Each Growth tenant: exactly its own invoice, posted into its own company.
+    expect(receiptsInCompany(calls, a).map((c) => c.body?.DocNumber)).toEqual([a.invoiceNumber]);
+    expect(receiptsInCompany(calls, b).map((c) => c.body?.DocNumber)).toEqual([b.invoiceNumber]);
+    expect(await pushedInvoiceIds(a)).toEqual([a.invoiceId]);
+    expect(await pushedInvoiceIds(b)).toEqual([b.invoiceId]);
+    // The Starter tenant is connected but not entitled: zero Intuit calls, zero sync rows.
+    expect(calls.filter((c) => c.url.includes(`/${starter.realmId}/`))).toEqual([]);
+    expect(await syncLogRepo.listRecent(starter.tenantId, starter.integrationId, 50)).toEqual([]);
+  });
+
+  it('keeps going when one tenant throws — the other connected tenants are still synced', async () => {
+    const ours = [
+      await seedConnectedTenant('growth'),
+      await seedConnectedTenant('growth'),
+      await seedConnectedTenant('growth'),
+    ];
+    const ourIds = ours.map((t) => t.tenantId);
+    // Fail whichever of OUR tenants the enumerator reaches first (findAllActive
+    // has no ORDER BY — same reasoning as recordingSeam), at its first repo read.
+    let doomed: string | null = null;
+    const failingInvoiceRepo = {
+      findByTenant: async (tenantId: string, opts: Parameters<PgInvoiceRepository['findByTenant']>[1]) => {
+        if (ourIds.includes(tenantId) && (doomed === null || doomed === tenantId)) {
+          doomed = tenantId;
+          throw new Error(`synthetic failure for tenant ${tenantId}`);
+        }
+        return invoiceRepo.findByTenant(tenantId, opts);
+      },
+    } as unknown as PgInvoiceRepository;
+    const { fetchFn } = fakeIntuit();
+
+    await runAccountingSyncSweep({
+      integrationRepo,
+      syncLogRepo,
+      invoiceRepo: failingInvoiceRepo,
+      customerRepo,
+      jobRepo,
+      qboConfig: QBO_CONFIG,
+      fetchFn,
+      logger,
+      planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId),
+    });
+
+    expect(doomed).not.toBeNull();
+    const lost = ours.filter((t) => t.tenantId === doomed);
+    const survivors = ours.filter((t) => t.tenantId !== doomed);
+    expect(lost).toHaveLength(1);
+    expect(await pushedInvoiceIds(lost[0])).toEqual([]);
+    expect(survivors).toHaveLength(2);
+    expect(await pushedInvoiceIds(survivors[0])).toEqual([survivors[0].invoiceId]);
+    expect(await pushedInvoiceIds(survivors[1])).toEqual([survivors[1].invoiceId]);
   });
 });

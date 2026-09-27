@@ -561,6 +561,10 @@ function makeWhisperBufferTranscriber(apiKey: string): WhisperBufferTranscriber 
           method: 'POST',
           headers: { Authorization: `Bearer ${apiKey}` },
           body: fd,
+          // #1331 — fetch has no default timeout; a stalled Whisper call
+          // would hold the script past vitest's 60 s budget. Transcribing a
+          // few seconds of agent audio normally takes well under this.
+          signal: AbortSignal.timeout(20_000),
         },
       );
       if (!res.ok) {
