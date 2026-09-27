@@ -628,13 +628,16 @@ describe('Postgres integration — B7.7 drafting leg: spoken "Mark the Garcia jo
     await closeSharedTestDb();
   });
 
-  it('the ILIKE display-text search CANNOT reach this job from the spoken name — only the customer traversal can', async () => {
-    // findByTenant's `search` reads (summary ILIKE … OR job_number ILIKE …)
-    // only. Neither carries the customer's name, so the fallback path inside
-    // resolveTargetJob is a dead end here. This is what makes the drafting
-    // proof below non-vacuous.
+  it('the loose ILIKE search cannot SINGLE OUT this job from the spoken name — only the resolver can', async () => {
+    // #1406 D4 made findByTenant's `search` also match the customer's name
+    // and address (the jobs search box promises it). As a substring match it
+    // hits BOTH "Jamie Garcia" and the prefix decoy "Marco Garcialopez", so
+    // the search fallback inside resolveTargetJob still cannot pick the right
+    // job — and the full spoken phrase matches nothing. That keeps the
+    // resolver-driven drafting proof below non-vacuous.
     const bySurname = await jobRepo.findByTenant(tenant.tenantId, { search: 'Garcia', limit: 5 });
-    expect(bySurname).toHaveLength(0);
+    expect(bySurname.map((j) => j.id)).toContain(garciaJobId);
+    expect(bySurname.length).toBeGreaterThan(1);
     const bySpoken = await jobRepo.findByTenant(tenant.tenantId, {
       search: B77_SPOKEN_REFERENCE,
       limit: 5,
