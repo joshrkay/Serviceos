@@ -1217,10 +1217,14 @@ export class TextModeDriver implements AgentDriver {
     safety: SafetyClassification,
   ): Promise<string> {
     let responseScript = safety.responseScript;
+    let scriptSource: 'reviewed' | 'placeholder' = 'placeholder';
     if (this.deps.settingsRepo) {
       try {
         const settings = await this.deps.settingsRepo.findByTenant(session.tenantId);
-        if (settings?.e1ReviewedScript) responseScript = settings.e1ReviewedScript;
+        if (settings?.e1ReviewedScript) {
+          responseScript = settings.e1ReviewedScript;
+          scriptSource = 'reviewed';
+        }
       } catch {
         // Placeholder script, as production falls back.
       }
@@ -1231,6 +1235,7 @@ export class TextModeDriver implements AgentDriver {
       utterance: callerTranscript,
       tier: 'E1',
       ...(responseScript ? { responseScript } : {}),
+      scriptSource,
       ...(safety.language ? { language: safety.language } : {}),
       ...(session.language === 'es' || session.language === 'en'
         ? { sessionLanguage: session.language }

@@ -37,6 +37,7 @@ describe('Postgres integration — voice gate usage caps', () => {
     status: 'trialing' | 'active';
     planId?: 'starter' | 'growth';
     ownerPhone?: string | null;
+    e1ReviewedScript?: string | null;
   }) {
     const { tenantId } = await createTestTenant(pool);
     await pool.query(
@@ -46,10 +47,14 @@ describe('Postgres integration — voice gate usage caps', () => {
     );
     await pool.query(
       `INSERT INTO tenant_settings (tenant_id, business_name, owner_phone, voice_agent_live_at, e1_reviewed_script)
-       VALUES ($1, 'Gate Plumbing', $2, NOW(), 'Reviewed safety script')
+       VALUES ($1, 'Gate Plumbing', $2, NOW(), $3)
        ON CONFLICT (tenant_id) DO UPDATE SET owner_phone = EXCLUDED.owner_phone,
          voice_agent_live_at = EXCLUDED.voice_agent_live_at, e1_reviewed_script = EXCLUDED.e1_reviewed_script`,
-      [tenantId, opts.ownerPhone === undefined ? OWNER_PHONE : opts.ownerPhone],
+      [
+        tenantId,
+        opts.ownerPhone === undefined ? OWNER_PHONE : opts.ownerPhone,
+        opts.e1ReviewedScript === undefined ? 'Reviewed safety script' : opts.e1ReviewedScript,
+      ],
     );
     return tenantId;
   }
@@ -150,5 +155,24 @@ describe('Postgres integration — voice gate usage caps', () => {
 
     await useSeconds(tenantId, 60);
     expect(await check(tenantId)).toMatchObject({ allowed: false, reason: 'overage_cap' });
+  });
+
+  // #1386 / O-2 — until a licensed trade pro + counsel sign the E1 script, AI
+  // answering runs on the hard-flagged placeholder instead of voicemail.
+  it('answers a paid call with no reviewed E1 script on file (placeholder, hard-flagged — O-2)', async () => {
+    const tenantId = await liveTenant({ status: 'active', e1ReviewedScript: null });
+    expect(await check(tenantId)).toEqual({ allowed: true });
+  });
+
+  it('answers a trial call with no reviewed E1 script on file, and still forwards at the 60-minute cap', async () => {
+    const tenantId = await liveTenant({ status: 'trialing', e1ReviewedScript: null });
+    expect(await check(tenantId)).toEqual({ allowed: true });
+
+    await useSeconds(tenantId, 3_600);
+    expect(await check(tenantId)).toEqual({
+      allowed: false,
+      reason: 'trial_cap_total',
+      forwardTo: OWNER_PHONE,
+    });
   });
 });

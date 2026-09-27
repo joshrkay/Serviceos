@@ -1528,8 +1528,6 @@ export function voicemailTwimlForGateReason(
   const say =
     reason === 'not_live'
       ? "This line isn't using our AI assistant yet. Please leave a message after the tone."
-      : reason === 'e1_script_unreviewed'
-        ? "We're completing this line's safety setup. Please leave a message after the tone."
       : reason === 'no_billing'
         ? "We're finishing account setup. Please leave a message after the tone."
         : 'This number is being set up. Please leave a message after the tone.';

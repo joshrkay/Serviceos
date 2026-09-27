@@ -27,6 +27,7 @@ import { WelcomeWalkthrough } from '../walkthrough/WelcomeWalkthrough';
 import { WhatsNewModal } from '../walkthrough/WhatsNewModal';
 import { PastDueBanner } from '../billing/PastDueBanner';
 import { UsageBanner } from '../billing/UsageBanner';
+import { E1ScriptPlaceholderBanner } from '../settings/E1ScriptPlaceholderBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -471,6 +472,9 @@ function ShellInner() {
           past_due. Blocking, not dismissible. */}
       <PastDueBanner />
       <UsageBanner />
+      {/* #1386 / O-2 — E1 calls are running the unreviewed placeholder
+          safety script. Not dismissible; clears once a reviewed script is saved. */}
+      <E1ScriptPlaceholderBanner />
 
       {/* Activation celebration — one-time "first real call" banner, fires
           when tenant_settings.activated_at is set (< 7 days, not dismissed). */}

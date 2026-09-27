@@ -155,3 +155,28 @@ describe('ANS-001 E2 — existing dispatcher-escalation behavior is unchanged', 
     },
   );
 });
+
+describe('#1386 / O-2 — every E1 invocation records whether the script was the unreviewed placeholder', () => {
+  const auditPayload = (fx: SideEffect[]) =>
+    fx.find((f) => f.type === 'audit_log')!.payload as Record<string, unknown>;
+
+  it('hard-flags the audit row when the caller did not declare a reviewed script', () => {
+    const result = transition('intent_capture', E1_EVENT, baseContext);
+    expect(auditPayload(result.sideEffects)).toMatchObject({
+      tier: 'E1',
+      e1ScriptPlaceholder: true,
+    });
+  });
+
+  it('records a reviewed script as not the placeholder', () => {
+    const result = transition(
+      'intent_capture',
+      { ...E1_EVENT, scriptSource: 'reviewed' } as CallingAgentEvent,
+      baseContext,
+    );
+    expect(auditPayload(result.sideEffects)).toMatchObject({
+      tier: 'E1',
+      e1ScriptPlaceholder: false,
+    });
+  });
+});

@@ -66,25 +66,19 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
       });
     }
 
-    const safetyRes = await deps.pool.query<{
-      e1_reviewed_script: string | null;
-      owner_phone: string | null;
-    }>(
-      `SELECT e1_reviewed_script, owner_phone FROM tenant_settings WHERE tenant_id = $1`,
+    // #1386 / O-2 (owner, 2026-09-26) — a missing reviewed E1 script is NOT a
+    // reason to send the call to voicemail. Until a licensed trade pro plus
+    // counsel sign the script, AI answering runs on the embedded placeholder,
+    // HARD-FLAGGED: every E1 invocation stamps `e1ScriptPlaceholder: true` on
+    // its audit row (transitions.ts), the owner sees a persistent banner
+    // (GET /api/settings/e1-script), and boot still warns (app.ts). Once the
+    // owner saves a reviewed script (PUT /api/settings/e1-script) it is spoken
+    // instead. Every other gate reason above and below is unchanged.
+    const ownerRes = await deps.pool.query<{ owner_phone: string | null }>(
+      `SELECT owner_phone FROM tenant_settings WHERE tenant_id = $1`,
       [tenantId],
     );
-    const reviewedScript = safetyRes.rows[0]?.e1_reviewed_script?.trim();
-    if (!reviewedScript) {
-      return block(deps, {
-        tenantId,
-        callSid,
-        reason: 'e1_script_unreviewed',
-        rawStatus,
-        usage: null,
-      });
-    }
-
-    const forwardTo = safetyRes.rows[0]?.owner_phone?.trim() || null;
+    const forwardTo = ownerRes.rows[0]?.owner_phone?.trim() || null;
 
     if (status === 'trialing') {
       const concurrentRes = await deps.pool.query<{ concurrent: number }>(
@@ -150,8 +144,6 @@ async function block(
       ? 'voice_blocked_no_billing'
       : input.reason === 'not_live'
         ? 'voice_blocked_not_live'
-        : input.reason === 'e1_script_unreviewed'
-          ? 'voice_blocked_e1_script_unreviewed'
         : input.reason === 'overage_cap'
           ? 'voice_forwarded_overage_cap'
           : 'voice_forwarded_trial_cap';
