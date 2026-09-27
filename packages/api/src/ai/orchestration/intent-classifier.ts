@@ -608,8 +608,18 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           refused on `lineItems`. Paid for in prompt budget by dropping
  *           the skill-routing notes from the lookup_appointments /
  *           lookup_account_summary blocks. No intent or slot changes.
+ *   1.20.0 — #1427 (path-smoke on the production provider, 2026-09-27),
+ *           prompt text only: gpt-4o-mini classified a plain customer quote
+ *           request ("How much would it cost to …? Can you send me an
+ *           estimate?") as `unknown` @0.40 — the draft_estimate block only
+ *           showed operator dictation, while lookup_estimates / send_estimate
+ *           examples pulled the other way. The block now names "a customer
+ *           asking what new work would cost" and carries a customer-voiced
+ *           example. Paid for by dropping the skill-routing notes from the
+ *           lookup_invoices / lookup_availability blocks (caller first turn
+ *           shrinks net). No intent or slot changes.
  */
-export const INTENT_TAXONOMY_VERSION = '1.19.0';
+export const INTENT_TAXONOMY_VERSION = '1.20.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route

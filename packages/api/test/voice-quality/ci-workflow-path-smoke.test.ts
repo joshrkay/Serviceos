@@ -32,9 +32,22 @@ describe('agent-path-smoke.yml — real-LLM path smoke workflow', () => {
     expect(src).toMatch(/AGENT_PATH_SMOKE_COST_CAP_CENTS:/);
   });
 
-  it('fails closed when ANTHROPIC_API_KEY is absent', () => {
+  it('exercises the production provider config (Railway prod/dev: OpenAI, gpt-4o-mini / gpt-4o)', () => {
     const src = fs.readFileSync(workflowPath, 'utf-8');
-    expect(src).toMatch(/::error::ANTHROPIC_API_KEY is not set/);
+    expect(src).toMatch(/AI_PROVIDER_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
+    expect(src).toMatch(/AI_PROVIDER_BASE_URL:\s*'?https:\/\/api\.openai\.com\/v1'?/);
+    expect(src).toMatch(/AI_DEFAULT_MODEL:\s*'?gpt-4o-mini'?/);
+    expect(src).toMatch(/AI_LIGHTWEIGHT_MODEL:\s*'?gpt-4o-mini'?/);
+    expect(src).toMatch(/AI_STANDARD_MODEL:\s*'?gpt-4o-mini'?/);
+    expect(src).toMatch(/AI_COMPLEX_MODEL:\s*'?gpt-4o'?\s*$/m);
+    // Anthropic is not the provider production uses — it must not be wired in
+    // CI, or the script's fallback could silently test the wrong provider.
+    expect(src).not.toMatch(/secrets\.ANTHROPIC_API_KEY/);
+  });
+
+  it('fails closed when AI_PROVIDER_API_KEY is absent', () => {
+    const src = fs.readFileSync(workflowPath, 'utf-8');
+    expect(src).toMatch(/::error::AI_PROVIDER_API_KEY is not set/);
     expect(src).toMatch(/exit 1/);
     expect(src).not.toMatch(/has_key=false/);
     expect(src).not.toMatch(/steps\.check\.outputs\.has_key == 'true'/);

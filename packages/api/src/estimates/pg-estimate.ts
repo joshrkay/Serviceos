@@ -196,6 +196,16 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       paramIndex++;
     }
 
+    if (options?.documentSearch) {
+      // AI resolution's document-reference search — deliberately NOT the
+      // customer-name widening above (see EstimateListOptions.documentSearch).
+      conditions.push(
+        `(estimate_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex})`
+      );
+      params.push(`%${options.documentSearch}%`);
+      paramIndex++;
+    }
+
     if (options?.sentBefore) {
       conditions.push(`sent_at IS NOT NULL AND sent_at < $${paramIndex}`);
       params.push(options.sentBefore);

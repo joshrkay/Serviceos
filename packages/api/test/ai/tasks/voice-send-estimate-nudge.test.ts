@@ -68,7 +68,7 @@ describe('SendEstimateNudgeTaskHandler — B8.10 nudgeable resolution', () => {
       estimateRepo: { findById, findByTenant } as never,
     }).handle(ctx({ now: NOW, existingEntities: { customerName: 'Khan' } }));
 
-    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Khan', limit: 5 });
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { documentSearch: 'Khan', limit: 5 });
     expect(res.proposal.proposalType).toBe('send_estimate_nudge');
     expect(res.proposal.payload.estimateId).toBe('est-khan');
     expect(missingFieldsFor(res.proposal)).toEqual([]);
@@ -236,7 +236,7 @@ describe('SendEstimateNudgeTaskHandler — B8.10 nudgeable resolution', () => {
 
 // ── customer → jobs → estimates traversal ────────────────────────────────
 //
-// A spoken nudge names a PERSON. `findByTenant({ search })` only ILIKEs
+// A spoken nudge names a PERSON. `findByTenant({ documentSearch })` only ILIKEs
 // estimate_number / customer_message — DISPLAY TEXT — so it can only find
 // "the Khan estimate" when someone happened to type "Khan" into the optional
 // customer_message. The real relationship is customer → jobs → estimates
@@ -359,7 +359,7 @@ describe('SendEstimateNudgeTaskHandler — customer-anchored resolution', () => 
       ctx({ existingEntities: { customerName: 'Khan', customerId: CUSTOMER_UUID } }),
     );
 
-    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Khan', limit: 5 });
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { documentSearch: 'Khan', limit: 5 });
     expect(res.proposal.payload.estimateId).toBe('est-khan');
   });
 
@@ -373,13 +373,13 @@ describe('SendEstimateNudgeTaskHandler — customer-anchored resolution', () => 
       ctx({ existingEntities: { customerName: 'Khan', customerId: CUSTOMER_UUID } }),
     );
 
-    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Khan', limit: 5 });
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { documentSearch: 'Khan', limit: 5 });
     expect(res.proposal.payload.estimateId).toBe('est-khan');
   });
 
   it('a job-repo error degrades to the display-text search, never throws', async () => {
     const findByTenant = vi.fn(async (_t: string, options: Record<string, unknown>) =>
-      options.search ? [estimateRow({ id: 'est-khan', status: 'sent' })] : [],
+      options.documentSearch ? [estimateRow({ id: 'est-khan', status: 'sent' })] : [],
     );
     const findByCustomer = vi.fn().mockRejectedValue(new Error('db down'));
 
@@ -390,13 +390,13 @@ describe('SendEstimateNudgeTaskHandler — customer-anchored resolution', () => 
       ctx({ existingEntities: { customerName: 'Khan', customerId: CUSTOMER_UUID } }),
     );
 
-    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Khan', limit: 5 });
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { documentSearch: 'Khan', limit: 5 });
     expect(res.proposal.payload.estimateId).toBe('est-khan');
   });
 
   it('a customer with no jobs falls back to the display-text search', async () => {
     const findByTenant = vi.fn(async (_t: string, options: Record<string, unknown>) =>
-      options.search ? [estimateRow({ id: 'est-khan', status: 'sent' })] : [],
+      options.documentSearch ? [estimateRow({ id: 'est-khan', status: 'sent' })] : [],
     );
     const findByCustomer = vi.fn().mockResolvedValue([]);
 
@@ -407,7 +407,7 @@ describe('SendEstimateNudgeTaskHandler — customer-anchored resolution', () => 
       ctx({ existingEntities: { customerName: 'Khan', customerId: CUSTOMER_UUID } }),
     );
 
-    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Khan', limit: 5 });
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { documentSearch: 'Khan', limit: 5 });
     expect(res.proposal.payload.estimateId).toBe('est-khan');
   });
 
@@ -421,6 +421,6 @@ describe('SendEstimateNudgeTaskHandler — customer-anchored resolution', () => 
     }).handle(ctx({ existingEntities: { customerName: 'Khan', customerId: 'Khan' } }));
 
     expect(findByCustomer).not.toHaveBeenCalled();
-    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Khan', limit: 5 });
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { documentSearch: 'Khan', limit: 5 });
   });
 });
