@@ -1,5 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
-import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+import { startVoiceSession, voiceInput, approveAndAwaitExecution, ensureTenantTimezone } from './helpers/voice-flow';
 
 /**
  * SMS-01 — outbound SMS dispatch records: create a consenting customer + job +
@@ -118,6 +118,8 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
   // QA-2026-07-26 — callerPhone = the seeded customer's phone (fixtures/
   // seed.ts: '555-0100') so InAppVoiceAdapter resolves the caller up front;
   // otherwise "our customer" below has no name to fall back on.
+  // Spoken times resolve only in the tenant's own zone — see ensureTenantTimezone.
+  await ensureTenantTimezone(h, h.tenantA.token, '01');
   const sessionId = await startVoiceSession(h, h.tenantA.token, '01', '555-0100');
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
   const proposalIds = await voiceInput(
@@ -130,7 +132,8 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
   if (proposalIds.length === 0) return void h.evidence.fail('No booking proposal from voice utterance.');
   const outcome = await approveAndAwaitExecution(h, h.tenantA.token, proposalIds[0], '01');
   if (outcome.status !== 'executed' || !outcome.resultEntityId) {
-    return void h.evidence.partial(`Booking proposal did not execute (status=${outcome.status}); confirmation trigger not reached.`);
+    const why = outcome.rejection ? ` — approve refused: ${outcome.rejection.message}` : '';
+    return void h.evidence.partial(`Booking proposal did not execute (status=${outcome.status})${why}; confirmation trigger not reached.`);
   }
   const appointmentId = outcome.resultEntityId;
   const dispatched = await pollDispatchCount(h, appointmentId, '01');
