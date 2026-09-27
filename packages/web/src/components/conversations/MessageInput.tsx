@@ -1,7 +1,11 @@
 import React, { useState, useCallback } from 'react';
 
 export interface MessageInputProps {
-  onSend: (content: string) => void;
+  /**
+   * May return a promise; if it rejects, the draft is restored so a failed
+   * send (e.g. a 409 asking for a channel) never loses what was typed.
+   */
+  onSend: (content: string) => void | Promise<unknown>;
   disabled?: boolean;
   placeholder?: string;
   /**
@@ -37,8 +41,15 @@ export function MessageInput({ onSend, disabled = false, placeholder = 'Type a m
       return;
     }
     setError(null);
-    onSend(content.trim());
+    const draft = content.trim();
     setContent('');
+    const pending = onSend(draft);
+    if (pending && typeof (pending as Promise<unknown>).catch === 'function') {
+      // #1406 D10 — give the draft back unless the owner already started a new one.
+      (pending as Promise<unknown>).catch(() => {
+        setContent((current) => (current === '' ? draft : current));
+      });
+    }
   }, [content, onSend]);
 
   const handleSuggest = useCallback(async () => {

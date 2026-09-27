@@ -237,6 +237,31 @@ async function lastInbound(
 }
 
 /**
+ * #1406 D10 — the channel the OWNER last replied on in this thread, for
+ * owner-started threads with no inbound traffic yet. An owner who already
+ * texted a customer here has chosen the thread's channel; "Auto" on the
+ * next reply must not 409 with "no prior channel". Only consulted when there
+ * is no inbound (so the scan is bounded by owner-sent messages in practice).
+ */
+async function lastOutboundChannel(
+  deps: ConversationReplyDeps,
+  tenantId: string,
+  conversationId: string,
+): Promise<ReplyChannel | undefined> {
+  const messages = await deps.conversationRepo.getMessages(tenantId, conversationId);
+  let latest: { at: number; channel: ReplyChannel } | undefined;
+  for (const m of messages) {
+    const meta = (m.metadata ?? {}) as Record<string, unknown>;
+    if (meta.direction !== 'outbound') continue;
+    const channel = (meta.channel as string | undefined) ?? m.source;
+    if (channel !== 'sms' && channel !== 'email') continue;
+    const at = m.createdAt instanceof Date ? m.createdAt.getTime() : 0;
+    if (!latest || at >= latest.at) latest = { at, channel };
+  }
+  return latest?.channel;
+}
+
+/**
  * Resolve which channel + address an outbound reply goes to.
  *
  * Comms C3 (spec §3/§4) — a reply resolves within its own channel thread:
@@ -326,9 +351,13 @@ async function resolveTarget(
         : customer.preferredChannel === 'sms' || customer.preferredChannel === 'phone'
           ? 'sms'
           : undefined;
+    const ownerChannel =
+      threadChannel || input.channel
+        ? undefined
+        : await lastOutboundChannel(deps, input.tenantId, input.conversationId);
     const target = pickReplyChannel({
       explicit: input.channel,
-      defaultChannel: threadChannel ?? preferenceChannel,
+      defaultChannel: threadChannel ?? ownerChannel ?? preferenceChannel,
       defaultSource: threadChannel ? 'thread' : 'fallback',
       phone,
       email,
