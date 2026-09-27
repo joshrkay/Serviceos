@@ -974,13 +974,15 @@ export function AssistantPage() {
     });
   }, [convLoading, conversation, convError, welcomeMessage]);
 
-  // Auto-submit from voice bar ?q= param
+  // Auto-submit from voice bar ?q= param. #1384 — the cleanup cancels the
+  // pending send: StrictMode (dev) mounts, unmounts and re-mounts, and both
+  // mount passes read the same initial ?q=, so without it the turn went twice.
   useEffect(() => {
     const q = searchParams.get('q');
-    if (q) {
-      setSearchParams({}, { replace: true });
-      setTimeout(() => send(q), 300);
-    }
+    if (!q) return;
+    setSearchParams({}, { replace: true });
+    const timer = setTimeout(() => send(q), 300);
+    return () => clearTimeout(timer);
   }, []); // eslint-disable-line
 
   useEffect(() => {

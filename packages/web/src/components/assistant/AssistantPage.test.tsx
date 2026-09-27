@@ -976,3 +976,23 @@ describe('#1277 — chat card gated picks', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /approve/i })).toBeEnabled());
   });
 });
+
+describe('#1384 — ?q= auto-submit under React StrictMode', () => {
+  it('sends the ?q= message exactly once when StrictMode double-invokes the mount effect', async () => {
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    render(
+      <React.StrictMode>
+        <MemoryRouter initialEntries={['/assistant?q=whats+on+today']}>
+          <AssistantPage />
+        </MemoryRouter>
+      </React.StrictMode>,
+    );
+
+    const chatPosts = () =>
+      mockedApiFetch.mock.calls.filter(([url]) => String(url).includes('/api/assistant/chat'));
+    await waitFor(() => expect(chatPosts().length).toBeGreaterThan(0));
+    // Past the 300ms auto-submit delay, so a second scheduled send would have fired.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(chatPosts()).toHaveLength(1);
+  });
+});
