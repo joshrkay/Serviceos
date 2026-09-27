@@ -156,7 +156,11 @@ import {
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
 } from '../../proposals/autonomous-close-execution';
-import { resolveAndPlaceAppointmentHold } from '../scheduling/place-hold';
+import {
+  resolveAndPlaceAppointmentHold,
+  type HoldFeasibility,
+} from '../scheduling/place-hold';
+import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
 import { formatForReadback } from '../scheduling/resolve-datetime';
 import { checkBusinessHours } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
@@ -716,6 +720,12 @@ export interface VoiceTurnProcessorDeps {
   businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
+  /**
+   * #1045 / PRD 3.12 — shared feasibility composer deps. Wired, every hold the
+   * live call places is checked for a back-to-back drive that does not fit,
+   * and the result rides the create_booking proposal as `holdFeasibility`.
+   */
+  feasibilityDeps?: FeasibilityDependencies;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
   /** Customer tags for escalation CRM hydration (handoff context pack). */
@@ -2109,6 +2119,8 @@ export function createVoiceTurnProcessor(
         | { eligible: true; threshold: number }
         | undefined;
       let laneSourceStamp: Record<string, unknown> | undefined;
+      // #1045 — the held slot's back-to-back drivability result.
+      let holdFeasibilityStamp: HoldFeasibility | undefined;
       if (
         !degradedFromContract &&
         surfaceAllowed &&
@@ -2137,6 +2149,7 @@ export function createVoiceTurnProcessor(
               {
                 appointmentRepo: deps.appointmentRepo,
                 ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+                ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
               },
               {
                 tenantId,
@@ -2190,6 +2203,7 @@ export function createVoiceTurnProcessor(
               bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
               payloadProposalType = 'create_booking';
               payload = bookingPayload;
+              holdFeasibilityStamp = hold.feasibility;
               if (laneEval.eligible) {
                 autonomousLaneForCreate = laneEval;
               } else if (!laneEval.eligible) {
@@ -2259,6 +2273,7 @@ export function createVoiceTurnProcessor(
             ? { catalogResolution: estimateQuote.catalogResolution }
             : {}),
           ...(laneSourceStamp ?? {}),
+          ...(holdFeasibilityStamp ? { holdFeasibility: holdFeasibilityStamp } : {}),
         },
         // WS5 — thread the (uncatalogued-capped) confidence and force 'draft'
         // for an ambiguous line, matching the EstimateTaskHandler. The voice
@@ -3351,7 +3366,12 @@ export function createVoiceTurnProcessor(
     session: VoiceSession,
     tenantId: string,
     evaluation: AutonomousCloseEvaluation,
-    booking?: { appointmentId: string; holdExpiryAt: Date; summary: string },
+    booking?: {
+      appointmentId: string;
+      holdExpiryAt: Date;
+      summary: string;
+      holdFeasibility?: HoldFeasibility;
+    },
   ): Promise<void> {
     const pq = session.machine.currentContext.pendingQuote;
     if (!pq || !deps.proposalRepo) return;
@@ -3606,6 +3626,7 @@ export function createVoiceTurnProcessor(
       {
         appointmentRepo: deps.appointmentRepo,
         ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+        ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
       },
       {
         tenantId,
@@ -3721,6 +3742,7 @@ export function createVoiceTurnProcessor(
       appointmentId: hold.appointmentId,
       holdExpiryAt: hold.holdExpiryAt,
       summary,
+      holdFeasibility: hold.feasibility,
     });
 
     out.push({

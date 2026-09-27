@@ -21,6 +21,7 @@ import { InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import type { CustomerRepository } from '../../customers/customer';
 import type { LocationRepository } from '../../locations/location';
+import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import {
   RescheduleAppointmentTaskHandler,
@@ -167,6 +168,13 @@ export interface HandlerRegistryDeps {
    * the review card. Optional; absent → no gate (pre-existing behavior).
    */
   locationRepo?: LocationRepository;
+  /**
+   * #1045 / PRD 3.12 — the shared feasibility composer's deps. Wired, the
+   * create_appointment held-slot path runs `checkFeasibility` on the hold and
+   * surfaces any back-to-back `travel_time` warning on the booking card.
+   * Optional; absent → `holdFeasibility: { checked: false }`.
+   */
+  feasibilityDeps?: FeasibilityDependencies;
 }
 
 /**
@@ -193,6 +201,8 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
       // auto-approve into a guaranteed execution failure.
       { ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
         ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}) },
+      // #1045 — back-to-back travel warning on the held slot.
+      deps.feasibilityDeps,
     ),
   );
   handlers.set(
