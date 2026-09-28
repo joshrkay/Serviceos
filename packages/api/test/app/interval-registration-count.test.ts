@@ -55,13 +55,14 @@ import { resetConfig } from '../../src/shared/config';
  * change configuration — it moves construction. Any movement in this figure
  * under identical env is a real behaviour change.
  *
- * 21 → 23 (PR #1437, billing resilience): two new hourly, leader-gated,
+ * 21 → 22 (#1434, CLERK-META-2026-09-27): clerk-metadata-backfill sweep.
+ * 22 → 24 (PR #1437, billing resilience): two new hourly, leader-gated,
  * `shouldRunWorkers`-only sweeps — the dunning sweep (`runDunningSweep`,
  * day-of/+3d/+7d payment-failed emails) and the overage-settlement
  * reconciliation sweep (retries stale settlements, backfills gap periods).
  * Both register once per worker-role boot; web/voice stay at zero.
  */
-const EXPECTED_WORKER_INTERVALS_HERMETIC = 23;
+const EXPECTED_WORKER_INTERVALS_HERMETIC = 24;
 
 describe('characterization — background interval registration', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;
