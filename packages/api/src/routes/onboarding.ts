@@ -40,16 +40,16 @@ import {
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
 import { isValidIanaTimezone, resolveBootstrapAiModel } from '../settings/settings';
+import { isBillingLiveStatus } from '../billing/tenant-billing-state';
 
 /**
  * Trial-checkout gating for the phone routes. A Twilio number is real,
  * recurring money — /phone/retry and /phone/claim must not enqueue a
  * purchase for a tenant that hasn't completed billing (card on file). The
- * provisioning worker enforces the same invariant; this guard fails fast
- * with a clear 409 instead of enqueueing a job the worker will skip.
+ * provisioning worker enforces the same invariant (see
+ * billing/tenant-billing-state.ts); this guard fails fast with a clear 409
+ * instead of enqueueing a job the worker will skip.
  */
-const BILLING_LIVE_STATUSES = new Set(['trialing', 'active', 'past_due']);
-
 async function isBillingLive(
   db: { query: (sql: string, params: unknown[]) => Promise<{ rows: Array<{ subscription_status: string | null }> }> },
   tenantId: string,
@@ -58,7 +58,14 @@ async function isBillingLive(
     `SELECT subscription_status FROM tenants WHERE id = $1`,
     [tenantId],
   );
-  return BILLING_LIVE_STATUSES.has(rows[0]?.subscription_status ?? '');
+  return isBillingLiveStatus(rows[0]?.subscription_status);
+}
+
+function billingRequired(res: Response, verb: 'provisioning' | 'claiming'): void {
+  res.status(409).json({
+    error: 'PHONE_BILLING_REQUIRED',
+    message: `Complete trial checkout before ${verb} a phone number.`,
+  });
 }
 
 export interface OnboardingRouterDeps {
@@ -583,10 +590,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // Trial-checkout gating: never enqueue a number purchase before the
         // tenant has a card on file.
         if (!(await isBillingLive(db, tenantId))) {
-          res.status(409).json({
-            error: 'PHONE_BILLING_REQUIRED',
-            message: 'Complete trial checkout before provisioning a phone number.',
-          });
+          billingRequired(res, 'provisioning');
           return;
         }
         const callbackBaseUrl =
@@ -717,10 +721,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // Trial-checkout gating: never enqueue a number purchase before the
         // tenant has a card on file.
         if (!(await isBillingLive(db, tenantId))) {
-          res.status(409).json({
-            error: 'PHONE_BILLING_REQUIRED',
-            message: 'Complete trial checkout before claiming a phone number.',
-          });
+          billingRequired(res, 'claiming');
           return;
         }
         const callbackBaseUrl =

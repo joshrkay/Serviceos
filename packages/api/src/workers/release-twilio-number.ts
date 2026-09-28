@@ -1,42 +1,16 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
-import { Pool, QueryResult, QueryResultRow } from 'pg';
+import type { Pool } from 'pg';
 import { decrypt } from '../integrations/crypto';
-import { applyTenantContext } from '../db/rls-runtime-role';
 import { releasePhoneNumber } from '../integrations/twilio/provisioning';
 import { getSentryClient } from '../monitoring/sentry';
+import { tenantQuery } from './tenant-query';
 
 export const RELEASE_TWILIO_NUMBER_JOB_TYPE = 'release_twilio_number';
 
 export interface ReleaseTwilioNumberPayload {
   tenantId: string;
   reason: 'stripe_subscription_deleted' | 'stripe_subscription_canceled';
-}
-
-// tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
-// app.current_tenant_id. Background workers run outside withTenantTransaction,
-// so every DB op against this table must run in a transaction that sets the
-// GUC first. (Same pattern as workers/provision-twilio.ts.)
-async function tenantQuery<R extends QueryResultRow = QueryResultRow>(
-  pool: Pool,
-  tenantId: string,
-  sql: string,
-  params: unknown[] = []
-): Promise<QueryResult<R>> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await applyTenantContext(client, tenantId, { transactional: true });
-    const result = await client.query<R>(sql, params);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
-    throw err;
-  } finally {
-    try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
-    client.release();
-  }
 }
 
 function reportReleaseFailure(logger: Logger, tenantId: string, reason: string, err: unknown): void {
@@ -135,9 +109,9 @@ export function createReleaseTwilioNumberWorker(deps: {
           [tenantId]
         );
 
-        // The worker stamps business_phone from the provisioned number; clear
-        // it only when it still points at the number we just released, so a
-        // manually-changed business line is never clobbered.
+        // Clear the worker-stamped business_phone only when it still points at
+        // the number just released, so a manually-changed business line is
+        // never clobbered.
         if (phoneE164) {
           await tenantQuery(
             pool,

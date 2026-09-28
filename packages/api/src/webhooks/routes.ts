@@ -262,6 +262,56 @@ export interface WebhookRouterDeps {
   connectAccountResolver?: ConnectAccountResolver;
 }
 
+/**
+ * Release the Twilio number on a true cancellation (deleted event, or status
+ * 'canceled') — including trials that never convert. The number is a
+ * recurring cost; unlike the hard purge below this is NOT gated behind
+ * AUTO_DEPROVISION_ON_CANCEL because it is cheaply reversible (a resubscribe
+ * re-provisions a fresh number) and never touches tenant data. Never acts on
+ * dunning states (past_due / unpaid / incomplete). Enqueues a background job;
+ * never throws (must not 500 the webhook → Stripe would retry forever). The
+ * worker is idempotent and failure-tolerant: a missing number is a no-op, and
+ * Twilio failures are logged + sent to Sentry without failing the job.
+ */
+async function enqueueTwilioNumberRelease(
+  deps: Pick<WebhookRouterDeps, 'queue' | 'pool'>,
+  sub: { customer?: string; status?: string },
+  eventType: string,
+): Promise<void> {
+  if (!deps.queue || !deps.pool) return;
+  try {
+    const tenantRow = await deps.pool.query<{ id: string }>(
+      `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
+      [sub.customer],
+    );
+    const tenantId = tenantRow.rows[0]?.id;
+    if (tenantId) {
+      const payload: ReleaseTwilioNumberPayload = {
+        tenantId,
+        reason:
+          eventType === 'customer.subscription.deleted'
+            ? 'stripe_subscription_deleted'
+            : 'stripe_subscription_canceled',
+      };
+      await deps.queue.send(
+        RELEASE_TWILIO_NUMBER_JOB_TYPE,
+        payload,
+        `release-twilio-${tenantId}`,
+      );
+      logger.info('Twilio number release enqueued on subscription cancellation', {
+        tenantId,
+        customerId: sub.customer,
+        type: eventType,
+      });
+    }
+  } catch (err) {
+    logger.error('Failed to enqueue Twilio number release', {
+      customerId: sub.customer,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
   const router = Router();
 
@@ -2469,52 +2519,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           });
         }
 
-        // Release the Twilio number on a true cancellation (deleted event, or
-        // status 'canceled') — including trials that never convert. The number
-        // is a recurring cost; unlike the hard purge above this is NOT gated
-        // behind AUTO_DEPROVISION_ON_CANCEL because it is cheaply reversible
-        // (a resubscribe re-provisions a fresh number) and never touches
-        // tenant data. Never acts on dunning states (past_due / unpaid /
-        // incomplete). Enqueues a background job; never throws (must not 500
-        // the webhook → Stripe would retry forever). The worker is
-        // idempotent and failure-tolerant: a missing number is a no-op, and
-        // Twilio failures are logged + sent to Sentry without failing the job.
-        if (
-          deps.queue &&
-          deps.pool &&
-          (event.type === 'customer.subscription.deleted' || sub.status === 'canceled')
-        ) {
-          try {
-            const tenantRow = await deps.pool.query<{ id: string }>(
-              `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
-              [sub.customer],
-            );
-            const tenantId = tenantRow.rows[0]?.id;
-            if (tenantId) {
-              const payload: ReleaseTwilioNumberPayload = {
-                tenantId,
-                reason:
-                  event.type === 'customer.subscription.deleted'
-                    ? 'stripe_subscription_deleted'
-                    : 'stripe_subscription_canceled',
-              };
-              await deps.queue.send(
-                RELEASE_TWILIO_NUMBER_JOB_TYPE,
-                payload,
-                `release-twilio-${tenantId}`,
-              );
-              logger.info('Twilio number release enqueued on subscription cancellation', {
-                tenantId,
-                customerId: sub.customer,
-                type: event.type,
-              });
-            }
-          } catch (err) {
-            logger.error('Failed to enqueue Twilio number release', {
-              customerId: sub.customer,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
+        // Release the Twilio number on a true cancellation — see
+        // enqueueTwilioNumberRelease above. Deliberately NOT gated behind
+        // AUTO_DEPROVISION_ON_CANCEL (unlike the hard purge below).
+        if (event.type === 'customer.subscription.deleted' || sub.status === 'canceled') {
+          await enqueueTwilioNumberRelease(deps, sub, event.type);
         }
 
         // Auto-deprovision on cancellation. Gated behind a flag (default off)

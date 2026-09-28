@@ -1,9 +1,9 @@
 import { randomBytes } from 'crypto';
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
-import { Pool, QueryResult, QueryResultRow } from 'pg';
+import { Pool } from 'pg';
 import { encrypt, decrypt } from '../integrations/crypto';
-import { applyTenantContext } from '../db/rls-runtime-role';
+import { tenantQuery } from './tenant-query';
 import {
   createTwilioSubaccountWithCreds,
   createMessagingService,
@@ -16,6 +16,7 @@ import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { isTwilioDeploymentEnv } from '../integrations/credentials';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
 import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
+import { isBillingLiveStatus } from '../billing/tenant-billing-state';
 
 // Status values match migration 071_widen_tenant_integrations_status:
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
@@ -43,37 +44,6 @@ export function isDidAlreadyClaimed(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as { code?: string; constraint?: string };
   return e.code === '23505' && e.constraint === 'uq_tenant_integrations_twilio_phone_e164';
-}
-
-// tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
-// app.current_tenant_id. Background workers run outside withTenantTransaction,
-// so every DB op against this table must run in a transaction that sets the
-// GUC first. Twilio HTTP calls happen between these blocks — we don't hold
-// a DB transaction open across network I/O.
-async function tenantQuery<R extends QueryResultRow = QueryResultRow>(
-  pool: Pool,
-  tenantId: string,
-  sql: string,
-  params: unknown[] = []
-): Promise<QueryResult<R>> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await applyTenantContext(client, tenantId, { transactional: true });
-    const result = await client.query<R>(sql, params);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
-    throw err;
-  } finally {
-    // GUC leak fix: plain `SET app.current_tenant_id` persists past
-    // COMMIT/ROLLBACK on the underlying connection. Clear it before
-    // release so the next pool checkout doesn't inherit this tenant's
-    // context.
-    try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
-    client.release();
-  }
 }
 
 export interface ProvisionTwilioPayload {
@@ -177,13 +147,11 @@ export function createProvisionTwilioWorker(deps: {
 
       // Trial-checkout gating: a Twilio number is real, recurring money, so
       // it is only ever bought for a tenant that has completed billing (card
-      // on file). The subscription webhook is the intended trigger, but this
-      // gate is the invariant — no caller (claim/retry routes, replays, ops
-      // scripts) can spend Twilio money on a tire-kicker. past_due counts:
-      // the tenant completed billing; dunning may still recover. Skips are
-      // quiet and safe: the checkout webhook re-enqueues with the same stable
-      // key once billing goes live. (The dev-stub branch above returns before
-      // this, so Twilio-less environments are unaffected.)
+      // on file). This gate is the invariant — no caller (claim/retry routes,
+      // replays, ops scripts) can spend Twilio money on a tire-kicker. Skips
+      // are quiet and safe: the checkout webhook re-enqueues with the same
+      // stable key once billing goes live. (The dev-stub branch above returns
+      // before this, so Twilio-less environments are unaffected.)
       const { rows: billingRows } = await tenantQuery<{
         subscription_status: string | null;
       }>(
@@ -193,7 +161,7 @@ export function createProvisionTwilioWorker(deps: {
         [tenantId],
       );
       const billingStatus = billingRows[0]?.subscription_status ?? null;
-      if (billingStatus !== 'trialing' && billingStatus !== 'active' && billingStatus !== 'past_due') {
+      if (!isBillingLiveStatus(billingStatus)) {
         logger.info('Twilio provisioning skipped — tenant has not completed billing', {
           tenantId,
           billingStatus,

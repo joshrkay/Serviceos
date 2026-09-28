@@ -18,6 +18,18 @@ export interface TenantBillingState {
   ownerEmail: string | null;
 }
 
+/**
+ * "Billing is live" = the tenant completed trial checkout (card on file).
+ * past_due counts: the tenant did check out; dunning may still recover.
+ * Canonical home for the status set so the Twilio provisioning gate (worker)
+ * and the phone-route guards (fail-fast 409) can never disagree.
+ */
+const BILLING_LIVE_STATUSES = new Set(['trialing', 'active', 'past_due']);
+
+export function isBillingLiveStatus(status: string | null | undefined): boolean {
+  return status != null && BILLING_LIVE_STATUSES.has(status);
+}
+
 export async function readTenantBillingState(
   pool: Pool,
   tenantId: string,
