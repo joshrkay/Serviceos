@@ -5,10 +5,12 @@ import {
   Plus, Send, ArrowLeft, DollarSign, CheckCircle, CheckCircle2,
   Clock, AlertCircle, FileText, CreditCard, ChevronRight, X,
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
-  ExternalLink, Lock, Building2, Smartphone, Briefcase,
+  ExternalLink, Lock, Building2, Smartphone, Briefcase, Search,
 } from 'lucide-react';
 import type { InvoiceResponse, LineItem as InvoiceLineItem, CatalogUnitValue } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
+import { INVOICE_LIST_SORT, type InvoiceSortField, type ListSort } from '@ai-service-os/shared';
+import { ListSortSelect, listSortParams, type ListSortOption } from '../shared/ListSortSelect';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { deriveInvoiceUiStatus, centsToDisplay } from '../../utils/statusNormalize';
@@ -1235,6 +1237,20 @@ const API_STATUS_FOR_TAB: Record<string, string> = {
   Paid:    'paid',
 };
 
+// #1402 — server-side sort options (shared list-sort control).
+const SORT_OPTIONS: ReadonlyArray<ListSortOption<InvoiceSortField>> = [
+  { field: 'created',  direction: 'desc', label: 'Newest first' },
+  { field: 'created',  direction: 'asc',  label: 'Oldest first' },
+  { field: 'due',      direction: 'asc',  label: 'Due soonest' },
+  { field: 'total',    direction: 'desc', label: 'Highest total' },
+  { field: 'total',    direction: 'asc',  label: 'Lowest total' },
+  { field: 'customer', direction: 'asc',  label: 'Customer A–Z' },
+];
+const DEFAULT_SORT: ListSort<InvoiceSortField> = {
+  field: INVOICE_LIST_SORT.defaultField,
+  direction: INVOICE_LIST_SORT.fields[INVOICE_LIST_SORT.defaultField],
+};
+
 const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
   { label: 'All',     value: 'All'     },
   { label: 'Draft',   value: 'Draft'   },
@@ -1254,6 +1270,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
   const navigate = useNavigate();
   const tz = useTenantTimezone();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
+  const [sort,     setSort]     = useState<ListSort<InvoiceSortField>>(DEFAULT_SORT);
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
   // Keep `selected` in sync with the route param so deep-links and in-place
@@ -1263,7 +1280,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<InvoiceResponse>(
+  const { data, total, isLoading, error, setFilters, setSearch, refetch } = useListQuery<InvoiceResponse>(
     '/api/invoices',
     {
       // P5-018 — live refresh while the list is visible. Pause while a detail
@@ -1289,6 +1306,12 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     }
     previousStatusesRef.current = next;
   }, [data]);
+
+  // Tab status + sort compose into one server-side filter set (#1402).
+  const listFilters = (t: InvoiceStatus | 'All', s: ListSort<InvoiceSortField>) => {
+    const apiStatus = t !== 'All' ? API_STATUS_FOR_TAB[t] : undefined;
+    return { ...(apiStatus ? { status: apiStatus } : {}), ...listSortParams(INVOICE_LIST_SORT, s) };
+  };
 
   if (selected) {
     return <InvoiceDetail invoiceId={selected} onBack={() => {
@@ -1351,6 +1374,30 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
           </div>
         </div>
 
+        {/* Search + sort (#1402) — both server-side; search matches the
+            invoice number and the customer's name. */}
+        <div className="flex flex-col gap-2 mb-3">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3">
+            <Search size={15} className="text-muted-foreground shrink-0" />
+            <input
+              type="search"
+              aria-label="Search invoices"
+              placeholder="Search number or customer…"
+              onChange={e => setSearch(e.target.value)}
+              className="flex-1 min-w-0 min-h-11 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
+            />
+          </div>
+          <ListSortSelect
+            label="Sort invoices"
+            options={SORT_OPTIONS}
+            value={sort}
+            onChange={next => {
+              setSort(next);
+              setFilters(listFilters(tab, next));
+            }}
+          />
+        </div>
+
         {/* Tabs */}
         <div className="flex gap-1 mb-4 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
           {TABS.map(t => (
@@ -1358,12 +1405,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
               key={t.value}
               onClick={() => {
                 setTab(t.value);
-                if (t.value !== 'All') {
-                  const apiStatus = API_STATUS_FOR_TAB[t.value];
-                  if (apiStatus) setFilters({ status: apiStatus });
-                } else {
-                  setFilters({});
-                }
+                setFilters(listFilters(t.value, sort));
               }}
               className={`shrink-0 flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
