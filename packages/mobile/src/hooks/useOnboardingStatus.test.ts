@@ -17,7 +17,6 @@ import {
   skipSetupGateForSession,
   isSetupGateSkippedForSession,
   _resetSetupGateSkipForTests,
-  _resetOnboardingStatusFetchForTests,
 } from './useOnboardingStatus';
 
 /** Flush pending microtasks (one macrotask drains the awaited promise chain). */
@@ -41,7 +40,6 @@ function mockOk(body: unknown) {
 beforeEach(() => {
   vi.clearAllMocks();
   _resetSetupGateSkipForTests();
-  _resetOnboardingStatusFetchForTests();
 });
 
 afterEach(() => {

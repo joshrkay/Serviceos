@@ -61,19 +61,22 @@ function AuthGate() {
     if (!isLoaded) return;
     const inAuthGroup = segments[0] === '(auth)';
     const inOnboarding = segments[0] === '(onboarding)';
+    // Known-incomplete setup only: null (still loading / status outage) is
+    // fail-open and never redirects.
+    const setupIncomplete = onboarding.isSetupComplete === false;
     if (!isSignedIn && !inAuthGroup) {
       router.replace('/sign-in');
     } else if (isSignedIn && inAuthGroup) {
       // Fresh sign-in with known-incomplete setup goes straight to onboarding
       // instead of flashing the CRM (and its failing API calls). Unknown
-      // status (still loading) falls through to '/' — the gate branch below
-      // redirects to /onboarding as soon as the status resolves.
-      router.replace(onboarding.isSetupComplete === false ? '/onboarding' : '/');
+      // status falls through to '/' — the gate branch below redirects to
+      // /onboarding as soon as the status resolves.
+      router.replace(setupIncomplete ? '/onboarding' : '/');
     } else if (isSignedIn && inOnboarding) {
       // allow onboarding flow
     } else if (
       isSignedIn &&
-      onboarding.isSetupComplete === false &&
+      setupIncomplete &&
       !isSetupGateSkippedForSession(userId)
     ) {
       // Setup-complete gate: incomplete setup routes to onboarding. An

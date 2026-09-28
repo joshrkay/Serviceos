@@ -10,20 +10,15 @@
  * blocking the whole app on a status fetch (or a status outage) would be
  * worse than a mistimed redirect.
  *
- * Differences from web, deliberate:
- * - No interval polling. The gate re-fetches (TTL-guarded) whenever the
- *   route changes, so finishing onboarding in the voice tab unlocks the CRM
- *   without an app restart and without a background poll draining battery.
- * - Session-scoped skip: the onboarding screen's "Skip for now" is an
- *   explicit deferral. The gate must not trap the owner in a
- *   skip -> bounce-back loop, so a skip is honored for the rest of the
- *   session (per Clerk user id). A cold start re-arms the gate.
+ * Deliberate differences from web: no interval polling — the gate re-fetches
+ * (TTL-guarded) whenever the route changes, so finishing onboarding in the
+ * voice tab unlocks the CRM without an app restart or a battery-draining
+ * background poll.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import {
   fetchOnboardingStatus,
-  isIdentityStepDone,
   type OnboardingStatusResponse,
 } from '../api/onboarding';
 
@@ -34,7 +29,7 @@ export interface UseOnboardingStatusResult {
   error: Error | null;
   /**
    * Tri-state setup verdict. `true`/`false` once the status is known;
-   * `null` while loading or when the fetch failed — the gate treats null as
+   * `null` while loading or on fetch failure — the gate treats null as
    * "don't redirect" (fail open).
    */
   isSetupComplete: boolean | null;
@@ -44,20 +39,28 @@ export interface UseOnboardingStatusResult {
 
 /** Minimum gap between server hits; keeps route-change refetches cheap. */
 const REFETCH_TTL_MS = 10_000;
-let lastFetchAt = 0;
 
-/** Test-only: drop the module fetch timestamp so cases don't bleed. */
-export function _resetOnboardingStatusFetchForTests(): void {
-  lastFetchAt = 0;
+/**
+ * The web `OnboardingGuard`'s soft-gate rule: the CRM unlocks once business
+ * identity is saved (name + hours + rate). Remaining steps (phone, billing,
+ * AI check, test call) stay available on /onboarding and are soft-nudged —
+ * they must not hard-block the product when Stripe/Twilio are still pending.
+ */
+function isIdentityStepDone(status: OnboardingStatusResponse | null): boolean {
+  if (!status || !Array.isArray(status.steps)) return false;
+  return status.steps.some(
+    (step) => step.id === 'identity' && step.status === 'done',
+  );
 }
 
 // --- session-scoped skip ---------------------------------------------------
+// The onboarding screen's "Skip for now" is an explicit deferral; the gate
+// must not trap the owner in a skip -> bounce-back loop, so a skip is
+// honored for the rest of the session (per Clerk user id). A cold start
+// re-arms the gate.
 const skippedUserIds = new Set<string>();
 
-/**
- * Record an explicit "Skip for now" so the gate stops redirecting this user
- * to onboarding for the rest of the session.
- */
+/** Record an explicit "Skip for now" for this user, for the session. */
 export function skipSetupGateForSession(
   userId: string | null | undefined,
 ): void {
@@ -85,12 +88,16 @@ export function useOnboardingStatus(
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const requestIdRef = useRef(0);
+  // Per-instance fetch timestamp — AuthGate is the only consumer, so module
+  // state (and its test reset) buys nothing over a ref.
+  const lastFetchAtRef = useRef(0);
 
   const load = useCallback(
     async (force: boolean) => {
-      if (!force && Date.now() - lastFetchAt < REFETCH_TTL_MS) return;
+      if (!force && Date.now() - lastFetchAtRef.current < REFETCH_TTL_MS)
+        return;
       const myRequest = ++requestIdRef.current;
-      lastFetchAt = Date.now();
+      lastFetchAtRef.current = Date.now();
       setIsLoading(true);
       try {
         const body = await fetchOnboardingStatus(apiFetch);

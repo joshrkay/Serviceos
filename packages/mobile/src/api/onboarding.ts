@@ -1,14 +1,14 @@
 /**
- * Typed wrapper for the `/api/onboarding/status` endpoint — the mobile
- * counterpart of the web onboarding gate (`packages/web/src/hooks/
- * useOnboardingStatus.ts` + the `OnboardingGuard` in `ProtectedRoute`).
+ * Typed client for GET /api/onboarding/status — the status payload the
+ * mobile setup-complete gate (`src/hooks/useOnboardingStatus.ts`) reads.
  * Accepts a `fetch`-shaped client (from `useApiClient`) so the Clerk JWT is
  * attached automatically; calls no hooks itself.
  *
  * Shapes mirror `packages/web/src/types/onboarding.ts` (whose source of
  * truth is `packages/api/src/onboarding/contracts.ts`); this client only
- * needs the status payload.
+ * reads the status payload.
  */
+import type { AuthedFetch } from './me';
 
 export type OnboardingStepId =
   | 'signup'
@@ -56,11 +56,6 @@ export interface OnboardingStatusResponse {
   accountCreatedAt?: string;
 }
 
-export type AuthedFetch = (
-  input: string,
-  init?: RequestInit,
-) => Promise<Response>;
-
 /** GET /api/onboarding/status — the tenant's onboarding step states. */
 export async function fetchOnboardingStatus(
   client: AuthedFetch,
@@ -70,20 +65,4 @@ export async function fetchOnboardingStatus(
     throw new Error(`fetchOnboardingStatus: ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as OnboardingStatusResponse;
-}
-
-/**
- * The mobile gate mirrors the web `OnboardingGuard`'s soft-gate rule: the CRM
- * unlocks once business identity is saved (name + hours + rate). Remaining
- * steps (phone, billing, AI check, test call) stay available on /onboarding
- * and are soft-nudged — they must not hard-block the product when
- * Stripe/Twilio are still pending.
- */
-export function isIdentityStepDone(
-  status: OnboardingStatusResponse | null,
-): boolean {
-  if (!status || !Array.isArray(status.steps)) return false;
-  return status.steps.some(
-    (step) => step.id === 'identity' && step.status === 'done',
-  );
 }
