@@ -183,7 +183,7 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
   const appointmentsFor = (tenantId: string) =>
     pool.query<{ id: string }>(`SELECT id FROM appointments WHERE tenant_id = $1`, [tenantId]);
 
-  test('BOOK reaches the deterministic create_appointment readback; nothing is drafted (same model-dependent seam as row 3.1)', async ({
+  test('BOOK reaches the deterministic create_appointment readback; nothing is drafted before the owner confirms', async ({
     request,
   }) => {
     const callSid = `CA-book310-book-${crypto.randomUUID().slice(0, 8)}`;
@@ -342,6 +342,54 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
       [neighbourGarcia.appointmentId],
     );
     expect(nbAudits.rows).toHaveLength(0);
+  });
+
+  test('BOOK by talking on the owner line: the readback is confirmed, the draft is completed on the card and approved → exactly one new appointment with exactly one audit event', async ({
+    request,
+  }) => {
+    const callSid = `CA-book310-bookok-${crypto.randomUUID().slice(0, 8)}`;
+    const sid = await startOwnerCall(request, tenantA, A_OWNER_PHONE, callSid);
+    const book = await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, sid, BOOK_UTTERANCE);
+    expect(book.twiml.toLowerCase()).toContain('create appointment. is that right');
+    await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, book.sid, 'Yes');
+
+    const { rows } = await pool.query<{ id: string; status: string; payload: { customerId: string } }>(
+      `SELECT id, status, payload FROM proposals WHERE tenant_id = $1 AND proposal_type = 'create_appointment'`,
+      [tenantA.tenantId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('draft');
+    const proposal = rows[0];
+    const auth = { authorization: `Bearer ${devAuthBearerToken(tenantA.userId)}` };
+
+    // No time was spoken: approving as drafted is refused.
+    const early = await request.post(`${API_URL}/api/proposals/${proposal.id}/approve`, { headers: auth, data: {} });
+    expect(early.status()).toBe(400);
+
+    // What the owner does on the card (row 3.1's completion): an address and a time.
+    const loc = await request.post(`${API_URL}/api/locations`, {
+      headers: auth,
+      data: { customerId: proposal.payload.customerId, street1: '12 Oak Street', city: 'Austin', state: 'TX', postalCode: '78701' },
+    });
+    expect(loc.status()).toBe(201);
+    const start = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+    start.setUTCHours(15, 0, 0, 0);
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const edit = await request.put(`${API_URL}/api/proposals/${proposal.id}`, {
+      headers: auth,
+      data: { edits: { scheduledStart: start.toISOString(), scheduledEnd: end.toISOString() } },
+    });
+    expect(edit.status()).toBe(200);
+    const approve = await request.post(`${API_URL}/api/proposals/${proposal.id}/approve`, { headers: auth, data: {} });
+    expect(approve.status()).toBe(200);
+
+    const booked = await pollFor<{ id: string }>(
+      pool,
+      `SELECT id FROM appointments WHERE tenant_id = $1 AND scheduled_start = $2`,
+      [tenantA.tenantId, start],
+    );
+    expect(booked).toHaveLength(1);
+    expect(await auditsFor(tenantA.tenantId, booked[0].id, 'appointment.created')).toHaveLength(1);
   });
 
   test('MOVE by talking: "I need to reschedule my appointment" → "The Okafor appointment" resolves → the owner sets the new time and approves → the appointment moves with exactly one audit event', async ({
