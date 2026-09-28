@@ -40,6 +40,17 @@ updates:
       # failure — real breakage for no runtime benefit.
       - dependency-name: 'globals'
         update-types: ['version-update:semver-major']
+      # React majors. packages/web runs React 18; #1445 (react-router 7 -> 8)
+      # merged green-ish but v8 peers react >=19.2.7, so it pulled the hoisted
+      # React 19 in beside the app's React 18 (two Reacts, invalid hook call)
+      # and broke web tsc; reverted in #1451. React 19 is a planned migration
+      # — react, react-dom and react-router move together, deliberately.
+      - dependency-name: 'react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-dom'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-router'
+        update-types: ['version-update:semver-major']
 
   # packages/mobile is not a root workspace and carries its own lockfile, so
   # the root entry above does not cover it.
@@ -70,6 +81,20 @@ updates:
       # and enumerating it means a new ignore rule every time a module is added.
       - dependency-name: 'expo-*'
         update-types: ['version-update:semver-major']
+      # jest-expo is released per SDK (52 -> 57 is "align to SDK 57"); it must
+      # track the installed expo major. #1325 (52 -> 57) failed e2e.
+      - dependency-name: 'jest-expo'
+        update-types: ['version-update:semver-major']
+      # react-native is 0.x, so an RN "minor" (0.76 -> 0.87) is really an SDK
+      # train change; #1324 grouped it (plus SDK-53+ expo-* minors) as a
+      # "minor-patch" update against expo ~52 and failed test + e2e. RN and the
+      # expo-* modules move only with an Expo SDK upgrade.
+      - dependency-name: 'react-native'
+        update-types: ['version-update:semver-minor']
+      - dependency-name: 'expo-*'
+        update-types: ['version-update:semver-minor']
+      - dependency-name: 'react-native-*'
+        update-types: ['version-update:semver-minor']
 
   - package-ecosystem: github-actions
     directory: '/'
