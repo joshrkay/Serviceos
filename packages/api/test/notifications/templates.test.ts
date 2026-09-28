@@ -7,6 +7,7 @@ import {
   renderWelcomeEmail,
   renderSetupReminderEmail,
   renderTrialEndingEmail,
+  renderPaymentFailedEmail,
 } from '../../src/notifications/templates';
 
 describe('estimate templates', () => {
@@ -110,6 +111,23 @@ describe('onboarding lifecycle emails', () => {
     const { text } = renderTrialEndingEmail({ ...base, daysLeft: 3 });
     expect(text).toContain('20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute');
     expect(text).not.toMatch(/provider cost|30 AI voice minutes/);
+  });
+
+  it('payment-failed dunning copy varies by dunningDay and never promises an automatic charge', () => {
+    const ctx = { businessName: 'Acme HVAC', appBaseUrl: 'https://app.rivet.ai', supportEmail: 'support@rivet.ai' };
+    const day0 = renderPaymentFailedEmail({ ...ctx, dunningDay: 0, daysLeft: 7 });
+    expect(day0.subject).toMatch(/didn.t go through/i);
+    expect(day0.text).toContain('7 days');
+    expect(day0.text).toContain('https://app.rivet.ai/settings');
+    const day3 = renderPaymentFailedEmail({ ...ctx, dunningDay: 3, daysLeft: 4 });
+    expect(day3.subject).toMatch(/4 days left/i);
+    const day7 = renderPaymentFailedEmail({ ...ctx, dunningDay: 7, daysLeft: 0 });
+    expect(day7.subject).toMatch(/last day/i);
+    expect(day7.text).toMatch(/voicemail/i);
+    for (const email of [day0, day3, day7]) {
+      expect(email.text).not.toMatch(/charged automatically|will be charged/);
+      expect(email.html).toContain('Acme HVAC');
+    }
   });
 });
 

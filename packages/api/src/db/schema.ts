@@ -7228,6 +7228,16 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_material_items_job
       ON material_items (tenant_id, job_id, created_at) WHERE job_id IS NOT NULL;
   `,
+  // Billing resilience — dunning grace window. invoice.payment_failed stamps
+  // a 7-day grace here; the voice gate keeps answering while it is in the
+  // future, and the dunning sweep keys its 0d/3d/7d emails off it. Cleared
+  // when the subscription returns to active/trialing.
+  '298_tenant_past_due_grace_until': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS past_due_grace_until TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_tenants_past_due_grace
+      ON tenants (past_due_grace_until) WHERE past_due_grace_until IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

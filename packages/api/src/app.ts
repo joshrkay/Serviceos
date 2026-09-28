@@ -63,7 +63,7 @@ import {
 import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
-import { BillingService, planIdForStripePrice } from './billing/subscription';
+import { BillingService, planIdForStripePrice, stripePriceIdForPlan } from './billing/subscription';
 import { PgVoiceUsageCostRepository } from './billing/voice-usage-cost';
 import { PgCallUsageRepository } from './billing/call-usage-events';
 import { PgSeatUsageReader } from './users/seat-limit';
@@ -294,6 +294,8 @@ import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
+import { runDunningSweep } from './workers/dunning-sweep';
+import { runOverageSettlementReconciliation } from './workers/overage-settlement-reconciliation';
 import { runVoiceCostReconciliationSweep } from './workers/voice-cost-reconciliation';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
@@ -1076,6 +1078,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           overageCaps: new PgOverageCapStore(pool),
           stripeApiKey: process.env.STRIPE_SECRET_KEY,
           planForPriceId: planIdForStripePrice,
+          // Billing resilience (Part B) — the shared durable queue's
+          // dead-letter table is where persistently-failed overage
+          // settlements land for operator visibility (same _queue_dlq the
+          // queue-depth SLO monitors).
+          ...(queue ? { queue } : {}),
           onAlert: (alert) => {
             sentryClient.captureMessage(
               `[CALL_BILLING:${alert.rule}] tenant=${alert.tenantId} ${alert.message}`,
@@ -2316,6 +2323,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // parallel track.
     moneyReconciliation: 590026,
     voiceCostReconciliation: 590027,
+    // Billing resilience — dunning sweep (day-of/+3d/+7d payment-failure
+    // emails). DISTINCT key per the collision discipline above.
+    dunning: 590028,
+    // Billing resilience — AI-minute overage settlement reconciliation
+    // (stale-retry + gap backfill). DISTINCT key per the collision
+    // discipline above.
+    overageReconciliation: 590029,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -6909,6 +6923,55 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // lock collision where the old digest sweep and hfcrWeeklySend both held
   // 590014.
 
+  // Billing resilience (Part A) — dunning sweep: day-of/+3d/+7d emails after
+  // a failed card charge, keyed off the past_due_grace_until window. Same
+  // P0-009 sweep idiom as the trial-reminder sweep above.
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.dunning, async () => {
+        await runDunningSweep({
+          pool: pool ?? null,
+          settingsRepo,
+          delivery: messageDelivery,
+          auditRepo,
+          appBaseUrl: lifecycleEmailAppBaseUrl,
+          supportEmail: lifecycleEmailSupportEmail,
+          logger: lifecycleSweepLogger,
+        });
+      }).catch((err) => {
+        lifecycleSweepLogger.error('Dunning sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // Billing resilience (Part B) — overage settlement reconciliation: retries
+  // stale pending/failed settlements and backfills gap periods where metered
+  // AI usage was never billed. Same P0-009 sweep idiom; no-ops without a
+  // pool or Stripe configuration.
+  const overageReconciliationLogger = createLogger({
+    service: 'overage-reconciliation',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.overageReconciliation, async () => {
+        await runOverageSettlementReconciliation({
+          pool: pool ?? null,
+          logger: overageReconciliationLogger,
+          billing: callUsageBillingService ?? null,
+          callUsage: callUsageRepo ?? { sumBillableSeconds: async () => 0 },
+          overageCaps: pool ? new PgOverageCapStore(pool) : { get: async () => null },
+          priceIdForPlan: (planId) => stripePriceIdForPlan(planId),
+        });
+      }).catch((err) => {
+        overageReconciliationLogger.error('Overage reconciliation sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
   // The voiceSessionStore is shared with the Twilio adapter (created above).

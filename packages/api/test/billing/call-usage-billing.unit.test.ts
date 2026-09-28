@@ -7,9 +7,13 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CallUsageBillingService,
   PgCallUsageSettlementRepository,
+  OVERAGE_INVOICE_ITEM_MAX_ATTEMPTS,
+  OVERAGE_SETTLEMENT_DLQ_TYPE,
   type CallUsageSettlementRepository,
   type CallUsageSettlementRow,
 } from '../../src/billing/call-usage-billing';
+import { InMemoryQueue } from '../../src/queues/queue';
+import type { Queue } from '../../src/queues/queue';
 import { fakePool } from './fake-pool';
 
 const START = new Date('2026-10-01T00:00:00Z');
@@ -40,7 +44,7 @@ function memorySettlements(): CallUsageSettlementRepository & { rows: Map<string
   };
 }
 
-function service(opts: { seconds: number; cap?: number | null; fetchFn?: typeof fetch; customer?: string | null; onAlert?: () => void }) {
+function service(opts: { seconds: number; cap?: number | null; fetchFn?: typeof fetch; customer?: string | null; onAlert?: () => void; queue?: Queue }) {
   const settlementRepo = memorySettlements();
   const svc = new CallUsageBillingService({
     pool: fakePool((sql) =>
@@ -53,10 +57,11 @@ function service(opts: { seconds: number; cap?: number | null; fetchFn?: typeof 
     fetchFn: opts.fetchFn ?? ((async () => new Response(JSON.stringify({ id: 'ii_1' }))) as unknown as typeof fetch),
     planForPriceId: (p) => (p === 'price_starter' ? 'starter' : p === 'price_growth' ? 'growth' : null),
     ...(opts.onAlert ? { onAlert: opts.onAlert } : {}),
+    ...(opts.queue ? { queue: opts.queue } : {}),
   });
   const settle = (price = 'price_starter') =>
     svc.settlePeriod({ tenantId: 't1', periodStart: START, periodEnd: END, subscriptionPriceId: price, stripeInvoiceId: 'in_1' });
-  return { settle, settlementRepo };
+  return { settle, settlementRepo, svc };
 }
 
 describe('CallUsageBillingService (unit)', () => {
@@ -97,6 +102,59 @@ describe('CallUsageBillingService (unit)', () => {
 
     const noId = service({ seconds: 3_600, fetchFn: (async () => new Response('{}')) as unknown as typeof fetch });
     await expect(noId.settle()).rejects.toThrow(/returned no id/);
+  });
+
+  it('retries the invoice-item POST and succeeds on a later attempt', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response('down', { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ii_retry' })));
+    const { settle, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    const out = await settle();
+    expect(out.invoiceItemId).toBe('ii_retry');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    // Same idempotency key across retries — a lost response can't double-bill.
+    const keys = fetchFn.mock.calls.map((c) => (c[1].headers as Record<string, string>)['Idempotency-Key']);
+    expect(new Set(keys).size).toBe(1);
+    expect([...settlementRepo.rows.values()][0].status).toBe('completed');
+  });
+
+  it('gives up after the max attempts and writes the settlement to the dead-letter queue', async () => {
+    const queue = new InMemoryQueue();
+    const onAlert = vi.fn();
+    const fetchFn = vi.fn(async () => new Response('down', { status: 503 }));
+    const { settle, settlementRepo } = service({ seconds: 3_600, onAlert, queue, fetchFn: fetchFn as unknown as typeof fetch });
+    await expect(settle()).rejects.toThrow(/failed \(503\)/);
+    expect(fetchFn).toHaveBeenCalledTimes(OVERAGE_INVOICE_ITEM_MAX_ATTEMPTS);
+    expect([...settlementRepo.rows.values()][0].status).toBe('failed');
+    expect(onAlert).toHaveBeenCalledWith(expect.objectContaining({ rule: 'call_settlement_failed' }));
+    const dlq = await queue.listDeadLetter();
+    expect(dlq).toHaveLength(1);
+    expect(dlq[0].type).toBe(OVERAGE_SETTLEMENT_DLQ_TYPE);
+    expect(dlq[0].error).toMatch(/failed \(503\)/);
+    expect((dlq[0].payload as { tenantId: string }).tenantId).toBe('t1');
+  });
+
+  it('retrySettlement re-drives a failed settlement without an invoice pin', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'ii_2' })));
+    const { svc, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    await svc.settlePeriod({ tenantId: 't1', periodStart: START, periodEnd: END, subscriptionPriceId: 'price_starter' });
+    const failed = { ...[...settlementRepo.rows.values()][0], status: 'failed' as const };
+    const out = await svc.retrySettlement({ tenantId: 't1', settlement: failed });
+    expect(out.invoiceItemId).toBe('ii_2');
+    expect(out.alreadyCompleted).toBe(false);
+    // The retry must NOT pin to the (possibly finalized) original invoice.
+    const body = fetchFn.mock.calls[fetchFn.mock.calls.length - 1][1].body as URLSearchParams;
+    expect(body.get('invoice')).toBeNull();
+  });
+
+  it('retrySettlement returns an already-completed settlement as-is', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'ii_1' })));
+    const { svc, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    await svc.settlePeriod({ tenantId: 't1', periodStart: START, periodEnd: END, subscriptionPriceId: 'price_starter' });
+    const completed = [...settlementRepo.rows.values()][0];
+    const out = await svc.retrySettlement({ tenantId: 't1', settlement: completed });
+    expect(out).toEqual({ invoiceItemId: 'ii_1', alreadyCompleted: true });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it('refuses an unknown subscription price and a tenant with no Stripe customer', async () => {

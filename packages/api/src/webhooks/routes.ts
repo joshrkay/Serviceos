@@ -2164,6 +2164,43 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // Billing resilience — dunning grace (Part A). A failed charge at
+      // trial end / renewal flips the mirrored subscription status to
+      // past_due; instead of hard-blocking the voice gate to voicemail
+      // immediately, this stamps a 7-day grace window
+      // (tenants.past_due_grace_until) during which calls keep being
+      // answered while the account stays flagged past_due. The dunning
+      // sweep keys its day-of/+3d/+7d emails off the same window. Stripe
+      // Smart Retries are untouched — this handler only changes OUR side
+      // of the failure. Idempotent: an active grace is never extended by a
+      // second failed invoice (see BillingService.applyInvoicePaymentFailed).
+      if (deps.billingService && event.type === 'invoice.payment_failed') {
+        const invoice = event.data.object as {
+          id?: string;
+          customer?: string;
+          attempt_count?: number;
+          next_payment_attempt?: number | null;
+        };
+        const customerId =
+          typeof invoice.customer === 'string' ? invoice.customer : null;
+        if (customerId) {
+          const graceUntil = await deps.billingService.applyInvoicePaymentFailed({
+            customerId,
+          });
+          logger.info('invoice.payment_failed: past-due grace stamped', {
+            customerId,
+            invoiceId: invoice.id ?? null,
+            attemptCount: invoice.attempt_count ?? null,
+            nextPaymentAttempt: invoice.next_payment_attempt ?? null,
+            graceUntil: graceUntil ? graceUntil.toISOString() : null,
+          });
+        } else {
+          logger.warn('invoice.payment_failed missing customer — skipping grace stamp', {
+            invoiceId: invoice.id ?? null,
+          });
+        }
+      }
+
       // Tier 4 (Subscription — Rivet billing). customer.subscription.*
       // events update the tenant's cached subscription status. Match
       // by stripe_customer_id (the BillingService persists it on
@@ -2171,7 +2208,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // snapshot. created/updated/deleted all share the same handler;
       // 'deleted' typically arrives with status='canceled' so the
       // mirror naturally reflects the lifecycle end.
-      // AI-minute overage for the period that just closed. The invoice's
       // subscription line carries the plan in force now, which prices the
       // whole period (upgrades apply retroactively). A throw → 500 so
       // Stripe retries; settlement is idempotent per (tenant, period).
@@ -2351,7 +2387,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                           plan_id = COALESCE($5, plan_id),
                           current_period_start = COALESCE($6, current_period_start),
                           current_period_end = COALESCE($7, current_period_end),
-                          updated_at = NOW()
+                          updated_at = NOW(),
+                          -- Billing resilience (Part A): a recovered card
+                          -- clears the past-due grace; a past_due re-fire
+                          -- leaves an active grace untouched.
+                          past_due_grace_until = CASE
+                            WHEN $2 IN ('active', 'trialing') THEN NULL
+                            ELSE past_due_grace_until
+                          END
                     WHERE id = $4`,
                   [sub.id, sub.status, trialEndsAt, row.id, planId, currentPeriodStart, currentPeriodEnd],
                 );

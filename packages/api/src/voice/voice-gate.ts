@@ -45,6 +45,16 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
     const rawStatus = tenant?.status ?? null;
     const status = normalizeStatus(rawStatus);
 
+    // Billing resilience — dunning grace (Part A). A card that fails at
+    // trial end flips the mirrored status to past_due; instead of
+    // hard-blocking to voicemail immediately, we answer while the grace
+    // window stamped by invoice.payment_failed is still in the future. The
+    // account stays flagged past_due in subscription_status the whole time,
+    // and once the grace lapses the gate below blocks as before.
+    if (status === 'past_due' && isPastDueGraceActive(tenant?.pastDueGraceUntil ?? null)) {
+      return { allowed: true };
+    }
+
     if (status !== 'trialing' && status !== 'active') {
       return block(deps, {
         tenantId,
@@ -178,4 +188,15 @@ const VALID_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'i
 function normalizeStatus(raw: string | null): SubscriptionStatus {
   if (!raw) return null;
   return VALID_STATUSES.has(raw) ? (raw as SubscriptionStatus) : null;
+}
+
+/**
+ * Billing resilience — dunning grace (Part A). True while the
+ * past_due_grace_until stamped by invoice.payment_failed is in the future.
+ * The raw DB value may be a string or Date depending on the driver; both
+ * are handled.
+ */
+function isPastDueGraceActive(graceUntil: Date | null): boolean {
+  if (!graceUntil) return false;
+  return graceUntil.getTime() > Date.now();
 }
