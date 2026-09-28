@@ -562,10 +562,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['295_service_location_service_types', '0ba1a383f72240c3a6f775a7c59419f0a05d195c4d9c29d235f8d0f2e164ae79'],
   ['294_tenant_settings_e1_reviewers', 'ccbf692cee535ba6052eaf62d87d123094ffefa9d08b1a23e02a9d1edbc33933'],
   ['296_material_items_job_parts', '7dc74c1ad7030bd0e003b33762e1c0a0b3ff7083b7d4dab643038431f6cf91c5'],
-  // AI-check escape hatch: ai_verification_skipped_at on tenant_settings.
-  ['297_ai_check_skip', '9c44e3dfd7e7bcee64a4346685d1ea939395558af95b83b7aeb832570afb7600'],
   // Billing resilience — dunning grace window (invoice.payment_failed → 7-day grace).
   ['298_tenant_past_due_grace_until', 'e0c80255b2fa642bde99777c62ad3d75fb468ccedda951d45bf901bda65c147b'],
+  // AI-check escape hatch: ai_verification_skipped_at on tenant_settings.
+  ['297_ai_check_skip', '9c44e3dfd7e7bcee64a4346685d1ea939395558af95b83b7aeb832570afb7600'],
 ];
 
 function hashMigration(value: string): string {
