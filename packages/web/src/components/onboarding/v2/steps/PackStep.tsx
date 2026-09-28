@@ -26,61 +26,67 @@ interface PackOption {
   icon: React.ReactNode;
 }
 
+/** The standard "…tuned for X." line every trade card shares; only the
+ *  trailing word(s) vary, so entries pass just those. */
+function includesLine(forTrade: string): string {
+  return `Job types, sample pricing, and message templates tuned for ${forTrade}.`;
+}
+
 const PACKS: PackOption[] = [
   {
     id: 'hvac',
     name: 'HVAC',
     blurb: 'Heating, cooling, and ventilation.',
-    includes: 'Job types, sample pricing, and message templates tuned for HVAC.',
+    includes: includesLine('HVAC'),
     icon: <Flame size={20} />,
   },
   {
     id: 'plumbing',
     name: 'Plumbing',
     blurb: 'Repairs, installs, leaks, and drains.',
-    includes: 'Job types, sample pricing, and message templates tuned for plumbing.',
+    includes: includesLine('plumbing'),
     icon: <Droplets size={20} />,
   },
   {
     id: 'electrical',
     name: 'Electrical',
     blurb: 'Wiring, panels, lighting, and troubleshooting.',
-    includes: 'Job types, sample pricing, and message templates tuned for electrical work.',
+    includes: includesLine('electrical work'),
     icon: <Zap size={20} />,
   },
   {
     id: 'roofing',
     name: 'Roofing',
     blurb: 'Inspections, repairs, and replacements.',
-    includes: 'Job types, sample pricing, and message templates tuned for roofing.',
+    includes: includesLine('roofing'),
     icon: <House size={20} />,
   },
   {
     id: 'painting',
     name: 'Painting',
     blurb: 'Interior, exterior, and prep work.',
-    includes: 'Job types, sample pricing, and message templates tuned for painting.',
+    includes: includesLine('painting'),
     icon: <Paintbrush size={20} />,
   },
   {
     id: 'gc_remodel',
     name: 'Remodeling / GC',
     blurb: 'Kitchens, baths, and general contracting.',
-    includes: 'Job types, sample pricing, and message templates tuned for remodelers.',
+    includes: includesLine('remodelers'),
     icon: <Hammer size={20} />,
   },
   {
     id: 'landscaping',
     name: 'Landscaping',
     blurb: 'Lawn care, plantings, and irrigation.',
-    includes: 'Job types, sample pricing, and message templates tuned for landscapers.',
+    includes: includesLine('landscapers'),
     icon: <TreePine size={20} />,
   },
   {
     id: 'concrete',
     name: 'Concrete',
     blurb: 'Pours, repairs, and removal.',
-    includes: 'Job types, sample pricing, and message templates tuned for concrete work.',
+    includes: includesLine('concrete work'),
     icon: <Layers size={20} />,
   },
   {
