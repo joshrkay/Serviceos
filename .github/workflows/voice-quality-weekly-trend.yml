@@ -5,7 +5,14 @@
 # the overall pass rate drops more than 5pp week-over-week the workflow
 # also opens a tracking issue tagged `voice-quality-regression`.
 #
-# Cost shape: each weekly run hits real Anthropic + OpenAI APIs.
+# Provider (#1331): the SAME gateway config production runs — Railway
+# prod/dev set AI_PROVIDER_BASE_URL=https://api.openai.com/v1 +
+# AI_PROVIDER_API_KEY with gpt-4o-mini (default/lightweight/standard) and
+# gpt-4o (complex); the suite builds its gateway with createLLMGateway from
+# these vars. ANTHROPIC_API_KEY is deliberately NOT wired — production does not
+# use Anthropic (and that account is out of credit).
+#
+# Cost shape: each weekly run hits the real OpenAI API (LLM + Whisper + TTS).
 # `VOICE_QUALITY_COST_CAP_CENTS=1000` ($10) is the per-suite ceiling
 # enforced by the runner (see runner-layer2.ts SUITE_COST_CAP_CENTS_DEFAULT).
 #
@@ -37,11 +44,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # #1331 — the agent + judges run on the provider production runs
+      # (Railway prod/dev), built by createLLMGateway from these vars.
+      AI_PROVIDER_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AI_PROVIDER_BASE_URL: https://api.openai.com/v1
+      AI_DEFAULT_MODEL: gpt-4o-mini
+      AI_LIGHTWEIGHT_MODEL: gpt-4o-mini
+      AI_STANDARD_MODEL: gpt-4o-mini
+      AI_COMPLEX_MODEL: gpt-4o
+      # Classify deadline: the production value from
+      # docs/runbooks/live-ai-restore.md (code default is 4s).
+      AI_CLASSIFY_INTENT_DEADLINE_MS: '12000'
+      # Whisper STT + OpenAI TTS (the speech legs).
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       VOICE_QUALITY_LAYER2: 'true'
       VOICE_QUALITY_LAYER2_WEEKLY: 'true'
       VOICE_QUALITY_REPO: memory
+      # ~2x the gpt-4o-mini projection (ci-workflow-layer2-provider.test.ts
+      # pins projection <= cap <= 3x projection).
       VOICE_QUALITY_COST_CAP_CENTS: '1000'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -55,6 +75,14 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci
+      - name: Verify API keys are present
+        run: |
+          if [ -z "$AI_PROVIDER_API_KEY" ] || [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::AI_PROVIDER_API_KEY / OPENAI_API_KEY is not set (secrets.OPENAI_API_KEY) — Layer 2 was not executed."
+            echo "A missing credential is an unmet external prerequisite, not a green gate."
+            exit 1
+          fi
+          echo "API keys verified present."
       - name: Run Layer 2 weekly suite
         run: npm run voice-quality:layer2:weekly --workspace=packages/api
       - name: Upload weekly report artifact

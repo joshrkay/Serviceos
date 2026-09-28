@@ -31,8 +31,9 @@
  *   2. Constructs `WhisperRealProvider` (wrapping a buffer adapter
  *      around `WhisperTranscriptionProvider`), `TtsFixtureCache` (with
  *      a real `OpenAiTtsProvider`), `TwilioStreamEmulator` pointed at
- *      the shared server, and `createRealLayerTwoGateway` for the
- *      LLM-judge graders.
+ *      the shared server, and `createLayer2Gateway` (#1331: the production
+ *      `createLLMGateway` when AI_PROVIDER_API_KEY is set) for the agent
+ *      and the LLM-judge graders.
  *   3. Runs each script via `it.each` so vitest reports per-script
  *      pass/fail. Sequential execution is enforced by the Layer 2
  *      vitest config (`maxForks: 1`) plus vitest's natural ordering.
@@ -79,7 +80,11 @@ import {
 import { createLayer2AudioDriver } from '../../src/ai/voice-quality/audio/layer2-audio-driver';
 import type { WhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/whisper-real-provider';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
-import { createRealLayerTwoGateway } from '../../src/ai/gateway/real-layer-two-factory';
+import {
+  createLayer2Gateway,
+  selectLayer2Providers,
+  type Layer2ProviderPlan,
+} from '../../src/ai/gateway/real-layer-two-factory';
 import { OpenAiTtsProvider } from '../../src/ai/tts/tts-provider';
 import type { TtsProvider } from '../../src/ai/tts/tts-provider';
 import { mp3ToPcm16Mono16k } from '../../src/ai/voice-quality/audio/pcm-codec';
@@ -121,8 +126,11 @@ const corpusLoad = ((): {
 })();
 const scripts = corpusLoad.scripts;
 
-const hasKeys =
-  !!process.env.ANTHROPIC_API_KEY && !!process.env.OPENAI_API_KEY;
+// #1331 — the LLM leg runs on the provider production runs
+// (AI_PROVIDER_API_KEY → createLLMGateway; Railway: OpenAI gpt-4o-mini).
+// ANTHROPIC_API_KEY is only an explicit, logged local fallback.
+const providerPlan = selectLayer2Providers(process.env);
+const hasKeys = providerPlan.ok;
 const isLayer2CIMode = process.env.VOICE_QUALITY_LAYER2 === 'true';
 
 function writeReport(report: Layer2Report): void {
@@ -158,17 +166,17 @@ describe('Voice Quality Layer 2 — corpus', () => {
     // not skip — a skipped test exits 0 and allows a false-green deploy.
     // Local/dev runs (VOICE_QUALITY_LAYER2 unset) still skip gracefully.
     if (isLayer2CIMode) {
-      it('VQ2-016 — Layer 2 requires ANTHROPIC_API_KEY + OPENAI_API_KEY (CI mode — must fail)', () => {
+      it('VQ2-016 — Layer 2 requires AI_PROVIDER_API_KEY + OPENAI_API_KEY (CI mode — must fail)', () => {
         throw new Error(
-          'Layer 2 CI mode requires ANTHROPIC_API_KEY and OPENAI_API_KEY. ' +
-            'One or both are missing. This is a gate failure, not a skip.',
+          `Layer 2 CI mode: ${providerPlan.ok ? '' : providerPlan.error} ` +
+            'This is a gate failure, not a skip.',
         );
       });
       return;
     }
     writeEmptyReport();
     it.skip(
-      'VQ2-016 — Layer 2 requires ANTHROPIC_API_KEY + OPENAI_API_KEY (skipping in local env without keys)',
+      'VQ2-016 — Layer 2 requires AI_PROVIDER_API_KEY + OPENAI_API_KEY (skipping in local env without keys)',
       () => {
         expect(true).toBe(true);
       },
@@ -177,6 +185,9 @@ describe('Voice Quality Layer 2 — corpus', () => {
   }
 
   // ─── Real-mode path ────────────────────────────────────────────────────────
+
+  const plan = providerPlan as Extract<Layer2ProviderPlan, { ok: true }>;
+  console.log(plan.notice);
 
   const suiteState: {
     httpServer: HttpServer | null;
@@ -249,7 +260,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
     // The media adapter only accepts raw PCM16@16k for buffered output.
     // OpenAI returns MP3, so adapt it explicitly instead of either omitting
     // TTS (silent agent) or feeding compressed bytes to the μ-law encoder.
-    const openAiTts = new OpenAiTtsProvider(process.env.OPENAI_API_KEY!);
+    const openAiTts = new OpenAiTtsProvider(plan.speechApiKey);
     const layerTwoTtsProvider: TtsProvider = {
       async synthesize(input) {
         const result = await openAiTts.synthesize(input);
@@ -335,7 +346,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
         return;
       }
 
-      const driverDeps = await buildAudioModeDriverDeps(script, suiteState);
+      const driverDeps = await buildAudioModeDriverDeps(script, suiteState, plan);
 
       let result: RunScriptLayer2Result;
       try {
@@ -410,7 +421,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
             process.env.VOICE_QUALITY_COST_CAP_CENTS ?? '1000',
             10,
           ),
-          // `driverDeps.gateway` is built via `createRealLayerTwoGateway`,
+          // `driverDeps.gateway` is built via `createLayer2Gateway`,
           // which already wraps the gateway to add per-call cost into
           // `suiteState.suiteCostTracker`. Tell the runner so it skips
           // its own redundant `suiteCostTracker.addCents(runCents)` —
@@ -592,7 +603,7 @@ interface BuiltDriverDeps {
     Parameters<typeof createLayer2AudioDriver>[1],
     'onSessionCreated' | 'onSessionEnded'
   >;
-  gateway: ReturnType<typeof createRealLayerTwoGateway>;
+  gateway: ReturnType<typeof createLayer2Gateway>;
   /** Register a per-run audio stack for disposal at script end. */
   trackRun: (dispose: () => Promise<void>) => void;
   /** Free per-script disposables (every run's emulator hangup). */
@@ -613,9 +624,9 @@ async function buildAudioModeDriverDeps(
     suiteCostTracker: SuiteCostTracker;
     deliverFinalTranscript: ((transcript: string) => void) | null;
   },
+  plan: Extract<Layer2ProviderPlan, { ok: true }>,
 ): Promise<BuiltDriverDeps> {
-  const openaiKey = process.env.OPENAI_API_KEY!;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY!;
+  const openaiKey = plan.speechApiKey;
   if (!suiteState.voiceSessionStore) {
     throw new Error('buildAudioModeDriverDeps: voiceSessionStore not set up');
   }
@@ -633,8 +644,9 @@ async function buildAudioModeDriverDeps(
     // disk cache.
   });
 
-  const gateway = createRealLayerTwoGateway({
-    apiKey: anthropicKey,
+  const gateway = createLayer2Gateway({
+    llm: plan.llm,
+    env: process.env,
     bus: gatewayBus,
     costTracker: suiteState.suiteCostTracker,
   });
