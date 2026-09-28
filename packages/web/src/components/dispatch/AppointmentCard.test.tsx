@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import { AppointmentCard, AppointmentCardData } from './AppointmentCard';
+import { AppointmentCard, AppointmentCardData, AppointmentLateness } from './AppointmentCard';
 
 describe('P6-002 — Appointment card model', () => {
   const mockAppointment: AppointmentCardData = {
@@ -66,6 +66,35 @@ describe('P6-002 — Appointment card model', () => {
   it('omits the pending-change badge by default', () => {
     render(<AppointmentCard appointment={mockAppointment} />);
     expect(screen.queryByTestId('appointment-pending-change-badge')).not.toBeInTheDocument();
+  });
+
+  // PRD 4.7 — GET /api/dispatch/board serves `lateness` (state + confidence
+  // breakdown) evaluated from the truck's real pings; the card is where the
+  // owner hears it before the customer does.
+  const lateness = (latenessState: AppointmentLateness['latenessState']): AppointmentLateness => ({
+    latenessState,
+    confidenceScore: 0.82,
+    confidenceBreakdown: { recency: 0.9, accuracy: 0.8, movementConsistency: 0.7 },
+  });
+
+  it('4.7: a late state renders a "Running late" badge carrying its confidence breakdown', () => {
+    render(<AppointmentCard appointment={{ ...mockAppointment, lateness: lateness('late_prompt_required') }} />);
+    const badge = screen.getByTestId('appointment-lateness-badge');
+    expect(badge).toHaveTextContent('Running late');
+    expect(badge).toHaveAttribute('title', 'Confidence 82% — recency 90%, GPS accuracy 80%, movement 70%');
+  });
+
+  it('4.7: at_risk warns early with an "At risk" badge; on_track and no evaluation stay quiet', () => {
+    const { unmount } = render(<AppointmentCard appointment={{ ...mockAppointment, lateness: lateness('at_risk') }} />);
+    expect(screen.getByTestId('appointment-lateness-badge')).toHaveTextContent('At risk');
+    unmount();
+    const { unmount: unmount2 } = render(
+      <AppointmentCard appointment={{ ...mockAppointment, lateness: lateness('on_track') }} />,
+    );
+    expect(screen.queryByTestId('appointment-lateness-badge')).not.toBeInTheDocument();
+    unmount2();
+    render(<AppointmentCard appointment={mockAppointment} />);
+    expect(screen.queryByTestId('appointment-lateness-badge')).not.toBeInTheDocument();
   });
 
   it('applies dragging class when isDragging', () => {

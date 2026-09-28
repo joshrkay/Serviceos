@@ -173,7 +173,12 @@ describe('CreateAppointmentAITaskHandler', () => {
       now: NOW,
     });
     expect(result.proposal.proposalType).toBe('create_appointment');
-    expect(result.proposal.sourceContext).toEqual({ conversationId: 'conv-99' });
+    // PRD 3.12 — no feasibility deps wired here, so the draft says the
+    // drivability check did not run rather than implying an all-clear.
+    expect(result.proposal.sourceContext).toEqual({
+      conversationId: 'conv-99',
+      slotFeasibility: { checked: false, warnings: [] },
+    });
   });
 
   it('sends the classifier transcript as the user message to the LLM', async () => {

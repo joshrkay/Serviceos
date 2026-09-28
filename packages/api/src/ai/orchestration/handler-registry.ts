@@ -210,7 +210,8 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
       // auto-approve into a guaranteed execution failure.
       { ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
         ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}) },
-      // #1045 — back-to-back travel warning on the held slot.
+      // #1045 / PRD 3.12 — back-to-back travel warning on the held slot AND
+      // on the non-held create_appointment draft.
       deps.feasibilityDeps,
     ),
   );

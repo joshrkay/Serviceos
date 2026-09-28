@@ -17,10 +17,6 @@ export const stripTrailingSlash = (url: string): string => url.replace(/\/+$/, '
 export const API_URL = stripTrailingSlash(process.env.E2E_API_URL ?? 'http://localhost:3000');
 export const SIGNING_BASE = stripTrailingSlash(process.env.PUBLIC_API_URL ?? API_URL);
 
-/** Test stand-in for the owner-reviewed E1 script (see provisionTenant). */
-export const E2E_REVIEWED_E1_SCRIPT =
-  'If you smell gas or see fire, leave the building now and call 911 from outside.';
-
 export interface ProvisionedTenant {
   tenantId: string;
   userId: string;
@@ -72,24 +68,20 @@ export async function provisionTenant(
      VALUES ($1, $2, $3, $4, 'owner', 'Dev', 'Owner')`,
     [userId, tenantId, userId, `owner+${tenantId.slice(0, 8)}@example.com`],
   );
-  // `e1_reviewed_script`: since 52157b6f0 (2026-09-15, "fail closed on safety
-  // and billing gaps") `createVoiceGate` sends every call on a tenant WITHOUT a
-  // reviewed E1 life-safety script to voicemail ("We're completing this line's
-  // safety setup"), so every phone-lane spec went red at the /voice turn. No
-  // product surface writes this column — it is the owner's legal review of the
-  // E1 script (docs/audit/blocked-on-josh.md) — so the fixture provisions it
-  // alongside `voice_agent_live_at`, and a phone-surface rung-5 claim built on
-  // this fixture inherits that caveat.
+  // No `e1_reviewed_script` here. #1385 wrote it by SQL because the voice gate
+  // then sent every tenant without one to voicemail; since #1388 (O-2) a
+  // missing reviewed script runs the hard-flagged embedded placeholder instead,
+  // and since #1404 a script is live only with BOTH reviewer sign-offs
+  // (`liveE1Script`), so a script-only SQL row was already inert. The phone
+  // lane now provisions exactly what an onboarded tenant has — no E1 SQL.
   await pool.query(
-    `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region, voice_agent_live_at, e1_reviewed_script${
+    `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region, voice_agent_live_at${
       opts.ownerPhone ? ', owner_phone' : ''
     })
-     VALUES ($1, $2, $3, 'America/Chicago', 'TX', NOW(), $4${
-       opts.ownerPhone ? ', $5' : ''
-     })`,
+     VALUES ($1, $2, $3, 'America/Chicago', 'TX', NOW()${opts.ownerPhone ? ', $4' : ''})`,
     opts.ownerPhone
-      ? [crypto.randomUUID(), tenantId, businessName, E2E_REVIEWED_E1_SCRIPT, opts.ownerPhone]
-      : [crypto.randomUUID(), tenantId, businessName, E2E_REVIEWED_E1_SCRIPT],
+      ? [crypto.randomUUID(), tenantId, businessName, opts.ownerPhone]
+      : [crypto.randomUUID(), tenantId, businessName],
   );
   const client = await pool.connect();
   try {

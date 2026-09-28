@@ -39,6 +39,7 @@ const NO_AUTH_BYPASS_SPECS = [
   'journeys/running-late-chip.spec.ts',
   'journeys/on-my-way-tap.spec.ts',
   'journeys/technician-assignment-notification.spec.ts',
+  'journeys/dispatch-lateness-badge-4-7.spec.ts',
 ];
 
 // §10 — when Clerk journey tests run, default v2 on for the Vite dev server unless

@@ -7,32 +7,15 @@
  * at a real Postgres, no SQL beyond ordinary tenant provisioning, no
  * platform-admin route, no env-var shortcut.
  *
- * REACHABILITY FINDING (see docs/audit/lane-reports/book-8-3-phone.md for
- * the full RED trail): the phone IVR's `create_appointment` flow is
- * reachable deterministically up to and including the intent readback —
- * `matchNewBookingPhrase` (intent-classifier.ts:1859) is a pre-LLM regex
- * short-circuit that needs no AI key — but the VERY NEXT turn always
- * requires a real model. `confirmIntent` (ai/skills/confirm-intent.ts)
- * classifies the caller's yes/no answer via `gateway.complete({taskType:
- * 'classify_intent', ...})`, and the hermetic no-key gateway
- * (`scriptHermeticResponse`, ai/providers/mock.ts) never produces the
- * `{"answer": "yes"|"no"}` shape `parseYesNo` needs for ANY input — it only
- * ever returns `{intentType, confidence}` for that task type. An
- * unparseable classification is `confirmed: false` by design ("safer to
- * re-ask than queue the wrong proposal"), so no spoken answer — literal
- * "yes" included — can ever confirm the booking without a live model. This
- * was verified empirically (RED capture in the report), not assumed from
- * reading the source: an earlier version of this spec asserted a drafted
- * `create_appointment` proposal past this point and failed with an empty
- * `proposals` table every time.
- *
- * What IS proven below: the call never silently books (no `appointments`
- * row, no `proposals` row, ever — no gate needed since nothing is drafted
- * until the confirm succeeds), the correct intent is read back to the
- * caller by a model-free path, and this reachable frontier is tenant-
- * isolated (T2). The row's remaining claim — the confirmed proposal, its
- * approval through the inbox, and the resulting appointment — needs a real
- * `AI_PROVIDER_API_KEY`, which is out of scope for this hermetic lane.
+ * REACHABILITY (re-graded 2026-09-27 at origin/main): the whole row is now
+ * reached hermetically. `matchNewBookingPhrase` classifies the opening
+ * model-free; since #1119 (PR #1365) the hermetic gateway answers a clear
+ * "yes" on the confirm turn, so the call drafts ONE `create_appointment`
+ * proposal and books nothing. The last test drives the owner's half through
+ * the real routes: approving the draft as-is is refused (no time was named),
+ * the owner adds the address and the time, approves, and the production
+ * executor writes exactly one appointment with its `appointment.created`
+ * audit row. Since #1388 the fixture provisions no E1 script by SQL.
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { Pool } from 'pg';
@@ -41,6 +24,9 @@ import {
   provisionTenant,
   signedPost,
   sessionIdFromTwiml,
+  devAuthBearerToken,
+  pollFor,
+  API_URL,
   type ProvisionedTenant,
 } from './fixtures/twilio-phone-lane';
 
@@ -215,5 +201,68 @@ test.describe('#1015 row 3.1 — a call produces a PROPOSED booking, not a booki
     // Tenant A's state (from the previous test in this serial file) is
     // unaffected by tenant B's independent call.
     expect(await proposalsFor(tenantA.tenantId)).toEqual(beforeA);
+  });
+
+  test('the owner fills the time and approves: the production executor books exactly one appointment, audited — and not before', async ({
+    request,
+  }) => {
+    // The proposal tenant A's call drafted in the first test. The caller named
+    // no time, so it carries the scheduledStart/scheduledEnd gate: approving it
+    // as drafted is refused — the AI never books a time nobody chose.
+    const [proposal] = (
+      await pool.query<{ id: string; payload: { customerId: string } }>(
+        `SELECT id, payload FROM proposals WHERE tenant_id = $1 AND proposal_type = 'create_appointment'`,
+        [tenantA.tenantId],
+      )
+    ).rows;
+    expect(proposal).toBeDefined();
+    const auth = { authorization: `Bearer ${devAuthBearerToken(tenantA.userId)}` };
+
+    const early = await request.post(`${API_URL}/api/proposals/${proposal.id}/approve`, { headers: auth, data: {} });
+    expect(early.status()).toBe(400);
+    expect((await appointmentsFor(tenantA.tenantId)).rows).toHaveLength(0);
+
+    // What the owner does on the card, through the real routes: the caller's
+    // service address (the auto-opened job needs one — jobs.location_id is
+    // NOT NULL) and a time.
+    const loc = await request.post(`${API_URL}/api/locations`, {
+      headers: auth,
+      data: {
+        customerId: proposal.payload.customerId,
+        street1: '12 Oak Street',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+      },
+    });
+    expect(loc.status()).toBe(201);
+    const start = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    start.setUTCHours(15, 0, 0, 0);
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const edit = await request.put(`${API_URL}/api/proposals/${proposal.id}`, {
+      headers: auth,
+      data: { edits: { scheduledStart: start.toISOString(), scheduledEnd: end.toISOString() } },
+    });
+    expect(edit.status()).toBe(200);
+
+    const approve = await request.post(`${API_URL}/api/proposals/${proposal.id}/approve`, { headers: auth, data: {} });
+    expect(approve.status()).toBe(200);
+
+    // Execution runs on the in-process executor after approval — poll for it.
+    const appts = await pollFor<{ id: string; scheduled_start: Date }>(
+      pool,
+      `SELECT id, scheduled_start FROM appointments WHERE tenant_id = $1`,
+      [tenantA.tenantId],
+    );
+    expect(appts).toHaveLength(1);
+    expect(new Date(appts[0].scheduled_start).toISOString()).toBe(start.toISOString());
+    const audit = await pollFor<{ event_type: string }>(
+      pool,
+      `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_id = $2 AND event_type = 'appointment.created'`,
+      [tenantA.tenantId, appts[0].id],
+    );
+    expect(audit).toHaveLength(1);
+    // Tenant B's drafted proposal is still only a proposal.
+    expect((await appointmentsFor(tenantB.tenantId)).rows).toHaveLength(0);
   });
 });

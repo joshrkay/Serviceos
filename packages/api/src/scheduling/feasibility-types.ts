@@ -75,6 +75,13 @@ export interface FeasibilityInput {
   proposedTechnicianId: string | undefined;
   proposedScheduledStart: Date;
   proposedScheduledEnd: Date;
+  /**
+   * PRD 3.12 — the service location the travel check drives to/from, for a
+   * candidate that has no job yet (a `create_appointment` draft whose executor
+   * auto-opens the job at the customer's service location). Absent → the
+   * location of `appointment.jobId`, as before.
+   */
+  targetLocationId?: string;
 }
 
 export interface FeasibilityDependencies {

@@ -179,6 +179,23 @@ async function checkHoldFeasibility(
   tenantId: string,
   held: Appointment,
 ): Promise<HoldFeasibility> {
+  return checkSlotFeasibility(deps, tenantId, held);
+}
+
+/**
+ * The neighbour-technician drivability check behind both booking-creation
+ * paths (PRD 3.12): a placed hold (above) and a not-yet-written
+ * `create_appointment` candidate, which has no job yet and so names the
+ * service location to drive to (`targetLocationId`). Same contract: the
+ * warning-severity issues, each stamped with the technician; `checked: false`
+ * when not wired or on failure — never a silent all-clear.
+ */
+export async function checkSlotFeasibility(
+  deps: FeasibilityDependencies | undefined,
+  tenantId: string,
+  held: Appointment,
+  opts: { targetLocationId?: string } = {},
+): Promise<HoldFeasibility> {
   if (!deps) return { checked: false, warnings: [] };
   try {
     const neighbours = await deps.appointmentRepo.findByDateRange(
@@ -201,6 +218,7 @@ async function checkHoldFeasibility(
           proposedTechnicianId: technicianId,
           proposedScheduledStart: held.scheduledStart,
           proposedScheduledEnd: held.scheduledEnd,
+          ...(opts.targetLocationId ? { targetLocationId: opts.targetLocationId } : {}),
         },
         deps,
       );

@@ -32,6 +32,15 @@
  *     just shallower than BOOK: it never even reaches entity resolution, so
  *     no appointment lookup — real or not — is ever attempted.
  *
+ * UPDATE (re-grade 2026-09-27 at origin/main): #1119 (PR #1365) added
+ * anchored, entity-free MOVE/CANCEL openings ("I need to reschedule my
+ * appointment") and a hermetic "yes". Those now classify, confirm and draft
+ * a `reschedule_appointment` / `cancel_appointment` proposal — but one that
+ * names no appointment, and the follow-up ("the Garcia appointment") is not
+ * understood without a model. The entity-bearing phrasings above still stop
+ * at classification. So the row's claim (a move/cancel that lands) is still
+ * not reached hermetically; the new tests pin exactly how far it gets.
+ *
  * What IS proven below, on the real owner-line routes at a real Postgres:
  * the deterministic BOOK readback, the immediate MOVE/CANCEL reprompt, that
  * nothing is ever drafted or booked for any of the three, and that this
@@ -176,7 +185,7 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     expect((await appointmentsFor(tenantA.tenantId)).rows).toHaveLength(0);
   });
 
-  test('MOVE never even classifies deterministically — no reschedule_appointment short-circuit exists on this surface', async ({
+  test('an entity-bearing MOVE ("Move Tuesday\'s Garcia appointment…") still never classifies without a model — the #1119 opening is entity-free by design', async ({
     request,
   }) => {
     const callSid = `CA-book310-move-${crypto.randomUUID().slice(0, 8)}`;
@@ -193,7 +202,7 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     expect((await proposalsFor(tenantA.tenantId)).rows).toHaveLength(0);
   });
 
-  test('CANCEL never even classifies deterministically — no cancel_appointment short-circuit exists on this surface', async ({
+  test('an entity-bearing CANCEL still never classifies without a model', async ({
     request,
   }) => {
     const callSid = `CA-book310-cancel-${crypto.randomUUID().slice(0, 8)}`;
@@ -205,6 +214,35 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     expect(twiml).toMatch(/<Gather/);
     expect((await proposalsFor(tenantA.tenantId)).rows).toHaveLength(0);
   });
+
+  for (const leg of [
+    { name: 'MOVE', opening: 'I need to reschedule my appointment', readback: 'reschedule appointment', type: 'reschedule_appointment' },
+    { name: 'CANCEL', opening: 'I need to cancel my appointment', readback: 'cancel appointment', type: 'cancel_appointment' },
+  ] as const) {
+    test(`${leg.name} opening (#1119): classifies model-free, confirms, and drafts a ${leg.type} proposal that names NO appointment — nothing moves`, async ({
+      request,
+    }) => {
+      const callSid = `CA-book310-open-${leg.name.toLowerCase()}-${crypto.randomUUID().slice(0, 8)}`;
+      const sid = await startOwnerCall(request, tenantA, A_OWNER_PHONE, callSid);
+      const opening = await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, sid, leg.opening);
+      expect(opening.twiml.toLowerCase()).toContain(leg.readback);
+      expect(opening.twiml.toLowerCase()).toContain('is that right');
+
+      const confirm = await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, opening.sid, 'Yes');
+      // Honest: the owner is told details are still open, never that it is done.
+      expect(confirm.twiml.toLowerCase()).toContain('still need to be sorted out');
+
+      const { rows } = await pool.query<{ status: string; payload: Record<string, unknown> }>(
+        `SELECT status, payload FROM proposals WHERE tenant_id = $1 AND proposal_type = $2`,
+        [tenantA.tenantId, leg.type],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe('draft');
+      // The frontier: which appointment is never resolved hermetically.
+      expect(rows[0].payload.appointmentId).toBeUndefined();
+      expect((await appointmentsFor(tenantA.tenantId)).rows).toHaveLength(0);
+    });
+  }
 
   test('T1 with a neighbour: the neighbour tenant\'s identical owner-line calls reach the same frontier independently, and tenant A stays untouched', async ({
     request,
