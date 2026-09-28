@@ -1653,7 +1653,46 @@ export function createVoiceTurnProcessor(
         ...(resolution.notFound?.reference ? { reference: resolution.notFound.reference } : {}),
       };
     }
+    // #1015 row 3.10 — a move/cancel that names no appointment at all ("I
+    // need to cancel my appointment") asks WHICH one, once, instead of reading
+    // back a request whose draft could never be approved. The answer turn
+    // (`handleDisambiguationTurn`) resolves it through the same resolver.
+    if (shouldAskWhichAppointment(session, intent, entities, resolution.refs)) {
+      return {
+        type: 'entity_reference_requested',
+        entityKind: 'appointment',
+        referenceKey: 'appointmentReference',
+        partialRefs: resolution.refs,
+      };
+    }
     return { type: 'entity_resolved', refs: resolution.refs };
+  }
+
+  /**
+   * #1015 row 3.10 — ask "which appointment?" only when ALL hold:
+   *   - the intent changes an existing appointment (move / cancel);
+   *   - nothing named one: no id resolved, no appointment reference, and no
+   *     customer named (a named customer already gets the customer-anchored
+   *     lookup, whose ambiguity is asked about as `entity_ambiguous`);
+   *   - it has not been asked for this request yet (one question, then the
+   *     request proceeds with whatever the answer resolved — never a guess);
+   *   - the line is the owner's / a trusted operator surface. An S1 caller is
+   *     not offered other customers' appointments to pick from.
+   */
+  function shouldAskWhichAppointment(
+    session: VoiceSession,
+    intent: string,
+    entities: Record<string, unknown>,
+    refs: Record<string, string>,
+  ): boolean {
+    if (intent !== 'reschedule_appointment' && intent !== 'cancel_appointment') return false;
+    if (refs.appointmentId) return false;
+    const named = (key: string) =>
+      typeof entities[key] === 'string' && (entities[key] as string).trim().length > 0;
+    if (named('appointmentReference') || named('customerName') || named('appointmentId')) return false;
+    if (session.machine.currentContext.pendingEntityRequest) return false;
+    const profile = classifierProfileForSession(session);
+    return profile === 'owner_line' || profile === 'operator';
   }
 
   /**
@@ -1673,7 +1712,19 @@ export function createVoiceTurnProcessor(
     const ctx = session.machine.currentContext;
     let event: CallingAgentEvent;
     const pending = ctx.pendingEntityAmbiguity;
-    if (!pending) {
+    const request = ctx.pendingEntityRequest;
+    if (!pending && request && ctx.currentIntent) {
+      // #1015 row 3.10 — the answer to "which appointment?": the caller's
+      // words become the reference and go through the shared resolver. An
+      // ambiguous answer is asked about; an unmatched one leaves the id
+      // absent (the draft stays gated) — never a guess.
+      const answer = speechResult.trim();
+      event = await resolveTurnEntityEvent(session, tenantId, ctx.currentIntent, {
+        ...(ctx.extractedEntities ?? {}),
+        ...request.partialRefs,
+        ...(answer ? { [request.referenceKey]: answer } : {}),
+      });
+    } else if (!pending) {
       const intent = ctx.currentIntent;
       const entities = ctx.extractedEntities;
       event =
