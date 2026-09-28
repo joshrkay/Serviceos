@@ -38,6 +38,33 @@ export interface AppointmentCardData {
    * confirmation. Drives the "change requested" badge.
    */
   pendingChange?: 'cancel' | 'reschedule';
+  /**
+   * PRD 4.7 — lateness evaluated from the truck's real location pings,
+   * served per active appointment by GET /api/dispatch/board
+   * (`DispatchBoardItem.lateness`, api dispatch/lateness.ts). Only the fields
+   * the card reads are typed here.
+   */
+  lateness?: AppointmentLateness;
+}
+
+export interface AppointmentLateness {
+  latenessState: 'on_track' | 'at_risk' | 'late_prompt_required' | 'late_confirmed';
+  confidenceScore: number;
+  confidenceBreakdown: { recency: number; accuracy: number; movementConsistency: number };
+}
+
+const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+function latenessLabel(state: AppointmentLateness['latenessState']): string | null {
+  switch (state) {
+    case 'late_prompt_required':
+    case 'late_confirmed':
+      return 'Running late';
+    case 'at_risk':
+      return 'At risk';
+    default:
+      return null;
+  }
 }
 
 export interface AppointmentCardProps {
@@ -114,6 +141,9 @@ export function AppointmentCard({
     appointment.arrivalWindowEnd
   );
 
+  const lateness = appointment.lateness;
+  const latenessText = lateness ? latenessLabel(lateness.latenessState) : null;
+
   const isHold = appointment.holdPendingApproval === true;
   let holdExpiryLabel: string | null = null;
   if (isHold && appointment.holdExpiryAt) {
@@ -159,6 +189,24 @@ export function AppointmentCard({
             title="This appointment overlaps another booking"
           >
             Conflict
+          </span>
+        )}
+        {lateness && latenessText && (
+          <span
+            className={`appointment-card__badge ${
+              lateness.latenessState === 'at_risk'
+                ? 'appointment-card__badge--at-risk'
+                : 'appointment-card__badge--late'
+            }`}
+            data-testid="appointment-lateness-badge"
+            role="status"
+            title={`Confidence ${pct(lateness.confidenceScore)} — recency ${pct(
+              lateness.confidenceBreakdown.recency,
+            )}, GPS accuracy ${pct(lateness.confidenceBreakdown.accuracy)}, movement ${pct(
+              lateness.confidenceBreakdown.movementConsistency,
+            )}`}
+          >
+            {latenessText}
           </span>
         )}
         {appointment.pendingChange && (

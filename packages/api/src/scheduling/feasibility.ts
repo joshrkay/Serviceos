@@ -126,6 +126,14 @@ async function locationCoordsFor(
   const job = await deps.jobRepo.findById(tenantId, jobId);
   const locationId = (job as any)?.locationId as string | undefined;
   if (!locationId) return { coords: null };
+  return coordsOfLocation(deps, tenantId, locationId);
+}
+
+async function coordsOfLocation(
+  deps: FeasibilityDependencies,
+  tenantId: string,
+  locationId: string,
+): Promise<{ coords: LatLng | null }> {
   const loc = await deps.locationRepo.findById(tenantId, locationId);
   const lat = (loc as any)?.latitude;
   const lng = (loc as any)?.longitude;
@@ -142,6 +150,9 @@ async function skillMatchIssues(
   input: TechnicianScopedInput,
   deps: FeasibilityDependencies,
 ): Promise<{ issues: FeasibilityIssue[]; constraints: SkillConstraintStatus }> {
+  // A job-less candidate (PRD 3.12's create_appointment draft) has no job to
+  // read required skills from — say so rather than query with an empty id.
+  if (!input.appointment.jobId) return { issues: [], constraints: 'not_evaluated' };
   const required = await deps.skillMatcher.requiredSkillsForJob(input.tenantId, input.appointment.jobId);
   // The wired matcher is StubSkillMatcher, so this is today's normal path.
   // `none_configured` says so out loud; it is NOT the same claim as
@@ -186,7 +197,9 @@ async function travelTimeIssues(
   const issues: FeasibilityIssue[] = [];
   if (!prev && !next) return { issues, summary };
 
-  const target = await locationCoordsFor(deps, input.tenantId, input.appointment.jobId);
+  const target = input.targetLocationId
+    ? await coordsOfLocation(deps, input.tenantId, input.targetLocationId)
+    : await locationCoordsFor(deps, input.tenantId, input.appointment.jobId);
 
   for (const [neighbor, kind] of [
     [prev, 'fromPrev'] as const,

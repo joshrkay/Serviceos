@@ -19,7 +19,7 @@ themselves are kept as written (history); this table is the current state.
 
 | Entry | Ticket | State now | Row(s) now |
 |---|---|---|---|
-| O-2 E1 script sign-off | #1000 (closed) | **Answered 2026-09-26** (trade professional + counsel; placeholder hard-flagged until then; engineering adds a write path). **Not yet reconciled with the code — see the new entry below:** since 52157b6f0 the voice gate refuses AI answering on any tenant without a reviewed script, and the promised write path does not exist | 2.5 4 (T1), I8 4; phone rows 3.1 / 3.7 / 3.10 held at 4 by it |
+| O-2 E1 script sign-off | #1000 (closed) | **Answered 2026-09-26** (trade professional + counsel; placeholder hard-flagged until then; engineering adds a write path). ~~Not yet reconciled with the code~~ **Reconciled 2026-09-27:** #1388 (placeholder hard-flagged, no voicemail) + #1404 (owner write path, two sign-offs); the phone fixture writes no E1 SQL | 2.5 4 (T1), I8 4; phone rows 3.1 / 3.7 (phone) now 5, 3.10 held by its MOVE/CANCEL frontier instead |
 | O-4 static PIN | #1000 | Answered 2026-09-26 (accept for now) | I3 4 (T1) |
 | O-6 approval transport | #1000 | Answered 2026-09-26 (`speechTurn`, Gather degrade, #838) | I3; §8.6 voice-approval rows |
 | O-9 second classifier | #1000 | Answered 2026-09-26 (amend the commitment to name the covered surfaces) — the PRD text amendment is not yet made | C5 2, 7.11 3 |
@@ -40,7 +40,7 @@ themselves are kept as written (history); this table is the current state.
 | 5.5 simulated reader | #1018 | Open — needs the Stripe test key above | 5.5 live-charge half |
 | #1102 refuse vs skip | #1102 (closed) | Fixed by PR #1107 (refuse); #1109 closed too | 5.5 4 (T1) both halves |
 
-**Count still parked on Josh:** 9 — the O-2/voice-gate conflict (new, below),
+**Count still parked on Josh:** 8 *(was 9; the O-2/voice-gate conflict below is resolved in code — lane RG, 2026-09-27)* —
 the Intuit click, the GBP connect, the Stripe test key (covers 8.5b/c and
 5.5), the 8.12 minimum, 1.6's Twilio subaccount, 1.10's flag, the §E questions
 E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
@@ -59,7 +59,11 @@ E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
   the hard-flagged placeholder, as the O-2 answer reads.
 - **Until decided:** phone-surface rows that reach 5 only with the SQL-provisioned script are held at
   4 (3.1, 3.7 phone, 3.10), and 2.5 stays at 4.
-- **Parked:** 2026-09-26 · **Answer:**
+- **Parked:** 2026-09-26 · **Answer:** **Resolved in code 2026-09-27 — option (b).** #1388 lets the gate pass on the
+  hard-flagged placeholder (no voicemail for a missing script) and ships the owner write path; #1404 makes a
+  saved script live only with both sign-offs. The phone-lane fixture no longer writes the column by SQL
+  (lane RG re-grade, `docs/PRD-v5-as-built.md` 3.1 / 3.7 / 3.10); 3.1 and 3.7 (phone) are at 5 on it. Still
+  Josh's: obtaining the trade + counsel sign-off (the O-2 row below).
 
 ## Decisions (product, not engineering)
 

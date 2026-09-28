@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput, Proposal } from '../../proposals/proposal';
@@ -8,7 +9,7 @@ import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
 import { AppointmentRepository } from '../../appointments/appointment';
 import { JobRepository } from '../../jobs/job';
-import { placeAppointmentHold } from '../scheduling/place-hold';
+import { placeAppointmentHold, checkSlotFeasibility, type HoldFeasibility } from '../scheduling/place-hold';
 import {
   resolveDateTime,
   formatForReadback,
@@ -825,8 +826,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // CreateAppointmentExecutionHandler (which only checks jobId is a string)
       // would book against the unverified job. Dropping the trust tier lands it
       // in 'draft' so a human reviews the booking first.
-      const reviewGatedFallback = (): TaskResult => ({
-        proposal: createProposal({ ...input, sourceTrustTier: undefined }),
+      const reviewGatedFallback = async (): Promise<TaskResult> => ({
+        proposal: createProposal(
+          await this.withSlotFeasibility({ ...input, sourceTrustTier: undefined }, context.tenantId),
+        ),
         taskType: this.taskType,
       });
       // WS18 — the ownership guard + tentative-hold write now live in the shared
@@ -867,7 +870,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         // create_appointment (repo/validation error), rather than failing the call.
         return holdResult.failed === 'job_not_owned'
           ? reviewGatedFallback()
-          : { proposal: createProposal(input), taskType: this.taskType };
+          : {
+              proposal: createProposal(await this.withSlotFeasibility(input, context.tenantId)),
+              taskType: this.taskType,
+            };
       }
       const holdExpiryAt = holdResult.holdExpiryAt;
       // Same confidence marker as the create_appointment payload — the booking
@@ -962,7 +968,74 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       return { proposal: createProposal(bookingInput), taskType: 'create_booking' };
     }
 
-    return { proposal: createProposal(input), taskType: this.taskType };
+    return {
+      proposal: createProposal(await this.withSlotFeasibility(input, context.tenantId)),
+      taskType: this.taskType,
+    };
+  }
+
+  /**
+   * PRD 3.12 — the non-held `create_appointment` draft gets the same
+   * back-to-back drivability check the held path runs (#1045), stamped as
+   * `sourceContext.slotFeasibility` for the owner's card. No job is named yet
+   * on the common path, so the travel check drives to the service location
+   * the executor will open the job at (an operator-picked `locationId`, else
+   * the customer's primary, else any live one — CreateAppointmentExecution
+   * Handler's own order). Nothing to locate → `checked: false`, never a
+   * silent all-clear.
+   */
+  private async withSlotFeasibility(
+    input: CreateProposalInput,
+    tenantId: string,
+  ): Promise<CreateProposalInput> {
+    const slotFeasibility = await this.slotFeasibility(input.payload, tenantId, input.createdBy);
+    return { ...input, sourceContext: { ...(input.sourceContext ?? {}), slotFeasibility } };
+  }
+
+  private async slotFeasibility(
+    payload: Record<string, unknown>,
+    tenantId: string,
+    createdBy: string | undefined,
+  ): Promise<HoldFeasibility> {
+    const unchecked: HoldFeasibility = { checked: false, warnings: [] };
+    const deps = this.feasibilityDeps;
+    const start = typeof payload.scheduledStart === 'string' ? new Date(payload.scheduledStart) : null;
+    const end = typeof payload.scheduledEnd === 'string' ? new Date(payload.scheduledEnd) : null;
+    if (!deps || !start || !end) return unchecked;
+    const jobId = typeof payload.jobId === 'string' && isUuid(payload.jobId) ? payload.jobId : '';
+    let targetLocationId: string | undefined;
+    if (!jobId) {
+      const customerId = typeof payload.customerId === 'string' ? payload.customerId : '';
+      if (!isUuid(customerId)) return unchecked;
+      try {
+        const live = (await deps.locationRepo.findByCustomer(tenantId, customerId)).filter((l) => !l.isArchived);
+        const supplied = typeof payload.locationId === 'string' ? live.find((l) => l.id === payload.locationId) : undefined;
+        targetLocationId = (supplied ?? live.find((l) => l.isPrimary) ?? live[0])?.id;
+      } catch {
+        return unchecked;
+      }
+      if (!targetLocationId) return unchecked;
+    }
+    const now = new Date();
+    return checkSlotFeasibility(
+      deps,
+      tenantId,
+      {
+        // A candidate, never persisted — a fresh id matches no sibling row.
+        id: randomUUID(),
+        tenantId,
+        jobId,
+        scheduledStart: start,
+        scheduledEnd: end,
+        timezone: typeof payload.timezone === 'string' ? payload.timezone : 'UTC',
+        status: 'scheduled',
+        holdPendingApproval: false,
+        createdBy: createdBy ?? 'system',
+        createdAt: now,
+        updatedAt: now,
+      },
+      targetLocationId ? { targetLocationId } : {},
+    );
   }
 
   private buildUserMessage(context: TaskContext): string {
