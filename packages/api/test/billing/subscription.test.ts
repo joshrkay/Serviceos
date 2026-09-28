@@ -91,6 +91,47 @@ describe('BillingService', () => {
     fetchFn = vi.fn();
   });
 
+  describe('applyInvoicePaymentFailed — dunning grace (Part A)', () => {
+    function gracePool(activeGrace: Date | null, matched: boolean) {
+      const query = vi.fn(async (sql: string) => {
+        if (sql.includes('past_due_grace_until')) {
+          if (!matched) return { rows: [] };
+          if (activeGrace) return { rows: [] }; // WHERE clause: active grace is never extended
+          const stamped = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+          return { rows: [{ past_due_grace_until: stamped }] };
+        }
+        return { rows: [] };
+      });
+      return { query };
+    }
+
+    it('stamps a 7-day grace when no grace is active', async () => {
+      const grace = gracePool(null, true);
+      const svc = new BillingService({ pool: grace as never, config: { apiKey: 'sk_test' } });
+      const before = Date.now();
+      const graceUntil = await svc.applyInvoicePaymentFailed({ customerId: 'cus_x' });
+      expect(graceUntil).toBeInstanceOf(Date);
+      const inSevenDays = before + 7 * 24 * 60 * 60 * 1000;
+      expect(Math.abs((graceUntil as Date).getTime() - inSevenDays)).toBeLessThan(60_000);
+      expect(grace.query).toHaveBeenCalledWith(
+        expect.stringContaining('past_due_grace_until'),
+        ['cus_x'],
+      );
+    });
+
+    it('does not extend an already-active grace', async () => {
+      const grace = gracePool(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), true);
+      const svc = new BillingService({ pool: grace as never, config: { apiKey: 'sk_test' } });
+      expect(await svc.applyInvoicePaymentFailed({ customerId: 'cus_x' })).toBeNull();
+    });
+
+    it('returns null when the customer maps to no tenant', async () => {
+      const grace = gracePool(null, false);
+      const svc = new BillingService({ pool: grace as never, config: { apiKey: 'sk_test' } });
+      expect(await svc.applyInvoicePaymentFailed({ customerId: 'cus_ghost' })).toBeNull();
+    });
+  });
+
   it('getSubscription returns null fields for a fresh tenant', async () => {
     pool = makePool({
       stripe_customer_id: null,

@@ -599,3 +599,70 @@ export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEm
 
   return { subject, text, html: renderEmailShell(heading, bodyHtml) };
 }
+
+export interface PaymentFailedEmailContext {
+  businessName?: string;
+  appBaseUrl: string;
+  supportEmail: string;
+  /**
+   * Which dunning send this is: 0 (day of the failed charge), 3, or 7
+   * (last day of the 7-day grace window). Drives the subject and urgency.
+   * The copy hardcodes the matching days-remaining (7, 4, 0) per send, so
+   * no separate days-left parameter is needed.
+   */
+  dunningDay: 0 | 3 | 7;
+}
+
+/**
+ * Billing resilience — dunning sequence (Part A). Fires after a card is
+ * declined at trial end / renewal: day-of, +3d, +7d. Same shape and tone
+ * as the trial-ending reminders — plain-spoken, no jargon — but the facts
+ * differ: this is a failed charge with a 7-day grace, not a trial ending.
+ * Never implies a card will be charged later without the owner acting.
+ */
+export function renderPaymentFailedEmail(ctx: PaymentFailedEmailContext): RenderedEmail {
+  const billingUrl = `${ctx.appBaseUrl}/settings`;
+  const cta = renderCtaButton(billingUrl, 'Update payment info');
+
+  const subject =
+    ctx.dunningDay === 0
+      ? 'Your Rivet payment didn’t go through'
+      : ctx.dunningDay === 3
+        ? '4 days left to fix your Rivet payment'
+        : 'Last day — update your Rivet payment info';
+  const heading =
+    ctx.dunningDay === 0
+      ? 'Your payment didn’t go through'
+      : ctx.dunningDay === 3
+        ? '4 days left on your payment'
+        : 'Your grace ends today';
+
+  const greeting = ctx.businessName ? `Hi ${ctx.businessName} — ` : '';
+  const intro =
+    ctx.dunningDay === 0
+      ? `${greeting}heads up: the card on file was declined when we tried to ` +
+        'charge your Rivet plan. Nothing’s paused — your AI dispatcher is ' +
+        'still answering calls. You’ve got 7 days to update your payment ' +
+        'info before anything changes.'
+      : ctx.dunningDay === 3
+        ? `${greeting}still showing a failed payment on your Rivet account. ` +
+          'Update your card in the next 4 days and your AI dispatcher keeps ' +
+          'running without a gap — no calls missed.'
+        : `${greeting}last call: your 7-day grace ends today. Update your ` +
+          'payment info now, or your AI dispatcher stops answering and ' +
+          'callers go straight to voicemail.';
+
+  const text = [intro, '', cta.text, '', `Questions about billing? Email ${ctx.supportEmail}.`].join(
+    '\n',
+  );
+
+  const bodyHtml = [
+    `<p style="margin: 0 0 20px 0;">${escapeHtml(intro)}</p>`,
+    cta.html,
+    `<p style="margin: 0; color: #6b7280; font-size: 13px;">Questions about billing? Email ${escapeHtml(
+      ctx.supportEmail,
+    )}.</p>`,
+  ].join('\n    ');
+
+  return { subject, text, html: renderEmailShell(heading, bodyHtml) };
+}

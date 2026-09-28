@@ -9,12 +9,20 @@ import type { AuditRepository } from '../../src/audit/audit';
 function mockPool(opts: {
   subscriptionStatus: string | null;
   voiceAgentLiveAt?: Date | null;
+  pastDueGraceUntil?: Date | null;
 }): Pool {
   const liveAt = opts.voiceAgentLiveAt === undefined ? new Date() : opts.voiceAgentLiveAt;
   return {
     query: vi.fn(async (sql: string) => {
       if (sql.includes('FROM tenants')) {
-        return { rows: [{ subscription_status: opts.subscriptionStatus }] };
+        return {
+          rows: [
+            {
+              subscription_status: opts.subscriptionStatus,
+              past_due_grace_until: opts.pastDueGraceUntil ?? null,
+            },
+          ],
+        };
       }
       if (sql.includes('voice_agent_live_at')) {
         return { rows: [{ voice_agent_live_at: liveAt }] };
@@ -86,6 +94,42 @@ describe('createVoiceGate', () => {
       auditRepo,
     });
     const result = await gate({ tenantId: 't1', callSid: 'CA1' });
+    expect(result.reason).toBe('no_billing');
+  });
+
+  it('answers past_due calls while the 7-day grace is active', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'past_due',
+        pastDueGraceUntil: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
+      }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
+    expect(result.allowed).toBe(true);
+    expect(auditRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks past_due to voicemail once the grace has lapsed', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'past_due',
+        pastDueGraceUntil: new Date(Date.now() - 60 * 1000),
+      }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('no_billing');
+  });
+
+  it('blocks past_due to voicemail when no grace was ever stamped', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({ subscriptionStatus: 'past_due' }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
+    expect(result.allowed).toBe(false);
     expect(result.reason).toBe('no_billing');
   });
 

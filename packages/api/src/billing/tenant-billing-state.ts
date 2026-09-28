@@ -16,6 +16,13 @@ export interface TenantBillingState {
   period: { start: Date; end: Date } | null;
   ownerId: string | null;
   ownerEmail: string | null;
+  /**
+   * Billing resilience — dunning grace (Part A). Stamped by
+   * invoice.payment_failed; the voice gate answers past-due calls while this
+   * is in the future. Null when no grace is active (cleared on recovery to
+   * active/trialing).
+   */
+  pastDueGraceUntil: Date | null;
 }
 
 export async function readTenantBillingState(
@@ -29,9 +36,10 @@ export async function readTenantBillingState(
     current_period_end: Date | null;
     owner_id: string | null;
     owner_email: string | null;
+    past_due_grace_until: Date | null;
   }>(
     `SELECT subscription_status, plan_id, current_period_start, current_period_end,
-            owner_id, owner_email
+            owner_id, owner_email, past_due_grace_until
        FROM tenants WHERE id = $1`,
     [tenantId],
   );
@@ -46,5 +54,6 @@ export async function readTenantBillingState(
         : null,
     ownerId: row.owner_id,
     ownerEmail: row.owner_email,
+    pastDueGraceUntil: row.past_due_grace_until ? new Date(row.past_due_grace_until) : null,
   };
 }
