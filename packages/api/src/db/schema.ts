@@ -7257,7 +7257,7 @@ export const MIGRATIONS = {
     DO $$ BEGIN
       ALTER TABLE tenant_settings
         ADD CONSTRAINT tenant_settings_business_address_len
-        CHECK (business_address IS NULL OR char_length(business_address) <= 300);
+        CHECK (business_address IS NULL OR char_length(business_address) <= 300) NOT VALID;
     EXCEPTION WHEN duplicate_object THEN NULL; END $$;
   `,
   // #1402 §18 — per-recipient outbound SMS volume ledger. One row per
