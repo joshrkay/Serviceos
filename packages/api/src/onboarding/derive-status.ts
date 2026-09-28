@@ -92,7 +92,12 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     test_call: isTestCallDone(f) || isTestCallSkipped(f),
   };
 
-  const order: OnboardingStepId[] = ['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call'];
+  // Billing precedes phone: the Twilio number is a real, recurring cost, so
+  // provisioning only starts after trial checkout (card on file) — the
+  // subscription webhook enqueues the provisioning job when the trial goes
+  // live. The phone step's existing "provisioning in progress" UI is the
+  // graceful pre-number state; no number is ever bought for a tire-kicker.
+  const order: OnboardingStepId[] = ['signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call'];
   const firstNotDone = order.find((id) => !done[id]) ?? null;
 
   const phoneMetadata = f.twilioPhoneNumber ? { phoneNumber: f.twilioPhoneNumber } : undefined;

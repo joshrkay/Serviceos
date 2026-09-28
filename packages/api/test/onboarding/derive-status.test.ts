@@ -94,50 +94,72 @@ describe('deriveOnboardingStatus', () => {
     expect(r.steps[1].status).toBe('current');
   });
 
-  it('pack activated: phone becomes current', () => {
+  it('pack activated: billing becomes current', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
     }));
     expect(r.steps[2].status).toBe('done');
     expect(r.steps[3].status).toBe('current');
+    expect(r.currentStep).toBe('billing');
+  });
+
+  it('billing not done: phone stays pending even while provisioning runs', () => {
+    // Provisioning only starts at trial checkout now, but the derivation must
+    // stay sane if a twilio status exists pre-billing: billing is the current
+    // step, phone is pending.
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
+      packActivated: true,
+      twilioStatus: 't0_requested',
+    }));
+    expect(r.steps[3].status).toBe('current');
+    expect(r.steps[4].status).toBe('pending');
   });
 
   it('phone provisioning: phone is current (not done)', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
       twilioStatus: 'provisioning',
     }));
-    expect(r.steps[3].status).toBe('current');
+    expect(r.steps[4].status).toBe('current');
   });
 
-  it('phone full_readiness: billing becomes current', () => {
+  it('phone full_readiness: phone done, ai_check becomes current', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
       twilioStatus: 'full_readiness',
     }));
-    expect(r.steps[3].status).toBe('done');
-    expect(r.steps[4].status).toBe('current');
+    expect(r.steps[3]).toEqual({ id: 'billing', status: 'done' });
+    expect(r.steps[4].status).toBe('done');
+    expect(r.steps[5].status).toBe('current');
   });
 
   it('phone failed: phone is error with blocker', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
       twilioStatus: 'failed',
     }));
-    expect(r.steps[3].status).toBe('error');
-    expect(r.steps[3].blockers).toBeDefined();
+    expect(r.steps[4].status).toBe('error');
+    expect(r.steps[4].blockers).toBeDefined();
   });
 
-  it('subscription trialing: billing done, ai_check current', () => {
-    const r = deriveOnboardingStatus(billingDoneFacts());
-    expect(r.steps[4]).toEqual({ id: 'billing', status: 'done' });
-    expect(r.steps[5].id).toBe('ai_check');
-    expect(r.steps[5].status).toBe('current');
-    expect(r.currentStep).toBe('ai_check');
+  it('subscription trialing: billing done, phone current', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
+      packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
+    }));
+    expect(r.steps[3]).toEqual({ id: 'billing', status: 'done' });
+    expect(r.steps[4].id).toBe('phone');
+    expect(r.steps[4].status).toBe('current');
+    expect(r.currentStep).toBe('phone');
   });
 
   it('ai_check passed: test_call becomes current', () => {
@@ -200,7 +222,7 @@ describe('deriveOnboardingStatus', () => {
   it('has 7 steps in order', () => {
     const r = deriveOnboardingStatus(facts());
     expect(r.steps.map((s) => s.id)).toEqual([
-      'signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call',
+      'signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call',
     ]);
   });
 
@@ -208,9 +230,10 @@ describe('deriveOnboardingStatus', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
       twilioStatus: 't0_requested',
     }));
-    expect(r.steps[3].status).toBe('current');
+    expect(r.steps[4].status).toBe('current');
   });
 
   it('test call skipped (ai_check passed): test_call=skipped, complete=true', () => {

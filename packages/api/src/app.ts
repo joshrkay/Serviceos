@@ -222,6 +222,7 @@ import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
+import { createReleaseTwilioNumberWorker } from './workers/release-twilio-number';
 import { createVerifyAiWorker } from './workers/verify-ai';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
@@ -2854,6 +2855,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     workerRegistry.set(
       deprovisionTenantWorker.type,
       deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+
+    // Releases the tenant's Twilio number (not the subaccount) when a
+    // subscription is canceled — e.g. a trial that never converts — so the
+    // platform stops paying for the line. Best-effort and idempotent.
+    const releaseTwilioNumberWorker = createReleaseTwilioNumberWorker({ pool });
+    workerRegistry.set(
+      releaseTwilioNumberWorker.type,
+      releaseTwilioNumberWorker as import('./queues/queue').WorkerHandler<unknown>
     );
   }
 

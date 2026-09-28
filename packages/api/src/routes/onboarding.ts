@@ -41,6 +41,26 @@ import {
 import { normalizeMobileE164 } from '../shared/phone/normalize';
 import { isValidIanaTimezone, resolveBootstrapAiModel } from '../settings/settings';
 
+/**
+ * Trial-checkout gating for the phone routes. A Twilio number is real,
+ * recurring money — /phone/retry and /phone/claim must not enqueue a
+ * purchase for a tenant that hasn't completed billing (card on file). The
+ * provisioning worker enforces the same invariant; this guard fails fast
+ * with a clear 409 instead of enqueueing a job the worker will skip.
+ */
+const BILLING_LIVE_STATUSES = new Set(['trialing', 'active', 'past_due']);
+
+async function isBillingLive(
+  db: { query: (sql: string, params: unknown[]) => Promise<{ rows: Array<{ subscription_status: string | null }> }> },
+  tenantId: string,
+): Promise<boolean> {
+  const { rows } = await db.query(
+    `SELECT subscription_status FROM tenants WHERE id = $1`,
+    [tenantId],
+  );
+  return BILLING_LIVE_STATUSES.has(rows[0]?.subscription_status ?? '');
+}
+
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
   packActivationRepo: PackActivationRepository;
@@ -560,6 +580,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           });
           return;
         }
+        // Trial-checkout gating: never enqueue a number purchase before the
+        // tenant has a card on file.
+        if (!(await isBillingLive(db, tenantId))) {
+          res.status(409).json({
+            error: 'PHONE_BILLING_REQUIRED',
+            message: 'Complete trial checkout before provisioning a phone number.',
+          });
+          return;
+        }
         const callbackBaseUrl =
           process.env.PUBLIC_API_URL ??
           process.env.APP_PUBLIC_URL ??
@@ -685,6 +714,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           });
           return;
         }
+        // Trial-checkout gating: never enqueue a number purchase before the
+        // tenant has a card on file.
+        if (!(await isBillingLive(db, tenantId))) {
+          res.status(409).json({
+            error: 'PHONE_BILLING_REQUIRED',
+            message: 'Complete trial checkout before claiming a phone number.',
+          });
+          return;
+        }
         const callbackBaseUrl =
           process.env.PUBLIC_API_URL ??
           process.env.APP_PUBLIC_URL ??
@@ -696,13 +734,14 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           phoneNumber: parsed.data.phoneNumber,
         };
         // Share the canonical provisioning idempotency key (same as the
-        // signup auto-provision at webhooks/routes.ts) so the queue collapses a
-        // claim into an already-pending/in-flight provisioning job rather than
-        // running a second one — which would create a duplicate Twilio
-        // subaccount and buy a second paid number. (Residual: a claim landing
-        // in the narrow window after the auto job is picked up but before it
-        // persists state is not deduped; fully closing that needs worker-level
-        // per-tenant serialization — deferred, see the plan's follow-ups.)
+        // trial-checkout auto-provision in webhooks/routes.ts) so the queue
+        // collapses a claim into an already-pending/in-flight provisioning
+        // job rather than running a second one — which would create a
+        // duplicate Twilio subaccount and buy a second paid number.
+        // (Residual: a claim landing in the narrow window after the auto job
+        // is picked up but before it persists state is not deduped; fully
+        // closing that needs worker-level per-tenant serialization —
+        // deferred, see the plan's follow-ups.)
         await queue.send(
           PROVISION_TWILIO_JOB_TYPE,
           payload,

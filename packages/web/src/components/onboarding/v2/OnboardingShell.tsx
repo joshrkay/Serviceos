@@ -326,7 +326,7 @@ export function OnboardingShell() {
           {activeId === 'phone' && (
             <PhoneStep
               status={data}
-              onAdvance={() => setOverride('billing')}
+              onAdvance={() => setOverride('ai_check')}
               onRetryComplete={() => void refetch()}
             />
           )}

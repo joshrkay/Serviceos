@@ -175,6 +175,32 @@ export function createProvisionTwilioWorker(deps: {
         throw new Error('TENANT_ENCRYPTION_KEY must be set');
       }
 
+      // Trial-checkout gating: a Twilio number is real, recurring money, so
+      // it is only ever bought for a tenant that has completed billing (card
+      // on file). The subscription webhook is the intended trigger, but this
+      // gate is the invariant — no caller (claim/retry routes, replays, ops
+      // scripts) can spend Twilio money on a tire-kicker. past_due counts:
+      // the tenant completed billing; dunning may still recover. Skips are
+      // quiet and safe: the checkout webhook re-enqueues with the same stable
+      // key once billing goes live. (The dev-stub branch above returns before
+      // this, so Twilio-less environments are unaffected.)
+      const { rows: billingRows } = await tenantQuery<{
+        subscription_status: string | null;
+      }>(
+        pool,
+        tenantId,
+        `SELECT subscription_status FROM tenants WHERE id = $1`,
+        [tenantId],
+      );
+      const billingStatus = billingRows[0]?.subscription_status ?? null;
+      if (billingStatus !== 'trialing' && billingStatus !== 'active' && billingStatus !== 'past_due') {
+        logger.info('Twilio provisioning skipped — tenant has not completed billing', {
+          tenantId,
+          billingStatus,
+        });
+        return;
+      }
+
       // Check current state — idempotent: skip if already active
       const { rows } = await tenantQuery<{
         status: string;

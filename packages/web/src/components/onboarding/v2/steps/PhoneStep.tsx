@@ -412,12 +412,12 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
 
       <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
         <strong className="font-medium">Heads up:</strong> the AI doesn&apos;t start answering until you
-        finish billing and turn it on. You can forward your line now or after — your call.
+        turn it on. You can forward your line now or after — your call.
       </div>
 
       <div className="flex">
         <Button variant="primary" size="lg" onClick={onAdvance}>
-          Continue to billing
+          Continue
         </Button>
       </div>
     </div>
