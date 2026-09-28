@@ -101,6 +101,11 @@ async function seedSettings(
       overrides.services ?? ['drain cleaning', 'water heaters'],
     ],
   );
+  // PR #1438: the provision worker only buys a number for a tenant that has
+  // completed trial checkout (subscription_status trialing/active/past_due);
+  // an unbilled tenant is skipped before any Twilio/Vapi call. These cases
+  // exercise the post-checkout path, so the tenant is billed.
+  await pool.query(`UPDATE tenants SET subscription_status = 'trialing' WHERE id = $1`, [tenantId]);
 }
 
 describe('Postgres integration — provision-twilio Vapi assistant (voice agent) creation', () => {
