@@ -50,6 +50,9 @@ export interface OnboardingFacts {
   aiVerificationStatus: 'pending' | 'running' | 'passed' | 'failed' | null;
   /** Last verification error message (when status is 'failed'). */
   aiVerificationError?: string | null;
+  /** When the tenant skipped the AI check (escape hatch — completes the step,
+   * verification stays retryable from Settings). */
+  aiVerificationSkippedAt: Date | null;
 }
 
 /**
@@ -88,7 +91,7 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     pack:      f.packActivated,
     phone:     f.twilioStatus === 'full_readiness',
     billing:   isBillingDone(f.subscription),
-    ai_check:  f.aiVerificationStatus === 'passed',
+    ai_check:  f.aiVerificationStatus === 'passed' || f.aiVerificationSkippedAt !== null,
     test_call: isTestCallDone(f) || isTestCallSkipped(f),
   };
 
@@ -109,6 +112,12 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     if (id === 'ai_check') {
       if (f.aiVerificationStatus === 'passed') {
         return { id, status: 'done' };
+      }
+      // Escape hatch: a skip completes the step — it takes precedence over a
+      // recorded failure (the tenant chose to move on; 'passed' above still
+      // wins when a retry later succeeds).
+      if (f.aiVerificationSkippedAt !== null) {
+        return { id, status: 'skipped' };
       }
       if (f.aiVerificationStatus === 'failed') {
         const blocker = f.aiConfigPresent ? 'ai_verification_failed' : 'ai_config_missing';

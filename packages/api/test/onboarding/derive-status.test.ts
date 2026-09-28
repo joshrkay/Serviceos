@@ -16,6 +16,7 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
     aiConfigPresent: false,
     aiVerificationStatus: null,
     aiVerificationError: null,
+    aiVerificationSkippedAt: null,
     ...overrides,
   };
 }
@@ -200,6 +201,37 @@ describe('deriveOnboardingStatus', () => {
     }));
     expect(r.steps[5].status).toBe('error');
     expect(r.steps[5].blockers).toEqual(['ai_config_missing']);
+  });
+
+  it('ai_check skipped after failure: step skipped, setup completes', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({
+      aiConfigPresent: true,
+      aiVerificationStatus: 'failed',
+      aiVerificationError: 'boom',
+      aiVerificationSkippedAt: new Date('2026-09-27T00:00:00.000Z'),
+      inboundCallCount: 1,
+    }));
+    expect(r.steps[5]).toEqual({ id: 'ai_check', status: 'skipped' });
+    expect(r.isComplete).toBe(true);
+    expect(r.currentStep).toBeNull();
+  });
+
+  it('ai_check passed after skip: still done (a real pass wins)', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({
+      aiConfigPresent: true,
+      aiVerificationStatus: 'passed',
+      aiVerificationSkippedAt: new Date('2026-09-27T00:00:00.000Z'),
+    }));
+    expect(r.steps[5]).toEqual({ id: 'ai_check', status: 'done' });
+  });
+
+  it('ai_check skip without a failure on record: skipped, not current', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({
+      aiVerificationStatus: null,
+      aiVerificationSkippedAt: new Date('2026-09-27T00:00:00.000Z'),
+    }));
+    expect(r.steps[5]).toEqual({ id: 'ai_check', status: 'skipped' });
+    expect(r.currentStep).toBe('test_call');
   });
 
   it('inbound call recorded but ai_check not passed: not complete', () => {

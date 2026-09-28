@@ -44,6 +44,7 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
     activatedAt: null,
     aiConfigPresent: true,
     aiVerificationStatus: 'passed',
+    aiVerificationSkippedAt: null,
     ...overrides,
   };
 }
