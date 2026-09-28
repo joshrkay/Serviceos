@@ -28,7 +28,7 @@ in this sandbox), the tooling is delivered ready-to-run and the status is marked
 | Vocab coverage ≥ 95% | ✅ **met** | 100% of transcript domain nouns covered |
 | 36/41 behaviors validated + gaps | ✅ **met** | `behaviors.yaml` (code-synced) + `behaviors-gap-analysis.md`; each behavior has ≥ 74 utterances (> the 25/50 bars) |
 | Reddit: deduped + PII-scrubbed + embedded + searchable | ✅ **met (offline) / gated (scale)** | PII zero-leakage on 100 fixtures; offline embed + 10-query search self-test; 50k real ingest is credential-gated |
-| Intent accuracy ≥ 92% | ⏳ **wired, credential-gated (live)** | offline rule baseline ≈ **62%**; `--live` routes the held-out split through the production `classifyIntent` behind the Layer-2 real gateway and enforces ≥92% with `--gate` (credential-gated step 3) |
+| Intent accuracy ≥ 92% | ⏳ **wired, credential-gated (live)** | offline rule baseline ≈ **62%**; `--live` routes the held-out split through the production `classifyIntent` behind the production gateway (`createLLMGateway`, OpenAI gpt-4o-mini as prod runs) and enforces ≥92% with `--gate` (credential-gated step 3) |
 | Slot F1 ≥ 0.88 | ⏳ **wired, credential-gated (live)** | offline heuristic baseline = **88.5% micro-F1**; `--live` runs `classifyIntent` + production `extractLaunchSlots` and enforces ≥0.88 with `--gate` on the four LLM-derived slots (service_type excluded — vertical-resolver sourced) (credential-gated step 3) |
 
 ## What runs in this sandbox
@@ -60,9 +60,11 @@ and `academictorrents.com` return HTTP 403; no DB.
 3. **Live intent/slot eval (≥92% / ≥0.88)** — **now wired.**
    `npx tsx packages/voice-eval/run-intent-eval.ts --live --gate` and
    `run-slot-eval.ts --live --gate` route the held-out split through the
-   production `classifyIntent` (fast-path + LLM together) behind the Layer-2
-   real gateway; slot eval also runs the production `extractLaunchSlots`
-   projection. Requires `ANTHROPIC_API_KEY` (or `AI_PROVIDER_API_KEY`); no key ⇒
+   production `classifyIntent` (fast-path + LLM together) behind the production
+   gateway (`createLLMGateway` from `AI_PROVIDER_*`/`AI_*_MODEL` — prod runs OpenAI
+   gpt-4o-mini); slot eval also runs the production `extractLaunchSlots`
+   projection. Requires `AI_PROVIDER_API_KEY` (`ANTHROPIC_API_KEY` is a local-only
+   fallback, logged as not the production provider); no key ⇒
    fail-fast exit 2 (never a silent offline fallback). Cost-bounded via
    `--max-utterances N` + `VOICE_EVAL_COST_CAP_CENTS` (default $5/script, aborts
    before spending). Scheduled surface: `.github/workflows/voice-eval-live.yml`
@@ -83,7 +85,7 @@ accuracy are no longer conflated into one number.
 | Surface | Engine / path | Mode | Offline-measurable? | Status |
 |---|---|---|---|---|
 | Whisper (batch) | `WhisperTranscriptionProvider` via `makeWhisperDialectTranscriber` | buffer-in, batch REST | Yes — pure WER math, no network to grade a canned/replayed hypothesis | Harness code path ✅ (57 dialect-suite tests incl. surface rollup); **no committed real-audio dialect corpus yet** (see below), so there is no live numeric WER baseline to report for this pass — reporting one would be fabricated |
-| Deepgram (streaming) | `DeepgramStreamingProvider` via `makeDeepgramDialectTranscriber` (A4, new this pass) | WS streaming, requires `DEEPGRAM_API_KEY` | No — the production engine is a live WebSocket session; grading it means paying for a real Deepgram call per case | Credential-gated: `resolveDeepgramApiKey()` returns `null` when `DEEPGRAM_API_KEY` is unset, so a report-refresh run skips this surface rather than spend in PR CI (mirrors the `ANTHROPIC_API_KEY` gate in `voice-eval-live.yml`). Engine mocked in unit tests — WER math + surface attribution pinned, zero live spend |
+| Deepgram (streaming) | `DeepgramStreamingProvider` via `makeDeepgramDialectTranscriber` (A4, new this pass) | WS streaming, requires `DEEPGRAM_API_KEY` | No — the production engine is a live WebSocket session; grading it means paying for a real Deepgram call per case | Credential-gated: `resolveDeepgramApiKey()` returns `null` when `DEEPGRAM_API_KEY` is unset, so a report-refresh run skips this surface rather than spend in PR CI (mirrors the `AI_PROVIDER_API_KEY` gate in `voice-eval-live.yml`). Engine mocked in unit tests — WER math + surface attribution pinned, zero live spend |
 | Gather (Twilio speech-to-text) | Twilio's own ASR inside `<Gather>` | Twilio-hosted, no buffer-in seam | No — Twilio does not expose an offline batch-transcribe API; the only signal is the `Confidence` attribute on a live callback | **Not offline-measurable at all** — out of scope for this harness; A3 (`mediastream-adapter.ts` / `twilio-adapter.ts`) instead reads Twilio's per-call `Confidence` to gate a reprompt, which is the closest available signal |
 | Live call (in-call, either engine) | whichever engine handles the active call | real-time, in-call | No — by definition requires a live phone call | Same reasoning as Gather; live-call accuracy is only inferable indirectly (acoustic-confidence reprompt rate, A3) |
 

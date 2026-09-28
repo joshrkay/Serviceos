@@ -17,7 +17,15 @@
 # record_baseline=true and commit the uploaded voice-eval-live-baselines
 # artifact (or run each file's recordCommand locally with a key).
 #
-# Cost shape: each run hits the real Anthropic API for the classify calls.
+# Provider: the SAME gateway config production runs (as agent-path-smoke.yml,
+# #1426). Railway prod/dev set AI_PROVIDER_BASE_URL=https://api.openai.com/v1 +
+# AI_PROVIDER_API_KEY with gpt-4o-mini (default/lightweight/standard) and
+# gpt-4o (complex); the runners build the classifier's gateway with the
+# production factory (createLLMGateway(loadConfig(env))) from these vars.
+# ANTHROPIC_API_KEY is deliberately NOT wired — production does not use
+# Anthropic, so a green run on it would measure the wrong provider.
+#
+# Cost shape: each run hits the real OpenAI API for the classify calls.
 # Spend is bounded two ways: --max-utterances caps the sample size, and a
 # per-step VOICE_EVAL_COST_CAP_CENTS makes each script abort (exit 3) BEFORE
 # spending if its conservative projection exceeds the cap. No Postgres/Docker/ffmpeg — the
@@ -42,8 +50,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # The eval only needs the Anthropic key for live classification.
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AI_PROVIDER_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AI_PROVIDER_BASE_URL: https://api.openai.com/v1
+      AI_DEFAULT_MODEL: gpt-4o-mini
+      AI_LIGHTWEIGHT_MODEL: gpt-4o-mini
+      AI_STANDARD_MODEL: gpt-4o-mini
+      AI_COMPLEX_MODEL: gpt-4o
+      # Classify deadline: the production value from
+      # docs/runbooks/live-ai-restore.md (code default is 4s).
+      AI_CLASSIFY_INTENT_DEADLINE_MS: '12000'
       # #839 — compare each live run against its committed baseline
       # (baselines/*-live.json; exit 1 on a regression past tolerance, exit 4
       # while the file is still an unrecorded placeholder), or — on a manual
@@ -53,8 +68,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Verify API key is present
         run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::error::ANTHROPIC_API_KEY is not set — live voice eval was not executed."
+          if [ -z "$AI_PROVIDER_API_KEY" ]; then
+            echo "::error::AI_PROVIDER_API_KEY is not set (secrets.OPENAI_API_KEY) — live voice eval was not executed."
             echo "A missing credential is an unmet external prerequisite, not a green gate."
             exit 1
           fi
@@ -71,14 +86,15 @@ jobs:
       # samples' projections, so every keyed run would have aborted with exit
       # 3 before classifying anything). Each runner projects cost
       # conservatively — no cache discount, EST_SYSTEM_PROMPT_TOKENS headroom,
-      # Haiku priced at the eval harness's pinned $3/$15 per MTok (roughly 3x
-      # the current $1/$5 list rate) — and aborts before spending if the
-      # projection exceeds the cap; the same cap then bounds recorded spend
-      # row by row. Real spend for a 200-row intent run is ~$3.
+      # priced per model (gpt-4o-mini at OpenAI list $0.15/$0.60 per MTok) —
+      # and aborts before spending if the projection exceeds the cap; the same
+      # cap then bounds recorded spend row by row. Caps are ~2.5x the
+      # projection; ci-workflow-voice-eval-live.test.ts also fails if a cap
+      # drifts past 3x (a stale cap sized for a pricier model).
       # ci-workflow-voice-eval-live.test.ts fails if a sample outgrows its cap.
       - name: Live intent eval (gated, sampled)
         env:
-          VOICE_EVAL_COST_CAP_CENTS: '1500'   # projection ~1,280c at N=200
+          VOICE_EVAL_COST_CAP_CENTS: '150'    # projection ~63c at N=200 (gpt-4o-mini)
         run: |
           set -o pipefail
           npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 "$BASELINE_FLAG" packages/voice-eval/baselines/intent-live.json \
@@ -87,7 +103,7 @@ jobs:
       - name: Live slot eval (gated, sampled)
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
-          VOICE_EVAL_COST_CAP_CENTS: '800'    # projection ~640c at N=100
+          VOICE_EVAL_COST_CAP_CENTS: '80'     # projection ~32c at N=100 (gpt-4o-mini)
         run: |
           set -o pipefail
           npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 "$BASELINE_FLAG" packages/voice-eval/baselines/slot-live.json \

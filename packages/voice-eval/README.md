@@ -20,9 +20,13 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
   numbers and enforces only a low regression floor (50%) unless `--gate`.
 - **LIVE (`--live`)** — **wired, credential-gated.** Routes the held-out split
   through the **production** classifier (`classifyIntent`, fast-path + LLM
-  fallback together) behind the Layer-2 real gateway
-  (`createRealLayerTwoGateway`, Anthropic via the OpenAI-compat endpoint).
-  Requires `ANTHROPIC_API_KEY` (or `AI_PROVIDER_API_KEY`). With `--gate`,
+  fallback together) behind the **production gateway** — `createLLMGateway(loadConfig(env))`,
+  the factory the app uses — built from `AI_PROVIDER_API_KEY` /
+  `AI_PROVIDER_BASE_URL` / `AI_*_MODEL` (Railway prod/dev: api.openai.com,
+  `gpt-4o-mini` for classify). Provider selection and per-model pricing are
+  shared with the real-LLM path smoke (`ai/voice-quality/path-smoke/provider.ts`).
+  `ANTHROPIC_API_KEY` (Layer-2 harness, Haiku) is an explicit local fallback
+  only and is logged as NOT the production provider. With `--gate`,
   enforces the goal thresholds (intent ≥ 92%, slot micro-F1 ≥ 0.88); without it,
   report-only. When no key is present it **fails fast (exit 2)** with a clear
   message — it never silently falls back to offline.
@@ -30,7 +34,7 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
 ### Live design notes
 
 - **Synthetic tenant.** The classifier never touches the DB/RLS; live eval uses
-  the shared `system` tenant so the gateway's tenant override pins the model.
+  the shared `system` tenant (as the path smoke does).
 - **Fast-path metric.** Live measures production behavior end to end and reports
   the **fast-path hit rate** — the fraction of utterances resolved by a
   deterministic short-circuit (empty transcript / opted-in phrase match) with no
@@ -47,11 +51,12 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
   discount) and **aborts (exit 3) before spending** if the projection exceeds
   the cap. Exit codes: `1` gate fail, `2` no key, `3` over cost cap, `4` no
   baseline recorded (see below).
-  The projection prices Haiku at the harness's pinned $3/$15 per MTok (about
-  3x the current $1/$5 list rate), so a cap must be sized to its sample: the
-  scheduled workflow sets it per step (intent N=200 → 1500c, slot N=100 →
-  800c), and `ci-workflow-voice-eval-live.test.ts` fails if a configured sample
-  ever projects over its cap (#839 — the old shared 500c cap sat below both).
+  The projection prices the selected model (gpt-4o-mini at OpenAI list
+  $0.15/$0.60 per MTok; an unpriced model aborts with exit 3), so a cap must be
+  sized to its sample: the scheduled workflow sets it per step (intent N=200 →
+  150c vs ~63c projected, slot N=100 → 80c vs ~32c), and
+  `ci-workflow-voice-eval-live.test.ts` fails if a configured sample ever
+  projects over its cap, or a cap drifts past 3x its projection.
 
 ## Run
 
@@ -88,7 +93,7 @@ the one command that re-records it. Compare fails with:
 
 The offline baselines are recorded (free, deterministic). **The live baselines
 are placeholders** — recording them needs a paid run against the production
-model (~$3 + ~$1 real spend). Either run the `recordCommand` in each file
+model (~$0.95 projected worst case for both, no-cache; hard caps $2.30). Either run the `recordCommand` in each file
 locally with a key and commit the result, or dispatch `voice-eval-live.yml`
 with `record_baseline: true` and commit the `voice-eval-live-baselines`
 artifact. Until then the weekly live run exits 4.

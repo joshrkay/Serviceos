@@ -12,8 +12,10 @@
  *     reports accuracy + per-intent confusion. Enforces only a low regression
  *     floor (OFFLINE_FLOOR) unless --gate is given.
  *   LIVE (--live): routes utterances through the PRODUCTION classifier
- *     (classifyIntent) behind the Layer-2 real gateway. Requires
- *     ANTHROPIC_API_KEY (or AI_PROVIDER_API_KEY). Enforces LIVE_INTENT_TARGET
+ *     (classifyIntent) behind the PRODUCTION gateway (createLLMGateway from
+ *     AI_PROVIDER_API_KEY / AI_PROVIDER_BASE_URL / AI_*_MODEL — prod runs
+ *     OpenAI gpt-4o-mini). ANTHROPIC_API_KEY is a local fallback only (logged
+ *     as NOT the production provider). Enforces LIVE_INTENT_TARGET
  *     (0.92) when --gate is given. Fails fast (exit 2) when no key is present —
  *     never silently falls back to offline.
  *
@@ -47,13 +49,17 @@ import {
   ActualCostCapExceededError,
   assertActualCostWithinCap,
   LIVE_INTENT_TARGET,
+  LIVE_FALLBACK_WARNING,
+  LIVE_RECORD_COMMANDS,
   SYNTHETIC_TENANT_ID,
+  buildLiveGateway,
   checkCostCap,
+  describeLiveProvider,
   evaluateGate,
   parseMaxUtterances,
   resolveCostCapCents,
-  resolveLiveApiKey,
   runLiveIntentEval,
+  selectLiveProvider,
   sampleDeterministic,
 } from './live-support';
 
@@ -61,7 +67,7 @@ const OFFLINE_FLOOR = 0.50; // regression guard for the rule baseline on this da
 
 const RECORD_COMMANDS: Record<EvalMode, string> = {
   offline: 'npx tsx packages/voice-eval/run-intent-eval.ts --record-baseline packages/voice-eval/baselines/intent-offline.json',
-  live: 'ANTHROPIC_API_KEY=... VOICE_EVAL_COST_CAP_CENTS=1500 npx tsx packages/voice-eval/run-intent-eval.ts --live --max-utterances 200 --record-baseline packages/voice-eval/baselines/intent-live.json',
+  live: LIVE_RECORD_COMMANDS.intent,
 };
 
 /**
@@ -90,26 +96,32 @@ function baselineStep(mode: EvalMode, rows: IntentGoldRow[], report: ClassReport
 // fail-fast message shown when the key is absent (exit 2 — distinct from a gate
 // failure). See data/VOICE-CORPUS-REPORT.md → credential-gated step 3.
 const LIVE_NO_KEY =
-  '--live is wired but credential-gated: no ANTHROPIC_API_KEY (or AI_PROVIDER_API_KEY) is set.\n' +
+  '--live is wired but credential-gated: no AI_PROVIDER_API_KEY (or fallback ANTHROPIC_API_KEY) is set.\n' +
   '   Live intent eval routes the held-out split through the production classifier\n' +
-  '   (classifyIntent) behind the Layer-2 real gateway. Set ANTHROPIC_API_KEY to run it.\n' +
-  '   See data/VOICE-CORPUS-REPORT.md → credential-gated step 3.';
+  '   (classifyIntent) behind the production gateway. Set AI_PROVIDER_API_KEY\n' +
+  '   (+ AI_PROVIDER_BASE_URL / AI_*_MODEL, as in baselines/intent-live.json recordCommand) to run it.';
 
 async function runLive(gate: boolean): Promise<void> {
-  const key = resolveLiveApiKey();
-  if (!key) { console.error(`ℹ️  ${LIVE_NO_KEY}`); process.exit(2); }
+  const selection = await selectLiveProvider();
+  if (!selection) { console.error(`ℹ️  ${LIVE_NO_KEY}`); process.exit(2); }
 
   const maxUtterances = parseMaxUtterances(process.argv);
   const full = loadTestSplit();
   if (full.length === 0) { console.error('❌ empty test split; run generate-utterances.ts'); process.exit(1); }
   const sample = sampleDeterministic(full, (r) => r.utterance, maxUtterances);
 
-  // Pre-flight cost cap — abort BEFORE spending if the projection is over cap.
+  // Pre-flight cost cap — abort BEFORE spending if the projection is over cap
+  // (or the selected model is unpriced, so the cap cannot be enforced).
   const capCents = resolveCostCapCents();
-  const cost = checkCostCap(sample.map((r) => r.utterance), capCents);
+  const cost = await checkCostCap(sample.map((r) => r.utterance), capCents, selection.model);
   console.log(`\n🎯 Intent classification eval — LIVE (production classifier)`);
-  console.log(`   key source:         ${key.source}`);
+  console.log(`   provider:           ${await describeLiveProvider(selection)}`);
+  if (selection.kind !== 'production') console.warn(LIVE_FALLBACK_WARNING);
   console.log(`   held-out rows:      ${full.length}${maxUtterances ? ` (sampled ${sample.length})` : ''}`);
+  if (cost.projectedCents === null) {
+    console.error(`\n❌ ABORT: no known price for model ${selection.model} — cannot enforce the cost cap.`);
+    process.exit(3);
+  }
   console.log(`   projected cost:     ${cost.projectedCents.toFixed(1)}c (cap ${capCents}c, conservative/no-cache)`);
   if (!cost.withinCap) {
     console.error(
@@ -121,14 +133,8 @@ async function runLive(gate: boolean): Promise<void> {
 
   // Build the real gateway lazily (imports the openai-bearing factory only on
   // the live path) so offline runs never load it.
-  const { createRealLayerTwoGateway } = await import('../api/src/ai/gateway/real-layer-two-factory');
-  const { AgentEventBus } = await import('../api/src/ai/voice-quality/event-bus');
   let spentCents = 0;
-  const gateway = createRealLayerTwoGateway({
-    apiKey: key.key,
-    bus: new AgentEventBus(),
-    costTracker: { addCents: (n) => { spentCents += n; }, totalCents: () => spentCents },
-  });
+  const gateway = await buildLiveGateway(selection, (n) => { spentCents += n; });
 
   const { pairs, fastPathHits, llmCalls } = await runLiveIntentEval(sample, gateway, {
     tenantId: SYNTHETIC_TENANT_ID,
@@ -188,7 +194,13 @@ async function main(): Promise<void> {
   else runOffline(gate);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(e instanceof ActualCostCapExceededError ? 3 : 1);
-});
+main()
+  .then(() => {
+    // The production gateway's resilience/quota stack may hold timers; this is
+    // a one-shot CLI, so exit explicitly once the report is printed.
+    process.exit(0);
+  })
+  .catch((e) => {
+    console.error(e);
+    process.exit(e instanceof ActualCostCapExceededError ? 3 : 1);
+  });
