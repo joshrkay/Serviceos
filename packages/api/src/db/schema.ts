@@ -7228,6 +7228,14 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_material_items_job
       ON material_items (tenant_id, job_id, created_at) WHERE job_id IS NOT NULL;
   `,
+  '297_ai_check_skip': `
+    -- AI-check escape hatch: records when the tenant skips verification so a
+    -- failed or flaky gateway call can never trap onboarding in incomplete
+    -- setup forever. A skip completes the ai_check step; the verification
+    -- remains retryable from Settings.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_verification_skipped_at TIMESTAMPTZ;
+  `,
   // Billing resilience — dunning grace window. invoice.payment_failed stamps
   // a 7-day grace here; the voice gate keeps answering while it is in the
   // future, and the dunning sweep keys its 0d/3d/7d emails off it. Cleared
@@ -7237,14 +7245,6 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS past_due_grace_until TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_tenants_past_due_grace
       ON tenants (past_due_grace_until) WHERE past_due_grace_until IS NOT NULL;
-
-  '297_ai_check_skip': `
-    -- AI-check escape hatch: records when the tenant skips verification so a
-    -- failed or flaky gateway call can never trap onboarding in incomplete
-    -- setup forever. A skip completes the ai_check step; the verification
-    -- remains retryable from Settings.
-    ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS ai_verification_skipped_at TIMESTAMPTZ;
   `,
 };
 

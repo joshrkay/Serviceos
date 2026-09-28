@@ -37,6 +37,24 @@ describe('Postgres integration — tenant billing state', () => {
       period: { start, end },
       ownerId: userId,
       ownerEmail: 'owner@shop.test',
+      pastDueGraceUntil: null,
+    });
+  });
+
+  // PR #1437 — invoice.payment_failed stamps tenants.past_due_grace_until
+  // (migration 298); the voice gate reads it through this snapshot to keep
+  // answering a past_due tenant inside the 7-day grace.
+  it('carries the past_due grace deadline when one is stamped', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const graceUntil = new Date(Date.UTC(2026, 9, 8, 12));
+    await pool.query(
+      `UPDATE tenants SET subscription_status = 'past_due', past_due_grace_until = $2 WHERE id = $1`,
+      [tenantId, graceUntil],
+    );
+
+    expect(await readTenantBillingState(pool, tenantId)).toMatchObject({
+      status: 'past_due',
+      pastDueGraceUntil: graceUntil,
     });
   });
 

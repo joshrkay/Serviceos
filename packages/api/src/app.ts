@@ -2326,8 +2326,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     moneyReconciliation: 590026,
     voiceCostReconciliation: 590027,
     // Billing resilience — dunning sweep (day-of/+3d/+7d payment-failure
-    // emails). DISTINCT key per the collision discipline above.
-    dunning: 590028,
+    // emails). DISTINCT key per the collision discipline above — 590028 was
+    // taken on main by clerkMetadataBackfill (#1434), so this owns 590030.
+    dunning: 590030,
     // Billing resilience — AI-minute overage settlement reconciliation
     // (stale-retry + gap backfill). DISTINCT key per the collision
     // discipline above.
