@@ -56,11 +56,13 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       ai_model: string | null;
       ai_verification_status: string | null;
       ai_verification_error: string | null;
+      ai_verification_skipped_at: Date | null;
     }>(
       `SELECT business_hours, job_buffer_minutes, hourly_rate_cents, timezone,
               onboarding_test_call_skipped_at, onboarding_upgrade_prompt_shown_at,
               voice_agent_live_at, activated_at,
-              ai_model, ai_verification_status, ai_verification_error
+              ai_model, ai_verification_status, ai_verification_error,
+              ai_verification_skipped_at
          FROM tenant_settings WHERE tenant_id=$1`,
       [tenantId]
     ),
@@ -108,5 +110,6 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     aiConfigPresent: !!ts?.ai_model,
     aiVerificationStatus: (ts?.ai_verification_status as OnboardingFacts['aiVerificationStatus']) ?? null,
     aiVerificationError: ts?.ai_verification_error ?? null,
+    aiVerificationSkippedAt: ts?.ai_verification_skipped_at ?? null,
   };
 }
