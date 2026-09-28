@@ -21,7 +21,13 @@ export type LifecycleEmailKind =
   | 'setup_reminder'
   | 'trial_3d'
   | 'trial_1d'
-  | 'trial_0d';
+  | 'trial_0d'
+  /** Billing resilience (Part A): dunning sequence for a failed card at
+   * trial end / renewal. Fired day-of the failure, +3d, and +7d (last day
+   * of the 7-day grace window). */
+  | 'dunning_0d'
+  | 'dunning_3d'
+  | 'dunning_7d';
 
 const ACTOR = 'system:lifecycle_email';
 
