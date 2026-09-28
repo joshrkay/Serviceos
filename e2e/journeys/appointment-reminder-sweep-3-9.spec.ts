@@ -374,6 +374,43 @@ test.describe('appointment-reminder sweep (3.9) — real Postgres', () => {
       await runAppointmentReminderSweep(sweepDeps);
       expect(delivery.sentSms.length, 'a second sweep must not double-send').toBe(beforeSecondSweep);
       expect(pushProvider.sent.filter((m) => m.data?.entityId === chi.appointmentId)).toHaveLength(1);
+
+      // ── #1015 — DURABLY idempotent: a "restarted" worker (fresh delivery
+      //    provider, fresh comms service, fresh push provider — no in-process
+      //    memory of the first pass) sweeps the same instant and sends
+      //    nothing; only the Postgres dispatch rows stand between it and a
+      //    double reminder. Each tenant's customer holds exactly ONE sms
+      //    reminder row, under its own tenant. ───────────────────────────────
+      const restartedDelivery = new InMemoryDeliveryProvider();
+      const restartedPush = new InMemoryPushDeliveryProvider();
+      setOwnerNotifications(new OwnerNotificationService({ deviceTokenRepo, provider: restartedPush }));
+      const restartedComms = new TransactionalCommsService({
+        delivery: restartedDelivery,
+        dispatchRepo,
+        dncRepo: new PgDncRepository(pool),
+        appointmentRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        invoiceRepo: new PgInvoiceRepository(pool),
+        pool,
+        logger: createLogger({ service: 'e2e-reminder-restart', environment: 'test', level: 'error' }),
+      });
+      await runAppointmentReminderSweep({ ...sweepDeps, transactionalComms: restartedComms });
+      expect(restartedDelivery.sentSms, 'a restarted worker must not re-send a reminder').toEqual([]);
+      expect(restartedPush.sent.filter((m) => m.data?.entityId === chi.appointmentId)).toEqual([]);
+      for (const [tenantId, appointmentId, phone] of [
+        [tenantChicago.tenantId, chi.appointmentId, chiPhone],
+        [tenantPhoenix.tenantId, phx.appointmentId, phxPhone],
+      ] as const) {
+        // The owner-push row shares entity_type (recipient 'owner-push'); the
+        // customer's reminder is the one addressed to the customer's phone.
+        const customerRows = (await dispatchRepo.findByEntity(tenantId, 'appointment_reminder', appointmentId)).filter(
+          (r) => r.recipient === phone,
+        );
+        expect(customerRows, `exactly one customer reminder row for ${phone}`).toHaveLength(1);
+        expect(customerRows[0].channel).toBe('sms');
+      }
     } finally {
       setOwnerNotifications(undefined);
       await pool.end().catch(() => undefined);
