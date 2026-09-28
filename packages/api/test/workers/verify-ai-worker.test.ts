@@ -14,17 +14,7 @@ const logger = createLogger({ service: 'test', environment: 'test', level: 'erro
 function makeSentrySpy() {
   const events: { tags: Record<string, string>; error: Error | null }[] = [];
   const sentry = {
-    captureException: () => 'spy',
-    captureMessage: () => 'spy',
-    setTag: () => {},
-    setUser: () => {},
-    startTransaction: () => ({ finish() {}, setStatus() {} }),
-    withScope(
-      cb: (scope: {
-        setTag(key: string, value: string): void;
-        captureException(error: Error): string;
-      }) => void,
-    ): void {
+    withScope(cb: (scope: { setTag(key: string, value: string): void; captureException(error: Error): string }) => void) {
       const tags: Record<string, string> = {};
       let error: Error | null = null;
       cb({

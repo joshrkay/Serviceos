@@ -127,9 +127,6 @@ export function createVerifyAiWorker(deps: {
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         logger.error('AI verification failed', { tenantId, error });
-        // Diagnose flakes instead of trapping users: a failure record goes to
-        // Sentry with tenant + step + reason so a flaky gateway/provider shows
-        // up in monitoring rather than silently stranding the tenant.
         reportVerificationFailure(sentry, tenantId, error, err);
         await pool.query(
           `UPDATE tenant_settings

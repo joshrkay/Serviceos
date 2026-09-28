@@ -148,6 +148,23 @@ interface CapabilityState {
   platformFrozen?: boolean;
 }
 
+/** Pulls the ai_check step's status out of an /api/onboarding/status payload. */
+function aiCheckStatusOf(payload: { steps?: { id: string; status: string }[] }): string | null {
+  return payload.steps?.find((s) => s.id === 'ai_check')?.status ?? null;
+}
+
+/** Banner copy for the AI-check escape-hatch checklist item in Settings. */
+const AI_CHECK_COPY: Record<'error' | 'skipped', { title: string; body: string }> = {
+  error: {
+    title: 'AI check needs another look',
+    body: 'Your AI didn’t answer the test prompt during setup. Re-run the check to confirm it’s ready for real calls.',
+  },
+  skipped: {
+    title: 'AI check was skipped',
+    body: 'Setup finished without the AI check. Re-run it here to confirm your assistant answers correctly.',
+  },
+};
+
 export function SettingsPage() {
   const navigate = useNavigate();
   const { signOut } = useClerk();
@@ -193,10 +210,9 @@ export function SettingsPage() {
   // settings document loads; the subtitle must never show made-up data).
   const [serviceArea, setServiceArea] = useState<ServiceAreaFields | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
-  // AI-check escape hatch surface: when the tenant skipped or failed the
-  // onboarding AI check, Settings shows it as a retryable checklist item
-  // (the onboarding sidebar is done/complete at that point, so this is the
-  // way back to a verified AI).
+  // AI-check escape hatch: Settings surfaces a skipped/failed AI check as a
+  // retryable checklist item (the onboarding sidebar is done by then, so
+  // this is the way back to a verified AI).
   const [aiCheckStatus, setAiCheckStatus] = useState<string | null>(null);
   const [aiCheckRetrying, setAiCheckRetrying] = useState(false);
   const [aiCheckRetryError, setAiCheckRetryError] = useState<string | null>(null);
@@ -330,7 +346,7 @@ export function SettingsPage() {
           steps?: { id: string; status: string }[];
         };
         setVoiceAgentLive(status.voiceAgentLive ?? false);
-        setAiCheckStatus(status.steps?.find((s) => s.id === 'ai_check')?.status ?? null);
+        setAiCheckStatus(aiCheckStatusOf(status));
       } catch {
         // Settings still usable when onboarding status unavailable.
       }
@@ -773,10 +789,7 @@ export function SettingsPage() {
       }
       const statusRes = await apiFetch('/api/onboarding/status');
       if (statusRes.ok) {
-        const status = (await statusRes.json()) as {
-          steps?: { id: string; status: string }[];
-        };
-        setAiCheckStatus(status.steps?.find((s) => s.id === 'ai_check')?.status ?? null);
+        setAiCheckStatus(aiCheckStatusOf((await statusRes.json()) as { steps?: { id: string; status: string }[] }));
       }
       toast.success('Verification re-running — it usually takes a few seconds');
     } catch (err) {
@@ -1023,6 +1036,10 @@ export function SettingsPage() {
     },
   ];
 
+  // AI-check escape hatch banner: only when the check errored or was skipped.
+  const aiCheckCopy =
+    aiCheckStatus === 'error' || aiCheckStatus === 'skipped' ? AI_CHECK_COPY[aiCheckStatus] : null;
+
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0" style={{ scrollbarWidth: 'thin' }}>
       <div className="p-4 md:p-6 max-w-2xl mx-auto">
@@ -1111,7 +1128,7 @@ export function SettingsPage() {
             onboarding complete but the AI unverified — surface it here as a
             retryable checklist item so the tenant can confirm the assistant
             before it takes real calls. */}
-        {(aiCheckStatus === 'error' || aiCheckStatus === 'skipped') && (
+        {aiCheckCopy && (
           <div
             data-testid="ai-checklist-item"
             className="w-full flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5 mb-5"
@@ -1120,14 +1137,8 @@ export function SettingsPage() {
               <Zap size={16} className="text-white" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm text-amber-900">
-                {aiCheckStatus === 'error' ? 'AI check needs another look' : 'AI check was skipped'}
-              </p>
-              <p className="text-xs text-amber-700 mt-0.5">
-                {aiCheckStatus === 'error'
-                  ? 'Your AI didn\u2019t answer the test prompt during setup. Re-run the check to confirm it\u2019s ready for real calls.'
-                  : 'Setup finished without the AI check. Re-run it here to confirm your assistant answers correctly.'}
-              </p>
+              <p className="text-sm text-amber-900">{aiCheckCopy.title}</p>
+              <p className="text-xs text-amber-700 mt-0.5">{aiCheckCopy.body}</p>
               {aiCheckRetryError && (
                 <p className="text-xs text-red-600 mt-1">{aiCheckRetryError}</p>
               )}

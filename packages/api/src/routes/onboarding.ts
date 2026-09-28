@@ -61,6 +61,20 @@ export interface OnboardingRouterDeps {
   vapiClient?: VapiClient | null;
 }
 
+/**
+ * Runs a single tenant-scoped write. A lone UPDATE is already atomic, so no
+ * explicit transaction is needed — just set the RLS tenant id and run it.
+ */
+async function tenantWrite(pool: Pool, tenantId: string, sql: string, params: unknown[]): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    await client.query(sql, params);
+  } finally {
+    client.release();
+  }
+}
+
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
   const {
     settingsRepo,
@@ -744,25 +758,16 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
-          await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-          await client.query(
-            `UPDATE tenant_settings
-               SET ai_verification_status = 'pending',
-                   ai_verification_error = NULL,
-                   updated_at = now()
-             WHERE tenant_id = $1`,
-            [tenantId],
-          );
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK').catch(() => {});
-          throw err;
-        } finally {
-          client.release();
-        }
+        await tenantWrite(
+          pool,
+          tenantId,
+          `UPDATE tenant_settings
+              SET ai_verification_status = 'pending',
+                  ai_verification_error = NULL,
+                  updated_at = now()
+            WHERE tenant_id = $1`,
+          [tenantId],
+        );
         const payload: VerifyAiPayload = { tenantId };
         await queue.send(VERIFY_AI_JOB_TYPE, payload, `verify-ai-retry-${tenantId}`);
         await auditRepo.create(
@@ -790,10 +795,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
    *
    * Escape hatch for a failed/flaky AI check: records the skip so the
    * ai_check step completes and onboarding can finish. Verification stays
-   * retryable — POST /api/onboarding/ai-check/retry still works, and the
-   * Settings surface shows the skipped state with a retry action. Skipping
-   * never flips ai_verification_status, so a later pass still records
-   * 'passed' on top of the skip.
+   * retryable from Settings or the step itself. The skip never flips
+   * ai_verification_status, so a later pass still records 'passed' on top.
    */
   router.post(
     '/ai-check/skip',
@@ -809,24 +812,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
-          await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-          await client.query(
-            `UPDATE tenant_settings
-               SET ai_verification_skipped_at = now(),
-                   updated_at = now()
-             WHERE tenant_id = $1`,
-            [tenantId],
-          );
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK').catch(() => {});
-          throw err;
-        } finally {
-          client.release();
-        }
+        await tenantWrite(
+          pool,
+          tenantId,
+          `UPDATE tenant_settings
+              SET ai_verification_skipped_at = now(),
+                  updated_at = now()
+            WHERE tenant_id = $1`,
+          [tenantId],
+        );
         await auditRepo.create(
           createAuditEvent({
             tenantId,

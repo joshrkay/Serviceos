@@ -28,11 +28,11 @@ function status(overrides: Partial<Record<string, string>>, currentStep: Onboard
   };
 }
 
-describe('AiCheckStep (#1282)', () => {
-  beforeEach(() => {
-    apiFetchMock.mockReset();
-  });
+beforeEach(() => {
+  apiFetchMock.mockReset();
+});
 
+describe('AiCheckStep (#1282)', () => {
   it('before a plan exists it does not claim to be running — it points at Start trial', () => {
     const onGoToStep = vi.fn();
     render(
@@ -58,10 +58,6 @@ describe('AiCheckStep (#1282)', () => {
 });
 
 describe('AiCheckStep skip escape hatch', () => {
-  beforeEach(() => {
-    apiFetchMock.mockReset();
-  });
-
   it('pending state (no plan yet) offers no skip — #1282 fail-fast is preserved', () => {
     render(
       <AiCheckStep
