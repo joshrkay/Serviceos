@@ -294,6 +294,7 @@ import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
+import { runClerkMetadataBackfillSweep } from './workers/clerk-metadata-backfill-sweep';
 import { runVoiceCostReconciliationSweep } from './workers/voice-cost-reconciliation';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
@@ -2316,6 +2317,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // parallel track.
     moneyReconciliation: 590026,
     voiceCostReconciliation: 590027,
+    // CLERK-META-2026-09-27 — Clerk public_metadata tenant_id reconciliation.
+    // DISTINCT key per the collision discipline above (590014 taught us).
+    clerkMetadataBackfill: 590028,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -6897,6 +6901,35 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         });
       }).catch((err) => {
         lifecycleSweepLogger.error('Trial-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // CLERK-META-2026-09-27 — reconcile Clerk public_metadata tenant_id for
+  // users the signup webhook couldn't sync (Clerk retry budget exhausted,
+  // or a path that deliberately doesn't fail the webhook like the invitee
+  // join). Hourly; the sweep no-ops without a pool or CLERK_SECRET_KEY.
+  const clerkMetadataSweepLogger = createLogger({
+    service: 'clerk-metadata-backfill-sweep',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.clerkMetadataBackfill, async () => {
+        const result = await runClerkMetadataBackfillSweep({
+          pool: pool ?? null,
+          secretKey: process.env.CLERK_SECRET_KEY ?? '',
+          logger: clerkMetadataSweepLogger,
+        });
+        if (result.backfilled > 0 || result.failed > 0) {
+          clerkMetadataSweepLogger.info('Clerk metadata backfill sweep tick', {
+            ...result,
+          });
+        }
+      }).catch((err) => {
+        clerkMetadataSweepLogger.error('Clerk metadata backfill sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       });

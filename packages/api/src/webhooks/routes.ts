@@ -10,6 +10,10 @@ import {
 import { createLogger } from '../logging/logger';
 import { isValidTenantId } from '../db/schema';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
+import {
+  writeClerkUserMetadata,
+  describeClerkFailure,
+} from '../auth/clerk-user-metadata';
 import { LIFECYCLE_EMAIL_JOB_TYPE } from '../workers/lifecycle-email-worker';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
@@ -1093,36 +1097,41 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }
           }
 
-          // Write tenant_id back to Clerk user's public_metadata (best-effort)
+          // Write tenant_id back to Clerk user's public_metadata.
+          //
+          // CLERK-META-2026-09-27 — this write is LOAD-BEARING, not
+          // best-effort: without tenant_id in the JWT every tenant API call
+          // 403s and there is no self-service recovery, so a failed write
+          // FAILS the webhook (the catch below marks the event 'failed' and
+          // answers 500 → Clerk retries) instead of logging and returning
+          // 200. Safe BECAUSE the handler is idempotent: bootstrapTenant
+          // gates every side effect on result.created, the queues dedupe on
+          // deterministic idempotency keys, and the owner users-row insert
+          // above is WHERE NOT EXISTS.
           if (config.CLERK_SECRET_KEY) {
-            try {
-              const clerkRes = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
-                method: 'PATCH',
-                headers: {
-                  'Authorization': `Bearer ${config.CLERK_SECRET_KEY}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  public_metadata: { tenant_id: result.tenantId, role: 'owner' },
-                }),
-                // Bounded like the invitee-path sync above.
-                signal: AbortSignal.timeout(10_000),
-              });
-              if (!clerkRes.ok) {
-                const errBody = await clerkRes.text();
-                logger.error('Failed to update Clerk user metadata', {
-                  userId, tenantId: result.tenantId, status: clerkRes.status, body: errBody,
-                });
-              } else {
-                logger.info('Clerk user metadata updated with tenant_id', {
-                  userId, tenantId: result.tenantId,
-                });
-              }
-            } catch (err) {
-              logger.error('Clerk API call failed', {
+            const sync = await writeClerkUserMetadata(
+              { secretKey: config.CLERK_SECRET_KEY, logger },
+              userId,
+              { tenant_id: result.tenantId, role: 'owner' },
+            );
+            if (sync.ok) {
+              logger.info('Clerk user metadata updated with tenant_id', {
                 userId, tenantId: result.tenantId,
-                error: err instanceof Error ? err.message : 'Unknown error',
               });
+            } else if (sync.status === 404) {
+              // The Clerk user vanished between signup and this write —
+              // retrying would never succeed, so don't burn Clerk's retry
+              // budget on it. The reconciliation sweep and the request-time
+              // recovery path cover any residue.
+              logger.warn('Clerk user gone while writing tenant metadata — not failing webhook', {
+                userId, tenantId: result.tenantId,
+              });
+            } else {
+              const detail = describeClerkFailure(sync);
+              logger.error('Failed to update Clerk user metadata — failing webhook so Clerk retries', {
+                userId, tenantId: result.tenantId, detail,
+              });
+              throw new Error(`Clerk tenant metadata sync failed for user ${userId}: ${detail}`);
             }
           }
         } else if (!deps.tenantRepo) {

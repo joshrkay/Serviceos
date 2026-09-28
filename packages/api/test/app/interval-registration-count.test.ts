@@ -55,7 +55,7 @@ import { resetConfig } from '../../src/shared/config';
  * change configuration — it moves construction. Any movement in this figure
  * under identical env is a real behaviour change.
  */
-const EXPECTED_WORKER_INTERVALS_HERMETIC = 21;
+const EXPECTED_WORKER_INTERVALS_HERMETIC = 22; // 21 baseline + 1 CLERK-META-2026-09-27 clerk-metadata-backfill sweep
 
 describe('characterization — background interval registration', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;
