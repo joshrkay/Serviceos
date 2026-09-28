@@ -2,6 +2,13 @@
  * VQ2-005 — real-mode `LLMGateway` factory for Layer 2 of the Voice
  * Quality harness.
  *
+ * #1331 — the suite now builds its gateway with {@link createLayer2Gateway}:
+ * the PRODUCTION gateway (`createLLMGateway(loadConfig(env))`, Railway:
+ * OpenAI gpt-4o-mini) whenever AI_PROVIDER_API_KEY is set, chosen by
+ * {@link selectLayer2Providers}. The Anthropic harness gateway below
+ * (`createRealLayerTwoGateway`) is only the explicit, logged fallback for a
+ * local run with nothing but ANTHROPIC_API_KEY.
+ *
  * Layer 1 always returns `CassetteLLMGateway` (record/replay). Layer 2
  * needs to actually exercise the production agent end-to-end against
  * Anthropic, but with two non-production concerns layered on:
@@ -53,6 +60,16 @@ import type {
 import { buildChatMessages, ensureJsonModeMessages } from '../providers/openai-compatible';
 import type { AgentEventBus } from '../voice-quality/event-bus';
 import { costIncurredEvent } from '../voice-quality/events';
+import {
+  describePathSmokeProvider,
+  pathSmokeCallCents,
+  selectPathSmokeProvider,
+  type PathSmokeProviderSelection,
+} from '../voice-quality/path-smoke/provider';
+import { ANTHROPIC_OPENAI_COMPAT_BASE_URL, DEFAULT_LAYER_TWO_MODEL } from './layer-two-models';
+import { createLLMGateway } from './factory';
+import { DEFAULT_RETRY } from './retry';
+import { loadConfig } from '../../shared/config';
 
 /**
  * Anthropic Claude Haiku 4.5 pricing as of 2026-04-30.
@@ -87,12 +104,50 @@ export const HAIKU_INPUT_CENTS_PER_MTOKEN = 300;
 export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 export const HAIKU_CACHE_READ_CENTS_PER_MTOKEN = 30;
 
-/** Production agent model. Pinned so a model bump is an explicit edit. */
-export const DEFAULT_LAYER_TWO_MODEL = 'claude-haiku-4-5-20251001';
+export { ANTHROPIC_OPENAI_COMPAT_BASE_URL, DEFAULT_LAYER_TWO_MODEL };
 
-/** Anthropic's OpenAI-compatible chat-completions endpoint. */
-export const ANTHROPIC_OPENAI_COMPAT_BASE_URL =
-  'https://api.anthropic.com/v1/';
+/** Env subset the Layer 2 selector reads (plain record so tests need no process.env). */
+export type Layer2Env = Record<string, string | undefined>;
+
+export type Layer2ProviderPlan =
+  | {
+      ok: true;
+      /** The LLM the agent + judges run on — production config first. */
+      llm: PathSmokeProviderSelection;
+      /** OpenAI key for Whisper STT + OpenAI TTS (the speech legs). */
+      speechApiKey: string;
+      /** One-line, key-free log line naming what the suite exercises. */
+      notice: string;
+    }
+  | { ok: false; error: string };
+
+/**
+ * #1331 — which providers Layer 2 runs on. The LLM leg reuses the path-smoke
+ * selector (#1426) so every real-LLM gate shares ONE definition of "the
+ * production provider": AI_PROVIDER_API_KEY + AI_PROVIDER_BASE_URL +
+ * AI_*_MODEL (Railway prod/dev: api.openai.com, gpt-4o-mini). ANTHROPIC_API_KEY
+ * is an explicit fallback only, and the notice says so loudly.
+ */
+export function selectLayer2Providers(env: Layer2Env): Layer2ProviderPlan {
+  const llm = selectPathSmokeProvider(env);
+  if (!llm) {
+    return {
+      ok: false,
+      error:
+        'Layer 2 requires AI_PROVIDER_API_KEY (the production LLM provider; ANTHROPIC_API_KEY is a local-only fallback).',
+    };
+  }
+  const speechApiKey = env.OPENAI_API_KEY?.trim();
+  if (!speechApiKey) {
+    return { ok: false, error: 'Layer 2 requires OPENAI_API_KEY (Whisper STT + OpenAI TTS).' };
+  }
+  return {
+    ok: true,
+    llm,
+    speechApiKey,
+    notice: `Layer 2 LLM: ${describePathSmokeProvider(llm)}`,
+  };
+}
 
 /**
  * Cost accumulator the wrapper feeds. Mirrors the structural shape of
@@ -135,6 +190,82 @@ export interface RealLayerTwoGatewayDeps {
  */
 export const LAYER_TWO_REQUEST_TIMEOUT_MS = 20_000;
 export const LAYER_TWO_MAX_RETRIES = 2;
+
+export interface Layer2GatewayDeps {
+  /** The LLM leg of {@link selectLayer2Providers}'s plan. */
+  llm: PathSmokeProviderSelection;
+  /** Env the production gateway is built from (`loadConfig(env)`). */
+  env: Layer2Env;
+  bus: AgentEventBus;
+  costTracker: LayerTwoCostTracker;
+  /** Per-call deadline for harness judge calls. Defaults to {@link LAYER_TWO_REQUEST_TIMEOUT_MS}. */
+  requestTimeoutMs?: number;
+  /** Retries after the first attempt. Defaults to {@link LAYER_TWO_MAX_RETRIES}. */
+  maxRetries?: number;
+  /** Where the not-production fallback warning goes. Defaults to console.warn. */
+  warn?: (line: string) => void;
+}
+
+/**
+ * #1331 — the Layer 2 gateway. With a production selection it is the gateway
+ * production runs — `createLLMGateway(loadConfig(env))` (OpenAI-compatible
+ * provider, tier routing, resilience stack) — with the Layer 2 retry count
+ * pinned and the per-call spend fed to the suite cost tracker. The Anthropic
+ * selection keeps the old harness gateway, with a loud warning.
+ */
+export function createLayer2Gateway(deps: Layer2GatewayDeps): LLMGateway {
+  const requestTimeoutMs = deps.requestTimeoutMs ?? LAYER_TWO_REQUEST_TIMEOUT_MS;
+  const maxRetries = deps.maxRetries ?? LAYER_TWO_MAX_RETRIES;
+  if (deps.llm.kind === 'anthropic-fallback') {
+    (deps.warn ?? console.warn)(
+      `⚠️  Layer 2 is running on the ANTHROPIC_API_KEY fallback — NOT the provider production runs. ` +
+        `Set AI_PROVIDER_API_KEY (+ AI_PROVIDER_BASE_URL / AI_*_MODEL) to measure production.`,
+    );
+    return createRealLayerTwoGateway({
+      apiKey: deps.llm.apiKey,
+      bus: deps.bus,
+      costTracker: deps.costTracker,
+      requestTimeoutMs,
+      maxRetries,
+    });
+  }
+  const production = createLLMGateway(loadConfig(deps.env), {
+    resilience: { retryPolicy: { ...DEFAULT_RETRY, maxAttempts: 1 + maxRetries } },
+  });
+  return wrapWithCostTracking(new JudgeDeadlineGateway(production, requestTimeoutMs), {
+    bus: deps.bus,
+    costTracker: deps.costTracker,
+  });
+}
+
+/** Task types owned by the Layer 2 harness judges (graders), not the agent. */
+const HARNESS_JUDGE_TASK_PREFIX = 'voice_quality_';
+
+/**
+ * #1385 on the production gateway. The production stack bounds every call by
+ * its tier deadline — right for the agent's own calls (they stay exactly as in
+ * production), but the judge task types resolve to the lightweight tier whose
+ * 1.5 s budget is sized for classify on a live call and would abort a normal
+ * grading reply. Judge calls without an explicit deadline get the Layer 2
+ * per-call deadline instead; retries still run inside it.
+ */
+class JudgeDeadlineGateway extends LLMGateway {
+  constructor(
+    private readonly inner: LLMGateway,
+    private readonly judgeDeadlineMs: number,
+  ) {
+    super({ defaultProvider: 'layer2-judge-deadline-passthrough' }, new Map());
+  }
+
+  override complete(request: LLMRequest): Promise<LLMResponse> {
+    const isJudge = request.taskType.startsWith(HARNESS_JUDGE_TASK_PREFIX);
+    return this.inner.complete(
+      isJudge && request.deadlineMs === undefined
+        ? { ...request, deadlineMs: this.judgeDeadlineMs }
+        : request,
+    );
+  }
+}
 
 /**
  * Creates a real-mode `LLMGateway` for Layer 2 use:
@@ -251,6 +382,21 @@ class CostTrackingLayerTwoGateway extends LLMGateway {
 
     const inputTokens = response.tokenUsage?.input ?? 0;
     const outputTokens = response.tokenUsage?.output ?? 0;
+
+    // #1331 — a reply served by the production provider (OpenAI) is priced
+    // at ITS model's rate via the shared path-smoke table (#1426). Haiku
+    // replies — and any model that table does not price — keep the pinned,
+    // conservative Haiku harness rates below (with the cache-read discount).
+    const perModelCents = isHaikuModel(response.model)
+      ? null
+      : pathSmokeCallCents(response.model, { input: inputTokens, output: outputTokens });
+    if (perModelCents !== null) {
+      this.deps.costTracker.addCents(perModelCents);
+      this.deps.bus.record(
+        costIncurredEvent(perModelCents, this.deps.costTracker.totalCents()),
+      );
+      return response;
+    }
     const cachedInputTokens = readCachedInputTokens(response);
 
     // Cached portion is billed at the cache rate; the remainder of
@@ -277,6 +423,10 @@ class CostTrackingLayerTwoGateway extends LLMGateway {
 
     return response;
   }
+}
+
+function isHaikuModel(model: string | undefined): boolean {
+  return (model ?? '').toLowerCase().includes('claude-haiku');
 }
 
 /**

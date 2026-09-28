@@ -19,7 +19,7 @@ import { LLMGateway, type LLMRequest, type LLMResponse } from '../../gateway/gat
 import {
   ANTHROPIC_OPENAI_COMPAT_BASE_URL,
   DEFAULT_LAYER_TWO_MODEL,
-} from '../../gateway/real-layer-two-factory';
+} from '../../gateway/layer-two-models';
 
 /** Env subset the selector reads (plain record so tests need no process.env). */
 export type PathSmokeEnv = Record<string, string | undefined>;
