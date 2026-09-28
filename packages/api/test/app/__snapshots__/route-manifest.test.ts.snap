@@ -444,6 +444,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /status
          └─ GET /voice/presets
          └─ POST /ai-check/retry
+         └─ POST /ai-check/skip
          └─ POST /billing/cancel
          └─ POST /billing/checkout-session
          └─ POST /calendar/choose

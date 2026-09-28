@@ -37,10 +37,93 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Pool, PoolClient } from 'pg';
 import type { AuthenticatedRequest } from '../auth/clerk';
 import { applyTenantContext } from '../db/rls-runtime-role';
+import { createLogger } from '../logging/logger';
+import {
+  writeClerkUserMetadata,
+  describeClerkFailure,
+} from '../auth/clerk-user-metadata';
+
+const tenantContextLogger = createLogger({
+  service: 'tenant-context',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 export interface TenantContext {
   client: PoolClient;
   tenantId: string;
+}
+
+/**
+ * CLERK-META-2026-09-27 — self-service recovery for a dropped Clerk metadata
+ * write (see webhooks/routes.ts `user.created`).
+ *
+ * The request arrived with a valid Clerk session (verified upstream) but the
+ * JWT carries no tenant_id. When the DB has a non-deleted users row for this
+ * Clerk subject, that row is authoritative: return its tenant, role, and
+ * canonical id, and best-effort backfill Clerk's public_metadata so the NEXT
+ * session token carries tenant_id. A backfill failure does NOT fail the
+ * recovery — the reconciliation sweep alerts if the metadata stays broken.
+ *
+ * When one Clerk subject has rows in several tenants, the oldest row wins:
+ * that is the tenant bootstrapped at signup, whose metadata write this
+ * recovery is healing.
+ */
+export interface TenantRecovery {
+  tenantId: string;
+  role: string;
+  canonicalUserId: string;
+}
+
+export async function recoverTenantFromUsersRow(
+  pool: Pool,
+  clerkUserId: string | undefined,
+  opts: WithTenantTransactionOptions = {},
+): Promise<TenantRecovery | null> {
+  if (!clerkUserId) return null;
+  // System-level read (no tenant GUC set yet — there is no tenant to scope
+  // to). The WHERE on clerk_user_id makes cross-tenant leakage impossible.
+  const r = await pool.query<{ id: string; tenant_id: string; role: string }>(
+    `SELECT id, tenant_id, role
+       FROM users
+      WHERE clerk_user_id = $1 AND deleted_at IS NULL
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    [clerkUserId],
+  );
+  if (r.rows.length === 0) return null;
+  const row = r.rows[0];
+
+  const secretKey = opts.clerkSecretKey ?? process.env.CLERK_SECRET_KEY;
+  if (secretKey) {
+    const sync = await writeClerkUserMetadata(
+      { secretKey, fetchFn: opts.clerkFetch, logger: tenantContextLogger },
+      clerkUserId,
+      { tenant_id: row.tenant_id, role: row.role },
+    );
+    if (sync.ok) {
+      tenantContextLogger.info('Recovered missing JWT tenant_id — backfilled Clerk metadata', {
+        clerkUserId,
+        tenantId: row.tenant_id,
+      });
+    } else {
+      tenantContextLogger.warn('Recovered missing JWT tenant_id but Clerk backfill failed — request proceeds on DB truth', {
+        clerkUserId,
+        tenantId: row.tenant_id,
+        detail: describeClerkFailure(sync),
+      });
+    }
+  }
+
+  return { tenantId: row.tenant_id, role: row.role, canonicalUserId: row.id };
+}
+
+export interface WithTenantTransactionOptions {
+  /**
+   * Overrides process.env.CLERK_SECRET_KEY for the recovery backfill.
+   * Tests inject a dummy key + clerkFetch; production reads the env.
+   */
+  clerkSecretKey?: string;
+  clerkFetch?: typeof fetch;
 }
 
 /**
@@ -138,19 +221,49 @@ const SUCCESS_REPRESENTATION_HEADERS = [
   'location',
 ] as const;
 
-export function withTenantTransaction(pool: Pool) {
+export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOptions = {}) {
   return async (
     req: AuthenticatedRequest,
     res: Response,
     next: NextFunction,
   ): Promise<void> => {
-    const tenantId = req.auth?.tenantId;
+    let tenantId = req.auth?.tenantId;
     if (!tenantId) {
-      res.status(403).json({
-        error: 'FORBIDDEN',
-        message: 'Tenant context required',
+      // CLERK-META-2026-09-27 — recover instead of a dead 403. The session
+      // is valid but the JWT lacks tenant_id (dropped metadata write); if
+      // the DB knows this subject, heal the link and serve the request.
+      const recovered = await recoverTenantFromUsersRow(pool, req.auth?.userId, {
+        clerkSecretKey: opts.clerkSecretKey,
+        clerkFetch: opts.clerkFetch,
       });
-      return;
+      if (recovered) {
+        tenantId = recovered.tenantId;
+        // Downstream gates read req.auth.tenantId, so publish the recovery.
+        // Role + canonical id come from the DB row, not the stale claim.
+        if (req.auth) {
+          req.auth.tenantId = recovered.tenantId;
+          req.auth.role = recovered.role;
+          req.auth.canonicalUserId = recovered.canonicalUserId;
+        }
+      } else {
+        // No users row for this subject. Authenticated-but-tenantless (e.g.
+        // the signup webhook hasn't been processed yet) gets a distinct
+        // code so the client can route to a "finish setup" screen instead of
+        // a dead end; with no authenticated principal at all, preserve the
+        // legacy shape (requireAuth normally 401s before this middleware).
+        res.status(403).json(
+          req.auth
+            ? {
+                error: 'ACCOUNT_SETUP_INCOMPLETE',
+                message: 'Your account is not linked to a business yet. Finish setup to continue.',
+              }
+            : {
+                error: 'FORBIDDEN',
+                message: 'Tenant context required',
+              },
+        );
+        return;
+      }
     }
 
     // SSE / long-lived streams: a `text/event-stream` response keeps the HTTP

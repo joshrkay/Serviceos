@@ -73,6 +73,27 @@ export function planIdForStripePrice(priceId: string | null | undefined): Billin
   return null;
 }
 
+/**
+ * Reverse of planIdForStripePrice: the configured Stripe price id for a
+ * plan, used by the overage-settlement reconciliation sweep to backfill a
+ * gap period (settlePeriod takes the price id, not the plan). Null when the
+ * plan's env var is unset — the sweep skips rather than failing closed.
+ */
+export function stripePriceIdForPlan(planId: BillingPlanId): string | null {
+  return process.env[PLAN_SPECS[planId].envVar] ?? null;
+}
+
+/**
+ * Billing resilience — dunning grace (Part A). SQL fragment clearing the
+ * past-due grace when the mirrored subscription recovers to
+ * active/trialing; a past_due re-fire leaves an active grace untouched.
+ * Every call site binds the subscription status as $2.
+ */
+export const PAST_DUE_GRACE_CLEAR_SQL = `past_due_grace_until = CASE
+  WHEN $2 IN ('active', 'trialing') THEN NULL
+  ELSE past_due_grace_until
+END`;
+
 /** Fails closed with a non-secret, actionable message — never the env value. */
 function resolvePlanPriceId(planId: BillingPlanId): string {
   const spec = PLAN_SPECS[planId];
@@ -756,7 +777,8 @@ export class BillingService {
       await this.deps.pool.query(
         `UPDATE tenants
          SET stripe_subscription_id = $1, subscription_status = $2,
-             trial_ends_at = $3, updated_at = NOW()
+             trial_ends_at = $3, updated_at = NOW(),
+             ${PAST_DUE_GRACE_CLEAR_SQL}
          WHERE stripe_customer_id = $4`,
         [input.subscriptionId, input.status, input.trialEndsAt, input.customerId],
       );
@@ -764,10 +786,39 @@ export class BillingService {
     }
     await this.deps.pool.query(
       `UPDATE tenants
-       SET stripe_subscription_id = $1, subscription_status = $2, updated_at = NOW()
+       SET stripe_subscription_id = $1, subscription_status = $2, updated_at = NOW(),
+           ${PAST_DUE_GRACE_CLEAR_SQL}
        WHERE stripe_customer_id = $3`,
       [input.subscriptionId, input.status, input.customerId],
     );
+  }
+
+  /**
+   * Billing resilience — dunning grace (Part A). Stamps a 7-day grace window
+   * on tenants.past_due_grace_until when a card fails at trial end / renewal
+   * (invoice.payment_failed). Only stamps when no grace is already active —
+   * a second failed invoice during an active grace must not extend it
+   * indefinitely. The voice gate answers calls while the grace is in the
+   * future; the dunning sweep keys its day-of/+3d/+7d emails off it; the
+   * subscription webhook clears it when the account returns to
+   * active/trialing. Returns the grace expiry, or null when the customer
+   * maps to no tenant.
+   */
+  async applyInvoicePaymentFailed(input: {
+    customerId: string;
+  }): Promise<Date | null> {
+    const { rows } = await this.deps.pool.query<{
+      past_due_grace_until: Date | null;
+    }>(
+      `UPDATE tenants
+          SET past_due_grace_until = NOW() + INTERVAL '7 days',
+              updated_at = NOW()
+        WHERE stripe_customer_id = $1
+          AND (past_due_grace_until IS NULL OR past_due_grace_until <= NOW())
+        RETURNING past_due_grace_until`,
+      [input.customerId],
+    );
+    return rows[0]?.past_due_grace_until ?? null;
   }
 
   /**

@@ -10,6 +10,10 @@ import {
 import { createLogger } from '../logging/logger';
 import { isValidTenantId } from '../db/schema';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
+import {
+  writeClerkUserMetadata,
+  describeClerkFailure,
+} from '../auth/clerk-user-metadata';
 import { LIFECYCLE_EMAIL_JOB_TYPE } from '../workers/lifecycle-email-worker';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
@@ -34,7 +38,7 @@ import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
 import { PendingInvitationRepository } from '../users/pending-invitation';
-import { BillingService, planIdForStripePrice } from '../billing/subscription';
+import { BillingService, PAST_DUE_GRACE_CLEAR_SQL, planIdForStripePrice } from '../billing/subscription';
 import type { CallUsageBillingService } from '../billing/call-usage-billing';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
@@ -1093,36 +1097,39 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }
           }
 
-          // Write tenant_id back to Clerk user's public_metadata (best-effort)
+          // Write tenant_id back to Clerk user's public_metadata.
+          //
+          // CLERK-META-2026-09-27 — this write is LOAD-BEARING, not
+          // best-effort: a failed write FAILS the webhook (the catch below
+          // marks the event 'failed' and answers 500 → Clerk retries)
+          // instead of logging and returning 200. Safe because the handler
+          // is idempotent (bootstrapTenant gates side effects on
+          // result.created, queues dedupe on idempotency keys, the owner
+          // users-row insert is WHERE NOT EXISTS).
           if (config.CLERK_SECRET_KEY) {
-            try {
-              const clerkRes = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
-                method: 'PATCH',
-                headers: {
-                  'Authorization': `Bearer ${config.CLERK_SECRET_KEY}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  public_metadata: { tenant_id: result.tenantId, role: 'owner' },
-                }),
-                // Bounded like the invitee-path sync above.
-                signal: AbortSignal.timeout(10_000),
-              });
-              if (!clerkRes.ok) {
-                const errBody = await clerkRes.text();
-                logger.error('Failed to update Clerk user metadata', {
-                  userId, tenantId: result.tenantId, status: clerkRes.status, body: errBody,
-                });
-              } else {
-                logger.info('Clerk user metadata updated with tenant_id', {
-                  userId, tenantId: result.tenantId,
-                });
-              }
-            } catch (err) {
-              logger.error('Clerk API call failed', {
+            const sync = await writeClerkUserMetadata(
+              { secretKey: config.CLERK_SECRET_KEY, logger },
+              userId,
+              { tenant_id: result.tenantId, role: 'owner' },
+            );
+            if (sync.ok) {
+              logger.info('Clerk user metadata updated with tenant_id', {
                 userId, tenantId: result.tenantId,
-                error: err instanceof Error ? err.message : 'Unknown error',
               });
+            } else if (sync.status === 404) {
+              // The Clerk user vanished between signup and this write —
+              // retrying would never succeed, so don't burn Clerk's retry
+              // budget on it. The reconciliation sweep and the request-time
+              // recovery path cover any residue.
+              logger.warn('Clerk user gone while writing tenant metadata — not failing webhook', {
+                userId, tenantId: result.tenantId,
+              });
+            } else {
+              const detail = describeClerkFailure(sync);
+              logger.error('Failed to update Clerk user metadata — failing webhook so Clerk retries', {
+                userId, tenantId: result.tenantId, detail,
+              });
+              throw new Error(`Clerk tenant metadata sync failed for user ${userId}: ${detail}`);
             }
           }
         } else if (!deps.tenantRepo) {
@@ -2164,6 +2171,39 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // Billing resilience — dunning grace (Part A). A failed charge at
+      // trial end / renewal flips the mirrored status to past_due; stamp a
+      // 7-day grace (tenants.past_due_grace_until) during which the voice
+      // gate keeps answering. The dunning sweep keys its 0d/3d/7d emails
+      // off the same window. Idempotent: an active grace is never extended
+      // by a second failed invoice (see applyInvoicePaymentFailed).
+      if (deps.billingService && event.type === 'invoice.payment_failed') {
+        const invoice = event.data.object as {
+          id?: string;
+          customer?: string;
+          attempt_count?: number;
+          next_payment_attempt?: number | null;
+        };
+        const customerId =
+          typeof invoice.customer === 'string' ? invoice.customer : null;
+        if (customerId) {
+          const graceUntil = await deps.billingService.applyInvoicePaymentFailed({
+            customerId,
+          });
+          logger.info('invoice.payment_failed: past-due grace stamped', {
+            customerId,
+            invoiceId: invoice.id ?? null,
+            attemptCount: invoice.attempt_count ?? null,
+            nextPaymentAttempt: invoice.next_payment_attempt ?? null,
+            graceUntil: graceUntil ? graceUntil.toISOString() : null,
+          });
+        } else {
+          logger.warn('invoice.payment_failed missing customer — skipping grace stamp', {
+            invoiceId: invoice.id ?? null,
+          });
+        }
+      }
+
       // Tier 4 (Subscription — Rivet billing). customer.subscription.*
       // events update the tenant's cached subscription status. Match
       // by stripe_customer_id (the BillingService persists it on
@@ -2171,7 +2211,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // snapshot. created/updated/deleted all share the same handler;
       // 'deleted' typically arrives with status='canceled' so the
       // mirror naturally reflects the lifecycle end.
-      // AI-minute overage for the period that just closed. The invoice's
       // subscription line carries the plan in force now, which prices the
       // whole period (upgrades apply retroactively). A throw → 500 so
       // Stripe retries; settlement is idempotent per (tenant, period).
@@ -2351,7 +2390,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                           plan_id = COALESCE($5, plan_id),
                           current_period_start = COALESCE($6, current_period_start),
                           current_period_end = COALESCE($7, current_period_end),
-                          updated_at = NOW()
+                          updated_at = NOW(),
+                          -- Billing resilience (Part A): a recovered card
+                          -- clears the past-due grace; a past_due re-fire
+                          -- leaves an active grace untouched.
+                          ${PAST_DUE_GRACE_CLEAR_SQL}
                     WHERE id = $4`,
                   [sub.id, sub.status, trialEndsAt, row.id, planId, currentPeriodStart, currentPeriodEnd],
                 );

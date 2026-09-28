@@ -35,6 +35,7 @@ function facts(over: Partial<OnboardingFacts> = {}): OnboardingFacts {
     aiConfigPresent: false,
     aiVerificationStatus: null,
     aiVerificationError: null,
+    aiVerificationSkippedAt: null,
     ...over,
   };
 }

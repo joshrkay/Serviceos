@@ -216,7 +216,77 @@ describe('seedPackDefaults', () => {
   it('isSeedablePackId reports the supported set', () => {
     expect(isSeedablePackId('hvac')).toBe(true);
     expect(isSeedablePackId('plumbing')).toBe(true);
-    expect(isSeedablePackId('electrical')).toBe(false);
+    expect(isSeedablePackId('electrical')).toBe(true);
+    expect(isSeedablePackId('roofing')).toBe(true);
+    expect(isSeedablePackId('painting')).toBe(true);
+    expect(isSeedablePackId('gc_remodel')).toBe(true);
+    expect(isSeedablePackId('landscaping')).toBe(true);
+    expect(isSeedablePackId('concrete')).toBe(true);
+    expect(isSeedablePackId('other')).toBe(true);
     expect(isSeedablePackId('garbage')).toBe(false);
+  });
+
+  it('seeds Electrical with trade-specific catalog items and job types', async () => {
+    const result = await seedPackDefaults(
+      { tenantId: TENANT, packId: 'electrical' },
+      { catalogRepo, templateRepo },
+    );
+
+    expect(result.catalogItemsCreated).toBe(6);
+    expect(result.templatesCreated).toBe(5);
+
+    const catalog = await catalogRepo.listByTenant(TENANT);
+    expect(catalog.map((c) => c.name)).toContain('Electrical Labor');
+    expect(catalog.map((c) => c.name)).toContain('Panel Upgrade');
+
+    const templates = await templateRepo.findByVertical(TENANT, 'electrical');
+    expect(templates.map((t) => t.name)).toContain('Panel Upgrade');
+    expect(templates.map((t) => t.name)).toContain('After-Hours Emergency Electrical');
+    for (const t of templates) {
+      expect(typeof t.defaultCustomerMessage).toBe('string');
+      expect(t.defaultCustomerMessage.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('seeds the other new trades with sensible defaults', async () => {
+    for (const packId of ['roofing', 'painting', 'gc_remodel', 'landscaping', 'concrete'] as const) {
+      const catalogRepo2 = new InMemoryCatalogItemRepository();
+      const templateRepo2 = new InMemoryEstimateTemplateRepository();
+      const result = await seedPackDefaults(
+        { tenantId: TENANT, packId },
+        { catalogRepo: catalogRepo2, templateRepo: templateRepo2 },
+      );
+      expect(result.catalogItemsCreated).toBeGreaterThan(0);
+      expect(result.templatesCreated).toBeGreaterThan(0);
+    }
+  });
+
+  it('seeds generic defaults for "other" carrying the free-text trade label', async () => {
+    const result = await seedPackDefaults(
+      { tenantId: TENANT, packId: 'other', tradeLabel: 'Pool service' },
+      { catalogRepo, templateRepo },
+    );
+
+    expect(result.catalogItemsCreated).toBe(4);
+    expect(result.templatesCreated).toBe(5);
+
+    const catalog = await catalogRepo.listByTenant(TENANT);
+    expect(catalog.map((c) => c.name)).toContain('Pool service Labor');
+    expect(catalog.map((c) => c.name)).toContain('Pool service Diagnostic Fee');
+
+    const templates = await templateRepo.findByVertical(TENANT, 'other' as never);
+    expect(templates.map((t) => t.name)).toContain('Pool service Repair');
+    expect(templates.map((t) => t.name)).toContain('Pool service After-Hours Emergency');
+  });
+
+  it('falls back to "General" seeds for "other" with no trade label', async () => {
+    const result = await seedPackDefaults(
+      { tenantId: TENANT, packId: 'other' },
+      { catalogRepo, templateRepo },
+    );
+
+    expect(result.catalogItemsCreated).toBe(4);
+    const catalog = await catalogRepo.listByTenant(TENANT);
+    expect(catalog.map((c) => c.name)).toContain('General Labor');
   });
 });
