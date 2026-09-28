@@ -340,7 +340,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
 
         const tenantId = req.auth!.tenantId;
         const userId = req.auth!.userId;
-        const { packId } = parsed.data;
+        const { packId, tradeLabel } = parsed.data;
 
         // B1.19 — the actual activate+seed logic lives in
         // activatePackWithSeed (src/onboarding/activate-pack-with-seed.ts),
@@ -354,7 +354,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // would then fail too). Letting the error propagate rolls the
         // whole request back so the next click retries cleanly.
         const result = await activatePackWithSeed(
-          { tenantId, packId, actorId: userId, lockClient: currentTenantContext()?.client },
+          { tenantId, packId, tradeLabel, actorId: userId, lockClient: currentTenantContext()?.client },
           { settingsRepo, packActivationRepo, auditRepo, packSeedDeps },
         );
         if (result.status === 'locked') {
