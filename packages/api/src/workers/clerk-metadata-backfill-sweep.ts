@@ -1,25 +1,15 @@
 /**
- * CLERK-META-2026-09-27 — Clerk metadata reconciliation sweep.
+ * CLERK-META-2026-09-27 — hourly reconciliation for Clerk public_metadata.
  *
- * Backstop for the `user.created` webhook's tenant-metadata write
- * (webhooks/routes.ts): that write now fails the webhook so Clerk retries,
- * but retries are bounded — once exhausted (or when the write failed on a
- * path that deliberately doesn't fail the webhook, e.g. the invitee join),
- * the user is left with no tenant_id in their JWT and every tenant API
- * call 403s.
+ * Backstop for the `user.created` webhook's tenant-metadata write: that
+ * write fails the webhook so Clerk retries, but retries are bounded. For
+ * users still unsynced afterwards, this sweep READs Clerk's public_metadata
+ * and PATCHes it from the DB (the DB is authoritative). A still-broken sync
+ * older than `alertAfterHours` pages ops via Sentry; younger failures log at
+ * warn (webhook retries may still heal them).
  *
- * Mirrors the P0-009 sweep idiom (setup-reminder-sweep): a single
- * eligibility SELECT, per-user try/catch, no-DB no-op, injectable clock and
- * fetch.
- *
- * Eligibility: non-deleted users created inside `lookbackDays` (default 7 —
- * covers Clerk's webhook retry window). For each candidate we READ the
- * Clerk user's public_metadata; when tenant_id is missing or points at a
- * different tenant than the DB row, we PATCH it from the DB (the DB is
- * authoritative). A failure against a user older than `alertAfterHours`
- * (default 24) is a PERSISTENT failure — the webhook retries are long over
- * and the request-time recovery may be masking it — so we alert via Sentry
- * captureMessage plus an error log; younger failures log at warn only.
+ * Mirrors the setup-reminder-sweep idiom: one eligibility SELECT, per-user
+ * try/catch, no-DB no-op, injectable clock and fetch.
  */
 import type { Pool } from 'pg';
 import type { Logger } from '../logging/logger';
@@ -140,25 +130,28 @@ async function reconcileCandidate(
     logger: deps.logger,
   };
   const ctx = { clerkUserId: row.clerk_user_id, tenantId: row.tenant_id };
+  // Webhook retries are long over for old rows — a still-broken sync is
+  // persistent and pages ops; a young failure may still self-heal.
+  const ageHours =
+    Math.round(
+      ((now.getTime() - new Date(row.created_at).getTime()) / (60 * 60 * 1000)) * 10,
+    ) / 10;
 
   const fail = (detail: string): 'failed' => {
-    const ageHours = (now.getTime() - new Date(row.created_at).getTime()) / (60 * 60 * 1000);
     if (ageHours >= alertAfterHours) {
-      // Persistent failure: webhook retries are long over and this is
-      // still broken — page ops, don't just log.
       sentry.captureMessage(
         'Clerk tenant metadata sync persistently failing',
         'error',
       );
       deps.logger.error('Clerk metadata backfill: persistent sync failure', {
         ...ctx,
-        ageHours: Math.round(ageHours),
+        ageHours,
         detail,
       });
     } else {
       deps.logger.warn('Clerk metadata backfill: sync failed (webhook retry may still heal)', {
         ...ctx,
-        ageHours: Math.round(ageHours * 10) / 10,
+        ageHours,
         detail,
       });
     }

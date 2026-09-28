@@ -6908,9 +6908,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   }
 
   // CLERK-META-2026-09-27 — reconcile Clerk public_metadata tenant_id for
-  // users the signup webhook couldn't sync (Clerk retry budget exhausted,
-  // or a path that deliberately doesn't fail the webhook like the invitee
-  // join). Hourly; the sweep no-ops without a pool or CLERK_SECRET_KEY.
+  // users the signup webhook couldn't sync. Hourly; the sweep no-ops
+  // without a pool or CLERK_SECRET_KEY.
   const clerkMetadataSweepLogger = createLogger({
     service: 'clerk-metadata-backfill-sweep',
     environment: process.env.NODE_ENV || 'development',

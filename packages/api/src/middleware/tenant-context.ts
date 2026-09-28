@@ -58,21 +58,15 @@ export interface TenantContext {
  * write (see webhooks/routes.ts `user.created`).
  *
  * The request arrived with a valid Clerk session (verified upstream) but the
- * JWT carries no tenant_id, so every tenant API call would 403 with no way
- * for the customer to unstick themselves. When the DB has a non-deleted
- * users row for this Clerk subject, that row is authoritative (the same
- * DB-authoritative doctrine as `resolveAuthorization`): return its tenant,
- * role, and canonical id, and best-effort backfill Clerk's public_metadata
- * so the NEXT session token carries tenant_id and skips this path entirely.
+ * JWT carries no tenant_id. When the DB has a non-deleted users row for this
+ * Clerk subject, that row is authoritative: return its tenant, role, and
+ * canonical id, and best-effort backfill Clerk's public_metadata so the NEXT
+ * session token carries tenant_id. A backfill failure does NOT fail the
+ * recovery — the reconciliation sweep alerts if the metadata stays broken.
  *
- * A backfill failure does NOT fail the recovery — the DB row is
- * authoritative for this request, and the reconciliation sweep
- * (workers/clerk-metadata-backfill-sweep.ts) alerts if the metadata stays
- * broken.
- *
- * When one Clerk subject has rows in several tenants (owner + invited
- * memberships), the oldest row wins: that is the tenant bootstrapped at
- * signup, which is the one whose metadata write this recovery is healing.
+ * When one Clerk subject has rows in several tenants, the oldest row wins:
+ * that is the tenant bootstrapped at signup, whose metadata write this
+ * recovery is healing.
  */
 export interface TenantRecovery {
   tenantId: string;
@@ -83,10 +77,7 @@ export interface TenantRecovery {
 export async function recoverTenantFromUsersRow(
   pool: Pool,
   clerkUserId: string | undefined,
-  opts: {
-    clerkSecretKey?: string;
-    clerkFetch?: typeof fetch;
-  } = {},
+  opts: WithTenantTransactionOptions = {},
 ): Promise<TenantRecovery | null> {
   if (!clerkUserId) return null;
   // System-level read (no tenant GUC set yet — there is no tenant to scope
@@ -121,11 +112,6 @@ export async function recoverTenantFromUsersRow(
         detail: describeClerkFailure(sync),
       });
     }
-  } else {
-    tenantContextLogger.info('Recovered missing JWT tenant_id from DB (no Clerk secret — backfill skipped)', {
-      clerkUserId,
-      tenantId: row.tenant_id,
-    });
   }
 
   return { tenantId: row.tenant_id, role: row.role, canonicalUserId: row.id };
@@ -252,36 +238,30 @@ export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOpt
       });
       if (recovered) {
         tenantId = recovered.tenantId;
-        // verifyClerkSession populated req.auth before this middleware;
-        // downstream gates (requireTenant, resolveAuthorization's
-        // tenantless skip) read req.auth.tenantId, so publish the
-        // recovery. Role + canonical id come from the DB row, not the
-        // stale claim — resolveAuthorization already ran and skipped this
-        // tenantless request, so mirror its DB-authoritative assignments.
+        // Downstream gates read req.auth.tenantId, so publish the recovery.
+        // Role + canonical id come from the DB row, not the stale claim.
         if (req.auth) {
           req.auth.tenantId = recovered.tenantId;
           req.auth.role = recovered.role;
           req.auth.canonicalUserId = recovered.canonicalUserId;
         }
       } else {
-        // No users row for this subject.
-        if (!req.auth) {
-          // No authenticated principal at all (requireAuth normally 401s
-          // before this middleware on /api) — preserve the legacy shape.
-          res.status(403).json({
-            error: 'FORBIDDEN',
-            message: 'Tenant context required',
-          });
-          return;
-        }
-        // Authenticated but genuinely tenantless (e.g. the signup webhook
-        // hasn't been processed yet). Distinct error code so the client can
-        // route to a "finish setup" screen that retries, instead of a dead
-        // end.
-        res.status(403).json({
-          error: 'ACCOUNT_SETUP_INCOMPLETE',
-          message: 'Your account is not linked to a business yet. Finish setup to continue.',
-        });
+        // No users row for this subject. Authenticated-but-tenantless (e.g.
+        // the signup webhook hasn't been processed yet) gets a distinct
+        // code so the client can route to a "finish setup" screen instead of
+        // a dead end; with no authenticated principal at all, preserve the
+        // legacy shape (requireAuth normally 401s before this middleware).
+        res.status(403).json(
+          req.auth
+            ? {
+                error: 'ACCOUNT_SETUP_INCOMPLETE',
+                message: 'Your account is not linked to a business yet. Finish setup to continue.',
+              }
+            : {
+                error: 'FORBIDDEN',
+                message: 'Tenant context required',
+              },
+        );
         return;
       }
     }

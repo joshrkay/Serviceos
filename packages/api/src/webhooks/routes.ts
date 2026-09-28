@@ -1100,14 +1100,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // Write tenant_id back to Clerk user's public_metadata.
           //
           // CLERK-META-2026-09-27 — this write is LOAD-BEARING, not
-          // best-effort: without tenant_id in the JWT every tenant API call
-          // 403s and there is no self-service recovery, so a failed write
-          // FAILS the webhook (the catch below marks the event 'failed' and
-          // answers 500 → Clerk retries) instead of logging and returning
-          // 200. Safe BECAUSE the handler is idempotent: bootstrapTenant
-          // gates every side effect on result.created, the queues dedupe on
-          // deterministic idempotency keys, and the owner users-row insert
-          // above is WHERE NOT EXISTS.
+          // best-effort: a failed write FAILS the webhook (the catch below
+          // marks the event 'failed' and answers 500 → Clerk retries)
+          // instead of logging and returning 200. Safe because the handler
+          // is idempotent (bootstrapTenant gates side effects on
+          // result.created, queues dedupe on idempotency keys, the owner
+          // users-row insert is WHERE NOT EXISTS).
           if (config.CLERK_SECRET_KEY) {
             const sync = await writeClerkUserMetadata(
               { secretKey: config.CLERK_SECRET_KEY, logger },
