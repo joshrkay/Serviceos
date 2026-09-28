@@ -7,5 +7,5 @@
   "goldenSet": null,
   "metrics": {},
   "tolerance": 0.05,
-  "recordCommand": "ANTHROPIC_API_KEY=... VOICE_EVAL_COST_CAP_CENTS=800 npx tsx packages/voice-eval/run-slot-eval.ts --live --max-utterances 100 --record-baseline packages/voice-eval/baselines/slot-live.json"
+  "recordCommand": "AI_PROVIDER_API_KEY=... AI_PROVIDER_BASE_URL=https://api.openai.com/v1 AI_DEFAULT_MODEL=gpt-4o-mini AI_LIGHTWEIGHT_MODEL=gpt-4o-mini AI_STANDARD_MODEL=gpt-4o-mini AI_COMPLEX_MODEL=gpt-4o AI_CLASSIFY_INTENT_DEADLINE_MS=12000 VOICE_EVAL_COST_CAP_CENTS=80 npx tsx packages/voice-eval/run-slot-eval.ts --live --max-utterances 100 --record-baseline packages/voice-eval/baselines/slot-live.json"
 }
