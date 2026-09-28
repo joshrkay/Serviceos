@@ -83,6 +83,17 @@ export function stripePriceIdForPlan(planId: BillingPlanId): string | null {
   return process.env[PLAN_SPECS[planId].envVar] ?? null;
 }
 
+/**
+ * Billing resilience — dunning grace (Part A). SQL fragment clearing the
+ * past-due grace when the mirrored subscription recovers to
+ * active/trialing; a past_due re-fire leaves an active grace untouched.
+ * Every call site binds the subscription status as $2.
+ */
+export const PAST_DUE_GRACE_CLEAR_SQL = `past_due_grace_until = CASE
+  WHEN $2 IN ('active', 'trialing') THEN NULL
+  ELSE past_due_grace_until
+END`;
+
 /** Fails closed with a non-secret, actionable message — never the env value. */
 function resolvePlanPriceId(planId: BillingPlanId): string {
   const spec = PLAN_SPECS[planId];
@@ -767,10 +778,7 @@ export class BillingService {
         `UPDATE tenants
          SET stripe_subscription_id = $1, subscription_status = $2,
              trial_ends_at = $3, updated_at = NOW(),
-             past_due_grace_until = CASE
-               WHEN $2 IN ('active', 'trialing') THEN NULL
-               ELSE past_due_grace_until
-             END
+             ${PAST_DUE_GRACE_CLEAR_SQL}
          WHERE stripe_customer_id = $4`,
         [input.subscriptionId, input.status, input.trialEndsAt, input.customerId],
       );
@@ -779,10 +787,7 @@ export class BillingService {
     await this.deps.pool.query(
       `UPDATE tenants
        SET stripe_subscription_id = $1, subscription_status = $2, updated_at = NOW(),
-           past_due_grace_until = CASE
-             WHEN $2 IN ('active', 'trialing') THEN NULL
-             ELSE past_due_grace_until
-           END
+           ${PAST_DUE_GRACE_CLEAR_SQL}
        WHERE stripe_customer_id = $3`,
       [input.subscriptionId, input.status, input.customerId],
     );

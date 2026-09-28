@@ -34,7 +34,7 @@ import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
 import { PendingInvitationRepository } from '../users/pending-invitation';
-import { BillingService, planIdForStripePrice } from '../billing/subscription';
+import { BillingService, PAST_DUE_GRACE_CLEAR_SQL, planIdForStripePrice } from '../billing/subscription';
 import type { CallUsageBillingService } from '../billing/call-usage-billing';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
@@ -2165,15 +2165,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       }
 
       // Billing resilience — dunning grace (Part A). A failed charge at
-      // trial end / renewal flips the mirrored subscription status to
-      // past_due; instead of hard-blocking the voice gate to voicemail
-      // immediately, this stamps a 7-day grace window
-      // (tenants.past_due_grace_until) during which calls keep being
-      // answered while the account stays flagged past_due. The dunning
-      // sweep keys its day-of/+3d/+7d emails off the same window. Stripe
-      // Smart Retries are untouched — this handler only changes OUR side
-      // of the failure. Idempotent: an active grace is never extended by a
-      // second failed invoice (see BillingService.applyInvoicePaymentFailed).
+      // trial end / renewal flips the mirrored status to past_due; stamp a
+      // 7-day grace (tenants.past_due_grace_until) during which the voice
+      // gate keeps answering. The dunning sweep keys its 0d/3d/7d emails
+      // off the same window. Idempotent: an active grace is never extended
+      // by a second failed invoice (see applyInvoicePaymentFailed).
       if (deps.billingService && event.type === 'invoice.payment_failed') {
         const invoice = event.data.object as {
           id?: string;
@@ -2391,10 +2387,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                           -- Billing resilience (Part A): a recovered card
                           -- clears the past-due grace; a past_due re-fire
                           -- leaves an active grace untouched.
-                          past_due_grace_until = CASE
-                            WHEN $2 IN ('active', 'trialing') THEN NULL
-                            ELSE past_due_grace_until
-                          END
+                          ${PAST_DUE_GRACE_CLEAR_SQL}
                     WHERE id = $4`,
                   [sub.id, sub.status, trialEndsAt, row.id, planId, currentPeriodStart, currentPeriodEnd],
                 );

@@ -193,10 +193,8 @@ function normalizeStatus(raw: string | null): SubscriptionStatus {
 /**
  * Billing resilience — dunning grace (Part A). True while the
  * past_due_grace_until stamped by invoice.payment_failed is in the future.
- * The raw DB value may be a string or Date depending on the driver; both
- * are handled.
+ * (readTenantBillingState normalizes the column to Date | null.)
  */
 function isPastDueGraceActive(graceUntil: Date | null): boolean {
-  if (!graceUntil) return false;
-  return graceUntil.getTime() > Date.now();
+  return graceUntil !== null && graceUntil.getTime() > Date.now();
 }

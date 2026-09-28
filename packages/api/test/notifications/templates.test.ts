@@ -115,13 +115,13 @@ describe('onboarding lifecycle emails', () => {
 
   it('payment-failed dunning copy varies by dunningDay and never promises an automatic charge', () => {
     const ctx = { businessName: 'Acme HVAC', appBaseUrl: 'https://app.rivet.ai', supportEmail: 'support@rivet.ai' };
-    const day0 = renderPaymentFailedEmail({ ...ctx, dunningDay: 0, daysLeft: 7 });
+    const day0 = renderPaymentFailedEmail({ ...ctx, dunningDay: 0 });
     expect(day0.subject).toMatch(/didn.t go through/i);
     expect(day0.text).toContain('7 days');
     expect(day0.text).toContain('https://app.rivet.ai/settings');
-    const day3 = renderPaymentFailedEmail({ ...ctx, dunningDay: 3, daysLeft: 4 });
+    const day3 = renderPaymentFailedEmail({ ...ctx, dunningDay: 3 });
     expect(day3.subject).toMatch(/4 days left/i);
-    const day7 = renderPaymentFailedEmail({ ...ctx, dunningDay: 7, daysLeft: 0 });
+    const day7 = renderPaymentFailedEmail({ ...ctx, dunningDay: 7 });
     expect(day7.subject).toMatch(/last day/i);
     expect(day7.text).toMatch(/voicemail/i);
     for (const email of [day0, day3, day7]) {

@@ -198,7 +198,7 @@ export async function runOverageSettlementReconciliation(
       const periodEnd = new Date(tenant.current_period_end);
       const periodStart = new Date(tenant.current_period_start);
       const durationMs = periodEnd.getTime() - periodStart.getTime();
-      if (!(durationMs > 0)) {
+      if (durationMs <= 0) {
         result.failed++;
         continue;
       }

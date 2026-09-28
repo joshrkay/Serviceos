@@ -76,15 +76,15 @@ export type DunningDay = 0 | 3 | 7;
 /** Maps hours-since-failure to a dunning window, or null in a gap. */
 export function dunningWindow(
   hoursSinceFailure: number,
-): { kind: LifecycleEmailKind; dunningDay: DunningDay; daysLeft: 7 | 4 | 0 } | null {
+): { kind: LifecycleEmailKind; dunningDay: DunningDay } | null {
   if (hoursSinceFailure > 0 && hoursSinceFailure <= 12) {
-    return { kind: 'dunning_0d', dunningDay: 0, daysLeft: 7 };
+    return { kind: 'dunning_0d', dunningDay: 0 };
   }
   if (hoursSinceFailure > 60 && hoursSinceFailure <= 84) {
-    return { kind: 'dunning_3d', dunningDay: 3, daysLeft: 4 };
+    return { kind: 'dunning_3d', dunningDay: 3 };
   }
   if (hoursSinceFailure > 156 && hoursSinceFailure <= DUNNING_GRACE_HOURS) {
-    return { kind: 'dunning_7d', dunningDay: 7, daysLeft: 0 };
+    return { kind: 'dunning_7d', dunningDay: 7 };
   }
   return null;
 }
@@ -138,7 +138,6 @@ export async function runDunningSweep(deps: DunningSweepDeps): Promise<DunningSw
         appBaseUrl: deps.appBaseUrl,
         supportEmail: deps.supportEmail,
         dunningDay: window.dunningDay,
-        daysLeft: window.daysLeft,
       });
 
       const outcome = await sendLifecycleEmail(

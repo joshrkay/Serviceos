@@ -607,10 +607,10 @@ export interface PaymentFailedEmailContext {
   /**
    * Which dunning send this is: 0 (day of the failed charge), 3, or 7
    * (last day of the 7-day grace window). Drives the subject and urgency.
+   * The copy hardcodes the matching days-remaining (7, 4, 0) per send, so
+   * no separate days-left parameter is needed.
    */
   dunningDay: 0 | 3 | 7;
-  /** Whole days of grace remaining when the email goes out: 7, 4, or 0. */
-  daysLeft: 7 | 4 | 0;
 }
 
 /**

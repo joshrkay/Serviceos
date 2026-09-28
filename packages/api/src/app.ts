@@ -6963,7 +6963,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           billing: callUsageBillingService ?? null,
           callUsage: callUsageRepo ?? { sumBillableSeconds: async () => 0 },
           overageCaps: pool ? new PgOverageCapStore(pool) : { get: async () => null },
-          priceIdForPlan: (planId) => stripePriceIdForPlan(planId),
+          priceIdForPlan: stripePriceIdForPlan,
         });
       }).catch((err) => {
         overageReconciliationLogger.error('Overage reconciliation sweep failed', {

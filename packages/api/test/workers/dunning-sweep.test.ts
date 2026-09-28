@@ -71,11 +71,11 @@ function makeDeps(candidates: Candidate[], ledger?: Set<string>): {
 describe('dunningWindow', () => {
   it('maps hours-since-failure to the right window or null in the gaps', () => {
     expect(dunningWindow(6)?.kind).toBe('dunning_0d');
-    expect(dunningWindow(6)?.daysLeft).toBe(7);
+    expect(dunningWindow(6)?.dunningDay).toBe(0);
     expect(dunningWindow(72)?.kind).toBe('dunning_3d');
-    expect(dunningWindow(72)?.daysLeft).toBe(4);
+    expect(dunningWindow(72)?.dunningDay).toBe(3);
     expect(dunningWindow(160)?.kind).toBe('dunning_7d');
-    expect(dunningWindow(160)?.daysLeft).toBe(0);
+    expect(dunningWindow(160)?.dunningDay).toBe(7);
     expect(dunningWindow(30)).toBeNull(); // between 0d and 3d windows
     expect(dunningWindow(100)).toBeNull(); // between 3d and 7d windows
     expect(dunningWindow(0)).toBeNull(); // not yet failed

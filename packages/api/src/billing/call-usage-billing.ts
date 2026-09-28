@@ -357,15 +357,14 @@ export class CallUsageBillingService {
 
     await this.deps.settlementRepo.fail(input.tenantId, input.settlementId, lastError);
     await this.deadLetterSettlement(input, lastError).catch(() => undefined);
-    const message = lastError;
     void Promise.resolve(
       this.deps.onAlert?.({
         rule: "call_settlement_failed",
         tenantId: input.tenantId,
-        message,
+        message: lastError,
       }),
     ).catch(() => undefined);
-    throw new Error(message);
+    throw new Error(lastError);
   }
 
   /**
