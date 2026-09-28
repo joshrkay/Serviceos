@@ -1,8 +1,18 @@
+import { useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Pressable, Text, View } from 'react-native';
+import { skipSetupGateForSession } from '../../src/hooks/useOnboardingStatus';
 
 export default function Onboarding() {
   const router = useRouter();
+  const { userId } = useAuth();
+
+  const onSkip = () => {
+    // Explicit deferral — the setup gate honors this for the session instead
+    // of bouncing the owner straight back here.
+    skipSetupGateForSession(userId);
+    router.replace('/');
+  };
 
   return (
     <View className="flex-1 bg-background px-6 pb-20 pt-24">
@@ -27,7 +37,7 @@ export default function Onboarding() {
 
       <Pressable
         accessibilityRole="button"
-        onPress={() => router.replace('/')}
+        onPress={onSkip}
         className="min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
       >
         <Text className="text-base text-foreground">Skip for now</Text>
