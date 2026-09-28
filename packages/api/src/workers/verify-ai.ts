@@ -4,12 +4,37 @@ import { Pool } from 'pg';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { LLMGateway } from '../ai/gateway';
+import { getSentryClient, type SentryClient } from '../monitoring/sentry';
 
 export interface VerifyAiPayload {
   tenantId: string;
 }
 
 export const VERIFY_AI_JOB_TYPE = 'verify_ai';
+
+/**
+ * Reports a verification failure to Sentry with the context needed to
+ * diagnose flakes (tenant, step, failure reason). Monitoring must never
+ * break the worker, so capture is wrapped — the no-op client (SENTRY_DSN
+ * unset) makes this a no-op in dev/test.
+ */
+function reportVerificationFailure(
+  sentry: SentryClient,
+  tenantId: string,
+  failureReason: string,
+  cause: unknown,
+) {
+  try {
+    sentry.withScope((scope) => {
+      scope.setTag('tenant_id', tenantId);
+      scope.setTag('step', 'ai_check');
+      scope.setTag('failure_reason', failureReason.slice(0, 200));
+      scope.captureException(cause instanceof Error ? cause : new Error(failureReason));
+    });
+  } catch {
+    // monitoring must never break the worker
+  }
+}
 
 /**
  * Onboarding AI self-check. Makes ONE real gateway.complete() call on the
@@ -21,6 +46,8 @@ export function createVerifyAiWorker(deps: {
   pool: Pool;
   gateway: LLMGateway;
   auditRepo: AuditRepository;
+  /** Injected for tests — defaults to the global Sentry client (no-op when unconfigured). */
+  sentry?: SentryClient;
 }): WorkerHandler<VerifyAiPayload> {
   return {
     type: VERIFY_AI_JOB_TYPE,
@@ -28,6 +55,7 @@ export function createVerifyAiWorker(deps: {
     async handle(message: QueueMessage<VerifyAiPayload>, logger: Logger): Promise<void> {
       const { tenantId } = message.payload;
       const { pool, gateway, auditRepo } = deps;
+      const sentry = deps.sentry ?? getSentryClient();
 
       const { rows } = await pool.query<{ ai_model: string | null; ai_verification_status: string | null }>(
         `SELECT ai_model, ai_verification_status FROM tenant_settings WHERE tenant_id = $1`,
@@ -42,6 +70,7 @@ export function createVerifyAiWorker(deps: {
 
       if (!current?.ai_model) {
         logger.warn('AI verification cannot run — no ai_model configured', { tenantId });
+        reportVerificationFailure(sentry, tenantId, 'ai_config_missing', new Error('ai_config_missing'));
         await pool.query(
           `UPDATE tenant_settings
               SET ai_verification_status = 'failed',
@@ -98,6 +127,7 @@ export function createVerifyAiWorker(deps: {
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         logger.error('AI verification failed', { tenantId, error });
+        reportVerificationFailure(sentry, tenantId, error, err);
         await pool.query(
           `UPDATE tenant_settings
               SET ai_verification_status = 'failed',

@@ -132,10 +132,40 @@ describe('BusinessIdentityInputSchema', () => {
 });
 
 describe('PackPickInputSchema', () => {
-  it('accepts hvac and plumbing only', () => {
-    expect(PackPickInputSchema.safeParse({ packId: 'hvac' }).success).toBe(true);
-    expect(PackPickInputSchema.safeParse({ packId: 'plumbing' }).success).toBe(true);
-    expect(PackPickInputSchema.safeParse({ packId: 'electrical' }).success).toBe(false);
+  it('accepts every supported trade', () => {
+    for (const packId of [
+      'hvac',
+      'plumbing',
+      'electrical',
+      'roofing',
+      'painting',
+      'gc_remodel',
+      'landscaping',
+      'concrete',
+      'other',
+    ]) {
+      expect(PackPickInputSchema.safeParse({ packId }).success).toBe(true);
+    }
+  });
+
+  it('rejects unknown pack ids', () => {
+    expect(PackPickInputSchema.safeParse({ packId: 'garbage' }).success).toBe(false);
+  });
+
+  it('accepts an optional free-text trade label for "other"', () => {
+    expect(
+      PackPickInputSchema.safeParse({ packId: 'other', tradeLabel: 'Pool service' }).success,
+    ).toBe(true);
+  });
+
+  it('trims and bounds the trade label', () => {
+    const parsed = PackPickInputSchema.safeParse({ packId: 'other', tradeLabel: '  Pool service  ' });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.tradeLabel).toBe('Pool service');
+    expect(PackPickInputSchema.safeParse({ packId: 'other', tradeLabel: '' }).success).toBe(false);
+    expect(
+      PackPickInputSchema.safeParse({ packId: 'other', tradeLabel: 'x'.repeat(81) }).success,
+    ).toBe(false);
   });
 });
 
